@@ -1,0 +1,2 @@
+
+Configure channel <CHANNEL_ID> as condicionado: forced model <MODEL>/<PROVIDER>, allow only skills <...>, allow slash <...>, always allow /status, strict free text policy with default_action skill:add, custom invalid_text_message for <use-case>. Ensure thread inheritance works from parent channel.

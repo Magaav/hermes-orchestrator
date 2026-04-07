@@ -1,0 +1,30 @@
+# ============================================================
+# Patch: run.py Channel ACL + SKILL_ADD support
+# ============================================================
+#
+# Aplica em: gateway/run.py
+# Necessário após cada update do hermes-agent.
+#
+# Mudanças:
+# 1. SKILL_ADD action: handle "SKILL_ADD" além de "FALTAS_ADD"
+# 2. Inject [author_id:XXX] na mensagem normalizada (Discord)
+#
+# Aplicar: patch -p1 < run_py_channel_acl.patch
+# Reverter: patch -p1 -R < run_py_channel_acl.patch
+# ============================================================
+
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -2675,7 +2675,10 @@ async def _handle_message_with_agent(self, event, source, _quick_key: str):
+                             if _action == "BLOCK":
+                                 _blocked = True
+                                 _block_msg = _result
+-                            elif _action == "FALTAS_ADD":
++                            elif _action in ("FALTAS_ADD", "SKILL_ADD"):
+                                 _normalized = _result
++                                # Inject Discord author_id so pipeline can validate it
++                                if source and source.user_id:
++                                    _normalized = f"{_normalized} [author_id:{source.user_id}]"
+                             # "PASSTHROUGH" → use message_text as-is
+                         else:
+                             _acl_err = "normalize_to_channel_skill not callable"

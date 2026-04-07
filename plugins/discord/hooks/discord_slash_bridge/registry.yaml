@@ -1,0 +1,97 @@
+version: 1
+native_overrides:
+  restart:
+    enabled: true
+    description: Restart the Hermes gateway
+    ack_message: ✅ Reinício solicitado. O gateway será reiniciado em alguns segundos.
+    restart_cmd_env: COLMEIO_DISCORD_RESTART_CMD
+    restart_delay_env: COLMEIO_DISCORD_RESTART_DELAY_SEC
+    default_restart_cmd: sudo hermes gateway restart --system
+    default_delay_sec: 0.1
+    log_path: /tmp/hermes-discord-restart.log
+  reboot:
+    enabled: true
+    description: Reboot the Hermes container
+    reboot_cmd_env: COLMEIO_DISCORD_REBOOT_CMD
+    reboot_delay_env: COLMEIO_DISCORD_REBOOT_DELAY_SEC
+    default_reboot_cmd: "touch /tmp/hermes-reboot-requested; if [ -s /tmp/hermes-gateway.pid ]; then kill -KILL $(cat /tmp/hermes-gateway.pid); else pkill -KILL -f '/local/hermes-agent/cli.py --gateway'; fi"
+    default_delay_sec: 0.2
+    log_path: /tmp/hermes-discord-reboot.log
+    reapplies:
+      - camofox_env_bootstrap
+      - openviking_env_bootstrap
+      - model_env_bootstrap
+      - channel_acl hook
+      - gateway FIFO queue hook
+      - session_info hook
+      - discord guild sync
+      - discord command bootstrap
+  metricas:
+    enabled: true
+    description: Show Colmeio metrics dashboard
+    acl_command: metricas
+    script_path: /local/.hermes/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py
+    timeout_sec: 45
+  backup:
+    enabled: true
+    group_name: backup
+    group_description: Backup Hermes agent files
+    acl_command: backup
+    subcommand_name: version
+    subcommand_description: Create a versioned backup tar.gz
+    snapshot_script: /local/workspace/crons/scripts/backup/backup_snapshot.sh
+    drive_script: /local/workspace/crons/scripts/backup/drive_backup.py
+    local_backup_root: /local/backups
+    drive_folder_path: backups/agent/versions
+    timeout_snapshot_sec: 1800
+    timeout_drive_sec: 3600
+  model:
+    enabled: true
+    description: Trocar o modelo padrão do gateway
+    acl_command: model
+    option_description: Digite para buscar ou selecione um modelo
+    usage_left_default: unlimited
+    choices:
+      - key: gpt54
+        label: GPT-5.4 (OpenAI Codex)
+        provider: openai-codex
+        model: gpt-5.4
+      - key: gpt53codex
+        label: GPT-5.3 Codex(OpenIA Codex)
+        provider: openai-codex
+        model: gpt-5.3-codex
+      - key: nemotron120b
+        label: Nemotron 120B (NVIDIA)
+        provider: nvidia
+        model: nvidia/nemotron-3-super-120b-a12b
+      - key: minimaxm27
+        label: MiniMax M2.7
+        provider: minimax
+        model: MiniMax-M2.7
+      - key: kimik25
+        label: Kimi K2.5
+        provider: kimi-coding
+        model: moonshotai/kimi-k2.5
+slash_bridge:
+  enabled: true
+  force_bridge_commands: []
+  commands:
+    metricas:
+      handler: metrics_dashboard
+      acl_command: metricas
+    colmeio-metrics:
+      handler: metrics_dashboard
+      acl_command: metricas
+    clean:
+      acl_command: clean
+      handler: custom:clean
+    pair:
+      acl_command: pair
+      handler: custom:pair
+    clone:
+      acl_command: clone
+      handler: custom:clone
+      docker_image: ubuntu:24.04
+    thread:
+      acl_command: thread
+      handler: custom:thread

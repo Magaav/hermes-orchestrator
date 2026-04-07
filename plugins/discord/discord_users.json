@@ -1,0 +1,115 @@
+{
+  "version": 2,
+  "updated_at": "2026-03-30T14:16:00Z",
+  "description": "ACL de usuários Discord para uso do Hermes no ambiente Colmeio.",
+  "roles": {
+    "admin": {
+      "description": "Acesso total",
+      "allowed_intents": [
+        "*"
+      ],
+      "requires_admin_approval": false
+    },
+    "user": {
+      "description": "Pode somente executar skills. Qualquer ação fora disso exige aprovação de admin.",
+      "allowed_intents": [
+        "skill_execute"
+      ],
+      "requires_admin_approval_for": [
+        "*"
+      ],
+      "forbidden_without_approval": [
+        "skill_manage",
+        "memory_manage",
+        "config_change",
+        "outside_skill",
+        "system_change"
+      ]
+    }
+  },
+  "users": [
+    {
+      "name": "Victor de Genaro",
+      "discord_user_id": "1228037612338679961",
+      "aliases": [
+        "victor",
+        "Victor",
+        "Victor de Genaro"
+      ],
+      "role": "admin"
+    },
+    {
+      "name": "Laura",
+      "discord_user_id": "1099316732885205004",
+      "aliases": [
+        "laura",
+        "Laura"
+      ],
+      "role": "user"
+    },
+    {
+      "name": "Maria",
+      "discord_user_id": "1489322275512520744",
+      "aliases": [
+        "maria",
+        "Maria",
+        "Maria Eduarda"
+      ],
+      "role": "user"
+    }
+  ],
+  "channels": {
+    "master": {
+      "name": "🧙‍♂️master",
+      "discord_channel_id": "1488175722932736071",
+      "purpose": [
+        "approvals",
+        "proactive_notifications"
+      ]
+    }
+  },
+  "admin_contact": {
+    "name": "Victor de Genaro",
+    "discord_user_id": "1228037612338679961",
+    "notification_mode": "master_channel",
+    "delivery_target": "discord:1488175722932736071",
+    "notes": "Canal master centraliza aprovações e alertas proativos."
+  },
+  "proactive": {
+    "enabled": true,
+    "delivery_target": "discord:1488175722932736071",
+    "immediate": {
+      "enabled": true,
+      "notify_on": [
+        "approval_requests",
+        "blocked_operations",
+        "errors",
+        "risky_actions"
+      ]
+    },
+    "batched": {
+      "enabled": true,
+      "mode": "only_if_matters",
+      "min_severity": "warning",
+      "max_messages_per_hour": 1
+    },
+    "digest": {
+      "enabled": true,
+      "frequency": "daily",
+      "timezone": "America/Sao_Paulo",
+      "preferred_time": "09:00",
+      "only_if_matters": true
+    }
+  },
+  "approval_flow": {
+    "enabled": true,
+    "states": [
+      "pending",
+      "approved",
+      "denied",
+      "cancelled"
+    ],
+    "default_timeout_minutes": 1440
+  },
+  "pending_requests": []
+}

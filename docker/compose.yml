@@ -1,0 +1,30 @@
+services:
+  openviking:
+    container_name: openviking
+    image: openviking-local:latest
+    build:
+      context: ./dockerfiles
+      dockerfile: openviking.dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    networks:
+      - dockerfiles_default
+    ports:
+      - "1933:1933"
+    volumes:
+      - /local/memory:/data
+      - /local/logs/openviking:/var/log/openviking
+      - /local/docker/containers.conf/openviking/ov.conf:/etc/openviking/ov.conf:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:1933/health',timeout=3).status==200 else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

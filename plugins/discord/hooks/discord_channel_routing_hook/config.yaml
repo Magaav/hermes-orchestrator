@@ -1,0 +1,63 @@
+# Discord Channel Routing Hook — survives hermes-agent updates
+# Maps Discord channel/thread IDs to routing behavior.
+#
+# Thread inherits from parent channel unless explicitly overridden.
+#
+# Modes:
+#   livre     → no restrictions, uses default model, any skill/context allowed
+#   condicionado → forced model (provider) + restricted skill scope
+#
+# Fields per channel:
+#   mode: livre | condicionado
+#   model: model name to force (e.g. nemotron, gpt-5.3-codex)
+#   provider: provider (e.g. nvidia, openai, minimax)
+#   allowed_skills: list of permitted skill names (only for condicionado)
+#   allowed_commands: list of permitted slash commands (only for condicionado)
+#   always_allowed_commands: passthrough commands even in condicionado mode (default: status)
+#   default_action: when message doesn't match allowed scope (e.g. "skill:add")
+#   free_text_policy: auto_add | strict_item (strict_item blocks greetings/chatty text)
+
+channels:
+  # ── Free channels ──────────────────────────────────────────────────────────
+  1487073289137553581:   # 🐝zangão
+    mode: livre
+
+  1488175722932736071:   # 🧙‍♂️master
+    mode: livre
+
+  # ── Faltas — condicionado (forced nemotron + only faltas skill) ────────────
+  1487099467726328038:   # 📃faltas (loja 1)
+    mode: condicionado
+    model: nemotron
+    provider: nvidia
+    allowed_skills:
+      - colmeio-lista-de-faltas
+    allowed_commands:
+      - lista-de-faltas
+      - faltas
+    always_allowed_commands:
+      - status
+    default_action: skill:add
+    free_text_policy: strict_item
+    invalid_text_message: >
+      🚫 Este canal aceita apenas inclusão de itens de faltas.
+      Use `/faltas adicionar <item>` ou envie somente o nome do item (ex.: `papel higienico`).
+    max_item_words: 8
+
+  1487099552636080201:   # 📃faltas (loja 2)
+    mode: condicionado
+    model: nemotron
+    provider: nvidia
+    allowed_skills:
+      - colmeio-lista-de-faltas
+    allowed_commands:
+      - lista-de-faltas
+      - faltas
+    always_allowed_commands:
+      - status
+    default_action: skill:add
+    free_text_policy: strict_item
+    invalid_text_message: >
+      🚫 Este canal aceita apenas inclusão de itens de faltas.
+      Use `/faltas adicionar <item>` ou envie somente o nome do item (ex.: `papel higienico`).
+    max_item_words: 8

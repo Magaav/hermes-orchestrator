@@ -1,0 +1,10 @@
+# Colmeio Discord Slash Bridge
+#
+# `aliases` + `blocked` stay intentionally simple and are safe to edit quickly.
+# The advanced command runtime behavior lives in `registry.yaml`.
+
+aliases:
+  colmeio-metrics: metricas
+
+blocked:
+  metrics: "🚫 `/metrics` foi descontinuado. Use `/metricas`."
