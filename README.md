@@ -2,6 +2,24 @@
 
 Hermes Orchestrator is the host-layer control plane for spawning and managing multiple Hermes agent nodes on demand.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash
+```
+
+Note: this one-liner requires the repository to be public.
+
+What this does:
+- Clones/updates this repository into `/local`
+- Installs `horc` (default: `/usr/local/bin/horc`)
+
+Optional flags:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash -s -- --dir /local --branch main
+```
+
 ## Goals
 
 - Keep orchestrator state isolated under `/local/agents/nodes/orchestrator/.hermes` (no runtime dependency on `/local/.hermes`).
@@ -102,6 +120,12 @@ Note on paths: inside worker containers, `HERMES_HOME=/local/.hermes` is expecte
 - Primary CLI wrapper: `/local/scripts/clone/horc.sh`
 - Compatibility shim: `/local/scripts/clone.sh`
 - Installer: `/local/scripts/install.sh` (installs `/usr/local/bin/horc`)
+
+## Branching
+
+- Long-lived branch: `main` only.
+- Do not use `master`.
+- Feature/work branches must be named with your orchestrator id format: `<horc-id>`.
 
 ## Versioning Hygiene
 

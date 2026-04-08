@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ============================================================================
 # Hermes Orchestrator Installer (Colmeio Edition)
 # ============================================================================
@@ -7,7 +7,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash
 #
 # ============================================================================
-set -e
+set -euo pipefail
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,6 +24,14 @@ info()    { echo -e "${CYAN}[horc]${NC} $1"; }
 success() { echo -e "${GREEN}[horc]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[horc]${NC} $1"; }
 error()   { echo -e "${RED}[horc]${NC} $1"; }
+
+require_cmd() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        error "Missing required command: $cmd"
+        exit 1
+    fi
+}
 
 # Parse arguments
 BRANCH="main"
@@ -47,33 +55,48 @@ done
 
 info "Hermes Orchestrator installation starting..."
 info "Target: ${INSTALL_DIR}"
-
-# Detect if already installed
-if [[ -d "${INSTALL_DIR}/hermes-agent" ]] || [[ -d "${INSTALL_DIR}/scripts" ]]; then
-    warn "Existing installation detected. Updating instead of fresh install."
-    UPDATE_MODE=true
-fi
+require_cmd git
 
 # Clone or pull
-if [[ -d "${INSTALL_DIR}/.git" ]] || [[ -d "${INSTALL_DIR}/hermes-agent" ]]; then
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
     info "Repository exists — pulling latest..."
-    cd "${INSTALL_DIR}"
-    git fetch origin "${BRANCH}"
-    git checkout "${BRANCH}"
-    git pull origin "${BRANCH}"
+    git -C "${INSTALL_DIR}" fetch origin "${BRANCH}"
+    git -C "${INSTALL_DIR}" checkout "${BRANCH}"
+    git -C "${INSTALL_DIR}" pull --ff-only origin "${BRANCH}"
 else
+    if [[ -e "${INSTALL_DIR}" ]] && [[ -n "$(ls -A "${INSTALL_DIR}" 2>/dev/null || true)" ]]; then
+        error "Target directory exists and is not a git repo: ${INSTALL_DIR}"
+        error "Use --dir to choose an empty path, or convert ${INSTALL_DIR} into a repo first."
+        exit 1
+    fi
+
     info "Cloning repository..."
+    mkdir -p "${INSTALL_DIR}"
     git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
 fi
 
 # Install horc command
 info "Installing 'horc' command..."
-cat > "${HORC_INSTALL_PATH}" <<EOF
+WRAPPER_CONTENT=$(cat <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 exec "${INSTALL_DIR}/scripts/clone/horc.sh" "\$@"
 EOF
-chmod +x "${HORC_INSTALL_PATH}"
+)
+
+TARGET_DIR="$(dirname "${HORC_INSTALL_PATH}")"
+TMP_WRAPPER="$(mktemp)"
+printf "%s\n" "${WRAPPER_CONTENT}" > "${TMP_WRAPPER}"
+chmod +x "${TMP_WRAPPER}"
+
+if [[ -d "${TARGET_DIR}" && -w "${TARGET_DIR}" ]] || mkdir -p "${TARGET_DIR}" 2>/dev/null; then
+    install -m 0755 "${TMP_WRAPPER}" "${HORC_INSTALL_PATH}"
+else
+    require_cmd sudo
+    sudo mkdir -p "${TARGET_DIR}"
+    sudo install -m 0755 "${TMP_WRAPPER}" "${HORC_INSTALL_PATH}"
+fi
+rm -f "${TMP_WRAPPER}"
 
 success "'horc' installed to ${HORC_INSTALL_PATH}"
 
