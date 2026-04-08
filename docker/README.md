@@ -7,8 +7,8 @@ This directory contains a production-oriented OpenViking deployment for Hermes m
 - OpenViking config template: `/local/docker/containers.conf/openviking/ov.conf`
 - Docker image artifacts: `/local/docker/dockerfiles/`
 - Logs (host volume): `/local/logs/openviking/`
-- Persistent memory/index storage (host volume): `/local/memory/`
-- Validation scripts: `/local/scripts/tests/openviking_doctor.py`
+- Persistent memory/index storage (host volume): `/local/plugins/memory/`
+- Validation scripts: `/local/scripts/openviking/openviking_doctor.py`
 
 ## Architecture
 
@@ -48,7 +48,7 @@ This directory contains a production-oriented OpenViking deployment for Hermes m
       +------------------------------------------------------------------+
                                     |
                                     v
-                    /local/memory (mounted as /data in container)
+                    /local/plugins/memory (mounted as /data in container)
 ```
 
 ## Model Mapping (Default)
@@ -79,7 +79,7 @@ Candidate generation narrows the search space cheaply (vector recall + path/hier
 
 Integration is non-invasive:
 
-1. Enable `MEMORY_OPENVIKING=1` in `/local/agents/<agent>.env`.
+1. Enable `OPENVIKING_ENABLED=1` in `/local/agents/envs/<agent>.env`.
 2. Prestart bootstrap (`openviking_env_bootstrap.py`) enforces:
    - `memory.provider: openviking` in `.hermes/config.yaml` when plugin is supported.
    - defaults for `OPENVIKING_ENDPOINT`, `OPENVIKING_ACCOUNT`, `OPENVIKING_USER`.
@@ -88,7 +88,7 @@ Integration is non-invasive:
 
 Optional adapter example:
 
-- `/local/scripts/openviking_adapter.py`
+- `/local/scripts/openviking/openviking_adapter.py`
   - `commit` memory notes
     - committed under `viking://resources/memory/<OPENVIKING_USER>/<category>/...`
   - `recall` semantic contexts
@@ -152,7 +152,7 @@ Success looks like:
 2. Boot + health + ingestion + retrieval + rerank + Hermes smoke:
 
 ```bash
-python3 /local/scripts/tests/openviking_doctor.py
+python3 /local/scripts/openviking/openviking_doctor.py
 ```
 
 Validates:
@@ -199,7 +199,7 @@ Runtime health checks:
 
 Ingestion verification:
 - ingest a known doc and confirm URI under `viking://resources/...`
-- confirm file/index artifacts under `/local/memory/`
+- confirm file/index artifacts under `/local/plugins/memory/`
 
 Retrieval verification:
 - run known query and confirm expected URI appears in top candidates.
@@ -242,5 +242,5 @@ On this VM, verification was performed against the running `openviking` containe
 The exact command list and outcomes are captured in the section **HOW THIS WAS TESTED** and can be rerun at any time with:
 
 ```bash
-python3 /local/scripts/tests/openviking_doctor.py
+python3 /local/scripts/openviking/openviking_doctor.py
 ```

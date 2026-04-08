@@ -3,19 +3,28 @@
 agents/nodes/
 agents/registry.json
 logs/
-memory/
+/plugins/memory/
+/memory/
+/memory
+hermes-agent/plugins/memory/
+hermes-agent/tests/plugins/
 backups/
 crons/
 plugins/discord/discord_users.json
+plugins/discord/discord_webhooks_table.json
 
 # Secrets / machine-local envs
 .env
 .env.*
 !.env.example
-agents/envs/*.env
-!agents/envs/*.env.example
+agents/envs/*
+!agents/envs/node.env.example
 docker/.env
 hermes-agent/.env
+plugins/**/.env
+plugins/**/*.env
+plugins/**/*.env.*
+!plugins/**/*.env.example
 
 # Python / Node build artifacts
 **/__pycache__/

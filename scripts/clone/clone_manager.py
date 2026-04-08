@@ -64,7 +64,7 @@ import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict
 
 
@@ -89,7 +89,8 @@ PARENT_WORKSPACE_BACKUP_SCRIPTS = PARENT_WORKSPACE_ROOT / "crons" / "scripts" / 
 SHARED_PLUGINS_ROOT = Path(os.getenv("HERMES_PLUGINS_ROOT", "/local/plugins"))
 SHARED_SCRIPTS_ROOT = Path(os.getenv("HERMES_SCRIPTS_ROOT", "/local/scripts"))
 SHARED_CRONS_ROOT = Path(os.getenv("HERMES_CRONS_ROOT", "/local/crons"))
-SHARED_MEMORY_ROOT = Path(os.getenv("HERMES_MEMORY_ROOT", "/local/memory"))
+SHARED_MEMORY_ROOT = Path(os.getenv("HERMES_MEMORY_ROOT", "/local/plugins/memory"))
+LEGACY_MEMORY_ROOT = Path("/local/memory")
 BACKUPS_ROOT = Path(os.getenv("HERMES_BACKUPS_ROOT", "/local/backups"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
 HERMES_AGENT_UPSTREAM_REPO = str(
@@ -150,12 +151,64 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _ensure_memory_root_layout() -> None:
+    target = SHARED_MEMORY_ROOT
+    legacy = LEGACY_MEMORY_ROOT
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if (
+        target != legacy
+        and not target.exists()
+        and not target.is_symlink()
+        and legacy.exists()
+        and not legacy.is_symlink()
+    ):
+        try:
+            shutil.move(str(legacy), str(target))
+        except Exception:
+            pass
+
+    target.mkdir(parents=True, exist_ok=True)
+
+    if target == legacy:
+        return
+
+    if legacy.is_symlink():
+        try:
+            link_target = Path(os.readlink(legacy))
+            resolved_link = (legacy.parent / link_target).resolve()
+            if resolved_link == target.resolve():
+                return
+        except Exception:
+            pass
+        _remove_path(legacy)
+    elif legacy.exists():
+        try:
+            if legacy.is_dir() and any(legacy.iterdir()):
+                return
+            if legacy.is_dir():
+                legacy.rmdir()
+            else:
+                return
+        except Exception:
+            return
+
+    try:
+        os.symlink(str(target), str(legacy))
+    except Exception:
+        pass
+
+
 def _ensure_dirs() -> None:
     AGENTS_ROOT.mkdir(parents=True, exist_ok=True)
     ENVS_ROOT.mkdir(parents=True, exist_ok=True)
     CLONES_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
     BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
+    SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
+    SHARED_CRONS_ROOT.mkdir(parents=True, exist_ok=True)
+    _ensure_memory_root_layout()
 
 
 def _legacy_orchestrator_home_candidates() -> list[Path]:
@@ -396,8 +449,131 @@ def _archive_add_path(tf: tarfile.TarFile, source: Path) -> str | None:
     if not source.exists():
         return None
     arcname = _to_archive_relative(source)
-    tf.add(str(source), arcname=arcname, recursive=True)
+    archive_source = source
+    if source.is_symlink():
+        try:
+            resolved = source.resolve()
+            if resolved.exists():
+                archive_source = resolved
+        except Exception:
+            archive_source = source
+    tf.add(str(archive_source), arcname=arcname, recursive=True)
     return arcname
+
+
+def _resolve_backup_path(raw_path: str) -> Path:
+    value = str(raw_path or "").strip()
+    if not value:
+        raise CloneManagerError("backup/restore path is required")
+
+    probe = Path(value).expanduser()
+    candidates = [probe]
+    if not probe.is_absolute():
+        candidates.append(BACKUPS_ROOT / probe)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    tried = ", ".join(str(c) for c in candidates)
+    raise CloneManagerError(f"backup path not found: {value} (tried: {tried})")
+
+
+def _is_safe_archive_member(name: str) -> bool:
+    clean = str(name or "").strip()
+    if not clean:
+        return False
+    while clean.startswith("./"):
+        clean = clean[2:]
+    if not clean:
+        return False
+    posix = PurePosixPath(clean)
+    if posix.is_absolute():
+        return False
+    return ".." not in posix.parts
+
+
+def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, Any]:
+    if not tarfile.is_tarfile(archive_path):
+        raise CloneManagerError(f"backup file is not a valid tar archive: {archive_path}")
+
+    nodes: set[str] = set()
+    env_nodes: set[str] = set()
+    registry_present = False
+    plugins_memory_present = False
+    legacy_memory_present = False
+    crons_present = False
+    member_count = 0
+
+    with tarfile.open(archive_path, "r:*") as tf:
+        members = tf.getmembers()
+        for member in members:
+            member_count += 1
+            member_name = str(member.name or "").strip()
+            if not member_name:
+                continue
+            if not _is_safe_archive_member(member_name):
+                raise CloneManagerError(
+                    f"unsafe path inside backup archive: {member_name}"
+                )
+
+            clean = member_name
+            while clean.startswith("./"):
+                clean = clean[2:]
+            parts = PurePosixPath(clean).parts
+            if not parts:
+                continue
+            if parts[0] == "agents":
+                if len(parts) == 2 and parts[1] == "registry.json":
+                    registry_present = True
+                    continue
+                if len(parts) >= 3 and parts[1] == "envs" and parts[2].endswith(".env"):
+                    env_nodes.add(_normalize_clone_name(parts[2][:-4]))
+                    continue
+                if len(parts) >= 3 and parts[1] == "nodes":
+                    nodes.add(_normalize_clone_name(parts[2]))
+                    continue
+                if len(parts) == 1:
+                    continue
+                if len(parts) >= 2 and parts[1] in {"envs", "nodes"}:
+                    continue
+                raise CloneManagerError(
+                    f"unsupported path in backup archive: {member_name}"
+                )
+
+            if parts[0] == "plugins":
+                if len(parts) == 1:
+                    continue
+                if parts[1] == "memory":
+                    plugins_memory_present = True
+                    continue
+                raise CloneManagerError(
+                    f"unsupported path in backup archive: {member_name}"
+                )
+
+            if parts[0] == "memory":
+                legacy_memory_present = True
+                continue
+
+            if parts[0] == "crons":
+                crons_present = True
+                continue
+
+            raise CloneManagerError(
+                f"unsupported path in backup archive: {member_name}"
+            )
+
+        tf.extractall(destination)
+
+    return {
+        "nodes": sorted(nodes),
+        "env_nodes": sorted(env_nodes),
+        "registry_present": registry_present,
+        "plugins_memory_present": plugins_memory_present,
+        "legacy_memory_present": legacy_memory_present,
+        "crons_present": crons_present,
+        "member_count": member_count,
+    }
 
 
 def _load_registry() -> Dict[str, Any]:
@@ -1083,7 +1259,7 @@ def _ensure_clone_ownership(clone_root: Path) -> None:
         DEFAULT_DOCKER_IMAGE,
         "sh",
         "-lc",
-        f"chown -R {HOST_UID}:{HOST_GID} /clone",
+        f"chown -R -h {HOST_UID}:{HOST_GID} /clone",
     ]
     _run(cmd, check=True)
 
@@ -1221,11 +1397,12 @@ def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
     return target
 
 
-def _discord_runtime_seed_candidates() -> list[Path]:
+def _discord_runtime_seed_candidates(filename: str) -> list[Path]:
     shared = _discord_plugin_dir(require_exists=False)
+    primary = shared / filename
     return [
-        shared / "discord_users.json",
-        shared / "discord_users.json.example",
+        primary,
+        primary.with_name(f"{primary.name}.example"),
     ]
 
 
@@ -1234,11 +1411,13 @@ def _seed_workspace_discord_state_file(
     clone_name: str,
     target_file: Path,
     default_content: str,
+    seed_candidates: list[Path] | None = None,
 ) -> None:
     if target_file.exists():
         return
 
-    source = next((c for c in _discord_runtime_seed_candidates() if c.exists()), None)
+    candidates = list(seed_candidates or [])
+    source = next((c for c in candidates if c.exists()), None)
     target_file.parent.mkdir(parents=True, exist_ok=True)
     if source is not None:
         shutil.copy2(source, target_file)
@@ -1306,16 +1485,19 @@ def _link_clone_workspace_discord(clone_root: Path, clone_name: str = "") -> Non
         clone_name=clone_name,
         target_file=workspace_discord / "discord_users.json",
         default_content='{\n  "version": 2,\n  "users": []\n}\n',
+        seed_candidates=_discord_runtime_seed_candidates("discord_users.json"),
     )
     _seed_workspace_discord_state_file(
         clone_name=clone_name,
         target_file=workspace_discord / "discord_commands.json",
         default_content="[]\n",
+        seed_candidates=_discord_runtime_seed_candidates("discord_commands.json"),
     )
     _seed_workspace_discord_state_file(
         clone_name=clone_name,
         target_file=workspace_discord / "discord_webhooks_table.json",
         default_content="{}\n",
+        seed_candidates=_discord_runtime_seed_candidates("discord_webhooks_table.json"),
     )
 
 
@@ -2991,11 +3173,53 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
 
     included: list[str] = []
     missing: list[str] = []
+    included_global: list[str] = []
+
+    global_candidates: list[Path] = []
+    if backup_all:
+        global_candidates.extend([SHARED_MEMORY_ROOT, SHARED_CRONS_ROOT])
+        try:
+            legacy_resolved = LEGACY_MEMORY_ROOT.resolve() if LEGACY_MEMORY_ROOT.exists() else None
+        except Exception:
+            legacy_resolved = None
+        try:
+            shared_resolved = SHARED_MEMORY_ROOT.resolve() if SHARED_MEMORY_ROOT.exists() else None
+        except Exception:
+            shared_resolved = None
+        if LEGACY_MEMORY_ROOT.exists() and legacy_resolved != shared_resolved:
+            global_candidates.append(LEGACY_MEMORY_ROOT)
+    else:
+        node_name = target_nodes[0]
+        global_candidates.extend(
+            [
+                SHARED_MEMORY_ROOT / "openviking" / node_name,
+                SHARED_MEMORY_ROOT / "viking" / node_name,
+                SHARED_CRONS_ROOT / node_name,
+            ]
+        )
+        if LEGACY_MEMORY_ROOT.exists():
+            global_candidates.extend(
+                [
+                    LEGACY_MEMORY_ROOT / "openviking" / node_name,
+                    LEGACY_MEMORY_ROOT / "viking" / node_name,
+                ]
+            )
 
     with tarfile.open(archive_path, "w:gz") as tf:
         registry_added = _archive_add_path(tf, REGISTRY_PATH)
         if registry_added:
             included.append(registry_added)
+
+        seen_global: set[str] = set()
+        for global_path in global_candidates:
+            key = str(global_path.resolve()) if global_path.exists() else str(global_path)
+            if key in seen_global:
+                continue
+            seen_global.add(key)
+            added = _archive_add_path(tf, global_path)
+            if added is not None:
+                included.append(added)
+                included_global.append(added)
 
         for node in target_nodes:
             env_path = _clone_env_path(node)
@@ -3020,7 +3244,170 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
         "archive": str(archive_path),
         "size_bytes": int(size_bytes),
         "included_paths": included,
+        "included_global_paths": included_global,
         "missing_paths": missing,
+    }
+
+
+def _restore_agents_root(restore_root: Path) -> Path:
+    if (restore_root / "agents").is_dir():
+        return restore_root / "agents"
+    if restore_root.name == "agents" and restore_root.is_dir():
+        return restore_root
+    raise CloneManagerError(
+        f"restore source does not include an agents/ tree: {restore_root}"
+    )
+
+
+def _collect_restore_source(restore_root: Path) -> Dict[str, Any]:
+    agents_root = _restore_agents_root(restore_root)
+    env_dir = agents_root / "envs"
+    nodes_dir = agents_root / "nodes"
+    registry_path = agents_root / "registry.json"
+
+    env_files: Dict[str, Path] = {}
+    if env_dir.exists():
+        for env_path in sorted(env_dir.glob("*.env")):
+            node = _normalize_clone_name(env_path.stem)
+            env_files[node] = env_path
+
+    node_dirs: Dict[str, Path] = {}
+    if nodes_dir.exists():
+        for node_path in sorted(nodes_dir.iterdir()):
+            if not node_path.is_dir():
+                continue
+            node = _normalize_clone_name(node_path.name)
+            node_dirs[node] = node_path
+
+    if not registry_path.exists() and not env_files and not node_dirs:
+        raise CloneManagerError(
+            f"restore source has no registry/envs/nodes payload: {restore_root}"
+        )
+
+    return {
+        "agents_root": agents_root,
+        "registry_path": registry_path if registry_path.exists() else None,
+        "env_files": env_files,
+        "node_dirs": node_dirs,
+        "plugins_memory_path": (restore_root / "plugins" / "memory") if (restore_root / "plugins" / "memory").exists() else None,
+        "legacy_memory_path": (restore_root / "memory") if (restore_root / "memory").exists() else None,
+        "crons_path": (restore_root / "crons") if (restore_root / "crons").exists() else None,
+    }
+
+
+def _action_restore(restore_path: str) -> Dict[str, Any]:
+    resolved = _resolve_backup_path(restore_path)
+    archive_meta: Dict[str, Any] | None = None
+    source_kind = "directory"
+
+    with tempfile.TemporaryDirectory(prefix="horc-restore-", dir=str(BACKUPS_ROOT)) as tmp:
+        restore_root: Path
+        if resolved.is_file():
+            source_kind = "archive"
+            restore_root = Path(tmp)
+            archive_meta = _extract_backup_archive(resolved, restore_root)
+        elif resolved.is_dir():
+            restore_root = resolved
+        else:
+            raise CloneManagerError(f"restore path is neither file nor directory: {resolved}")
+
+        source = _collect_restore_source(restore_root)
+        env_files: Dict[str, Path] = source["env_files"]
+        node_dirs: Dict[str, Path] = source["node_dirs"]
+        registry_path = source["registry_path"]
+        plugins_memory_path: Path | None = source.get("plugins_memory_path")
+        legacy_memory_path: Path | None = source.get("legacy_memory_path")
+        crons_path: Path | None = source.get("crons_path")
+
+        target_nodes = sorted(set(env_files) | set(node_dirs))
+        running_before: list[str] = []
+        stop_results: Dict[str, str] = {}
+
+        for node in target_nodes:
+            status_before = _action_status(node)
+            was_running = bool((status_before.get("container_state") or {}).get("running"))
+            if not was_running:
+                continue
+            stop_payload = _action_stop(node)
+            stop_results[node] = str(stop_payload.get("result") or "")
+            status_after = _action_status(node)
+            if bool((status_after.get("container_state") or {}).get("running")):
+                raise CloneManagerError(f"failed to stop node before restore: {node}")
+            running_before.append(node)
+
+        restored_registry = False
+        if isinstance(registry_path, Path) and registry_path.exists():
+            REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(registry_path, REGISTRY_PATH)
+            restored_registry = True
+
+        restored_envs: list[str] = []
+        for node, env_src in sorted(env_files.items()):
+            env_dst = ENVS_ROOT / f"{node}.env"
+            env_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(env_src, env_dst)
+            try:
+                env_dst.chmod(0o600)
+            except Exception:
+                pass
+            restored_envs.append(str(env_dst))
+
+        restored_nodes: list[str] = []
+        for node, node_src in sorted(node_dirs.items()):
+            node_dst = CLONES_ROOT / node
+            if node_dst.exists() or node_dst.is_symlink():
+                _remove_path(node_dst)
+            _sync_dir(node_src, node_dst, delete=True)
+            _ensure_clone_ownership(node_dst)
+            _link_clone_workspace_discord(node_dst, node)
+            _ensure_workspace_data_layout(node_dst, node)
+            _log(node, f"restore applied from {resolved}")
+            restored_nodes.append(node)
+
+        restored_memory_root = ""
+        memory_src = plugins_memory_path or legacy_memory_path
+        if isinstance(memory_src, Path) and memory_src.exists():
+            SHARED_MEMORY_ROOT.parent.mkdir(parents=True, exist_ok=True)
+            SHARED_MEMORY_ROOT.mkdir(parents=True, exist_ok=True)
+            _sync_dir(memory_src, SHARED_MEMORY_ROOT, delete=False)
+            _ensure_memory_root_layout()
+            restored_memory_root = str(SHARED_MEMORY_ROOT)
+
+        restored_crons_root = ""
+        if isinstance(crons_path, Path) and crons_path.exists():
+            SHARED_CRONS_ROOT.mkdir(parents=True, exist_ok=True)
+            _sync_dir(crons_path, SHARED_CRONS_ROOT, delete=False)
+            restored_crons_root = str(SHARED_CRONS_ROOT)
+
+        restarted_nodes: list[str] = []
+        restart_errors: Dict[str, str] = {}
+        for node in running_before:
+            env_path = _clone_env_path(node)
+            node_root = _clone_root_path(node)
+            if not env_path.exists() or not node_root.exists():
+                restart_errors[node] = "skipped: env or node root missing after restore"
+                continue
+            try:
+                _action_start(node, image=DEFAULT_DOCKER_IMAGE)
+                restarted_nodes.append(node)
+            except Exception as exc:
+                restart_errors[node] = str(exc)
+
+    return {
+        "ok": True,
+        "action": "restore",
+        "source": str(resolved),
+        "source_kind": source_kind,
+        "restored_registry": restored_registry,
+        "restored_envs": restored_envs,
+        "restored_nodes": restored_nodes,
+        "restored_memory_root": restored_memory_root,
+        "restored_crons_root": restored_crons_root,
+        "stopped_before_restore": running_before,
+        "stop_results": stop_results,
+        "restarted_after_restore": restarted_nodes,
+        "restart_errors": restart_errors,
+        "archive": archive_meta,
     }
 
 
@@ -3221,6 +3608,7 @@ def _dispatch(
     lines: int,
     source_branch: str,
     backup_all: bool,
+    restore_path: str,
 ) -> Dict[str, Any]:
     if action == "start":
         if not clone_name:
@@ -3246,12 +3634,14 @@ def _dispatch(
         return _action_update(clone_name, source_branch=source_branch)
     if action == "backup":
         return _action_backup(clone_name, backup_all=backup_all)
+    if action == "restore":
+        return _action_restore(restore_path)
     raise CloneManagerError(f"unsupported action: {action}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hermes clone lifecycle manager")
-    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update", "backup"])
+    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update", "backup", "restore"])
     parser.add_argument(
         "name_positional",
         nargs="?",
@@ -3267,6 +3657,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image for clone runtime")
     parser.add_argument("--lines", type=int, default=80, help="Log tail lines for logs action")
     parser.add_argument("--all", dest="backup_all", action="store_true", help="Backup all nodes (backup action)")
+    parser.add_argument("--path", dest="restore_path", default=None, help="Backup file path for restore action")
     parser.add_argument(
         "--source-branch",
         default=str(os.getenv("HERMES_AGENT_UPDATE_BRANCH", HERMES_AGENT_UPSTREAM_BRANCH) or HERMES_AGENT_UPSTREAM_BRANCH),
@@ -3283,7 +3674,14 @@ def main() -> int:
 
     try:
         clone_name: str | None
-        if args.action in {"update", "backup"}:
+        restore_path = ""
+        if args.action == "restore":
+            raw_restore = args.restore_path or args.name_positional
+            restore_path = str(raw_restore or "").strip()
+            if not restore_path:
+                raise CloneManagerError("restore requires backup path (use positional path or --path)")
+            clone_name = None
+        elif args.action in {"update", "backup"}:
             raw_name = args.name_flag or args.name_positional
             clone_name = _normalize_clone_name(raw_name) if raw_name else None
             if args.action == "backup" and args.backup_all:
@@ -3303,6 +3701,7 @@ def main() -> int:
             lines=lines,
             source_branch=str(args.source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
             backup_all=bool(args.backup_all),
+            restore_path=restore_path,
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0

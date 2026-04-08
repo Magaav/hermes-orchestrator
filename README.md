@@ -41,16 +41,18 @@ What install does:
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
-│       │   ├── data/
 │       │   ├── workspace/
+│       │   │   ├── data/
+│       │   │   └── discord/
 │       │   ├── hermes-agent -> /local/hermes-agent
 │       │   ├── .hermes/
 │       │   ├── scripts -> /local/scripts
 │       │   ├── crons -> /local/crons/orchestrator
 │       │   └── plugins -> /local/plugins
 │       ├── node1/
-│       │   ├── data/
 │       │   ├── workspace/
+│       │   │   ├── data/
+│       │   │   └── discord/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
 │       │   ├── scripts/   # mounted from host (ro)
@@ -60,11 +62,13 @@ What install does:
 ├── hermes-agent/
 ├── scripts/
 ├── plugins/
+│   ├── memory/
+│   │   ├── openviking/
+│   │   ├── vectordb/
+│   │   └── viking/
+│   └── discord/
 ├── memory/
-│   └── openviking/
-│       ├── orchestrator/
-│       ├── catatau/
-│       └── colmeio/
+│   └── -> /local/plugins/memory (compatibility symlink)
 ├── backups/
 ├── crons/
 └── logs/
@@ -102,6 +106,26 @@ horc stop catatau
 horc delete catatau
 ```
 
+## Backups & Restore
+
+```bash
+# backup one node
+horc backup node colmeio
+
+# backup all nodes
+horc backup all
+
+# restore from a backup archive
+horc restore /local/backups/horc-backup-node-colmeio-YYYYMMDDTHHMMSSZ.tar.gz
+```
+
+Restore behavior:
+- If you pass a relative path, `horc restore` resolves it under `/local/backups/`
+- `backup node <name>` captures that node env/root plus node-scoped `plugins/memory/{openviking,viking}/<name>` and `crons/<name>`
+- `backup all` captures all envs/nodes plus full shared `plugins/memory/*` and `crons/*`
+- Restore reapplies whatever is present in the archive (`agents/*`, memory paths, and crons paths)
+- Stops included running nodes before restore and restarts those that were running
+
 ## Updates
 
 ```bash
@@ -138,7 +162,7 @@ Rotate Codex OAuth for a node by running Hermes login/logout in that node contex
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `logs/`, `memory/`, `backups/`, `crons/`, `workspace/`, `spawns/`
+- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `memory/`, `backups/`, `crons/`, `workspace/`, `spawns/`
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/.runtime/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 

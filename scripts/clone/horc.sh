@@ -63,6 +63,7 @@ Usage:
   horc backup all
   horc backup node <name>
   horc backup <name>
+  horc restore <path>
 
   horc update
   horc agent update [name] [--source-branch BRANCH]
@@ -74,6 +75,7 @@ Examples:
   horc logs node1 --lines 120
   horc backup all
   horc backup node node1
+  horc restore /local/backups/horc-backup-node-node1-20260101T000000Z.tar.gz
 
   horc update
   horc agent update
@@ -85,6 +87,7 @@ Notes:
   - 'horc agent update' updates /local/hermes-agent (template for new nodes).
   - 'horc agent update <node>' also syncs that node's hermes-agent and restarts it if running.
   - Backups are written under /local/backups.
+  - Restore accepts either an absolute path or a filename under /local/backups.
   - Compatibility alias: 'hord' runs the same commands as 'horc'.
 TXT
 }
@@ -214,6 +217,16 @@ case "${ACTION}" in
         exec_manager backup --name "${MODE}" "$@"
         ;;
     esac
+    ;;
+  restore)
+    BACKUP_PATH="${1:-}"
+    if [[ -z "${BACKUP_PATH}" ]]; then
+      echo "horc: restore requires <path>" >&2
+      usage >&2
+      exit 2
+    fi
+    shift
+    exec_manager restore --path "${BACKUP_PATH}" "$@"
     ;;
   help|-h|--help)
     usage

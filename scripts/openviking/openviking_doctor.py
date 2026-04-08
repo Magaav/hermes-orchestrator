@@ -382,7 +382,7 @@ class Doctor:
         return True, "rerank changed ordering meaningfully", payload
 
     def test_hermes_smoke(self) -> Tuple[bool, str, Dict[str, Any]]:
-        adapter = Path("/local/scripts/openviking_adapter.py")
+        adapter = Path("/local/scripts/openviking/openviking_adapter.py")
         if not adapter.exists():
             return False, "adapter script missing", {"path": str(adapter)}
 
