@@ -146,7 +146,11 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    root = Path("/local/workspace/discord")
+    root = Path(__import__("os").getenv("HERMES_DISCORD_PLUGIN_DIR", "/local/plugins/discord")).resolve()
+    if not root.exists():
+        legacy_root = Path("/local/workspace/discord")
+        if legacy_root.exists():
+            root = legacy_root.resolve()
     commands_path = root / "discord_commands.json"
     registry_path = root / "hooks" / "discord_slash_bridge" / "registry.yaml"
     custom_dir = root / "hooks" / "discord_slash_bridge" / "custom_handlers"

@@ -154,3 +154,8 @@ def get_session_info(platform_adapter, session_entry, source) -> Dict[str, Any]:
         "provider_label": provider_label,
         "routing_note": routing_note,
     }
+
+
+def handle(event_name: str, context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Hook entrypoint for gateway event bus (no-op for compatibility)."""
+    return context or {}

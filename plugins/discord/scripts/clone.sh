@@ -82,14 +82,15 @@ case "$MODE" in
     ;;
 esac
 
-AGENTS_ROOT="${HERMES_AGENTS_ROOT:-/local/agents}"
+AGENTS_ROOT="${HERMES_AGENTS_NODES_ROOT:-/local/agents/nodes}"
+ENVS_ROOT="${HERMES_AGENTS_ENVS_ROOT:-/local/agents/envs}"
 LEGACY_AGENTS_ROOT="/local/clones"
 
 if [[ "$ACTION" == "start" ]]; then
-  ENV_FILE="${AGENTS_ROOT%/}/${NAME}.env"
+  ENV_FILE="${ENVS_ROOT%/}/${NAME}.env"
   if [[ ! -f "$ENV_FILE" ]]; then
     echo "agent env not found: $ENV_FILE" >&2
-    echo "create ${NAME}.env in ${AGENTS_ROOT} before running add/start." >&2
+    echo "create ${NAME}.env in ${ENVS_ROOT} before running add/start." >&2
     exit 2
   fi
 fi

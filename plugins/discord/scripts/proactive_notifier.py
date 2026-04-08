@@ -6,7 +6,7 @@ Goal:
 - Send a daily DIGEST with insights when there is useful signal (without spam).
 
 Main config:
-- /local/workspace/discord/discord_users.json
+- /local/plugins/discord/discord_users.json
 
 Run:
   python3 discord/scripts/proactive_notifier.py immediate
@@ -27,13 +27,63 @@ from typing import Any
 
 import requests
 
-PROJECT_DIR = Path(os.getenv("COLMEIO_PROJECT_DIR", "/local/workspace")).resolve()
-ACL_PATH = Path(os.getenv("DISCORD_USERS_DB", "/local/workspace/discord/discord_users.json")).resolve()
-STATE_PATH = Path(os.getenv("PROACTIVE_NOTIFIER_STATE", str(PROJECT_DIR / ".proactive_notifier_state.json"))).resolve()
+def _resolve_project_dir() -> Path:
+    explicit = str(os.getenv("COLMEIO_PROJECT_DIR", "") or "").strip()
+    if explicit:
+        return Path(explicit).resolve()
+
+    canonical = Path("/local").resolve()
+    legacy = Path("/local/workspace").resolve()
+    if (canonical / ".hermes").exists() or (canonical / "data").exists():
+        return canonical
+    return legacy if legacy.exists() else canonical
+
+
+def _resolve_acl_path(project_dir: Path) -> Path:
+    configured = str(os.getenv("DISCORD_USERS_DB", "") or "").strip()
+    if configured:
+        return Path(configured).resolve()
+
+    candidates = [
+        project_dir / "plugins" / "discord" / "discord_users.json",
+        Path("/local/plugins/discord/discord_users.json"),
+        Path("/local/workspace/discord/discord_users.json"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+PROJECT_DIR = _resolve_project_dir()
+HERMES_HOME = Path(os.getenv("HERMES_HOME", str(PROJECT_DIR / ".hermes"))).resolve()
+ACL_PATH = _resolve_acl_path(PROJECT_DIR)
+STATE_PATH = Path(
+    os.getenv(
+        "PROACTIVE_NOTIFIER_STATE",
+        str(PROJECT_DIR / "data" / ".proactive_notifier_state.json"),
+    )
+).resolve()
 ENV_PATH = PROJECT_DIR / ".env"
 
-PIPELINE_LOG = PROJECT_DIR / "skills" / "custom" / "colmeio" / "colmeio-lista-de-faltas" / "logs" / "pipeline.log"
-PIPELINE_ERROR_LOG = PROJECT_DIR / "skills" / "custom" / "colmeio" / "colmeio-lista-de-faltas" / "logs" / "pipeline.error.log"
+PIPELINE_LOG = (
+    HERMES_HOME
+    / "skills"
+    / "custom"
+    / "colmeio"
+    / "colmeio-lista-de-faltas"
+    / "logs"
+    / "pipeline.log"
+)
+PIPELINE_ERROR_LOG = (
+    HERMES_HOME
+    / "skills"
+    / "custom"
+    / "colmeio"
+    / "colmeio-lista-de-faltas"
+    / "logs"
+    / "pipeline.error.log"
+)
 
 
 @dataclass

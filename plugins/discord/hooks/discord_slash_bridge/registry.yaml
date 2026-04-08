@@ -39,8 +39,8 @@ native_overrides:
     acl_command: backup
     subcommand_name: version
     subcommand_description: Create a versioned backup tar.gz
-    snapshot_script: /local/workspace/crons/scripts/backup/backup_snapshot.sh
-    drive_script: /local/workspace/crons/scripts/backup/drive_backup.py
+    snapshot_script: /local/crons/scripts/backup/backup_snapshot.sh
+    drive_script: /local/crons/scripts/backup/drive_backup.py
     local_backup_root: /local/backups
     drive_folder_path: backups/agent/versions
     timeout_snapshot_sec: 1800

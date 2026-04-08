@@ -2619,6 +2619,13 @@ class GatewayRunner:
 
 
 
+
+
+
+
+
+
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -3128,6 +3135,13 @@ class GatewayRunner:
             f"  route: {_routing_note}",
         ])
         # COLMEIO_CHANNEL_ACL_STATUS_END
+
+
+
+
+
+
+
 
 
 
@@ -5438,6 +5452,13 @@ class GatewayRunner:
             if _sp_addon:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + _sp_addon).strip()
             # COLMEIO_CHANNEL_ACL_MODEL_END
+
+
+
+
+
+
+
 
 
 

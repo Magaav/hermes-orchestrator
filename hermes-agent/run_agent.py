@@ -74,11 +74,28 @@ from tools.browser_tool import cleanup_browser
 from hermes_constants import OPENROUTER_BASE_URL
 
 # Agent internals extracted to agent/ package for modularity
-from agent.memory_manager import build_memory_context_block
-from agent.prompt_builder import (
-    DEFAULT_AGENT_IDENTITY, PLATFORM_HINTS,
-    MEMORY_GUIDANCE, SESSION_SEARCH_GUIDANCE, SKILLS_GUIDANCE,
-    build_nous_subscription_prompt,
+try:
+    from agent.memory_manager import build_memory_context_block
+except Exception:
+    def build_memory_context_block(_prefetch_payload):
+        return ""
+
+from agent import prompt_builder as _prompt_builder
+
+
+def _noop_prompt(*_args, **_kwargs):
+    return ""
+
+
+DEFAULT_AGENT_IDENTITY = getattr(_prompt_builder, "DEFAULT_AGENT_IDENTITY", "")
+PLATFORM_HINTS = getattr(_prompt_builder, "PLATFORM_HINTS", {})
+MEMORY_GUIDANCE = getattr(_prompt_builder, "MEMORY_GUIDANCE", "")
+SESSION_SEARCH_GUIDANCE = getattr(_prompt_builder, "SESSION_SEARCH_GUIDANCE", "")
+SKILLS_GUIDANCE = getattr(_prompt_builder, "SKILLS_GUIDANCE", "")
+build_nous_subscription_prompt = getattr(
+    _prompt_builder,
+    "build_nous_subscription_prompt",
+    _noop_prompt,
 )
 from agent.model_metadata import (
     fetch_model_metadata,
@@ -87,9 +104,25 @@ from agent.model_metadata import (
     save_context_length, is_local_endpoint,
 )
 from agent.context_compressor import ContextCompressor
-from agent.subdirectory_hints import SubdirectoryHintTracker
+try:
+    from agent.subdirectory_hints import SubdirectoryHintTracker
+except Exception:
+    class SubdirectoryHintTracker:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def check_tool_call(self, *_args, **_kwargs):
+            return ""
+
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
+build_skills_system_prompt = getattr(_prompt_builder, "build_skills_system_prompt", _noop_prompt)
+build_context_files_prompt = getattr(_prompt_builder, "build_context_files_prompt", _noop_prompt)
+load_soul_md = getattr(_prompt_builder, "load_soul_md", lambda: None)
+TOOL_USE_ENFORCEMENT_GUIDANCE = getattr(_prompt_builder, "TOOL_USE_ENFORCEMENT_GUIDANCE", "")
+TOOL_USE_ENFORCEMENT_MODELS = getattr(_prompt_builder, "TOOL_USE_ENFORCEMENT_MODELS", set())
+DEVELOPER_ROLE_MODELS = getattr(_prompt_builder, "DEVELOPER_ROLE_MODELS", set())
+GOOGLE_MODEL_OPERATIONAL_GUIDANCE = getattr(_prompt_builder, "GOOGLE_MODEL_OPERATIONAL_GUIDANCE", "")
+OPENAI_MODEL_EXECUTION_GUIDANCE = getattr(_prompt_builder, "OPENAI_MODEL_EXECUTION_GUIDANCE", "")
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -101,7 +134,13 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, env_var_enabled
+from utils import atomic_json_write
+try:
+    from utils import env_var_enabled
+except Exception:
+    def env_var_enabled(name: str, default: bool = False) -> bool:
+        raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
 
 

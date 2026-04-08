@@ -13,7 +13,9 @@ from pathlib import Path
 
 
 def main() -> int:
-    target = Path("/local/workspace/discord/scripts/reapply_discord_command_bootstrap.py")
+    target = Path("/local/plugins/discord/scripts/reapply_discord_command_bootstrap.py")
+    if not target.exists():
+        target = Path("/local/workspace/discord/scripts/reapply_discord_command_bootstrap.py")
     if not target.exists():
         print(f"❌ Bootstrap script not found: {target}", file=sys.stderr)
         return 1

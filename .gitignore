@@ -1,0 +1,29 @@
+# Runtime state (do not version)
+.hermes/
+agents/nodes/
+agents/registry.json
+logs/
+memory/
+backups/
+crons/
+
+# Secrets / machine-local envs
+agents/envs/*.env
+!agents/envs/*.env.example
+docker/.env
+hermes-agent/.env
+
+# Python / Node build artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.cache/
+**/node_modules/
+
+# Local virtual environments
+.venv/
+venv/
+hermes-agent/.venv/
+hermes-agent/venv/

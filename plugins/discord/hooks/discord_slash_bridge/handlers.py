@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -15,6 +16,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 _CUSTOM_HANDLER_CACHE: Dict[str, Any] = {}
+_LOCAL_PREFIX = "/local/"
 _WORKSPACE_PREFIX = "/local/workspace/"
 _WORKSPACE_LEGACY_PREFIX = "/local/workspace/colmeio/"
 
@@ -27,6 +29,18 @@ def _resolve_hermes_home() -> Path:
 
 
 _HERMES_HOME = _resolve_hermes_home()
+
+
+def _resolve_python_bin() -> str:
+    candidates = (
+        "/local/hermes-agent/.venv/bin/python",
+        "/local/hermes-agent/.venv/bin/python3",
+        "/usr/bin/python3",
+    )
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return shutil.which("python3") or shutil.which("python") or "python3"
 
 
 def _path_variants(raw_path: Any) -> list[Path]:
@@ -44,13 +58,21 @@ def _path_variants(raw_path: Any) -> list[Path]:
     _append(base)
 
     if text.startswith(_WORKSPACE_LEGACY_PREFIX):
-        _append(Path(_WORKSPACE_PREFIX + text[len(_WORKSPACE_LEGACY_PREFIX) :]))
+        suffix = text[len(_WORKSPACE_LEGACY_PREFIX) :]
+        _append(Path(_WORKSPACE_PREFIX + suffix))
+        _append(Path(_LOCAL_PREFIX + suffix))
     elif text.startswith(_WORKSPACE_PREFIX):
-        _append(Path(_WORKSPACE_LEGACY_PREFIX + text[len(_WORKSPACE_PREFIX) :]))
+        suffix = text[len(_WORKSPACE_PREFIX) :]
+        _append(Path(_LOCAL_PREFIX + suffix))
+        _append(Path(_WORKSPACE_LEGACY_PREFIX + suffix))
+    elif text.startswith(_LOCAL_PREFIX):
+        suffix = text[len(_LOCAL_PREFIX) :]
+        _append(Path(_WORKSPACE_PREFIX + suffix))
+        _append(Path(_WORKSPACE_LEGACY_PREFIX + suffix))
     elif not base.is_absolute():
+        _append(Path("/local") / text)
         _append(Path("/local/workspace") / text)
         _append(Path("/local/workspace/colmeio") / text)
-        _append(Path("/local") / text)
 
     return out
 
@@ -331,8 +353,9 @@ async def run_metrics_dashboard(
     cfg = settings or {}
     script, script_attempts = _resolve_existing_path(
         cfg.get("script_path"),
-        "/local/workspace/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py",
+        str(_HERMES_HOME / "skills" / "custom" / "colmeio" / "colmeio-metrics" / "scripts" / "metrics_logger.py"),
         "/local/.hermes/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py",
+        "/local/workspace/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py",
     )
     timeout_sec = int(cfg.get("timeout_sec") or 45)
 
@@ -361,8 +384,9 @@ async def run_metrics_dashboard(
         getattr(actor, "display_name", "") or getattr(actor, "name", "") or ""
     )
 
+    python_bin = _resolve_python_bin()
     cmd = [
-        "python3",
+        python_bin,
         str(script),
         "dashboard",
         "--days",
@@ -632,10 +656,12 @@ async def handle_backup_version(
 
     snapshot_script, snapshot_attempts = _resolve_existing_path(
         cfg.get("snapshot_script"),
+        "/local/crons/scripts/backup/backup_snapshot.sh",
         "/local/workspace/crons/scripts/backup/backup_snapshot.sh",
     )
     drive_script, drive_attempts = _resolve_existing_path(
         cfg.get("drive_script"),
+        "/local/crons/scripts/backup/drive_backup.py",
         "/local/workspace/crons/scripts/backup/drive_backup.py",
     )
     local_backup_root = Path(str(cfg.get("local_backup_root") or "/local/backups"))
@@ -759,8 +785,7 @@ async def handle_backup_version(
                     failed += 1
         return deleted, failed
 
-    drive_python = Path("/local/hermes-agent/.venv/bin/python3")
-    python_bin = str(drive_python) if drive_python.exists() else "python3"
+    python_bin = _resolve_python_bin()
 
     ensure_cmd = [
         python_bin,

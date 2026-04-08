@@ -10,8 +10,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
-_WORKSPACE_DISCORD_COMMANDS = Path("/local/workspace/discord/discord_commands.json")
-_WORKSPACE_LEGACY_DISCORD_COMMANDS = Path("/local/workspace/colmeio/discord/discord_commands.json")
+_PRIMARY_DISCORD_COMMANDS = Path("/local/plugins/discord/discord_commands.json")
+_LEGACY_DISCORD_COMMANDS = (
+    Path("/local/workspace/discord/discord_commands.json"),
+    Path("/local/workspace/colmeio/discord/discord_commands.json"),
+)
 
 
 def _resolve_hermes_home() -> Path:
@@ -180,10 +183,16 @@ class DiscordSlashRuntime:
 
     @staticmethod
     def _resolve_payload_commands_path() -> Path | None:
-        for candidate in (_WORKSPACE_DISCORD_COMMANDS, _WORKSPACE_LEGACY_DISCORD_COMMANDS):
+        configured = str(os.getenv("DISCORD_COMMANDS_FILE", "") or "").strip()
+        if configured:
+            cfg_path = Path(configured).expanduser()
+            if cfg_path.exists():
+                return cfg_path
+
+        for candidate in (_PRIMARY_DISCORD_COMMANDS, *_LEGACY_DISCORD_COMMANDS):
             if candidate.exists():
                 return candidate
-        return _WORKSPACE_DISCORD_COMMANDS
+        return _PRIMARY_DISCORD_COMMANDS
 
     # ------------------------------------------------------------------
     # Interaction bridge

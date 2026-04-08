@@ -9,6 +9,7 @@ from typing import Any, Dict, Tuple
 SCRIPT_CANDIDATES = (
     Path("/local/scripts/clone/clone_manager.py"),
     Path("/local/scripts/clone_manager.py"),
+    Path("/local/plugins/discord/scripts/hermes_clone_manager.py"),
     Path("/local/workspace/discord/scripts/hermes_clone_manager.py"),
     Path("/local/workspace/colmeio/discord/scripts/hermes_clone_manager.py"),
 )

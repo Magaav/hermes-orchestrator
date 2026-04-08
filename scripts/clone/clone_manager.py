@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Deterministic Hermes clone lifecycle manager.
 
-This script manages Dockerized Hermes clone nodes whose runtime configuration is
-read from:
-  /local/agents/<clone_name>.env
+This script manages Hermes orchestrator + clone nodes whose runtime
+configuration is read from:
+  /local/agents/envs/<clone_name>.env
 
 Supported actions:
   - start   (idempotent spawn)
@@ -15,7 +15,7 @@ Supported actions:
 Design goals:
   - No secrets in command payloads
   - Transactional spawn path (best-effort rollback on failure)
-  - Deterministic filesystem layout under /local/agents/<clone_name>/
+  - Deterministic filesystem layout under /local/agents/nodes/<clone_name>/
   - Per-clone management log at /local/logs/agents/<clone_name>.log
 
 ================================================================================
@@ -34,7 +34,7 @@ Architecture:
   - Host access: http://127.0.0.1:1933
   - Container access: http://host.docker.internal:1933
 
-Per-clone configuration (in /local/agents/<clone_name>.env):
+Per-clone configuration (in /local/agents/envs/<clone_name>.env):
   MEMORY_OPENVIKING=1           # Enable OpenViking (0 to disable)
   OPENVIKING_ENDPOINT=...       # Server URL (auto-set to host.docker.internal for clones)
   OPENVIKING_ACCOUNT=colmeio    # Tenant account (shared across nodes)
@@ -61,24 +61,35 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
 
-CLONES_ROOT = Path(os.getenv("HERMES_AGENTS_ROOT", "/local/agents"))
+AGENTS_ROOT = Path(os.getenv("HERMES_AGENTS_ROOT", "/local/agents"))
+ENVS_ROOT = Path(os.getenv("HERMES_AGENTS_ENVS_ROOT", str(AGENTS_ROOT / "envs")))
+CLONES_ROOT = Path(os.getenv("HERMES_AGENTS_NODES_ROOT", str(AGENTS_ROOT / "nodes")))
 LEGACY_CLONES_ROOT = Path("/local/clones")
+LEGACY_AGENTS_NODES_ROOT = AGENTS_ROOT
 LOG_ROOT = Path(os.getenv("HERMES_AGENTS_LOG_ROOT", "/local/logs/agents"))
 LEGACY_LOG_ROOT = Path("/local/logs/clones")
-REGISTRY_PATH = CLONES_ROOT / "registry.json"
+REGISTRY_PATH = Path(os.getenv("HERMES_AGENTS_REGISTRY_PATH", str(AGENTS_ROOT / "registry.json")))
 LEGACY_REGISTRY_PATH = LEGACY_CLONES_ROOT / "registry.json"
 
-PARENT_HERMES_HOME = Path("/local/.hermes")
-PARENT_UV_STORE = Path("/home/ubuntu/.local/share/uv")
+CANONICAL_ORCHESTRATOR_HOME = Path(
+    os.getenv("HERMES_ORCHESTRATOR_HOME", str(CLONES_ROOT / "orchestrator" / ".hermes"))
+)
+PARENT_HERMES_HOME = CANONICAL_ORCHESTRATOR_HOME
+PARENT_UV_STORE = Path(os.getenv("HERMES_PARENT_UV_STORE", str(Path.home() / ".local" / "share" / "uv")))
 PARENT_WORKSPACE_ROOT = Path("/local/workspace")
 LEGACY_DISCORD_PLUGIN_ROOT = PARENT_WORKSPACE_ROOT / "discord"
 PARENT_WORKSPACE_BACKUP_SCRIPTS = PARENT_WORKSPACE_ROOT / "crons" / "scripts" / "backup"
 SHARED_PLUGINS_ROOT = Path(os.getenv("HERMES_PLUGINS_ROOT", "/local/plugins"))
+SHARED_SCRIPTS_ROOT = Path(os.getenv("HERMES_SCRIPTS_ROOT", "/local/scripts"))
+SHARED_CRONS_ROOT = Path(os.getenv("HERMES_CRONS_ROOT", "/local/crons"))
+SHARED_MEMORY_ROOT = Path(os.getenv("HERMES_MEMORY_ROOT", "/local/memory"))
+HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
 DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
 HOST_BOOTSTRAP_ENV_FILE = Path(os.getenv("HERMES_BOOTSTRAP_ENV_FILE", "/local/.env"))
 
@@ -112,32 +123,107 @@ def _utc_now() -> str:
 
 
 def _ensure_dirs() -> None:
+    AGENTS_ROOT.mkdir(parents=True, exist_ok=True)
+    ENVS_ROOT.mkdir(parents=True, exist_ok=True)
     CLONES_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def _legacy_orchestrator_home_candidates() -> list[Path]:
+    configured = str(os.getenv("HERMES_ORCHESTRATOR_LEGACY_HOME", "") or "").strip()
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            Path.home() / ".hermes",
+            Path("/local/.hermes"),
+        ]
+    )
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _parent_hermes_home_source() -> Path:
+    canonical = PARENT_HERMES_HOME
+    if canonical.exists():
+        try:
+            if any(canonical.iterdir()):
+                return canonical
+        except Exception:
+            pass
+    for candidate in _legacy_orchestrator_home_candidates():
+        if candidate.exists():
+            return candidate
+    raise CloneManagerError(
+        "could not locate orchestrator state source. Checked: "
+        + ", ".join([str(PARENT_HERMES_HOME)] + [str(p) for p in _legacy_orchestrator_home_candidates()])
+    )
+
+
+def _orchestrator_cron_host_dir(clone_name: str = "orchestrator") -> Path:
+    return SHARED_CRONS_ROOT / clone_name
+
+
+def _orchestrator_memory_home(clone_name: str = "orchestrator") -> Path:
+    return SHARED_MEMORY_ROOT / "openviking" / clone_name
+
+
 def _log(clone_name: str, message: str) -> None:
-    _ensure_dirs()
     line = f"[{_utc_now()}] {message}\n"
-    (LOG_ROOT / f"{clone_name}.log").open("a", encoding="utf-8").write(line)
+    candidates = [
+        LOG_ROOT / f"{clone_name}.log",
+        _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log",
+    ]
+    for path in candidates:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.open("a", encoding="utf-8").write(line)
+            return
+        except PermissionError:
+            continue
+    raise CloneManagerError(f"unable to write log file for {clone_name}")
 
 
 def _log_spawn_event(clone_name: str, phase: str, action: str, detail: str = "") -> None:
     """Deterministic spawn event logging for observability and replay."""
-    _ensure_dirs()
     msg = f"[{_utc_now()}] [SPAWN] phase={phase} action={action}"
     if detail:
         msg += f" detail={detail}"
     msg += "\n"
-    (LOG_ROOT / f"{clone_name}.log").open("a", encoding="utf-8").write(msg)
+    candidates = [
+        LOG_ROOT / f"{clone_name}.log",
+        _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log",
+    ]
+    for path in candidates:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.open("a", encoding="utf-8").write(msg)
+            return
+        except PermissionError:
+            continue
+    raise CloneManagerError(f"unable to write spawn log file for {clone_name}")
 
 
 def _management_log_path(clone_name: str) -> Path:
     canonical = LOG_ROOT / f"{clone_name}.log"
+    local_fallback = _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log"
     legacy = LEGACY_LOG_ROOT / f"{clone_name}.log"
-    if canonical.exists() or not legacy.exists():
+    if canonical.exists():
         return canonical
-    return legacy
+    if local_fallback.exists():
+        return local_fallback
+    if legacy.exists():
+        return legacy
+    return local_fallback
 
 
 def _read_env_file(path: Path) -> Dict[str, str]:
@@ -347,12 +433,6 @@ def _load_registry() -> Dict[str, Any]:
 
 def _save_registry(data: Dict[str, Any]) -> None:
     _atomic_write_json(REGISTRY_PATH, data)
-    # Best-effort mirror for legacy nodes still reading /local/clones/registry.json.
-    try:
-        if LEGACY_REGISTRY_PATH != REGISTRY_PATH:
-            _atomic_write_json(LEGACY_REGISTRY_PATH, data)
-    except Exception:
-        pass
 
 
 def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -442,22 +522,22 @@ def _normalize_clone_name(raw: str) -> str:
 
 
 def _clone_env_path(clone_name: str) -> Path:
-    canonical = CLONES_ROOT / f"{clone_name}.env"
-    legacy = LEGACY_CLONES_ROOT / f"{clone_name}.env"
-    if canonical.exists():
-        return canonical
-    if legacy.exists():
-        return legacy
+    canonical = ENVS_ROOT / f"{clone_name}.env"
+    legacy_agents = LEGACY_AGENTS_NODES_ROOT / f"{clone_name}.env"
+    legacy_clones = LEGACY_CLONES_ROOT / f"{clone_name}.env"
+    for candidate in (canonical, legacy_agents, legacy_clones):
+        if candidate.exists():
+            return candidate
     return canonical
 
 
 def _clone_root_path(clone_name: str) -> Path:
     canonical = CLONES_ROOT / clone_name
+    legacy_agents = LEGACY_AGENTS_NODES_ROOT / clone_name
     legacy = LEGACY_CLONES_ROOT / clone_name
-    if canonical.exists():
-        return canonical
-    if legacy.exists():
-        return legacy
+    for candidate in (canonical, legacy_agents, legacy):
+        if candidate.exists():
+            return candidate
     return canonical
 
 
@@ -469,12 +549,12 @@ def _parent_hermes_agent_source() -> Path:
     """Preferred source tree for clone seeding.
 
     Priority:
-    1) /local/.hermes/hermes-agent  (runtime-patched source used by parent gateway)
-    2) /local/hermes-agent          (base source fallback)
+    1) /local/hermes-agent (canonical source checkout)
+    2) <orchestrator-home>/hermes-agent (legacy runtime-patched source)
     """
     candidates = [
+        HERMES_SOURCE_ROOT,
         PARENT_HERMES_HOME / "hermes-agent",
-        Path("/local/hermes-agent"),
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -548,7 +628,7 @@ def _select_host_python(required_module: str | None = None) -> Path | None:
 def _seed_venv_candidates() -> list[Path]:
     preferred = [
         Path("/local/.venv"),
-        Path("/local/hermes-agent/.venv"),
+        HERMES_SOURCE_ROOT / ".venv",
         PARENT_HERMES_HOME / "hermes-agent" / ".venv",
     ]
     deduped: list[Path] = []
@@ -577,7 +657,7 @@ def _select_seed_venv_source(required_module: str | None = None) -> Path:
 
     raise CloneManagerError(
         "could not locate parent seed venv (expected one of "
-        "/local/.venv, /local/hermes-agent/.venv, or /local/.hermes/hermes-agent/.venv)."
+        "/local/.venv, /local/hermes-agent/.venv, or /local/agents/nodes/orchestrator/.hermes/hermes-agent/.venv)."
     )
 
 
@@ -705,6 +785,9 @@ def _ensure_clone_ownership(clone_root: Path) -> None:
     if probe.returncode == 0 and not (probe.stdout or "").strip():
         return
 
+    if shutil.which("docker") is None:
+        return
+
     cmd = [
         "docker",
         "run",
@@ -728,6 +811,37 @@ def _remove_path(path: Path) -> None:
         return
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _set_symlink(path: Path, target: Path) -> None:
+    if path.is_symlink():
+        try:
+            if str(path.resolve()) == str(target.resolve()):
+                return
+        except Exception:
+            pass
+        _remove_path(path)
+    elif path.exists():
+        _remove_path(path)
+    os.symlink(target, path)
+
+
+def _worker_cron_host_dir(clone_name: str) -> Path:
+    return SHARED_CRONS_ROOT / clone_name
+
+
+def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str) -> None:
+    """Ensure worker node host tree is mount-ready (no self-referential links)."""
+    SHARED_SCRIPTS_ROOT.mkdir(parents=True, exist_ok=True)
+    SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
+    worker_crons = _worker_cron_host_dir(clone_name)
+    worker_crons.mkdir(parents=True, exist_ok=True)
+
+    for rel in ("scripts", "plugins", "crons"):
+        path = clone_root / rel
+        if path.is_symlink():
+            _remove_path(path)
+        path.mkdir(parents=True, exist_ok=True)
 
 
 def _discord_plugin_roots() -> list[Path]:
@@ -834,58 +948,84 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
 
     The orchestrator:
     - Lives directly on the VM (not containerized)
-    - Has hermes-agent code at /local/agents/<clone_name>/hermes-agent/
-    - Symlinks ~/.hermes/ to /local/agents/<clone_name>/.hermes/
-    - Symlinks /local/plugins/ -> /local/agents/<clone_name>/plugins/
-    - Symlinks /local/scripts/ -> /local/agents/<clone_name>/scripts/
+    - Lives under /local/agents/nodes/orchestrator/
+    - Stores state in /local/agents/nodes/orchestrator/.hermes
+    - Uses shared host assets via symlinks:
+      /local/hermes-agent, /local/plugins, /local/scripts, /local/crons/orchestrator
     - Can bootstrap other nodes
     """
     _log_spawn_event(clone_name, "orchestrator", "setup_start", f"clone_root={clone_root}")
 
-    parent_source = _parent_hermes_agent_source()
+    clone_root_created = False
+    if not clone_root.exists():
+        clone_root.mkdir(parents=True, exist_ok=True)
+        clone_root_created = True
 
-    # Ensure clone root exists with standard directory structure
-    clone_root.mkdir(parents=True, exist_ok=True)
-    for sub in ("backups", "agents", "workspace", "plugins", "hermes-agent", ".hermes", "logs/agents", "logs/clones", str(RUNTIME_UV_REL)):
-        (clone_root / sub).mkdir(parents=True, exist_ok=True)
+    state_source: Path | None = None
+    try:
+        state_source = _parent_hermes_home_source()
+    except CloneManagerError:
+        state_source = None
 
-    # Seed hermes-agent code
-    _seed_code_tree(parent_source, clone_root / "hermes-agent")
-    _log_spawn_event(clone_name, "orchestrator", "seed_code", f"source={parent_source}")
+    # Ensure canonical orchestrator directory shape.
+    for sub in ("data", "workspace", ".hermes", "logs/agents", "logs/clones", ".clone-meta"):
+        sub_path = clone_root / sub
+        if sub_path.is_symlink():
+            _remove_path(sub_path)
+        sub_path.mkdir(parents=True, exist_ok=True)
 
-    # Sync parent hermes home (state, skills, memory, etc.)
-    _sync_dir(PARENT_HERMES_HOME, clone_root / ".hermes", delete=True)
-    _log_spawn_event(clone_name, "orchestrator", "sync_hermes_home", f"source={PARENT_HERMES_HOME}")
+    # Drop legacy clone-era paths that don't belong to orchestrator topology.
+    for legacy_sub in ("memory", "backups", "agents", "clones"):
+        legacy_path = clone_root / legacy_sub
+        if legacy_path.exists() or legacy_path.is_symlink():
+            _remove_path(legacy_path)
 
-    # Symlink /local/plugins -> clone_root/plugins (shared, not copied)
-    orchestrator_plugins = clone_root / "plugins"
-    if orchestrator_plugins.is_symlink() or (orchestrator_plugins.exists() and not orchestrator_plugins.is_symlink() and any(orchestrator_plugins.iterdir())):
-        _remove_path(orchestrator_plugins)
-    if not orchestrator_plugins.is_symlink():
-        os.symlink(Path("/local/plugins"), orchestrator_plugins)
-        _log_spawn_event(clone_name, "orchestrator", "symlink_plugins", f"target=/local/plugins")
-        _log(clone_name, f"symlinked /local/plugins -> {orchestrator_plugins}")
+    # Make sure shared host roots exist.
+    _orchestrator_cron_host_dir(clone_name).mkdir(parents=True, exist_ok=True)
+    _orchestrator_memory_home(clone_name).mkdir(parents=True, exist_ok=True)
+    SHARED_SCRIPTS_ROOT.mkdir(parents=True, exist_ok=True)
+    SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    # Symlink /local/scripts -> clone_root/scripts (shared, not copied)
-    orchestrator_scripts = clone_root / "scripts"
-    if orchestrator_scripts.is_symlink() or (orchestrator_scripts.exists() and not orchestrator_scripts.is_symlink() and any(orchestrator_scripts.iterdir())):
-        _remove_path(orchestrator_scripts)
-    if not orchestrator_scripts.is_symlink():
-        os.symlink(Path("/local/scripts"), orchestrator_scripts)
-        _log_spawn_event(clone_name, "orchestrator", "symlink_scripts", f"target=/local/scripts")
-        _log(clone_name, f"symlinked /local/scripts -> {orchestrator_scripts}")
+    if not HERMES_SOURCE_ROOT.exists():
+        raise CloneManagerError(f"hermes-agent source tree not found: {HERMES_SOURCE_ROOT}")
 
-    # Symlink workspace/discord to shared plugin
+    _set_symlink(clone_root / "hermes-agent", HERMES_SOURCE_ROOT)
+    _set_symlink(clone_root / "scripts", SHARED_SCRIPTS_ROOT)
+    _set_symlink(clone_root / "plugins", SHARED_PLUGINS_ROOT)
+    _set_symlink(clone_root / "crons", _orchestrator_cron_host_dir(clone_name))
+
+    orchestrator_home = clone_root / ".hermes"
+    if orchestrator_home.is_symlink():
+        _remove_path(orchestrator_home)
+        orchestrator_home.mkdir(parents=True, exist_ok=True)
+
+    # First bootstrap migrates legacy state (~/.hermes or /local/.hermes) into
+    # /local/agents/nodes/orchestrator/.hermes.
+    has_local_state = False
+    try:
+        has_local_state = any(orchestrator_home.iterdir())
+    except Exception:
+        has_local_state = False
+    if not has_local_state and state_source is not None and state_source != orchestrator_home:
+        _sync_dir(state_source, orchestrator_home, delete=True)
+        _log_spawn_event(
+            clone_name,
+            "orchestrator",
+            "migrate_state",
+            f"source={state_source} dest={orchestrator_home}",
+        )
+
     _link_clone_workspace_discord(clone_root, clone_name)
-
-    # Symlink plugins/discord to shared plugin
-    _link_shared_plugins_for_clone(clone_root, clone_name)
-
-    # Normalize skills layout
-    _normalize_clone_skills_layout(clone_root)
-
-    # Seed runtime (venv, uv)
-    _seed_clone_runtime(clone_root, allow_parent_seed=True)
+    try:
+        _normalize_clone_skills_layout(clone_root)
+    except CloneManagerError:
+        home_skills = clone_root / ".hermes" / "skills"
+        workspace_skills = clone_root / "workspace" / "skills"
+        home_skills.mkdir(parents=True, exist_ok=True)
+        if workspace_skills.exists() or workspace_skills.is_symlink():
+            _remove_path(workspace_skills)
+        workspace_skills.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink("../.hermes/skills", workspace_skills)
 
     # Write bootstrap metadata
     bootstrap_meta_path = _clone_bootstrap_meta_path(clone_root)
@@ -896,10 +1036,13 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
             "bootstrapped_at": _utc_now(),
             "state_mode": STATE_LABELS[1],
             "state_code": 1,
-            "seed_code_source": str(parent_source),
-            "seed_venv_source": str(_select_seed_venv_source(required_module="discord")),
+            "seed_code_source": str(HERMES_SOURCE_ROOT),
+            "seed_venv_source": "",
+            "state_source": str(state_source) if state_source is not None else "",
             "orchestrator_baremetal": True,
-            "seeded_workspace_integrations": {"workspace/discord": True, "plugins/discord": True},
+            "seeded_workspace_integrations": {},
+            "topology_root": str(clone_root),
+            "topology_version": "agents-v2",
         },
     )
     _log_spawn_event(clone_name, "orchestrator", "bootstrap_complete", f"meta_path={bootstrap_meta_path}")
@@ -916,7 +1059,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     _log(clone_name, f"orchestrator bootstrap complete at {clone_root}")
 
     return {
-        "clone_root_created": True,
+        "clone_root_created": clone_root_created,
         "state_mode": STATE_LABELS[1],
         "state_code": 1,
         "bootstrapped": True,
@@ -1197,7 +1340,14 @@ def _bootstrap_models_for_clone(clone_name: str, env_path: Path, clone_root: Pat
 def _parent_skills_source() -> Path:
     # Canonical source of truth is HERMES_HOME/skills; fallback to workspace/skills
     # for migration safety if the old symlink is still misconfigured.
+    state_source: Path | None
+    try:
+        state_source = _parent_hermes_home_source()
+    except CloneManagerError:
+        state_source = None
+
     candidates = [
+        (state_source / "skills") if state_source is not None else Path("/nonexistent"),
         PARENT_HERMES_HOME / "skills",
         Path("/local/workspace/skills"),
     ]
@@ -1212,15 +1362,15 @@ def _parent_skills_source() -> Path:
             if resolved.is_dir():
                 return resolved
     raise CloneManagerError(
-        "no valid skills source found (expected /local/.hermes/skills or /local/workspace/skills)."
+        "no valid skills source found (expected orchestrator .hermes/skills or /local/workspace/skills)."
     )
 
 
 def _normalize_clone_skills_layout(clone_root: Path) -> None:
     """Ensure deterministic clone skills layout.
 
-    - Canonical skills dir:   /local/.hermes/skills      (clone_root/.hermes/skills)
-    - Workspace convenience:  /local/workspace/skills -> /local/.hermes/skills
+    - Canonical skills dir: /local/.hermes/skills (clone_root/.hermes/skills)
+    - Workspace legacy links are removed to avoid path drift.
     """
     home_skills = clone_root / ".hermes" / "skills"
     workspace_skills = clone_root / "workspace" / "skills"
@@ -1241,11 +1391,9 @@ def _normalize_clone_skills_layout(clone_root: Path) -> None:
         home_skills.mkdir(parents=True, exist_ok=True)
         _sync_dir(source, home_skills, delete=True)
 
-    # Always expose skills through workspace for operator convenience.
+    # Drop workspace compatibility link if it exists.
     if workspace_skills.exists() or workspace_skills.is_symlink():
         _remove_path(workspace_skills)
-    workspace_skills.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink("../.hermes/skills", workspace_skills)
 
 
 def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
@@ -1372,29 +1520,8 @@ def _rewrite_uv_store_symlinks(clone_root: Path) -> int:
 
 
 def _seed_clone_workspace_integrations(clone_root: Path) -> Dict[str, bool]:
-    """Seed clone-local workspace integration assets.
-
-    Discord plugin is shared via /local/plugins/discord mount (not copied into
-    clone workspace). We only seed non-shared assets here.
-    """
-    seeded: Dict[str, bool] = {}
-
-    mappings = [
-        (PARENT_WORKSPACE_BACKUP_SCRIPTS, clone_root / "workspace" / "crons" / "scripts" / "backup"),
-    ]
-
-    seeded["workspace/discord"] = False
-
-    for src, dst in mappings:
-        key = str(dst.relative_to(clone_root))
-        if not src.exists():
-            seeded[key] = False
-            continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        _sync_dir(src, dst, delete=True)
-        seeded[key] = True
-
-    return seeded
+    """Legacy workspace seeding disabled in agents-v2 topology."""
+    return {}
 
 
 def _extract_state_mode(env: Dict[str, str]) -> int:
@@ -1453,6 +1580,19 @@ def _seed_from_backup(clone_root: Path, backup_path: Path) -> None:
         workspace_src = next((p for p in workspace_candidates if p.exists()), None)
         if workspace_src is not None:
             _sync_dir(workspace_src, clone_root / "workspace", delete=False)
+            # Keep user payload files but drop legacy runtime trees that
+            # conflict with the canonical node topology.
+            for legacy_rel in (
+                "data",
+                "crons",
+                "skills",
+                "discord",
+                "plugins",
+                "colmeio",
+            ):
+                legacy_path = clone_root / "workspace" / legacy_rel
+                if legacy_path.exists() or legacy_path.is_symlink():
+                    _remove_path(legacy_path)
 
         code_src = next((p for p in code_candidates if p.exists()), None)
         if code_src is not None:
@@ -1465,20 +1605,38 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         clone_root.mkdir(parents=True, exist_ok=True)
         clone_root_created = True
 
-    for sub in ("backups", "agents", "workspace", "plugins", "hermes-agent", ".hermes", "logs/agents", "logs/clones", str(RUNTIME_UV_REL)):
-        (clone_root / sub).mkdir(parents=True, exist_ok=True)
+    mode = _extract_state_mode(env)
 
-    # Compatibility shim for old scripts still expecting /local/clones inside
-    # each node volume.
-    clone_local_legacy = clone_root / "clones"
-    if not clone_local_legacy.exists() and not clone_local_legacy.is_symlink():
-        try:
-            os.symlink("agents", clone_local_legacy)
-        except Exception:
-            pass
+    for sub in (
+        "data",
+        "workspace",
+        "hermes-agent",
+        ".hermes",
+        "logs/agents",
+        ".clone-meta",
+        str(RUNTIME_UV_REL),
+    ):
+        sub_path = clone_root / sub
+        if sub_path.is_symlink():
+            _remove_path(sub_path)
+        sub_path.mkdir(parents=True, exist_ok=True)
+
+    # Drop legacy clone-era paths that are outside the agents-v2 topology.
+    for legacy_rel in ("memory", "backups", "agents", "clones"):
+        legacy_path = clone_root / legacy_rel
+        if legacy_path.exists() or legacy_path.is_symlink():
+            _remove_path(legacy_path)
+
+    # Drop workspace compatibility trees; callers should use /local/data,
+    # /local/crons and /local/.hermes/skills canonical paths.
+    for legacy_rel in ("data", "crons", "skills", "discord", "plugins", "colmeio"):
+        legacy_path = clone_root / "workspace" / legacy_rel
+        if legacy_path.exists() or legacy_path.is_symlink():
+            _remove_path(legacy_path)
+
+    _ensure_worker_shared_mount_links(clone_root, clone_name)
 
     _ensure_clone_ownership(clone_root)
-    mode = _extract_state_mode(env)
     force_reseed = _is_truthy(env.get("CLONE_FORCE_RESEED", "0"))
     bootstrap_meta_path = _clone_bootstrap_meta_path(clone_root)
     has_local_code = (clone_root / "hermes-agent" / "cli.py").exists()
@@ -1503,8 +1661,8 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
 
     needs_bootstrap = force_reseed or not bootstrap_meta_path.exists()
 
-    # Handle orchestrator (CLONE_STATE=1) as bare-metal bootstrap node
-    if mode == 1 and needs_bootstrap:
+    # Handle orchestrator (CLONE_STATE=1) as bare-metal bootstrap node.
+    if mode == 1:
         return _setup_orchestrator_baremetal(clone_name, clone_root, env, env_path)
 
     if needs_bootstrap:
@@ -1513,8 +1671,9 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         _log_spawn_event(clone_name, "bootstrap", "seed_code", f"source={parent_source}")
 
         if mode == 2:
-            _sync_dir(PARENT_HERMES_HOME, clone_root / ".hermes", delete=True)
-            _log_spawn_event(clone_name, "bootstrap", "sync_hermes_home", f"source={PARENT_HERMES_HOME}")
+            parent_home = _parent_hermes_home_source()
+            _sync_dir(parent_home, clone_root / ".hermes", delete=True)
+            _log_spawn_event(clone_name, "bootstrap", "sync_hermes_home", f"source={parent_home}")
         elif mode == 3:
             raw_backup = str(env.get("CLONE_STATE_FROM_BACKUP_PATH", "") or "").strip()
             if not raw_backup:
@@ -1529,8 +1688,6 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
 
         workspace_seeded = _seed_clone_workspace_integrations(clone_root)
         _normalize_clone_skills_layout(clone_root)
-        _link_clone_workspace_discord(clone_root, clone_name)
-        _link_shared_plugins_for_clone(clone_root, clone_name)
         _seed_clone_runtime(clone_root, allow_parent_seed=True)
 
         _atomic_write_json(
@@ -1558,8 +1715,6 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
                     "Set CLONE_FORCE_RESEED=1 in clone env to re-bootstrap."
                 )
         _normalize_clone_skills_layout(clone_root)
-        _link_clone_workspace_discord(clone_root, clone_name)
-        _link_shared_plugins_for_clone(clone_root, clone_name)
         _seed_clone_runtime(clone_root, allow_parent_seed=False)
 
     # Keep clone-local .hermes/.env aligned with the clone profile.
@@ -1592,6 +1747,8 @@ def _build_docker_run_cmd(
 ) -> list[str]:
     container = _container_name(clone_name)
     runtime_log = f"/local/logs/agents/{clone_name}.log"
+    node_crons_host = SHARED_CRONS_ROOT / clone_name
+    node_crons_host.mkdir(parents=True, exist_ok=True)
 
     gateway_cmd = (
         "set -euo pipefail; "
@@ -1673,9 +1830,19 @@ def _build_docker_run_cmd(
         "-e",
         "HOME=/local",
         "-e",
+        "COLMEIO_PROJECT_DIR=/local",
+        "-e",
+        "COLMEIO_DB_PATH=/local/data/colmeio_db.sqlite3",
+        "-e",
+        "DISCORD_USERS_DB=/local/plugins/discord/discord_users.json",
+        "-e",
         "USER=ubuntu",
         "-e",
         "LOGNAME=ubuntu",
+        "-e",
+        "VIRTUAL_ENV=/local/hermes-agent/.venv",
+        "-e",
+        "PATH=/local/hermes-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "-e",
         f"COLMEIO_CLONE_NAME={clone_name}",
         "-e",
@@ -1685,7 +1852,11 @@ def _build_docker_run_cmd(
         "-v",
         f"{clone_root}:/local",
         "-v",
-        f"{shared_discord_plugin_root}:/local/plugins/discord",
+        f"{SHARED_SCRIPTS_ROOT}:/local/scripts:ro",
+        "-v",
+        f"{SHARED_PLUGINS_ROOT}:/local/plugins:ro",
+        "-v",
+        f"{node_crons_host}:/local/crons",
         "--workdir",
         "/local/hermes-agent",
     ]
@@ -1699,25 +1870,229 @@ def _build_docker_run_cmd(
     return cmd
 
 
+def _orchestrator_pid_path(clone_root: Path) -> Path:
+    return clone_root / "data" / "gateway.pid"
+
+
+def _read_pid(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    raw = str(path.read_text(encoding="utf-8", errors="ignore") or "").strip()
+    if not raw:
+        return None
+    try:
+        pid = int(raw)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_running(pid: int | None) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _orchestrator_process_state(clone_root: Path) -> Dict[str, Any]:
+    pid_path = _orchestrator_pid_path(clone_root)
+    pid = _read_pid(pid_path)
+    running = _pid_running(pid)
+    return {
+        "exists": True,
+        "running": running,
+        "status": "running" if running else "stopped",
+        "pid": pid,
+        "pid_file": str(pid_path),
+    }
+
+
+def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Path) -> Dict[str, Any]:
+    state = _orchestrator_process_state(clone_root)
+    if state.get("running"):
+        return {
+            "result": "already_running",
+            "pid": state.get("pid"),
+            "process_state": state,
+        }
+
+    gateway_run_path = clone_root / "hermes-agent" / "gateway" / "run.py"
+    if not gateway_run_path.exists():
+        raise CloneManagerError(f"orchestrator gateway entrypoint not found: {gateway_run_path}")
+
+    python_candidates = [
+        clone_root / "hermes-agent" / ".venv" / "bin" / "python3",
+        clone_root / "hermes-agent" / ".venv" / "bin" / "python",
+        Path("/local/.venv/bin/python3"),
+        Path("/usr/bin/python3"),
+        Path("/usr/bin/python"),
+    ]
+    python_bin = next((p for p in python_candidates if p.exists()), None)
+    if python_bin is None:
+        raise CloneManagerError("python runtime not found for orchestrator gateway start")
+
+    runtime_log = _clone_runtime_log_path(clone_name, clone_root=clone_root)
+    runtime_log.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = runtime_log.open("a", encoding="utf-8")
+
+    proc_env = os.environ.copy()
+    proc_env.update(_read_env_file(env_path))
+    proc_env["HERMES_HOME"] = str(clone_root / ".hermes")
+    proc_env["HOME"] = str(clone_root)
+    proc_env["USER"] = str(proc_env.get("USER") or "ubuntu")
+    proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
+    proc_env["COLMEIO_CLONE_NAME"] = clone_name
+    proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
+    proc_env["HERMES_AGENT_ROOT"] = str(clone_root / "hermes-agent")
+    proc_env["PYTHONUNBUFFERED"] = "1"
+
+    # Keep host-layer orchestrator behavior aligned with container nodes:
+    # reapply Discord/runtime patches before gateway launch.
+    prestart_script = _discord_plugin_script("scripts/prestart_reapply.sh")
+    if prestart_script.exists():
+        try:
+            prestart_proc = subprocess.run(
+                ["bash", str(prestart_script)],
+                cwd=str(clone_root / "hermes-agent"),
+                env=proc_env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+            if prestart_proc.returncode != 0:
+                _log(
+                    clone_name,
+                    f"orchestrator prestart reapply failed rc={prestart_proc.returncode} script={prestart_script}",
+                )
+        except Exception as exc:
+            _log(clone_name, f"orchestrator prestart reapply crashed: {exc}")
+
+    proc = subprocess.Popen(
+        [
+            str(python_bin),
+            "-c",
+            (
+                "import asyncio; "
+                "from gateway.run import start_gateway; "
+                "asyncio.run(start_gateway(replace=True))"
+            ),
+        ],
+        cwd=str(clone_root / "hermes-agent"),
+        env=proc_env,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        text=True,
+    )
+    log_handle.close()
+
+    pid_path = _orchestrator_pid_path(clone_root)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(f"{proc.pid}\n", encoding="utf-8")
+
+    # Fail fast if the gateway crashes immediately after spawn.
+    time.sleep(2.0)
+    if proc.poll() is not None:
+        rc = proc.returncode
+        if pid_path.exists():
+            try:
+                pid_path.unlink()
+            except Exception:
+                pass
+        raise CloneManagerError(
+            f"orchestrator gateway exited immediately (rc={rc}). "
+            f"See runtime log: {_clone_runtime_log_path(clone_name, clone_root=clone_root)}"
+        )
+
+    _log(clone_name, f"orchestrator gateway started on host pid={proc.pid}")
+
+    return {
+        "result": "started",
+        "pid": proc.pid,
+        "process_state": _orchestrator_process_state(clone_root),
+    }
+
+
+def _orchestrator_stop_gateway(clone_name: str, clone_root: Path) -> Dict[str, Any]:
+    pid_path = _orchestrator_pid_path(clone_root)
+    pid = _read_pid(pid_path)
+    if not _pid_running(pid):
+        if pid_path.exists():
+            try:
+                pid_path.unlink()
+            except Exception:
+                pass
+        return {
+            "result": "not_found",
+            "pid": pid,
+            "process_state": _orchestrator_process_state(clone_root),
+        }
+
+    assert pid is not None
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        pass
+
+    for _ in range(25):
+        if not _pid_running(pid):
+            break
+        time.sleep(0.2)
+
+    if _pid_running(pid):
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+    for _ in range(10):
+        if not _pid_running(pid):
+            break
+        time.sleep(0.1)
+
+    if pid_path.exists():
+        try:
+            pid_path.unlink()
+        except Exception:
+            pass
+
+    _log(clone_name, f"orchestrator gateway stopped pid={pid}")
+    return {
+        "result": "stopped",
+        "pid": pid,
+        "process_state": _orchestrator_process_state(clone_root),
+    }
+
+
 def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     env_path = _clone_env_path(clone_name)
     env = _read_env_file(env_path)
     clone_root = _clone_root_path(clone_name)
     container = _container_name(clone_name)
+    state_code = _extract_state_mode(env)
+    is_orchestrator = state_code == 1
+
     if clone_root.exists():
         # Heal legacy root-owned artifacts before any bootstrap writes.
         _ensure_clone_ownership(clone_root)
     discord_home_sync = _sync_discord_home_channel_env(clone_name, env_path)
     restart_reboot_sync = _sync_restart_reboot_env(clone_name, env_path)
     env = _read_env_file(env_path)
+    state_code = _extract_state_mode(env)
+    is_orchestrator = state_code == 1
 
-    if shutil.which("docker") is None:
-        raise CloneManagerError("docker CLI not found on host.")
     if not str(env.get("DISCORD_BOT_TOKEN", "") or "").strip():
         raise CloneManagerError(
             "DISCORD_BOT_TOKEN missing in clone env. "
-            "Add it to /local/agents/<clone_name>.env."
+            "Add it to /local/agents/envs/<clone_name>.env."
         )
+
+    if not is_orchestrator and shutil.which("docker") is None:
+        raise CloneManagerError("docker CLI not found on host.")
 
     shared_discord_plugin_root = _ensure_discord_shared_plugin_seeded(clone_name)
     camofox_bootstrap = _bootstrap_camofox_for_clone(clone_name, env_path)
@@ -1755,7 +2130,11 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
 
     _log(clone_name, f"start requested: container={container} env={env_path}")
 
-    if _docker_running(container):
+    if is_orchestrator and _docker_exists(container):
+        # Heals legacy deployments where orchestrator used to run in Docker.
+        _run(["docker", "rm", "-f", container], check=False)
+
+    if not is_orchestrator and _docker_running(container):
         state = _docker_state(container)
         status = str(state.get("status") or "").strip().lower()
         if status != "restarting":
@@ -1797,6 +2176,49 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         model_bootstrap = _bootstrap_models_for_clone(clone_name, env_path, clone_root)
         env = _read_env_file(env_path)
         openviking_enabled = _is_truthy(env.get("MEMORY_OPENVIKING", ""))
+
+        if fs_meta.get("orchestrator_baremetal"):
+            host_start = _orchestrator_start_gateway(clone_name, clone_root, env_path)
+            registry_after.setdefault("clones", {})
+            registry_after["clones"][clone_name] = {
+                "clone_name": clone_name,
+                "container_name": "",
+                "container_id": "",
+                "runtime_type": "baremetal",
+                "host_pid": host_start.get("pid"),
+                "clone_root": str(clone_root),
+                "env_path": str(env_path),
+                "state_mode": fs_meta["state_mode"],
+                "state_code": fs_meta["state_code"],
+                "docker_image": "",
+                "updated_at": _utc_now(),
+            }
+            _save_registry(registry_after)
+
+            process_state = _orchestrator_process_state(clone_root)
+            return {
+                "ok": True,
+                "action": "start",
+                "result": host_start.get("result", "started"),
+                "clone_name": clone_name,
+                "container_name": "",
+                "container_id": "",
+                "runtime_type": "baremetal",
+                "host_pid": host_start.get("pid"),
+                "clone_root": str(clone_root),
+                "env_path": str(env_path),
+                "state_mode": fs_meta["state_mode"],
+                "state_code": fs_meta["state_code"],
+                "container_state": process_state,
+                "log_file": str(_management_log_path(clone_name)),
+                "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
+                "camofox": camofox_bootstrap,
+                "openviking": openviking_bootstrap,
+                "models": model_bootstrap,
+                "discord_home_channel": str(env.get("DISCORD_HOME_CHANNEL", "") or ""),
+                "discord_home_channel_sync": discord_home_sync,
+                "restart_reboot_sync": restart_reboot_sync,
+            }
 
         if _docker_exists(container):
             _run(["docker", "rm", "-f", container], check=False)
@@ -1883,13 +2305,15 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         except Exception:
             state_mode = "invalid"
 
-    state = _docker_state(container)
+    is_orchestrator = state_code == 1
+    state = _orchestrator_process_state(clone_root) if is_orchestrator else _docker_state(container)
     mgmt_log_file = _management_log_path(clone_name)
     return {
         "ok": True,
         "action": "status",
         "clone_name": clone_name,
-        "container_name": container,
+        "container_name": "" if is_orchestrator else container,
+        "runtime_type": "baremetal" if is_orchestrator else "container",
         "env_exists": env_path.exists(),
         "env_path": str(env_path),
         "clone_root_exists": clone_root.exists(),
@@ -1925,7 +2349,31 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
 
 def _action_stop(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
+    env_path = _clone_env_path(clone_name)
+    env = _read_env_file(env_path) if env_path.exists() else {}
+    state_code: Any = None
+    if env:
+        try:
+            state_code = _extract_state_mode(env)
+        except Exception:
+            state_code = None
+    is_orchestrator = state_code == 1
+    clone_root = _clone_root_path(clone_name)
+
     _log(clone_name, "stop requested")
+    if is_orchestrator:
+        stop_state = _orchestrator_stop_gateway(clone_name, clone_root)
+        return {
+            "ok": True,
+            "action": "stop",
+            "result": str(stop_state.get("result") or "stopped"),
+            "clone_name": clone_name,
+            "container_name": "",
+            "runtime_type": "baremetal",
+            "container_state": stop_state.get("process_state", {}),
+            "host_pid": stop_state.get("pid"),
+        }
+
     if not _docker_exists(container):
         return {
             "ok": True,
@@ -1933,6 +2381,7 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
             "result": "not_found",
             "clone_name": clone_name,
             "container_name": container,
+            "runtime_type": "container",
         }
 
     _run(["docker", "stop", container], check=False)
@@ -1944,13 +2393,28 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
         "result": "stopped",
         "clone_name": clone_name,
         "container_name": container,
+        "runtime_type": "container",
         "container_state": state,
     }
 
 
 def _action_delete(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
+    env_path = _clone_env_path(clone_name)
+    env = _read_env_file(env_path) if env_path.exists() else {}
+    state_code: Any = None
+    if env:
+        try:
+            state_code = _extract_state_mode(env)
+        except Exception:
+            state_code = None
+    is_orchestrator = state_code == 1
+    clone_root = _clone_root_path(clone_name)
+
     _log(clone_name, "delete requested")
+
+    if is_orchestrator:
+        _orchestrator_stop_gateway(clone_name, clone_root)
 
     if _docker_exists(container):
         _run(["docker", "rm", "-f", container], check=False)
@@ -1968,9 +2432,10 @@ def _action_delete(clone_name: str) -> Dict[str, Any]:
         "action": "delete",
         "result": "deleted",
         "clone_name": clone_name,
-        "container_name": container,
+        "container_name": "" if is_orchestrator else container,
+        "runtime_type": "baremetal" if is_orchestrator else "container",
         "data_preserved": True,
-        "clone_root": str(_clone_root_path(clone_name)),
+        "clone_root": str(clone_root),
     }
 
 
@@ -2029,7 +2494,18 @@ def _dispatch(action: str, clone_name: str, image: str, lines: int) -> Dict[str,
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hermes clone lifecycle manager")
     parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs"])
-    parser.add_argument("--name", required=True, help="Clone name (maps to /local/agents/<name>.env)")
+    parser.add_argument(
+        "name_positional",
+        nargs="?",
+        default=None,
+        help="Clone name (default: orchestrator)",
+    )
+    parser.add_argument(
+        "--name",
+        dest="name_flag",
+        default=None,
+        help="Clone name (maps to /local/agents/envs/<name>.env)",
+    )
     parser.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image for clone runtime")
     parser.add_argument("--lines", type=int, default=80, help="Log tail lines for logs action")
     return parser
@@ -2042,7 +2518,12 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        clone_name = _normalize_clone_name(args.name)
+        raw_name = (
+            args.name_flag
+            or args.name_positional
+            or str(os.getenv("HERMES_DEFAULT_NODE", "orchestrator") or "orchestrator")
+        )
+        clone_name = _normalize_clone_name(raw_name)
         lines = max(10, min(int(args.lines), 500))
         payload = _dispatch(args.action, clone_name, image=str(args.image), lines=lines)
         print(json.dumps(payload, ensure_ascii=False))

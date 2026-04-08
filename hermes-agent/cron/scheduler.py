@@ -389,14 +389,26 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             },
         )
 
+        # Guardrail: some legacy job/state combinations can yield an empty
+        # routed model/provider, which causes downstream 400 "No models provided".
+        route_model = str(turn_route.get("model") or "").strip() or str(model or "").strip()
+        route_runtime = dict(turn_route.get("runtime") or {})
+        for key in ("api_key", "base_url", "provider", "api_mode", "command"):
+            if not route_runtime.get(key):
+                route_runtime[key] = runtime.get(key)
+        if not route_runtime.get("args"):
+            route_runtime["args"] = list(runtime.get("args") or [])
+        if not route_model:
+            raise RuntimeError("cron route resolved without a model")
+
         agent = AIAgent(
-            model=turn_route["model"],
-            api_key=turn_route["runtime"].get("api_key"),
-            base_url=turn_route["runtime"].get("base_url"),
-            provider=turn_route["runtime"].get("provider"),
-            api_mode=turn_route["runtime"].get("api_mode"),
-            acp_command=turn_route["runtime"].get("command"),
-            acp_args=turn_route["runtime"].get("args"),
+            model=route_model,
+            api_key=route_runtime.get("api_key"),
+            base_url=route_runtime.get("base_url"),
+            provider=route_runtime.get("provider"),
+            api_mode=route_runtime.get("api_mode"),
+            acp_command=route_runtime.get("command"),
+            acp_args=route_runtime.get("args"),
             max_iterations=max_iterations,
             reasoning_config=reasoning_config,
             prefill_messages=prefill_messages,

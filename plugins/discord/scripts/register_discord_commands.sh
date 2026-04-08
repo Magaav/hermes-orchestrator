@@ -1,12 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/local/workspace"
-ENV_FILE="$PROJECT_DIR/.env"
-PAYLOAD_FILE="${1:-$PROJECT_DIR/discord/discord_commands.json}"
+# Canonical topology defaults to /local with Discord assets under /local/plugins/discord.
+PROJECT_DIR="${COLMEIO_PROJECT_DIR:-/local}"
+HERMES_HOME_DIR="${HERMES_HOME:-${PROJECT_DIR}/.hermes}"
+
+ENV_FILE="${DISCORD_ENV_FILE:-}"
+if [[ -z "$ENV_FILE" ]]; then
+  for candidate in \
+    "${HERMES_HOME_DIR}/.env" \
+    "${PROJECT_DIR}/.env" \
+    "/local/.env" \
+    "/local/workspace/.env"; do
+    if [[ -f "$candidate" ]]; then
+      ENV_FILE="$candidate"
+      break
+    fi
+  done
+fi
+
+PAYLOAD_FILE="${1:-${DISCORD_COMMANDS_FILE:-${PROJECT_DIR}/plugins/discord/discord_commands.json}}"
+if [[ ! -f "$PAYLOAD_FILE" && -f "/local/plugins/discord/discord_commands.json" ]]; then
+  PAYLOAD_FILE="/local/plugins/discord/discord_commands.json"
+fi
+if [[ ! -f "$PAYLOAD_FILE" && -f "/local/workspace/discord/discord_commands.json" ]]; then
+  PAYLOAD_FILE="/local/workspace/discord/discord_commands.json"
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
-  echo "[error] .env not found at $ENV_FILE" >&2
+  echo "[error] .env not found (checked HERMES_HOME/.env, /local/.env legacy fallbacks)" >&2
   exit 1
 fi
 
@@ -38,11 +60,8 @@ HTTP_CODE=$(curl -sS -o "$RESP_FILE" -w "%{http_code}" \
   --data-binary "@$PAYLOAD_FILE")
 
 echo "[info] HTTP $HTTP_CODE"
-python3 - <<'PY'
-from pathlib import Path
-p = Path('/tmp/discord_cmds_resp.json')
-print(p.read_text(errors='ignore')[:2000])
-PY
+head -c 2000 "$RESP_FILE" || true
+echo
 
 if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
   echo "[error] Failed to register commands." >&2

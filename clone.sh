@@ -1,1 +1,0 @@
-/local/workspace/discord/scripts/clone.sh

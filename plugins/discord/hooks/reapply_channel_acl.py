@@ -13,12 +13,12 @@ PROBLEM:
 
 SOLUTION:
   Copy the custom hook files from:
-    /local/workspace/discord/hooks/channel_acl/
+    /local/plugins/discord/hooks/channel_acl/
   to:
     ~/.hermes/hooks/channel_acl/
 
 USAGE:
-  python3 /local/workspace/discord/hooks/reapply_channel_acl.py
+  python3 /local/plugins/discord/hooks/reapply_channel_acl.py
 
 AUTORUN:
   - Via BOOT.md: BOOT.md can trigger an LLM agent that runs this script.
@@ -28,7 +28,11 @@ AUTORUN:
 import sys
 from pathlib import Path
 
-SOURCE = Path("/local/workspace/discord/hooks/channel_acl")
+SOURCE = Path("/local/plugins/discord/hooks/channel_acl")
+if not SOURCE.exists():
+    legacy_source = Path("/local/workspace/discord/hooks/channel_acl")
+    if legacy_source.exists():
+        SOURCE = legacy_source
 DEST = Path.home() / ".hermes" / "hooks" / "channel_acl"
 
 

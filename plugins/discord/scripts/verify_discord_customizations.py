@@ -19,7 +19,11 @@ def _resolve_hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
-WORKSPACE = Path("/local/workspace/discord")
+WORKSPACE = Path(os.getenv("HERMES_DISCORD_PLUGIN_DIR", "/local/plugins/discord")).resolve()
+if not WORKSPACE.exists():
+    legacy_workspace = Path("/local/workspace/discord")
+    if legacy_workspace.exists():
+        WORKSPACE = legacy_workspace.resolve()
 HERMES_HOME = _resolve_hermes_home()
 RUN_PATH = HERMES_HOME / "hermes-agent" / "gateway" / "run.py"
 DISCORD_PATH = HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "discord.py"

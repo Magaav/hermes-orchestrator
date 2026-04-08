@@ -14,12 +14,12 @@
 #
 # SOLUTION:
 #   Copy custom hook files from:
-#     /local/workspace/discord/hooks/channel_acl/
+#     /local/plugins/discord/hooks/channel_acl/
 #   to:
 #     ~/.hermes/hooks/channel_acl/
 #
 # USAGE:
-#   bash /local/workspace/discord/hooks/reapply_channel_acl.sh
+#   bash /local/plugins/discord/hooks/reapply_channel_acl.sh
 #
 # AUTORUN:
 #   - Via BOOT.md (LLM agent, not shell; use reapply_channel_acl.py for that)
@@ -28,7 +28,10 @@
 
 set -e
 
-SOURCE="/local/workspace/discord/hooks/channel_acl"
+SOURCE="/local/plugins/discord/hooks/channel_acl"
+if [ ! -d "$SOURCE" ] && [ -d "/local/workspace/discord/hooks/channel_acl" ]; then
+    SOURCE="/local/workspace/discord/hooks/channel_acl"
+fi
 DEST="$HOME/.hermes/hooks/channel_acl"
 
 echo "[reapply] Channel ACL Hook"

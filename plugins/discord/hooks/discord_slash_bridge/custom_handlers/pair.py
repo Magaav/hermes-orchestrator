@@ -22,6 +22,7 @@ _HERMES_HOME = _resolve_hermes_home()
 
 _ENV_PATHS = (
     _HERMES_HOME / ".env",
+    Path("/local/.env"),
     Path("/local/workspace/.env"),
     Path("/local/workspace/colmeio/.env"),
 )

@@ -21,8 +21,14 @@ for arg in "$@"; do
 done
 
 HERMES_REPO="/home/ubuntu/.hermes/hermes-agent"
-REAPPLY_SCRIPT="/local/workspace/discord/scripts/prestart_reapply.sh"
-VERIFY_SCRIPT="/local/workspace/discord/scripts/verify_discord_customizations.py"
+REAPPLY_SCRIPT="/local/plugins/discord/scripts/prestart_reapply.sh"
+VERIFY_SCRIPT="/local/plugins/discord/scripts/verify_discord_customizations.py"
+if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/workspace/discord/scripts/prestart_reapply.sh" ]]; then
+  REAPPLY_SCRIPT="/local/workspace/discord/scripts/prestart_reapply.sh"
+fi
+if [[ ! -f "$VERIFY_SCRIPT" && -f "/local/workspace/discord/scripts/verify_discord_customizations.py" ]]; then
+  VERIFY_SCRIPT="/local/workspace/discord/scripts/verify_discord_customizations.py"
+fi
 LOG_DIR="/home/ubuntu/.hermes/logs"
 LOG_FILE="$LOG_DIR/colmeio-update-and-repatch.log"
 

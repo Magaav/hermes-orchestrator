@@ -12,11 +12,11 @@ BEHAVIOR:
     - Thread inherits from parent channel unless overridden
 
   This hook SURVIVES hermes-agent updates because it lives in
-  /local/workspace/discord/hooks/ and is re-applied via
+  /local/plugins/discord/hooks/ and is re-applied via
   reapply_discord_channel_routing_hook.py after each agent update.
 
-SURVIVES: hermes-agent updates (lives in /local/workspace/discord/hooks/)
-CONFIG:   /local/workspace/discord/hooks/discord_channel_routing_hook/config.yaml
+SURVIVES: hermes-agent updates (lives in /local/plugins/discord/hooks/)
+CONFIG:   /local/plugins/discord/hooks/discord_channel_routing_hook/config.yaml
 
 CHANGELOG:
 - 2026-04-01: v1 — fork of channel_acl with free/restricted modes
@@ -486,3 +486,8 @@ def check_skill_allowed(
             )
 
     return True, ""
+
+
+def handle(event_name: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Hook entrypoint for gateway event bus (no-op for compatibility)."""
+    return context or {}

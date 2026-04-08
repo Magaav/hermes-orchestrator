@@ -14,10 +14,10 @@ SOLUTION:
 
 USAGE:
   # After updating hermes-agent:
-  python3 /local/workspace/discord/hooks/reapply_discord_channel_routing_hook.py
+  python3 /local/plugins/discord/hooks/reapply_discord_channel_routing_hook.py
 
   # Optional auto-restore after reboot (cron):
-  # @reboot python3 /local/workspace/discord/hooks/reapply_discord_channel_routing_hook.py
+  # @reboot python3 /local/plugins/discord/hooks/reapply_discord_channel_routing_hook.py
 """
 
 import sys
