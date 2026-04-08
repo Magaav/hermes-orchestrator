@@ -1,7 +1,6 @@
 {
   "version": 2,
-  "updated_at": "2026-04-08T00:00:00Z",
-  "description": "Example Discord ACL for hermes-orchestrator.",
+  "description": "Template runtime Discord ACL for node-local workspace state.",
   "roles": {
     "admin": {
       "description": "Full access",
@@ -27,28 +26,11 @@
       ]
     }
   },
-  "users": [
-    {
-      "name": "Admin User",
-      "discord_user_id": "000000000000000000",
-      "aliases": [
-        "admin"
-      ],
-      "role": "admin"
-    },
-    {
-      "name": "Member User",
-      "discord_user_id": "000000000000000001",
-      "aliases": [
-        "member"
-      ],
-      "role": "user"
-    }
-  ],
+  "users": [],
   "channels": {
     "master": {
       "name": "master",
-      "discord_channel_id": "000000000000000000",
+      "discord_channel_id": "",
       "purpose": [
         "approvals",
         "proactive_notifications"
@@ -56,15 +38,14 @@
     }
   },
   "admin_contact": {
-    "name": "Admin User",
-    "discord_user_id": "000000000000000000",
+    "name": "",
+    "discord_user_id": "",
     "notification_mode": "master_channel",
-    "delivery_target": "discord:000000000000000000",
-    "notes": "Replace with your admin contact/channel in local runtime config."
+    "delivery_target": ""
   },
   "proactive": {
-    "enabled": true,
-    "delivery_target": "discord:000000000000000000",
+    "enabled": false,
+    "delivery_target": "",
     "immediate": {
       "enabled": true,
       "notify_on": [

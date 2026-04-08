@@ -2,7 +2,13 @@
 set -euo pipefail
 
 # Canonical topology defaults to /local with Discord assets under /local/plugins/discord.
-PROJECT_DIR="${COLMEIO_PROJECT_DIR:-/local}"
+PROJECT_DIR="${COLMEIO_PROJECT_DIR:-/local/workspace}"
+if [ ! -d "${PROJECT_DIR}" ] && [ -d "/local/workspace" ]; then
+  PROJECT_DIR="/local/workspace"
+fi
+if [ ! -d "${PROJECT_DIR}" ]; then
+  PROJECT_DIR="/local"
+fi
 HERMES_HOME_DIR="${HERMES_HOME:-${PROJECT_DIR}/.hermes}"
 
 ENV_FILE="${DISCORD_ENV_FILE:-}"

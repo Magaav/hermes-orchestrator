@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """ACL helper for Discord access control (Colmeio/Hermes).
 
-Source of truth: /local/plugins/discord/discord_users.json
+Source of truth (runtime):
+  - /local/workspace/discord/discord_users.json
+Fallback (template/backward-compat):
+  - /local/plugins/discord/discord_users.json
 
 Quick usage:
   # Authorize an intent and queue approval if needed
@@ -28,7 +31,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-DEFAULT_DB = Path(os.getenv("DISCORD_USERS_DB", "/local/plugins/discord/discord_users.json"))
+def _default_db_path() -> Path:
+    configured = str(os.getenv("DISCORD_USERS_DB", "") or "").strip()
+    if configured:
+        return Path(configured)
+    candidates = [
+        Path("/local/workspace/discord/discord_users.json"),
+        Path("/local/plugins/discord/discord_users.json"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+DEFAULT_DB = _default_db_path()
 
 
 def utc_now_iso() -> str:

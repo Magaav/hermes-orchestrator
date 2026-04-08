@@ -60,6 +60,9 @@ Usage:
   horc restart [name] [--image IMAGE]
   horc delete [name]
   horc logs [name] [--lines N]
+  horc backup all
+  horc backup node <name>
+  horc backup <name>
 
   horc update
   horc agent update [name] [--source-branch BRANCH]
@@ -69,6 +72,8 @@ Examples:
   horc restart
   horc start node1
   horc logs node1 --lines 120
+  horc backup all
+  horc backup node node1
 
   horc update
   horc agent update
@@ -79,6 +84,7 @@ Notes:
   - 'horc update' updates this repository (/local) from origin/main.
   - 'horc agent update' updates /local/hermes-agent (template for new nodes).
   - 'horc agent update <node>' also syncs that node's hermes-agent and restarts it if running.
+  - Backups are written under /local/backups.
   - Compatibility alias: 'hord' runs the same commands as 'horc'.
 TXT
 }
@@ -181,6 +187,31 @@ case "${ACTION}" in
         echo "horc: unknown agent subcommand '${SUBACTION}'" >&2
         usage >&2
         exit 2
+        ;;
+    esac
+    ;;
+  backup)
+    MODE="${1:-all}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "${MODE}" in
+      all)
+        exec_manager backup --all "$@"
+        ;;
+      node)
+        NAME="${1:-}"
+        if [[ -z "${NAME}" ]]; then
+          echo "horc: backup node requires <name>" >&2
+          usage >&2
+          exit 2
+        fi
+        shift
+        exec_manager backup --name "${NAME}" "$@"
+        ;;
+      *)
+        # Convenience alias: `horc backup <name>`
+        exec_manager backup --name "${MODE}" "$@"
         ;;
     esac
     ;;

@@ -6,6 +6,7 @@ logs/
 memory/
 backups/
 crons/
+plugins/discord/discord_users.json
 
 # Secrets / machine-local envs
 .env

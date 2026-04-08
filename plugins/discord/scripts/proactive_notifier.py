@@ -6,7 +6,7 @@ Goal:
 - Send a daily DIGEST with insights when there is useful signal (without spam).
 
 Main config:
-- /local/plugins/discord/discord_users.json
+- /local/workspace/discord/discord_users.json
 
 Run:
   python3 discord/scripts/proactive_notifier.py immediate
@@ -32,11 +32,12 @@ def _resolve_project_dir() -> Path:
     if explicit:
         return Path(explicit).resolve()
 
+    workspace = Path("/local/workspace").resolve()
+    if workspace.exists():
+        return workspace
+
     canonical = Path("/local").resolve()
-    legacy = Path("/local/workspace").resolve()
-    if (canonical / ".hermes").exists() or (canonical / "data").exists():
-        return canonical
-    return legacy if legacy.exists() else canonical
+    return canonical
 
 
 def _resolve_acl_path(project_dir: Path) -> Path:
@@ -45,9 +46,10 @@ def _resolve_acl_path(project_dir: Path) -> Path:
         return Path(configured).resolve()
 
     candidates = [
+        project_dir / "discord" / "discord_users.json",
         project_dir / "plugins" / "discord" / "discord_users.json",
-        Path("/local/plugins/discord/discord_users.json"),
         Path("/local/workspace/discord/discord_users.json"),
+        Path("/local/plugins/discord/discord_users.json"),
     ]
     for candidate in candidates:
         if candidate.exists():

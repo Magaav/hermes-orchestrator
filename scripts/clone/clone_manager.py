@@ -90,6 +90,7 @@ SHARED_PLUGINS_ROOT = Path(os.getenv("HERMES_PLUGINS_ROOT", "/local/plugins"))
 SHARED_SCRIPTS_ROOT = Path(os.getenv("HERMES_SCRIPTS_ROOT", "/local/scripts"))
 SHARED_CRONS_ROOT = Path(os.getenv("HERMES_CRONS_ROOT", "/local/crons"))
 SHARED_MEMORY_ROOT = Path(os.getenv("HERMES_MEMORY_ROOT", "/local/memory"))
+BACKUPS_ROOT = Path(os.getenv("HERMES_BACKUPS_ROOT", "/local/backups"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
 HERMES_AGENT_UPSTREAM_REPO = str(
     os.getenv("HERMES_AGENT_UPSTREAM_REPO", "https://github.com/NousResearch/hermes-agent.git")
@@ -126,6 +127,9 @@ DISCORD_DEFAULT_REBOOT_CMD = (
 )
 DISCORD_DEFAULT_RESTART_DELAY_SEC = "0.1"
 DISCORD_DEFAULT_REBOOT_DELAY_SEC = "0.1"
+NODE_WORKSPACE_ROOT_IN_CONTAINER = "/local/workspace"
+NODE_WORKSPACE_DB_PATH_IN_CONTAINER = "/local/workspace/data/colmeio_db.sqlite3"
+NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = "/local/workspace/discord/discord_users.json"
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -151,6 +155,7 @@ def _ensure_dirs() -> None:
     ENVS_ROOT.mkdir(parents=True, exist_ok=True)
     CLONES_ROOT.mkdir(parents=True, exist_ok=True)
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
 
 
 def _legacy_orchestrator_home_candidates() -> list[Path]:
@@ -377,6 +382,22 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+def _to_archive_relative(path: Path) -> str:
+    local_root = Path("/local")
+    try:
+        return str(path.resolve().relative_to(local_root))
+    except Exception:
+        return path.name
+
+
+def _archive_add_path(tf: tarfile.TarFile, source: Path) -> str | None:
+    if not source.exists():
+        return None
+    arcname = _to_archive_relative(source)
+    tf.add(str(source), arcname=arcname, recursive=True)
+    return arcname
 
 
 def _load_registry() -> Dict[str, Any]:
@@ -694,6 +715,16 @@ def _fallback_model_name_from_env(env: Dict[str, str]) -> str:
 
 def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
+
+    overrides["COLMEIO_PROJECT_DIR"] = (
+        _env_first_nonempty(env, "COLMEIO_PROJECT_DIR") or NODE_WORKSPACE_ROOT_IN_CONTAINER
+    )
+    overrides["COLMEIO_DB_PATH"] = (
+        _env_first_nonempty(env, "COLMEIO_DB_PATH") or NODE_WORKSPACE_DB_PATH_IN_CONTAINER
+    )
+    overrides["DISCORD_USERS_DB"] = (
+        _env_first_nonempty(env, "DISCORD_USERS_DB") or NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER
+    )
 
     discord_home = _effective_discord_home_channel(env)
     if discord_home:
@@ -1190,15 +1221,102 @@ def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
     return target
 
 
+def _discord_runtime_seed_candidates() -> list[Path]:
+    shared = _discord_plugin_dir(require_exists=False)
+    return [
+        shared / "discord_users.json",
+        shared / "discord_users.json.example",
+    ]
+
+
+def _seed_workspace_discord_state_file(
+    *,
+    clone_name: str,
+    target_file: Path,
+    default_content: str,
+) -> None:
+    if target_file.exists():
+        return
+
+    source = next((c for c in _discord_runtime_seed_candidates() if c.exists()), None)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    if source is not None:
+        shutil.copy2(source, target_file)
+        _log(clone_name, f"seeded workspace discord state: {source} -> {target_file}")
+        return
+
+    target_file.write_text(default_content, encoding="utf-8")
+    _log(clone_name, f"created workspace discord state file: {target_file}")
+
+
+def _ensure_workspace_data_layout(clone_root: Path, clone_name: str = "") -> None:
+    workspace_data_dir = clone_root / "workspace" / "data"
+    workspace_data_dir.mkdir(parents=True, exist_ok=True)
+    legacy_data_dir = clone_root / "data"
+    if not legacy_data_dir.exists() or legacy_data_dir.is_symlink():
+        return
+    if not legacy_data_dir.is_dir():
+        return
+
+    migrated_items: list[str] = []
+    for legacy_item in sorted(legacy_data_dir.iterdir(), key=lambda p: p.name):
+        target_item = workspace_data_dir / legacy_item.name
+        if target_item.exists() or target_item.is_symlink():
+            continue
+        shutil.move(str(legacy_item), str(target_item))
+        migrated_items.append(legacy_item.name)
+
+    if clone_name and migrated_items:
+        joined = ", ".join(migrated_items)
+        _log(clone_name, f"migrated data/* -> workspace/data ({joined})")
+
+    try:
+        has_entries = any(legacy_data_dir.iterdir())
+    except Exception:
+        has_entries = True
+    if not has_entries:
+        try:
+            legacy_data_dir.rmdir()
+            if clone_name:
+                _log(clone_name, "removed legacy data/ directory after workspace migration")
+        except Exception:
+            pass
+
+
 def _link_clone_workspace_discord(clone_root: Path, clone_name: str = "") -> None:
-    """Expose shared Discord plugin under clone-local /local/workspace/discord."""
+    """Expose Discord runtime under clone-local /local/workspace/discord.
+
+    Layout:
+      - scripts/ -> shared /local/plugins/discord/scripts (symlink)
+      - hooks/   -> shared /local/plugins/discord/hooks   (symlink)
+      - discord_users.json            (node-local mutable state)
+      - discord_commands.json         (node-local mutable state)
+      - discord_webhooks_table.json   (node-local mutable state)
+    """
     workspace_discord = clone_root / "workspace" / "discord"
-    if workspace_discord.exists() or workspace_discord.is_symlink():
+    if workspace_discord.is_symlink():
         _remove_path(workspace_discord)
-    workspace_discord.parent.mkdir(parents=True, exist_ok=True)
-    os.symlink("/local/plugins/discord", workspace_discord)
-    if clone_name:
-        _log(clone_name, f"symlinked workspace/discord -> /local/plugins/discord")
+    workspace_discord.mkdir(parents=True, exist_ok=True)
+
+    shared_discord_root = _discord_plugin_dir(require_exists=False)
+    _set_symlink(workspace_discord / "scripts", shared_discord_root / "scripts")
+    _set_symlink(workspace_discord / "hooks", shared_discord_root / "hooks")
+
+    _seed_workspace_discord_state_file(
+        clone_name=clone_name,
+        target_file=workspace_discord / "discord_users.json",
+        default_content='{\n  "version": 2,\n  "users": []\n}\n',
+    )
+    _seed_workspace_discord_state_file(
+        clone_name=clone_name,
+        target_file=workspace_discord / "discord_commands.json",
+        default_content="[]\n",
+    )
+    _seed_workspace_discord_state_file(
+        clone_name=clone_name,
+        target_file=workspace_discord / "discord_webhooks_table.json",
+        default_content="{}\n",
+    )
 
 
 def _link_shared_plugins_for_clone(clone_root: Path, clone_name: str) -> None:
@@ -1255,7 +1373,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
         state_source = None
 
     # Ensure canonical orchestrator directory shape.
-    for sub in ("data", "workspace", ".hermes", ".runtime", "logs/agents", "logs/clones", ".clone-meta"):
+    for sub in ("workspace", ".hermes", ".runtime", "logs/agents", "logs/clones", ".clone-meta"):
         sub_path = clone_root / sub
         if sub_path.is_symlink():
             _remove_path(sub_path)
@@ -1307,6 +1425,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
         )
 
     _link_clone_workspace_discord(clone_root, clone_name)
+    _ensure_workspace_data_layout(clone_root, clone_name)
     try:
         _normalize_clone_skills_layout(clone_root)
     except CloneManagerError:
@@ -1874,10 +1993,8 @@ def _seed_from_backup(clone_root: Path, backup_path: Path) -> None:
             # Keep user payload files but drop legacy runtime trees that
             # conflict with the canonical node topology.
             for legacy_rel in (
-                "data",
                 "crons",
                 "skills",
-                "discord",
                 "plugins",
                 "colmeio",
             ):
@@ -1899,7 +2016,6 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
     mode = _extract_state_mode(env)
 
     for sub in (
-        "data",
         "workspace",
         "hermes-agent",
         ".hermes",
@@ -1918,14 +2034,16 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         if legacy_path.exists() or legacy_path.is_symlink():
             _remove_path(legacy_path)
 
-    # Drop workspace compatibility trees; callers should use /local/data,
-    # /local/crons and /local/.hermes/skills canonical paths.
-    for legacy_rel in ("data", "crons", "skills", "discord", "plugins", "colmeio"):
+    # Drop legacy workspace compatibility trees that conflict with agents-v2.
+    # Keep workspace/data and workspace/discord as node-local mutable runtime state.
+    for legacy_rel in ("crons", "skills", "plugins", "colmeio"):
         legacy_path = clone_root / "workspace" / legacy_rel
         if legacy_path.exists() or legacy_path.is_symlink():
             _remove_path(legacy_path)
 
     _ensure_worker_shared_mount_links(clone_root, clone_name)
+    _link_clone_workspace_discord(clone_root, clone_name)
+    _ensure_workspace_data_layout(clone_root, clone_name)
 
     _ensure_clone_ownership(clone_root)
     force_reseed = _is_truthy(_env_first_nonempty(env, "NODE_FORCE_RESEED", "CLONE_FORCE_RESEED", "0"))
@@ -2126,12 +2244,6 @@ def _build_docker_run_cmd(
         "-e",
         "HOME=/local",
         "-e",
-        "COLMEIO_PROJECT_DIR=/local",
-        "-e",
-        "COLMEIO_DB_PATH=/local/data/colmeio_db.sqlite3",
-        "-e",
-        "DISCORD_USERS_DB=/local/plugins/discord/discord_users.json",
-        "-e",
         "USER=ubuntu",
         "-e",
         "LOGNAME=ubuntu",
@@ -2171,7 +2283,18 @@ def _build_docker_run_cmd(
 
 
 def _orchestrator_pid_path(clone_root: Path) -> Path:
+    return clone_root / "workspace" / "data" / "gateway.pid"
+
+
+def _orchestrator_legacy_pid_path(clone_root: Path) -> Path:
     return clone_root / "data" / "gateway.pid"
+
+
+def _orchestrator_pid_candidates(clone_root: Path) -> list[Path]:
+    return [
+        _orchestrator_pid_path(clone_root),
+        _orchestrator_legacy_pid_path(clone_root),
+    ]
 
 
 def _read_pid(path: Path) -> int | None:
@@ -2198,9 +2321,26 @@ def _pid_running(pid: int | None) -> bool:
 
 
 def _orchestrator_process_state(clone_root: Path) -> Dict[str, Any]:
-    pid_path = _orchestrator_pid_path(clone_root)
-    pid = _read_pid(pid_path)
-    running = _pid_running(pid)
+    running_pid: int | None = None
+    running_path: Path | None = None
+    stale_pid: int | None = None
+    stale_path: Path | None = None
+
+    for candidate in _orchestrator_pid_candidates(clone_root):
+        pid = _read_pid(candidate)
+        if pid is None:
+            continue
+        if stale_path is None:
+            stale_path = candidate
+            stale_pid = pid
+        if _pid_running(pid):
+            running_pid = pid
+            running_path = candidate
+            break
+
+    pid_path = running_path or stale_path or _orchestrator_pid_path(clone_root)
+    pid = running_pid if running_pid is not None else stale_pid
+    running = running_pid is not None
     return {
         "exists": True,
         "running": running,
@@ -2303,6 +2443,12 @@ def _orchestrator_start_gateway(
     pid_path = _orchestrator_pid_path(clone_root)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(f"{proc.pid}\n", encoding="utf-8")
+    legacy_pid = _orchestrator_legacy_pid_path(clone_root)
+    if legacy_pid != pid_path and legacy_pid.exists():
+        try:
+            legacy_pid.unlink()
+        except Exception:
+            pass
 
     # Fail fast if the gateway crashes immediately after spawn.
     time.sleep(2.0)
@@ -2328,21 +2474,22 @@ def _orchestrator_start_gateway(
 
 
 def _orchestrator_stop_gateway(clone_name: str, clone_root: Path) -> Dict[str, Any]:
-    pid_path = _orchestrator_pid_path(clone_root)
-    pid = _read_pid(pid_path)
-    if not _pid_running(pid):
-        if pid_path.exists():
-            try:
-                pid_path.unlink()
-            except Exception:
-                pass
+    state = _orchestrator_process_state(clone_root)
+    pid = state.get("pid")
+    running = bool(state.get("running"))
+    if not running or not isinstance(pid, int):
+        for pid_path in _orchestrator_pid_candidates(clone_root):
+            if pid_path.exists():
+                try:
+                    pid_path.unlink()
+                except Exception:
+                    pass
         return {
             "result": "not_found",
             "pid": pid,
             "process_state": _orchestrator_process_state(clone_root),
         }
 
-    assert pid is not None
     try:
         os.kill(pid, 15)
     except OSError:
@@ -2364,11 +2511,12 @@ def _orchestrator_stop_gateway(clone_name: str, clone_root: Path) -> Dict[str, A
             break
         time.sleep(0.1)
 
-    if pid_path.exists():
-        try:
-            pid_path.unlink()
-        except Exception:
-            pass
+    for pid_path in _orchestrator_pid_candidates(clone_root):
+        if pid_path.exists():
+            try:
+                pid_path.unlink()
+            except Exception:
+                pass
 
     _log(clone_name, f"orchestrator gateway stopped pid={pid}")
     return {
@@ -2797,6 +2945,85 @@ def _action_logs(clone_name: str, lines: int) -> Dict[str, Any]:
     }
 
 
+def _discover_node_names() -> list[str]:
+    names: set[str] = set()
+
+    try:
+        for env_path in ENVS_ROOT.glob("*.env"):
+            if env_path.is_file():
+                names.add(env_path.stem)
+    except Exception:
+        pass
+
+    try:
+        if CLONES_ROOT.exists():
+            for node_root in CLONES_ROOT.iterdir():
+                if node_root.is_dir():
+                    names.add(node_root.name)
+    except Exception:
+        pass
+
+    ordered: list[str] = []
+    for raw in sorted(names):
+        try:
+            ordered.append(_normalize_clone_name(raw))
+        except Exception:
+            continue
+    return ordered
+
+
+def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any]:
+    target_nodes: list[str]
+    if backup_all:
+        target_nodes = _discover_node_names()
+        if not target_nodes:
+            raise CloneManagerError("no node profiles found to back up")
+    else:
+        if not clone_name:
+            raise CloneManagerError("backup node requires clone name")
+        target_nodes = [clone_name]
+
+    BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    scope = "all" if backup_all else f"node-{target_nodes[0]}"
+    archive_name = f"horc-backup-{scope}-{stamp}.tar.gz"
+    archive_path = BACKUPS_ROOT / archive_name
+
+    included: list[str] = []
+    missing: list[str] = []
+
+    with tarfile.open(archive_path, "w:gz") as tf:
+        registry_added = _archive_add_path(tf, REGISTRY_PATH)
+        if registry_added:
+            included.append(registry_added)
+
+        for node in target_nodes:
+            env_path = _clone_env_path(node)
+            node_root = _clone_root_path(node)
+
+            for path in (env_path, node_root):
+                added = _archive_add_path(tf, path)
+                if added is not None:
+                    included.append(added)
+                else:
+                    missing.append(str(path))
+
+    size_bytes = archive_path.stat().st_size if archive_path.exists() else 0
+    for node in target_nodes:
+        _log(node, f"backup created: {archive_path}")
+
+    return {
+        "ok": True,
+        "action": "backup",
+        "scope": "all" if backup_all else "node",
+        "nodes": target_nodes,
+        "archive": str(archive_path),
+        "size_bytes": int(size_bytes),
+        "included_paths": included,
+        "missing_paths": missing,
+    }
+
+
 def _git_commit(path: Path) -> str:
     proc = _run(["git", "-C", str(path), "rev-parse", "HEAD"], check=False)
     if proc.returncode != 0:
@@ -2993,6 +3220,7 @@ def _dispatch(
     image: str,
     lines: int,
     source_branch: str,
+    backup_all: bool,
 ) -> Dict[str, Any]:
     if action == "start":
         if not clone_name:
@@ -3016,12 +3244,14 @@ def _dispatch(
         return _action_logs(clone_name, lines=lines)
     if action == "update":
         return _action_update(clone_name, source_branch=source_branch)
+    if action == "backup":
+        return _action_backup(clone_name, backup_all=backup_all)
     raise CloneManagerError(f"unsupported action: {action}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hermes clone lifecycle manager")
-    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update"])
+    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update", "backup"])
     parser.add_argument(
         "name_positional",
         nargs="?",
@@ -3036,6 +3266,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image for clone runtime")
     parser.add_argument("--lines", type=int, default=80, help="Log tail lines for logs action")
+    parser.add_argument("--all", dest="backup_all", action="store_true", help="Backup all nodes (backup action)")
     parser.add_argument(
         "--source-branch",
         default=str(os.getenv("HERMES_AGENT_UPDATE_BRANCH", HERMES_AGENT_UPSTREAM_BRANCH) or HERMES_AGENT_UPSTREAM_BRANCH),
@@ -3052,9 +3283,11 @@ def main() -> int:
 
     try:
         clone_name: str | None
-        if args.action == "update":
+        if args.action in {"update", "backup"}:
             raw_name = args.name_flag or args.name_positional
             clone_name = _normalize_clone_name(raw_name) if raw_name else None
+            if args.action == "backup" and args.backup_all:
+                clone_name = None
         else:
             raw_name = (
                 args.name_flag
@@ -3069,6 +3302,7 @@ def main() -> int:
             image=str(args.image),
             lines=lines,
             source_branch=str(args.source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
+            backup_all=bool(args.backup_all),
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0

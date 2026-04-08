@@ -7,6 +7,7 @@ Canonical home for Colmeio Discord integration artifacts.
 - `discord_commands.json` -> `/local/workspace/discord/discord_commands.json`
 - `discord_users.json` -> `/local/workspace/discord/discord_users.json`
 - `discord_webhooks_table.json` -> `/local/workspace/discord/discord_webhooks_table.json`
+- `discord_users.json.example` (tracked template) -> `/local/plugins/discord/discord_users.json.example`
 - Scripts -> `/local/workspace/discord/scripts/`
 - Hooks -> `/local/workspace/discord/hooks/`
 - Cron launchers -> `/local/workspace/crons/`
@@ -15,6 +16,7 @@ Canonical home for Colmeio Discord integration artifacts.
 
 Legacy compatibility symlinks were intentionally removed.
 Use only the canonical paths above.
+Runtime `discord_users.json` is node-local state and is intentionally not versioned.
 
 ## One-Command Upgrade
 
