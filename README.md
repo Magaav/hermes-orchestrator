@@ -1,6 +1,7 @@
 # hermes-orchestrator
 
 Hermes Orchestrator is the host control plane for running one orchestrator node plus many containerized Hermes worker nodes.
+Node env conventions and defaults are documented in [`agents/READ.me`](agents/READ.me) and [`agents/README.md`](agents/README.md).
 
 ## Install
 
@@ -36,6 +37,7 @@ What install does:
 │   │   ├── orchestrator.env
 │   │   ├── catatau.env
 │   │   ├── colmeio.env
+│   │   ├── node.env.example
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
@@ -141,11 +143,53 @@ Runtime and secret files are intentionally excluded:
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/.runtime/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 
 Commit only templates:
-- `agents/envs/orchestrator.env.example`
-- `agents/envs/catatau.env.example`
-- `agents/envs/colmeio.env.example`
+- `agents/envs/node.env.example`
+- `agents/README.md`
 
 Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
+
+## Road Map
+
+### UI (Hermes Workspace-style Interface)
+
+A lightweight web UI is planned as an optional visual layer inspired by Hermes Workspace, but independent from Hermes runtime internals.
+
+Scope:
+- node lifecycle management
+- tenant and environment overview
+- task execution monitoring
+- orchestration logs and event streams
+- shared wiki navigation and editing
+- health and heartbeat dashboards
+
+```text
+UI
+  ├─ Fleet overview
+  ├─ Node management
+  ├─ Task monitoring
+  ├─ Logs & events
+  └─ Shared wiki
+```
+
+The orchestrator remains fully operable via CLI and automation pipelines even without the UI.
+
+## Why Use Hermes Orchestrator
+
+Hermes Agent is excellent at reasoning and tool use inside a single runtime.
+Hermes Orchestrator solves a different layer: operating many Hermes nodes safely and reliably.
+
+Hermes Agent focuses on:
+- reasoning
+- memory
+- tool execution
+
+Hermes Orchestrator focuses on:
+- node lifecycle and fleet management
+- environment and tenant isolation
+- upgrades, rollbacks, and operational guardrails
+- logs, auditability, and policy boundaries
+
+This separation gives teams scale and operational clarity without modifying Hermes Agent itself.
 
 ## Branch Policy
 

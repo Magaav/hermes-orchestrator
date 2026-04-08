@@ -34,11 +34,10 @@ Architecture:
   - Host access: http://127.0.0.1:1933
   - Container access: http://host.docker.internal:1933
 
-Per-clone configuration (in /local/agents/envs/<clone_name>.env):
-  MEMORY_OPENVIKING=1           # Enable OpenViking (0 to disable)
+Per-node configuration (in /local/agents/envs/<node_name>.env):
+  OPENVIKING_ENABLED=1          # Enable OpenViking (0 to disable)
   OPENVIKING_ENDPOINT=...       # Server URL (auto-set to host.docker.internal for clones)
-  OPENVIKING_ACCOUNT=colmeio    # Tenant account (shared across nodes)
-  OPENVIKING_USER=<clone_name>   # Per-node user identifier
+  # OPENVIKING_ACCOUNT / OPENVIKING_USER are optional and default to <node_name>
 
 The clone manager auto-configures OpenViking during `start` by calling
 openviking_env_bootstrap.py which:
@@ -47,8 +46,10 @@ openviking_env_bootstrap.py which:
   3. Updates config.yaml to set memory.provider=openviking
   4. Sets fail-open mode if endpoint is unreachable
 
-New clones inherit OpenViking configuration automatically when MEMORY_OPENVIKING=1
-is set in the clone's .env file before spawning.
+Legacy keys remain supported for compatibility:
+  MEMORY_OPENVIKING -> OPENVIKING_ENABLED
+  BROWSER_CAMOFOX   -> CAMOFOX_ENABLED
+  CLONE_STATE*      -> NODE_STATE*
 """
 
 from __future__ import annotations
@@ -108,7 +109,23 @@ RUNTIME_UV_REL = Path(".runtime/uv")
 BOOTSTRAP_META_REL = Path(".clone-meta/bootstrap.json")
 CAMOFOX_DEFAULT_URL_CLONE = "http://host.docker.internal:9377"
 OPENVIKING_DEFAULT_ENDPOINT_CLONE = "http://host.docker.internal:1933"
-OPENVIKING_DEFAULT_ACCOUNT = "colmeio"
+DISCORD_DEFAULT_RESTART_CMD = (
+    "if [ -s /tmp/hermes-gateway.pid ]; then "
+    "kill -KILL $(cat /tmp/hermes-gateway.pid); "
+    "else "
+    "pkill -KILL -f '/local/hermes-agent/cli.py --gateway'; "
+    "fi"
+)
+DISCORD_DEFAULT_REBOOT_CMD = (
+    "touch /tmp/hermes-reboot-requested; "
+    "if [ -s /tmp/hermes-gateway.pid ]; then "
+    "kill -KILL $(cat /tmp/hermes-gateway.pid); "
+    "else "
+    "pkill -KILL -f '/local/hermes-agent/cli.py --gateway'; "
+    "fi"
+)
+DISCORD_DEFAULT_RESTART_DELAY_SEC = "0.1"
+DISCORD_DEFAULT_REBOOT_DELAY_SEC = "0.1"
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -311,100 +328,43 @@ def _upsert_env_value(path: Path, key: str, value: str) -> bool:
 
 
 def _sync_discord_home_channel_env(clone_name: str, env_path: Path) -> Dict[str, Any]:
-    """Map DISCORD_HOME_CHANNEL_ID -> DISCORD_HOME_CHANNEL for gateway runtime."""
+    """Resolve canonical Discord home channel without mutating profile env."""
     env = _read_env_file(env_path)
     source = str(env.get("DISCORD_HOME_CHANNEL_ID", "") or "").strip()
     current = str(env.get("DISCORD_HOME_CHANNEL", "") or "").strip()
+    effective = _effective_discord_home_channel(env)
 
-    if not source:
-        return {
-            "mapped": False,
-            "changed": False,
-            "source": "",
-            "effective": current,
-        }
-
-    changed = False
-    if current != source:
-        changed = _upsert_env_value(env_path, "DISCORD_HOME_CHANNEL", source)
-        current = source if changed else str(_read_env_file(env_path).get("DISCORD_HOME_CHANNEL", "") or "").strip()
+    if source and not current:
         _log(
             clone_name,
-            f"discord home channel sync: mapped DISCORD_HOME_CHANNEL_ID -> DISCORD_HOME_CHANNEL ({source})",
+            f"discord home channel sync: using legacy DISCORD_HOME_CHANNEL_ID as runtime DISCORD_HOME_CHANNEL ({source})",
         )
 
     return {
-        "mapped": True,
-        "changed": changed,
+        "mapped": bool(source and not current),
+        "changed": False,
         "source": source,
-        "effective": current or source,
+        "effective": effective,
     }
 
 
 def _sync_restart_reboot_env(clone_name: str, env_path: Path) -> Dict[str, Any]:
-    """Ensure restart/reboot commands are explicitly and safely separated.
-
-    Contract:
-    - restart => restart gateway process only (inside running container)
-    - reboot  => restart container (PID 1)
-    """
+    """Resolve restart/reboot runtime defaults without mutating profile env."""
     env = _read_env_file(env_path)
+    effective = _effective_restart_reboot_env(env)
+    restart_cmd = effective["restart_cmd"]
+    reboot_cmd = effective["reboot_cmd"]
+    restart_delay = effective["restart_delay_sec"]
+    reboot_delay = effective["reboot_delay_sec"]
 
-    restart_cmd = str(env.get("COLMEIO_DISCORD_RESTART_CMD", "") or "").strip()
-    reboot_cmd = str(env.get("COLMEIO_DISCORD_REBOOT_CMD", "") or "").strip()
-    restart_delay = str(env.get("COLMEIO_DISCORD_RESTART_DELAY_SEC", "") or "").strip()
-    reboot_delay = str(env.get("COLMEIO_DISCORD_REBOOT_DELAY_SEC", "") or "").strip()
-
-    changed = False
-
-    # Migrate legacy restart behavior (kill PID 1) to gateway-only restart.
-    if (
-        (not restart_cmd)
-        or restart_cmd in {"kill -TERM 1", "kill -KILL 1"}
-        or "/tmp/hermes-gateway.pid" in restart_cmd
-    ):
-        restart_cmd = (
-            "if [ -s /tmp/hermes-gateway.pid ]; then "
-            "kill -KILL $(cat /tmp/hermes-gateway.pid); "
-            "else "
-            "pkill -KILL -f '/local/hermes-agent/cli.py --gateway'; "
-            "fi"
-        )
-        changed = _upsert_env_value(env_path, "COLMEIO_DISCORD_RESTART_CMD", restart_cmd) or changed
-
-    if (
-        (not reboot_cmd)
-        or reboot_cmd in {"kill -TERM 1", "kill -KILL 1"}
-        or "/tmp/hermes-gateway.pid" in reboot_cmd
-    ):
-        reboot_cmd = (
-            "touch /tmp/hermes-reboot-requested; "
-            "if [ -s /tmp/hermes-gateway.pid ]; then "
-            "kill -KILL $(cat /tmp/hermes-gateway.pid); "
-            "else "
-            "pkill -KILL -f '/local/hermes-agent/cli.py --gateway'; "
-            "fi"
-        )
-        changed = _upsert_env_value(env_path, "COLMEIO_DISCORD_REBOOT_CMD", reboot_cmd) or changed
-
-    if not restart_delay:
-        restart_delay = "0.2"
-        changed = _upsert_env_value(env_path, "COLMEIO_DISCORD_RESTART_DELAY_SEC", restart_delay) or changed
-
-    if not reboot_delay:
-        reboot_delay = "0.2"
-        changed = _upsert_env_value(env_path, "COLMEIO_DISCORD_REBOOT_DELAY_SEC", reboot_delay) or changed
-
-    if changed:
-        _log(
-            clone_name,
-            "restart/reboot env sync: "
-            f"restart_cmd='{restart_cmd}' reboot_cmd='{reboot_cmd}' "
-            f"restart_delay={restart_delay} reboot_delay={reboot_delay}",
-        )
+    _log(
+        clone_name,
+        "restart/reboot env sync: "
+        f"runtime restart_delay={restart_delay} reboot_delay={reboot_delay}",
+    )
 
     return {
-        "changed": changed,
+        "changed": False,
         "restart_cmd": restart_cmd,
         "reboot_cmd": reboot_cmd,
         "restart_delay_sec": restart_delay,
@@ -641,6 +601,124 @@ def _clone_bootstrap_meta_path(clone_root: Path) -> Path:
 def _is_truthy(value: Any) -> bool:
     raw = str(value or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
+
+
+def _env_first_nonempty(env: Dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = str(env.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _env_truthy_prefer(env: Dict[str, str], primary: str, legacy: str) -> bool:
+    primary_raw = str(env.get(primary, "") or "").strip()
+    if primary_raw:
+        return _is_truthy(primary_raw)
+    legacy_raw = str(env.get(legacy, "") or "").strip()
+    if legacy_raw:
+        return _is_truthy(legacy_raw)
+    return False
+
+
+def _is_camofox_enabled_env(env: Dict[str, str]) -> bool:
+    return _env_truthy_prefer(env, "CAMOFOX_ENABLED", "BROWSER_CAMOFOX")
+
+
+def _is_openviking_enabled_env(env: Dict[str, str]) -> bool:
+    return _env_truthy_prefer(env, "OPENVIKING_ENABLED", "MEMORY_OPENVIKING")
+
+
+def _effective_discord_home_channel(env: Dict[str, str]) -> str:
+    return _env_first_nonempty(env, "DISCORD_HOME_CHANNEL", "DISCORD_HOME_CHANNEL_ID")
+
+
+def _resolve_openviking_identity(env: Dict[str, str], clone_name: str) -> tuple[str, str]:
+    account = _env_first_nonempty(env, "OPENVIKING_ACCOUNT", "OPENVIKING_ACCOUNT_DEFAULT")
+    user = _env_first_nonempty(env, "OPENVIKING_USER", "OPENVIKING_USER_DEFAULT")
+
+    if not account and not user:
+        account = clone_name
+        user = clone_name
+    elif account and not user:
+        user = account
+    elif user and not account:
+        account = user
+
+    return account, user
+
+
+def _effective_restart_reboot_env(env: Dict[str, str]) -> Dict[str, str]:
+    restart_cmd = str(env.get("COLMEIO_DISCORD_RESTART_CMD", "") or "").strip()
+    reboot_cmd = str(env.get("COLMEIO_DISCORD_REBOOT_CMD", "") or "").strip()
+    restart_delay = str(env.get("COLMEIO_DISCORD_RESTART_DELAY_SEC", "") or "").strip()
+    reboot_delay = str(env.get("COLMEIO_DISCORD_REBOOT_DELAY_SEC", "") or "").strip()
+
+    if not restart_cmd or restart_cmd in {"kill -TERM 1", "kill -KILL 1"}:
+        restart_cmd = DISCORD_DEFAULT_RESTART_CMD
+    if not reboot_cmd or reboot_cmd in {"kill -TERM 1", "kill -KILL 1"}:
+        reboot_cmd = DISCORD_DEFAULT_REBOOT_CMD
+    if not restart_delay:
+        restart_delay = DISCORD_DEFAULT_RESTART_DELAY_SEC
+    if not reboot_delay:
+        reboot_delay = DISCORD_DEFAULT_REBOOT_DELAY_SEC
+
+    return {
+        "restart_cmd": restart_cmd,
+        "reboot_cmd": reboot_cmd,
+        "restart_delay_sec": restart_delay,
+        "reboot_delay_sec": reboot_delay,
+    }
+
+
+def _default_model_provider_from_env(env: Dict[str, str]) -> str:
+    return _env_first_nonempty(
+        env,
+        "NODE_AGENT_DEFAULT_MODEL_PROVIDER",
+        "DEFAULT_MODEL_PROVIDER",
+        "HERMES_INFERENCE_PROVIDER",
+    )
+
+
+def _default_model_name_from_env(env: Dict[str, str]) -> str:
+    return _env_first_nonempty(env, "NODE_AGENT_DEFAULT_MODEL", "DEFAULT_MODEL")
+
+
+def _fallback_model_provider_from_env(env: Dict[str, str]) -> str:
+    return _env_first_nonempty(env, "NODE_AGENT_FALLBACK_MODEL_PROVIDER", "FALLBACK_MODEL_PROVIDER")
+
+
+def _fallback_model_name_from_env(env: Dict[str, str]) -> str:
+    return _env_first_nonempty(env, "NODE_AGENT_FALLBACK_MODEL", "FALLBACK_MODEL")
+
+
+def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, str]:
+    overrides: Dict[str, str] = {}
+
+    discord_home = _effective_discord_home_channel(env)
+    if discord_home:
+        overrides["DISCORD_HOME_CHANNEL"] = discord_home
+
+    restart_reboot = _effective_restart_reboot_env(env)
+    overrides["COLMEIO_DISCORD_RESTART_CMD"] = restart_reboot["restart_cmd"]
+    overrides["COLMEIO_DISCORD_REBOOT_CMD"] = restart_reboot["reboot_cmd"]
+    overrides["COLMEIO_DISCORD_RESTART_DELAY_SEC"] = restart_reboot["restart_delay_sec"]
+    overrides["COLMEIO_DISCORD_REBOOT_DELAY_SEC"] = restart_reboot["reboot_delay_sec"]
+
+    overrides["CAMOFOX_ENABLED"] = "1" if _is_camofox_enabled_env(env) else "0"
+    overrides["OPENVIKING_ENABLED"] = "1" if _is_openviking_enabled_env(env) else "0"
+    if _is_camofox_enabled_env(env):
+        overrides["CAMOFOX_URL"] = _env_first_nonempty(env, "CAMOFOX_URL") or CAMOFOX_DEFAULT_URL_CLONE
+    if _is_openviking_enabled_env(env):
+        overrides["OPENVIKING_ENDPOINT"] = (
+            _env_first_nonempty(env, "OPENVIKING_ENDPOINT") or OPENVIKING_DEFAULT_ENDPOINT_CLONE
+        )
+
+    openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name)
+    overrides["OPENVIKING_ACCOUNT"] = openviking_account
+    overrides["OPENVIKING_USER"] = openviking_user
+
+    return overrides
 
 
 def _python_has_module(python_bin: Path, module: str) -> bool:
@@ -1153,7 +1231,7 @@ def _link_shared_plugins_for_clone(clone_root: Path, clone_name: str) -> None:
 
 
 def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[str, str], env_path: Path) -> Dict[str, Any]:
-    """Set up orchestrator (CLONE_STATE=1) as a bare-metal bootstrap node.
+    """Set up orchestrator (NODE_STATE=1) as a bare-metal bootstrap node.
 
     The orchestrator:
     - Lives directly on the VM (not containerized)
@@ -1284,7 +1362,8 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
 
 def _bootstrap_camofox_for_clone(clone_name: str, env_path: Path) -> Dict[str, Any]:
     env = _read_env_file(env_path)
-    enabled = _is_truthy(env.get("BROWSER_CAMOFOX", ""))
+    enabled = _is_camofox_enabled_env(env)
+    enable_var = "CAMOFOX_ENABLED" if str(env.get("CAMOFOX_ENABLED", "") or "").strip() else "BROWSER_CAMOFOX"
     ensure_service = _is_truthy(
         env.get("CAMOFOX_ENSURE_SERVICE", env.get("BROWSER_CAMOFOX_ENSURE_SERVICE", "0"))
     )
@@ -1308,6 +1387,8 @@ def _bootstrap_camofox_for_clone(clone_name: str, env_path: Path) -> Dict[str, A
                     str(camofox_bootstrap_script),
                     "--env-file",
                     str(env_path),
+                    "--enable-var",
+                    enable_var,
                     "--default-url",
                     CAMOFOX_DEFAULT_URL_CLONE,
                 ]
@@ -1338,17 +1419,11 @@ def _bootstrap_camofox_for_clone(clone_name: str, env_path: Path) -> Dict[str, A
             )
 
     # Fallback behavior: only env normalization, no service orchestration.
-    current_url = str(env.get("CAMOFOX_URL", "") or "").strip()
-    changed = False
-    if not current_url:
-        changed = _upsert_env_value(env_path, "CAMOFOX_URL", CAMOFOX_DEFAULT_URL_CLONE)
-        env = _read_env_file(env_path)
-        current_url = str(env.get("CAMOFOX_URL", "") or "").strip()
-        _log(clone_name, f"camofox fallback: CAMOFOX_URL set to {current_url}")
+    current_url = str(env.get("CAMOFOX_URL", "") or "").strip() or CAMOFOX_DEFAULT_URL_CLONE
 
     return {
         "enabled": True,
-        "changed": changed,
+        "changed": False,
         "effective_url": current_url,
         "service": {
             "attempted": False,
@@ -1366,18 +1441,25 @@ def _clone_supports_openviking(clone_root: Path) -> bool:
 
 def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root: Path) -> Dict[str, Any]:
     env = _read_env_file(env_path)
-    enabled = _is_truthy(env.get("MEMORY_OPENVIKING", ""))
-    default_user = clone_name
+    enabled = _is_openviking_enabled_env(env)
+    enable_var = (
+        "OPENVIKING_ENABLED"
+        if str(env.get("OPENVIKING_ENABLED", "") or "").strip()
+        else "MEMORY_OPENVIKING"
+    )
+    default_account, default_user = _resolve_openviking_identity(env, clone_name)
     supported = _clone_supports_openviking(clone_root)
+    effective_endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or OPENVIKING_DEFAULT_ENDPOINT_CLONE
+    effective_account, effective_user = _resolve_openviking_identity(env, clone_name)
 
     if not enabled:
         return {
             "enabled": False,
             "changed": False,
             "effective": {
-                "endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or ""),
-                "account": str(env.get("OPENVIKING_ACCOUNT", "") or ""),
-                "user": str(env.get("OPENVIKING_USER", "") or ""),
+                "endpoint": effective_endpoint,
+                "account": effective_account,
+                "user": effective_user,
             },
             "compatibility": {"supported": supported, "message": "disabled"},
             "degraded": False,
@@ -1395,6 +1477,8 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
                     str(openviking_bootstrap_script),
                     "--env-file",
                     str(env_path),
+                    "--enable-var",
+                    enable_var,
                     "--config-file",
                     str(clone_root / ".hermes" / "config.yaml"),
                     "--agent-root",
@@ -1402,7 +1486,7 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
                     "--default-endpoint",
                     OPENVIKING_DEFAULT_ENDPOINT_CLONE,
                     "--default-account",
-                    OPENVIKING_DEFAULT_ACCOUNT,
+                    default_account,
                     "--default-user",
                     default_user,
                     "--skip-health-probe",
@@ -1437,34 +1521,28 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
             )
 
     # Fallback behavior: env normalization only (fail-open).
-    changed = False
-    if not str(env.get("OPENVIKING_ENDPOINT", "") or "").strip():
-        changed = _upsert_env_value(env_path, "OPENVIKING_ENDPOINT", OPENVIKING_DEFAULT_ENDPOINT_CLONE) or changed
-    if not str(env.get("OPENVIKING_ACCOUNT", "") or "").strip():
-        changed = _upsert_env_value(env_path, "OPENVIKING_ACCOUNT", OPENVIKING_DEFAULT_ACCOUNT) or changed
-    if not str(env.get("OPENVIKING_USER", "") or "").strip():
-        changed = _upsert_env_value(env_path, "OPENVIKING_USER", default_user) or changed
-
     env = _read_env_file(env_path)
+    effective_endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or OPENVIKING_DEFAULT_ENDPOINT_CLONE
+    effective_account, effective_user = _resolve_openviking_identity(env, clone_name)
     if not supported:
         _log(
             clone_name,
             "openviking compatibility warning: provider plugin missing in clone code; "
-            "set CLONE_FORCE_RESEED=1 and start again to upgrade.",
+            "run 'horc agent update <node>' to refresh node code.",
         )
     return {
         "enabled": True,
-        "changed": changed,
+        "changed": False,
         "effective": {
-            "endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or ""),
-            "account": str(env.get("OPENVIKING_ACCOUNT", "") or ""),
-            "user": str(env.get("OPENVIKING_USER", "") or ""),
+            "endpoint": effective_endpoint,
+            "account": effective_account,
+            "user": effective_user,
         },
         "compatibility": {
             "supported": supported,
             "message": "fallback mode (env only)" if supported else (
-                "provider plugin missing; explicit reseed required "
-                "(set CLONE_FORCE_RESEED=1 and start again)."
+                "provider plugin missing; refresh node code "
+                "(run 'horc agent update <node>' and start again)."
             ),
         },
         "degraded": not supported,
@@ -1480,16 +1558,14 @@ def _bootstrap_models_for_clone(clone_name: str, env_path: Path, clone_root: Pat
         "fallback_changed": False,
         "effective": {
             "default": {
-                "model": str(env.get("DEFAULT_MODEL", "") or ""),
-                "provider": str(
-                    env.get("DEFAULT_MODEL_PROVIDER", env.get("HERMES_INFERENCE_PROVIDER", "")) or ""
-                ),
+                "model": _default_model_name_from_env(env),
+                "provider": _default_model_provider_from_env(env),
                 "base_url": str(env.get("DEFAULT_MODEL_BASE_URL", "") or ""),
                 "api_mode": str(env.get("DEFAULT_MODEL_API_MODE", "") or ""),
             },
             "fallback": {
-                "model": str(env.get("FALLBACK_MODEL", "") or ""),
-                "provider": str(env.get("FALLBACK_MODEL_PROVIDER", "") or ""),
+                "model": _fallback_model_name_from_env(env),
+                "provider": _fallback_model_provider_from_env(env),
                 "base_url": str(env.get("FALLBACK_MODEL_BASE_URL", "") or ""),
                 "api_mode": str(env.get("FALLBACK_MODEL_API_MODE", "") or ""),
             },
@@ -1629,7 +1705,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
         if not allow_parent_seed:
             raise CloneManagerError(
                 "clone runtime venv missing at /local/hermes-agent/.venv. "
-                "Set CLONE_FORCE_RESEED=1 in clone env to re-bootstrap."
+                "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
             )
         src_venv = _select_seed_venv_source(required_module="discord")
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -1640,7 +1716,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
         if not allow_parent_seed:
             raise CloneManagerError(
                 "clone runtime venv does not include discord.py. "
-                "Set CLONE_FORCE_RESEED=1 in clone env to refresh runtime."
+                "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to refresh runtime."
             )
         src_venv = _select_seed_venv_source(required_module="discord")
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -1740,14 +1816,14 @@ def _seed_clone_workspace_integrations(clone_root: Path) -> Dict[str, bool]:
 
 
 def _extract_state_mode(env: Dict[str, str]) -> int:
-    raw = str(env.get("CLONE_STATE", "1") or "1").strip()
+    raw = _env_first_nonempty(env, "NODE_STATE", "CLONE_STATE") or "1"
     try:
         value = int(raw)
     except ValueError as exc:
-        raise CloneManagerError(f"invalid CLONE_STATE value: {raw}") from exc
+        raise CloneManagerError(f"invalid NODE_STATE value: {raw}") from exc
     if value not in STATE_LABELS:
         raise CloneManagerError(
-            f"invalid CLONE_STATE value: {value}. Expected: 1=orchestrator, 2=seed_from_parent_snapshot, 3=seed_from_backup, 4=fresh."
+            f"invalid NODE_STATE value: {value}. Expected: 1=orchestrator, 2=seed_from_parent_snapshot, 3=seed_from_backup, 4=fresh."
         )
     return value
 
@@ -1852,7 +1928,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
     _ensure_worker_shared_mount_links(clone_root, clone_name)
 
     _ensure_clone_ownership(clone_root)
-    force_reseed = _is_truthy(env.get("CLONE_FORCE_RESEED", "0"))
+    force_reseed = _is_truthy(_env_first_nonempty(env, "NODE_FORCE_RESEED", "CLONE_FORCE_RESEED", "0"))
     bootstrap_meta_path = _clone_bootstrap_meta_path(clone_root)
     has_local_code = (clone_root / "hermes-agent" / "cli.py").exists()
     has_local_home = (clone_root / ".hermes").exists()
@@ -1876,7 +1952,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
 
     needs_bootstrap = force_reseed or not bootstrap_meta_path.exists()
 
-    # Handle orchestrator (CLONE_STATE=1) as bare-metal bootstrap node.
+    # Handle orchestrator (NODE_STATE=1) as bare-metal bootstrap node.
     if mode == 1:
         return _setup_orchestrator_baremetal(clone_name, clone_root, env, env_path)
 
@@ -1890,10 +1966,14 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             _sync_dir(parent_home, clone_root / ".hermes", delete=True)
             _log_spawn_event(clone_name, "bootstrap", "sync_hermes_home", f"source={parent_home}")
         elif mode == 3:
-            raw_backup = str(env.get("CLONE_STATE_FROM_BACKUP_PATH", "") or "").strip()
+            raw_backup = _env_first_nonempty(
+                env,
+                "NODE_STATE_FROM_BACKUP_PATH",
+                "CLONE_STATE_FROM_BACKUP_PATH",
+            )
             if not raw_backup:
                 raise CloneManagerError(
-                    "CLONE_STATE=3 requires CLONE_STATE_FROM_BACKUP_PATH to be set."
+                    "NODE_STATE=3 requires NODE_STATE_FROM_BACKUP_PATH to be set."
                 )
             _seed_from_backup(clone_root, Path(raw_backup))
             _log_spawn_event(clone_name, "bootstrap", "seed_from_backup", f"path={raw_backup}")
@@ -1927,7 +2007,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             if not path.exists():
                 raise CloneManagerError(
                     f"clone local path missing: {path}. "
-                    "Set CLONE_FORCE_RESEED=1 in clone env to re-bootstrap."
+                    "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
                 )
         _normalize_clone_skills_layout(clone_root)
         _seed_clone_runtime(clone_root, allow_parent_seed=False)
@@ -1959,6 +2039,7 @@ def _build_docker_run_cmd(
     *,
     camofox_enabled: bool,
     openviking_enabled: bool,
+    runtime_env_overrides: Dict[str, str],
 ) -> list[str]:
     container = _container_name(clone_name)
     runtime_log = f"/local/logs/agents/{clone_name}.log"
@@ -2076,6 +2157,10 @@ def _build_docker_run_cmd(
         "/local/hermes-agent",
     ]
 
+    for key in sorted(runtime_env_overrides):
+        value = str(runtime_env_overrides.get(key, "") or "")
+        cmd.extend(["-e", f"{key}={value}"])
+
     # Needed so clone containers can reach host-level services via
     # host.docker.internal on Linux (Camofox/OpenViking defaults).
     if camofox_enabled or openviking_enabled:
@@ -2125,7 +2210,13 @@ def _orchestrator_process_state(clone_root: Path) -> Dict[str, Any]:
     }
 
 
-def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Path) -> Dict[str, Any]:
+def _orchestrator_start_gateway(
+    clone_name: str,
+    clone_root: Path,
+    env_path: Path,
+    *,
+    runtime_env_overrides: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
     state = _orchestrator_process_state(clone_root)
     if state.get("running"):
         return {
@@ -2158,6 +2249,7 @@ def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Pat
 
     proc_env = os.environ.copy()
     proc_env.update(_read_env_file(env_path))
+    proc_env.update(runtime_env_overrides or {})
     proc_env["HERMES_HOME"] = str(clone_root / ".hermes")
     proc_env["HOME"] = str(clone_root)
     proc_env["USER"] = str(proc_env.get("USER") or "ubuntu")
@@ -2300,6 +2392,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     discord_home_sync = _sync_discord_home_channel_env(clone_name, env_path)
     restart_reboot_sync = _sync_restart_reboot_env(clone_name, env_path)
     env = _read_env_file(env_path)
+    runtime_env_overrides = _runtime_env_overrides(clone_name, env)
     state_code = _extract_state_mode(env)
     is_orchestrator = state_code == 1
 
@@ -2325,16 +2418,14 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             "fallback_changed": False,
             "effective": {
                 "default": {
-                    "model": str(env.get("DEFAULT_MODEL", "") or ""),
-                    "provider": str(
-                        env.get("DEFAULT_MODEL_PROVIDER", env.get("HERMES_INFERENCE_PROVIDER", "")) or ""
-                    ),
+                    "model": _default_model_name_from_env(env),
+                    "provider": _default_model_provider_from_env(env),
                     "base_url": str(env.get("DEFAULT_MODEL_BASE_URL", "") or ""),
                     "api_mode": str(env.get("DEFAULT_MODEL_API_MODE", "") or ""),
                 },
                 "fallback": {
-                    "model": str(env.get("FALLBACK_MODEL", "") or ""),
-                    "provider": str(env.get("FALLBACK_MODEL_PROVIDER", "") or ""),
+                    "model": _fallback_model_name_from_env(env),
+                    "provider": _fallback_model_provider_from_env(env),
                     "base_url": str(env.get("FALLBACK_MODEL_BASE_URL", "") or ""),
                     "api_mode": str(env.get("FALLBACK_MODEL_API_MODE", "") or ""),
                 },
@@ -2343,8 +2434,9 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         }
     )
     env = _read_env_file(env_path)
-    camofox_enabled = _is_truthy(env.get("BROWSER_CAMOFOX", ""))
-    openviking_enabled = _is_truthy(env.get("MEMORY_OPENVIKING", ""))
+    runtime_env_overrides = _runtime_env_overrides(clone_name, env)
+    camofox_enabled = _is_camofox_enabled_env(env)
+    openviking_enabled = _is_openviking_enabled_env(env)
 
     _log(clone_name, f"start requested: container={container} env={env_path}")
 
@@ -2369,7 +2461,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "camofox": camofox_bootstrap,
                 "openviking": openviking_bootstrap,
                 "models": model_bootstrap,
-                "discord_home_channel": str(env.get("DISCORD_HOME_CHANNEL", "") or ""),
+                "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
                 "discord_home_channel_sync": discord_home_sync,
                 "restart_reboot_sync": restart_reboot_sync,
             }
@@ -2393,10 +2485,16 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         openviking_bootstrap = _bootstrap_openviking_for_clone(clone_name, env_path, clone_root)
         model_bootstrap = _bootstrap_models_for_clone(clone_name, env_path, clone_root)
         env = _read_env_file(env_path)
-        openviking_enabled = _is_truthy(env.get("MEMORY_OPENVIKING", ""))
+        runtime_env_overrides = _runtime_env_overrides(clone_name, env)
+        openviking_enabled = _is_openviking_enabled_env(env)
 
         if fs_meta.get("orchestrator_baremetal"):
-            host_start = _orchestrator_start_gateway(clone_name, clone_root, env_path)
+            host_start = _orchestrator_start_gateway(
+                clone_name,
+                clone_root,
+                env_path,
+                runtime_env_overrides=runtime_env_overrides,
+            )
             registry_after.setdefault("clones", {})
             registry_after["clones"][clone_name] = {
                 "clone_name": clone_name,
@@ -2433,7 +2531,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "camofox": camofox_bootstrap,
                 "openviking": openviking_bootstrap,
                 "models": model_bootstrap,
-                "discord_home_channel": str(env.get("DISCORD_HOME_CHANNEL", "") or ""),
+                "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
                 "discord_home_channel_sync": discord_home_sync,
                 "restart_reboot_sync": restart_reboot_sync,
             }
@@ -2449,6 +2547,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             shared_discord_plugin_root,
             camofox_enabled=camofox_enabled,
             openviking_enabled=openviking_enabled,
+            runtime_env_overrides=runtime_env_overrides,
         )
         proc = _run(cmd, check=True)
         created_container = True
@@ -2487,7 +2586,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             "camofox": camofox_bootstrap,
             "openviking": openviking_bootstrap,
             "models": model_bootstrap,
-            "discord_home_channel": str(env.get("DISCORD_HOME_CHANNEL", "") or ""),
+            "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
             "discord_home_channel_sync": discord_home_sync,
             "restart_reboot_sync": restart_reboot_sync,
         }
@@ -2526,6 +2625,13 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
     is_orchestrator = state_code == 1
     state = _orchestrator_process_state(clone_root) if is_orchestrator else _docker_state(container)
     mgmt_log_file = _management_log_path(clone_name)
+    openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name) if env else ("", "")
+    restart_reboot = _effective_restart_reboot_env(env) if env else {
+        "restart_cmd": "",
+        "reboot_cmd": "",
+        "restart_delay_sec": "",
+        "reboot_delay_sec": "",
+    }
     return {
         "ok": True,
         "action": "status",
@@ -2538,27 +2644,23 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         "clone_root": str(clone_root),
         "state_mode": state_mode,
         "state_code": state_code,
-        "camofox_enabled": _is_truthy(env.get("BROWSER_CAMOFOX", "")) if env else False,
+        "camofox_enabled": _is_camofox_enabled_env(env) if env else False,
         "camofox_url": str(env.get("CAMOFOX_URL", "") or "") if env else "",
-        "openviking_enabled": _is_truthy(env.get("MEMORY_OPENVIKING", "")) if env else False,
+        "openviking_enabled": _is_openviking_enabled_env(env) if env else False,
         "openviking_endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or "") if env else "",
-        "openviking_account": str(env.get("OPENVIKING_ACCOUNT", "") or "") if env else "",
-        "openviking_user": str(env.get("OPENVIKING_USER", "") or "") if env else "",
+        "openviking_account": openviking_account,
+        "openviking_user": openviking_user,
         "openviking_supported": _clone_supports_openviking(clone_root) if clone_root.exists() else False,
-        "default_model_env": str(env.get("DEFAULT_MODEL", "") or "") if env else "",
-        "default_model_provider_env": str(
-            env.get("DEFAULT_MODEL_PROVIDER", env.get("HERMES_INFERENCE_PROVIDER", "")) or ""
-        )
-        if env
-        else "",
-        "fallback_model_env": str(env.get("FALLBACK_MODEL", "") or "") if env else "",
-        "fallback_model_provider_env": str(env.get("FALLBACK_MODEL_PROVIDER", "") or "") if env else "",
-        "discord_home_channel": str(env.get("DISCORD_HOME_CHANNEL", "") or "") if env else "",
+        "default_model_env": _default_model_name_from_env(env) if env else "",
+        "default_model_provider_env": _default_model_provider_from_env(env) if env else "",
+        "fallback_model_env": _fallback_model_name_from_env(env) if env else "",
+        "fallback_model_provider_env": _fallback_model_provider_from_env(env) if env else "",
+        "discord_home_channel": _effective_discord_home_channel(env) if env else "",
         "discord_home_channel_id": str(env.get("DISCORD_HOME_CHANNEL_ID", "") or "") if env else "",
-        "discord_restart_cmd": str(env.get("COLMEIO_DISCORD_RESTART_CMD", "") or "") if env else "",
-        "discord_reboot_cmd": str(env.get("COLMEIO_DISCORD_REBOOT_CMD", "") or "") if env else "",
-        "discord_restart_delay_sec": str(env.get("COLMEIO_DISCORD_RESTART_DELAY_SEC", "") or "") if env else "",
-        "discord_reboot_delay_sec": str(env.get("COLMEIO_DISCORD_REBOOT_DELAY_SEC", "") or "") if env else "",
+        "discord_restart_cmd": restart_reboot["restart_cmd"],
+        "discord_reboot_cmd": restart_reboot["reboot_cmd"],
+        "discord_restart_delay_sec": restart_reboot["restart_delay_sec"],
+        "discord_reboot_delay_sec": restart_reboot["reboot_delay_sec"],
         "container_state": state,
         "log_file": str(mgmt_log_file),
         "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
@@ -2800,7 +2902,12 @@ def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
         was_running = bool(process_state_before.get("running"))
         if was_running:
             _orchestrator_stop_gateway(clone_name, clone_root)
-            _orchestrator_start_gateway(clone_name, clone_root, env_path)
+            _orchestrator_start_gateway(
+                clone_name,
+                clone_root,
+                env_path,
+                runtime_env_overrides=_runtime_env_overrides(clone_name, env),
+            )
 
         process_state_after = _orchestrator_process_state(clone_root)
         return {

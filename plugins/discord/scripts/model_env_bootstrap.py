@@ -159,8 +159,12 @@ def _build_default_target(env: Dict[str, str], cfg: Dict[str, Any]) -> Tuple[Dic
     cfg_model = _canonicalize_model_name(model_cfg.get("default"))
     cfg_provider = _normalize_provider(model_cfg.get("provider"))
 
-    env_model = _canonicalize_model_name(env.get("DEFAULT_MODEL"))
-    env_provider = _normalize_provider(env.get("DEFAULT_MODEL_PROVIDER"))
+    env_model = _canonicalize_model_name(
+        env.get("NODE_AGENT_DEFAULT_MODEL") or env.get("DEFAULT_MODEL")
+    )
+    env_provider = _normalize_provider(
+        env.get("NODE_AGENT_DEFAULT_MODEL_PROVIDER") or env.get("DEFAULT_MODEL_PROVIDER")
+    )
     env_provider_legacy = _normalize_provider(env.get("HERMES_INFERENCE_PROVIDER"))
 
     provider = env_provider or env_provider_legacy or cfg_provider
@@ -184,12 +188,20 @@ def _build_default_target(env: Dict[str, str], cfg: Dict[str, Any]) -> Tuple[Dic
     }
     source = {
         "provider": (
-            "DEFAULT_MODEL_PROVIDER"
+            (
+                "NODE_AGENT_DEFAULT_MODEL_PROVIDER"
+                if str(env.get("NODE_AGENT_DEFAULT_MODEL_PROVIDER", "") or "").strip()
+                else "DEFAULT_MODEL_PROVIDER"
+            )
             if env_provider
             else ("HERMES_INFERENCE_PROVIDER" if env_provider_legacy else ("config.model.provider" if cfg_provider else "derived"))
         ),
         "model": (
-            "DEFAULT_MODEL"
+            (
+                "NODE_AGENT_DEFAULT_MODEL"
+                if str(env.get("NODE_AGENT_DEFAULT_MODEL", "") or "").strip()
+                else "DEFAULT_MODEL"
+            )
             if env_model
             else ("config.model.default" if cfg_model else f"provider-default:{provider}")
         ),
@@ -200,8 +212,12 @@ def _build_default_target(env: Dict[str, str], cfg: Dict[str, Any]) -> Tuple[Dic
 def _build_fallback_target(env: Dict[str, str], cfg: Dict[str, Any], default_provider: str) -> Tuple[Dict[str, str], Dict[str, str]]:
     existing = _extract_existing_fallback(cfg)
 
-    env_model = _canonicalize_model_name(env.get("FALLBACK_MODEL"))
-    env_provider = _normalize_provider(env.get("FALLBACK_MODEL_PROVIDER"))
+    env_model = _canonicalize_model_name(
+        env.get("NODE_AGENT_FALLBACK_MODEL") or env.get("FALLBACK_MODEL")
+    )
+    env_provider = _normalize_provider(
+        env.get("NODE_AGENT_FALLBACK_MODEL_PROVIDER") or env.get("FALLBACK_MODEL_PROVIDER")
+    )
 
     if not env_model and not existing:
         return {}, {"provider": "none", "model": "none"}
@@ -221,8 +237,24 @@ def _build_fallback_target(env: Dict[str, str], cfg: Dict[str, Any], default_pro
         "api_mode": str(env.get("FALLBACK_MODEL_API_MODE", "") or "").strip(),
     }
     source = {
-        "provider": "FALLBACK_MODEL_PROVIDER" if env_provider else ("config.fallback_model.provider" if existing else "derived"),
-        "model": "FALLBACK_MODEL" if env_model else ("config.fallback_model.model" if existing else "derived"),
+        "provider": (
+            (
+                "NODE_AGENT_FALLBACK_MODEL_PROVIDER"
+                if str(env.get("NODE_AGENT_FALLBACK_MODEL_PROVIDER", "") or "").strip()
+                else "FALLBACK_MODEL_PROVIDER"
+            )
+            if env_provider
+            else ("config.fallback_model.provider" if existing else "derived")
+        ),
+        "model": (
+            (
+                "NODE_AGENT_FALLBACK_MODEL"
+                if str(env.get("NODE_AGENT_FALLBACK_MODEL", "") or "").strip()
+                else "FALLBACK_MODEL"
+            )
+            if env_model
+            else ("config.fallback_model.model" if existing else "derived")
+        ),
     }
     return target, source
 

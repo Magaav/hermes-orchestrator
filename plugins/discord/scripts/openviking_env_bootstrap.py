@@ -2,7 +2,7 @@
 """Bootstrap OpenViking defaults from profile .env flags.
 
 Goal:
-- Treat MEMORY_OPENVIKING=1 as an intent flag.
+- Treat OPENVIKING_ENABLED=1 as an intent flag (legacy MEMORY_OPENVIKING supported).
 - If enabled, normalize OPENVIKING_* env defaults.
 - Enforce memory.provider=openviking in config.yaml (when supported).
 - Keep startup fail-open when endpoint is unavailable.
@@ -140,20 +140,25 @@ def _provider_supported(agent_root: Path) -> Tuple[bool, str]:
         return True, "ok"
     return False, (
         f"openviking provider plugin missing in {agent_root}. "
-        "Older clone code detected; set CLONE_FORCE_RESEED=1 and start again."
+        "Older node code detected; run 'horc agent update <node>' and start again."
     )
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bootstrap OpenViking from MEMORY_OPENVIKING in .env")
+    parser = argparse.ArgumentParser(description="Bootstrap OpenViking from OPENVIKING_ENABLED in .env")
     parser.add_argument("--env-file", required=True, help="Path to profile env file")
     parser.add_argument("--config-file", default="", help="Optional explicit config.yaml path")
     parser.add_argument("--agent-root", default="", help="Optional explicit hermes-agent root for compatibility check")
-    parser.add_argument("--enable-var", default="MEMORY_OPENVIKING", help="Boolean enable env var key")
+    parser.add_argument("--enable-var", default="OPENVIKING_ENABLED", help="Boolean enable env var key")
     parser.add_argument("--provider", default="openviking", help="Memory provider name to enforce")
     parser.add_argument("--default-endpoint", default="http://127.0.0.1:1933", help="Default OPENVIKING_ENDPOINT")
     parser.add_argument("--default-account", default="colmeio", help="Default OPENVIKING_ACCOUNT")
     parser.add_argument("--default-user", default="colmeio", help="Default OPENVIKING_USER")
+    parser.add_argument(
+        "--persist-env",
+        action="store_true",
+        help="Persist computed OPENVIKING_* defaults into env file (disabled by default)",
+    )
     parser.add_argument("--health-timeout-sec", type=float, default=2.0, help="Health probe timeout")
     parser.add_argument("--strict-health", action="store_true", help="Fail when endpoint health probe fails")
     parser.add_argument("--skip-health-probe", action="store_true", help="Skip endpoint reachability probe")
@@ -171,7 +176,23 @@ def main() -> int:
     agent_root = Path(str(args.agent_root)).expanduser() if str(args.agent_root).strip() else _infer_agent_root(config_file)
 
     env = _read_env(env_file)
-    enabled = _is_truthy(env.get(args.enable_var, ""))
+    enable_raw = str(env.get(args.enable_var, "") or "").strip()
+    legacy_enable_raw = str(env.get("MEMORY_OPENVIKING", "") or "").strip()
+    enabled = _is_truthy(enable_raw) if enable_raw else _is_truthy(legacy_enable_raw)
+    enable_source = str(args.enable_var) if enable_raw else ("MEMORY_OPENVIKING" if legacy_enable_raw else str(args.enable_var))
+
+    endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or str(args.default_endpoint)
+    account = str(env.get("OPENVIKING_ACCOUNT", "") or "").strip()
+    user = str(env.get("OPENVIKING_USER", "") or "").strip()
+    default_account = str(args.default_account or "").strip()
+    default_user = str(args.default_user or "").strip()
+    if not account and not user:
+        account = default_account or "default"
+        user = default_user or account
+    elif account and not user:
+        user = account
+    elif user and not account:
+        account = user
 
     payload: Dict[str, Any] = {
         "ok": True,
@@ -180,14 +201,15 @@ def main() -> int:
         "agent_root": str(agent_root),
         "enabled": enabled,
         "enable_var": str(args.enable_var),
+        "enable_source": enable_source,
         "provider": str(args.provider),
         "changed": False,
         "env_changed": False,
         "provider_changed": False,
         "effective": {
-            "endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or ""),
-            "account": str(env.get("OPENVIKING_ACCOUNT", "") or ""),
-            "user": str(env.get("OPENVIKING_USER", "") or ""),
+            "endpoint": endpoint,
+            "account": account,
+            "user": user,
         },
         "compatibility": {"supported": True, "message": "ok"},
         "health": {"attempted": False, "reachable": False, "message": "not checked"},
@@ -199,19 +221,24 @@ def main() -> int:
         return 0
 
     env_changed = False
-    if not str(env.get("OPENVIKING_ENDPOINT", "") or "").strip():
-        env_changed = _upsert_env_value(env_file, "OPENVIKING_ENDPOINT", str(args.default_endpoint)) or env_changed
-    if not str(env.get("OPENVIKING_ACCOUNT", "") or "").strip():
-        env_changed = _upsert_env_value(env_file, "OPENVIKING_ACCOUNT", str(args.default_account)) or env_changed
-    if not str(env.get("OPENVIKING_USER", "") or "").strip():
-        env_changed = _upsert_env_value(env_file, "OPENVIKING_USER", str(args.default_user)) or env_changed
+    if args.persist_env:
+        if not str(env.get("OPENVIKING_ENDPOINT", "") or "").strip():
+            env_changed = _upsert_env_value(env_file, "OPENVIKING_ENDPOINT", endpoint) or env_changed
+        if not str(env.get("OPENVIKING_ACCOUNT", "") or "").strip():
+            env_changed = _upsert_env_value(env_file, "OPENVIKING_ACCOUNT", account) or env_changed
+        if not str(env.get("OPENVIKING_USER", "") or "").strip():
+            env_changed = _upsert_env_value(env_file, "OPENVIKING_USER", user) or env_changed
 
-    env = _read_env(env_file)
+        env = _read_env(env_file)
+        endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or endpoint
+        account = str(env.get("OPENVIKING_ACCOUNT", "") or "").strip() or account
+        user = str(env.get("OPENVIKING_USER", "") or "").strip() or user
+
     payload["env_changed"] = env_changed
     payload["effective"] = {
-        "endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or ""),
-        "account": str(env.get("OPENVIKING_ACCOUNT", "") or ""),
-        "user": str(env.get("OPENVIKING_USER", "") or ""),
+        "endpoint": endpoint,
+        "account": account,
+        "user": user,
     }
 
     supported, support_message = _provider_supported(agent_root)
@@ -237,7 +264,6 @@ def main() -> int:
         payload["provider_current"] = None
         payload["degraded"] = True
 
-    endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip()
     if endpoint and not args.skip_health_probe:
         reachable, msg = _probe_health(endpoint, timeout_sec=float(args.health_timeout_sec))
         payload["health"] = {"attempted": True, "reachable": reachable, "message": msg}

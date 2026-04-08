@@ -40,6 +40,7 @@ class OpenVikingBootstrapTests(unittest.TestCase):
         default_endpoint: str = "http://127.0.0.1:1933",
         default_account: str = "colmeio",
         default_user: str = "colmeio",
+        persist_env: bool = False,
     ) -> dict:
         cmd = [
             "python3",
@@ -59,6 +60,8 @@ class OpenVikingBootstrapTests(unittest.TestCase):
             "--health-timeout-sec",
             "0.2",
         ]
+        if persist_env:
+            cmd.append("--persist-env")
         proc = subprocess.run(cmd, capture_output=True, text=True)
         self.assertTrue(proc.stdout.strip(), msg=f"missing stdout, stderr={proc.stderr}")
         payload = json.loads(proc.stdout)
@@ -116,11 +119,14 @@ class OpenVikingBootstrapTests(unittest.TestCase):
             self.assertTrue(first.get("enabled"))
             self.assertTrue(first.get("changed"))
             self.assertEqual(first.get("provider_current"), "openviking")
+            effective = first.get("effective", {})
+            self.assertEqual(effective.get("endpoint"), "http://host.docker.internal:1933")
+            self.assertEqual(effective.get("account"), "colmeio")
+            self.assertEqual(effective.get("user"), "hermes-catatau")
 
             env_data = env_file.read_text(encoding="utf-8")
-            self.assertIn("OPENVIKING_ENDPOINT=http://host.docker.internal:1933", env_data)
-            self.assertIn("OPENVIKING_ACCOUNT=colmeio", env_data)
-            self.assertIn("OPENVIKING_USER=hermes-catatau", env_data)
+            self.assertNotIn("OPENVIKING_ACCOUNT=", env_data)
+            self.assertNotIn("OPENVIKING_USER=", env_data)
 
             cfg = _read_yaml(config_file)
             self.assertEqual(cfg.get("memory", {}).get("provider"), "openviking")

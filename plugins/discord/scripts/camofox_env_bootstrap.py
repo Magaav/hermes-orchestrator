@@ -2,7 +2,7 @@
 """Bootstrap Camofox defaults from .env flags.
 
 Goal:
-- Treat BROWSER_CAMOFOX=1 as an intent flag.
+- Treat CAMOFOX_ENABLED=1 as an intent flag (legacy BROWSER_CAMOFOX supported).
 - If enabled and CAMOFOX_URL is missing, set a deterministic default URL.
 - Optionally ensure a host-level Camofox Docker service exists.
 
@@ -234,11 +234,16 @@ def _ensure_camofox_service(
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bootstrap CAMOFOX_URL from BROWSER_CAMOFOX in .env")
+    parser = argparse.ArgumentParser(description="Bootstrap CAMOFOX_URL from CAMOFOX_ENABLED in .env")
     parser.add_argument("--env-file", required=True, help="Path to env file")
-    parser.add_argument("--enable-var", default="BROWSER_CAMOFOX", help="Boolean enable env var key")
+    parser.add_argument("--enable-var", default="CAMOFOX_ENABLED", help="Boolean enable env var key")
     parser.add_argument("--url-var", default="CAMOFOX_URL", help="Camofox URL env var key")
     parser.add_argument("--default-url", default="http://127.0.0.1:9377", help="Default CAMOFOX_URL when enabled")
+    parser.add_argument(
+        "--persist-url",
+        action="store_true",
+        help="Persist default CAMOFOX_URL into env file when missing (disabled by default)",
+    )
     parser.add_argument("--ensure-service", action="store_true", help="Ensure a host Docker camofox service is running")
     parser.add_argument("--service-name", default="camofox", help="Docker container name")
     parser.add_argument("--service-image", default="camofox-browser", help="Docker image")
@@ -262,13 +267,17 @@ def main() -> int:
         return 1
 
     env = _read_env(env_path)
-    enabled = _is_truthy(env.get(args.enable_var, ""))
+    enable_raw = str(env.get(args.enable_var, "") or "").strip()
+    legacy_enable_raw = str(env.get("BROWSER_CAMOFOX", "") or "").strip()
+    enabled = _is_truthy(enable_raw) if enable_raw else _is_truthy(legacy_enable_raw)
+    enable_source = args.enable_var if enable_raw else ("BROWSER_CAMOFOX" if legacy_enable_raw else args.enable_var)
 
     payload: Dict[str, object] = {
         "ok": True,
         "env_file": str(env_path),
         "enabled": enabled,
         "enable_var": args.enable_var,
+        "enable_source": enable_source,
         "url_var": args.url_var,
         "default_url": args.default_url,
         "changed": False,
@@ -283,12 +292,11 @@ def main() -> int:
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 
-    effective_url = str(env.get(args.url_var, "") or "").strip()
-    if not effective_url:
-        changed = _upsert_env_value(env_path, args.url_var, args.default_url)
-        env = _read_env(env_path)
-        effective_url = str(env.get(args.url_var, "") or "").strip()
-        payload["changed"] = bool(changed)
+    effective_url = str(env.get(args.url_var, "") or "").strip() or str(args.default_url)
+    changed = False
+    if args.persist_url and not str(env.get(args.url_var, "") or "").strip():
+        changed = _upsert_env_value(env_path, args.url_var, effective_url)
+    payload["changed"] = bool(changed)
 
     payload["effective_url"] = effective_url
 
