@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Block runtime/secrets paths from being committed.
+blocked_paths='^(\.hermes/|agents/nodes/|memory/|logs/|backups/|crons/|workspace/|spawns/|agents/envs/.*\.env$|docker/\.env$|hermes-agent/\.env$|\.env$|\.env\..+$)'
+allowed_paths='^(\.env\.example)$'
+
+has_rg=0
+if command -v rg >/dev/null 2>&1; then
+  has_rg=1
+fi
+
+match_stdin() {
+  local pattern="$1"
+  if [[ "${has_rg}" -eq 1 ]]; then
+    rg -n --pcre2 "${pattern}" >/dev/null
+  else
+    grep -E -n "${pattern}" >/dev/null
+  fi
+}
+
+print_matches_stdin() {
+  local pattern="$1"
+  if [[ "${has_rg}" -eq 1 ]]; then
+    rg --pcre2 "${pattern}"
+  else
+    grep -E "${pattern}"
+  fi
+}
+
+staged_files="$(git diff --cached --name-only)"
+if [[ -n "${staged_files}" ]] && echo "${staged_files}" | match_stdin "${blocked_paths}"; then
+  filtered_files="${staged_files}"
+  if [[ -n "${allowed_paths}" ]]; then
+    if [[ "${has_rg}" -eq 1 ]]; then
+      filtered_files="$(echo "${staged_files}" | rg -v --pcre2 "${allowed_paths}" || true)"
+    else
+      filtered_files="$(echo "${staged_files}" | grep -E -v "${allowed_paths}" || true)"
+    fi
+  fi
+  if [[ -n "${filtered_files}" ]] && echo "${filtered_files}" | match_stdin "${blocked_paths}"; then
+  echo "pre-commit: blocked runtime/secret paths detected in staged files:" >&2
+  echo "${filtered_files}" | print_matches_stdin "${blocked_paths}" >&2
+  echo "Use env templates (*.env.example) and runtime volumes instead." >&2
+  exit 1
+  fi
+fi
+
+# Scan staged patch for common secret/token patterns.
+secret_patterns=(
+  'https://(discord\\.com|discordapp\\.com)/api/webhooks/[0-9]+/[A-Za-z0-9_-]+'
+  'sk-[A-Za-z0-9]{20,}'
+  'rt_[A-Za-z0-9._-]{20,}'
+  'ghp_[A-Za-z0-9]{36}'
+  'github_pat_[A-Za-z0-9_]{20,}'
+  'AIza[0-9A-Za-z_-]{35}'
+)
+
+patch="$(git diff --cached --text)"
+for pattern in "${secret_patterns[@]}"; do
+  if echo "${patch}" | match_stdin "${pattern}"; then
+    echo "pre-commit: potential secret detected (pattern: ${pattern})." >&2
+    echo "Rotate and remove the secret before committing." >&2
+    exit 1
+  fi
+done
+
+exit 0

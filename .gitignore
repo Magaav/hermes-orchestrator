@@ -8,6 +8,9 @@ backups/
 crons/
 
 # Secrets / machine-local envs
+.env
+.env.*
+!.env.example
 agents/envs/*.env
 !agents/envs/*.env.example
 docker/.env

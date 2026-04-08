@@ -90,6 +90,13 @@ SHARED_SCRIPTS_ROOT = Path(os.getenv("HERMES_SCRIPTS_ROOT", "/local/scripts"))
 SHARED_CRONS_ROOT = Path(os.getenv("HERMES_CRONS_ROOT", "/local/crons"))
 SHARED_MEMORY_ROOT = Path(os.getenv("HERMES_MEMORY_ROOT", "/local/memory"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
+HERMES_AGENT_UPSTREAM_REPO = str(
+    os.getenv("HERMES_AGENT_UPSTREAM_REPO", "https://github.com/NousResearch/hermes-agent.git")
+    or "https://github.com/NousResearch/hermes-agent.git"
+).strip()
+HERMES_AGENT_UPSTREAM_BRANCH = str(
+    os.getenv("HERMES_AGENT_UPSTREAM_BRANCH", "main") or "main"
+).strip() or "main"
 DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
 HOST_BOOTSTRAP_ENV_FILE = Path(os.getenv("HERMES_BOOTSTRAP_ENV_FILE", "/local/.env"))
 
@@ -545,13 +552,78 @@ def _container_name(clone_name: str) -> str:
     return f"{CONTAINER_PREFIX}{clone_name}"
 
 
-def _parent_hermes_agent_source() -> Path:
+def _ensure_hermes_source_checkout(clone_name: str = "orchestrator") -> Path:
+    """Ensure /local/hermes-agent exists; clone upstream when absent."""
+    source = HERMES_SOURCE_ROOT
+    cli_entry = source / "cli.py"
+    git_dir = source / ".git"
+
+    if cli_entry.exists():
+        return source
+
+    if source.exists() and not git_dir.exists():
+        raise CloneManagerError(
+            f"hermes-agent source exists but is not a git checkout: {source}"
+        )
+
+    source.parent.mkdir(parents=True, exist_ok=True)
+    if not source.exists():
+        _log(
+            clone_name,
+            f"hermes-agent source missing; cloning {HERMES_AGENT_UPSTREAM_REPO} (branch={HERMES_AGENT_UPSTREAM_BRANCH}) to {source}",
+        )
+        _run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                HERMES_AGENT_UPSTREAM_BRANCH,
+                HERMES_AGENT_UPSTREAM_REPO,
+                str(source),
+            ],
+            check=True,
+        )
+    else:
+        _log(
+            clone_name,
+            f"hermes-agent source incomplete; refreshing checkout in {source}",
+        )
+        _run(["git", "-C", str(source), "fetch", "--prune", "origin"], check=True)
+        _run(["git", "-C", str(source), "checkout", HERMES_AGENT_UPSTREAM_BRANCH], check=True)
+        _run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "pull",
+                "--ff-only",
+                "origin",
+                HERMES_AGENT_UPSTREAM_BRANCH,
+            ],
+            check=True,
+        )
+
+    if not cli_entry.exists():
+        raise CloneManagerError(
+            f"hermes-agent checkout did not provide cli.py at {cli_entry}"
+        )
+    return source
+
+
+def _parent_hermes_agent_source(clone_name: str = "orchestrator") -> Path:
     """Preferred source tree for clone seeding.
 
     Priority:
     1) /local/hermes-agent (canonical source checkout)
     2) <orchestrator-home>/hermes-agent (legacy runtime-patched source)
     """
+    try:
+        return _ensure_hermes_source_checkout(clone_name=clone_name)
+    except Exception:
+        pass
+
     candidates = [
         HERMES_SOURCE_ROOT,
         PARENT_HERMES_HOME / "hermes-agent",
@@ -623,6 +695,115 @@ def _select_host_python(required_module: str | None = None) -> Path | None:
             continue
         return candidate
     return None
+
+
+def _ensure_orchestrator_runtime(clone_name: str) -> Dict[str, Any]:
+    """Ensure host runtime exists for orchestrator bare-metal gateway."""
+    runtime_venv = Path("/local/.venv")
+    runtime_python = runtime_venv / "bin" / "python3"
+    requirements = HERMES_SOURCE_ROOT / "requirements.txt"
+    source_venv = HERMES_SOURCE_ROOT / ".venv"
+    source_python_candidates = [
+        source_venv / "bin" / "python3",
+        source_venv / "bin" / "python",
+    ]
+    source_python = next((p for p in source_python_candidates if p.exists()), None)
+
+    # Fast path: if hermes-agent source venv already has gateway deps, use it.
+    if source_python is not None and _python_has_module(source_python, "discord"):
+        return {
+            "runtime_venv": str(source_venv),
+            "runtime_python": str(source_python),
+            "created": False,
+            "installed_dependencies": False,
+            "source": "hermes_agent_venv",
+        }
+
+    if runtime_python.exists() and _python_has_module(runtime_python, "discord"):
+        return {
+            "runtime_venv": str(runtime_venv),
+            "runtime_python": str(runtime_python),
+            "created": False,
+            "installed_dependencies": False,
+            "source": "local_venv",
+        }
+
+    bootstrap_python = _select_host_python(required_module="venv")
+    if bootstrap_python is None:
+        # Fallback for minimal hosts where python3-venv is unavailable.
+        if source_python is not None and _python_has_module(source_python, "discord"):
+            _log(
+                clone_name,
+                "python3-venv unavailable; reusing /local/hermes-agent/.venv runtime for orchestrator",
+            )
+            return {
+                "runtime_venv": str(source_venv),
+                "runtime_python": str(source_python),
+                "created": False,
+                "installed_dependencies": False,
+                "source": "hermes_agent_venv_fallback",
+            }
+        raise CloneManagerError(
+            "python runtime with venv module not found on host. Install python3-venv and retry."
+        )
+
+    created = False
+    if not runtime_python.exists():
+        runtime_venv.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _run([str(bootstrap_python), "-m", "venv", str(runtime_venv)], check=True)
+        except Exception:
+            if source_python is not None and _python_has_module(source_python, "discord"):
+                _log(
+                    clone_name,
+                    "failed to create /local/.venv; reusing /local/hermes-agent/.venv runtime",
+                )
+                return {
+                    "runtime_venv": str(source_venv),
+                    "runtime_python": str(source_python),
+                    "created": False,
+                    "installed_dependencies": False,
+                    "source": "hermes_agent_venv_fallback",
+                }
+            raise
+        created = True
+
+    if not runtime_python.exists():
+        raise CloneManagerError(f"failed to create runtime python at {runtime_python}")
+
+    if not requirements.exists():
+        raise CloneManagerError(f"requirements file not found: {requirements}")
+
+    pip_probe = _run([str(runtime_python), "-m", "pip", "--version"], check=False)
+    if pip_probe.returncode != 0:
+        if source_python is not None and _python_has_module(source_python, "discord"):
+            _log(
+                clone_name,
+                "runtime pip unavailable in /local/.venv; reusing /local/hermes-agent/.venv runtime",
+            )
+            return {
+                "runtime_venv": str(source_venv),
+                "runtime_python": str(source_python),
+                "created": created,
+                "installed_dependencies": False,
+                "source": "hermes_agent_venv_fallback",
+            }
+        raise CloneManagerError("runtime pip unavailable in /local/.venv; install python3-venv and retry.")
+
+    _run(
+        [str(runtime_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
+        check=True,
+    )
+    _run([str(runtime_python), "-m", "pip", "install", "-r", str(requirements)], check=True)
+    _log(clone_name, f"orchestrator runtime ready at {runtime_venv}")
+
+    return {
+        "runtime_venv": str(runtime_venv),
+        "runtime_python": str(runtime_python),
+        "created": created,
+        "installed_dependencies": True,
+        "source": "local_venv",
+    }
 
 
 def _seed_venv_candidates() -> list[Path]:
@@ -722,12 +903,15 @@ def _sync_dir(src: Path, dst: Path, delete: bool = False) -> None:
             shutil.copy2(item, out)
 
 
-def _seed_code_tree(src: Path, dst: Path) -> None:
+def _seed_code_tree(src: Path, dst: Path, *, include_git: bool = False) -> None:
     """Copy Hermes source tree excluding bulky / machine-specific caches."""
     if not src.exists():
         raise CloneManagerError(f"hermes source not found: {src}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
+    excludes = [".venv", "__pycache__", ".pytest_cache", "*.pyc"]
+    if not include_git:
+        excludes.append(".git")
 
     rsync = shutil.which("rsync")
     if rsync:
@@ -735,17 +919,10 @@ def _seed_code_tree(src: Path, dst: Path) -> None:
             rsync,
             "-a",
             "--delete",
-            "--exclude",
-            ".venv",
-            "--exclude",
-            "__pycache__",
-            "--exclude",
-            ".pytest_cache",
-            "--exclude",
-            "*.pyc",
-            f"{src}/",
-            f"{dst}/",
         ]
+        for pattern in excludes:
+            cmd.extend(["--exclude", pattern])
+        cmd.extend([f"{src}/", f"{dst}/"])
         _run(cmd, check=True)
         return
 
@@ -754,7 +931,7 @@ def _seed_code_tree(src: Path, dst: Path) -> None:
     shutil.copytree(
         src,
         dst,
-        ignore=shutil.ignore_patterns(".venv", "__pycache__", ".pytest_cache", "*.pyc"),
+        ignore=shutil.ignore_patterns(*excludes),
     )
 
 
@@ -824,6 +1001,38 @@ def _set_symlink(path: Path, target: Path) -> None:
     elif path.exists():
         _remove_path(path)
     os.symlink(target, path)
+
+
+def _orchestrator_runtime_agent_root(clone_root: Path) -> Path:
+    return clone_root / ".runtime" / "hermes-agent"
+
+
+def _prepare_orchestrator_runtime_agent_tree(
+    clone_name: str,
+    clone_root: Path,
+    source_tree: Path,
+) -> Path:
+    """Create a node-local runtime code tree for orchestrator patching.
+
+    This avoids mutating tracked /local/hermes-agent files when prestart patch
+    scripts reapply Discord customizations.
+    """
+    runtime_root = _orchestrator_runtime_agent_root(clone_root)
+    runtime_root.parent.mkdir(parents=True, exist_ok=True)
+    _seed_code_tree(source_tree, runtime_root, include_git=False)
+
+    source_venv = source_tree / ".venv"
+    runtime_venv = runtime_root / ".venv"
+    if source_venv.exists():
+        if runtime_venv.exists() or runtime_venv.is_symlink():
+            _remove_path(runtime_venv)
+        os.symlink(str(source_venv), str(runtime_venv))
+
+    _log(
+        clone_name,
+        f"orchestrator runtime agent tree synced: source={source_tree} runtime={runtime_root}",
+    )
+    return runtime_root
 
 
 def _worker_cron_host_dir(clone_name: str) -> Path:
@@ -968,7 +1177,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
         state_source = None
 
     # Ensure canonical orchestrator directory shape.
-    for sub in ("data", "workspace", ".hermes", "logs/agents", "logs/clones", ".clone-meta"):
+    for sub in ("data", "workspace", ".hermes", ".runtime", "logs/agents", "logs/clones", ".clone-meta"):
         sub_path = clone_root / sub
         if sub_path.is_symlink():
             _remove_path(sub_path)
@@ -986,13 +1195,17 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     SHARED_SCRIPTS_ROOT.mkdir(parents=True, exist_ok=True)
     SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
 
-    if not HERMES_SOURCE_ROOT.exists():
-        raise CloneManagerError(f"hermes-agent source tree not found: {HERMES_SOURCE_ROOT}")
-
-    _set_symlink(clone_root / "hermes-agent", HERMES_SOURCE_ROOT)
+    source_tree = _parent_hermes_agent_source(clone_name=clone_name)
+    _set_symlink(clone_root / "hermes-agent", source_tree)
+    runtime_agent_root = _prepare_orchestrator_runtime_agent_tree(
+        clone_name=clone_name,
+        clone_root=clone_root,
+        source_tree=source_tree,
+    )
     _set_symlink(clone_root / "scripts", SHARED_SCRIPTS_ROOT)
     _set_symlink(clone_root / "plugins", SHARED_PLUGINS_ROOT)
     _set_symlink(clone_root / "crons", _orchestrator_cron_host_dir(clone_name))
+    runtime_bootstrap = _ensure_orchestrator_runtime(clone_name)
 
     orchestrator_home = clone_root / ".hermes"
     if orchestrator_home.is_symlink():
@@ -1036,10 +1249,12 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
             "bootstrapped_at": _utc_now(),
             "state_mode": STATE_LABELS[1],
             "state_code": 1,
-            "seed_code_source": str(HERMES_SOURCE_ROOT),
+            "seed_code_source": str(source_tree),
+            "runtime_agent_root": str(runtime_agent_root),
             "seed_venv_source": "",
             "state_source": str(state_source) if state_source is not None else "",
             "orchestrator_baremetal": True,
+            "runtime_bootstrap": runtime_bootstrap,
             "seeded_workspace_integrations": {},
             "topology_root": str(clone_root),
             "topology_version": "agents-v2",
@@ -1919,11 +2134,14 @@ def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Pat
             "process_state": state,
         }
 
-    gateway_run_path = clone_root / "hermes-agent" / "gateway" / "run.py"
+    runtime_agent_root = _orchestrator_runtime_agent_root(clone_root)
+    gateway_run_path = runtime_agent_root / "gateway" / "run.py"
     if not gateway_run_path.exists():
         raise CloneManagerError(f"orchestrator gateway entrypoint not found: {gateway_run_path}")
 
     python_candidates = [
+        runtime_agent_root / ".venv" / "bin" / "python3",
+        runtime_agent_root / ".venv" / "bin" / "python",
         clone_root / "hermes-agent" / ".venv" / "bin" / "python3",
         clone_root / "hermes-agent" / ".venv" / "bin" / "python",
         Path("/local/.venv/bin/python3"),
@@ -1946,7 +2164,7 @@ def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Pat
     proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
     proc_env["COLMEIO_CLONE_NAME"] = clone_name
     proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
-    proc_env["HERMES_AGENT_ROOT"] = str(clone_root / "hermes-agent")
+    proc_env["HERMES_AGENT_ROOT"] = str(runtime_agent_root)
     proc_env["PYTHONUNBUFFERED"] = "1"
 
     # Keep host-layer orchestrator behavior aligned with container nodes:
@@ -1956,7 +2174,7 @@ def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Pat
         try:
             prestart_proc = subprocess.run(
                 ["bash", str(prestart_script)],
-                cwd=str(clone_root / "hermes-agent"),
+                cwd=str(runtime_agent_root),
                 env=proc_env,
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
@@ -1981,7 +2199,7 @@ def _orchestrator_start_gateway(clone_name: str, clone_root: Path, env_path: Pat
                 "asyncio.run(start_gateway(replace=True))"
             ),
         ],
-        cwd=str(clone_root / "hermes-agent"),
+        cwd=str(runtime_agent_root),
         env=proc_env,
         stdout=log_handle,
         stderr=subprocess.STDOUT,
@@ -2477,23 +2695,196 @@ def _action_logs(clone_name: str, lines: int) -> Dict[str, Any]:
     }
 
 
-def _dispatch(action: str, clone_name: str, image: str, lines: int) -> Dict[str, Any]:
+def _git_commit(path: Path) -> str:
+    proc = _run(["git", "-C", str(path), "rev-parse", "HEAD"], check=False)
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or "").strip()
+
+
+def _git_branch(path: Path) -> str:
+    proc = _run(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"], check=False)
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or "").strip()
+
+
+def _action_update_template(source_branch: str) -> Dict[str, Any]:
+    _ensure_hermes_source_checkout("orchestrator")
+    if not HERMES_SOURCE_ROOT.exists():
+        raise CloneManagerError(f"hermes-agent source tree not found: {HERMES_SOURCE_ROOT}")
+
+    branch = str(source_branch or "").strip() or HERMES_AGENT_UPSTREAM_BRANCH
+    before_commit = _git_commit(HERMES_SOURCE_ROOT)
+    before_branch = _git_branch(HERMES_SOURCE_ROOT)
+    source_mode = "snapshot_sync"
+    upstream_commit = ""
+
+    if (HERMES_SOURCE_ROOT / ".git").exists():
+        _run(["git", "-C", str(HERMES_SOURCE_ROOT), "fetch", "--prune", "origin"], check=True)
+        _run(["git", "-C", str(HERMES_SOURCE_ROOT), "checkout", branch], check=True)
+        _run(
+            ["git", "-C", str(HERMES_SOURCE_ROOT), "pull", "--ff-only", "origin", branch],
+            check=True,
+        )
+        source_mode = "git_checkout"
+        upstream_commit = _git_commit(HERMES_SOURCE_ROOT)
+    else:
+        with tempfile.TemporaryDirectory(prefix="horc-agent-update-") as tmp:
+            tmp_root = Path(tmp)
+            _run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    branch,
+                    HERMES_AGENT_UPSTREAM_REPO,
+                    str(tmp_root),
+                ],
+                check=True,
+            )
+            upstream_commit = _git_commit(tmp_root)
+            _seed_code_tree(tmp_root, HERMES_SOURCE_ROOT, include_git=False)
+
+    after_commit = _git_commit(HERMES_SOURCE_ROOT) or upstream_commit
+    after_branch = _git_branch(HERMES_SOURCE_ROOT) or branch
+    changed = bool(before_commit and after_commit and before_commit != after_commit)
+    if not before_commit and after_commit:
+        changed = True
+
+    _log(
+        "orchestrator",
+        f"template update: branch={branch} before={before_commit or 'unknown'} after={after_commit or 'unknown'} changed={str(changed).lower()}",
+    )
+
+    return {
+        "ok": True,
+        "action": "update",
+        "target": "template",
+        "source_root": str(HERMES_SOURCE_ROOT),
+        "branch_requested": branch,
+        "branch_before": before_branch,
+        "branch_after": after_branch,
+        "commit_before": before_commit,
+        "commit_after": after_commit,
+        "upstream_commit": upstream_commit,
+        "source_mode": source_mode,
+        "changed": changed,
+        "applies_to_new_nodes": True,
+    }
+
+
+def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
+    env_path = _clone_env_path(clone_name)
+    clone_root = _clone_root_path(clone_name)
+    if not env_path.exists():
+        raise CloneManagerError(f"clone env not found: {env_path}")
+    if not clone_root.exists():
+        raise CloneManagerError(f"clone root not found: {clone_root}")
+
+    env = _read_env_file(env_path)
+    state_code = _extract_state_mode(env)
+    if state_code == 1:
+        payload = _action_update_template(source_branch)
+        payload["target"] = "orchestrator"
+        payload["clone_name"] = clone_name
+        payload["note"] = "orchestrator uses /local/hermes-agent directly; template update applied."
+        return payload
+
+    template_payload = _action_update_template(source_branch)
+    source_root = _parent_hermes_agent_source(clone_name=clone_name)
+    source_commit = _git_commit(source_root)
+    clone_commit_before = _git_commit(clone_root / "hermes-agent")
+
+    container = _container_name(clone_name)
+    container_exists = _docker_exists(container)
+    was_running = _docker_running(container) if container_exists else False
+
+    if was_running:
+        _run(["docker", "stop", container], check=True)
+        _log(clone_name, "node update: container stopped for hermes-agent sync")
+
+    _seed_code_tree(source_root, clone_root / "hermes-agent")
+    _seed_clone_runtime(clone_root, allow_parent_seed=True)
+    clone_commit_after = _git_commit(clone_root / "hermes-agent")
+
+    if was_running:
+        _run(["docker", "start", container], check=True)
+        _log(clone_name, "node update: container restarted after hermes-agent sync")
+
+    container_state = _docker_state(container) if container_exists else {
+        "exists": False,
+        "running": False,
+        "status": "not_found",
+    }
+
+    changed = True
+    if clone_commit_before and clone_commit_after:
+        changed = clone_commit_before != clone_commit_after
+
+    return {
+        "ok": True,
+        "action": "update",
+        "target": "node",
+        "clone_name": clone_name,
+        "clone_root": str(clone_root),
+        "env_path": str(env_path),
+        "source_root": str(source_root),
+        "source_commit": source_commit,
+        "clone_commit_before": clone_commit_before,
+        "clone_commit_after": clone_commit_after,
+        "changed": changed,
+        "container_name": container,
+        "container_exists": container_exists,
+        "was_running": was_running,
+        "container_state": container_state,
+        "template_update": template_payload,
+    }
+
+
+def _action_update(clone_name: str | None, source_branch: str) -> Dict[str, Any]:
+    if clone_name:
+        return _action_update_node(clone_name, source_branch=source_branch)
+    return _action_update_template(source_branch=source_branch)
+
+
+def _dispatch(
+    action: str,
+    clone_name: str | None,
+    image: str,
+    lines: int,
+    source_branch: str,
+) -> Dict[str, Any]:
     if action == "start":
+        if not clone_name:
+            raise CloneManagerError("start requires clone name")
         return _action_start(clone_name, image=image)
     if action == "status":
+        if not clone_name:
+            raise CloneManagerError("status requires clone name")
         return _action_status(clone_name)
     if action == "stop":
+        if not clone_name:
+            raise CloneManagerError("stop requires clone name")
         return _action_stop(clone_name)
     if action == "delete":
+        if not clone_name:
+            raise CloneManagerError("delete requires clone name")
         return _action_delete(clone_name)
     if action == "logs":
+        if not clone_name:
+            raise CloneManagerError("logs requires clone name")
         return _action_logs(clone_name, lines=lines)
+    if action == "update":
+        return _action_update(clone_name, source_branch=source_branch)
     raise CloneManagerError(f"unsupported action: {action}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hermes clone lifecycle manager")
-    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs"])
+    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update"])
     parser.add_argument(
         "name_positional",
         nargs="?",
@@ -2508,6 +2899,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image for clone runtime")
     parser.add_argument("--lines", type=int, default=80, help="Log tail lines for logs action")
+    parser.add_argument(
+        "--source-branch",
+        default=str(os.getenv("HERMES_AGENT_UPDATE_BRANCH", HERMES_AGENT_UPSTREAM_BRANCH) or HERMES_AGENT_UPSTREAM_BRANCH),
+        help="Source git branch used by 'update' when syncing /local/hermes-agent",
+    )
     return parser
 
 
@@ -2518,14 +2914,25 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        raw_name = (
-            args.name_flag
-            or args.name_positional
-            or str(os.getenv("HERMES_DEFAULT_NODE", "orchestrator") or "orchestrator")
-        )
-        clone_name = _normalize_clone_name(raw_name)
+        clone_name: str | None
+        if args.action == "update":
+            raw_name = args.name_flag or args.name_positional
+            clone_name = _normalize_clone_name(raw_name) if raw_name else None
+        else:
+            raw_name = (
+                args.name_flag
+                or args.name_positional
+                or str(os.getenv("HERMES_DEFAULT_NODE", "orchestrator") or "orchestrator")
+            )
+            clone_name = _normalize_clone_name(raw_name)
         lines = max(10, min(int(args.lines), 500))
-        payload = _dispatch(args.action, clone_name, image=str(args.image), lines=lines)
+        payload = _dispatch(
+            args.action,
+            clone_name,
+            image=str(args.image),
+            lines=lines,
+            source_branch=str(args.source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
+        )
         print(json.dumps(payload, ensure_ascii=False))
         return 0
     except CloneManagerError as exc:

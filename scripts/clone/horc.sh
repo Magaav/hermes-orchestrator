@@ -4,9 +4,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${HORC_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 DEFAULT_MANAGER="${SCRIPT_DIR}/clone_manager.py"
 HERMES_CLONE_MANAGER_SCRIPT="${HERMES_CLONE_MANAGER_SCRIPT:-${DEFAULT_MANAGER}}"
 DEFAULT_NODE="${HERMES_DEFAULT_NODE:-orchestrator}"
+HORC_REPO_BRANCH="${HORC_REPO_BRANCH:-main}"
 
 if [[ ! -f "${HERMES_CLONE_MANAGER_SCRIPT}" ]]; then
   for path in \
@@ -39,27 +41,101 @@ if [[ -z "${PYTHON_BIN:-}" ]]; then
   exit 1
 fi
 
+manager() {
+  "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "$@"
+}
+
+exec_manager() {
+  exec "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "$@"
+}
+
 usage() {
-  cat <<'EOF'
+  cat <<'TXT'
 horc — Hermes Orchestrator CLI
 
 Usage:
   horc start [name] [--image IMAGE]
   horc status [name]
   horc stop [name]
+  horc restart [name] [--image IMAGE]
   horc delete [name]
   horc logs [name] [--lines N]
 
+  horc update
+  horc agent update [name] [--source-branch BRANCH]
+
 Examples:
   horc start
-  horc status
+  horc restart
   horc start node1
   horc logs node1 --lines 120
 
+  horc update
+  horc agent update
+  horc agent update node1
+
 Notes:
   - If name is omitted, 'orchestrator' is used.
-  - 'horc start' bootstraps host orchestrator from /local/agents/envs/orchestrator.env.
-EOF
+  - 'horc update' updates this repository (/local) from origin/main.
+  - 'horc agent update' updates /local/hermes-agent (template for new nodes).
+  - 'horc agent update <node>' also syncs that node's hermes-agent and restarts it if running.
+  - Compatibility alias: 'hord' runs the same commands as 'horc'.
+TXT
+}
+
+ensure_repo_clean() {
+  if ! git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "horc: ${REPO_ROOT} is not a git repository" >&2
+    exit 1
+  fi
+  if ! git -C "${REPO_ROOT}" diff --quiet || ! git -C "${REPO_ROOT}" diff --cached --quiet; then
+    echo "horc: repository has local changes at ${REPO_ROOT}" >&2
+    echo "commit/stash/discard changes before running 'horc update'" >&2
+    exit 1
+  fi
+}
+
+self_update() {
+  ensure_repo_clean
+  git -C "${REPO_ROOT}" fetch origin "${HORC_REPO_BRANCH}"
+  git -C "${REPO_ROOT}" checkout "${HORC_REPO_BRANCH}"
+  git -C "${REPO_ROOT}" pull --ff-only origin "${HORC_REPO_BRANCH}"
+  echo "horc: repository updated at ${REPO_ROOT} (${HORC_REPO_BRANCH})"
+}
+
+resolve_name_and_exec() {
+  local action="$1"
+  shift
+
+  if [[ "${1:-}" == "--name" ]]; then
+    exec_manager "${action}" "$@"
+  fi
+
+  local name="${DEFAULT_NODE}"
+  if [[ $# -gt 0 && "${1}" != --* ]]; then
+    name="${1}"
+    shift
+  fi
+
+  exec_manager "${action}" --name "${name}" "$@"
+}
+
+resolve_name_and_run() {
+  local action="$1"
+  shift
+
+  if [[ "${1:-}" == "--name" ]]; then
+    manager "${action}" "$@"
+    return
+  fi
+
+  local name="${DEFAULT_NODE}"
+  if [[ $# -gt 0 && "${1}" != --* ]]; then
+    name="${1}"
+    shift
+  fi
+
+  manager "${action}" --name "${name}" "$@"
 }
 
 ACTION="${1:-help}"
@@ -69,16 +145,44 @@ fi
 
 case "${ACTION}" in
   start|status|stop|delete|logs)
-    if [[ "${1:-}" == "--name" ]]; then
-      exec "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "${ACTION}" "$@"
-    fi
-
-    NAME="${DEFAULT_NODE}"
+    resolve_name_and_exec "${ACTION}" "$@"
+    ;;
+  restart)
+    resolve_name_and_run stop "$@" >/dev/null
+    resolve_name_and_exec start "$@"
+    ;;
+  update)
     if [[ $# -gt 0 && "${1}" != --* ]]; then
+      # Compatibility for older docs: `horc update node1`
       NAME="${1}"
       shift
+      exec_manager update --name "${NAME}" "$@"
     fi
-    exec "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "${ACTION}" --name "${NAME}" "$@"
+    self_update
+    ;;
+  agent)
+    SUBACTION="${1:-}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "${SUBACTION}" in
+      update)
+        if [[ "${1:-}" == "--name" ]]; then
+          exec_manager update "$@"
+        fi
+        if [[ $# -gt 0 && "${1}" != --* ]]; then
+          NAME="${1}"
+          shift
+          exec_manager update --name "${NAME}" "$@"
+        fi
+        exec_manager update "$@"
+        ;;
+      *)
+        echo "horc: unknown agent subcommand '${SUBACTION}'" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
     ;;
   help|-h|--help)
     usage

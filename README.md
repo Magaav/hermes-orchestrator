@@ -1,6 +1,6 @@
 # hermes-orchestrator
 
-Hermes Orchestrator is the host-layer control plane for spawning and managing multiple Hermes agent nodes on demand.
+Hermes Orchestrator is the host control plane for running one orchestrator node plus many containerized Hermes worker nodes.
 
 ## Install
 
@@ -8,26 +8,23 @@ Hermes Orchestrator is the host-layer control plane for spawning and managing mu
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash
 ```
 
-Note: this one-liner requires the repository to be public.
-
-What this does:
-- Clones/updates this repository into `/local`
-- Installs `horc` (default: `/usr/local/bin/horc`)
-
 Optional flags:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash -s -- --dir /local --branch main
 ```
 
+What install does:
+- Clones or updates this repo in `/local`
+- Installs `horc` and `hord` wrappers
+- Enables repo git hooks (`.githooks`) to block common secret leaks
+
 ## Goals
 
-- Keep orchestrator state isolated under `/local/agents/nodes/orchestrator/.hermes` (no runtime dependency on `/local/.hermes`).
-- Standardize node topology under `/local/agents/nodes/*`.
-- Spawn worker nodes as Dockerized agents while keeping shared host assets (`scripts`, `plugins`, `crons`) consistent.
-- Expose orchestration through:
-  - Shell CLI (`horc`)
-  - Discord-driven orchestration flows (via orchestrator gateway/plugin hooks)
+- Keep orchestrator state in `/local/agents/nodes/orchestrator/.hermes`
+- Keep runtime topology deterministic under `/local/agents/nodes/*`
+- Spawn and manage worker nodes on demand with shared host assets
+- Expose orchestration through shell (`horc`) and Discord-triggered workflows
 
 ## Topology
 
@@ -37,14 +34,15 @@ curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scr
 │   ├── registry.json
 │   ├── envs/
 │   │   ├── orchestrator.env
-│   │   ├── node1.env
+│   │   ├── catatau.env
+│   │   ├── colmeio.env
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
 │       │   ├── data/
 │       │   ├── workspace/
 │       │   ├── hermes-agent -> /local/hermes-agent
-│       │   ├── .hermes/        # canonical orchestrator state
+│       │   ├── .hermes/
 │       │   ├── scripts -> /local/scripts
 │       │   ├── crons -> /local/crons/orchestrator
 │       │   └── plugins -> /local/plugins
@@ -53,9 +51,9 @@ curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scr
 │       │   ├── workspace/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
-│       │   ├── scripts/        # mounted from host (ro)
-│       │   ├── crons/          # mounted from host node bucket
-│       │   └── plugins/        # mounted from host (ro)
+│       │   ├── scripts/   # mounted from host (ro)
+│       │   ├── crons/     # mounted from host node bucket
+│       │   └── plugins/   # mounted from host (ro)
 │       └── ...
 ├── hermes-agent/
 ├── scripts/
@@ -63,75 +61,91 @@ curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scr
 ├── memory/
 │   └── openviking/
 │       ├── orchestrator/
-│       ├── node1/
-│       └── ...
+│       ├── catatau/
+│       └── colmeio/
 ├── backups/
 ├── crons/
 └── logs/
 ```
 
-## Bootstrapping
-
-Use `horc` as the primary entrypoint.
+## Bootstrap
 
 ```bash
 horc start
 ```
 
-`horc start` (without a name) defaults to `orchestrator` and uses:
-
+Default `horc start` target is `orchestrator` and it reads:
 - `/local/agents/envs/orchestrator.env`
 - `/local/agents/nodes/orchestrator/`
 
-On first bootstrap, orchestrator state is migrated into `/local/agents/nodes/orchestrator/.hermes` from legacy locations (prefers `~/.hermes`, falls back to `/local/.hermes` when present).
-
-If `horc` is not found:
-
-```bash
-/local/scripts/clone/horc.sh --help
-```
-
-and install a shell command wrapper:
-
-```bash
-bash /local/scripts/install.sh
-```
+On first bootstrap:
+- Legacy state migrates to `/local/agents/nodes/orchestrator/.hermes` (prefers `~/.hermes`, fallback `/local/.hermes`)
+- If `/local/hermes-agent` is missing, it is cloned automatically
+- If `/local/.venv` runtime is missing, dependencies are bootstrapped automatically
 
 ## Node Lifecycle
 
 ```bash
-# start/check orchestrator (host-layer)
+# orchestrator
 horc start
 horc status
+horc restart
+horc logs --lines 120
 
-# spawn/manage worker node (containerized)
-horc start node1
-horc status node1
-horc logs node1 --lines 120
-horc stop node1
+# workers
+horc start catatau
+horc status catatau
+horc restart catatau
+horc stop catatau
+horc delete catatau
 ```
 
-Worker nodes run as Docker containers and are prepared to integrate with assets under `/local/docker/` and shared host resources.
+## Updates
 
-Note on paths: inside worker containers, `HERMES_HOME=/local/.hermes` is expected and maps to host path `/local/agents/nodes/<node>/.hermes` (because each container mounts its node root at `/local`).
+```bash
+# update hermes-orchestrator repo itself (/local)
+horc update
 
-## Scripts
+# update hermes-agent template source (/local/hermes-agent)
+horc agent update
 
-- Primary CLI wrapper: `/local/scripts/clone/horc.sh`
-- Compatibility shim: `/local/scripts/clone.sh`
-- Installer: `/local/scripts/install.sh` (installs `/usr/local/bin/horc`)
+# update one existing node to latest template and restart it if running
+horc agent update catatau
+```
 
-## Branching
+Compatibility alias:
 
-- Long-lived branch: `main` only.
-- Do not use `master`.
-- Feature/work branches must be named with your orchestrator id format: `<horc-id>`.
+```bash
+hord restart
+```
+
+`horc update <node>` is accepted as a compatibility alias for `horc agent update <node>`.
+
+## Credential Model
+
+- API keys and Discord bot tokens belong in `agents/envs/*.env` (local only, never committed)
+- Codex OAuth (`openai-codex`) is runtime auth state in each node’s `.hermes/auth.json` and must be re-login rotated, not committed in env templates
+
+Rotate Codex OAuth for a node by running Hermes login/logout in that node context:
+- Orchestrator (host): `HERMES_HOME=/local/agents/nodes/orchestrator/.hermes /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py login`
+- Worker: `docker exec -it hermes-node-<name> bash -lc 'cd /local/hermes-agent && /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py login'`
 
 ## Versioning Hygiene
 
-- Runtime state directories are ignored via `.gitignore` (`agents/nodes`, `logs`, `memory`, `backups`, etc.).
-- Real env files are ignored (`agents/envs/*.env`).
-- Commit only env templates:
-  - `agents/envs/orchestrator.env.example`
-  - `agents/envs/catatau.env.example`
-  - `agents/envs/colmeio.env.example`
+Runtime and secret files are intentionally excluded:
+- `.hermes/`, `agents/nodes/`, `logs/`, `memory/`, `backups/`, `crons/`, `workspace/`, `spawns/`
+- Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
+- Orchestrator prestart patching runs against `agents/nodes/orchestrator/.runtime/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
+
+Commit only templates:
+- `agents/envs/orchestrator.env.example`
+- `agents/envs/catatau.env.example`
+- `agents/envs/colmeio.env.example`
+
+Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
+
+## Branch Policy
+
+- Long-lived branch: `main` only
+- Do not use `master`
+- Work branches should use your orchestrator id format: `<horc-id>`

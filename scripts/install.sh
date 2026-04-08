@@ -19,6 +19,7 @@ BOLD='\033[1m'
 REPO_URL="https://github.com/Magaav/hermes-orchestrator.git"
 INSTALL_DIR="${HERMES_ORCHESTRATOR_DIR:-/local}"
 HORC_INSTALL_PATH="${HORC_INSTALL_PATH:-/usr/local/bin/horc}"
+HORD_INSTALL_PATH="${HORD_INSTALL_PATH:-/usr/local/bin/hord}"
 
 info()    { echo -e "${CYAN}[horc]${NC} $1"; }
 success() { echo -e "${GREEN}[horc]${NC} $1"; }
@@ -75,8 +76,8 @@ else
     git clone --branch "${BRANCH}" --depth 1 "${REPO_URL}" "${INSTALL_DIR}"
 fi
 
-# Install horc command
-info "Installing 'horc' command..."
+# Install horc/hord commands
+info "Installing 'horc' and 'hord' commands..."
 WRAPPER_CONTENT=$(cat <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -98,7 +99,28 @@ else
 fi
 rm -f "${TMP_WRAPPER}"
 
+TARGET_DIR_HORD="$(dirname "${HORD_INSTALL_PATH}")"
+TMP_WRAPPER_HORD="$(mktemp)"
+printf "%s\n" "${WRAPPER_CONTENT}" > "${TMP_WRAPPER_HORD}"
+chmod +x "${TMP_WRAPPER_HORD}"
+
+if [[ -d "${TARGET_DIR_HORD}" && -w "${TARGET_DIR_HORD}" ]] || mkdir -p "${TARGET_DIR_HORD}" 2>/dev/null; then
+    install -m 0755 "${TMP_WRAPPER_HORD}" "${HORD_INSTALL_PATH}"
+else
+    require_cmd sudo
+    sudo mkdir -p "${TARGET_DIR_HORD}"
+    sudo install -m 0755 "${TMP_WRAPPER_HORD}" "${HORD_INSTALL_PATH}"
+fi
+rm -f "${TMP_WRAPPER_HORD}"
+
+# Git safety hooks (best-effort)
+if git -C "${INSTALL_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "${INSTALL_DIR}" config core.hooksPath .githooks || true
+fi
+
 success "'horc' installed to ${HORC_INSTALL_PATH}"
+success "'hord' alias installed to ${HORD_INSTALL_PATH}"
+success "git hooks path set to .githooks (secret guard)"
 
 # Show horc help
 echo ""
@@ -108,12 +130,19 @@ echo -e "${BOLD}Usage:${NC}"
 echo "  horc start [name]          Start node (default: orchestrator)"
 echo "  horc status [name]         Show node status"
 echo "  horc stop [name]           Stop node"
+echo "  horc restart [name]        Restart node to reload env/credentials"
 echo "  horc delete [name]         Delete node container/runtime registration"
 echo "  horc logs [name]           View logs"
+echo "  horc update                Update hermes-orchestrator (/local)"
+echo "  horc agent update [name]   Update hermes-agent template or one node"
+echo "  hord ...                   Compatibility alias to horc"
 echo ""
 echo -e "${BOLD}Examples:${NC}"
 echo "  horc start"
 echo "  horc status"
 echo "  horc start node1"
 echo "  horc logs node1 --lines 50"
+echo "  horc restart"
+echo "  horc update"
+echo "  horc agent update node1"
 echo ""

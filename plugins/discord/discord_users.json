@@ -1,17 +1,17 @@
 {
   "version": 2,
-  "updated_at": "2026-03-30T14:16:00Z",
-  "description": "ACL de usuários Discord para uso do Hermes no ambiente Colmeio.",
+  "updated_at": "2026-04-08T00:00:00Z",
+  "description": "Example Discord ACL for hermes-orchestrator.",
   "roles": {
     "admin": {
-      "description": "Acesso total",
+      "description": "Full access",
       "allowed_intents": [
         "*"
       ],
       "requires_admin_approval": false
     },
     "user": {
-      "description": "Pode somente executar skills. Qualquer ação fora disso exige aprovação de admin.",
+      "description": "Skill-only access with admin approval for privileged actions.",
       "allowed_intents": [
         "skill_execute"
       ],
@@ -29,39 +29,26 @@
   },
   "users": [
     {
-      "name": "Victor de Genaro",
-      "discord_user_id": "1228037612338679961",
+      "name": "Admin User",
+      "discord_user_id": "000000000000000000",
       "aliases": [
-        "victor",
-        "Victor",
-        "Victor de Genaro"
+        "admin"
       ],
       "role": "admin"
     },
     {
-      "name": "Laura",
-      "discord_user_id": "1099316732885205004",
+      "name": "Member User",
+      "discord_user_id": "000000000000000001",
       "aliases": [
-        "laura",
-        "Laura"
-      ],
-      "role": "user"
-    },
-    {
-      "name": "Maria",
-      "discord_user_id": "1489322275512520744",
-      "aliases": [
-        "maria",
-        "Maria",
-        "Maria Eduarda"
+        "member"
       ],
       "role": "user"
     }
   ],
   "channels": {
     "master": {
-      "name": "🧙‍♂️master",
-      "discord_channel_id": "1488175722932736071",
+      "name": "master",
+      "discord_channel_id": "000000000000000000",
       "purpose": [
         "approvals",
         "proactive_notifications"
@@ -69,15 +56,15 @@
     }
   },
   "admin_contact": {
-    "name": "Victor de Genaro",
-    "discord_user_id": "1228037612338679961",
+    "name": "Admin User",
+    "discord_user_id": "000000000000000000",
     "notification_mode": "master_channel",
-    "delivery_target": "discord:1488175722932736071",
-    "notes": "Canal master centraliza aprovações e alertas proativos."
+    "delivery_target": "discord:000000000000000000",
+    "notes": "Replace with your admin contact/channel in local runtime config."
   },
   "proactive": {
     "enabled": true,
-    "delivery_target": "discord:1488175722932736071",
+    "delivery_target": "discord:000000000000000000",
     "immediate": {
       "enabled": true,
       "notify_on": [
@@ -96,7 +83,7 @@
     "digest": {
       "enabled": true,
       "frequency": "daily",
-      "timezone": "America/Sao_Paulo",
+      "timezone": "UTC",
       "preferred_time": "09:00",
       "only_if_matters": true
     }

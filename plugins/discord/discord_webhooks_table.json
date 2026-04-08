@@ -1,19 +1,19 @@
 {
   "channels": {
-    "colmeio": {
-      "label": "colmeio",
-      "channel_id": "1487099552636080201",
-      "webhook_url": "https://discordapp.com/api/webhooks/1487160364721377321/8DAulsaU04PKLurjMFGJjmHJ5DZO8v1aj9P1QJHM4u9Z6Y2qHwL8vbqRHiuM7b8xgaLN"
+    "orchestrator": {
+      "label": "orchestrator",
+      "channel_id": "000000000000000000",
+      "webhook_url": "DISCORD_WEBHOOK_URL_CHANGEME"
     },
-    "faltas-l1": {
-      "label": "Faltas L1",
-      "channel_id": "1487099467726328038",
-      "webhook_url": "https://discordapp.com/api/webhooks/1487143562079371284/vZ0Sgzl7guCfN2oZxirfMhEAxslU74LMwIPoV2D6gzVuy52HqCGRhRo8KjRTb3_RVxe_"
+    "node1": {
+      "label": "node1",
+      "channel_id": "000000000000000000",
+      "webhook_url": "DISCORD_WEBHOOK_URL_CHANGEME"
     },
-    "faltas-l2": {
-      "label": "Faltas L2",
-      "channel_id": "1487099552636080201",
-      "webhook_url": "https://discordapp.com/api/webhooks/1487113210321567818/QvmgMyov90qo16zfouZTLKycAdeAGbEKSCpTec3_7V4ek63MlRWD6Lns32uwaJqFxkVG"
+    "node2": {
+      "label": "node2",
+      "channel_id": "000000000000000000",
+      "webhook_url": "DISCORD_WEBHOOK_URL_CHANGEME"
     }
   }
 }
