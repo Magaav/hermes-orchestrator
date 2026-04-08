@@ -2787,11 +2787,41 @@ def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
     env = _read_env_file(env_path)
     state_code = _extract_state_mode(env)
     if state_code == 1:
-        payload = _action_update_template(source_branch)
-        payload["target"] = "orchestrator"
-        payload["clone_name"] = clone_name
-        payload["note"] = "orchestrator uses /local/hermes-agent directly; template update applied."
-        return payload
+        template_payload = _action_update_template(source_branch)
+        source_root = _parent_hermes_agent_source(clone_name=clone_name)
+        runtime_root = _prepare_orchestrator_runtime_agent_tree(
+            clone_name=clone_name,
+            clone_root=clone_root,
+            source_tree=source_root,
+        )
+        source_commit = _git_commit(source_root)
+
+        process_state_before = _orchestrator_process_state(clone_root)
+        was_running = bool(process_state_before.get("running"))
+        if was_running:
+            _orchestrator_stop_gateway(clone_name, clone_root)
+            _orchestrator_start_gateway(clone_name, clone_root, env_path)
+
+        process_state_after = _orchestrator_process_state(clone_root)
+        return {
+            "ok": True,
+            "action": "update",
+            "target": "orchestrator",
+            "clone_name": clone_name,
+            "clone_root": str(clone_root),
+            "env_path": str(env_path),
+            "source_root": str(source_root),
+            "source_commit": source_commit,
+            "runtime_root": str(runtime_root),
+            "was_running": was_running,
+            "process_state_before": process_state_before,
+            "process_state_after": process_state_after,
+            "template_update": template_payload,
+            "note": (
+                "orchestrator now patches and runs from "
+                "agents/nodes/orchestrator/.runtime/hermes-agent; /local/hermes-agent stays template-only."
+            ),
+        }
 
     template_payload = _action_update_template(source_branch)
     source_root = _parent_hermes_agent_source(clone_name=clone_name)

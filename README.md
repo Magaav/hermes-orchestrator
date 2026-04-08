@@ -111,6 +111,9 @@ horc agent update
 
 # update one existing node to latest template and restart it if running
 horc agent update catatau
+
+# refresh orchestrator runtime copy from template and restart host gateway if running
+horc agent update orchestrator
 ```
 
 Compatibility alias:
