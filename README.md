@@ -34,44 +34,39 @@ What install does:
 ├── agents/
 │   ├── registry.json
 │   ├── envs/
-│   │   ├── orchestrator.env
-│   │   ├── catatau.env
-│   │   ├── colmeio.env
-│   │   ├── node.env.example
+│   │   ├── orchestrator.env # runs inside host VM
+│   │   ├── node1.env        # runs inside docker container (sandboxed)
+│   │   ├── node2.env        # runs inside docker container (sandboxed)
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
 │       │   ├── workspace/
-│       │   │   ├── data/
-│       │   │   └── discord/
-│       │   ├── hermes-agent -> /local/hermes-agent
+│       │   ├── data/
+│       │   ├── hermes-agent/ # node-local runtime copy (not symlinked to /local/hermes-agent)
 │       │   ├── .hermes/
-│       │   ├── scripts -> /local/scripts
-│       │   ├── crons -> /local/crons/orchestrator
-│       │   └── plugins -> /local/plugins
+│       │   ├── scripts ->(symlink) /local/scripts
+│       │   ├── crons   ->(symlink) /local/crons/orchestrator
+│       │   └── plugins ->(symlink) /local/plugins
 │       ├── node1/
 │       │   ├── workspace/
-│       │   │   ├── data/
-│       │   │   └── discord/
+│       │   ├── data/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
 │       │   ├── scripts/   # mounted from host (ro)
 │       │   ├── crons/     # mounted from host node bucket
 │       │   └── plugins/   # mounted from host (ro)
 │       └── ...
-├── hermes-agent/
-├── scripts/
-├── plugins/
-│   ├── memory/
+├── hermes-agent/ # hermes-agent version used for spawning new nodes
+├── scripts/      # triggered directly from discord native slash command/cronjobs/etc...
+├── plugins/      # used to modify hermes-agent core on node start
+│   ├── memory/   # optional setted in /agents/envs/<node>.env
 │   │   ├── openviking/
 │   │   ├── vectordb/
 │   │   └── viking/
 │   └── discord/
-├── memory/
-│   └── -> /local/plugins/memory (compatibility symlink)
-├── backups/
-├── crons/
-└── logs/
+├── backups/ # used for rollback/versioning
+├── crons/   # nodes centralized cronjobs
+└── logs/    # nodes centralized debbuging interface
 ```
 
 ## Bootstrap
@@ -87,7 +82,7 @@ Default `horc start` target is `orchestrator` and it reads:
 On first bootstrap:
 - Legacy state migrates to `/local/agents/nodes/orchestrator/.hermes` (prefers `~/.hermes`, fallback `/local/.hermes`)
 - If `/local/hermes-agent` is missing, it is cloned automatically
-- If `/local/.venv` runtime is missing, dependencies are bootstrapped automatically
+- If orchestrator node runtime venv (`/local/agents/nodes/orchestrator/hermes-agent/.venv`) is missing, it is seeded automatically
 
 ## Node Lifecycle
 
@@ -99,24 +94,24 @@ horc restart
 horc logs --lines 120
 
 # workers
-horc start catatau
-horc status catatau
-horc restart catatau
-horc stop catatau
-horc delete catatau
+horc start node2
+horc status node2
+horc restart node2
+horc stop node2
+horc delete node2
 ```
 
 ## Backups & Restore
 
 ```bash
 # backup one node
-horc backup node colmeio
+horc backup node node1
 
 # backup all nodes
 horc backup all
 
 # restore from a backup archive
-horc restore /local/backups/horc-backup-node-colmeio-YYYYMMDDTHHMMSSZ.tar.gz
+horc restore /local/backups/horc-backup-node-node1-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
 Restore behavior:
@@ -136,7 +131,7 @@ horc update
 horc agent update
 
 # update one existing node to latest template and restart it if running
-horc agent update catatau
+horc agent update node2
 
 # refresh orchestrator runtime copy from template and restart host gateway if running
 horc agent update orchestrator
@@ -156,7 +151,7 @@ hord restart
 - Codex OAuth (`openai-codex`) is runtime auth state in each node’s `.hermes/auth.json` and must be re-login rotated, not committed in env templates
 
 Rotate Codex OAuth for a node by running Hermes login/logout in that node context:
-- Orchestrator (host): `HERMES_HOME=/local/agents/nodes/orchestrator/.hermes /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py login`
+- Orchestrator (host): `HERMES_HOME=/local/agents/nodes/orchestrator/.hermes /local/agents/nodes/orchestrator/hermes-agent/.venv/bin/python /local/agents/nodes/orchestrator/hermes-agent/cli.py login`
 - Worker: `docker exec -it hermes-node-<name> bash -lc 'cd /local/hermes-agent && /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py login'`
 
 ## Versioning Hygiene
@@ -164,7 +159,7 @@ Rotate Codex OAuth for a node by running Hermes login/logout in that node contex
 Runtime and secret files are intentionally excluded:
 - `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `memory/`, `backups/`, `crons/`, `workspace/`, `spawns/`
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
-- Orchestrator prestart patching runs against `agents/nodes/orchestrator/.runtime/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
+- Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 
 Commit only templates:
 - `agents/envs/node.env.example`

@@ -962,7 +962,6 @@ def _host_python_candidates() -> list[Path]:
 
     candidates.extend(
         [
-            Path("/local/.venv/bin/python3"),
             Path("/usr/bin/python3"),
             Path("/usr/bin/python"),
             Path("/local/hermes-agent/.venv/bin/python3"),  # legacy fallback
