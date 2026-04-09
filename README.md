@@ -1,4 +1,4 @@
-## Hermes Orchestrator
+# Hermes Orchestrator
 
 Hermes Orchestrator is a lightweight host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 
@@ -34,34 +34,29 @@ The orchestrator allows Hermes agents to operate as a coordinated distributed sy
 Hermes Orchestrator enables:
 
 Agent Fleet Management
-
-spawn Hermes nodes on demand
-start, stop, restart, and delete nodes
-isolate environments per tenant or project
+-spawn Hermes nodes on demand
+-start, stop, restart, and delete nodes
+-isolate environments per tenant or project
 
 Operational Safety
-
-upgrade agents safely
-rollback node environments
-maintain node-local runtime copies
+- upgrade agents safely
+- rollback node environments
+- maintain node-local runtime copies
 
 Observability
-
-centralized logging
-attention-level warning mirrors
-skill execution tracing
+- centralized logging
+- attention-level warning mirrors
+- skill execution tracing
 
 Infrastructure Automation
-
-shared scripts and plugins
-centralized cron orchestration
-automated maintenance workflows
+- shared scripts and plugins
+- centralized cron orchestration
+- automated maintenance workflows
 
 Multi-Agent Systems
-
-orchestrate multiple Hermes runtimes
-enable agent cooperation patterns
-maintain operational boundaries
+- orchestrate multiple Hermes runtimes
+- enable agent cooperation patterns
+- maintain operational boundaries
 
 ## Install
 
@@ -80,11 +75,11 @@ What install does:
 - Installs `horc` shell command wrappers
 - Enables repo git hooks (`.githooks`) to block common secret leaks
 
-## Core Concepts
+# Core Concepts
 
 Hermes Orchestrator operates with two primary node types.
 
-# Orchestrator Node
+## Orchestrator Node
 
 The orchestrator runs on the host machine and is responsible for:
 - managing worker nodes
@@ -92,7 +87,7 @@ The orchestrator runs on the host machine and is responsible for:
 - maintaining centralized logs
 - executing automation scripts
 
-# Worker Nodes
+## Worker Nodes
 
 Worker nodes are containerized Hermes Agent instances.
 
@@ -104,7 +99,7 @@ Each node runs in an isolated environment and can represent:
 
 Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of shared templates.
 
-## Filesystem Topology
+# Filesystem Topology
 
 ```text
 /local/
@@ -166,7 +161,7 @@ Important characteristics:
 - shared scripts/plugins enable coordinated automation
 - centralized logs simplify debugging and monitoring
 
-## Bootstrap
+# Bootstrap
 
 ```bash
 horc start
@@ -178,7 +173,7 @@ Default `horc start` target is `orchestrator` and it reads:
 
 Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
 
-## Node Lifecycle
+# Node Lifecycle
 
 ```bash
 # orchestrator
@@ -197,7 +192,7 @@ horc stop node2
 horc delete node2
 ```
 
-## Logging Topology
+# Logging Topology
 
 - Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.
 - Node skill mirrors are centralized at `/local/logs/nodes/<node>/skills/`.
@@ -205,7 +200,7 @@ horc delete node2
 - Legacy compatibility roots `/local/logs/agents`, `/local/logs/clones`, and `/local/logs/skills` are removed.
 - `horc logs <node>` now tails management, runtime, attention, and Hermes logs from this canonical tree.
 
-## Backups & Restore
+# Backups & Restore
 
 ```bash
 # backup one node
@@ -225,7 +220,7 @@ Restore behavior:
 - Restore reapplies whatever is present in the archive (`agents/*`, memory paths, and crons paths)
 - Stops included running nodes before restore and restarts those that were running
 
-## Updates
+# Updates
 
 ```bash
 # update hermes-orchestrator repo itself (/local)
@@ -249,7 +244,7 @@ hord restart
 
 `horc update <node>` is accepted as a compatibility alias for `horc agent update <node>`.
 
-## Versioning Hygiene
+# Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
 - `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `backups/`, `crons/`
@@ -263,9 +258,9 @@ Commit only templates:
 
 Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
 
-## Road Map
+# Road Map
 
-### UI (Hermes Workspace-style Interface)
+## UI (Hermes Workspace-style Interface)
 
 A lightweight web UI is planned as an optional visual layer inspired by Hermes Workspace, but independent from Hermes runtime internals.
 
@@ -288,35 +283,12 @@ UI
 
 The orchestrator remains fully operable via CLI and automation pipelines even without the UI.
 
-## Why Use Hermes Orchestrator
-
-Hermes Orchestrator layer can:
-- Spawn sandboxed hermes-agents nodes on demand for various corporations/especificities.
-- Doctor, fix, operate each others core code easily in case of fail or hard to debug problems and instanteneously up that node again.
-- Enable any node exchange communication so they can self evolve easily.
-- Orchestrate complex workflows
-Hermes Agent is excellent at reasoning and tool use inside a single runtime.
-Hermes Orchestrator solves a different layer: operating many Hermes nodes safely and reliably.
-
-Hermes Agent focuses on:
-- reasoning
-- memory
-- tool execution
-
-Hermes Orchestrator focuses on:
-- node lifecycle and fleet management
-- environment and tenant isolation
-- upgrades, rollbacks, and operational guardrails
-- logs, auditability, and policy boundaries
-
-This separation gives teams scale and operational clarity without modifying Hermes Agent itself.
-
-## Branch Policy
+# Branch Policy
 
 - Long-lived branch: `main` only (do not use `master`)
 - Work branches should use your orchestrator id format: `<horc-id>`
 
-## Contributing
+# Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
