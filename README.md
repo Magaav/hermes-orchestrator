@@ -20,13 +20,6 @@ What install does:
 - Installs `horc` and `hord` wrappers
 - Enables repo git hooks (`.githooks`) to block common secret leaks
 
-## Goals
-
-- Keep orchestrator state in `/local/agents/nodes/orchestrator/.hermes`
-- Keep runtime topology deterministic under `/local/agents/nodes/*`
-- Spawn and manage worker nodes on demand with shared host assets
-- Expose orchestration through shell (`horc`) and Discord-triggered workflows
-
 ## Topology
 
 ```text
@@ -66,7 +59,22 @@ What install does:
 │   └── discord/
 ├── backups/ # used for rollback/versioning
 ├── crons/   # nodes centralized cronjobs
-└── logs/    # nodes centralized debbuging interface
+└── logs/    # nodes centralized debugging interface
+    ├── nodes/
+    │   ├── orchestrator/
+    │   │   ├── management.log
+    │   │   ├── runtime.log
+    │   │   ├── skills/ # per-node skill log mirrors (for example: colmeio-*.log)
+    │   │   └── hermes/
+    │   │       ├── agent.log
+    │   │       ├── errors.log
+    │   │       └── gateway.log
+    │   └── <node>/...
+    └── attention/
+        └── nodes/
+            └── <node>/
+                ├── warning-plus.log
+                └── hermes-errors.log # hardlinked mirror of /local/logs/nodes/<node>/hermes/errors.log
 ```
 
 ## Bootstrap
@@ -87,14 +95,24 @@ horc start
 horc status
 horc restart
 horc logs --lines 120
+horc logs clean
 
 # workers
 horc start node2
 horc status node2
 horc restart node2
+horc logs clean node2
 horc stop node2
 horc delete node2
 ```
+
+## Logging Topology
+
+- Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.
+- Node skill mirrors are centralized at `/local/logs/nodes/<node>/skills/`.
+- Warning-and-above mirrors are centralized at `/local/logs/attention/nodes/<node>/`.
+- Legacy compatibility roots `/local/logs/agents`, `/local/logs/clones`, and `/local/logs/skills` are removed.
+- `horc logs <node>` now tails management, runtime, attention, and Hermes logs from this canonical tree.
 
 ## Backups & Restore
 
@@ -140,19 +158,10 @@ hord restart
 
 `horc update <node>` is accepted as a compatibility alias for `horc agent update <node>`.
 
-## Credential Model
-
-- API keys and Discord bot tokens belong in `agents/envs/*.env` (local only, never committed)
-- Codex OAuth (`openai-codex`) is runtime auth state in each node’s `.hermes/auth.json` and must be re-login rotated, not committed in env templates
-
-Rotate Codex OAuth for a node by running Hermes login/logout in that node context:
-- Orchestrator (host): `HERMES_HOME=/local/agents/nodes/orchestrator/.hermes /local/agents/nodes/orchestrator/hermes-agent/.venv/bin/python /local/agents/nodes/orchestrator/hermes-agent/cli.py login`
-- Worker: `docker exec -it hermes-node-<name> bash -lc 'cd /local/hermes-agent && /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py login'`
-
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `memory/`, `backups/`, `crons/`, `workspace/`, `spawns/`
+- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `backups/`, `crons/`
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 
@@ -189,6 +198,11 @@ The orchestrator remains fully operable via CLI and automation pipelines even wi
 
 ## Why Use Hermes Orchestrator
 
+Hermes Orchestrator layer can:
+- Spawn sandboxed hermes-agents nodes on demand for various corporations/especificities.
+- Doctor, fix, operate each others core code easily in case of fail or hard to debug problems and instanteneously up that node again.
+- Enable any node exchange communication so they can self evolve easily.
+- Orchestrate complex workflows
 Hermes Agent is excellent at reasoning and tool use inside a single runtime.
 Hermes Orchestrator solves a different layer: operating many Hermes nodes safely and reliably.
 
@@ -207,6 +221,5 @@ This separation gives teams scale and operational clarity without modifying Herm
 
 ## Branch Policy
 
-- Long-lived branch: `main` only
-- Do not use `master`
+- Long-lived branch: `main` only (do not use `master`)
 - Work branches should use your orchestrator id format: `<horc-id>`

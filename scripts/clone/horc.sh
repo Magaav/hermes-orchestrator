@@ -60,6 +60,7 @@ Usage:
   horc restart [name] [--image IMAGE]
   horc delete [name]
   horc logs [name] [--lines N]
+  horc logs clean [name|all]
   horc backup all
   horc backup node <name>
   horc backup <name>
@@ -73,6 +74,8 @@ Examples:
   horc restart
   horc start node1
   horc logs node1 --lines 120
+  horc logs clean
+  horc logs clean node1
   horc backup all
   horc backup node node1
   horc restore /local/backups/horc-backup-node-node1-20260101T000000Z.tar.gz
@@ -153,8 +156,27 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
-  start|status|stop|delete|logs)
+  start|status|stop|delete)
     resolve_name_and_exec "${ACTION}" "$@"
+    ;;
+  logs)
+    if [[ "${1:-}" == "clean" ]]; then
+      shift
+      if [[ $# -eq 0 ]]; then
+        exec_manager logs --clean --all
+      fi
+      if [[ "${1:-}" == "all" || "${1:-}" == "*" ]]; then
+        shift
+        exec_manager logs --clean --all "$@"
+      fi
+      if [[ "${1:-}" == --* ]]; then
+        exec_manager logs --clean "$@"
+      fi
+      NAME="${1}"
+      shift
+      exec_manager logs --clean --name "${NAME}" "$@"
+    fi
+    resolve_name_and_exec logs "$@"
     ;;
   restart)
     resolve_name_and_run stop "$@" >/dev/null

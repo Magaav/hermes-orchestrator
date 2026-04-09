@@ -7,6 +7,7 @@
 - `envs/<node>.env`: node profile (secrets + node-level toggles)
 - `envs/node.env.example`: single template for every node
 - `nodes/<node>/`: generated runtime state (not versioned)
+- logs are centralized under `/local/logs/nodes/<node>/` (including `skills/` mirrors) and warning+ mirrors under `/local/logs/attention/nodes/<node>/`
 
 ## Env Contract
 
@@ -31,6 +32,7 @@ Defaults handled automatically by orchestrator:
 
 - `NODE_NAME` inferred from `<node>.env` filename
 - node paths (`HERMES_NODE_ROOT`, `HERMES_HOME`, `HERMES_DATA_DIR`) derived from standard topology
+- `COLMEIO_LOGS_DIR` defaults to `/local/logs/nodes/<node>` so skill mirrors stay node-scoped
 - `OPENVIKING_ACCOUNT` and `OPENVIKING_USER` default to node name when omitted
 - Discord restart/reboot commands and delays are runtime defaults (set explicitly only when custom)
 - legacy keys remain backward-compatible (`CLONE_*`, `MEMORY_OPENVIKING`, `BROWSER_CAMOFOX`)

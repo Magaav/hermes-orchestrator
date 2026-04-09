@@ -16,7 +16,7 @@ Design goals:
   - No secrets in command payloads
   - Transactional spawn path (best-effort rollback on failure)
   - Deterministic filesystem layout under /local/agents/nodes/<clone_name>/
-  - Per-clone management log at /local/logs/agents/<clone_name>.log
+  - Per-node centralized logs at /local/logs/nodes/<clone_name>/
 
 ================================================================================
 OPENVIKING ORCHESTRATION LAYER
@@ -73,8 +73,11 @@ ENVS_ROOT = Path(os.getenv("HERMES_AGENTS_ENVS_ROOT", str(AGENTS_ROOT / "envs"))
 CLONES_ROOT = Path(os.getenv("HERMES_AGENTS_NODES_ROOT", str(AGENTS_ROOT / "nodes")))
 LEGACY_CLONES_ROOT = Path("/local/clones")
 LEGACY_AGENTS_NODES_ROOT = AGENTS_ROOT
-LOG_ROOT = Path(os.getenv("HERMES_AGENTS_LOG_ROOT", "/local/logs/agents"))
-LEGACY_LOG_ROOT = Path("/local/logs/clones")
+LOGS_ROOT = Path(os.getenv("HERMES_LOGS_ROOT", "/local/logs"))
+NODE_LOG_ROOT = Path(os.getenv("HERMES_AGENTS_NODE_LOG_ROOT", str(LOGS_ROOT / "nodes")))
+ATTENTION_LOG_ROOT = Path(
+    os.getenv("HERMES_AGENTS_ATTENTION_LOG_ROOT", str(LOGS_ROOT / "attention" / "nodes"))
+)
 REGISTRY_PATH = Path(os.getenv("HERMES_AGENTS_REGISTRY_PATH", str(AGENTS_ROOT / "registry.json")))
 LEGACY_REGISTRY_PATH = LEGACY_CLONES_ROOT / "registry.json"
 
@@ -135,6 +138,10 @@ NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = "/local/workspace/discord/discord
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+ATTENTION_LINE_RE = re.compile(
+    r"\b(warn(?:ing)?|error|critical|fatal|panic|emerg(?:ency)?|alert)\b",
+    re.IGNORECASE,
+)
 
 STATE_LABELS = {
     1: "orchestrator",           # bare-metal bootstrap node, syncs local hermes-agent copy + shared asset symlinks
@@ -205,7 +212,9 @@ def _ensure_dirs() -> None:
     AGENTS_ROOT.mkdir(parents=True, exist_ok=True)
     ENVS_ROOT.mkdir(parents=True, exist_ok=True)
     CLONES_ROOT.mkdir(parents=True, exist_ok=True)
-    LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    LOGS_ROOT.mkdir(parents=True, exist_ok=True)
+    NODE_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    ATTENTION_LOG_ROOT.mkdir(parents=True, exist_ok=True)
     BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
     SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
     SHARED_CRONS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -260,53 +269,187 @@ def _orchestrator_memory_home(clone_name: str = "orchestrator") -> Path:
     return SHARED_MEMORY_ROOT / "openviking" / clone_name
 
 
-def _log(clone_name: str, message: str) -> None:
-    line = f"[{_utc_now()}] {message}\n"
-    candidates = [
-        LOG_ROOT / f"{clone_name}.log",
-        _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log",
-    ]
-    for path in candidates:
+def _node_log_dir(clone_name: str) -> Path:
+    return NODE_LOG_ROOT / clone_name
+
+
+def _node_attention_dir(clone_name: str) -> Path:
+    return ATTENTION_LOG_ROOT / clone_name
+
+
+def _node_hermes_log_dir(clone_name: str) -> Path:
+    return _node_log_dir(clone_name) / "hermes"
+
+
+def _canonical_management_log_path(clone_name: str) -> Path:
+    return _node_log_dir(clone_name) / "management.log"
+
+
+def _canonical_runtime_log_path(clone_name: str) -> Path:
+    return _node_log_dir(clone_name) / "runtime.log"
+
+
+def _canonical_attention_log_path(clone_name: str) -> Path:
+    return _node_attention_dir(clone_name) / "warning-plus.log"
+
+
+def _append_line(path: Path, line: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.open("a", encoding="utf-8").write(line)
+
+
+def _link_attention_errors_file(clone_name: str) -> None:
+    """Expose attention/hermes-errors.log as a stable regular file path.
+
+    Prefer hardlink (same inode) so editors open it as a normal file while it
+    still reflects the canonical hermes/errors.log content.
+    """
+    source = _node_hermes_log_dir(clone_name) / "errors.log"
+    target = _node_attention_dir(clone_name) / "hermes-errors.log"
+
+    source.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.touch(exist_ok=True)
+
+    if target.exists() or target.is_symlink():
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.open("a", encoding="utf-8").write(line)
-            return
-        except PermissionError:
-            continue
-    raise CloneManagerError(f"unable to write log file for {clone_name}")
+            if target.is_file() and not target.is_symlink():
+                if source.exists() and target.stat().st_ino == source.stat().st_ino:
+                    return
+        except Exception:
+            pass
+        _remove_path(target)
+
+    try:
+        os.link(source, target)
+        return
+    except Exception:
+        pass
+
+    # Fallback to symlink when hardlink is unavailable.
+    try:
+        _set_symlink(target, source)
+    except Exception:
+        pass
+
+
+def _ensure_node_log_topology(
+    clone_name: str,
+    clone_root: Path | None = None,
+    *,
+    migrate_clone_paths: bool = False,
+    link_clone_hermes_logs: bool = True,
+) -> None:
+    node_dir = _node_log_dir(clone_name)
+    attention_dir = _node_attention_dir(clone_name)
+    hermes_dir = _node_hermes_log_dir(clone_name)
+    node_dir.mkdir(parents=True, exist_ok=True)
+    attention_dir.mkdir(parents=True, exist_ok=True)
+    hermes_dir.mkdir(parents=True, exist_ok=True)
+    for seed_file in (
+        _canonical_management_log_path(clone_name),
+        _canonical_runtime_log_path(clone_name),
+        _canonical_attention_log_path(clone_name),
+        _node_hermes_log_dir(clone_name) / "agent.log",
+        _node_hermes_log_dir(clone_name) / "errors.log",
+        _node_hermes_log_dir(clone_name) / "gateway.log",
+    ):
+        try:
+            seed_file.parent.mkdir(parents=True, exist_ok=True)
+            seed_file.touch(exist_ok=True)
+        except Exception:
+            pass
+
+    _link_attention_errors_file(clone_name)
+
+    if not migrate_clone_paths:
+        return
+
+    if clone_root is None or not clone_root.exists():
+        return
+
+    hermes_home = clone_root / ".hermes"
+    if hermes_home.exists() and hermes_home.is_dir():
+        hermes_logs = hermes_home / "logs"
+        if link_clone_hermes_logs:
+            if hermes_logs.exists() and not hermes_logs.is_symlink():
+                if hermes_logs.is_dir():
+                    _sync_dir(hermes_logs, hermes_dir, delete=False)
+                _remove_path(hermes_logs)
+            try:
+                _set_symlink(hermes_logs, hermes_dir)
+            except Exception:
+                pass
+        else:
+            if hermes_logs.is_symlink():
+                _remove_path(hermes_logs)
+            hermes_logs.mkdir(parents=True, exist_ok=True)
+    _link_attention_errors_file(clone_name)
+
+
+def _append_attention_if_needed(clone_name: str, line: str) -> None:
+    if ATTENTION_LINE_RE.search(line) is None:
+        return
+    attention_log = _canonical_attention_log_path(clone_name)
+    _append_line(attention_log, line)
+
+
+def _log(clone_name: str, message: str) -> None:
+    _ensure_node_log_topology(clone_name)
+    line = f"[{_utc_now()}] {message}\n"
+    log_path = _canonical_management_log_path(clone_name)
+    try:
+        _append_line(log_path, line)
+    except PermissionError as exc:
+        raise CloneManagerError(f"unable to write log file for {clone_name}: {log_path}") from exc
+    _append_attention_if_needed(clone_name, line)
 
 
 def _log_spawn_event(clone_name: str, phase: str, action: str, detail: str = "") -> None:
     """Deterministic spawn event logging for observability and replay."""
+    _ensure_node_log_topology(clone_name)
     msg = f"[{_utc_now()}] [SPAWN] phase={phase} action={action}"
     if detail:
         msg += f" detail={detail}"
     msg += "\n"
-    candidates = [
-        LOG_ROOT / f"{clone_name}.log",
-        _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log",
-    ]
-    for path in candidates:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.open("a", encoding="utf-8").write(msg)
-            return
-        except PermissionError:
-            continue
-    raise CloneManagerError(f"unable to write spawn log file for {clone_name}")
+    log_path = _canonical_management_log_path(clone_name)
+    try:
+        _append_line(log_path, msg)
+    except PermissionError as exc:
+        raise CloneManagerError(f"unable to write spawn log file for {clone_name}: {log_path}") from exc
+    _append_attention_if_needed(clone_name, msg)
 
 
 def _management_log_path(clone_name: str) -> Path:
-    canonical = LOG_ROOT / f"{clone_name}.log"
-    local_fallback = _clone_root_path(clone_name) / "logs" / "agents" / f"{clone_name}.log"
-    legacy = LEGACY_LOG_ROOT / f"{clone_name}.log"
+    return _canonical_management_log_path(clone_name)
+
+
+def _attention_log_path(clone_name: str) -> Path:
+    canonical = _canonical_attention_log_path(clone_name)
     if canonical.exists():
         return canonical
-    if local_fallback.exists():
-        return local_fallback
-    if legacy.exists():
-        return legacy
-    return local_fallback
+    return canonical
+
+
+def _clone_hermes_log_dir(clone_name: str, clone_root: Path | None = None) -> Path:
+    canonical = _node_hermes_log_dir(clone_name)
+    if canonical.exists():
+        return canonical
+    root = clone_root
+    if root is None:
+        try:
+            root = _clone_root_path(clone_name)
+        except Exception:
+            root = None
+    if root is not None:
+        legacy = root / ".hermes" / "logs"
+        if legacy.exists():
+            return legacy
+    return canonical
+
+
+def _clone_hermes_log_path(clone_name: str, filename: str, clone_root: Path | None = None) -> Path:
+    return _clone_hermes_log_dir(clone_name, clone_root=clone_root) / filename
 
 
 def _read_env_file(path: Path) -> Dict[str, str]:
@@ -892,12 +1035,16 @@ def _fallback_model_name_from_env(env: Dict[str, str]) -> str:
 
 def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
+    node_logs_dir = _node_log_dir(clone_name)
 
     overrides["COLMEIO_PROJECT_DIR"] = (
         _env_first_nonempty(env, "COLMEIO_PROJECT_DIR") or NODE_WORKSPACE_ROOT_IN_CONTAINER
     )
     overrides["COLMEIO_DB_PATH"] = (
         _env_first_nonempty(env, "COLMEIO_DB_PATH") or NODE_WORKSPACE_DB_PATH_IN_CONTAINER
+    )
+    overrides["COLMEIO_LOGS_DIR"] = (
+        _env_first_nonempty(env, "COLMEIO_LOGS_DIR") or str(node_logs_dir)
     )
     overrides["DISCORD_USERS_DB"] = (
         _env_first_nonempty(env, "DISCORD_USERS_DB") or NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER
@@ -1083,12 +1230,7 @@ def _clone_runtime_uv_path(clone_root: Path) -> Path:
 
 
 def _clone_runtime_log_path(clone_name: str, clone_root: Path | None = None) -> Path:
-    root = clone_root if clone_root is not None else _clone_root_path(clone_name)
-    canonical = root / "logs" / "agents" / f"{clone_name}.log"
-    legacy = root / "logs" / "clones" / f"{clone_name}.log"
-    if canonical.exists() or not legacy.exists():
-        return canonical
-    return legacy
+    return _canonical_runtime_log_path(clone_name)
 
 
 def _sync_dir(src: Path, dst: Path, delete: bool = False) -> None:
@@ -1519,11 +1661,17 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
         state_source = None
 
     # Ensure canonical orchestrator directory shape.
-    for sub in ("workspace", ".hermes", ".runtime", "logs/agents", "logs/clones", ".clone-meta"):
+    for sub in ("workspace", ".hermes", ".runtime", "logs", ".clone-meta"):
         sub_path = clone_root / sub
         if sub_path.is_symlink():
             _remove_path(sub_path)
         sub_path.mkdir(parents=True, exist_ok=True)
+    _ensure_node_log_topology(
+        clone_name,
+        clone_root=clone_root,
+        migrate_clone_paths=True,
+        link_clone_hermes_logs=True,
+    )
 
     # Drop legacy clone-era paths that don't belong to orchestrator topology.
     for legacy_sub in ("memory", "backups", "agents", "clones"):
@@ -2165,7 +2313,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         "workspace",
         "hermes-agent",
         ".hermes",
-        "logs/agents",
+        "logs",
         ".clone-meta",
         str(RUNTIME_UV_REL),
     ):
@@ -2173,6 +2321,19 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         if sub_path.is_symlink():
             _remove_path(sub_path)
         sub_path.mkdir(parents=True, exist_ok=True)
+    _ensure_node_log_topology(
+        clone_name,
+        clone_root=clone_root,
+        migrate_clone_paths=True,
+        link_clone_hermes_logs=(mode == 1),
+    )
+
+    # Drop clone-local legacy log buckets. Canonical runtime logs live under
+    # /local/logs/{nodes,attention}/... managed by the orchestrator.
+    for legacy_log_rel in ("agents", "clones", "skills"):
+        legacy_log_path = clone_root / "logs" / legacy_log_rel
+        if legacy_log_path.exists() or legacy_log_path.is_symlink():
+            _remove_path(legacy_log_path)
 
     # Drop legacy clone-era paths that are outside the agents-v2 topology.
     for legacy_rel in ("memory", "backups", "agents", "clones"):
@@ -2306,13 +2467,30 @@ def _build_docker_run_cmd(
     runtime_env_overrides: Dict[str, str],
 ) -> list[str]:
     container = _container_name(clone_name)
-    runtime_log = f"/local/logs/agents/{clone_name}.log"
+    _ensure_node_log_topology(
+        clone_name,
+        clone_root=clone_root,
+        migrate_clone_paths=True,
+        link_clone_hermes_logs=False,
+    )
+    node_log_host = _node_log_dir(clone_name)
+    attention_log_host = _node_attention_dir(clone_name)
+    hermes_log_host = _node_hermes_log_dir(clone_name)
+    node_log_host.mkdir(parents=True, exist_ok=True)
+    attention_log_host.mkdir(parents=True, exist_ok=True)
+    hermes_log_host.mkdir(parents=True, exist_ok=True)
+
     node_crons_host = SHARED_CRONS_ROOT / clone_name
     node_crons_host.mkdir(parents=True, exist_ok=True)
 
     gateway_cmd = (
         "set -euo pipefail; "
-        "mkdir -p /local/logs/agents; "
+        f"NODE_LOG_DIR=/local/logs/nodes/{clone_name}; "
+        f"ATTN_LOG_DIR=/local/logs/attention/nodes/{clone_name}; "
+        "RUNTIME_LOG=\"${NODE_LOG_DIR}/runtime.log\"; "
+        "ATTN_LOG=\"${ATTN_LOG_DIR}/warning-plus.log\"; "
+        "ATTN_REGEX='warn(ing)?|error|critical|fatal|panic|emerg(ency)?|alert'; "
+        "mkdir -p \"${NODE_LOG_DIR}\" \"${ATTN_LOG_DIR}\" /local/.hermes/logs; "
         "CA_BUNDLE=\"$("
         "/local/hermes-agent/.venv/bin/python -c "
         "\"import os, importlib.util; "
@@ -2327,7 +2505,7 @@ def _build_docker_run_cmd(
         "candidates=(([__import__('certifi').where()] if spec else []) + candidates); "
         "print(next((p for p in candidates if p and os.path.isfile(p)), ''))\""
         ")\"; "
-        f"echo \"[clone-bootstrap] ca_bundle=${{CA_BUNDLE:-unset}}\" >> {runtime_log}; "
+        "echo \"[clone-bootstrap] ca_bundle=${CA_BUNDLE:-unset}\" | tee -a \"${RUNTIME_LOG}\" >(grep -Eai \"${ATTN_REGEX}\" >> \"${ATTN_LOG}\") >/dev/null; "
         "if [ -n \"${CA_BUNDLE:-}\" ]; then "
         "export SSL_CERT_FILE=\"$CA_BUNDLE\"; "
         "export REQUESTS_CA_BUNDLE=\"$CA_BUNDLE\"; "
@@ -2338,7 +2516,7 @@ def _build_docker_run_cmd(
         "if [ -x \"${_p}\" ]; then PRESTART_SCRIPT=\"${_p}\"; break; fi; "
         "done; "
         "if [ -n \"${PRESTART_SCRIPT}\" ]; then "
-        f"bash \"${{PRESTART_SCRIPT}}\" >> {runtime_log} 2>&1 || true; "
+        "bash \"${PRESTART_SCRIPT}\" 2>&1 | tee -a \"${RUNTIME_LOG}\" >(grep -Eai \"${ATTN_REGEX}\" >> \"${ATTN_LOG}\") >/dev/null || true; "
         "fi; "
         "rm -f /tmp/hermes-supervisor-stop /tmp/hermes-reboot-requested; "
         "SUPERVISOR_STOP=0; "
@@ -2354,14 +2532,14 @@ def _build_docker_run_cmd(
         "}; "
         "trap _stop_supervisor TERM INT; "
         "while true; do "
-        f"/local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py --gateway >> {runtime_log} 2>&1 & "
+        "( /local/hermes-agent/.venv/bin/python /local/hermes-agent/cli.py --gateway 2>&1 | tee -a \"${RUNTIME_LOG}\" >(grep -Eai \"${ATTN_REGEX}\" >> \"${ATTN_LOG}\") >/dev/null ) & "
         "CHILD_PID=$!; "
         "echo \"${CHILD_PID}\" > /tmp/hermes-gateway.pid; "
         "set +e; "
         "wait \"${CHILD_PID}\"; "
         "RC=$?; "
         "set -e; "
-        f"echo \"[clone-bootstrap] gateway_exit_rc=${{RC}}\" >> {runtime_log}; "
+        "echo \"[clone-bootstrap] gateway_exit_rc=${RC}\" | tee -a \"${RUNTIME_LOG}\" >(grep -Eai \"${ATTN_REGEX}\" >> \"${ATTN_LOG}\") >/dev/null; "
         "if [ -f /tmp/hermes-reboot-requested ]; then "
         "rm -f /tmp/hermes-reboot-requested; "
         "exit 42; "
@@ -2405,6 +2583,12 @@ def _build_docker_run_cmd(
         "PYTHONUNBUFFERED=1",
         "-v",
         f"{clone_root}:/local",
+        "-v",
+        f"{node_log_host}:/local/logs/nodes/{clone_name}",
+        "-v",
+        f"{attention_log_host}:/local/logs/attention/nodes/{clone_name}",
+        "-v",
+        f"{hermes_log_host}:/local/.hermes/logs",
         "-v",
         f"{SHARED_SCRIPTS_ROOT}:/local/scripts:ro",
         "-v",
@@ -2539,6 +2723,12 @@ def _orchestrator_start_gateway(
             f"({required}); candidates={detail}"
         )
 
+    _ensure_node_log_topology(
+        clone_name,
+        clone_root=clone_root,
+        migrate_clone_paths=True,
+        link_clone_hermes_logs=True,
+    )
     runtime_log = _clone_runtime_log_path(clone_name, clone_root=clone_root)
     runtime_log.parent.mkdir(parents=True, exist_ok=True)
     log_handle = runtime_log.open("a", encoding="utf-8")
@@ -2686,6 +2876,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     env_path = _clone_env_path(clone_name)
     env = _read_env_file(env_path)
     clone_root = _clone_root_path(clone_name)
+    _ensure_node_log_topology(clone_name)
     container = _container_name(clone_name)
     state_code = _extract_state_mode(env)
     is_orchestrator = state_code == 1
@@ -2762,6 +2953,8 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "container_state": state,
                 "log_file": str(_management_log_path(clone_name)),
                 "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
+                "attention_log_file": str(_attention_log_path(clone_name)),
+                "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
                 "camofox": camofox_bootstrap,
                 "openviking": openviking_bootstrap,
                 "models": model_bootstrap,
@@ -2832,6 +3025,8 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "container_state": process_state,
                 "log_file": str(_management_log_path(clone_name)),
                 "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
+                "attention_log_file": str(_attention_log_path(clone_name)),
+                "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
                 "camofox": camofox_bootstrap,
                 "openviking": openviking_bootstrap,
                 "models": model_bootstrap,
@@ -2887,6 +3082,8 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             "container_state": state,
             "log_file": str(_management_log_path(clone_name)),
             "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
+            "attention_log_file": str(_attention_log_path(clone_name)),
+            "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
             "camofox": camofox_bootstrap,
             "openviking": openviking_bootstrap,
             "models": model_bootstrap,
@@ -2915,6 +3112,7 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
     env_path = _clone_env_path(clone_name)
     clone_root = _clone_root_path(clone_name)
+    _ensure_node_log_topology(clone_name)
     env = _read_env_file(env_path) if env_path.exists() else {}
 
     state_mode = "unknown"
@@ -2968,6 +3166,8 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         "container_state": state,
         "log_file": str(mgmt_log_file),
         "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
+        "attention_log_file": str(_attention_log_path(clone_name)),
+        "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
     }
 
 
@@ -3071,17 +3271,152 @@ def _tail_file(path: Path, lines: int) -> str:
     return "\n".join(parts[-lines:])
 
 
+def _truncate_log_file(path: Path) -> tuple[bool, str | None]:
+    target = path
+    try:
+        if path.is_symlink():
+            try:
+                target = path.resolve(strict=True)
+            except FileNotFoundError:
+                return False, "broken_symlink"
+        if not target.exists() or not target.is_file():
+            return False, "not_file"
+        with target.open("w", encoding="utf-8"):
+            pass
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _discover_log_node_names() -> list[str]:
+    names: set[str] = set(_discover_node_names())
+
+    for root in (NODE_LOG_ROOT, ATTENTION_LOG_ROOT):
+        try:
+            if root.exists():
+                for node_dir in root.iterdir():
+                    if node_dir.is_dir():
+                        names.add(node_dir.name)
+        except Exception:
+            continue
+
+    ordered: list[str] = []
+    for raw in sorted(names):
+        try:
+            ordered.append(_normalize_clone_name(raw))
+        except Exception:
+            continue
+    return ordered
+
+
+def _collect_node_log_files(clone_name: str) -> list[Path]:
+    files: set[Path] = {
+        _canonical_management_log_path(clone_name),
+        _canonical_runtime_log_path(clone_name),
+        _canonical_attention_log_path(clone_name),
+        _node_hermes_log_dir(clone_name) / "agent.log",
+        _node_hermes_log_dir(clone_name) / "errors.log",
+        _node_hermes_log_dir(clone_name) / "gateway.log",
+        _node_attention_dir(clone_name) / "hermes-errors.log",
+    }
+
+    for root in (_node_log_dir(clone_name), _node_attention_dir(clone_name)):
+        if not root.exists():
+            continue
+        for path in root.rglob("*.log"):
+            files.add(path)
+
+    return sorted(files, key=lambda p: str(p))
+
+
+def _action_logs_clean(clone_name: str | None, *, clean_all: bool) -> Dict[str, Any]:
+    targets: list[str]
+    if clean_all:
+        targets = _discover_log_node_names()
+    else:
+        if not clone_name:
+            raise CloneManagerError("logs clean requires node name or --all")
+        targets = [clone_name]
+
+    if not targets:
+        return {
+            "ok": True,
+            "action": "logs_clean",
+            "scope": "all" if clean_all else "node",
+            "cleaned_nodes": [],
+            "cleaned_files": 0,
+            "skipped_files": 0,
+            "failed": [],
+        }
+
+    cleaned_files = 0
+    skipped_files = 0
+    failed: list[Dict[str, str]] = []
+    cleaned_nodes: list[str] = []
+
+    for node in targets:
+        _ensure_node_log_topology(node)
+        cleaned_nodes.append(node)
+        for log_path in _collect_node_log_files(node):
+            ok, reason = _truncate_log_file(log_path)
+            if ok:
+                cleaned_files += 1
+            else:
+                skipped_files += 1
+                if reason not in {"not_file", "broken_symlink"}:
+                    failed.append(
+                        {
+                            "node": node,
+                            "path": str(log_path),
+                            "error": str(reason or "unknown"),
+                        }
+                    )
+
+    return {
+        "ok": len(failed) == 0,
+        "action": "logs_clean",
+        "scope": "all" if clean_all else "node",
+        "cleaned_nodes": cleaned_nodes,
+        "cleaned_files": cleaned_files,
+        "skipped_files": skipped_files,
+        "failed": failed,
+    }
+
+
 def _action_logs(clone_name: str, lines: int) -> Dict[str, Any]:
+    clone_root: Path | None = None
+    try:
+        clone_root = _clone_root_path(clone_name)
+    except Exception:
+        clone_root = None
+    _ensure_node_log_topology(clone_name)
+
     mgmt_log_file = _management_log_path(clone_name)
     runtime_log_file = _clone_runtime_log_path(clone_name)
+    attention_log_file = _attention_log_path(clone_name)
+    hermes_errors_log_file = _clone_hermes_log_path(clone_name, "errors.log", clone_root=clone_root)
+    hermes_gateway_log_file = _clone_hermes_log_path(clone_name, "gateway.log", clone_root=clone_root)
+    hermes_agent_log_file = _clone_hermes_log_path(clone_name, "agent.log", clone_root=clone_root)
     mgmt_text = _tail_file(mgmt_log_file, lines)
     runtime_text = _tail_file(runtime_log_file, lines)
+    attention_text = _tail_file(attention_log_file, lines)
+    hermes_errors_text = _tail_file(hermes_errors_log_file, lines)
+    hermes_gateway_text = _tail_file(hermes_gateway_log_file, lines)
+    hermes_agent_text = _tail_file(hermes_agent_log_file, lines)
 
     chunks: list[str] = []
     if mgmt_text:
         chunks.append(f"== management ({mgmt_log_file}) ==\n{mgmt_text}")
     if runtime_text:
         chunks.append(f"== runtime ({runtime_log_file}) ==\n{runtime_text}")
+    if attention_text:
+        chunks.append(f"== attention (warning+) ({attention_log_file}) ==\n{attention_text}")
+    if hermes_errors_text:
+        chunks.append(f"== hermes errors (warning+) ({hermes_errors_log_file}) ==\n{hermes_errors_text}")
+    if hermes_gateway_text:
+        chunks.append(f"== hermes gateway ({hermes_gateway_log_file}) ==\n{hermes_gateway_text}")
+    if hermes_agent_text:
+        chunks.append(f"== hermes agent ({hermes_agent_log_file}) ==\n{hermes_agent_text}")
     text = "\n\n".join(chunks).strip()
 
     if not text:
@@ -3096,6 +3431,11 @@ def _action_logs(clone_name: str, lines: int) -> Dict[str, Any]:
         "clone_name": clone_name,
         "log_file": str(mgmt_log_file),
         "runtime_log_file": str(runtime_log_file),
+        "attention_log_file": str(attention_log_file),
+        "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
+        "hermes_errors_log_file": str(hermes_errors_log_file),
+        "hermes_gateway_log_file": str(hermes_gateway_log_file),
+        "hermes_agent_log_file": str(hermes_agent_log_file),
         "lines": lines,
         "log_text": text,
     }
@@ -3583,6 +3923,7 @@ def _dispatch(
     source_branch: str,
     backup_all: bool,
     restore_path: str,
+    logs_clean: bool,
 ) -> Dict[str, Any]:
     if action == "start":
         if not clone_name:
@@ -3601,6 +3942,8 @@ def _dispatch(
             raise CloneManagerError("delete requires clone name")
         return _action_delete(clone_name)
     if action == "logs":
+        if logs_clean:
+            return _action_logs_clean(clone_name, clean_all=backup_all or not clone_name)
         if not clone_name:
             raise CloneManagerError("logs requires clone name")
         return _action_logs(clone_name, lines=lines)
@@ -3630,7 +3973,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--image", default=DEFAULT_DOCKER_IMAGE, help="Docker image for clone runtime")
     parser.add_argument("--lines", type=int, default=80, help="Log tail lines for logs action")
-    parser.add_argument("--all", dest="backup_all", action="store_true", help="Backup all nodes (backup action)")
+    parser.add_argument(
+        "--clean",
+        dest="logs_clean",
+        action="store_true",
+        help="Clean/truncate canonical logs (logs action)",
+    )
+    parser.add_argument(
+        "--all",
+        dest="backup_all",
+        action="store_true",
+        help="Apply to all nodes (backup action, or logs with --clean)",
+    )
     parser.add_argument("--path", dest="restore_path", default=None, help="Backup file path for restore action")
     parser.add_argument(
         "--source-branch",
@@ -3655,6 +4009,12 @@ def main() -> int:
             if not restore_path:
                 raise CloneManagerError("restore requires backup path (use positional path or --path)")
             clone_name = None
+        elif args.action == "logs" and bool(args.logs_clean):
+            raw_name = args.name_flag or args.name_positional
+            if raw_name and str(raw_name).strip().lower() not in {"all", "*"}:
+                clone_name = _normalize_clone_name(raw_name)
+            else:
+                clone_name = None
         elif args.action in {"update", "backup"}:
             raw_name = args.name_flag or args.name_positional
             clone_name = _normalize_clone_name(raw_name) if raw_name else None
@@ -3676,6 +4036,7 @@ def main() -> int:
             source_branch=str(args.source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
             backup_all=bool(args.backup_all),
             restore_path=restore_path,
+            logs_clean=bool(args.logs_clean),
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0
