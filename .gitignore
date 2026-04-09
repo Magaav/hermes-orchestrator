@@ -19,6 +19,7 @@ plugins/discord/discord_webhooks_table.json
 !.env.example
 agents/envs/*
 !agents/envs/node.env.example
+!agents/envs/orchestrator.env.example
 docker/.env
 hermes-agent/.env
 plugins/**/.env

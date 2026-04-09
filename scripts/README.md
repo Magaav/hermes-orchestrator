@@ -26,6 +26,6 @@ horc start
 horc status
 horc logs clean
 horc backup all
-horc backup node colmeio
+horc backup node node1
 horc restore /local/backups/<archive>.tar.gz
 ```

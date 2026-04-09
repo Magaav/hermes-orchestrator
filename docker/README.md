@@ -177,8 +177,8 @@ Failure means:
 curl -sS http://127.0.0.1:1933/health
 curl -sS -X POST http://127.0.0.1:1933/api/v1/search/search \
   -H 'Content-Type: application/json' \
-  -H 'X-OpenViking-Account: colmeio' \
-  -H 'X-OpenViking-User: colmeio' \
+  -H 'X-OpenViking-Account: example-account' \
+  -H 'X-OpenViking-User: example-user' \
   -d '{"query":"milk shortage","target_uri":"viking://resources","limit":5,"telemetry":true}'
 ```
 

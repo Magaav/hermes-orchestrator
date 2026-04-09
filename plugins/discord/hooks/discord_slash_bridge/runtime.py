@@ -11,9 +11,14 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 _PRIMARY_DISCORD_COMMANDS = Path("/local/plugins/discord/discord_commands.json")
+_PRIMARY_NODE_DISCORD_COMMANDS_DIR = Path("/local/plugins/discord/commands")
 _LEGACY_DISCORD_COMMANDS = (
     Path("/local/workspace/discord/discord_commands.json"),
     Path("/local/workspace/colmeio/discord/discord_commands.json"),
+)
+_LEGACY_NODE_DISCORD_COMMANDS_DIRS = (
+    Path("/local/workspace/discord/commands"),
+    Path("/local/workspace/colmeio/discord/commands"),
 )
 
 
@@ -188,6 +193,17 @@ class DiscordSlashRuntime:
             cfg_path = Path(configured).expanduser()
             if cfg_path.exists():
                 return cfg_path
+
+        profile = (
+            str(os.getenv("DISCORD_COMMANDS_PROFILE", "") or "").strip()
+            or str(os.getenv("COLMEIO_CLONE_NAME", "") or "").strip()
+        )
+        if profile:
+            profile_name = profile[:-5] if profile.lower().endswith(".json") else profile
+            for commands_dir in (_PRIMARY_NODE_DISCORD_COMMANDS_DIR, *_LEGACY_NODE_DISCORD_COMMANDS_DIRS):
+                candidate = commands_dir / f"{profile_name}.json"
+                if candidate.exists():
+                    return candidate
 
         for candidate in (_PRIMARY_DISCORD_COMMANDS, *_LEGACY_DISCORD_COMMANDS):
             if candidate.exists():

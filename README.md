@@ -1,7 +1,7 @@
 # hermes-orchestrator
 
 Hermes Orchestrator is the host control plane for running one orchestrator node plus many containerized Hermes worker nodes.
-Node env conventions and defaults are documented in [`agents/READ.me`](agents/READ.me) and [`agents/README.md`](agents/README.md).
+Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
 
 ## Install
 
@@ -64,7 +64,7 @@ What install does:
     │   ├── orchestrator/
     │   │   ├── management.log
     │   │   ├── runtime.log
-    │   │   ├── skills/ # per-node skill log mirrors (for example: colmeio-*.log)
+│   │   ├── skills/ # per-node skill log mirrors (for example: node-*.log)
     │   │   └── hermes/
     │   │       ├── agent.log
     │   │       ├── errors.log
@@ -84,7 +84,7 @@ horc start
 ```
 
 Default `horc start` target is `orchestrator` and it reads:
-- `/local/agents/envs/orchestrator.env`
+- `/local/agents/envs/orchestrator.env` (auto-created from `agents/envs/orchestrator.env.example` if missing)
 - `/local/agents/nodes/orchestrator/`
 
 ## Node Lifecycle
@@ -167,6 +167,7 @@ Runtime and secret files are intentionally excluded:
 
 Commit only templates:
 - `agents/envs/node.env.example`
+- `agents/envs/orchestrator.env.example`
 - `agents/README.md`
 
 Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
@@ -223,3 +224,11 @@ This separation gives teams scale and operational clarity without modifying Herm
 
 - Long-lived branch: `main` only (do not use `master`)
 - Work branches should use your orchestrator id format: `<horc-id>`
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

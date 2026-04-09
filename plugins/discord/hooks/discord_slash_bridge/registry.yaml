@@ -27,7 +27,7 @@ native_overrides:
       - discord guild sync
       - discord command bootstrap
   metricas:
-    enabled: true
+    enabled: false
     description: Show Colmeio metrics dashboard
     acl_command: metricas
     script_path: /local/.hermes/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py
@@ -79,9 +79,8 @@ slash_bridge:
     metricas:
       handler: metrics_dashboard
       acl_command: metricas
-    colmeio-metrics:
-      handler: metrics_dashboard
-      acl_command: metricas
+      script_path: /local/.hermes/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py
+      timeout_sec: 45
     clean:
       acl_command: clean
       handler: custom:clean

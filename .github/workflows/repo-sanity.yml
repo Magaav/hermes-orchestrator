@@ -1,0 +1,42 @@
+name: Repo Sanity
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Shell Syntax Checks
+        run: |
+          bash -n scripts/install.sh
+          bash -n scripts/clone/clone.sh
+          bash -n scripts/clone/hord.sh
+          bash -n scripts/clone/horc.sh
+          bash -n docker/entrypoint.sh
+          bash -n docker/dockerfiles/openviking-entrypoint.sh
+
+      - name: Python Syntax Checks
+        run: |
+          python3 -m compileall -q scripts plugins/discord
+
+      - name: Docs Guardrails
+        run: |
+          if grep -R -n "agents/READ.me" README.md; then
+            echo "Broken README link found: agents/READ.me"
+            exit 1
+          fi
+          if [ ! -f "agents/envs/orchestrator.env.example" ]; then
+            echo "Missing required template: agents/envs/orchestrator.env.example"
+            exit 1
+          fi

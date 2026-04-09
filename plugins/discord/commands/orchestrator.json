@@ -1,0 +1,75 @@
+[
+  {
+    "name": "clean",
+    "description": "Limpar todas as mensagens do canal/thread atual",
+    "type": 1,
+    "default_member_permissions": "8192",
+    "dm_permission": false,
+    "options": [
+      {
+        "type": 5,
+        "name": "confirm",
+        "description": "Confirme com true para apagar todas as mensagens do canal/thread atual",
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "pair",
+    "description": "Parear um usuário do Discord para usar o Hermes",
+    "type": 1,
+    "default_member_permissions": "8",
+    "dm_permission": false,
+    "options": [
+      {
+        "type": 3,
+        "name": "discord_user_id",
+        "description": "ID do usuário (ou menção <@id>) para liberar acesso",
+        "required": true
+      }
+    ]
+  },
+  {
+    "name": "clone",
+    "description": "Spawn and manage Dockerized Hermes clone nodes",
+    "type": 1,
+    "default_member_permissions": "8",
+    "dm_permission": false,
+    "options": [
+      {
+        "type": 3,
+        "name": "name",
+        "description": "Clone profile name (maps to /local/agents/<name>.env)",
+        "required": true
+      },
+      {
+        "type": 3,
+        "name": "action",
+        "description": "Lifecycle action (default: spawn)",
+        "required": false,
+        "choices": [
+          {
+            "name": "spawn",
+            "value": "spawn"
+          },
+          {
+            "name": "status",
+            "value": "status"
+          },
+          {
+            "name": "stop",
+            "value": "stop"
+          },
+          {
+            "name": "delete",
+            "value": "delete"
+          },
+          {
+            "name": "logs",
+            "value": "logs"
+          }
+        ]
+      }
+    ]
+  }
+]

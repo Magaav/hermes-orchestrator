@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Hermes Orchestrator Installer (Colmeio Edition)
+# Hermes Orchestrator Installer (Node Edition)
 # ============================================================================
 #
 # Usage:

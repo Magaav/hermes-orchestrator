@@ -71,6 +71,8 @@ from typing import Any, Dict
 AGENTS_ROOT = Path(os.getenv("HERMES_AGENTS_ROOT", "/local/agents"))
 ENVS_ROOT = Path(os.getenv("HERMES_AGENTS_ENVS_ROOT", str(AGENTS_ROOT / "envs")))
 CLONES_ROOT = Path(os.getenv("HERMES_AGENTS_NODES_ROOT", str(AGENTS_ROOT / "nodes")))
+NODE_ENV_TEMPLATE_PATH = ENVS_ROOT / "node.env.example"
+ORCHESTRATOR_ENV_TEMPLATE_PATH = ENVS_ROOT / "orchestrator.env.example"
 LEGACY_CLONES_ROOT = Path("/local/clones")
 LEGACY_AGENTS_NODES_ROOT = AGENTS_ROOT
 LOGS_ROOT = Path(os.getenv("HERMES_LOGS_ROOT", "/local/logs"))
@@ -475,6 +477,68 @@ def _read_env_file(path: Path) -> Dict[str, str]:
             value = value[1:-1]
         env[key] = value
     return env
+
+
+def _replace_or_append_env_line(text: str, key: str, value: str) -> str:
+    line = f"{key}={value}"
+    pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return f"{text}{line}\n"
+
+
+def _orchestrator_env_template() -> tuple[Path, str]:
+    if ORCHESTRATOR_ENV_TEMPLATE_PATH.exists():
+        return ORCHESTRATOR_ENV_TEMPLATE_PATH, ORCHESTRATOR_ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    if NODE_ENV_TEMPLATE_PATH.exists():
+        text = NODE_ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
+        text = _replace_or_append_env_line(text, "NODE_STATE", "1")
+        text = _replace_or_append_env_line(text, "NODE_STATE_FROM_BACKUP_PATH", "''")
+        text = _replace_or_append_env_line(text, "OPENVIKING_ENDPOINT", "http://127.0.0.1:1933")
+        text = _replace_or_append_env_line(text, "CAMOFOX_URL", "http://127.0.0.1:9377")
+        return NODE_ENV_TEMPLATE_PATH, text
+
+    raise CloneManagerError(
+        "orchestrator env missing and no template found. "
+        f"Tried: {ORCHESTRATOR_ENV_TEMPLATE_PATH}, {NODE_ENV_TEMPLATE_PATH}"
+    )
+
+
+def _ensure_clone_env_file(clone_name: str) -> Dict[str, Any]:
+    env_path = _clone_env_path(clone_name)
+    if env_path.exists():
+        return {
+            "created": False,
+            "clone_name": clone_name,
+            "env_path": str(env_path),
+            "template_path": "",
+            "reason": "already_exists",
+        }
+
+    if clone_name != "orchestrator":
+        return {
+            "created": False,
+            "clone_name": clone_name,
+            "env_path": str(env_path),
+            "template_path": "",
+            "reason": "missing_non_orchestrator_env",
+        }
+
+    template_path, template_text = _orchestrator_env_template()
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    final_text = template_text if template_text.endswith("\n") else f"{template_text}\n"
+    env_path.write_text(final_text, encoding="utf-8")
+    _log(clone_name, f"auto-created missing env from template: {template_path}")
+    return {
+        "created": True,
+        "clone_name": clone_name,
+        "env_path": str(env_path),
+        "template_path": str(template_path),
+        "reason": "auto_created_orchestrator_env",
+    }
 
 
 def _load_optional_env_file(path: Path) -> None:
@@ -1033,6 +1097,15 @@ def _fallback_model_name_from_env(env: Dict[str, str]) -> str:
     return _env_first_nonempty(env, "NODE_AGENT_FALLBACK_MODEL", "FALLBACK_MODEL")
 
 
+def _effective_hermes_yolo_mode(env: Dict[str, str]) -> str:
+    """Return the canonical YOLO toggle from profile env (supports legacy alias)."""
+    return _env_first_nonempty(
+        env,
+        "HERMES_YOLO_MODE",
+        "NODE_HERMES_YOLO_MODE",
+    )
+
+
 def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
     node_logs_dir = _node_log_dir(clone_name)
@@ -1072,6 +1145,10 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name)
     overrides["OPENVIKING_ACCOUNT"] = openviking_account
     overrides["OPENVIKING_USER"] = openviking_user
+
+    yolo_mode = _effective_hermes_yolo_mode(env)
+    if yolo_mode:
+        overrides["HERMES_YOLO_MODE"] = yolo_mode
 
     return overrides
 
@@ -1756,6 +1833,9 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     clone_home_env = clone_root / ".hermes" / ".env"
     clone_home_env.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(env_path, clone_home_env)
+    yolo_mode = _effective_hermes_yolo_mode(env)
+    if yolo_mode:
+        _upsert_env_value(clone_home_env, "HERMES_YOLO_MODE", yolo_mode)
     try:
         clone_home_env.chmod(0o600)
     except Exception:
@@ -2441,6 +2521,9 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
     clone_home_env = clone_root / ".hermes" / ".env"
     clone_home_env.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(env_path, clone_home_env)
+    yolo_mode = _effective_hermes_yolo_mode(env)
+    if yolo_mode:
+        _upsert_env_value(clone_home_env, "HERMES_YOLO_MODE", yolo_mode)
     try:
         clone_home_env.chmod(0o600)
     except Exception:
@@ -2874,6 +2957,7 @@ def _orchestrator_stop_gateway(clone_name: str, clone_root: Path) -> Dict[str, A
 
 def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     env_path = _clone_env_path(clone_name)
+    env_autocreate = _ensure_clone_env_file(clone_name)
     env = _read_env_file(env_path)
     clone_root = _clone_root_path(clone_name)
     _ensure_node_log_topology(clone_name)
@@ -2951,6 +3035,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "container_name": container,
                 "state_mode": STATE_LABELS.get(_extract_state_mode(env), "unknown"),
                 "container_state": state,
+                "env_autocreate": env_autocreate,
                 "log_file": str(_management_log_path(clone_name)),
                 "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
                 "attention_log_file": str(_attention_log_path(clone_name)),
@@ -3023,6 +3108,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "state_mode": fs_meta["state_mode"],
                 "state_code": fs_meta["state_code"],
                 "container_state": process_state,
+                "env_autocreate": env_autocreate,
                 "log_file": str(_management_log_path(clone_name)),
                 "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
                 "attention_log_file": str(_attention_log_path(clone_name)),
@@ -3080,6 +3166,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             "state_mode": fs_meta["state_mode"],
             "state_code": fs_meta["state_code"],
             "container_state": state,
+            "env_autocreate": env_autocreate,
             "log_file": str(_management_log_path(clone_name)),
             "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
             "attention_log_file": str(_attention_log_path(clone_name)),
@@ -3110,6 +3197,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
 
 def _action_status(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
+    env_autocreate = _ensure_clone_env_file(clone_name)
     env_path = _clone_env_path(clone_name)
     clone_root = _clone_root_path(clone_name)
     _ensure_node_log_topology(clone_name)
@@ -3142,6 +3230,7 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         "runtime_type": "baremetal" if is_orchestrator else "container",
         "env_exists": env_path.exists(),
         "env_path": str(env_path),
+        "env_autocreate": env_autocreate,
         "clone_root_exists": clone_root.exists(),
         "clone_root": str(clone_root),
         "state_mode": state_mode,
@@ -3173,6 +3262,7 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
 
 def _action_stop(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
+    env_autocreate = _ensure_clone_env_file(clone_name)
     env_path = _clone_env_path(clone_name)
     env = _read_env_file(env_path) if env_path.exists() else {}
     state_code: Any = None
@@ -3196,6 +3286,7 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
             "runtime_type": "baremetal",
             "container_state": stop_state.get("process_state", {}),
             "host_pid": stop_state.get("pid"),
+            "env_autocreate": env_autocreate,
         }
 
     if not _docker_exists(container):
@@ -3206,6 +3297,7 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
             "clone_name": clone_name,
             "container_name": container,
             "runtime_type": "container",
+            "env_autocreate": env_autocreate,
         }
 
     _run(["docker", "stop", container], check=False)
@@ -3219,11 +3311,13 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
         "container_name": container,
         "runtime_type": "container",
         "container_state": state,
+        "env_autocreate": env_autocreate,
     }
 
 
 def _action_delete(clone_name: str) -> Dict[str, Any]:
     container = _container_name(clone_name)
+    env_autocreate = _ensure_clone_env_file(clone_name)
     env_path = _clone_env_path(clone_name)
     env = _read_env_file(env_path) if env_path.exists() else {}
     state_code: Any = None
@@ -3260,6 +3354,7 @@ def _action_delete(clone_name: str) -> Dict[str, Any]:
         "runtime_type": "baremetal" if is_orchestrator else "container",
         "data_preserved": True,
         "clone_root": str(clone_root),
+        "env_autocreate": env_autocreate,
     }
 
 

@@ -25,7 +25,22 @@ if [[ -z "$ENV_FILE" ]]; then
   done
 fi
 
+NODE_COMMANDS_DIR="${PROJECT_DIR}/plugins/discord/commands"
+if [[ ! -d "$NODE_COMMANDS_DIR" && -d "/local/plugins/discord/commands" ]]; then
+  NODE_COMMANDS_DIR="/local/plugins/discord/commands"
+fi
+
 PAYLOAD_FILE="${1:-${DISCORD_COMMANDS_FILE:-${PROJECT_DIR}/plugins/discord/discord_commands.json}}"
+if [[ -z "${1:-}" && -z "${DISCORD_COMMANDS_FILE:-}" ]]; then
+  PROFILE_NAME="${DISCORD_COMMANDS_PROFILE:-${COLMEIO_CLONE_NAME:-}}"
+  if [[ -z "$PROFILE_NAME" && -n "$ENV_FILE" ]]; then
+    PROFILE_NAME="$(basename "$ENV_FILE" .env)"
+  fi
+  PROFILE_NAME="${PROFILE_NAME%.json}"
+  if [[ -n "$PROFILE_NAME" && -f "${NODE_COMMANDS_DIR}/${PROFILE_NAME}.json" ]]; then
+    PAYLOAD_FILE="${NODE_COMMANDS_DIR}/${PROFILE_NAME}.json"
+  fi
+fi
 if [[ ! -f "$PAYLOAD_FILE" && -f "/local/plugins/discord/discord_commands.json" ]]; then
   PAYLOAD_FILE="/local/plugins/discord/discord_commands.json"
 fi

@@ -1,6 +1,6 @@
 # Discord Slash Bridge Runtime
 
-This folder is the external command engine loaded by Discord bootstrap patch.
+This folder is the external command engine loaded by the Discord bootstrap patch.
 
 ## Files
 
@@ -9,7 +9,7 @@ This folder is the external command engine loaded by Discord bootstrap patch.
 - `registry.yaml`: native overrides + bridge routing registry
 - `config.yaml`: quick alias/block map
 
-## Registry quick reference
+## Registry Quick Reference
 
 `registry.yaml` supports two layers:
 
@@ -29,12 +29,12 @@ Current custom handlers include:
 - `custom:pair`
 - `custom:clone` (Dockerized Hermes node lifecycle via `/clone`)
 
-## Add a new command quickly
+## Add A New Command Quickly
 
 Preferred workflow:
 
 ```bash
-bash /local/workspace/discord/scripts/new_command_scaffold.sh \
+bash /local/plugins/discord/scripts/new_command_scaffold.sh \
   --name exemplo \
   --description "Meu novo comando" \
   --mode dispatch \
@@ -45,7 +45,7 @@ bash /local/workspace/discord/scripts/new_command_scaffold.sh \
 Handler mode (creates `custom_handlers/<id>.py` and route `handler: custom:<id>`):
 
 ```bash
-bash /local/workspace/discord/scripts/new_command_scaffold.sh \
+bash /local/plugins/discord/scripts/new_command_scaffold.sh \
   --name exemplo-custom \
   --mode handler \
   --handler-id exemplo_custom
@@ -54,7 +54,7 @@ bash /local/workspace/discord/scripts/new_command_scaffold.sh \
 Then run:
 
 ```bash
-bash /local/workspace/discord/scripts/register_discord_commands.sh /local/workspace/discord/discord_commands.json
-bash /local/workspace/discord/scripts/prestart_reapply.sh --strict
-python3 /local/workspace/discord/scripts/verify_discord_customizations.py
+bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/discord_commands.json
+bash /local/plugins/discord/scripts/prestart_reapply.sh --strict
+python3 /local/plugins/discord/scripts/verify_discord_customizations.py
 ```
