@@ -34,17 +34,32 @@ FAILED_MARKER="$LOG_DIR/colmeio-prestart.failed"
 mkdir -p "$LOG_DIR"
 
 AGENT_PYTHON="${HERMES_AGENT_ROOT:-/local/hermes-agent}/.venv/bin/python"
-PYTHON_BIN="$AGENT_PYTHON"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="/local/.venv/bin/python3"
+PYTHON_BIN=""
+FIRST_EXEC=""
+for candidate in \
+  "$AGENT_PYTHON" \
+  "$(command -v python3 || true)"; do
+  if [[ -z "${candidate:-}" || ! -x "$candidate" ]]; then
+    continue
+  fi
+  if [[ -z "$FIRST_EXEC" ]]; then
+    FIRST_EXEC="$candidate"
+  fi
+  if "$candidate" - <<'PY' >/dev/null 2>&1
+import importlib.util
+import sys
+sys.exit(0 if importlib.util.find_spec("yaml") else 1)
+PY
+  then
+    PYTHON_BIN="$candidate"
+    break
+  fi
+done
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$FIRST_EXEC"
 fi
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="/local/hermes-agent/.venv/bin/python"
-fi
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="$(command -v python3 || true)"
-fi
-if [[ -z "${PYTHON_BIN:-}" ]]; then
+if [[ -z "${PYTHON_BIN:-}" || ! -x "$PYTHON_BIN" ]]; then
   echo "[error] python runtime not found for prestart reapply" >&2
   exit 1
 fi

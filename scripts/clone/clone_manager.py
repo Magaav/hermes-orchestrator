@@ -111,6 +111,7 @@ RUNTIME_UV_REL = Path(".runtime/uv")
 BOOTSTRAP_META_REL = Path(".clone-meta/bootstrap.json")
 CAMOFOX_DEFAULT_URL_CLONE = "http://host.docker.internal:9377"
 OPENVIKING_DEFAULT_ENDPOINT_CLONE = "http://host.docker.internal:1933"
+GATEWAY_REQUIRED_MODULES: tuple[str, ...] = ("discord", "yaml")
 DISCORD_DEFAULT_RESTART_CMD = (
     "if [ -s /tmp/hermes-gateway.pid ]; then "
     "kill -KILL $(cat /tmp/hermes-gateway.pid); "
@@ -945,6 +946,13 @@ def _python_has_module(python_bin: Path, module: str) -> bool:
     return probe.returncode == 0
 
 
+def _python_has_modules(python_bin: Path, modules: tuple[str, ...]) -> bool:
+    for module in modules:
+        if not _python_has_module(python_bin, module):
+            return False
+    return True
+
+
 def _host_python_candidates() -> list[Path]:
     """Bootstrap Python candidates (host-level, not tied to hermes-agent)."""
     configured = str(os.getenv("HERMES_CLONE_BOOTSTRAP_PYTHON", "") or "").strip()
@@ -983,117 +991,52 @@ def _select_host_python(required_module: str | None = None) -> Path | None:
 
 
 def _ensure_orchestrator_runtime(clone_name: str) -> Dict[str, Any]:
-    """Ensure host runtime exists for orchestrator bare-metal gateway."""
-    runtime_venv = Path("/local/.venv")
-    runtime_python = runtime_venv / "bin" / "python3"
-    requirements = HERMES_SOURCE_ROOT / "requirements.txt"
-    source_venv = HERMES_SOURCE_ROOT / ".venv"
-    source_python_candidates = [
-        source_venv / "bin" / "python3",
-        source_venv / "bin" / "python",
+    """Ensure orchestrator runtime is clone-local under node root."""
+    clone_root = _clone_root_path(clone_name)
+    runtime_agent_root = _orchestrator_runtime_agent_root(clone_root)
+    runtime_venv = runtime_agent_root / ".venv"
+    python_candidates = [
+        runtime_venv / "bin" / "python3",
+        runtime_venv / "bin" / "python",
     ]
-    source_python = next((p for p in source_python_candidates if p.exists()), None)
-
-    # Fast path: if hermes-agent source venv already has gateway deps, use it.
-    if source_python is not None and _python_has_module(source_python, "discord"):
-        return {
-            "runtime_venv": str(source_venv),
-            "runtime_python": str(source_python),
-            "created": False,
-            "installed_dependencies": False,
-            "source": "hermes_agent_venv",
-        }
-
-    if runtime_python.exists() and _python_has_module(runtime_python, "discord"):
+    runtime_python = next((p for p in python_candidates if p.exists()), None)
+    if runtime_python is not None and _python_has_modules(runtime_python, GATEWAY_REQUIRED_MODULES):
         return {
             "runtime_venv": str(runtime_venv),
             "runtime_python": str(runtime_python),
             "created": False,
             "installed_dependencies": False,
-            "source": "local_venv",
+            "source": "clone_local_venv",
         }
 
-    bootstrap_python = _select_host_python(required_module="venv")
-    if bootstrap_python is None:
-        # Fallback for minimal hosts where python3-venv is unavailable.
-        if source_python is not None and _python_has_module(source_python, "discord"):
-            _log(
-                clone_name,
-                "python3-venv unavailable; reusing /local/hermes-agent/.venv runtime for orchestrator",
-            )
-            return {
-                "runtime_venv": str(source_venv),
-                "runtime_python": str(source_python),
-                "created": False,
-                "installed_dependencies": False,
-                "source": "hermes_agent_venv_fallback",
-            }
+    _seed_clone_runtime(clone_root, allow_parent_seed=True)
+    runtime_python = next(
+        (
+            p
+            for p in python_candidates
+            if p.exists() and _python_has_modules(p, GATEWAY_REQUIRED_MODULES)
+        ),
+        None,
+    )
+    if runtime_python is None:
+        required = ", ".join(GATEWAY_REQUIRED_MODULES)
         raise CloneManagerError(
-            "python runtime with venv module not found on host. Install python3-venv and retry."
+            "orchestrator clone-local runtime missing required modules "
+            f"({required}) at {runtime_venv}"
         )
 
-    created = False
-    if not runtime_python.exists():
-        runtime_venv.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            _run([str(bootstrap_python), "-m", "venv", str(runtime_venv)], check=True)
-        except Exception:
-            if source_python is not None and _python_has_module(source_python, "discord"):
-                _log(
-                    clone_name,
-                    "failed to create /local/.venv; reusing /local/hermes-agent/.venv runtime",
-                )
-                return {
-                    "runtime_venv": str(source_venv),
-                    "runtime_python": str(source_python),
-                    "created": False,
-                    "installed_dependencies": False,
-                    "source": "hermes_agent_venv_fallback",
-                }
-            raise
-        created = True
-
-    if not runtime_python.exists():
-        raise CloneManagerError(f"failed to create runtime python at {runtime_python}")
-
-    if not requirements.exists():
-        raise CloneManagerError(f"requirements file not found: {requirements}")
-
-    pip_probe = _run([str(runtime_python), "-m", "pip", "--version"], check=False)
-    if pip_probe.returncode != 0:
-        if source_python is not None and _python_has_module(source_python, "discord"):
-            _log(
-                clone_name,
-                "runtime pip unavailable in /local/.venv; reusing /local/hermes-agent/.venv runtime",
-            )
-            return {
-                "runtime_venv": str(source_venv),
-                "runtime_python": str(source_python),
-                "created": created,
-                "installed_dependencies": False,
-                "source": "hermes_agent_venv_fallback",
-            }
-        raise CloneManagerError("runtime pip unavailable in /local/.venv; install python3-venv and retry.")
-
-    _run(
-        [str(runtime_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
-        check=True,
-    )
-    _run([str(runtime_python), "-m", "pip", "install", "-r", str(requirements)], check=True)
     _log(clone_name, f"orchestrator runtime ready at {runtime_venv}")
-
     return {
         "runtime_venv": str(runtime_venv),
         "runtime_python": str(runtime_python),
-        "created": created,
-        "installed_dependencies": True,
-        "source": "local_venv",
+        "created": True,
+        "installed_dependencies": False,
+        "source": "clone_local_seed",
     }
 
 
 def _seed_venv_candidates() -> list[Path]:
     preferred = [
-        Path("/local/.venv"),
         HERMES_SOURCE_ROOT / ".venv",
         PARENT_HERMES_HOME / "hermes-agent" / ".venv",
     ]
@@ -1108,10 +1051,19 @@ def _seed_venv_candidates() -> list[Path]:
     return deduped
 
 
-def _select_seed_venv_source(required_module: str | None = None) -> Path:
+def _select_seed_venv_source(
+    *,
+    required_module: str | None = None,
+    required_modules: tuple[str, ...] | None = None,
+) -> Path:
     candidates = _seed_venv_candidates()
 
-    if required_module:
+    if required_modules:
+        for venv_dir in candidates:
+            py = venv_dir / "bin" / "python"
+            if _python_has_modules(py, required_modules):
+                return venv_dir
+    elif required_module:
         for venv_dir in candidates:
             py = venv_dir / "bin" / "python"
             if _python_has_module(py, required_module):
@@ -1123,7 +1075,7 @@ def _select_seed_venv_source(required_module: str | None = None) -> Path:
 
     raise CloneManagerError(
         "could not locate parent seed venv (expected one of "
-        "/local/.venv, /local/hermes-agent/.venv, or /local/agents/nodes/orchestrator/.hermes/hermes-agent/.venv)."
+        "/local/hermes-agent/.venv or /local/agents/nodes/orchestrator/hermes-agent/.venv)."
     )
 
 
@@ -2020,18 +1972,19 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
                 "clone runtime venv missing at /local/hermes-agent/.venv. "
                 "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
             )
-        src_venv = _select_seed_venv_source(required_module="discord")
+        src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
         python_bin = dst_venv / "bin" / "python"
 
     # Validate required gateway dependency to avoid boot loops.
-    if not _python_has_module(python_bin, "discord"):
+    if not _python_has_modules(python_bin, GATEWAY_REQUIRED_MODULES):
         if not allow_parent_seed:
+            required = ", ".join(GATEWAY_REQUIRED_MODULES)
             raise CloneManagerError(
-                "clone runtime venv does not include discord.py. "
+                f"clone runtime venv is missing required modules ({required}). "
                 "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to refresh runtime."
             )
-        src_venv = _select_seed_venv_source(required_module="discord")
+        src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
 
     uv_ready = False
@@ -2305,7 +2258,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
                 "state_mode": STATE_LABELS[mode],
                 "state_code": mode,
                 "seed_code_source": str(parent_source),
-                "seed_venv_source": str(_select_seed_venv_source(required_module="discord")),
+                "seed_venv_source": str(_select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)),
                 "seeded_workspace_integrations": workspace_seeded,
             },
         )
@@ -2569,13 +2522,23 @@ def _orchestrator_start_gateway(
         runtime_agent_root / ".venv" / "bin" / "python",
         clone_root / "hermes-agent" / ".venv" / "bin" / "python3",
         clone_root / "hermes-agent" / ".venv" / "bin" / "python",
-        Path("/local/.venv/bin/python3"),
-        Path("/usr/bin/python3"),
-        Path("/usr/bin/python"),
     ]
-    python_bin = next((p for p in python_candidates if p.exists()), None)
+    python_bin = next(
+        (
+            p
+            for p in python_candidates
+            if p.exists() and _python_has_modules(p, GATEWAY_REQUIRED_MODULES)
+        ),
+        None,
+    )
     if python_bin is None:
-        raise CloneManagerError("python runtime not found for orchestrator gateway start")
+        existing = [str(p) for p in python_candidates if p.exists()]
+        detail = ", ".join(existing) if existing else "none"
+        required = ", ".join(GATEWAY_REQUIRED_MODULES)
+        raise CloneManagerError(
+            "python runtime missing required gateway modules "
+            f"({required}); candidates={detail}"
+        )
 
     runtime_log = _clone_runtime_log_path(clone_name, clone_root=clone_root)
     runtime_log.parent.mkdir(parents=True, exist_ok=True)
