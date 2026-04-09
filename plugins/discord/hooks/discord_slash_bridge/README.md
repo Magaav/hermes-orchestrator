@@ -54,7 +54,14 @@ bash /local/plugins/discord/scripts/new_command_scaffold.sh \
 Then run:
 
 ```bash
-bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/discord_commands.json
+bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/commands/<node>.json
 bash /local/plugins/discord/scripts/prestart_reapply.sh --strict
 python3 /local/plugins/discord/scripts/verify_discord_customizations.py
 ```
+
+Notes:
+
+- Prefer one command name per handler (avoid alias duplicates).
+- If no payload argument is provided, `register_discord_commands.sh` auto-resolves
+  node payloads via `DISCORD_COMMANDS_FILE`, `DISCORD_COMMANDS_PROFILE`, or
+  `COLMEIO_CLONE_NAME`.

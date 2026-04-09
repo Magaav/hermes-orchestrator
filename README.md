@@ -1,26 +1,110 @@
-# hermes-orchestrator
+## Hermes Orchestrator
 
-Hermes Orchestrator is the host control plane for running one orchestrator node plus many containerized Hermes worker nodes.
-Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
+Hermes Orchestrator is a lightweight host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
+
+It provides the operational layer required to run Hermes agents at scale: spawning isolated nodes, managing environments, performing upgrades and rollbacks, centralizing logs, and orchestrating multi-agent workflows.
+
+Hermes Agent focuses on reasoning and tool execution inside a single runtime.
+Hermes Orchestrator focuses on operating many Hermes runtimes safely and reliably.
+
+Together they form a scalable architecture for AI-driven automation systems, multi-tenant agent deployments, and autonomous infrastructure operations.
+
+# Why Hermes Orchestrator Exists
+
+Hermes Agent is extremely capable within a single runtime:
+-reasoning
+-memory
+-tool usage
+-autonomous task execution
+
+However, production deployments often require many agents running concurrently, each with different environments, policies, or tenants.
+
+Hermes Orchestrator provides the missing operational layer:
+-fleet management
+-node lifecycle control
+-environment isolation
+-upgrade and rollback safety
+-centralized observability
+-orchestration of multi-agent systems
+
+The orchestrator allows Hermes agents to operate as a coordinated distributed system, without modifying Hermes core internals.
+
+# Key Capabilities
+
+Hermes Orchestrator enables:
+
+Agent Fleet Management
+
+spawn Hermes nodes on demand
+start, stop, restart, and delete nodes
+isolate environments per tenant or project
+
+Operational Safety
+
+upgrade agents safely
+rollback node environments
+maintain node-local runtime copies
+
+Observability
+
+centralized logging
+attention-level warning mirrors
+skill execution tracing
+
+Infrastructure Automation
+
+shared scripts and plugins
+centralized cron orchestration
+automated maintenance workflows
+
+Multi-Agent Systems
+
+orchestrate multiple Hermes runtimes
+enable agent cooperation patterns
+maintain operational boundaries
 
 ## Install
 
+Install the orchestrator:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash
 ```
 
-Optional flags:
-
+Optional install parameters:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash -s -- --dir /local --branch main
 ```
 
 What install does:
 - Clones or updates this repo in `/local`
-- Installs `horc` and `hord` wrappers
+- Installs `horc` shell command wrappers
 - Enables repo git hooks (`.githooks`) to block common secret leaks
 
-## Topology
+## Core Concepts
+
+Hermes Orchestrator operates with two primary node types.
+
+# Orchestrator Node
+
+The orchestrator runs on the host machine and is responsible for:
+- managing worker nodes
+- coordinating updates and backups
+- maintaining centralized logs
+- executing automation scripts
+
+# Worker Nodes
+
+Worker nodes are containerized Hermes Agent instances.
+
+Each node runs in an isolated environment and can represent:
+- a tenant
+- a task executor
+- a specialized agent
+- a service automation worker
+
+Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of shared templates.
+
+## Filesystem Topology
 
 ```text
 /local/
@@ -77,6 +161,11 @@ What install does:
                 └── hermes-errors.log # hardlinked mirror of /local/logs/nodes/<node>/hermes/errors.log
 ```
 
+Important characteristics:
+- node-local runtime copies prevent template corruption
+- shared scripts/plugins enable coordinated automation
+- centralized logs simplify debugging and monitoring
+
 ## Bootstrap
 
 ```bash
@@ -86,6 +175,8 @@ horc start
 Default `horc start` target is `orchestrator` and it reads:
 - `/local/agents/envs/orchestrator.env` (auto-created from `agents/envs/orchestrator.env.example` if missing)
 - `/local/agents/nodes/orchestrator/`
+
+Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
 
 ## Node Lifecycle
 

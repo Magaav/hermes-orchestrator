@@ -93,7 +93,7 @@ class DiscordSlashRuntime:
         self._bootstrap_model(tree, native.get("model") or {})
 
     async def sync_external_payload_commands(self) -> int:
-        """Upsert external guild commands from discord_commands.json.
+        """Upsert external guild commands from the resolved payload JSON.
 
         This protects payload-managed commands (e.g. /clean) from being removed by
         guild tree.sync() on startup.

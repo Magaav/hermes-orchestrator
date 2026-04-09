@@ -318,6 +318,8 @@ def main() -> int:
             names = [str(c.get("name") or "").strip() for c in payload if isinstance(c, dict)]
             _check(results, "discord_commands has /metricas", "metricas" in names, f"names={sorted(names)}")
             _check(results, "discord_commands has no /metrics", "metrics" not in names, f"names={sorted(names)}")
+            _check(results, "discord_commands has no /colmeio-metrics alias", "colmeio-metrics" not in names, f"names={sorted(names)}")
+            _check(results, "discord_commands has no /faltas alias", "faltas" not in names, f"names={sorted(names)}")
         except Exception as exc:
             _check(results, "discord_commands payload parse", False, str(exc))
     else:
