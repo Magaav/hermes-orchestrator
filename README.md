@@ -79,11 +79,6 @@ Default `horc start` target is `orchestrator` and it reads:
 - `/local/agents/envs/orchestrator.env`
 - `/local/agents/nodes/orchestrator/`
 
-On first bootstrap:
-- Legacy state migrates to `/local/agents/nodes/orchestrator/.hermes` (prefers `~/.hermes`, fallback `/local/.hermes`)
-- If `/local/hermes-agent` is missing, it is cloned automatically
-- If orchestrator node runtime venv (`/local/agents/nodes/orchestrator/hermes-agent/.venv`) is missing, it is seeded automatically
-
 ## Node Lifecycle
 
 ```bash

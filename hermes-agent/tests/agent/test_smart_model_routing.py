@@ -1,4 +1,4 @@
-from agent.smart_model_routing import choose_cheap_model_route, is_complex_turn
+from agent.smart_model_routing import choose_cheap_model_route
 
 
 _BASE_CONFIG = {
@@ -53,18 +53,9 @@ def test_resolve_turn_route_falls_back_to_primary_when_route_runtime_cannot_be_r
             "provider": "openrouter",
             "base_url": "https://openrouter.ai/api/v1",
             "api_mode": "chat_completions",
-            "api_key": "***",
+            "api_key": "sk-primary",
         },
     )
     assert result["model"] == "anthropic/claude-sonnet-4"
     assert result["runtime"]["provider"] == "openrouter"
     assert result["label"] is None
-
-
-def test_is_complex_turn_pt_br_keywords():
-    assert is_complex_turn("implementar uma rota no sistema") is True
-    assert is_complex_turn("depurar erro 500") is True
-
-
-def test_is_complex_turn_simple_pt_br_message():
-    assert is_complex_turn("qual o horário da loja 1?") is False

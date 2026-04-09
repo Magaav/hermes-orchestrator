@@ -6,8 +6,9 @@ import os
 import re
 from typing import Any, Dict, Optional
 
+from utils import is_truthy_value
+
 _COMPLEX_KEYWORDS = {
-    # English
     "debug",
     "debugging",
     "implement",
@@ -42,51 +43,13 @@ _COMPLEX_KEYWORDS = {
     "cron",
     "docker",
     "kubernetes",
-    "route",
-    "routes",
-    "code",
-    "coding",
-    "system",
-    # Portuguese (pt-BR)
-    "código",
-    "codigo",
-    "rotas",
-    "rota",
-    "sistema",
-    "implementar",
-    "implementação",
-    "implementacao",
-    "depurar",
-    "depuração",
-    "depuracao",
-    "erro",
-    "erros",
-    "analisar",
-    "análise",
-    "analise",
-    "arquitetura",
-    "refatorar",
-    "refatoração",
-    "refatoracao",
-    "teste",
-    "testes",
-    "planejar",
-    "plano",
-    "ferramenta",
-    "ferramentas",
 }
 
 _URL_RE = re.compile(r"https?://|www\.", re.IGNORECASE)
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return is_truthy_value(value, default=default)
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -94,28 +57,6 @@ def _coerce_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def is_complex_turn(user_message: str, *, max_simple_chars: int = 160, max_simple_words: int = 28) -> bool:
-    """Return True when a turn looks complex and should stay on a frontier model."""
-    text = (user_message or "").strip()
-    if not text:
-        return False
-
-    if len(text) > max_simple_chars:
-        return True
-    if len(text.split()) > max_simple_words:
-        return True
-    if text.count("\n") > 1:
-        return True
-    if "```" in text or "`" in text:
-        return True
-    if _URL_RE.search(text):
-        return True
-
-    lowered = text.lower()
-    words = {token.strip(".,:;!?()[]{}\"'`") for token in lowered.split()}
-    return bool(words & _COMPLEX_KEYWORDS)
 
 
 def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -136,9 +77,27 @@ def choose_cheap_model_route(user_message: str, routing_config: Optional[Dict[st
     if not provider or not model:
         return None
 
+    text = (user_message or "").strip()
+    if not text:
+        return None
+
     max_chars = _coerce_int(cfg.get("max_simple_chars"), 160)
     max_words = _coerce_int(cfg.get("max_simple_words"), 28)
-    if is_complex_turn(user_message, max_simple_chars=max_chars, max_simple_words=max_words):
+
+    if len(text) > max_chars:
+        return None
+    if len(text.split()) > max_words:
+        return None
+    if text.count("\n") > 1:
+        return None
+    if "```" in text or "`" in text:
+        return None
+    if _URL_RE.search(text):
+        return None
+
+    lowered = text.lower()
+    words = {token.strip(".,:;!?()[]{}\"'`") for token in lowered.split()}
+    if words & _COMPLEX_KEYWORDS:
         return None
 
     route = dict(cheap_model)
@@ -164,6 +123,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 "api_mode": primary.get("api_mode"),
                 "command": primary.get("command"),
                 "args": list(primary.get("args") or []),
+                "credential_pool": primary.get("credential_pool"),
             },
             "label": None,
             "signature": (
@@ -199,6 +159,7 @@ def resolve_turn_route(user_message: str, routing_config: Optional[Dict[str, Any
                 "api_mode": primary.get("api_mode"),
                 "command": primary.get("command"),
                 "args": list(primary.get("args") or []),
+                "credential_pool": primary.get("credential_pool"),
             },
             "label": None,
             "signature": (

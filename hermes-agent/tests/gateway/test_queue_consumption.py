@@ -1,7 +1,8 @@
 """Tests for /queue message consumption after normal agent completion.
 
-Verifies that messages queued via /queue are kept in FIFO order without
-triggering interrupts, then consumed after the active task completes.
+Verifies that messages queued via /queue (which store in
+adapter._pending_messages WITHOUT triggering an interrupt) are consumed
+after the agent finishes its current task — not silently dropped.
 """
 
 import asyncio
@@ -45,7 +46,7 @@ class _StubAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 class TestQueueMessageStorage:
-    """Verify /queue stores messages correctly in the adapter FIFO queue."""
+    """Verify /queue stores messages correctly in adapter._pending_messages."""
 
     def test_queue_stores_message_in_pending(self):
         adapter = _StubAdapter()
@@ -56,15 +57,10 @@ class TestQueueMessageStorage:
             source=MagicMock(chat_id="123", platform=Platform.TELEGRAM),
             message_id="q1",
         )
-        adapter.enqueue_pending_message(
-            session_key=session_key,
-            event=event,
-            interrupt=False,
-            merge_photo=False,
-        )
+        adapter._pending_messages[session_key] = event
 
-        assert adapter.get_pending_message(session_key).text == "do this next"
-        assert adapter.get_pending_message(session_key) is None
+        assert session_key in adapter._pending_messages
+        assert adapter._pending_messages[session_key].text == "do this next"
 
     def test_get_pending_message_consumes_and_clears(self):
         adapter = _StubAdapter()
@@ -75,12 +71,7 @@ class TestQueueMessageStorage:
             source=MagicMock(chat_id="123", platform=Platform.TELEGRAM),
             message_id="q2",
         )
-        adapter.enqueue_pending_message(
-            session_key=session_key,
-            event=event,
-            interrupt=False,
-            merge_photo=False,
-        )
+        adapter._pending_messages[session_key] = event
 
         retrieved = adapter.get_pending_message(session_key)
         assert retrieved is not None
@@ -103,21 +94,18 @@ class TestQueueMessageStorage:
             source=MagicMock(),
             message_id="q3",
         )
-        adapter.enqueue_pending_message(
-            session_key=session_key,
-            event=event,
-            interrupt=False,
-            merge_photo=False,
-        )
+        adapter._pending_messages[session_key] = event
 
         # The interrupt event should NOT be set
         assert not adapter._active_sessions[session_key].is_set()
         assert not adapter.has_pending_interrupt(session_key)
 
     def test_regular_message_sets_interrupt_event(self):
-        """Regular messages with interrupt=True set the interrupt flag on the event."""
+        """Contrast: regular messages DO trigger interrupt."""
         adapter = _StubAdapter()
         session_key = "telegram:user:123"
+
+        adapter._active_sessions[session_key] = asyncio.Event()
 
         # Simulate regular message arrival (what handle_message does)
         event = MessageEvent(
@@ -126,19 +114,10 @@ class TestQueueMessageStorage:
             source=MagicMock(),
             message_id="m1",
         )
-        assert not event.interrupt  # Initially False
+        adapter._pending_messages[session_key] = event
+        adapter._active_sessions[session_key].set()  # this is what handle_message does
 
-        adapter.enqueue_pending_message(
-            session_key=session_key,
-            event=event,
-            interrupt=True,
-            merge_photo=False,
-        )
-
-        # The event in the queue should have interrupt=True
-        pending = adapter.get_pending_message(session_key)
-        assert pending is not None
-        assert pending.interrupt is True
+        assert adapter.has_pending_interrupt(session_key)
 
 
 class TestQueueConsumptionAfterCompletion:
@@ -158,12 +137,7 @@ class TestQueueConsumptionAfterCompletion:
             source=MagicMock(),
             message_id="q4",
         )
-        adapter.enqueue_pending_message(
-            session_key=session_key,
-            event=event,
-            interrupt=False,
-            merge_photo=False,
-        )
+        adapter._pending_messages[session_key] = event
 
         # Agent finishes (no interrupt)
         del adapter._active_sessions[session_key]
@@ -173,8 +147,8 @@ class TestQueueConsumptionAfterCompletion:
         assert retrieved is not None
         assert retrieved.text == "process this after"
 
-    def test_multiple_queues_are_consumed_fifo(self):
-        """If user /queue's multiple times, all prompts are preserved in order."""
+    def test_multiple_queues_last_one_wins(self):
+        """If user /queue's multiple times, last message overwrites."""
         adapter = _StubAdapter()
         session_key = "telegram:user:123"
 
@@ -185,14 +159,7 @@ class TestQueueConsumptionAfterCompletion:
                 source=MagicMock(),
                 message_id=f"q-{text}",
             )
-            adapter.enqueue_pending_message(
-                session_key=session_key,
-                event=event,
-                interrupt=False,
-                merge_photo=False,
-            )
+            adapter._pending_messages[session_key] = event
 
-        assert adapter.get_pending_message(session_key).text == "first"
-        assert adapter.get_pending_message(session_key).text == "second"
-        assert adapter.get_pending_message(session_key).text == "third"
-        assert adapter.get_pending_message(session_key) is None
+        retrieved = adapter.get_pending_message(session_key)
+        assert retrieved.text == "third"

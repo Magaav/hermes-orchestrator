@@ -85,15 +85,12 @@ class TestInterruptKeyConsistency:
     @pytest.mark.asyncio
     async def test_get_pending_message_requires_session_key(self):
         """get_pending_message returns the event only with session_key."""
-        from collections import deque
-        
         adapter = StubAdapter()
         source = _source("123456", "dm")
         session_key = build_session_key(source)
 
         event = MessageEvent(text="hello", source=source, message_id="42")
-        # For FIFO queue: store deque instead of single event
-        adapter._pending_messages[session_key] = deque([event])
+        adapter._pending_messages[session_key] = event
 
         # Using chat_id → None (the bug)
         assert adapter.get_pending_message(source.chat_id) is None
@@ -147,8 +144,7 @@ class TestInterruptKeyConsistency:
         )
         await adapter.handle_message(event)
 
-        queued = adapter.get_pending_message(session_key)
+        queued = adapter._pending_messages[session_key]
         assert queued is event
         assert queued.media_urls == ["/tmp/photo-a.jpg"]
-        assert adapter.get_pending_message(session_key) is None
         assert interrupt_event.is_set() is False
