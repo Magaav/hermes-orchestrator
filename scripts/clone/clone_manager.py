@@ -136,7 +136,7 @@ VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 STATE_LABELS = {
-    1: "orchestrator",           # bare-metal bootstrap node, symlinks to /local/plugins, /local/scripts
+    1: "orchestrator",           # bare-metal bootstrap node, syncs local hermes-agent copy + shared asset symlinks
     2: "seed_from_parent_snapshot",
     3: "seed_from_backup",
     4: "fresh",                  # fresh containerized clone for testing/benchmarking/lab
@@ -1289,7 +1289,20 @@ def _set_symlink(path: Path, target: Path) -> None:
 
 
 def _orchestrator_runtime_agent_root(clone_root: Path) -> Path:
-    return clone_root / ".runtime" / "hermes-agent"
+    """Canonical orchestrator runtime code root.
+
+    New topology uses clone-local `/hermes-agent` as the mutable runtime tree.
+    Legacy `.runtime/hermes-agent` is still recognized for migration fallback.
+    """
+    local_copy = clone_root / "hermes-agent"
+    if (local_copy / "gateway" / "run.py").exists():
+        return local_copy
+
+    legacy_runtime = clone_root / ".runtime" / "hermes-agent"
+    if (legacy_runtime / "gateway" / "run.py").exists():
+        return legacy_runtime
+
+    return local_copy
 
 
 def _prepare_orchestrator_runtime_agent_tree(
@@ -1297,21 +1310,21 @@ def _prepare_orchestrator_runtime_agent_tree(
     clone_root: Path,
     source_tree: Path,
 ) -> Path:
-    """Create a node-local runtime code tree for orchestrator patching.
+    """Sync orchestrator node-local runtime code tree for patching.
 
-    This avoids mutating tracked /local/hermes-agent files when prestart patch
-    scripts reapply Discord customizations.
+    NODE_STATE=1 must patch and run from the clone-local hermes-agent copy so
+    `/local/hermes-agent` remains template-only.
     """
-    runtime_root = _orchestrator_runtime_agent_root(clone_root)
+    runtime_root = clone_root / "hermes-agent"
+    if runtime_root.is_symlink():
+        _remove_path(runtime_root)
     runtime_root.parent.mkdir(parents=True, exist_ok=True)
     _seed_code_tree(source_tree, runtime_root, include_git=False)
 
-    source_venv = source_tree / ".venv"
-    runtime_venv = runtime_root / ".venv"
-    if source_venv.exists():
-        if runtime_venv.exists() or runtime_venv.is_symlink():
-            _remove_path(runtime_venv)
-        os.symlink(str(source_venv), str(runtime_venv))
+    # Clean obsolete legacy runtime tree created by older layouts.
+    legacy_runtime_root = clone_root / ".runtime" / "hermes-agent"
+    if legacy_runtime_root.exists() or legacy_runtime_root.is_symlink():
+        _remove_path(legacy_runtime_root)
 
     _log(
         clone_name,
@@ -1537,8 +1550,8 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     - Lives directly on the VM (not containerized)
     - Lives under /local/agents/nodes/orchestrator/
     - Stores state in /local/agents/nodes/orchestrator/.hermes
-    - Uses shared host assets via symlinks:
-      /local/hermes-agent, /local/plugins, /local/scripts, /local/crons/orchestrator
+    - Uses a clone-local hermes-agent runtime copy under node root
+    - Uses shared host assets via symlinks: /local/plugins, /local/scripts, /local/crons/orchestrator
     - Can bootstrap other nodes
     """
     _log_spawn_event(clone_name, "orchestrator", "setup_start", f"clone_root={clone_root}")
@@ -1574,7 +1587,6 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
 
     source_tree = _parent_hermes_agent_source(clone_name=clone_name)
-    _set_symlink(clone_root / "hermes-agent", source_tree)
     runtime_agent_root = _prepare_orchestrator_runtime_agent_tree(
         clone_name=clone_name,
         clone_root=clone_root,
@@ -3540,7 +3552,7 @@ def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
             "template_update": template_payload,
             "note": (
                 "orchestrator now patches and runs from "
-                "agents/nodes/orchestrator/.runtime/hermes-agent; /local/hermes-agent stays template-only."
+                "agents/nodes/orchestrator/hermes-agent; /local/hermes-agent stays template-only."
             ),
         }
 
