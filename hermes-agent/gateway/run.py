@@ -236,6 +236,11 @@ from gateway.session import (
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.followup import (
+    resolve_followup_config,
+    count_followup_tool_errors,
+    build_followup_summary_lines,
+)
 
 
 def _normalize_whatsapp_identifier(value: str) -> str:
@@ -6564,6 +6569,12 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _followup_elapsed_minutes, _followup_summary_enabled = resolve_followup_config()
+        _followup_state: Dict[str, Any] = {
+            "iteration": 0,
+            "tool_names": [],
+            "error_count": 0,
+        }
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_event_loop()
@@ -6580,17 +6591,26 @@ class GatewayRunner:
                         _names.append(_t.get("name") or "")
                     else:
                         _names.append(str(_t))
-                asyncio.run_coroutine_threadsafe(
-                    _hooks_ref.emit("agent:step", {
-                        "platform": source.platform.value if source.platform else "",
-                        "user_id": source.user_id,
-                        "session_id": session_id,
-                        "iteration": iteration,
-                        "tool_names": _names,
-                        "tools": prev_tools,
-                    }),
-                    _loop_for_step,
-                )
+
+                if _followup_summary_enabled:
+                    _followup_state["iteration"] = int(iteration)
+                    _trimmed_names = [n for n in _names if n][:6]
+                    if _trimmed_names:
+                        _followup_state["tool_names"] = _trimmed_names
+                    _followup_state["error_count"] = count_followup_tool_errors(prev_tools)
+
+                if _hooks_ref.loaded_hooks:
+                    asyncio.run_coroutine_threadsafe(
+                        _hooks_ref.emit("agent:step", {
+                            "platform": source.platform.value if source.platform else "",
+                            "user_id": source.user_id,
+                            "session_id": session_id,
+                            "iteration": iteration,
+                            "tool_names": _names,
+                            "tools": prev_tools,
+                        }),
+                        _loop_for_step,
+                    )
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
 
@@ -6745,7 +6765,7 @@ class GatewayRunner:
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
-            agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+            agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or _followup_summary_enabled) else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
@@ -7104,8 +7124,8 @@ class GatewayRunner:
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
 
         # Periodic "still working" notifications for long-running tasks.
-        # Fires every 10 minutes so the user knows the agent hasn't died.
-        _NOTIFY_INTERVAL = 600  # 10 minutes
+        # Interval defaults to 10 min, configurable via env.
+        _NOTIFY_INTERVAL = _followup_elapsed_minutes * 60
         _notify_start = time.time()
 
         async def _notify_long_running():
@@ -7118,21 +7138,29 @@ class GatewayRunner:
                 # Include agent activity context if available.
                 _agent_ref = agent_holder[0]
                 _status_detail = ""
+                _activity = None
                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                     try:
-                        _a = _agent_ref.get_activity_summary()
-                        _parts = [f"iteration {_a['api_call_count']}/{_a['max_iterations']}"]
-                        if _a.get("current_tool"):
-                            _parts.append(f"running: {_a['current_tool']}")
+                        _activity = _agent_ref.get_activity_summary()
+                        _parts = [f"iteration {_activity['api_call_count']}/{_activity['max_iterations']}"]
+                        if _activity.get("current_tool"):
+                            _parts.append(f"running: {_activity['current_tool']}")
                         else:
-                            _parts.append(_a.get("last_activity_desc", ""))
+                            _parts.append(_activity.get("last_activity_desc", ""))
                         _status_detail = " — " + ", ".join(_parts)
                     except Exception:
-                        pass
+                        _activity = None
+                _notify_message = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                if _followup_summary_enabled:
+                    _summary_lines = build_followup_summary_lines(_activity, _followup_state)
+                    if _summary_lines:
+                        _notify_message += "\n👷summary:\n" + "\n".join(
+                            f"- {line}" for line in _summary_lines
+                        )
                 try:
                     await _notify_adapter.send(
                         source.chat_id,
-                        f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
+                        _notify_message,
                         metadata=_status_thread_metadata,
                     )
                 except Exception as _ne:
