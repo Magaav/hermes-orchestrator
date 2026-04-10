@@ -34,9 +34,9 @@ The orchestrator allows Hermes agents to operate as a coordinated distributed sy
 Hermes Orchestrator enables:
 
 Agent Fleet Management
--spawn Hermes nodes on demand
--start, stop, restart, and delete nodes
--isolate environments per tenant or project
+- spawn Hermes nodes on demand
+- start, stop, restart, and delete nodes
+- isolate environments per tenant or project
 
 Operational Safety
 - upgrade agents safely
@@ -86,6 +86,7 @@ The orchestrator runs on the host machine and is responsible for:
 - coordinating updates and backups
 - maintaining centralized logs
 - executing automation scripts
+- enforcing nodes runtime contract-role (node self-conscience)
 
 ## Worker Nodes
 
@@ -143,9 +144,9 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │       │   ├── data/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
-│       │   ├── scripts/   # mounted from host
+│       │   ├── scripts/   # mounted from host (ro)
 │       │   ├── crons/     # mounted from host node bucket
-│       │   └── plugins/   # mounted from host
+│       │   └── plugins/   # mounted from host (ro)
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
 ├── scripts/      # triggered directly from discord native slash command/cronjobs/etc...
@@ -279,28 +280,74 @@ Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token pa
 
 # Road Map
 
-## UI (Hermes Workspace-style Interface)
+Hermes Orchestrator will evolve into a complete control layer for large-scale agent systems.
 
-A lightweight web UI is planned as an optional visual layer inspired by Hermes Workspace, but independent from Hermes runtime internals.
+Future development focuses on visibility, collaboration, and scalable orchestration.
 
-Scope:
-- node lifecycle management
-- tenant and environment overview
-- task execution monitoring
-- orchestration logs and event streams
-- shared wiki navigation and editing
-- health and heartbeat dashboards
+---
 
-```text
-UI
-  ├─ Fleet overview
-  ├─ Node management
-  ├─ Task monitoring
-  ├─ Logs & events
-  └─ Shared wiki
-```
+## 1. Visual Control Interface
 
-The orchestrator remains fully operable via CLI and automation pipelines even without the UI.
+A lightweight web UI inspired by Hermes Workspace will provide a visual way to manage agent fleets.
+
+Planned features:
+
+- Fleet overview
+- Node lifecycle management
+- Task monitoring
+- Logs and event streams
+- Health and heartbeat dashboards
+- Shared documentation access
+
+The system will remain fully usable from the CLI.
+
+---
+
+## 2. Shared Knowledge (Karpatches-style Wiki)
+
+A shared wiki will act as operational memory for the system.
+
+It will contain:
+
+- infrastructure documentation  
+- troubleshooting guides  
+- runbooks  
+- architecture notes  
+
+Both humans and agents will be able to read and extend this knowledge.
+
+---
+
+## 3. High Performance Interface (WASM)
+
+The UI may use WebAssembly for high performance visualization.
+
+Possible capabilities:
+
+- real-time workflow graphs  
+- system topology maps  
+- fast debugging interfaces  
+- visual automation builders  
+
+---
+
+## 4. Cellular Agent Architecture
+
+Nodes will be able to form **cells**, groups of agents working together.
+
+Structure:
+
+Agents → Nodes → Cells → Organizations
+
+This enables large deployments where workflows are delegated between specialized groups of agents.
+
+---
+
+## Long-Term Vision
+
+Hermes Agent provides the intelligence inside a runtime.
+
+Hermes Orchestrator coordinates many runtimes to form a scalable autonomous system.
 
 # Branch Policy
 
