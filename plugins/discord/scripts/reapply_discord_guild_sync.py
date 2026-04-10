@@ -4,7 +4,13 @@ Reapply Discord guild-level slash sync after hermes-agent updates.
 
 Why:
 - Global slash command propagation can be delayed in Discord clients.
-- Guild-level sync makes new commands (e.g. /backup) appear immediately.
+- Guild-level sync can make new commands appear immediately.
+
+Default behavior:
+- Keep global commands only (no guild copy) to avoid duplicate entries in
+  Discord's slash picker.
+- Enable copy-global-to-guild only when explicitly requested via:
+  DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD=true
 """
 
 from __future__ import annotations
@@ -40,25 +46,29 @@ MARKER_END = "COLMEIO_DISCORD_GUILD_SYNC_END"
 
 INSERT_BLOCK = """\
                     # COLMEIO_DISCORD_GUILD_SYNC_BEGIN
-                    guilds = list(getattr(adapter_self._client, "guilds", []) or [])
-                    if guilds:
-                        for _guild in guilds:
-                            try:
-                                adapter_self._client.tree.copy_global_to(guild=_guild)
-                                _g_synced = await adapter_self._client.tree.sync(guild=_guild)
-                                logger.info(
-                                    "[%s] Synced %d guild slash command(s) for guild %s",
-                                    adapter_self.name,
-                                    len(_g_synced),
-                                    getattr(_guild, "id", "unknown"),
-                                )
-                            except Exception as _g_exc:
-                                logger.debug(
-                                    "[%s] Guild slash sync failed for guild %s: %s",
-                                    adapter_self.name,
-                                    getattr(_guild, "id", "unknown"),
-                                    _g_exc,
-                                )
+                    _enable_guild_copy = os.getenv(
+                        "DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD", ""
+                    ).strip().lower() in ("1", "true", "yes", "on")
+                    if _enable_guild_copy:
+                        guilds = list(getattr(adapter_self._client, "guilds", []) or [])
+                        if guilds:
+                            for _guild in guilds:
+                                try:
+                                    adapter_self._client.tree.copy_global_to(guild=_guild)
+                                    _g_synced = await adapter_self._client.tree.sync(guild=_guild)
+                                    logger.info(
+                                        "[%s] Synced %d guild slash command(s) for guild %s",
+                                        adapter_self.name,
+                                        len(_g_synced),
+                                        getattr(_guild, "id", "unknown"),
+                                    )
+                                except Exception as _g_exc:
+                                    logger.debug(
+                                        "[%s] Guild slash sync failed for guild %s: %s",
+                                        adapter_self.name,
+                                        getattr(_guild, "id", "unknown"),
+                                        _g_exc,
+                                    )
                     # COLMEIO_DISCORD_GUILD_SYNC_END
 """
 

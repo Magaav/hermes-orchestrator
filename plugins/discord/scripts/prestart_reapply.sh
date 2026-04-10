@@ -15,6 +15,12 @@ for arg in "$@"; do
   esac
 done
 
+case "${HERMES_PRESTART_STRICT:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    STRICT=1
+    ;;
+esac
+
 # Prefer explicit HERMES_HOME when available (clone containers), otherwise
 # fallback to the legacy HOME/.hermes location.
 if [[ -n "${HERMES_HOME:-}" ]]; then
@@ -136,9 +142,10 @@ OPENVIKING_DEFAULT_ACCOUNT="${OPENVIKING_ACCOUNT_DEFAULT:-}"
 OPENVIKING_DEFAULT_USER="${OPENVIKING_USER_DEFAULT:-}"
 
 if [[ -z "$OPENVIKING_DEFAULT_ACCOUNT" && -z "$OPENVIKING_DEFAULT_USER" ]]; then
-  if [[ -n "${COLMEIO_CLONE_NAME:-}" ]]; then
-    OPENVIKING_DEFAULT_ACCOUNT="${COLMEIO_CLONE_NAME}"
-    OPENVIKING_DEFAULT_USER="${COLMEIO_CLONE_NAME}"
+  NODE_IDENTITY="${NODE_NAME:-}"
+  if [[ -n "$NODE_IDENTITY" ]]; then
+    OPENVIKING_DEFAULT_ACCOUNT="$NODE_IDENTITY"
+    OPENVIKING_DEFAULT_USER="$NODE_IDENTITY"
   else
     OPENVIKING_DEFAULT_ACCOUNT="default"
     OPENVIKING_DEFAULT_USER="default"
@@ -169,8 +176,7 @@ fi
 run_step "channel_acl" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/hooks/apply_channel_acl_run_py.py" || FAILED=1
 run_step "gateway_fifo_queue" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_gateway_queue_fifo.py" || \
-  log "WARN gateway_fifo_queue failed (non-fatal on newer gateway trees)"
+  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_gateway_queue_fifo.py" || FAILED=1
 run_step "session_info" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_session_info_hook.py" || FAILED=1
 run_step "discord_thread_parent" \
@@ -179,6 +185,12 @@ run_step "discord_guild_sync" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_guild_sync.py" || FAILED=1
 run_step "discord_command_bootstrap" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_command_bootstrap.py" || FAILED=1
+
+VERIFY_SCRIPT="$DISCORD_PLUGIN_ROOT/scripts/verify_discord_customizations.py"
+if [[ -f "$VERIFY_SCRIPT" ]]; then
+  run_step "verify_customizations" \
+    "$PYTHON_BIN" "$VERIFY_SCRIPT" || FAILED=1
+fi
 
 if [[ "$FAILED" -ne 0 ]]; then
   log "WARN one or more prestart patch steps failed; gateway will still start"

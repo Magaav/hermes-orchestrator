@@ -10,16 +10,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
-_PRIMARY_DISCORD_COMMANDS = Path("/local/plugins/discord/discord_commands.json")
 _PRIMARY_NODE_DISCORD_COMMANDS_DIR = Path("/local/plugins/discord/commands")
-_LEGACY_DISCORD_COMMANDS = (
-    Path("/local/workspace/discord/discord_commands.json"),
-    Path("/local/workspace/colmeio/discord/discord_commands.json"),
-)
-_LEGACY_NODE_DISCORD_COMMANDS_DIRS = (
-    Path("/local/workspace/discord/commands"),
-    Path("/local/workspace/colmeio/discord/commands"),
-)
 
 
 def _resolve_hermes_home() -> Path:
@@ -36,7 +27,7 @@ class DiscordSlashRuntime:
     """External Discord slash runtime loaded from ~/.hermes/hooks.
 
     Responsibilities:
-    - Override selected native commands at startup (/restart, /reboot, /metricas, /backup version)
+    - Override selected native commands at startup (/restart, /reboot, /metricas, /backup)
     - Bridge unknown slash commands (from Discord API payload registration) to handlers
     - Keep behavior outside hermes-agent core so updates are easy to reapply
     """
@@ -193,22 +184,70 @@ class DiscordSlashRuntime:
             cfg_path = Path(configured).expanduser()
             if cfg_path.exists():
                 return cfg_path
+            logger.debug("DISCORD_COMMANDS_FILE is set but missing: %s", cfg_path)
 
-        profile = (
-            str(os.getenv("DISCORD_COMMANDS_PROFILE", "") or "").strip()
-            or str(os.getenv("COLMEIO_CLONE_NAME", "") or "").strip()
-        )
-        if profile:
-            profile_name = profile[:-5] if profile.lower().endswith(".json") else profile
-            for commands_dir in (_PRIMARY_NODE_DISCORD_COMMANDS_DIR, *_LEGACY_NODE_DISCORD_COMMANDS_DIRS):
-                candidate = commands_dir / f"{profile_name}.json"
-                if candidate.exists():
-                    return candidate
-
-        for candidate in (_PRIMARY_DISCORD_COMMANDS, *_LEGACY_DISCORD_COMMANDS):
+        node_name = str(os.getenv("NODE_NAME", "") or "").strip()
+        if node_name:
+            profile_name = node_name[:-5] if node_name.lower().endswith(".json") else node_name
+            candidate = _PRIMARY_NODE_DISCORD_COMMANDS_DIR / f"{profile_name}.json"
             if candidate.exists():
                 return candidate
-        return _PRIMARY_DISCORD_COMMANDS
+            logger.debug("NODE_NAME resolved payload is missing: %s", candidate)
+
+        return None
+
+    @staticmethod
+    def _runtime_node_name() -> str:
+        raw = str(os.getenv("NODE_NAME", "") or "").strip()
+        if raw:
+            return raw[:-5].lower() if raw.lower().endswith(".json") else raw.lower()
+
+        try:
+            parts = _HERMES_HOME.parts
+            idx = parts.index("nodes")
+            if idx + 1 < len(parts):
+                return str(parts[idx + 1]).strip().lower()
+        except Exception:
+            pass
+
+        return "orchestrator"
+
+    def _backup_enabled_for_node(self, cfg: Dict[str, Any]) -> bool:
+        raw_nodes = cfg.get("enabled_nodes")
+        if not isinstance(raw_nodes, list):
+            return True
+        allowed = {
+            str(entry or "").strip().lower()
+            for entry in raw_nodes
+            if str(entry or "").strip()
+        }
+        if not allowed:
+            return True
+        return self._runtime_node_name() in allowed
+
+    @staticmethod
+    def _backup_node_choice_specs(cfg: Dict[str, Any]) -> list[Dict[str, str]]:
+        raw = cfg.get("node_choices")
+        if not isinstance(raw, list):
+            raw = ["orchestrator", "all"]
+
+        specs: list[Dict[str, str]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                value = str(item.get("value") or "").strip().lower()
+                label = str(item.get("label") or value).strip()
+            else:
+                value = str(item or "").strip().lower()
+                label = value
+            if not value:
+                continue
+            if any(value == spec["value"] for spec in specs):
+                continue
+            specs.append({"value": value, "label": label or value})
+
+        if not specs:
+            specs = [{"value": "orchestrator", "label": "orchestrator"}, {"value": "all", "label": "all"}]
+        return specs
 
     # ------------------------------------------------------------------
     # Interaction bridge
@@ -323,32 +362,45 @@ class DiscordSlashRuntime:
     def _bootstrap_backup(self, tree: Any, cfg: Dict[str, Any]) -> None:
         if cfg.get("enabled", True) is False:
             return
+        if not self._backup_enabled_for_node(cfg):
+            return
 
         import discord  # type: ignore
 
-        group_name = str(cfg.get("group_name") or "backup")
-        group_desc = str(cfg.get("group_description") or "Backup Hermes agent files")
-        sub_name = str(cfg.get("subcommand_name") or "version")
-        sub_desc = str(cfg.get("subcommand_description") or "Create a versioned backup tar.gz")
+        command_name = str(cfg.get("group_name") or cfg.get("command_name") or "backup")
+        command_desc = str(
+            cfg.get("command_description")
+            or cfg.get("subcommand_description")
+            or "Create backup for one node or all nodes and mirror to Google Drive"
+        )
+        choice_specs = self._backup_node_choice_specs(cfg)
+        node_choices = [
+            discord.app_commands.Choice(name=entry["label"], value=entry["value"])
+            for entry in choice_specs[:25]
+        ]
+        valid_nodes = {entry["value"] for entry in choice_specs}
+        default_node = str(cfg.get("default_node") or "").strip().lower()
+        if not default_node:
+            default_node = choice_specs[0]["value"]
+        if default_node not in valid_nodes:
+            default_node = choice_specs[0]["value"]
 
-        self._remove_chat_command(tree, group_name)
+        self._remove_chat_command(tree, command_name)
 
-        group = discord.app_commands.Group(name=group_name, description=group_desc)
-
-        @group.command(name=sub_name, description=sub_desc)
-        @discord.app_commands.describe(version="Version label. Example: 1.0")
-        async def backup_version(interaction, version: str):
+        @tree.command(name=command_name, description=command_desc)
+        @discord.app_commands.describe(
+            version="Version label (required). Example: 2.0",
+            node="Node target (`orchestrator`, `colmeio`, `catatau`) or `all`",
+        )
+        @discord.app_commands.choices(node=node_choices)
+        async def backup_command(interaction, version: str, node: str):
             await self.handlers.handle_backup_version(
                 self.adapter,
                 interaction,
                 version=version,
+                node=node or default_node,
                 settings=cfg,
             )
-
-        try:
-            tree.add_command(group)
-        except Exception as exc:
-            logger.warning("Failed to register /%s command group: %s", group_name, exc)
 
     @staticmethod
     def _model_choice_specs(cfg: Dict[str, Any]) -> list[Dict[str, str]]:

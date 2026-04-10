@@ -99,6 +99,25 @@ Each node runs in an isolated environment and can represent:
 
 Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of shared templates.
 
+## Node Governance Contract
+
+Every node receives a runtime contract on start/restart:
+- `/local/.hermes/NODE_RUNTIME_CONTRACT.md`
+- `/local/workspace/NODE_RUNTIME_CONTRACT.md`
+
+This contract defines:
+- node role (`orchestrator` vs `worker`)
+- bootstrap mode (`NODE_STATE`)
+- shared framework ownership (`/local/plugins`, `/local/scripts`)
+- collaboration protocol for plugin/framework changes
+
+Operational rule:
+- Worker nodes should treat shared plugins/scripts as orchestrator-managed infrastructure.
+- Workers should propose changes (diff + rollout/rollback + verification), then request orchestrator execution.
+- Orchestrator applies approved shared changes and coordinates restarts/verification.
+
+At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL_SYSTEM_PROMPT` so agent decisions stay aligned with this contract.
+
 # Filesystem Topology
 
 ```text
@@ -124,9 +143,9 @@ Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of s
 │       │   ├── data/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
-│       │   ├── scripts/   # mounted from host (ro)
+│       │   ├── scripts/   # mounted from host
 │       │   ├── crons/     # mounted from host node bucket
-│       │   └── plugins/   # mounted from host (ro)
+│       │   └── plugins/   # mounted from host
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
 ├── scripts/      # triggered directly from discord native slash command/cronjobs/etc...

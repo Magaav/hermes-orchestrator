@@ -30,22 +30,19 @@ if [[ ! -d "$NODE_COMMANDS_DIR" && -d "/local/plugins/discord/commands" ]]; then
   NODE_COMMANDS_DIR="/local/plugins/discord/commands"
 fi
 
-PAYLOAD_FILE="${1:-${DISCORD_COMMANDS_FILE:-${PROJECT_DIR}/plugins/discord/discord_commands.json}}"
+PAYLOAD_FILE="${1:-${DISCORD_COMMANDS_FILE:-}}"
 if [[ -z "${1:-}" && -z "${DISCORD_COMMANDS_FILE:-}" ]]; then
-  PROFILE_NAME="${DISCORD_COMMANDS_PROFILE:-${COLMEIO_CLONE_NAME:-}}"
+  PROFILE_NAME="${NODE_NAME:-}"
   if [[ -z "$PROFILE_NAME" && -n "$ENV_FILE" ]]; then
     PROFILE_NAME="$(basename "$ENV_FILE" .env)"
   fi
   PROFILE_NAME="${PROFILE_NAME%.json}"
-  if [[ -n "$PROFILE_NAME" && -f "${NODE_COMMANDS_DIR}/${PROFILE_NAME}.json" ]]; then
-    PAYLOAD_FILE="${NODE_COMMANDS_DIR}/${PROFILE_NAME}.json"
+  if [[ -n "$PROFILE_NAME" ]]; then
+    CANDIDATE="${NODE_COMMANDS_DIR}/${PROFILE_NAME}.json"
+    if [[ -f "$CANDIDATE" ]]; then
+      PAYLOAD_FILE="$CANDIDATE"
+    fi
   fi
-fi
-if [[ ! -f "$PAYLOAD_FILE" && -f "/local/plugins/discord/discord_commands.json" ]]; then
-  PAYLOAD_FILE="/local/plugins/discord/discord_commands.json"
-fi
-if [[ ! -f "$PAYLOAD_FILE" && -f "/local/workspace/discord/discord_commands.json" ]]; then
-  PAYLOAD_FILE="/local/workspace/discord/discord_commands.json"
 fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -54,7 +51,18 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 if [[ ! -f "$PAYLOAD_FILE" ]]; then
-  echo "[error] JSON payload not found at $PAYLOAD_FILE" >&2
+  echo "[error] node payload not found." >&2
+  echo "        expected one of:" >&2
+  if [[ -n "${DISCORD_COMMANDS_FILE:-}" ]]; then
+    echo "        - DISCORD_COMMANDS_FILE=${DISCORD_COMMANDS_FILE}" >&2
+  fi
+  if [[ -n "${NODE_NAME:-}" ]]; then
+    echo "        - ${NODE_COMMANDS_DIR}/${NODE_NAME}.json" >&2
+  fi
+  if [[ -n "$ENV_FILE" ]]; then
+    echo "        - ${NODE_COMMANDS_DIR}/$(basename "$ENV_FILE" .env).json" >&2
+  fi
+  echo "        no legacy fallback is used." >&2
   exit 1
 fi
 

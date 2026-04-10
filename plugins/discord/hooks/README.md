@@ -29,6 +29,9 @@ Actual command logic stays external.
 - `/restart`
 - `/metricas`
 - `/backup version`
+  - orchestrator-only
+  - accepts `node` target (`orchestrator`, `colmeio`, `catatau`, `all`)
+  - writes local archives to `/local/backups` and mirrors to `/backups/orchestrator/` on Drive
 
 2. Bridges unknown slash commands (registered by payload JSON) using registry rules:
 - aliases
@@ -64,7 +67,7 @@ Then:
 
 1. Register command payload in Discord:
 - `bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/commands/<node>.json`
-  If omitted, the script auto-resolves node payloads from `DISCORD_COMMANDS_FILE`, `DISCORD_COMMANDS_PROFILE`, or `COLMEIO_CLONE_NAME`.
+  If omitted, the script auto-resolves node payloads from `DISCORD_COMMANDS_FILE` or `NODE_NAME`.
 2. Reapply + verify:
 - `bash /local/plugins/discord/scripts/prestart_reapply.sh --strict`
 - `python3 /local/plugins/discord/scripts/verify_discord_customizations.py`

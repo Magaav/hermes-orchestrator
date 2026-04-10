@@ -617,6 +617,7 @@ async def handle_backup_version(
     adapter: Any,
     interaction: Any,
     version: str,
+    node: str = "all",
     settings: Optional[Dict[str, Any]] = None,
 ) -> bool:
     cfg = settings or {}
@@ -633,9 +634,36 @@ async def handle_backup_version(
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
 
+    raw_choices = cfg.get("node_choices")
+    allowed_nodes: set[str] = set()
+    if isinstance(raw_choices, list):
+        for entry in raw_choices:
+            if isinstance(entry, dict):
+                value = str(entry.get("value") or "").strip().lower()
+            else:
+                value = str(entry or "").strip().lower()
+            if value:
+                allowed_nodes.add(value)
+    if not allowed_nodes:
+        allowed_nodes = {"orchestrator", "all"}
+
+    default_node = str(cfg.get("default_node") or "all").strip().lower() or "all"
+    raw_target = str(node or "").strip().lower() or default_node
+    if raw_target not in allowed_nodes:
+        options = ", ".join(f"`{name}`" for name in sorted(allowed_nodes))
+        await safe_edit_or_followup(
+            interaction,
+            f"❌ Node inválido: `{raw_target}`. Opções permitidas: {options}",
+        )
+        return True
+    backup_target = raw_target
+
     raw_version = str(version or "").strip()
     if not raw_version:
-        await safe_edit_or_followup(interaction, "❌ Informe uma versão. Exemplo: `/backup version 1.0`.")
+        await safe_edit_or_followup(
+            interaction,
+            "❌ Informe `version` (obrigatório). Exemplo: `/backup version:2.0 node:all`.",
+        )
         return True
 
     safe_version = "".join(
@@ -651,29 +679,27 @@ async def handle_backup_version(
     if safe_version.lower().startswith("v"):
         safe_version = safe_version[1:] or safe_version
 
-    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    filename = f"hermes-v{safe_version}-{timestamp}.tar.gz"
-
-    snapshot_script, snapshot_attempts = _resolve_existing_path(
-        cfg.get("snapshot_script"),
-        "/local/crons/scripts/backup/backup_snapshot.sh",
-        "/local/workspace/crons/scripts/backup/backup_snapshot.sh",
+    clone_manager_script, clone_attempts = _resolve_existing_path(
+        cfg.get("clone_manager_script"),
+        "/local/scripts/clone/clone_manager.py",
+        "/local/workspace/scripts/clone/clone_manager.py",
     )
     drive_script, drive_attempts = _resolve_existing_path(
         cfg.get("drive_script"),
-        "/local/crons/scripts/backup/drive_backup.py",
+        "/local/crons/colmeio/scripts/backup/drive_backup.py",
+        "/local/crons/catatau/scripts/backup/drive_backup.py",
         "/local/workspace/crons/scripts/backup/drive_backup.py",
     )
     local_backup_root = Path(str(cfg.get("local_backup_root") or "/local/backups"))
-    drive_folder_path = str(cfg.get("drive_folder_path") or "backups/agent/versions")
-    timeout_snapshot_sec = int(cfg.get("timeout_snapshot_sec") or 1800)
+    drive_folder_path = str(cfg.get("drive_folder_path") or "backups/orchestrator")
+    timeout_backup_sec = int(cfg.get("timeout_backup_sec") or 1800)
     timeout_drive_sec = int(cfg.get("timeout_drive_sec") or 3600)
 
-    if not snapshot_script.exists():
+    if not clone_manager_script.exists():
         await safe_edit_or_followup(
             interaction,
-            "❌ Script de snapshot não encontrado.\n"
-            f"tentativas:\n{_format_path_attempts(snapshot_attempts)}",
+            "❌ Script do clone manager não encontrado.\n"
+            f"tentativas:\n{_format_path_attempts(clone_attempts)}",
         )
         return True
     if not drive_script.exists():
@@ -690,102 +716,89 @@ async def handle_backup_version(
         await safe_edit_or_followup(interaction, f"❌ Não foi possível criar diretórios de backup: {exc}")
         return True
 
-    before_archives = {
-        p.name for p in local_backup_root.glob("hermes-backup-*.tar.gz")
-    }
+    python_bin = _resolve_python_bin()
+
+    backup_cmd = [python_bin, str(clone_manager_script), "backup"]
+    if backup_target == "all":
+        backup_cmd.append("--all")
+    else:
+        backup_cmd.extend(["--name", backup_target])
 
     try:
-        snapshot_cmd = ["bash", str(snapshot_script)]
-        proc = await asyncio.create_subprocess_exec(
-            *snapshot_cmd,
+        backup_proc = await asyncio.create_subprocess_exec(
+            *backup_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout_snapshot_sec)
+        backup_out, backup_err = await asyncio.wait_for(
+            backup_proc.communicate(),
+            timeout=timeout_backup_sec,
+        )
     except asyncio.TimeoutError:
-        await safe_edit_or_followup(interaction, "❌ Timeout ao gerar snapshot de backup.")
+        await safe_edit_or_followup(interaction, "❌ Timeout ao executar backup pelo clone manager.")
         return True
 
-    if proc.returncode != 0:
-        detail = ((err or out) or b"unknown error").decode(errors="ignore").strip()
+    backup_detail = ((backup_out or backup_err) or b"").decode(errors="ignore").strip()
+    backup_payload: Dict[str, Any] = {}
+    if backup_detail:
+        try:
+            parsed = json.loads(backup_detail)
+            if isinstance(parsed, dict):
+                backup_payload = parsed
+        except Exception:
+            backup_payload = {}
+
+    if backup_proc.returncode != 0:
+        detail = str(backup_payload.get("error") or backup_detail or "unknown error")
         detail = detail[-1500:] if len(detail) > 1500 else detail
-        await safe_edit_or_followup(interaction, f"❌ Falha ao criar snapshot de backup: {detail}")
+        await safe_edit_or_followup(interaction, f"❌ Falha ao criar backup local: {detail}")
         return True
 
-    candidates = sorted(
-        local_backup_root.glob("hermes-backup-*.tar.gz"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    source_archive = None
-    for p in candidates:
-        if p.name not in before_archives:
-            source_archive = p
-            break
-    if source_archive is None and candidates:
-        source_archive = candidates[0]
-    if source_archive is None:
+    if not backup_payload.get("ok", True):
+        detail = str(backup_payload.get("error") or backup_detail or "unknown error")
+        detail = detail[-1500:] if len(detail) > 1500 else detail
+        await safe_edit_or_followup(interaction, f"❌ Falha ao criar backup local: {detail}")
+        return True
+
+    archive_path = str(backup_payload.get("archive") or "").strip()
+    if not archive_path:
         await safe_edit_or_followup(
             interaction,
-            "❌ Snapshot concluído, mas nenhum arquivo `.tar.gz` foi encontrado em `/local/backups`.",
+            f"❌ Backup concluído, mas clone manager não retornou o caminho do arquivo.\noutput: `{backup_detail[:500]}`",
         )
         return True
 
-    archive_local = local_backup_root / filename
+    archive_local = Path(archive_path)
+    if not archive_local.is_absolute():
+        archive_local = local_backup_root / archive_local.name
+    if not archive_local.exists():
+        await safe_edit_or_followup(
+            interaction,
+            f"❌ Backup local reportado, mas arquivo não encontrado em disco: `{archive_local}`",
+        )
+        return True
+
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    remote_name = f"orchestrator-{backup_target}-v{safe_version}-{timestamp}.tar.gz"
+    target_local_archive = local_backup_root / remote_name
 
     try:
-        if archive_local.exists() and archive_local != source_archive:
-            archive_local.unlink()
-    except Exception:
-        pass
-
-    try:
-        if source_archive != archive_local:
-            source_archive.rename(archive_local)
-        else:
-            archive_local = source_archive
+        if archive_local.resolve(strict=False) != target_local_archive.resolve(strict=False):
+            if target_local_archive.exists():
+                target_local_archive.unlink()
+            archive_local.rename(target_local_archive)
+            archive_local = target_local_archive
     except Exception as exc:
         await safe_edit_or_followup(
             interaction,
-            f"❌ Snapshot criado, mas falhou ao preparar arquivo versionado local: {exc}",
+            (
+                "❌ Backup local criado, mas falhou ao padronizar nome do arquivo.\n"
+                f"origem: `{archive_local}`\n"
+                f"destino: `{target_local_archive}`\n"
+                f"erro: {exc}"
+            ),
         )
         return True
-
-    # Keep this command output minimal: only the final .tar.gz artifact.
-    source_manifest = Path(str(source_archive).replace(".tar.gz", ".manifest.json"))
-    source_log = Path(str(source_archive).replace(".tar.gz", ".log"))
-    for sidecar in (source_manifest, source_log):
-        try:
-            if sidecar.exists():
-                sidecar.unlink()
-        except Exception:
-            pass
-
-    def _cleanup_local_backups(keep_archive: Path) -> tuple[int, int]:
-        keep = keep_archive.resolve(strict=False)
-        deleted = 0
-        failed = 0
-        patterns = (
-            "hermes-v*.tar.gz",
-            "hermes-v*.manifest.json",
-            "hermes-v*.log",
-        )
-        for pattern in patterns:
-            for path in local_backup_root.glob(pattern):
-                try:
-                    if path.resolve(strict=False) == keep:
-                        continue
-                except Exception:
-                    pass
-                try:
-                    if path.is_file():
-                        path.unlink()
-                        deleted += 1
-                except Exception:
-                    failed += 1
-        return deleted, failed
-
-    python_bin = _resolve_python_bin()
 
     ensure_cmd = [
         python_bin,
@@ -829,7 +842,7 @@ async def handle_backup_version(
         return True
     folder_id = folder_match.group(1)
 
-    async def upload_drive_file(local_file: Path, remote_name: str, timeout_sec: int = 1800) -> tuple[bool, str, str, str]:
+    async def upload_drive_file(local_file: Path, remote_file_name: str, timeout_sec: int = 1800) -> tuple[bool, str, str, str]:
         cmd = [
             python_bin,
             str(drive_script),
@@ -837,7 +850,7 @@ async def handle_backup_version(
             str(local_file),
             folder_id,
             "--name",
-            remote_name,
+            remote_file_name,
         ]
         proc_u = await asyncio.create_subprocess_exec(
             *cmd,
@@ -862,7 +875,7 @@ async def handle_backup_version(
     try:
         up_ok, drive_file_id, drive_link, up_detail = await upload_drive_file(
             archive_local,
-            filename,
+            remote_name,
             timeout_sec=timeout_drive_sec,
         )
     except asyncio.TimeoutError:
@@ -879,7 +892,7 @@ async def handle_backup_version(
             (
                 "❌ Backup local criado, mas falhou upload para Google Drive.\n"
                 f"archive: `{archive_local}`\n"
-                f"path: `{drive_folder_path}/{filename}`\n"
+                f"path: `{drive_folder_path}/{remote_name}`\n"
                 f"erro: {detail}"
             ),
         )
@@ -909,13 +922,13 @@ async def handle_backup_version(
                     for item in payload
                     if isinstance(item, dict)
                 }
-                if filename not in names:
+                if remote_name not in names:
                     await safe_edit_or_followup(
                         interaction,
                         (
                             "❌ Upload retornou sem `file_id` e o arquivo não foi confirmado na pasta do Drive.\n"
                             f"archive: `{archive_local}`\n"
-                            f"path: `{drive_folder_path}/{filename}`"
+                            f"path: `{drive_folder_path}/{remote_name}`"
                         ),
                     )
                     return True
@@ -927,7 +940,7 @@ async def handle_backup_version(
                     (
                         "❌ Upload retornou sem `file_id` e não foi possível validar no Drive.\n"
                         f"archive: `{archive_local}`\n"
-                        f"path: `{drive_folder_path}/{filename}`\n"
+                        f"path: `{drive_folder_path}/{remote_name}`\n"
                         f"list_error: {detail}"
                     ),
                 )
@@ -938,32 +951,33 @@ async def handle_backup_version(
                 (
                     "❌ Upload retornou sem `file_id` e falhou validação no Drive.\n"
                     f"archive: `{archive_local}`\n"
-                    f"path: `{drive_folder_path}/{filename}`\n"
+                    f"path: `{drive_folder_path}/{remote_name}`\n"
                     f"error: {exc}"
                 ),
             )
             return True
 
-    # Keep only latest local copy to avoid VM bloat.
-    deleted_local, failed_local = _cleanup_local_backups(archive_local)
-
     size_bytes = archive_local.stat().st_size if archive_local.exists() else 0
     size_mb = size_bytes / (1024 * 1024) if size_bytes else 0.0
+    nodes = backup_payload.get("nodes")
+    if isinstance(nodes, list) and nodes:
+        node_label = ", ".join(str(item) for item in nodes if str(item or "").strip())
+    else:
+        node_label = backup_target
 
     await safe_edit_or_followup(
         interaction,
         (
             "✅ Backup criado com sucesso.\n"
+            f"target: `{backup_target}`\n"
+            f"nodes: `{node_label}`\n"
             f"version: `{safe_version}`\n"
-            f"snapshot_mode: `backup_snapshot.sh (same as cron backup_daily)`\n"
             f"archive: `{archive_local}`\n"
-            f"mirror: `/backups/agent/versions/{filename}` (Google Drive)\n"
+            f"mirror: `/{drive_folder_path}/{remote_name}` (Google Drive)\n"
             f"drive_folder_id: `{folder_id}`\n"
             f"drive_file_id: `{drive_file_id or 'n/a'}`\n"
             f"drive_link: {drive_link or 'n/a'}\n"
-            f"size: `{size_mb:.2f} MB`\n"
-            f"local_cleanup_deleted: `{deleted_local}`\n"
-            f"local_cleanup_failed: `{failed_local}`"
+            f"size: `{size_mb:.2f} MB`"
         ),
     )
     return True

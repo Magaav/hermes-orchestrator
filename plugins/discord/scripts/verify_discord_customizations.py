@@ -25,9 +25,30 @@ if not WORKSPACE.exists():
     if legacy_workspace.exists():
         WORKSPACE = legacy_workspace.resolve()
 HERMES_HOME = _resolve_hermes_home()
-RUN_PATH = HERMES_HOME / "hermes-agent" / "gateway" / "run.py"
-DISCORD_PATH = HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "discord.py"
-BASE_PATH = HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "base.py"
+
+
+def _resolve_agent_root() -> Path:
+    configured = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.extend(
+        [
+            HERMES_HOME.parent / "hermes-agent",  # clone layout: <node>/.hermes + <node>/hermes-agent
+            HERMES_HOME / "hermes-agent",         # legacy layout
+            Path("/local/hermes-agent"),          # shared host checkout
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "gateway").exists():
+            return candidate
+    return HERMES_HOME / "hermes-agent"
+
+
+AGENT_ROOT = _resolve_agent_root()
+RUN_PATH = AGENT_ROOT / "gateway" / "run.py"
+DISCORD_PATH = AGENT_ROOT / "gateway" / "platforms" / "discord.py"
+BASE_PATH = AGENT_ROOT / "gateway" / "platforms" / "base.py"
 
 CHANNEL_ACL_SRC = WORKSPACE / "hooks" / "channel_acl"
 CHANNEL_ACL_DST = HERMES_HOME / "hooks" / "channel_acl"
@@ -44,7 +65,33 @@ SLASH_BRIDGE_HANDLERS_SRC = SLASH_BRIDGE_SRC_DIR / "handlers.py"
 SLASH_BRIDGE_HANDLERS_DST = SLASH_BRIDGE_DST_DIR / "handlers.py"
 SLASH_BRIDGE_RUNTIME_SRC = SLASH_BRIDGE_SRC_DIR / "runtime.py"
 SLASH_BRIDGE_RUNTIME_DST = SLASH_BRIDGE_DST_DIR / "runtime.py"
-DISCORD_COMMANDS_JSON = WORKSPACE / "discord_commands.json"
+NODE_COMMANDS_DIR = WORKSPACE / "commands"
+
+
+def _resolve_node_payload_json() -> Path | None:
+    configured = str(os.getenv("DISCORD_COMMANDS_FILE", "") or "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.exists():
+            return candidate
+
+    node_name = str(os.getenv("NODE_NAME", "") or "").strip()
+    if node_name:
+        profile = node_name[:-5] if node_name.lower().endswith(".json") else node_name
+        candidate = NODE_COMMANDS_DIR / f"{profile}.json"
+        if candidate.exists():
+            return candidate
+
+    env_file = str(os.getenv("DISCORD_ENV_FILE", "") or "").strip()
+    if env_file:
+        candidate = NODE_COMMANDS_DIR / f"{Path(env_file).stem}.json"
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+DISCORD_COMMANDS_JSON = _resolve_node_payload_json()
 
 
 def _check(results: list[tuple[str, bool, str]], name: str, ok: bool, detail: str = "") -> None:
@@ -312,18 +359,60 @@ def main() -> int:
         _compile(results, SLASH_BRIDGE_HANDLERS_DST)
 
     # Command payload assertions (/metricas active, legacy /metrics removed)
-    if DISCORD_COMMANDS_JSON.exists():
+    if DISCORD_COMMANDS_JSON and DISCORD_COMMANDS_JSON.exists():
         try:
             payload = json.loads(DISCORD_COMMANDS_JSON.read_text(encoding="utf-8"))
             names = [str(c.get("name") or "").strip() for c in payload if isinstance(c, dict)]
             _check(results, "discord_commands has /metricas", "metricas" in names, f"names={sorted(names)}")
             _check(results, "discord_commands has no /metrics", "metrics" not in names, f"names={sorted(names)}")
             _check(results, "discord_commands has no /colmeio-metrics alias", "colmeio-metrics" not in names, f"names={sorted(names)}")
-            _check(results, "discord_commands has no /faltas alias", "faltas" not in names, f"names={sorted(names)}")
+            _check(results, "discord_commands has no /lista-de-faltas alias", "lista-de-faltas" not in names, f"names={sorted(names)}")
+            faltas_cmd = next(
+                (c for c in payload if isinstance(c, dict) and str(c.get("name") or "").strip() == "faltas"),
+                None,
+            )
+            opts = faltas_cmd.get("options") if isinstance(faltas_cmd, dict) else []
+            opts = opts if isinstance(opts, list) else []
+            opt_names = {str(o.get("name") or "").strip() for o in opts if isinstance(o, dict)}
+            _check(results, "discord_commands /faltas has action option", "action" in opt_names, f"options={sorted(opt_names)}")
+            action_opt = next(
+                (o for o in opts if isinstance(o, dict) and str(o.get("name") or "").strip() == "action"),
+                None,
+            )
+            action_choices = action_opt.get("choices") if isinstance(action_opt, dict) else []
+            action_choices = action_choices if isinstance(action_choices, list) else []
+            action_values = {
+                str(choice.get("value") or "").strip()
+                for choice in action_choices
+                if isinstance(choice, dict)
+            }
+            required_actions = {"listar", "adicionar", "remover", "limpar", "help"}
+            _check(
+                results,
+                "discord_commands /faltas action choices",
+                required_actions.issubset(action_values),
+                f"action_values={sorted(action_values)}",
+            )
+            _check(
+                results,
+                "discord_commands /faltas has no sync action",
+                "sync" not in action_values,
+                f"action_values={sorted(action_values)}",
+            )
         except Exception as exc:
             _check(results, "discord_commands payload parse", False, str(exc))
     else:
-        _check(results, "discord_commands.json exists", False, str(DISCORD_COMMANDS_JSON))
+        _check(
+            results,
+            "node discord payload exists",
+            False,
+            (
+                f"resolved={DISCORD_COMMANDS_JSON} "
+                f"(DISCORD_COMMANDS_FILE={os.getenv('DISCORD_COMMANDS_FILE', '')}, "
+                f"NODE_NAME={os.getenv('NODE_NAME', '')}, "
+                f"DISCORD_ENV_FILE={os.getenv('DISCORD_ENV_FILE', '')})"
+            ),
+        )
 
     # Model native override assertions (/model deterministic choices)
     _contains_marker(

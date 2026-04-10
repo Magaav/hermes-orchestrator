@@ -34,16 +34,22 @@ native_overrides:
     timeout_sec: 45
   backup:
     enabled: true
+    enabled_nodes:
+      - orchestrator
     group_name: backup
-    group_description: Backup Hermes agent files
+    command_description: Create backup for one node or all nodes and mirror to Google Drive
     acl_command: backup
-    subcommand_name: version
-    subcommand_description: Create a versioned backup tar.gz
-    snapshot_script: /local/crons/scripts/backup/backup_snapshot.sh
-    drive_script: /local/crons/scripts/backup/drive_backup.py
+    default_node: all
+    node_choices:
+      - orchestrator
+      - colmeio
+      - catatau
+      - all
+    clone_manager_script: /local/scripts/clone/clone_manager.py
+    drive_script: /local/crons/colmeio/scripts/backup/drive_backup.py
     local_backup_root: /local/backups
-    drive_folder_path: backups/agent/versions
-    timeout_snapshot_sec: 1800
+    drive_folder_path: backups/orchestrator
+    timeout_backup_sec: 1800
     timeout_drive_sec: 3600
   model:
     enabled: true
@@ -76,6 +82,9 @@ slash_bridge:
   enabled: true
   force_bridge_commands: []
   commands:
+    faltas:
+      acl_command: faltas
+      handler: custom:faltas
     metricas:
       handler: metrics_dashboard
       acl_command: metricas

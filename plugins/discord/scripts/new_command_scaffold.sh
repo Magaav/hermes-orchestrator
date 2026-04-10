@@ -130,7 +130,12 @@ def main() -> int:
     parser.add_argument(
         "--skip-discord-payload",
         action="store_true",
-        help="Do not append command entry into discord_commands.json",
+        help="Do not append command entry into commands/<node>.json",
+    )
+    parser.add_argument(
+        "--node",
+        default=str(__import__("os").getenv("NODE_NAME", "") or "").strip(),
+        help="Node name for payload file commands/<node>.json (defaults to NODE_NAME env)",
     )
     parser.add_argument(
         "--force",
@@ -151,7 +156,11 @@ def main() -> int:
         legacy_root = Path("/local/workspace/discord")
         if legacy_root.exists():
             root = legacy_root.resolve()
-    commands_path = root / "discord_commands.json"
+    commands_dir = root / "commands"
+    node_name = str(args.node or "").strip().lower()
+    if node_name.endswith(".json"):
+        node_name = node_name[:-5]
+    commands_path = commands_dir / f"{node_name}.json" if node_name else None
     registry_path = root / "hooks" / "discord_slash_bridge" / "registry.yaml"
     custom_dir = root / "hooks" / "discord_slash_bridge" / "custom_handlers"
 
@@ -163,14 +172,19 @@ def main() -> int:
     dispatch_target = _validate_command_name(args.dispatch_target or command_name)
     handler_id = _validate_custom_id(args.handler_id or command_name)
 
-    if not commands_path.exists():
-        raise FileNotFoundError(f"discord_commands.json not found: {commands_path}")
     if not registry_path.exists():
         raise FileNotFoundError(f"registry.yaml not found: {registry_path}")
+    if not args.skip_discord_payload and not node_name:
+        raise RuntimeError("node name is required when editing payload (set --node or NODE_NAME)")
 
-    commands = _read_json(commands_path)
-    if not isinstance(commands, list):
-        raise RuntimeError(f"Invalid JSON payload format in {commands_path}: expected list")
+    commands = []
+    if not args.skip_discord_payload:
+        assert commands_path is not None
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        if commands_path.exists():
+            commands = _read_json(commands_path)
+            if not isinstance(commands, list):
+                raise RuntimeError(f"Invalid JSON payload format in {commands_path}: expected list")
 
     registry = _read_yaml(registry_path)
     if not isinstance(registry, dict):
@@ -193,7 +207,7 @@ def main() -> int:
 
     if existing_payload and not args.skip_discord_payload and not args.force:
         raise RuntimeError(
-            f"Command '/{command_name}' already exists in discord_commands.json. "
+            f"Command '/{command_name}' already exists in {commands_path}. "
             "Use --skip-discord-payload or --force."
         )
 
@@ -223,6 +237,8 @@ def main() -> int:
     print(f"  mode: {mode}")
     print(f"  route: {route}")
     print(f"  payload_edit: {'no' if args.skip_discord_payload else 'yes'}")
+    if not args.skip_discord_payload:
+        print(f"  payload_file: {commands_path}")
     if mode == "handler":
         print(f"  handler_file: {handler_path}")
     print(f"  dry_run: {'yes' if args.dry_run else 'no'}")
@@ -233,6 +249,7 @@ def main() -> int:
 
     # Write payload entry.
     if not args.skip_discord_payload:
+        assert commands_path is not None
         if existing_payload is not None and args.force:
             idx = commands.index(existing_payload)
             commands[idx] = payload_entry
@@ -274,7 +291,7 @@ def main() -> int:
     print("\n[next]")
     print("  1) Register slash payload in Discord:")
     print(
-        f"     bash {root / 'scripts' / 'register_discord_commands.sh'} {commands_path}"
+        f"     bash {root / 'scripts' / 'register_discord_commands.sh'} {commands_path or '<commands/<node>.json>'}"
     )
     print("  2) Reapply + verify:")
     print(f"     bash {root / 'scripts' / 'prestart_reapply.sh'} --strict")

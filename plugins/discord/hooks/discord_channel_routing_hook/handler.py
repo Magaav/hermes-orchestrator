@@ -60,9 +60,19 @@ _QUESTION_STARTERS = {
     "voce",
 }
 _VOICE_TRANSCRIPT_PATTERN = re.compile(
-    r"\[The user sent a voice message~ Here's what they said: \"([^\"]+)\"\]"
+    r"\[The user sent (?:a )?(?:voice|audio) message\s*~?\s*Here(?:'|’)s what they said:\s*\"([^\"]+)\"\]",
+    flags=re.IGNORECASE,
 )
 _EMPTY_TEXT_SENTINEL = "(The user sent a message with no text content)"
+_TRAILING_STT_PUNCT_RE = re.compile(r"[ \t\r\n.,!?;:]+$")
+_LEADING_SENDER_PREFIX_RE = re.compile(
+    r"^\s*\[(?!the user sent\b)[^\]\n]{1,120}\]\s*",
+    flags=re.IGNORECASE,
+)
+_GENERIC_EMPTY_TEXT_SENTINEL_RE = re.compile(
+    r"\(\s*the user sent a message with no text content\s*\)",
+    flags=re.IGNORECASE,
+)
 
 
 def _normalize_command_set(raw_values: Any) -> Set[str]:
@@ -91,16 +101,42 @@ def _strip_discord_mentions(text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _strip_leading_sender_prefix(text: str) -> str:
+    return _LEADING_SENDER_PREFIX_RE.sub("", str(text or "")).strip()
+
+
+def _normalize_candidate_item(text: str) -> str:
+    item = _strip_leading_sender_prefix(text)
+    item = _strip_discord_mentions(item)
+    if not item:
+        return ""
+    item = item.strip().strip("\"'`")
+    item = re.sub(r"\s+", " ", item).strip()
+    item = _TRAILING_STT_PUNCT_RE.sub("", item).strip()
+    return item
+
+
+def _normalize_store(raw: Any) -> str:
+    key = str(raw or "").strip().lower()
+    mapping = {
+        "loja1": "loja1",
+        "l1": "loja1",
+        "1": "loja1",
+        "loja2": "loja2",
+        "l2": "loja2",
+        "2": "loja2",
+    }
+    return mapping.get(key, "")
+
+
 def _looks_like_item_text(text: str, cfg: Dict[str, Any]) -> bool:
-    item = _strip_discord_mentions(text)
+    item = _normalize_candidate_item(text)
     if not item:
         return False
 
     lowered = item.lower()
     greeting_probe = lowered.lstrip(" ,.!;:-_")
     if "http://" in lowered or "https://" in lowered:
-        return False
-    if "\n" in item:
         return False
     if "?" in item:
         return False
@@ -128,12 +164,22 @@ def _extract_voice_transcript_text(text: str) -> str:
     raw = str(text or "").strip()
     if not raw:
         return ""
+    raw_no_sender = _strip_leading_sender_prefix(raw)
 
-    transcripts = [m.strip() for m in _VOICE_TRANSCRIPT_PATTERN.findall(raw) if str(m or "").strip()]
+    transcripts = [m.strip() for m in _VOICE_TRANSCRIPT_PATTERN.findall(raw_no_sender) if str(m or "").strip()]
+    if not transcripts:
+        transcripts = [
+            m.strip()
+            for m in re.findall(r"Here(?:'|’)s what they said:\s*\"([^\"]+)\"", raw_no_sender, flags=re.IGNORECASE)
+            if str(m or "").strip()
+        ]
     if not transcripts:
         return ""
 
-    remainder = _VOICE_TRANSCRIPT_PATTERN.sub(" ", raw)
+    remainder = _VOICE_TRANSCRIPT_PATTERN.sub(" ", raw_no_sender)
+    remainder = re.sub(r"Here(?:'|’)s what they said:\s*\"([^\"]+)\"", " ", remainder, flags=re.IGNORECASE)
+    remainder = _GENERIC_EMPTY_TEXT_SENTINEL_RE.sub(" ", remainder)
+    remainder = _strip_leading_sender_prefix(remainder)
     remainder = re.sub(r"\s+", " ", remainder).strip()
     if remainder == _EMPTY_TEXT_SENTINEL:
         remainder = ""
@@ -155,7 +201,7 @@ def _invalid_free_text_message(cfg: Dict[str, Any], allowed_cmds: Set[str]) -> s
 
     return (
         "🚫 Este canal executa apenas itens de faltas.\n\n"
-        "Use `/faltas adicionar <item>` ou envie apenas o nome do item.\n"
+        "Use `/faltas action:adicionar itens:<item>` ou envie apenas o nome do item.\n"
         "Exemplo: `papel higienico`."
         f"{cmd_line}"
     )
@@ -294,19 +340,19 @@ def normalize_to_channel_skill(
       - PASSTHROUGH: let Hermes handle it normally
 
     For restricted (`condicionado`) channels:
-      - If message starts with allowed command (/faltas, /lista-de-faltas, etc.)
+      - If message starts with allowed command (/faltas, etc.)
         → PASSTHROUGH
       - If message starts with / but NOT an allowed command
         → BLOCK with error
       - If free text / voice transcript
         → applies default_action:
-            "skill:add" → /faltas adicionar <text>
+            "skill:add" → /faltas adicionar <text> (internal normalization)
       - Meta commands (/status, /help, /reset, etc.) → always PASSTHROUGH
 
     Returns (cmd, transformed_text).
     cmd = "BLOCK"  → reject with block message
     cmd = "PASSTHROUGH" → use message_text as-is
-    cmd = "SKILL_ADD"   → transformed to /faltas adicionar <text>
+    cmd = "SKILL_ADD"   → transformed to /faltas adicionar <text> (internal)
     """
     # Resolve channel IDs from source
     chat_id = getattr(source, "chat_id", None) or getattr(source, "chat_id_alt", None) or ""
@@ -352,17 +398,20 @@ def normalize_to_channel_skill(
             if not allowed_any:
                 return "BLOCK", (
                     f"🚫 O comando `/{cmd}` não é permitido neste canal.\n\n"
-                    f"Use `/faltas adicionar <item>` ou envie apenas o nome do item.\n"
+                    f"Use `/faltas action:adicionar itens:<item>` ou envie apenas o nome do item.\n"
                     f"Comandos permitidos: `/{'/'.join(sorted(allowed_cmds))}`"
                 )
             return "PASSTHROUGH", message_text
         else:
             # Free text or voice → apply default_action
             if default_action == "skill:add":
-                item = _strip_discord_mentions(text)
+                item = _normalize_candidate_item(text)
                 free_text_policy = str(effective.get("free_text_policy", "auto_add") or "auto_add").strip().lower()
                 if free_text_policy == "strict_item" and not _looks_like_item_text(item, effective):
                     return "BLOCK", _invalid_free_text_message(effective, allowed_cmds)
+                store = _normalize_store(effective.get("store"))
+                if store and not re.search(r"\b(?:loja\s*[12]|l[12]|ambas|todas)\b", item.lower()):
+                    item = f"{item} {store}"
                 return "SKILL_ADD", f"/faltas adicionar {item}"
             # Fallback: pass through
             return "PASSTHROUGH", message_text
@@ -486,3 +535,8 @@ def check_skill_allowed(
             )
 
     return True, ""
+
+
+def handle(event_name: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Hook entrypoint for gateway event bus (no-op for compatibility)."""
+    return context or {}

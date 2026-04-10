@@ -1789,6 +1789,7 @@ class DiscordAdapter(BasePlatformAdapter):
         is_dm = isinstance(interaction.channel, discord.DMChannel)
         is_thread = isinstance(interaction.channel, discord.Thread)
         thread_id = None
+        parent_channel_id = self._get_parent_channel_id(interaction.channel) if is_thread else None
 
         if is_dm:
             chat_type = "dm"
@@ -1816,6 +1817,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=interaction.user.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            chat_id_alt=parent_channel_id,
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
@@ -1879,6 +1881,7 @@ class DiscordAdapter(BasePlatformAdapter):
             guild_name = interaction.guild.name
 
         chat_name = f"{guild_name} / {thread_name}" if guild_name else thread_name
+        _parent_channel_id = str(getattr(interaction, "channel_id", "") or "")
 
         # Inherit forum topic when the thread was created inside a forum channel.
         _chan = getattr(interaction, "channel", None)
@@ -1891,6 +1894,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_id=str(interaction.user.id),
             user_name=interaction.user.display_name,
             thread_id=thread_id,
+            chat_id_alt=_parent_channel_id or None,
             chat_topic=chat_topic,
         )
 
@@ -2312,6 +2316,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     is_thread = True
                     thread_id = str(thread.id)
                     auto_threaded_channel = thread
+                    parent_channel_id = self._get_parent_channel_id(thread) or str(message.channel.id)
                     self._track_thread(thread_id)
 
         # Determine message type
@@ -2367,6 +2372,7 @@ class DiscordAdapter(BasePlatformAdapter):
             user_name=message.author.display_name,
             thread_id=thread_id,
             chat_topic=chat_topic,
+            chat_id_alt=parent_channel_id,
         )
 
         # Build media URLs -- download image attachments to local cache so the

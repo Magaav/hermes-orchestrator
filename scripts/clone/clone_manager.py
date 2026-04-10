@@ -114,6 +114,8 @@ HOST_UID = os.getuid()
 HOST_GID = os.getgid()
 RUNTIME_UV_REL = Path(".runtime/uv")
 BOOTSTRAP_META_REL = Path(".clone-meta/bootstrap.json")
+NODE_RUNTIME_CONTRACT_REL = Path(".hermes/NODE_RUNTIME_CONTRACT.md")
+NODE_RUNTIME_CONTRACT_WORKSPACE_REL = Path("workspace/NODE_RUNTIME_CONTRACT.md")
 CAMOFOX_DEFAULT_URL_CLONE = "http://host.docker.internal:9377"
 OPENVIKING_DEFAULT_ENDPOINT_CLONE = "http://host.docker.internal:1933"
 GATEWAY_REQUIRED_MODULES: tuple[str, ...] = ("discord", "yaml")
@@ -883,6 +885,125 @@ def _docker_state(container_name: str) -> Dict[str, Any]:
     }
 
 
+def _docker_mounts(container_name: str) -> list[Dict[str, Any]]:
+    if not _docker_exists(container_name):
+        return []
+    proc = _run(
+        ["docker", "inspect", container_name, "--format", "{{json .Mounts}}"],
+        check=False,
+    )
+    raw = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not raw:
+        return []
+    try:
+        mounts = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(mounts, list):
+        return []
+
+    normalized: list[Dict[str, Any]] = []
+    for item in mounts:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "source": str(item.get("Source") or ""),
+                "destination": str(item.get("Destination") or ""),
+                "rw": bool(item.get("RW")),
+                "mode": str(item.get("Mode") or ""),
+            }
+        )
+    return normalized
+
+
+def _normalized_path_str(path: Path | str) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    try:
+        return str(Path(raw).resolve())
+    except Exception:
+        return os.path.normpath(raw)
+
+
+def _required_worker_mount_specs(clone_name: str, clone_root: Path) -> list[Dict[str, Any]]:
+    return [
+        {
+            "destination": "/local",
+            "source": str(clone_root),
+            "read_only": False,
+        },
+        {
+            "destination": f"/local/logs/nodes/{clone_name}",
+            "source": str(_node_log_dir(clone_name)),
+            "read_only": False,
+        },
+        {
+            "destination": f"/local/logs/attention/nodes/{clone_name}",
+            "source": str(_node_attention_dir(clone_name)),
+            "read_only": False,
+        },
+        {
+            "destination": "/local/.hermes/logs",
+            "source": str(_node_hermes_log_dir(clone_name)),
+            "read_only": False,
+        },
+        {
+            "destination": "/local/scripts",
+            "source": str(SHARED_SCRIPTS_ROOT),
+            "read_only": True,
+        },
+        {
+            "destination": "/local/plugins",
+            "source": str(SHARED_PLUGINS_ROOT),
+            "read_only": True,
+        },
+        {
+            "destination": "/local/crons",
+            "source": str(SHARED_CRONS_ROOT / clone_name),
+            "read_only": False,
+        },
+    ]
+
+
+def _missing_required_worker_mounts(container_name: str, clone_name: str, clone_root: Path) -> list[str]:
+    mounts = _docker_mounts(container_name)
+    if not mounts:
+        return ["docker inspect mount data unavailable"]
+
+    by_dest = {
+        str(mount.get("destination") or "").strip(): mount
+        for mount in mounts
+        if str(mount.get("destination") or "").strip()
+    }
+    missing: list[str] = []
+
+    for spec in _required_worker_mount_specs(clone_name, clone_root):
+        destination = str(spec["destination"])
+        expected_source = _normalized_path_str(str(spec["source"]))
+        expected_ro = bool(spec["read_only"])
+        actual = by_dest.get(destination)
+        if actual is None:
+            missing.append(f"{destination} (missing)")
+            continue
+
+        actual_source = _normalized_path_str(str(actual.get("source") or ""))
+        if expected_source and actual_source != expected_source:
+            missing.append(
+                f"{destination} (source mismatch: expected={expected_source} actual={actual_source})"
+            )
+            continue
+
+        actual_ro = not bool(actual.get("rw"))
+        if actual_ro != expected_ro:
+            missing.append(
+                f"{destination} (mode mismatch: expected={'ro' if expected_ro else 'rw'} actual={'ro' if actual_ro else 'rw'})"
+            )
+
+    return missing
+
+
 def _normalize_clone_name(raw: str) -> str:
     name = str(raw or "").strip().lower()
     if not VALID_NAME_RE.fullmatch(name):
@@ -1003,6 +1124,102 @@ def _clone_bootstrap_meta_path(clone_root: Path) -> Path:
     return clone_root / BOOTSTRAP_META_REL
 
 
+def _clone_runtime_contract_path(clone_root: Path) -> Path:
+    return clone_root / NODE_RUNTIME_CONTRACT_REL
+
+
+def _clone_workspace_runtime_contract_path(clone_root: Path) -> Path:
+    return clone_root / NODE_RUNTIME_CONTRACT_WORKSPACE_REL
+
+
+def _resolve_state_mode_info(env: Dict[str, str]) -> tuple[int | None, str]:
+    try:
+        mode = _extract_state_mode(env)
+        return mode, STATE_LABELS.get(mode, "unknown")
+    except Exception:
+        raw = _env_first_nonempty(env, "NODE_STATE", "CLONE_STATE")
+        if not raw:
+            return None, "unknown"
+        try:
+            mode = int(raw)
+        except Exception:
+            return None, "invalid"
+        return mode, STATE_LABELS.get(mode, "invalid")
+
+
+def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> str:
+    state_code, state_label = _resolve_state_mode_info(env)
+    role = "orchestrator-control-plane" if state_code == 1 else "worker-node"
+    lines = [
+        "# Node Runtime Contract",
+        "",
+        "This file defines the operational contract for this node in the Hermes",
+        "Orchestrator topology.",
+        "",
+        f"- Node: {clone_name}",
+        f"- Role: {role}",
+        f"- Bootstrap mode: NODE_STATE={state_code if state_code is not None else '?'} ({state_label})",
+        f"- Shared plugins root: {SHARED_PLUGINS_ROOT}",
+        f"- Shared scripts root: {SHARED_SCRIPTS_ROOT}",
+        f"- Bootstrap metadata: /local/.clone-meta/bootstrap.json",
+        f"- Prestart patch pipeline: {SHARED_PLUGINS_ROOT}/discord/scripts/prestart_reapply.sh",
+        "",
+        "## Framework Roles",
+        "- Orchestrator node owns shared framework assets and node lifecycle controls.",
+        "- Worker nodes execute domain tasks and provide technical proposals/improvements.",
+        "- Plugins and framework patches are shared infrastructure, not per-node app code.",
+        "",
+        "## Plugin Governance",
+        "- Workers must treat /local/plugins and /local/scripts as orchestrator-managed assets.",
+        "- Workers should not claim plugin/framework changes are applied unless orchestrator executes them.",
+        "- Workers should propose exact file diffs, rollout plan, rollback plan, and verification steps.",
+        "- Orchestrator should apply approved shared changes, restart affected nodes, and verify outcomes.",
+        "",
+        "## Collaboration Protocol",
+        "1. Detect issue or improvement opportunity.",
+        "2. Draft a scoped change proposal (what/why/risk/tests).",
+        "3. Ask orchestrator to execute shared plugin/framework mutations.",
+        "4. Validate behavior after restart and document residual risk.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _build_node_governance_prompt(clone_name: str, env: Dict[str, str]) -> str:
+    state_code, state_label = _resolve_state_mode_info(env)
+    role = "orchestrator" if state_code == 1 else "worker"
+    role_line = (
+        "You own shared plugin/framework execution and rollout for the fleet."
+        if state_code == 1
+        else "Do not execute or claim direct shared plugin/framework mutations; escalate to orchestrator."
+    )
+    return (
+        f"[Node governance contract]\n"
+        f"Node={clone_name}; role={role}; NODE_STATE={state_code if state_code is not None else '?'} ({state_label}).\n"
+        f"Shared framework assets live at {SHARED_PLUGINS_ROOT} and {SHARED_SCRIPTS_ROOT}; "
+        "they are orchestrator-managed infrastructure.\n"
+        f"{role_line}\n"
+        "When proposing shared changes, provide exact file edits, rollout+rollback, and verification.\n"
+        "Bootstrap note: gateway startup runs /local/plugins/discord/scripts/prestart_reapply.sh "
+        "so plugin hooks are re-applied on restart.\n"
+        "Reference contract file: /local/.hermes/NODE_RUNTIME_CONTRACT.md"
+    ).strip()
+
+
+def _write_node_runtime_contract(clone_root: Path, clone_name: str, env: Dict[str, str]) -> None:
+    content = _build_node_runtime_contract_text(clone_name, env)
+    hermes_path = _clone_runtime_contract_path(clone_root)
+    workspace_path = _clone_workspace_runtime_contract_path(clone_root)
+
+    for target in (hermes_path, workspace_path):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        try:
+            target.chmod(0o644)
+        except Exception:
+            pass
+
+
 def _is_truthy(value: Any) -> bool:
     raw = str(value or "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -1101,14 +1318,15 @@ def _effective_hermes_yolo_mode(env: Dict[str, str]) -> str:
     """Return the canonical YOLO toggle from profile env (supports legacy alias)."""
     return _env_first_nonempty(
         env,
-        "HERMES_YOLO_MODE",
         "NODE_HERMES_YOLO_MODE",
+        "HERMES_YOLO_MODE",
     )
 
 
 def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, str]:
     overrides: Dict[str, str] = {}
     node_logs_dir = _node_log_dir(clone_name)
+    overrides["NODE_NAME"] = _env_first_nonempty(env, "NODE_NAME") or clone_name
 
     overrides["COLMEIO_PROJECT_DIR"] = (
         _env_first_nonempty(env, "COLMEIO_PROJECT_DIR") or NODE_WORKSPACE_ROOT_IN_CONTAINER
@@ -1149,6 +1367,17 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     yolo_mode = _effective_hermes_yolo_mode(env)
     if yolo_mode:
         overrides["HERMES_YOLO_MODE"] = yolo_mode
+
+    governance_prompt = _build_node_governance_prompt(clone_name, env)
+    existing_prompt = _env_first_nonempty(env, "HERMES_EPHEMERAL_SYSTEM_PROMPT")
+    if existing_prompt:
+        overrides["HERMES_EPHEMERAL_SYSTEM_PROMPT"] = (
+            f"{existing_prompt}\n\n{governance_prompt}"
+        ).strip()
+    else:
+        overrides["HERMES_EPHEMERAL_SYSTEM_PROMPT"] = governance_prompt
+    overrides["HERMES_NODE_RUNTIME_CONTRACT_PATH"] = "/local/.hermes/NODE_RUNTIME_CONTRACT.md"
+    overrides["HERMES_NODE_BOOTSTRAP_META_PATH"] = "/local/.clone-meta/bootstrap.json"
 
     return overrides
 
@@ -1652,7 +1881,6 @@ def _link_clone_workspace_discord(clone_root: Path, clone_name: str = "") -> Non
       - scripts/ -> shared /local/plugins/discord/scripts (symlink)
       - hooks/   -> shared /local/plugins/discord/hooks   (symlink)
       - discord_users.json            (node-local mutable state)
-      - discord_commands.json         (node-local mutable state)
       - discord_webhooks_table.json   (node-local mutable state)
     """
     workspace_discord = clone_root / "workspace" / "discord"
@@ -1669,12 +1897,6 @@ def _link_clone_workspace_discord(clone_root: Path, clone_name: str = "") -> Non
         target_file=workspace_discord / "discord_users.json",
         default_content='{\n  "version": 2,\n  "users": []\n}\n',
         seed_candidates=_discord_runtime_seed_candidates("discord_users.json"),
-    )
-    _seed_workspace_discord_state_file(
-        clone_name=clone_name,
-        target_file=workspace_discord / "discord_commands.json",
-        default_content="[]\n",
-        seed_candidates=_discord_runtime_seed_candidates("discord_commands.json"),
     )
     _seed_workspace_discord_state_file(
         clone_name=clone_name,
@@ -1806,6 +2028,8 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
             _remove_path(workspace_skills)
         workspace_skills.parent.mkdir(parents=True, exist_ok=True)
         os.symlink("../.hermes/skills", workspace_skills)
+
+    _write_node_runtime_contract(clone_root, clone_name, env)
 
     # Write bootstrap metadata
     bootstrap_meta_path = _clone_bootstrap_meta_path(clone_root)
@@ -2431,6 +2655,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
     _ensure_worker_shared_mount_links(clone_root, clone_name)
     _link_clone_workspace_discord(clone_root, clone_name)
     _ensure_workspace_data_layout(clone_root, clone_name)
+    _write_node_runtime_contract(clone_root, clone_name, env)
 
     _ensure_clone_ownership(clone_root)
     force_reseed = _is_truthy(_env_first_nonempty(env, "NODE_FORCE_RESEED", "CLONE_FORCE_RESEED", "0"))
@@ -2659,7 +2884,7 @@ def _build_docker_run_cmd(
         "-e",
         "PATH=/local/hermes-agent/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "-e",
-        f"COLMEIO_CLONE_NAME={clone_name}",
+        f"NODE_NAME={clone_name}",
         "-e",
         "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/discord",
         "-e",
@@ -2823,7 +3048,7 @@ def _orchestrator_start_gateway(
     proc_env["HOME"] = str(clone_root)
     proc_env["USER"] = str(proc_env.get("USER") or "ubuntu")
     proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
-    proc_env["COLMEIO_CLONE_NAME"] = clone_name
+    proc_env["NODE_NAME"] = str(proc_env.get("NODE_NAME") or clone_name)
     proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
     proc_env["HERMES_AGENT_ROOT"] = str(runtime_agent_root)
     proc_env["PYTHONUNBUFFERED"] = "1"
@@ -3025,8 +3250,9 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
 
     if not is_orchestrator and _docker_running(container):
         state = _docker_state(container)
+        missing_mounts = _missing_required_worker_mounts(container, clone_name, clone_root)
         status = str(state.get("status") or "").strip().lower()
-        if status != "restarting":
+        if status != "restarting" and not missing_mounts:
             return {
                 "ok": True,
                 "action": "start",
@@ -3046,12 +3272,21 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
                 "discord_home_channel_sync": discord_home_sync,
                 "restart_reboot_sync": restart_reboot_sync,
+                "required_mounts_ok": True,
+                "required_mounts_missing": [],
             }
 
-        _log(
-            clone_name,
-            "start requested while container was restarting; forcing recreate",
-        )
+        if status == "restarting":
+            _log(
+                clone_name,
+                "start requested while container was restarting; forcing recreate",
+            )
+        else:
+            _log(
+                clone_name,
+                "start requested while container had stale/missing mounts; forcing recreate: "
+                + "; ".join(missing_mounts),
+            )
         _run(["docker", "rm", "-f", container], check=False)
 
     registry_before = _load_registry()
@@ -3214,6 +3449,12 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
 
     is_orchestrator = state_code == 1
     state = _orchestrator_process_state(clone_root) if is_orchestrator else _docker_state(container)
+    required_mounts_missing: list[str] = []
+    required_mounts_ok: bool | None = None
+    if not is_orchestrator and state.get("exists"):
+        required_mounts_missing = _missing_required_worker_mounts(container, clone_name, clone_root)
+        required_mounts_ok = not required_mounts_missing
+    runtime_contract_path = _clone_runtime_contract_path(clone_root)
     mgmt_log_file = _management_log_path(clone_name)
     openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name) if env else ("", "")
     restart_reboot = _effective_restart_reboot_env(env) if env else {
@@ -3253,6 +3494,10 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         "discord_restart_delay_sec": restart_reboot["restart_delay_sec"],
         "discord_reboot_delay_sec": restart_reboot["reboot_delay_sec"],
         "container_state": state,
+        "required_mounts_ok": required_mounts_ok,
+        "required_mounts_missing": required_mounts_missing,
+        "runtime_contract_path": str(runtime_contract_path),
+        "runtime_contract_exists": runtime_contract_path.exists(),
         "log_file": str(mgmt_log_file),
         "runtime_log_file": str(_clone_runtime_log_path(clone_name, clone_root=clone_root)),
         "attention_log_file": str(_attention_log_path(clone_name)),

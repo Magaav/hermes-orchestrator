@@ -1449,7 +1449,7 @@ def _build_docker_run_cmd(
         "-e",
         "LOGNAME=ubuntu",
         "-e",
-        f"COLMEIO_CLONE_NAME={clone_name}",
+        f"NODE_NAME={clone_name}",
         "-e",
         "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/discord",
         "-e",

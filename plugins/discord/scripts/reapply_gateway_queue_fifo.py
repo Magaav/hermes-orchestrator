@@ -109,29 +109,51 @@ def _patch_base(content: str) -> tuple[str, bool]:
     changed |= did
 
     if "Queuing voice/audio follow-up for session" not in content:
-        old = (
-            "            if event.message_type == MessageType.PHOTO:\n"
-            "                logger.debug(\"[%s] Queuing photo follow-up for session %s without interrupt\", self.name, session_key)\n"
-            "                existing = self._pending_messages.get(session_key)\n"
-            "                if existing and existing.message_type == MessageType.PHOTO:\n"
-            "                    existing.media_urls.extend(event.media_urls)\n"
-            "                    existing.media_types.extend(event.media_types)\n"
-            "                    if event.text:\n"
-            "                        if not existing.text:\n"
-            "                            existing.text = event.text\n"
-            "                        elif event.text not in existing.text:\n"
-            "                            existing.text = f\"{existing.text}\\n\\n{event.text}\".strip()\n"
-            "                else:\n"
-            "                    self._pending_messages[session_key] = event\n"
-            "                return  # Don't interrupt now - will run after current task completes\n"
-            "\n"
-            "            # Default behavior for non-photo follow-ups: interrupt the running agent\n"
-            "            logger.debug(\"[%s] New message while session %s is active — triggering interrupt\", self.name, session_key)\n"
-            "            self._pending_messages[session_key] = event\n"
-            "            # Signal the interrupt (the processing task checks this)\n"
-            "            self._active_sessions[session_key].set()\n"
-            "            return  # Don't process now - will be handled after current task finishes\n"
-        )
+        old_variants = [
+            (
+                "            if event.message_type == MessageType.PHOTO:\n"
+                "                logger.debug(\"[%s] Queuing photo follow-up for session %s without interrupt\", self.name, session_key)\n"
+                "                existing = self._pending_messages.get(session_key)\n"
+                "                if existing and existing.message_type == MessageType.PHOTO:\n"
+                "                    existing.media_urls.extend(event.media_urls)\n"
+                "                    existing.media_types.extend(event.media_types)\n"
+                "                    if event.text:\n"
+                "                        if not existing.text:\n"
+                "                            existing.text = event.text\n"
+                "                        elif event.text not in existing.text:\n"
+                "                            existing.text = f\"{existing.text}\\n\\n{event.text}\".strip()\n"
+                "                else:\n"
+                "                    self._pending_messages[session_key] = event\n"
+                "                return  # Don't interrupt now - will run after current task completes\n"
+                "\n"
+                "            # Default behavior for non-photo follow-ups: interrupt the running agent\n"
+                "            logger.debug(\"[%s] New message while session %s is active — triggering interrupt\", self.name, session_key)\n"
+                "            self._pending_messages[session_key] = event\n"
+                "            # Signal the interrupt (the processing task checks this)\n"
+                "            self._active_sessions[session_key].set()\n"
+                "            return  # Don't process now - will be handled after current task finishes\n"
+            ),
+            (
+                "            if event.message_type == MessageType.PHOTO:\n"
+                "                logger.debug(\"[%s] Queuing photo follow-up for session %s without interrupt\", self.name, session_key)\n"
+                "                existing = self._pending_messages.get(session_key)\n"
+                "                if existing and existing.message_type == MessageType.PHOTO:\n"
+                "                    existing.media_urls.extend(event.media_urls)\n"
+                "                    existing.media_types.extend(event.media_types)\n"
+                "                    if event.text:\n"
+                "                        existing.text = self._merge_caption(existing.text, event.text)\n"
+                "                else:\n"
+                "                    self._pending_messages[session_key] = event\n"
+                "                return  # Don't interrupt now - will run after current task completes\n"
+                "\n"
+                "            # Default behavior for non-photo follow-ups: interrupt the running agent\n"
+                "            logger.debug(\"[%s] New message while session %s is active — triggering interrupt\", self.name, session_key)\n"
+                "            self._pending_messages[session_key] = event\n"
+                "            # Signal the interrupt (the processing task checks this)\n"
+                "            self._active_sessions[session_key].set()\n"
+                "            return  # Don't process now - will be handled after current task finishes\n"
+            ),
+        ]
         new = (
             "            if event.message_type == MessageType.PHOTO:\n"
             "                logger.debug(\"[%s] Queuing photo follow-up for session %s without interrupt\", self.name, session_key)\n"
@@ -167,8 +189,15 @@ def _patch_base(content: str) -> tuple[str, bool]:
             "            self._active_sessions[session_key].set()\n"
             "            return  # Don't process now - will be handled after current task finishes\n"
         )
-        content, did = _replace_once(content, old, new, "base active-session queue behavior")
-        changed |= did
+        replaced = False
+        for old in old_variants:
+            if old in content:
+                content = content.replace(old, new, 1)
+                changed = True
+                replaced = True
+                break
+        if not replaced:
+            raise RuntimeError("anchor not found for base active-session queue behavior")
 
     if "pending_event = self.get_pending_message(session_key)" not in content:
         old = (
@@ -363,30 +392,53 @@ def _patch_run(content: str) -> tuple[str, bool]:
     changed |= did
 
     if "PRIORITY voice/audio follow-up for session" not in content:
-        old = (
-            "            if event.message_type == MessageType.PHOTO:\n"
-            "                logger.debug(\"PRIORITY photo follow-up for session %s — queueing without interrupt\", _quick_key[:20])\n"
-            "                adapter = self.adapters.get(source.platform)\n"
-            "                if adapter:\n"
-            "                    # Reuse adapter queue semantics so photo bursts merge cleanly.\n"
-            "                    if _quick_key in adapter._pending_messages:\n"
-            "                        existing = adapter._pending_messages[_quick_key]\n"
-            "                        if getattr(existing, \"message_type\", None) == MessageType.PHOTO:\n"
-            "                            existing.media_urls.extend(event.media_urls)\n"
-            "                            existing.media_types.extend(event.media_types)\n"
-            "                            if event.text:\n"
-            "                                if not existing.text:\n"
-            "                                    existing.text = event.text\n"
-            "                                elif event.text not in existing.text:\n"
-            "                                    existing.text = f\"{existing.text}\\n\\n{event.text}\".strip()\n"
-            "                        else:\n"
-            "                            adapter._pending_messages[_quick_key] = event\n"
-            "                    else:\n"
-            "                        adapter._pending_messages[_quick_key] = event\n"
-            "                return None\n"
-            "\n"
-            "            running_agent = self._running_agents.get(_quick_key)\n"
-        )
+        old_variants = [
+            (
+                "            if event.message_type == MessageType.PHOTO:\n"
+                "                logger.debug(\"PRIORITY photo follow-up for session %s — queueing without interrupt\", _quick_key[:20])\n"
+                "                adapter = self.adapters.get(source.platform)\n"
+                "                if adapter:\n"
+                "                    # Reuse adapter queue semantics so photo bursts merge cleanly.\n"
+                "                    if _quick_key in adapter._pending_messages:\n"
+                "                        existing = adapter._pending_messages[_quick_key]\n"
+                "                        if getattr(existing, \"message_type\", None) == MessageType.PHOTO:\n"
+                "                            existing.media_urls.extend(event.media_urls)\n"
+                "                            existing.media_types.extend(event.media_types)\n"
+                "                            if event.text:\n"
+                "                                if not existing.text:\n"
+                "                                    existing.text = event.text\n"
+                "                                elif event.text not in existing.text:\n"
+                "                                    existing.text = f\"{existing.text}\\n\\n{event.text}\".strip()\n"
+                "                        else:\n"
+                "                            adapter._pending_messages[_quick_key] = event\n"
+                "                    else:\n"
+                "                        adapter._pending_messages[_quick_key] = event\n"
+                "                return None\n"
+                "\n"
+                "            running_agent = self._running_agents.get(_quick_key)\n"
+            ),
+            (
+                "            if event.message_type == MessageType.PHOTO:\n"
+                "                logger.debug(\"PRIORITY photo follow-up for session %s — queueing without interrupt\", _quick_key[:20])\n"
+                "                adapter = self.adapters.get(source.platform)\n"
+                "                if adapter:\n"
+                "                    # Reuse adapter queue semantics so photo bursts merge cleanly.\n"
+                "                    if _quick_key in adapter._pending_messages:\n"
+                "                        existing = adapter._pending_messages[_quick_key]\n"
+                "                        if getattr(existing, \"message_type\", None) == MessageType.PHOTO:\n"
+                "                            existing.media_urls.extend(event.media_urls)\n"
+                "                            existing.media_types.extend(event.media_types)\n"
+                "                            if event.text:\n"
+                "                                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)\n"
+                "                        else:\n"
+                "                            adapter._pending_messages[_quick_key] = event\n"
+                "                    else:\n"
+                "                        adapter._pending_messages[_quick_key] = event\n"
+                "                return None\n"
+                "\n"
+                "            running_agent = self._running_agents.get(_quick_key)\n"
+            ),
+        ]
         new = (
             "            if event.message_type == MessageType.PHOTO:\n"
             "                logger.debug(\"PRIORITY photo follow-up for session %s — queueing without interrupt\", _quick_key[:20])\n"
@@ -420,8 +472,15 @@ def _patch_run(content: str) -> tuple[str, bool]:
             "\n"
             "            running_agent = self._running_agents.get(_quick_key)\n"
         )
-        content, did = _replace_once(content, old, new, "run photo+voice priority queue")
-        changed |= did
+        replaced = False
+        for old in old_variants:
+            if old in content:
+                content = content.replace(old, new, 1)
+                changed = True
+                replaced = True
+                break
+        if not replaced:
+            raise RuntimeError("anchor not found for run photo+voice priority queue")
 
     # Sentinel-setup queue uses helper
     old = (

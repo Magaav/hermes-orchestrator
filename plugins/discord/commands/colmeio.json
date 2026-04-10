@@ -1,180 +1,82 @@
 [
   {
-    "name": "lista-de-faltas",
+    "name": "faltas",
     "description": "Gerenciar lista de faltas das lojas",
     "type": 1,
     "options": [
       {
-        "type": 1,
-        "name": "listar",
-        "description": "Listar faltas",
-        "options": [
+        "type": 3,
+        "name": "action",
+        "description": "Acao do comando",
+        "required": true,
+        "choices": [
           {
-            "type": 3,
-            "name": "loja",
-            "description": "loja1, loja2 ou ambas",
-            "required": false,
-            "choices": [
-              {
-                "name": "loja1",
-                "value": "loja1"
-              },
-              {
-                "name": "loja2",
-                "value": "loja2"
-              },
-              {
-                "name": "ambas",
-                "value": "ambas"
-              }
-            ]
+            "name": "listar",
+            "value": "listar"
           },
           {
-            "type": 3,
-            "name": "formato",
-            "description": "links (padrao), excel ou texto",
-            "required": false,
-            "choices": [
-              {
-                "name": "links",
-                "value": "links"
-              },
-              {
-                "name": "excel",
-                "value": "excel"
-              },
-              {
-                "name": "texto",
-                "value": "texto"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "type": 1,
-        "name": "adicionar",
-        "description": "Adicionar item(ns)",
-        "options": [
-          {
-            "type": 3,
-            "name": "itens",
-            "description": "Itens separados por virgula",
-            "required": true
+            "name": "adicionar",
+            "value": "adicionar"
           },
           {
-            "type": 3,
-            "name": "loja",
-            "description": "loja1, loja2 ou ambas",
-            "required": false,
-            "choices": [
-              {
-                "name": "loja1",
-                "value": "loja1"
-              },
-              {
-                "name": "loja2",
-                "value": "loja2"
-              },
-              {
-                "name": "ambas",
-                "value": "ambas"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "type": 1,
-        "name": "remover",
-        "description": "Remover item(ns)",
-        "options": [
-          {
-            "type": 3,
-            "name": "itens",
-            "description": "Itens separados por virgula",
-            "required": true
+            "name": "remover",
+            "value": "remover"
           },
           {
-            "type": 3,
-            "name": "loja",
-            "description": "loja1, loja2 ou ambas",
-            "required": false,
-            "choices": [
-              {
-                "name": "loja1",
-                "value": "loja1"
-              },
-              {
-                "name": "loja2",
-                "value": "loja2"
-              },
-              {
-                "name": "ambas",
-                "value": "ambas"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "type": 1,
-        "name": "limpar",
-        "description": "Limpar faltas (sempre pede confirmacao)",
-        "options": [
+            "name": "limpar",
+            "value": "limpar"
+          },
           {
-            "type": 3,
-            "name": "loja",
-            "description": "loja1, loja2 ou ambas",
-            "required": false,
-            "choices": [
-              {
-                "name": "loja1",
-                "value": "loja1"
-              },
-              {
-                "name": "loja2",
-                "value": "loja2"
-              },
-              {
-                "name": "ambas",
-                "value": "ambas"
-              }
-            ]
+            "name": "help",
+            "value": "help"
           }
         ]
       },
       {
-        "type": 1,
-        "name": "sync",
-        "description": "Sincronizar xlsx para Google Sheets",
-        "options": [
+        "type": 3,
+        "name": "loja",
+        "description": "loja1, loja2 ou ambas",
+        "required": false,
+        "choices": [
           {
-            "type": 3,
-            "name": "loja",
-            "description": "loja1, loja2 ou ambas",
-            "required": false,
-            "choices": [
-              {
-                "name": "loja1",
-                "value": "loja1"
-              },
-              {
-                "name": "loja2",
-                "value": "loja2"
-              },
-              {
-                "name": "ambas",
-                "value": "ambas"
-              }
-            ]
+            "name": "loja1",
+            "value": "loja1"
+          },
+          {
+            "name": "loja2",
+            "value": "loja2"
+          },
+          {
+            "name": "ambas",
+            "value": "ambas"
           }
         ]
       },
       {
-        "type": 1,
-        "name": "help",
-        "description": "Ajuda rapida"
+        "type": 3,
+        "name": "itens",
+        "description": "Itens separados por virgula (adicionar/remover)",
+        "required": false
+      },
+      {
+        "type": 3,
+        "name": "formato",
+        "description": "Formato para listar: links, excel ou texto",
+        "required": false,
+        "choices": [
+          {
+            "name": "links",
+            "value": "links"
+          },
+          {
+            "name": "excel",
+            "value": "excel"
+          },
+          {
+            "name": "texto",
+            "value": "texto"
+          }
+        ]
       }
     ]
   },

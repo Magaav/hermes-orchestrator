@@ -4,7 +4,6 @@ Canonical home for Discord integration artifacts used by orchestrator nodes.
 
 ## Canonical Paths
 
-- `discord_commands.json` -> `/local/plugins/discord/discord_commands.json`
 - `commands/<node>.json` -> per-node slash payload files (e.g. `commands/colmeio.json`)
 - `discord_users.json` (runtime, not tracked) -> `/local/plugins/discord/discord_users.json`
 - `discord_webhooks_table.json` (runtime, not tracked) -> `/local/plugins/discord/discord_webhooks_table.json`
@@ -14,14 +13,14 @@ Canonical home for Discord integration artifacts used by orchestrator nodes.
 - Hooks -> `/local/plugins/discord/hooks/`
 - Node cron launchers -> `/local/crons/<node>/`
 
-Legacy `/local/workspace/discord/*` compatibility fallbacks may still exist in some scripts, but `/local/plugins/discord/*` is the source of truth.
+`/local/plugins/discord/*` is the source of truth.
 
 Node payload selection order:
 
 1. `DISCORD_COMMANDS_FILE` (explicit path)
-2. `commands/$DISCORD_COMMANDS_PROFILE.json`
-3. `commands/$COLMEIO_CLONE_NAME.json`
-4. fallback `discord_commands.json`
+2. `commands/$NODE_NAME.json`
+
+No legacy fallback payload is used.
 
 ## Strict Mode
 

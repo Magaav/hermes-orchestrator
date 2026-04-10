@@ -15,6 +15,12 @@ This folder is the external command engine loaded by the Discord bootstrap patch
 
 1. `native_overrides`
 - for commands we want as native tree commands (`/restart`, `/metricas`, `/backup version`, `/model`)
+- `/backup version` is orchestrator-only and now accepts:
+  - `version` (optional label)
+  - `node` (`orchestrator`, `colmeio`, `catatau`, `all`)
+- backup flow:
+  - local archive via clone manager under `/local/backups`
+  - Drive mirror under `/backups/orchestrator/`
 
 2. `slash_bridge`
 - for commands registered in Discord payload but not in Hermes core
@@ -63,5 +69,4 @@ Notes:
 
 - Prefer one command name per handler (avoid alias duplicates).
 - If no payload argument is provided, `register_discord_commands.sh` auto-resolves
-  node payloads via `DISCORD_COMMANDS_FILE`, `DISCORD_COMMANDS_PROFILE`, or
-  `COLMEIO_CLONE_NAME`.
+  node payloads via `DISCORD_COMMANDS_FILE` or `NODE_NAME`.
