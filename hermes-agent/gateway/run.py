@@ -236,6 +236,10 @@ from gateway.session import (
 )
 from gateway.delivery import DeliveryRouter
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.final_response_footer import (
+    resolve_files_footer_enabled,
+    build_files_changed_footer,
+)
 
 
 def _normalize_whatsapp_identifier(value: str) -> str:
@@ -6564,6 +6568,7 @@ class GatewayRunner:
         result_holder = [None]  # Mutable container for the result
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
+        _files_footer_enabled = resolve_files_footer_enabled()
         
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_event_loop()
@@ -6994,6 +6999,17 @@ class GatewayRunner:
                     if has_voice_directive:
                         unique_tags.insert(0, "[[audio_as_voice]]")
                     final_response = final_response + "\n" + "\n".join(unique_tags)
+
+            if _files_footer_enabled and final_response:
+                try:
+                    footer = build_files_changed_footer(
+                        result.get("messages", []) if isinstance(result, dict) else [],
+                        history_offset=len(agent_history),
+                    )
+                    if footer:
+                        final_response = final_response.rstrip() + "\n\n" + footer
+                except Exception as footer_exc:
+                    logger.debug("Final response footer generation failed: %s", footer_exc)
             
             # Sync session_id: the agent may have created a new session during
             # mid-run context compression (_compress_context splits sessions).
