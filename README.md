@@ -1,71 +1,60 @@
 # Hermes Orchestrator
 
-Hermes Orchestrator is a lightweight host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
+> Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 
-It provides the operational layer required to run Hermes agents at scale: spawning isolated nodes, managing environments, performing upgrades and rollbacks, centralizing logs, and orchestrating multi-agent workflows.
+[![GitHub Stars](https://img.shields.io/github/stars/Magaav/hermes-orchestrator?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/stargazers)
+[![Last Commit](https://img.shields.io/github/last-commit/Magaav/hermes-orchestrator/main?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/commits/main)
+[![License](https://img.shields.io/github/license/Magaav/hermes-orchestrator?style=flat-square)](LICENSE)
+
+![Hermes Orchestrator Hero](docs/assets/hero.png)
+
+**Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
+
+Hermes Orchestrator is a lightweight host-level operational layer for running Hermes agents at scale: spawning isolated nodes, managing environments, handling upgrades/rollbacks, centralizing logs, and coordinating multi-agent workflows.
 
 Hermes Agent focuses on reasoning and tool execution inside a single runtime.
 Hermes Orchestrator focuses on operating many Hermes runtimes safely and reliably.
 
 Together they form a scalable architecture for AI-driven automation systems, multi-tenant agent deployments, and autonomous infrastructure operations.
 
-# Why Hermes Orchestrator Exists
+## Why Hermes Orchestrator Exists
 
 Hermes Agent is extremely capable within a single runtime:
--reasoning
--memory
--tool usage
--autonomous task execution
+- reasoning
+- memory
+- tool usage
+- autonomous task execution
 
-However, production deployments often require many agents running concurrently, each with different environments, policies, or tenants.
+Production deployments often require many agents running concurrently, each with different environments, policies, or tenants.
 
 Hermes Orchestrator provides the missing operational layer:
--fleet management
--node lifecycle control
--environment isolation
--upgrade and rollback safety
--centralized observability
--orchestration of multi-agent systems
+- fleet management
+- node lifecycle control
+- environment isolation
+- upgrade and rollback safety
+- centralized observability
+- orchestration of multi-agent systems
 
-The orchestrator allows Hermes agents to operate as a coordinated distributed system, without modifying Hermes core internals.
+The orchestrator allows Hermes agents to operate as a coordinated distributed system without modifying Hermes core internals.
 
-# Key Capabilities
+## Key Capabilities
 
-Hermes Orchestrator enables:
-
-Agent Fleet Management
-- spawn Hermes nodes on demand
-- start, stop, restart, and delete nodes
-- isolate environments per tenant or project
-
-Operational Safety
-- upgrade agents safely
-- rollback node environments
-- maintain node-local runtime copies
-
-Observability
-- centralized logging
-- attention-level warning mirrors
-- skill execution tracing
-
-Infrastructure Automation
-- shared scripts and plugins
-- centralized cron orchestration
-- automated maintenance workflows
-
-Multi-Agent Systems
-- orchestrate multiple Hermes runtimes
-- enable agent cooperation patterns
-- maintain operational boundaries
+- **Agent Fleet Management:** spawn Hermes nodes on demand; start, stop, restart, and delete nodes; isolate environments per tenant/project.
+- **Operational Safety:** upgrade agents safely; rollback node environments; maintain node-local runtime copies.
+- **Observability:** centralized logging; attention-level warning mirrors; skill execution tracing.
+- **Infrastructure Automation:** shared scripts/plugins; centralized cron orchestration; automated maintenance workflows.
+- **Multi-Agent Systems:** orchestrate multiple Hermes runtimes; enable cooperation patterns; maintain operational boundaries.
 
 ## Install
 
 Install the orchestrator:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash
 ```
 
 Optional install parameters:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Magaav/hermes-orchestrator/main/scripts/install.sh | bash -s -- --dir /local --branch main
 ```
@@ -75,20 +64,20 @@ What install does:
 - Installs `horc` shell command wrappers
 - Enables repo git hooks (`.githooks`) to block common secret leaks
 
-# Core Concepts
+## Core Concepts
 
 Hermes Orchestrator operates with two primary node types.
 
-## Orchestrator Node
+### Orchestrator Node
 
 The orchestrator runs on the host machine and is responsible for:
 - managing worker nodes
 - coordinating updates and backups
 - maintaining centralized logs
 - executing automation scripts
-- enforcing nodes runtime contract-role (node self-conscience)
+- enforcing node runtime contract-role (node self-conscience)
 
-## Worker Nodes
+### Worker Nodes
 
 Worker nodes are containerized Hermes Agent instances.
 
@@ -100,7 +89,7 @@ Each node runs in an isolated environment and can represent:
 
 Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of shared templates.
 
-## Node Governance Contract
+### Node Governance Contract
 
 Every node receives a runtime contract on start/restart:
 - `/local/.hermes/NODE_RUNTIME_CONTRACT.md`
@@ -119,7 +108,7 @@ Operational rule:
 
 At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL_SYSTEM_PROMPT` so agent decisions stay aligned with this contract.
 
-# Filesystem Topology
+## Filesystem Topology
 
 ```text
 /local/
@@ -156,6 +145,10 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │   │   ├── vectordb/
 │   │   └── viking/
 │   └── discord/
+├── state/        # deployment-specific orchestrator state (local-first)
+│   └── orchestrator/
+│       ├── backup_nodes_to_gdrive.env.example
+│       └── backup_nodes_to_gdrive.env # local runtime config (not tracked)
 ├── backups/ # used for rollback/versioning
 ├── crons/   # nodes centralized cronjobs
 └── logs/    # nodes centralized debugging interface
@@ -163,7 +156,7 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
     │   ├── orchestrator/
     │   │   ├── management.log
     │   │   ├── runtime.log
-│   │   ├── skills/ # per-node skill log mirrors (for example: node-*.log)
+    │   │   ├── skills/ # per-node skill log mirrors (for example: node-*.log)
     │   │   └── hermes/
     │   │       ├── agent.log
     │   │       ├── errors.log
@@ -179,9 +172,17 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 Important characteristics:
 - node-local runtime copies prevent template corruption
 - shared scripts/plugins enable coordinated automation
+- state folder isolates deployment-specific assumptions from reusable framework code
 - centralized logs simplify debugging and monitoring
 
-# Bootstrap
+## Public vs Local State
+
+- `/local/scripts` and `/local/plugins` are the reusable/public framework surface.
+- `/local/state` is for orchestrator-local values and implementation assumptions.
+- `scripts/backup/backup_nodes_to_gdrive.sh` is now a shared entrypoint; Drive folder IDs, node allowlist, and Discord recipient live in `/local/state/orchestrator/backup_nodes_to_gdrive.env`.
+- Only `state/*.example` and state documentation should be committed.
+
+## Bootstrap
 
 ```bash
 horc start
@@ -193,7 +194,7 @@ Default `horc start` target is `orchestrator` and it reads:
 
 Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
 
-# Node Lifecycle
+## Node Lifecycle
 
 ```bash
 # orchestrator
@@ -212,15 +213,15 @@ horc stop node2
 horc delete node2
 ```
 
-# Logging Topology
+## Logging Topology
 
 - Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.
 - Node skill mirrors are centralized at `/local/logs/nodes/<node>/skills/`.
 - Warning-and-above mirrors are centralized at `/local/logs/attention/nodes/<node>/`.
 - Legacy compatibility roots `/local/logs/agents`, `/local/logs/clones`, and `/local/logs/skills` are removed.
-- `horc logs <node>` now tails management, runtime, attention, and Hermes logs from this canonical tree.
+- `horc logs <node>` tails management, runtime, attention, and Hermes logs from this canonical tree.
 
-# Backups & Restore
+## Backups & Restore
 
 ```bash
 # backup one node
@@ -240,7 +241,7 @@ Restore behavior:
 - Restore reapplies whatever is present in the archive (`agents/*`, memory paths, and crons paths)
 - Stops included running nodes before restore and restarts those that were running
 
-# Updates
+## Updates
 
 ```bash
 # update hermes-orchestrator repo itself (/local)
@@ -264,10 +265,10 @@ hord restart
 
 `horc update <node>` is accepted as a compatibility alias for `horc agent update <node>`.
 
-# Versioning Hygiene
+## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `backups/`, `crons/`
+- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `backups/`, `crons/`, `state/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 
@@ -275,73 +276,25 @@ Commit only templates:
 - `agents/envs/node.env.example`
 - `agents/envs/orchestrator.env.example`
 - `agents/README.md`
+- `state/orchestrator/backup_nodes_to_gdrive.env.example`
+- `state/README.md`
 
 Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
 
-# Road Map
+## Roadmap
 
-Hermes Orchestrator will evolve into a complete control layer for large-scale agent systems.
+Roadmap work is intentionally tracked in dedicated docs to keep this README operational and implementation-focused.
 
-Future development focuses on visibility, collaboration, and scalable orchestration.
+Current roadmap themes:
+- Visual control plane and high-performance observability exploration.
+- Runtime guard monitoring, alert routing, and bounded remediation.
+- Shared knowledge and collaboration workflows for larger multi-node operations.
 
----
+## Roadmap Workspace
 
-## 1. Visual Control Interface
-
-A lightweight web UI inspired by Hermes Workspace will provide a visual way to manage agent fleets.
-
-Planned features:
-
-- Fleet overview
-- Node lifecycle management
-- Task monitoring
-- Logs and event streams
-- Health and heartbeat dashboards
-- Shared documentation access
-
-The system will remain fully usable from the CLI.
-
----
-
-## 2. Shared Knowledge (Karpatches-style Wiki)
-
-A shared wiki will act as operational memory for the system.
-
-It will contain:
-
-- infrastructure documentation  
-- troubleshooting guides  
-- runbooks  
-- architecture notes  
-
-Both humans and agents will be able to read and extend this knowledge.
-
----
-
-## 3. High Performance Interface (WASM)
-
-The UI may use WebAssembly for high performance visualization.
-
-Possible capabilities:
-
-- real-time workflow graphs  
-- system topology maps  
-- fast debugging interfaces  
-- visual automation builders  
-
----
-
-## 4. Cellular Agent Architecture
-
-Nodes will be able to form **cells**, groups of agents working together.
-
-Structure:
-
-Agents → Nodes → Cells → Organizations
-
-This enables large deployments where workflows are delegated between specialized groups of agents.
-
----
+- [Roadmap Index](docs/roadmap/README.md)
+- [WASM UI Track](docs/roadmap/wasm-ui/README.md)
+- [Guard Track](docs/roadmap/guard/README.md)
 
 ## Long-Term Vision
 
@@ -349,12 +302,12 @@ Hermes Agent provides the intelligence inside a runtime.
 
 Hermes Orchestrator coordinates many runtimes to form a scalable autonomous system.
 
-# Branch Policy
+## Branch Policy
 
 - Long-lived branch: `main` only (do not use `master`)
 - Work branches should use your orchestrator id format: `<horc-id>`
 
-# Contributing
+## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 

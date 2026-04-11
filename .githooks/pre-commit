@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Block runtime/secrets paths from being committed.
-blocked_paths='^(\.hermes/|agents/nodes/|memory/|logs/|backups/|crons/|workspace/|spawns/|agents/envs/.*\.env$|docker/\.env$|hermes-agent/\.env$|\.env$|\.env\..+$)'
-allowed_paths='^(\.env\.example)$'
+blocked_paths='^(\.hermes/|agents/nodes/|memory/|logs/|backups/|crons/|workspace/|spawns/|state/|agents/envs/.*\.env$|docker/\.env$|hermes-agent/\.env$|\.env$|\.env\..+$)'
+allowed_paths='^(\.env\.example|state/.*\.example|state/.*\.md)$'
 
 has_rg=0
 if command -v rg >/dev/null 2>&1; then

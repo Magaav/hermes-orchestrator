@@ -10,6 +10,7 @@ Global plugin surface for Hermes Orchestrator.
 ## Layout
 
 - `discord/`: Discord integration hooks, scripts, and runtime templates.
+- `hermes-core/`: Durable Hermes core behavior patches (gateway followups/final footer).
 - `memory/`: shared memory runtime store (OpenViking/Viking indexes and state).
 
 ## Versioning Rules

@@ -9,6 +9,8 @@ Operational scripts used by Hermes Orchestrator.
 - `clone/clone.sh`: clone wrapper alias to `horc`.
 - `clone/clone_manager.py`: deterministic lifecycle engine for start/stop/status/backup/restore/update.
 - `install.sh`: repo install/bootstrap helper.
+- `backup/backup_nodes_to_gdrive.sh`: shared backup entrypoint; local IDs/allowlists/recipient config live in `/local/state/orchestrator/backup_nodes_to_gdrive.env`.
+- `backup_nodes_to_gdrive.sh`: compatibility shim to the canonical backup path above.
 
 Log topology managed by `clone_manager.py`:
 - `/local/logs/nodes/<node>/` for management/runtime/Hermes logs and node-scoped skill mirrors (`skills/`).
@@ -28,4 +30,11 @@ horc logs clean
 horc backup all
 horc backup node node1
 horc restore /local/backups/<archive>.tar.gz
+```
+
+## Local State-Bound Setup
+
+```bash
+cp /local/state/orchestrator/backup_nodes_to_gdrive.env.example \
+   /local/state/orchestrator/backup_nodes_to_gdrive.env
 ```

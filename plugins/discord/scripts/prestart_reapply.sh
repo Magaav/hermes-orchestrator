@@ -15,7 +15,7 @@ for arg in "$@"; do
   esac
 done
 
-case "${HERMES_PRESTART_STRICT:-0}" in
+case "${NODE_PLUGINS_STRICT:-0}" in
   1|true|TRUE|yes|YES|on|ON)
     STRICT=1
     ;;
@@ -76,6 +76,12 @@ if [[ ! -d "$DISCORD_PLUGIN_ROOT" && -d "/local/workspace/discord" ]]; then
   DISCORD_PLUGIN_ROOT="/local/workspace/discord"
 fi
 
+# Optional Hermes-core plugin root (followup summary + final footer patching).
+HERMES_CORE_PLUGIN_ROOT="${HERMES_CORE_PLUGIN_DIR:-/local/plugins/hermes-core}"
+if [[ ! -d "$HERMES_CORE_PLUGIN_ROOT" && -d "/local/workspace/hermes-core" ]]; then
+  HERMES_CORE_PLUGIN_ROOT="/local/workspace/hermes-core"
+fi
+
 # Explicitly expose clone code root for patch scripts.
 export HERMES_AGENT_ROOT="${HERMES_AGENT_ROOT:-/local/hermes-agent}"
 
@@ -103,6 +109,7 @@ FAILED=0
 rm -f "$FAILED_MARKER"
 log "using python runtime: $PYTHON_BIN"
 log "using discord plugin root: $DISCORD_PLUGIN_ROOT"
+log "using hermes-core plugin root: $HERMES_CORE_PLUGIN_ROOT"
 
 CAMOFOX_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/camofox_env_bootstrap.py"
 OPENVIKING_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/openviking_env_bootstrap.py"
@@ -186,10 +193,22 @@ run_step "discord_guild_sync" \
 run_step "discord_command_bootstrap" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_command_bootstrap.py" || FAILED=1
 
+NODE_AGENT_PATCH_SCRIPT="$HERMES_CORE_PLUGIN_ROOT/scripts/reapply_node_agent_followup_footer.py"
+if [[ -f "$NODE_AGENT_PATCH_SCRIPT" ]]; then
+  run_step "node_agent_followup_footer" \
+    "$PYTHON_BIN" "$NODE_AGENT_PATCH_SCRIPT" || FAILED=1
+fi
+
 VERIFY_SCRIPT="$DISCORD_PLUGIN_ROOT/scripts/verify_discord_customizations.py"
 if [[ -f "$VERIFY_SCRIPT" ]]; then
   run_step "verify_customizations" \
     "$PYTHON_BIN" "$VERIFY_SCRIPT" || FAILED=1
+fi
+
+NODE_AGENT_VERIFY_SCRIPT="$HERMES_CORE_PLUGIN_ROOT/scripts/verify_node_agent_followup_footer.py"
+if [[ -f "$NODE_AGENT_VERIFY_SCRIPT" ]]; then
+  run_step "verify_node_agent_followup_footer" \
+    "$PYTHON_BIN" "$NODE_AGENT_VERIFY_SCRIPT" || FAILED=1
 fi
 
 if [[ "$FAILED" -ne 0 ]]; then

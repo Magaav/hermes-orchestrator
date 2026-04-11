@@ -6374,6 +6374,13 @@ class GatewayRunner:
             if progress_mode == "new" and tool_name == last_tool[0]:
                 return
             last_tool[0] = tool_name
+
+            # Feed richer long-running followup summaries with tool-level activity.
+            try:
+                if _followup_summary_enabled:
+                    _record_followup_activity(tool_name, preview, args)
+            except Exception:
+                pass
             
             # Build progress message with primary argument preview
             from agent.display import get_tool_emoji
@@ -6565,6 +6572,694 @@ class GatewayRunner:
         tools_holder = [None]   # Mutable container for the tool definitions
         stream_consumer_holder = [None]  # Mutable container for stream consumer
         
+        # COLMEIO_NODE_AGENT_RUNTIME_BEGIN
+        def _coerce_node_int(raw_value: Any, default: int) -> int:
+            try:
+                if raw_value is None:
+                    return default
+                value = str(raw_value).strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1].strip()
+                return int(value)
+            except (TypeError, ValueError):
+                try:
+                    match = re.search(r"-?\d+", str(raw_value))
+                    return int(match.group(0)) if match else default
+                except Exception:
+                    return default
+
+        def _coerce_node_bool(raw_value: Any, default: bool = False) -> bool:
+            if raw_value is None:
+                return default
+            value = str(raw_value).strip().lower()
+            if not value:
+                return default
+            if value in ("1", "true", "yes", "on", "y", "sim"):
+                return True
+            if value in ("0", "false", "no", "off", "n", "nao", "não"):
+                return False
+            return default
+
+        def _parse_node_env_file(path: Path) -> Dict[str, str]:
+            values: Dict[str, str] = {}
+            try:
+                if not path.exists() or path.is_dir():
+                    return values
+                for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    key = key.strip()
+                    value = value.strip()
+                    if not key:
+                        continue
+                    if value and len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                        value = value[1:-1]
+                    values[key] = value
+            except Exception:
+                pass
+            return values
+
+        def _load_node_agent_env() -> Dict[str, str]:
+            candidates: List[Path] = []
+            explicit_file = str(os.getenv("NODE_AGENT_ENV_FILE", "") or "").strip()
+            if explicit_file:
+                candidates.append(Path(explicit_file).expanduser())
+
+            node_name = str(os.getenv("NODE_NAME", "") or "").strip()
+            if node_name:
+                candidates.extend([
+                    Path("/local/agents/nodes") / f"{node_name}.env",
+                    Path("/local/agents/nodes") / node_name / ".env",
+                    Path("/local/agents/envs") / f"{node_name}.env",
+                    Path("/local/agents") / f"{node_name}.env",
+                ])
+
+            merged: Dict[str, str] = {}
+            for candidate in candidates:
+                data = _parse_node_env_file(candidate)
+                if not data:
+                    continue
+                for key, value in data.items():
+                    if key not in merged and str(value).strip():
+                        merged[key] = str(value).strip()
+            return merged
+
+        _node_agent_env = _load_node_agent_env()
+
+        def _node_agent_setting(key: str, default: str = "") -> str:
+            runtime_value = str(os.getenv(key, "") or "").strip()
+            if runtime_value:
+                return runtime_value
+            file_value = str(_node_agent_env.get(key, "") or "").strip()
+            if file_value:
+                return file_value
+            return default
+
+        _followup_elapsed_minutes = _coerce_node_int(
+            _node_agent_setting("NODE_AGENT_FOLLOWUP_ELAPSED", "10"),
+            10,
+        )
+        if _followup_elapsed_minutes < 1:
+            _followup_elapsed_minutes = 1
+        _followup_send_timeout_seconds = _coerce_node_int(
+            _node_agent_setting("NODE_AGENT_FOLLOWUP_SEND_TIMEOUT_SECONDS", "15"),
+            15,
+        )
+        if _followup_send_timeout_seconds < 3:
+            _followup_send_timeout_seconds = 3
+
+        _followup_summary_enabled = _coerce_node_bool(
+            _node_agent_setting("NODE_AGENT_FOLLOWUP_SUMMARY", "false"),
+            False,
+        )
+        _finalresponse_footer_enabled = _coerce_node_bool(
+            _node_agent_setting("NODE_AGENT_FINALRESPONSE_ENFORCE_FILES_CHANGED", "false"),
+            False,
+        )
+
+        _followup_state: Dict[str, Any] = {
+            "iteration": 0,
+            "tool_names": [],
+            "error_count": 0,
+            "recent_actions": [],
+            "recent_paths": [],
+            "window_started_at": time.time(),
+            "window_tool_calls": 0,
+            "window_errors": 0,
+            "window_actions": [],
+            "window_paths": [],
+            "window_files": {},
+            "window_result_notes": [],
+            "phase_counts": {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            },
+        }
+
+        def _safe_parse_json_obj(raw_payload: Any) -> Optional[Dict[str, Any]]:
+            if not isinstance(raw_payload, str):
+                return None
+            payload = raw_payload.strip()
+            if not payload or not payload.startswith("{"):
+                return None
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                return None
+            return parsed if isinstance(parsed, dict) else None
+
+        def _normalize_changed_path(raw_path: Any) -> str:
+            if raw_path is None:
+                return ""
+            path = str(raw_path).strip()
+            if not path:
+                return ""
+            if " -> " in path:
+                left, right = path.split(" -> ", 1)
+                path = right.strip() or left.strip()
+            if path.startswith("a/") or path.startswith("b/"):
+                path = path[2:]
+            return path
+
+        def _count_unified_diff(diff_text: str) -> Dict[str, Dict[str, int]]:
+            stats: Dict[str, Dict[str, int]] = {}
+            current_path = ""
+            for raw_line in str(diff_text or "").splitlines():
+                line = raw_line.rstrip("\n")
+                if line.startswith("diff --git "):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        candidate = parts[3]
+                        if candidate.startswith("b/"):
+                            candidate = candidate[2:]
+                        current_path = _normalize_changed_path(candidate)
+                        if current_path:
+                            stats.setdefault(current_path, {"add": 0, "del": 0})
+                    continue
+                if line.startswith("+++ "):
+                    candidate = line[4:].strip()
+                    if candidate == "/dev/null":
+                        current_path = ""
+                    else:
+                        current_path = _normalize_changed_path(candidate)
+                        if current_path:
+                            stats.setdefault(current_path, {"add": 0, "del": 0})
+                    continue
+                if line.startswith("@@"):
+                    continue
+                if line.startswith("+") and not line.startswith("+++"):
+                    if current_path:
+                        stats.setdefault(current_path, {"add": 0, "del": 0})["add"] += 1
+                    continue
+                if line.startswith("-") and not line.startswith("---"):
+                    if current_path:
+                        stats.setdefault(current_path, {"add": 0, "del": 0})["del"] += 1
+                    continue
+            return stats
+
+        def _push_recent_line(bucket_key: str, value: str, limit: int) -> None:
+            text = str(value or "").strip()
+            if not text:
+                return
+            bucket = _followup_state.get(bucket_key)
+            if not isinstance(bucket, list):
+                bucket = []
+                _followup_state[bucket_key] = bucket
+            if bucket and str(bucket[-1]).strip().lower() == text.lower():
+                return
+            if text in bucket:
+                bucket.remove(text)
+            bucket.append(text)
+            if len(bucket) > limit:
+                del bucket[:-limit]
+
+        def _reset_followup_window() -> None:
+            _followup_state["window_started_at"] = time.time()
+            _followup_state["window_tool_calls"] = 0
+            _followup_state["window_errors"] = 0
+            _followup_state["window_actions"] = []
+            _followup_state["window_paths"] = []
+            _followup_state["window_files"] = {}
+            _followup_state["window_result_notes"] = []
+
+        def _path_hint_from_text(raw_text: Any) -> str:
+            text = str(raw_text or "")
+            if not text:
+                return ""
+            for match in re.findall(r"(/[-_A-Za-z0-9./]+)", text):
+                candidate = _normalize_changed_path(match.strip(" ,;:()[]{}\"'"))
+                if not candidate or candidate in ("/", "/dev/null"):
+                    continue
+                if len(candidate) > 180:
+                    continue
+                return candidate
+            return ""
+
+        def _path_hint_from_args(raw_args: Any) -> str:
+            if not isinstance(raw_args, dict):
+                return ""
+            for key in ("path", "file", "filepath", "target", "workdir", "cwd"):
+                value = raw_args.get(key)
+                hint = _normalize_changed_path(value)
+                if hint:
+                    return hint
+            for key in ("files", "paths"):
+                value = raw_args.get(key)
+                if isinstance(value, list):
+                    for entry in value:
+                        hint = _normalize_changed_path(entry)
+                        if hint:
+                            return hint
+            return ""
+
+        def _describe_terminal_action(preview: Any, raw_args: Any) -> Dict[str, str]:
+            command = ""
+            if isinstance(raw_args, dict):
+                for key in ("command", "cmd"):
+                    candidate = raw_args.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        command = candidate.strip()
+                        break
+            if not command:
+                command = str(preview or "").strip()
+
+            lowered = command.lower()
+            path_hint = _path_hint_from_text(command)
+            phase = "implementation"
+            note = "executing shell commands for implementation"
+
+            if any(token in lowered for token in (
+                "pytest", "unittest", "go test", "cargo test", "npm test",
+                "pnpm test", "ruff ", "mypy ", "flake8 ", "python -m pytest",
+            )):
+                phase = "validation"
+                note = "running tests and validation checks"
+            elif any(token in lowered for token in (
+                " rg ", "grep ", "find ", " ls ", "cat ", "head ", "tail ",
+                "sed -n", "wc ", "du -", "stat ", "tree ",
+            )) or lowered.startswith(("ls ", "cat ", "rg ", "grep ", "find ")):
+                phase = "investigation"
+                note = "inspecting files, logs, and runtime state"
+            elif any(token in lowered for token in (
+                "git status", "git diff", "git show", "git log", "git branch", "git rev-parse",
+            )):
+                phase = "investigation"
+                note = "checking repository state and recent changes"
+            elif any(token in lowered for token in (
+                "mkdir ", "cp ", "mv ", "chmod ", "chown ", "ln -s", "touch ",
+                "python ", "python3 ", "bash ", "sh ", "./",
+            )):
+                phase = "implementation"
+                note = "updating scripts and local files"
+            elif any(token in lowered for token in (
+                "curl ", "wget ", "rclone ", "gdrive ", "http://", "https://",
+            )):
+                phase = "validation"
+                note = "verifying external services and integrations"
+
+            return {"phase": phase, "note": note, "path": path_hint}
+
+        def _describe_tool_activity(tool_name: Any, preview: Any, raw_args: Any) -> Dict[str, str]:
+            name = str(tool_name or "").strip()
+            if name == "terminal":
+                return _describe_terminal_action(preview, raw_args)
+
+            path_hint = _path_hint_from_args(raw_args) or _path_hint_from_text(preview)
+            phase = "implementation"
+            note = ""
+
+            if name in ("read_file", "search_files"):
+                phase = "investigation"
+                note = "reviewing files to gather context"
+            elif name in ("patch", "write_file"):
+                phase = "implementation"
+                note = "applying file edits"
+            elif name in ("todo",):
+                phase = "coordination"
+                note = "updating the task plan"
+            elif name in ("process", "cronjob"):
+                phase = "validation"
+                note = "verifying background jobs and automation status"
+            elif name in ("clarify", "delegate_task"):
+                phase = "coordination"
+                note = "coordinating next decisions and task split"
+            elif name in ("web_search", "browser_navigate", "browser_snapshot"):
+                phase = "investigation"
+                note = "gathering external context"
+
+            if not note:
+                phase = "implementation"
+                note = f"working via {name or 'tool'}"
+
+            return {"phase": phase, "note": note, "path": path_hint}
+
+        def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None:
+            info = _describe_tool_activity(tool_name, preview, raw_args)
+            note = str(info.get("note") or "").strip()
+            if note:
+                _push_recent_line("recent_actions", note, 6)
+                _push_recent_line("window_actions", note, 8)
+
+            path_hint = str(info.get("path") or "").strip()
+            if path_hint:
+                _push_recent_line("recent_paths", path_hint, 4)
+                _push_recent_line("window_paths", path_hint, 6)
+
+            phase = str(info.get("phase") or "").strip().lower()
+            counts = _followup_state.get("phase_counts")
+            if not isinstance(counts, dict):
+                counts = {}
+                _followup_state["phase_counts"] = counts
+            if phase:
+                counts[phase] = int(counts.get(phase, 0) or 0) + 1
+            _followup_state["window_tool_calls"] = int(_followup_state.get("window_tool_calls", 0) or 0) + 1
+
+        def _record_followup_tool_result(tool_name: Any, raw_result: Any) -> None:
+            payload = _safe_parse_json_obj(raw_result)
+            if not payload:
+                return
+
+            name = str(tool_name or "").strip()
+            has_error = bool(payload.get("error")) or payload.get("success") is False
+            if has_error:
+                _followup_state["window_errors"] = int(_followup_state.get("window_errors", 0) or 0) + 1
+                reason = str(payload.get("error") or "").strip()
+                if reason:
+                    compact_reason = reason.replace("\n", " ").strip()
+                    if len(compact_reason) > 140:
+                        compact_reason = compact_reason[:137] + "..."
+                    _push_recent_line("window_result_notes", f"tool error: {compact_reason}", 6)
+
+            window_files_raw = _followup_state.get("window_files")
+            if not isinstance(window_files_raw, dict):
+                window_files_raw = {}
+                _followup_state["window_files"] = window_files_raw
+            window_files: Dict[str, Dict[str, int]] = window_files_raw
+
+            changed_paths: List[str] = []
+            for key in ("files_modified", "files_created", "files_deleted"):
+                raw_paths = payload.get(key)
+                if isinstance(raw_paths, list):
+                    for raw_path in raw_paths:
+                        path = _normalize_changed_path(raw_path)
+                        if path:
+                            changed_paths.append(path)
+
+            diff_stats = _count_unified_diff(str(payload.get("diff") or ""))
+            for path in changed_paths:
+                _push_recent_line("window_paths", path, 6)
+                window_files.setdefault(path, {"add": 0, "del": 0})
+
+            if diff_stats:
+                matched_any = False
+                for path in changed_paths:
+                    if path in diff_stats:
+                        window_files[path]["add"] += int(diff_stats[path].get("add", 0) or 0)
+                        window_files[path]["del"] += int(diff_stats[path].get("del", 0) or 0)
+                        matched_any = True
+                if not matched_any and changed_paths:
+                    total_add = sum(int(v.get("add", 0) or 0) for v in diff_stats.values())
+                    total_del = sum(int(v.get("del", 0) or 0) for v in diff_stats.values())
+                    window_files[changed_paths[0]]["add"] += total_add
+                    window_files[changed_paths[0]]["del"] += total_del
+
+            if name in ("patch", "write_file") and changed_paths:
+                _push_recent_line(
+                    "window_result_notes",
+                    f"captured edits in {len(set(changed_paths))} file(s)",
+                    6,
+                )
+            elif has_error and not str(payload.get("error") or "").strip():
+                _push_recent_line("window_result_notes", f"{name or 'tool'} returned an unsuccessful result", 6)
+
+        def _followup_phase_summary() -> str:
+            counts_raw = _followup_state.get("phase_counts")
+            if not isinstance(counts_raw, dict):
+                return ""
+            counts = {
+                "investigation": int(counts_raw.get("investigation", 0) or 0),
+                "implementation": int(counts_raw.get("implementation", 0) or 0),
+                "validation": int(counts_raw.get("validation", 0) or 0),
+                "coordination": int(counts_raw.get("coordination", 0) or 0),
+            }
+            if counts["investigation"] and counts["implementation"] and counts["validation"]:
+                return "iterating between investigation, edits, and validation"
+            if counts["implementation"] and counts["validation"]:
+                return "applying changes and validating them in loops"
+            if counts["investigation"] and counts["implementation"]:
+                return "mapping the current state and applying targeted fixes"
+
+            top_phase = max(counts, key=lambda key: counts[key])
+            if counts[top_phase] <= 0:
+                return ""
+            labels = {
+                "investigation": "mapping the current state and gathering context",
+                "implementation": "implementing and refining changes",
+                "validation": "running validations and debugging results",
+                "coordination": "coordinating execution steps",
+            }
+            return labels.get(top_phase, "")
+
+        def _next_followup_hint(activity: Optional[Dict[str, Any]]) -> str:
+            if not activity:
+                return ""
+            current_tool = str(activity.get("current_tool") or "").strip()
+            if current_tool:
+                if current_tool == "terminal":
+                    return "running the next terminal command and checking results"
+                return f"running the next {current_tool} step"
+
+            last_desc = str(activity.get("last_activity_desc") or "").strip()
+            if not last_desc:
+                return ""
+            if last_desc.lower().startswith("starting api call"):
+                return "starting the next reasoning and tool-selection cycle"
+            return last_desc
+
+        def _build_stopped_notice(reason: str, detail: str = "") -> str:
+            reason_text = str(reason or "an internal interruption").strip()
+            detail_text = str(detail or "").strip()
+            lines = [f"⚠️ I stopped before finishing due to: {reason_text}."]
+            if detail_text:
+                lines.append(detail_text)
+            lines.append("Reply `continue` if you want me to resume from the current context.")
+            return "\n".join(lines)
+        def _build_files_changed_footer(agent_messages: List[Dict[str, Any]], history_offset: int = 0) -> str:
+            if not agent_messages:
+                return ""
+
+            tool_call_meta: Dict[str, Dict[str, Any]] = {}
+            for msg in agent_messages:
+                if msg.get("role") != "assistant":
+                    continue
+                for tool_call in (msg.get("tool_calls") or []):
+                    if not isinstance(tool_call, dict):
+                        continue
+                    call_id = str(tool_call.get("id") or "").strip()
+                    fn_data = tool_call.get("function") or {}
+                    fn_name = str(fn_data.get("name") or "").strip()
+                    fn_args = fn_data.get("arguments")
+                    parsed_args: Dict[str, Any] = {}
+                    if isinstance(fn_args, str) and fn_args.strip():
+                        try:
+                            candidate_args = json.loads(fn_args)
+                            if isinstance(candidate_args, dict):
+                                parsed_args = candidate_args
+                        except Exception:
+                            parsed_args = {}
+                    elif isinstance(fn_args, dict):
+                        parsed_args = fn_args
+                    if call_id:
+                        tool_call_meta[call_id] = {
+                            "name": fn_name,
+                            "args": parsed_args,
+                        }
+
+            start_idx = 0
+            if isinstance(history_offset, int):
+                start_idx = max(0, min(history_offset, len(agent_messages)))
+
+            file_stats: Dict[str, Dict[str, int]] = {}
+            for msg in agent_messages[start_idx:]:
+                if msg.get("role") != "tool":
+                    continue
+                payload = _safe_parse_json_obj(msg.get("content"))
+                if not payload:
+                    continue
+
+                call_id = str(msg.get("tool_call_id") or "").strip()
+                meta = tool_call_meta.get(call_id, {})
+                tool_name = str(meta.get("name") or "").strip()
+                tool_args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
+
+                paths: List[str] = []
+                for key in ("files_modified", "files_created", "files_deleted"):
+                    raw_paths = payload.get(key)
+                    if isinstance(raw_paths, list):
+                        for raw_path in raw_paths:
+                            normalized = _normalize_changed_path(raw_path)
+                            if normalized:
+                                paths.append(normalized)
+
+                if not paths and isinstance(tool_args, dict):
+                    arg_path = _normalize_changed_path(tool_args.get("path"))
+                    if arg_path and tool_name in ("write_file", "patch"):
+                        paths.append(arg_path)
+
+                unique_paths: List[str] = []
+                seen_paths = set()
+                for path in paths:
+                    if path not in seen_paths:
+                        seen_paths.add(path)
+                        unique_paths.append(path)
+                paths = unique_paths
+                if not paths:
+                    continue
+
+                diff_stats = _count_unified_diff(str(payload.get("diff") or ""))
+                for path in paths:
+                    file_stats.setdefault(path, {"add": 0, "del": 0})
+
+                if diff_stats:
+                    matched_any = False
+                    for path in paths:
+                        if path in diff_stats:
+                            file_stats[path]["add"] += int(diff_stats[path].get("add", 0))
+                            file_stats[path]["del"] += int(diff_stats[path].get("del", 0))
+                            matched_any = True
+                    if not matched_any:
+                        total_add = sum(int(v.get("add", 0)) for v in diff_stats.values())
+                        total_del = sum(int(v.get("del", 0)) for v in diff_stats.values())
+                        file_stats[paths[0]]["add"] += total_add
+                        file_stats[paths[0]]["del"] += total_del
+                elif tool_name == "write_file" and isinstance(tool_args, dict):
+                    content_arg = tool_args.get("content")
+                    if isinstance(content_arg, str) and content_arg:
+                        line_count = content_arg.count("\n")
+                        if not content_arg.endswith("\n"):
+                            line_count += 1
+                        file_stats[paths[0]]["add"] += max(1, line_count)
+
+            nonzero_stats = {
+                path: stats
+                for path, stats in file_stats.items()
+                if int(stats.get("add", 0) or 0) or int(stats.get("del", 0) or 0)
+            }
+            if not nonzero_stats:
+                return ""
+
+            ordered_paths = sorted(nonzero_stats.keys())
+            total_add = sum(int(v.get("add", 0) or 0) for v in nonzero_stats.values())
+            total_del = sum(int(v.get("del", 0) or 0) for v in nonzero_stats.values())
+            lines = [f"## 📁 {len(ordered_paths)} Files Changed +{total_add} -{total_del}"]
+            for path in ordered_paths:
+                add = int(nonzero_stats[path].get("add", 0) or 0)
+                dele = int(nonzero_stats[path].get("del", 0) or 0)
+                deltas = []
+                if add:
+                    deltas.append(f"+{add}")
+                if dele:
+                    deltas.append(f"-{dele}")
+                if not deltas:
+                    continue
+                lines.append(f"- {path} {' '.join(deltas)}")
+            return "\n".join(lines)
+
+        def _build_followup_summary_lines(activity: Optional[Dict[str, Any]]) -> List[str]:
+            def _as_sentence(text: Any) -> str:
+                sentence = str(text or "").strip()
+                if not sentence:
+                    return ""
+                if sentence[-1] not in ".!?":
+                    sentence += "."
+                return sentence
+
+            def _top_counts(entries: List[str], limit: int = 2) -> List[str]:
+                counts: Dict[str, int] = {}
+                order: List[str] = []
+                for entry in entries:
+                    text = str(entry or "").strip()
+                    if not text:
+                        continue
+                    if text not in counts:
+                        counts[text] = 0
+                        order.append(text)
+                    counts[text] += 1
+                ranked = sorted(order, key=lambda item: (-counts[item], order.index(item)))
+                result: List[str] = []
+                for item in ranked[:limit]:
+                    count = counts[item]
+                    result.append(f"{item} ({count}x)" if count > 1 else item)
+                return result
+
+            lines: List[str] = []
+            phase_summary = _followup_phase_summary()
+            if phase_summary:
+                lines.append(_as_sentence(f"Focus: {phase_summary}"))
+            else:
+                lines.append("Focus: keeping momentum while I work through the current plan.")
+
+            window_started_at = float(_followup_state.get("window_started_at") or time.time())
+            window_minutes = max(1, int((time.time() - window_started_at) // 60))
+            window_tools = int(_followup_state.get("window_tool_calls", 0) or 0)
+            window_files_raw = _followup_state.get("window_files")
+            window_files = window_files_raw if isinstance(window_files_raw, dict) else {}
+            if window_files:
+                total_add = sum(int(v.get("add", 0) or 0) for v in window_files.values())
+                total_del = sum(int(v.get("del", 0) or 0) for v in window_files.values())
+                ranked_paths = sorted(
+                    window_files.keys(),
+                    key=lambda path: (
+                        -(int(window_files[path].get("add", 0) or 0) + int(window_files[path].get("del", 0) or 0)),
+                        path,
+                    ),
+                )
+                path_bits: List[str] = []
+                for path in ranked_paths[:3]:
+                    add = int(window_files[path].get("add", 0) or 0)
+                    dele = int(window_files[path].get("del", 0) or 0)
+                    delta_bits: List[str] = []
+                    if add:
+                        delta_bits.append(f"+{add}")
+                    if dele:
+                        delta_bits.append(f"-{dele}")
+                    suffix = f" ({' '.join(delta_bits)})" if delta_bits else ""
+                    path_bits.append(f"{path}{suffix}")
+                lines.append(
+                    _as_sentence(
+                        f"Did: in the last {window_minutes} min I captured edits across {len(window_files)} file(s) "
+                        f"(+{total_add} -{total_del}) in {'; '.join(path_bits)}"
+                    )
+                )
+            else:
+                window_actions_raw = _followup_state.get("window_actions")
+                window_actions = [str(entry).strip() for entry in window_actions_raw] if isinstance(window_actions_raw, list) else []
+                top_actions = _top_counts(window_actions, limit=2)
+                if top_actions:
+                    lines.append(_as_sentence(f"Did: in the last {window_minutes} min I ran {window_tools} tool step(s): {'; '.join(top_actions)}"))
+                elif window_tools > 0:
+                    lines.append(_as_sentence(f"Did: in the last {window_minutes} min I ran {window_tools} tool step(s) and collected partial outputs"))
+                else:
+                    lines.append(_as_sentence(f"Did: minimal external progress in the last {window_minutes} min while preparing the next move"))
+
+            error_count = int(_followup_state.get("error_count") or 0)
+            window_errors = int(_followup_state.get("window_errors", 0) or 0)
+            if window_errors > 0:
+                lines.append(_as_sentence(f"Blockers: this window surfaced {window_errors} tool result issue(s) that I'm actively addressing"))
+            elif error_count > 0:
+                lines.append(_as_sentence(f"Blockers: I still have {error_count} recent issue(s) in view and I'm adjusting the plan"))
+
+            window_notes_raw = _followup_state.get("window_result_notes")
+            window_notes = [str(entry).strip() for entry in window_notes_raw] if isinstance(window_notes_raw, list) else []
+            top_notes = _top_counts(window_notes, limit=2)
+            looking_for_hint = ""
+            if top_notes:
+                looking_for_hint = f"confirming {'; '.join(top_notes)}"
+            else:
+                window_paths_raw = _followup_state.get("window_paths")
+                window_paths = [str(entry).strip() for entry in window_paths_raw] if isinstance(window_paths_raw, list) else []
+                unique_window_paths: List[str] = []
+                for path in window_paths:
+                    if path and path not in unique_window_paths:
+                        unique_window_paths.append(path)
+                if unique_window_paths:
+                    looking_for_hint = f"progress on {', '.join(unique_window_paths[:3])}"
+
+            next_hint = _next_followup_hint(activity)
+            if next_hint:
+                looking_for_hint = next_hint
+            if looking_for_hint:
+                lines.append(_as_sentence(f"Looking for: {looking_for_hint}"))
+
+            cleaned = [line for line in lines if line]
+            if not cleaned:
+                cleaned.append("Focus: collecting progress details for the next checkpoint.")
+            return cleaned[:4]
+        # COLMEIO_NODE_AGENT_RUNTIME_END
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_event_loop()
         _hooks_ref = self.hooks
@@ -6580,17 +7275,40 @@ class GatewayRunner:
                         _names.append(_t.get("name") or "")
                     else:
                         _names.append(str(_t))
-                asyncio.run_coroutine_threadsafe(
-                    _hooks_ref.emit("agent:step", {
-                        "platform": source.platform.value if source.platform else "",
-                        "user_id": source.user_id,
-                        "session_id": session_id,
-                        "iteration": iteration,
-                        "tool_names": _names,
-                        "tools": prev_tools,
-                    }),
-                    _loop_for_step,
-                )
+                # COLMEIO_NODE_AGENT_STEP_SUMMARY_BEGIN
+                if _followup_summary_enabled:
+                    _followup_state["iteration"] = int(iteration)
+                    _trimmed_names = [n for n in _names if n][:6]
+                    if _trimmed_names:
+                        _followup_state["tool_names"] = _trimmed_names
+                    _error_count = 0
+                    for _tool_entry in (prev_tools or []):
+                        if not isinstance(_tool_entry, dict):
+                            continue
+                        _tool_result = _tool_entry.get("result")
+                        _parsed_result = _safe_parse_json_obj(_tool_result)
+                        if isinstance(_parsed_result, dict):
+                            if _parsed_result.get("error") or _parsed_result.get("success") is False:
+                                _error_count += 1
+                            _record_followup_tool_result(_tool_entry.get("name"), _tool_result)
+                            continue
+                        if isinstance(_tool_result, str) and _tool_result.strip().lower().startswith("error"):
+                            _error_count += 1
+                    _followup_state["error_count"] = _error_count
+
+                if _hooks_ref.loaded_hooks:
+                    asyncio.run_coroutine_threadsafe(
+                        _hooks_ref.emit("agent:step", {
+                            "platform": source.platform.value if source.platform else "",
+                            "user_id": source.user_id,
+                            "session_id": session_id,
+                            "iteration": iteration,
+                            "tool_names": _names,
+                            "tools": prev_tools,
+                        }),
+                        _loop_for_step,
+                    )
+                # COLMEIO_NODE_AGENT_STEP_SUMMARY_END
             except Exception as _e:
                 logger.debug("agent:step hook error: %s", _e)
 
@@ -6745,7 +7463,7 @@ class GatewayRunner:
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
             agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
-            agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+            agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or _followup_summary_enabled) else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.status_callback = _status_callback_sync
             agent.reasoning_config = reasoning_config
@@ -6947,7 +7665,16 @@ class GatewayRunner:
             _resolved_model = getattr(_agent, "model", None) if _agent else None
 
             if not final_response:
-                error_msg = f"⚠️ {result['error']}" if result.get("error") else "(No response generated)"
+                _raw_error = str(result.get("error") or "").strip()
+                _detail = (
+                    f"Gateway detail: {_raw_error}"
+                    if _raw_error
+                    else "Gateway detail: no final response was produced by the agent."
+                )
+                error_msg = _build_stopped_notice(
+                    "the run ended without a final response",
+                    _detail,
+                )
                 return {
                     "final_response": error_msg,
                     "messages": result.get("messages", []),
@@ -6995,6 +7722,18 @@ class GatewayRunner:
                         unique_tags.insert(0, "[[audio_as_voice]]")
                     final_response = final_response + "\n" + "\n".join(unique_tags)
             
+            # COLMEIO_NODE_AGENT_FINAL_FOOTER_BEGIN
+            if _finalresponse_footer_enabled and final_response:
+                try:
+                    _footer = _build_files_changed_footer(
+                        result.get("messages", []) if isinstance(result, dict) else [],
+                        history_offset=len(agent_history),
+                    )
+                    if _footer:
+                        final_response = final_response.rstrip() + "\n\n" + _footer
+                except Exception as _footer_exc:
+                    logger.debug("Final response footer generation failed: %s", _footer_exc)
+            # COLMEIO_NODE_AGENT_FINAL_FOOTER_END
             # Sync session_id: the agent may have created a new session during
             # mid-run context compression (_compress_context splits sessions).
             # If so, update the session store entry so the NEXT message loads
@@ -7104,8 +7843,8 @@ class GatewayRunner:
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
 
         # Periodic "still working" notifications for long-running tasks.
-        # Fires every 10 minutes so the user knows the agent hasn't died.
-        _NOTIFY_INTERVAL = 600  # 10 minutes
+        # Interval is configurable per node via NODE_AGENT_FOLLOWUP_ELAPSED.
+        _NOTIFY_INTERVAL = _followup_elapsed_minutes * 60
         _notify_start = time.time()
 
         async def _notify_long_running():
@@ -7117,24 +7856,47 @@ class GatewayRunner:
                 _elapsed_mins = int((time.time() - _notify_start) // 60)
                 # Include agent activity context if available.
                 _agent_ref = agent_holder[0]
+                # COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_BEGIN
                 _status_detail = ""
+                _activity = None
                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
                     try:
-                        _a = _agent_ref.get_activity_summary()
-                        _parts = [f"iteration {_a['api_call_count']}/{_a['max_iterations']}"]
-                        if _a.get("current_tool"):
-                            _parts.append(f"running: {_a['current_tool']}")
+                        _activity = _agent_ref.get_activity_summary()
+                        _parts = [f"iteration {_activity['api_call_count']}/{_activity['max_iterations']}"]
+                        if _activity.get("current_tool"):
+                            _parts.append(f"running: {_activity['current_tool']}")
                         else:
-                            _parts.append(_a.get("last_activity_desc", ""))
+                            _parts.append(_activity.get("last_activity_desc", ""))
                         _status_detail = " — " + ", ".join(_parts)
                     except Exception:
-                        pass
+                        _activity = None
+
+                _notify_message = f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})"
+                if _followup_summary_enabled:
+                    _summary_lines = _build_followup_summary_lines(_activity)
+                    if _summary_lines:
+                        _notify_message += "\n👷summary:\n" + "\n".join(
+                            f"- {line}" for line in _summary_lines
+                        )
+
                 try:
-                    await _notify_adapter.send(
-                        source.chat_id,
-                        f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
-                        metadata=_status_thread_metadata,
+                    await asyncio.wait_for(
+                        _notify_adapter.send(
+                            source.chat_id,
+                            _notify_message,
+                            metadata=_status_thread_metadata,
+                        ),
+                        timeout=float(_followup_send_timeout_seconds),
                     )
+                    if _followup_summary_enabled:
+                        _reset_followup_window()
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Long-running followup notification timed out after %ss (chat=%s)",
+                        _followup_send_timeout_seconds,
+                        source.chat_id,
+                    )
+                # COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_END
                 except Exception as _ne:
                     logger.debug("Long-running notification error: %s", _ne)
 
@@ -7261,11 +8023,15 @@ class GatewayRunner:
                 _diag_lines.append(
                     "To increase the limit, set agent.gateway_timeout in config.yaml "
                     "(value in seconds, 0 = no limit) and restart the gateway.\n"
-                    "Try again, or use /reset to start fresh."
+                    "You can also reply `continue` to resume from the current context, "
+                    "or use /reset to start fresh."
                 )
 
                 response = {
-                    "final_response": "\n".join(_diag_lines),
+                    "final_response": _build_stopped_notice(
+                        f"agent inactivity timeout ({_timeout_mins} min)",
+                        "\n".join(_diag_lines),
+                    ),
                     "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                     "api_calls": _iter_n,
                     "tools": tools_holder[0] or [],

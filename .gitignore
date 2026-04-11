@@ -1,5 +1,6 @@
 # Runtime state (do not version)
 .hermes/
+/tmp
 agents/nodes/
 agents/registry.json
 logs/
@@ -12,6 +13,12 @@ backups/
 crons/
 plugins/discord/discord_users.json
 plugins/discord/discord_webhooks_table.json
+state/**
+!state/
+!state/**/
+!state/README.md
+!state/**/*.md
+!state/**/*.example
 
 # Secrets / machine-local envs
 .env
@@ -41,3 +48,6 @@ plugins/**/*.env.*
 venv/
 hermes-agent/.venv/
 hermes-agent/venv/
+
+# Local upstream contribution workspace
+dummy/
