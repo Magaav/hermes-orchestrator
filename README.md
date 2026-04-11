@@ -1,12 +1,12 @@
 # Hermes Orchestrator
-
+![Hermes Orchestrator Hero](docs/assets/hero.png)
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 
+<p align="center">
 [![GitHub Stars](https://img.shields.io/github/stars/Magaav/hermes-orchestrator?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/Magaav/hermes-orchestrator/main?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/commits/main)
 [![License](https://img.shields.io/github/license/Magaav/hermes-orchestrator?style=flat-square)](LICENSE)
-
-![Hermes Orchestrator Hero](docs/assets/hero.png)
+</p>
 
 **Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
@@ -179,8 +179,6 @@ Important characteristics:
 
 - `/local/scripts` and `/local/plugins` are the reusable/public framework surface.
 - `/local/state` is for orchestrator-local values and implementation assumptions.
-- `scripts/backup/backup_nodes_to_gdrive.sh` is now a shared entrypoint; Drive folder IDs, node allowlist, and Discord recipient live in `/local/state/orchestrator/backup_nodes_to_gdrive.env`.
-- Only `state/*.example` and state documentation should be committed.
 
 ## Bootstrap
 
