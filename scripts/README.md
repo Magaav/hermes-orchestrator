@@ -8,6 +8,7 @@ Operational scripts used by Hermes Orchestrator.
 - `clone/hord.sh`: compatibility alias for `horc`.
 - `clone/clone.sh`: clone wrapper alias to `horc`.
 - `clone/clone_manager.py`: deterministic lifecycle engine for start/stop/status/backup/restore/update.
+- `ui-gateway/run.py`: local-only HTTP/SSE gateway for the experimental WASM UI (`WASM_UI_EXPERIMENTAL=1`).
 - `install.sh`: repo install/bootstrap helper.
 - `backup/backup_nodes_to_gdrive.sh`: shared backup entrypoint; local IDs/allowlists/recipient config live in `/local/state/orchestrator/backup_nodes_to_gdrive.env`.
 - `backup_nodes_to_gdrive.sh`: compatibility shim to the canonical backup path above.

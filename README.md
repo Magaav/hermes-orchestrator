@@ -1,13 +1,9 @@
 # Hermes Orchestrator
-![Hermes Orchestrator Hero](docs/assets/hero.png)
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
-
-<p align="center">
 [![GitHub Stars](https://img.shields.io/github/stars/Magaav/hermes-orchestrator?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/stargazers)
 [![Last Commit](https://img.shields.io/github/last-commit/Magaav/hermes-orchestrator/main?style=flat-square)](https://github.com/Magaav/hermes-orchestrator/commits/main)
 [![License](https://img.shields.io/github/license/Magaav/hermes-orchestrator?style=flat-square)](LICENSE)
-</p>
-
+![Hermes Orchestrator Hero](docs/assets/hero.png)
 **Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
 Hermes Orchestrator is a lightweight host-level operational layer for running Hermes agents at scale: spawning isolated nodes, managing environments, handling upgrades/rollbacks, centralizing logs, and coordinating multi-agent workflows.

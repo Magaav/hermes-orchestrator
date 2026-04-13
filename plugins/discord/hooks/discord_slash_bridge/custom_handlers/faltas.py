@@ -9,6 +9,13 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
+# Importa a View de confirmação com botões (se disponível)
+try:
+    sys.path.insert(0, str(Path(__file__).parent))
+    from falta_confirmation_view import SuspiciousItemConfirmationView
+except ImportError:
+    SuspiciousItemConfirmationView = None
+
 _CLEAR_CONFIRM_TTL_S = 90.0
 _PENDING_CLEAR: Dict[Tuple[str, str], float] = {}
 
@@ -400,6 +407,43 @@ def _render_response(payload: Dict[str, Any], normalized_action: str, output_for
     return "✅ Operação concluída."
 
 
+async def _render_confirmation_view(
+    interaction: Any,
+    channel_id: str,
+    user_id: str,
+    store: str,
+    original_text: str,
+    guesses: list[str],
+) -> None:
+    """Envia mensagem com botões de confirmação para item suspeito."""
+    if SuspiciousItemConfirmationView is None:
+        # Fallback: mensagem de texto simples
+        await _edit_or_followup(
+            interaction,
+            f"⚠️ Texto suspeito: `{original_text}`\n"
+            f"Escolha ou digite o item correto.\n"
+            f"Sugestões: {' | '.join(guesses[:3])}"
+        )
+        return
+
+    view = SuspiciousItemConfirmationView(
+        channel_id=channel_id,
+        user_id=user_id,
+        store=store,
+        original_text=original_text,
+        guesses=guesses,
+    )
+
+    await interaction.edit_original_response(
+        content=(
+            f"⚠️ **Item suspeito detectado**\n"
+            f"Texto original: `{original_text}`\n"
+            f"Escolha uma sugestão ou digite o nome correto:"
+        ),
+        view=view,
+    )
+
+
 async def handle(
     *,
     adapter: Any,
@@ -480,6 +524,23 @@ async def handle(
 
     if proc.returncode != 0:
         if isinstance(payload, dict) and payload.get("confirmation_required"):
+            suspicious_data = payload.get("data", {})
+            if isinstance(suspicious_data, dict) and suspicious_data.get("confirmation_required"):
+                suspicious_items = suspicious_data.get("suspicious_items", [])
+                if suspicious_items and SuspiciousItemConfirmationView is not None:
+                    first = suspicious_items[0]
+                    store = (payload.get("targets") or ["loja1"])[0]
+                    channel_id = str(getattr(interaction, "channel_id", "") or "")
+                    user_id = str(getattr(interaction.user, "id", "") if interaction.user else "")
+                    await _render_confirmation_view(
+                        interaction=interaction,
+                        channel_id=channel_id,
+                        user_id=user_id,
+                        store=store,
+                        original_text=first.get("original", ""),
+                        guesses=first.get("guesses", []),
+                    )
+                    return True
             msg = _render_response(payload, normalized_action, output_format)
             await _edit_or_followup(interaction, _truncate(msg))
             return True

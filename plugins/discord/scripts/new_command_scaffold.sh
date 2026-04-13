@@ -151,11 +151,17 @@ def main() -> int:
 
     args = parser.parse_args()
 
-    root = Path(__import__("os").getenv("HERMES_DISCORD_PLUGIN_DIR", "/local/plugins/discord")).resolve()
+    os_mod = __import__("os")
+    root = Path(os_mod.getenv("HERMES_DISCORD_PLUGIN_DIR", "/local/plugins/discord")).resolve()
     if not root.exists():
         legacy_root = Path("/local/workspace/discord")
         if legacy_root.exists():
             root = legacy_root.resolve()
+    core_prestart = Path(
+        os_mod.getenv("HERMES_CORE_PLUGIN_DIR", "/local/plugins/hermes-core")
+    ).resolve() / "scripts" / "prestart_reapply.sh"
+    if not core_prestart.exists():
+        core_prestart = root / "scripts" / "prestart_reapply.sh"
     commands_dir = root / "commands"
     node_name = str(args.node or "").strip().lower()
     if node_name.endswith(".json"):
@@ -279,7 +285,7 @@ def main() -> int:
 
     if args.apply:
         steps = [
-            ["bash", str(root / "scripts" / "prestart_reapply.sh"), "--strict"],
+            ["bash", str(core_prestart), "--strict"],
             ["python3", str(root / "scripts" / "verify_discord_customizations.py")],
         ]
         for step in steps:
@@ -294,7 +300,7 @@ def main() -> int:
         f"     bash {root / 'scripts' / 'register_discord_commands.sh'} {commands_path or '<commands/<node>.json>'}"
     )
     print("  2) Reapply + verify:")
-    print(f"     bash {root / 'scripts' / 'prestart_reapply.sh'} --strict")
+    print(f"     bash {core_prestart} --strict")
     print(f"     python3 {root / 'scripts' / 'verify_discord_customizations.py'}")
 
     return 0

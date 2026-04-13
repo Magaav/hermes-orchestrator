@@ -4,6 +4,10 @@ Reapply Discord thread parent context propagation after hermes-agent updates.
 
 Ensures SessionSource includes chat_id_alt (parent channel id) for thread messages
 and slash commands, so channel ACL routing and /status channel info work in threads.
+
+Also enforces DISCORD_AUTO_THREAD_IGNORE_CHANNELS behavior:
+- listed channels become mention-free for inline replies
+- those channels only auto-thread on explicit @mention
 """
 
 from __future__ import annotations
@@ -135,6 +139,124 @@ def _patch_handle_message(section: str) -> tuple[str, bool]:
             + "                    self._track_thread(thread_id)\n",
             1,
         )
+        changed = True
+
+    # Hybrid auto-thread behavior:
+    # - messages in listed channels can be inline without @mention
+    # - only explicit @mentions should auto-thread
+    if "DISCORD_AUTO_THREAD_IGNORE_CHANNELS" not in section:
+        old_mention_block = (
+            '            free_channels_raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")\n'
+            '            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}\n'
+            "            if parent_channel_id:\n"
+            "                channel_ids.add(parent_channel_id)\n"
+            "\n"
+            '            require_mention = os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")\n'
+            "            is_free_channel = bool(channel_ids & free_channels)\n"
+            "\n"
+            "            # Skip the mention check if the message is in a thread where\n"
+            "            # the bot has previously participated (auto-created or replied in).\n"
+            "            in_bot_thread = is_thread and thread_id in self._bot_participated_threads\n"
+            "\n"
+            "            if require_mention and not is_free_channel and not in_bot_thread:\n"
+            "                if self._client.user not in message.mentions:\n"
+            "                    return\n"
+            "\n"
+            "            if self._client.user and self._client.user in message.mentions:\n"
+            '                message.content = message.content.replace(f"<@{self._client.user.id}>", "").strip()\n'
+            '                message.content = message.content.replace(f"<@!{self._client.user.id}>", "").strip()\n'
+        )
+        new_mention_block = (
+            '            free_channels_raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")\n'
+            '            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}\n'
+            '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
+            "            auto_thread_ignore_channels = {\n"
+            '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
+            "            }\n"
+            "            if parent_channel_id:\n"
+            "                channel_ids.add(parent_channel_id)\n"
+            "\n"
+            '            require_mention = os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")\n'
+            "            is_auto_thread_ignore_channel = bool(channel_ids & auto_thread_ignore_channels)\n"
+            "            is_free_channel = bool(channel_ids & free_channels) or is_auto_thread_ignore_channel\n"
+            "\n"
+            "            # Skip the mention check if the message is in a thread where\n"
+            "            # the bot has previously participated (auto-created or replied in).\n"
+            "            in_bot_thread = is_thread and thread_id in self._bot_participated_threads\n"
+            "            bot_mentioned = bool(self._client.user and self._client.user in message.mentions)\n"
+            "\n"
+            "            if require_mention and not is_free_channel and not in_bot_thread:\n"
+            "                if not bot_mentioned:\n"
+            "                    return\n"
+            "\n"
+            "            if bot_mentioned:\n"
+            '                message.content = message.content.replace(f"<@{self._client.user.id}>", "").strip()\n'
+            '                message.content = message.content.replace(f"<@!{self._client.user.id}>", "").strip()\n'
+        )
+        if old_mention_block not in section:
+            raise RuntimeError("_handle_message mention/free-response block anchor not found for auto-thread-ignore patch")
+        section = section.replace(old_mention_block, new_mention_block, 1)
+        changed = True
+
+    if "skip_thread_for_auto_thread_ignore" not in section:
+        old_thread_block = (
+            '            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")\n'
+            '            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}\n'
+            "            skip_thread = bool(channel_ids & no_thread_channels)\n"
+        )
+        new_thread_block = (
+            '            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")\n'
+            '            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}\n'
+            '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
+            "            auto_thread_ignore_channels = {\n"
+            '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
+            "            }\n"
+            "            explicit_bot_mention = bool(\n"
+            "                self._client.user\n"
+            "                and (\n"
+            '                    f"<@{self._client.user.id}>" in (message.content or "")\n'
+            '                    or f"<@!{self._client.user.id}>" in (message.content or "")\n'
+            "                )\n"
+            "            )\n"
+            "            skip_thread_for_auto_thread_ignore = (\n"
+            "                bool(channel_ids & auto_thread_ignore_channels) and not explicit_bot_mention\n"
+            "            )\n"
+            "            skip_thread = bool(channel_ids & no_thread_channels) or skip_thread_for_auto_thread_ignore\n"
+        )
+        if old_thread_block not in section:
+            raise RuntimeError("_handle_message no-thread block anchor not found for auto-thread-ignore patch")
+        section = section.replace(old_thread_block, new_thread_block, 1)
+        changed = True
+    elif "explicit_bot_mention" not in section:
+        old_patched_thread_block = (
+            '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
+            "            auto_thread_ignore_channels = {\n"
+            '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
+            "            }\n"
+            "            bot_mentioned = bool(self._client.user and self._client.user in message.mentions)\n"
+            "            skip_thread_for_auto_thread_ignore = (\n"
+            "                bool(channel_ids & auto_thread_ignore_channels) and not bot_mentioned\n"
+            "            )\n"
+        )
+        if old_patched_thread_block not in section:
+            raise RuntimeError("_handle_message old auto-thread-ignore block not found for explicit-mention upgrade")
+        new_patched_thread_block = (
+            '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
+            "            auto_thread_ignore_channels = {\n"
+            '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
+            "            }\n"
+            "            explicit_bot_mention = bool(\n"
+            "                self._client.user\n"
+            "                and (\n"
+            '                    f"<@{self._client.user.id}>" in (message.content or "")\n'
+            '                    or f"<@!{self._client.user.id}>" in (message.content or "")\n'
+            "                )\n"
+            "            )\n"
+            "            skip_thread_for_auto_thread_ignore = (\n"
+            "                bool(channel_ids & auto_thread_ignore_channels) and not explicit_bot_mention\n"
+            "            )\n"
+        )
+        section = section.replace(old_patched_thread_block, new_patched_thread_block, 1)
         changed = True
 
     if "chat_id_alt=parent_channel_id," not in section:

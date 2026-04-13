@@ -511,7 +511,16 @@ class DiscordSlashRuntime:
             await self.handlers.send_ephemeral(interaction, msg)
             return True
 
-        cmd_cfg = self._bridge_commands.get(target_name) or self._bridge_commands.get(name) or {}
+        cmd_cfg_raw = self._bridge_commands.get(target_name) or self._bridge_commands.get(name) or {}
+        cmd_cfg = dict(cmd_cfg_raw) if isinstance(cmd_cfg_raw, dict) else {}
+        if target_name == "model":
+            native = self.registry.get("native_overrides") or {}
+            native_model_cfg = native.get("model") if isinstance(native, dict) else {}
+            if isinstance(native_model_cfg, dict):
+                merged_cfg = dict(native_model_cfg)
+                merged_cfg.update(cmd_cfg)
+                cmd_cfg = merged_cfg
+
         acl_command = str(cmd_cfg.get("acl_command") or target_name)
         allowed, acl_msg = self.handlers.check_command_acl(self.adapter, interaction, acl_command)
         if not allowed:

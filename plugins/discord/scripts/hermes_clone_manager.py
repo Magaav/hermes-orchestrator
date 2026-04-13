@@ -48,6 +48,7 @@ LEGACY_DISCORD_PLUGIN_ROOT = PARENT_WORKSPACE_ROOT / "discord"
 PARENT_WORKSPACE_BACKUP_SCRIPTS = PARENT_WORKSPACE_ROOT / "crons" / "scripts" / "backup"
 SHARED_PLUGINS_ROOT = Path(os.getenv("HERMES_PLUGINS_ROOT", "/local/plugins"))
 DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
+DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
 
 DEFAULT_DOCKER_IMAGE = os.getenv("HERMES_CLONE_DOCKER_IMAGE", "ubuntu:24.04")
 CONTAINER_PREFIX = "hermes-node-"
@@ -1389,7 +1390,7 @@ def _build_docker_run_cmd(
         "export CURL_CA_BUNDLE=\"$CA_BUNDLE\"; "
         "fi; "
         "PRESTART_SCRIPT=\"\"; "
-        "for _p in /local/plugins/discord/scripts/prestart_reapply.sh /local/workspace/discord/scripts/prestart_reapply.sh; do "
+        "for _p in /local/plugins/hermes-core/scripts/prestart_reapply.sh /local/plugins/discord/scripts/prestart_reapply.sh /local/workspace/discord/scripts/prestart_reapply.sh; do "
         "if [ -x \"${_p}\" ]; then PRESTART_SCRIPT=\"${_p}\"; break; fi; "
         "done; "
         "if [ -n \"${PRESTART_SCRIPT}\" ]; then "
@@ -1452,6 +1453,8 @@ def _build_docker_run_cmd(
         f"NODE_NAME={clone_name}",
         "-e",
         "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/discord",
+        "-e",
+        "HERMES_CORE_PLUGIN_DIR=/local/plugins/hermes-core",
         "-e",
         "PYTHONUNBUFFERED=1",
         "-v",

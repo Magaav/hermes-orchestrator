@@ -6689,9 +6689,16 @@ class GatewayRunner:
             "window_tool_calls": 0,
             "window_errors": 0,
             "window_actions": [],
+            "window_tool_names": [],
             "window_paths": [],
             "window_files": {},
             "window_result_notes": [],
+            "window_phase_counts": {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            },
             "phase_counts": {
                 "investigation": 0,
                 "implementation": 0,
@@ -6782,9 +6789,16 @@ class GatewayRunner:
             _followup_state["window_tool_calls"] = 0
             _followup_state["window_errors"] = 0
             _followup_state["window_actions"] = []
+            _followup_state["window_tool_names"] = []
             _followup_state["window_paths"] = []
             _followup_state["window_files"] = {}
             _followup_state["window_result_notes"] = []
+            _followup_state["window_phase_counts"] = {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            }
 
         def _path_hint_from_text(raw_text: Any) -> str:
             text = str(raw_text or "")
@@ -6887,6 +6901,9 @@ class GatewayRunner:
             elif name in ("clarify", "delegate_task"):
                 phase = "coordination"
                 note = "coordinating next decisions and task split"
+            elif name in ("execute_code", "python_exec", "code_interpreter"):
+                phase = "validation"
+                note = "running focused code probes and inspecting outputs"
             elif name in ("web_search", "browser_navigate", "browser_snapshot"):
                 phase = "investigation"
                 note = "gathering external context"
@@ -6899,6 +6916,9 @@ class GatewayRunner:
 
         def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None:
             info = _describe_tool_activity(tool_name, preview, raw_args)
+            name = str(tool_name or "").strip()
+            if name:
+                _push_recent_line("window_tool_names", name, 10)
             note = str(info.get("note") or "").strip()
             if note:
                 _push_recent_line("recent_actions", note, 6)
@@ -6916,6 +6936,11 @@ class GatewayRunner:
                 _followup_state["phase_counts"] = counts
             if phase:
                 counts[phase] = int(counts.get(phase, 0) or 0) + 1
+                window_counts = _followup_state.get("window_phase_counts")
+                if not isinstance(window_counts, dict):
+                    window_counts = {}
+                    _followup_state["window_phase_counts"] = window_counts
+                window_counts[phase] = int(window_counts.get(phase, 0) or 0) + 1
             _followup_state["window_tool_calls"] = int(_followup_state.get("window_tool_calls", 0) or 0) + 1
 
         def _record_followup_tool_result(tool_name: Any, raw_result: Any) -> None:
@@ -7011,13 +7036,22 @@ class GatewayRunner:
             if current_tool:
                 if current_tool == "terminal":
                     return "running the next terminal command and checking results"
+                if current_tool in ("execute_code", "python_exec", "code_interpreter"):
+                    return "running the next code probe and validating the output"
                 return f"running the next {current_tool} step"
 
             last_desc = str(activity.get("last_activity_desc") or "").strip()
             if not last_desc:
                 return ""
             if last_desc.lower().startswith("starting api call"):
-                return "starting the next reasoning and tool-selection cycle"
+                window_errors = int(_followup_state.get("window_errors", 0) or 0)
+                window_files_raw = _followup_state.get("window_files")
+                window_files = window_files_raw if isinstance(window_files_raw, dict) else {}
+                if window_errors > 0:
+                    return "triaging recent tool errors and choosing the safest recovery step"
+                if window_files:
+                    return "choosing the next validation pass for the files changed in this window"
+                return "selecting the next concrete tool step from the latest evidence"
             return last_desc
 
         def _build_stopped_notice(reason: str, detail: str = "") -> str:
@@ -7179,15 +7213,22 @@ class GatewayRunner:
             lines: List[str] = []
             phase_summary = _followup_phase_summary()
             if phase_summary:
-                lines.append(_as_sentence(f"Focus: {phase_summary}"))
+                lines.append(_as_sentence(f"Objective: {phase_summary}"))
             else:
-                lines.append("Focus: keeping momentum while I work through the current plan.")
+                lines.append("Objective: keeping momentum while I work through the current plan.")
 
             window_started_at = float(_followup_state.get("window_started_at") or time.time())
             window_minutes = max(1, int((time.time() - window_started_at) // 60))
             window_tools = int(_followup_state.get("window_tool_calls", 0) or 0)
             window_files_raw = _followup_state.get("window_files")
             window_files = window_files_raw if isinstance(window_files_raw, dict) else {}
+            window_tool_names_raw = _followup_state.get("window_tool_names")
+            window_tool_names = [str(entry).strip() for entry in window_tool_names_raw] if isinstance(window_tool_names_raw, list) else []
+            top_tool_names = _top_counts(window_tool_names, limit=3)
+            window_notes_raw = _followup_state.get("window_result_notes")
+            window_notes = [str(entry).strip() for entry in window_notes_raw] if isinstance(window_notes_raw, list) else []
+            top_notes = _top_counts(window_notes, limit=2)
+
             if window_files:
                 total_add = sum(int(v.get("add", 0) or 0) for v in window_files.values())
                 total_del = sum(int(v.get("del", 0) or 0) for v in window_files.values())
@@ -7211,33 +7252,68 @@ class GatewayRunner:
                     path_bits.append(f"{path}{suffix}")
                 lines.append(
                     _as_sentence(
-                        f"Did: in the last {window_minutes} min I captured edits across {len(window_files)} file(s) "
-                        f"(+{total_add} -{total_del}) in {'; '.join(path_bits)}"
+                        f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s) and captured edits across "
+                        f"{len(window_files)} file(s) (+{total_add} -{total_del}) in {'; '.join(path_bits)}"
                     )
                 )
             else:
                 window_actions_raw = _followup_state.get("window_actions")
                 window_actions = [str(entry).strip() for entry in window_actions_raw] if isinstance(window_actions_raw, list) else []
                 top_actions = _top_counts(window_actions, limit=2)
+                evidence_bits: List[str] = []
+                if top_tool_names:
+                    evidence_bits.append(f"tools: {', '.join(top_tool_names)}")
                 if top_actions:
-                    lines.append(_as_sentence(f"Did: in the last {window_minutes} min I ran {window_tools} tool step(s): {'; '.join(top_actions)}"))
+                    evidence_bits.append(f"activity: {'; '.join(top_actions)}")
+                if evidence_bits:
+                    lines.append(
+                        _as_sentence(
+                            f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s); {'; '.join(evidence_bits)}"
+                        )
+                    )
                 elif window_tools > 0:
-                    lines.append(_as_sentence(f"Did: in the last {window_minutes} min I ran {window_tools} tool step(s) and collected partial outputs"))
+                    lines.append(_as_sentence(f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s) and collected partial outputs"))
                 else:
-                    lines.append(_as_sentence(f"Did: minimal external progress in the last {window_minutes} min while preparing the next move"))
+                    lines.append(_as_sentence(f"Evidence: minimal external progress in the last {window_minutes} min while preparing the next move"))
 
             error_count = int(_followup_state.get("error_count") or 0)
             window_errors = int(_followup_state.get("window_errors", 0) or 0)
+            window_phase_counts_raw = _followup_state.get("window_phase_counts")
+            window_phase_counts = window_phase_counts_raw if isinstance(window_phase_counts_raw, dict) else {}
+            investigation_count = int(window_phase_counts.get("investigation", 0) or 0)
+            implementation_count = int(window_phase_counts.get("implementation", 0) or 0)
+            validation_count = int(window_phase_counts.get("validation", 0) or 0)
+            coordination_count = int(window_phase_counts.get("coordination", 0) or 0)
+            decision = ""
             if window_errors > 0:
-                lines.append(_as_sentence(f"Blockers: this window surfaced {window_errors} tool result issue(s) that I'm actively addressing"))
+                if implementation_count > 0:
+                    decision = "prioritize corrective edits before broadening scope"
+                else:
+                    decision = "inspect failing outputs first, then pick a targeted recovery path"
+            elif window_files:
+                if validation_count > 0:
+                    decision = "shift toward validation to confirm recent edits"
+                else:
+                    decision = "finish patching on touched files, then run targeted validation"
+            elif investigation_count > 0 and implementation_count == 0:
+                decision = "continue narrowing root cause before committing edits"
+            elif implementation_count > 0 and validation_count == 0:
+                decision = "translate gathered evidence into concrete file changes"
+            elif coordination_count > 0 and (investigation_count + implementation_count + validation_count) == 0:
+                decision = "stabilize task decomposition before the next tool sequence"
+            elif window_tools > 0:
+                decision = "keep iterating on the highest-signal tool path"
             elif error_count > 0:
-                lines.append(_as_sentence(f"Blockers: I still have {error_count} recent issue(s) in view and I'm adjusting the plan"))
+                decision = "revisit recent failures to recover forward progress"
 
-            window_notes_raw = _followup_state.get("window_result_notes")
-            window_notes = [str(entry).strip() for entry in window_notes_raw] if isinstance(window_notes_raw, list) else []
-            top_notes = _top_counts(window_notes, limit=2)
+            if decision and top_notes:
+                lines.append(_as_sentence(f"Decision: {decision}; latest signal: {'; '.join(top_notes)}"))
+            elif decision:
+                lines.append(_as_sentence(f"Decision: {decision}"))
+
+            next_hint = _next_followup_hint(activity)
             looking_for_hint = ""
-            if top_notes:
+            if top_notes and not window_files:
                 looking_for_hint = f"confirming {'; '.join(top_notes)}"
             else:
                 window_paths_raw = _followup_state.get("window_paths")
@@ -7249,16 +7325,16 @@ class GatewayRunner:
                 if unique_window_paths:
                     looking_for_hint = f"progress on {', '.join(unique_window_paths[:3])}"
 
-            next_hint = _next_followup_hint(activity)
             if next_hint:
                 looking_for_hint = next_hint
             if looking_for_hint:
-                lines.append(_as_sentence(f"Looking for: {looking_for_hint}"))
+                lines.append(_as_sentence(f"Next step: {looking_for_hint}"))
 
             cleaned = [line for line in lines if line]
             if not cleaned:
-                cleaned.append("Focus: collecting progress details for the next checkpoint.")
+                cleaned.append("Objective: collecting progress details for the next checkpoint.")
             return cleaned[:4]
+
         # COLMEIO_NODE_AGENT_RUNTIME_END
         # Bridge sync step_callback → async hooks.emit for agent:step events
         _loop_for_step = asyncio.get_event_loop()

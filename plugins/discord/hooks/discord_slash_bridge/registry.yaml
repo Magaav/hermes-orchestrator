@@ -63,7 +63,7 @@ native_overrides:
         provider: openai-codex
         model: gpt-5.4
       - key: gpt53codex
-        label: GPT-5.3 Codex(OpenIA Codex)
+        label: GPT-5.3 Codex(OpenAI Codex)
         provider: openai-codex
         model: gpt-5.3-codex
       - key: nemotron120b
@@ -82,6 +82,9 @@ slash_bridge:
   enabled: true
   force_bridge_commands: []
   commands:
+    model:
+      acl_command: model
+      handler: model_switch
     faltas:
       acl_command: faltas
       handler: custom:faltas

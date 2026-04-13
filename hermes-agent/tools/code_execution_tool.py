@@ -67,11 +67,132 @@ DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
+MAX_CHANGE_DIFF_BYTES = 120_000
+MAX_CHANGED_PATHS = 200
 
 
 def check_sandbox_requirements() -> bool:
     """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
     return SANDBOX_AVAILABLE
+
+
+def _safe_parse_json_obj(raw_payload: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_payload, str):
+        return None
+    payload = raw_payload.strip()
+    if not payload or not payload.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(payload)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_changed_path(raw_path: Any) -> str:
+    if raw_path is None:
+        return ""
+    path = str(raw_path).strip()
+    if not path:
+        return ""
+    if " -> " in path:
+        left, right = path.split(" -> ", 1)
+        path = right.strip() or left.strip()
+    if path.startswith("a/") or path.startswith("b/"):
+        path = path[2:]
+    if path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+def _init_file_change_tracker() -> Dict[str, Any]:
+    return {
+        "files_modified": set(),
+        "files_created": set(),
+        "files_deleted": set(),
+        "diff_chunks": [],
+    }
+
+
+def _truncate_combined_diff(diff_text: str, limit: int = MAX_CHANGE_DIFF_BYTES) -> str:
+    text = str(diff_text or "")
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.4)
+    tail = limit - head
+    omitted = len(text) - head - tail
+    return (
+        text[:head]
+        + f"\n\n... [DIFF TRUNCATED - {omitted:,} chars omitted out of {len(text):,} total] ...\n\n"
+        + text[-tail:]
+    )
+
+
+def _record_tool_file_changes(
+    tool_name: str,
+    tool_args: Any,
+    tool_result: str,
+    tracker: Dict[str, Any],
+) -> None:
+    if not isinstance(tracker, dict):
+        return
+    payload = _safe_parse_json_obj(tool_result)
+    if not payload:
+        return
+
+    touched = False
+    for key in ("files_modified", "files_created", "files_deleted"):
+        raw_paths = payload.get(key)
+        if not isinstance(raw_paths, list):
+            continue
+        bucket = tracker.get(key)
+        if not isinstance(bucket, set):
+            bucket = set()
+            tracker[key] = bucket
+        for raw_path in raw_paths:
+            path = _normalize_changed_path(raw_path)
+            if path:
+                bucket.add(path)
+                touched = True
+
+    diff_text = payload.get("diff")
+    if isinstance(diff_text, str) and diff_text.strip():
+        chunks = tracker.get("diff_chunks")
+        if not isinstance(chunks, list):
+            chunks = []
+            tracker["diff_chunks"] = chunks
+        chunks.append(diff_text)
+
+    # Fallback for write tools that succeeded but didn't return explicit files.
+    if not touched and tool_name in ("patch", "write_file") and isinstance(tool_args, dict):
+        if payload.get("error") or payload.get("success") is False:
+            return
+        path = _normalize_changed_path(tool_args.get("path"))
+        if path:
+            modified = tracker.get("files_modified")
+            if not isinstance(modified, set):
+                modified = set()
+                tracker["files_modified"] = modified
+            modified.add(path)
+
+
+def _build_file_change_payload(tracker: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if not isinstance(tracker, dict):
+        return payload
+
+    for key in ("files_modified", "files_created", "files_deleted"):
+        bucket = tracker.get(key)
+        if isinstance(bucket, set) and bucket:
+            payload[key] = sorted(bucket)[:MAX_CHANGED_PATHS]
+
+    chunks = tracker.get("diff_chunks")
+    if isinstance(chunks, list) and chunks:
+        merged = "\n".join(str(chunk or "").strip() for chunk in chunks if str(chunk or "").strip())
+        if merged:
+            payload["diff"] = _truncate_combined_diff(merged)
+
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +431,7 @@ def _rpc_server_loop(
     tool_call_counter: list,   # mutable [int] so the thread can increment
     max_tool_calls: int,
     allowed_tools: frozenset,
+    file_change_tracker: Dict[str, Any],
 ):
     """
     Accept one client connection and dispatch tool-call requests until
@@ -408,6 +530,12 @@ def _rpc_server_loop(
                     "args_preview": args_preview,
                     "duration": round(call_duration, 2),
                 })
+                _record_tool_file_changes(
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    tool_result=result,
+                    tracker=file_change_tracker,
+                )
 
                 conn.sendall((result + "\n").encode())
 
@@ -552,6 +680,7 @@ def _rpc_poll_loop(
     max_tool_calls: int,
     allowed_tools: frozenset,
     stop_event: threading.Event,
+    file_change_tracker: Dict[str, Any],
 ):
     """Poll the remote filesystem for tool call requests and dispatch them.
 
@@ -657,6 +786,12 @@ def _rpc_poll_loop(
                         "args_preview": str(tool_args)[:80],
                         "duration": round(call_duration, 2),
                     })
+                    _record_tool_file_changes(
+                        tool_name=tool_name,
+                        tool_args=tool_args,
+                        tool_result=tool_result,
+                        tracker=file_change_tracker,
+                    )
 
                 # Write response atomically (tmp + rename).
                 # Use echo piping (not stdin_data) because Modal doesn't
@@ -711,6 +846,7 @@ def _execute_remote(
 
     tool_call_log: list = []
     tool_call_counter = [0]
+    file_change_tracker = _init_file_change_tracker()
     exec_start = time.monotonic()
     stop_event = threading.Event()
     rpc_thread = None
@@ -751,7 +887,7 @@ def _execute_remote(
             args=(
                 env, f"{sandbox_dir}/rpc", effective_task_id,
                 tool_call_log, tool_call_counter, max_tool_calls,
-                sandbox_tools, stop_event,
+                sandbox_tools, stop_event, file_change_tracker,
             ),
             daemon=True,
         )
@@ -791,12 +927,14 @@ def _execute_remote(
             duration, tool_call_counter[0], type(exc).__name__, exc,
             exc_info=True,
         )
-        return json.dumps({
+        error_result = {
             "status": "error",
             "error": str(exc),
             "tool_calls_made": tool_call_counter[0],
             "duration_seconds": duration,
-        }, ensure_ascii=False)
+        }
+        error_result.update(_build_file_change_payload(file_change_tracker))
+        return json.dumps(error_result, ensure_ascii=False)
 
     finally:
         # Stop the polling thread
@@ -856,6 +994,7 @@ def _execute_remote(
         result["status"] = "error"
         result["error"] = f"Script exited with code {exit_code}"
 
+    result.update(_build_file_change_payload(file_change_tracker))
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -925,6 +1064,7 @@ def execute_code(
 
     tool_call_log: list = []
     tool_call_counter = [0]  # mutable so the RPC thread can increment
+    file_change_tracker = _init_file_change_tracker()
     exec_start = time.monotonic()
     server_sock = None
 
@@ -950,6 +1090,7 @@ def execute_code(
             args=(
                 server_sock, task_id, tool_call_log,
                 tool_call_counter, max_tool_calls, sandbox_tools,
+                file_change_tracker,
             ),
             daemon=True,
         )
@@ -1154,6 +1295,7 @@ def execute_code(
             if stderr_text:
                 result["output"] = stdout_text + "\n--- stderr ---\n" + stderr_text
 
+        result.update(_build_file_change_payload(file_change_tracker))
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as exc:
@@ -1166,12 +1308,14 @@ def execute_code(
             exc,
             exc_info=True,
         )
-        return json.dumps({
+        error_result = {
             "status": "error",
             "error": str(exc),
             "tool_calls_made": tool_call_counter[0],
             "duration_seconds": duration,
-        }, ensure_ascii=False)
+        }
+        error_result.update(_build_file_change_payload(file_change_tracker))
+        return json.dumps(error_result, ensure_ascii=False)
 
     finally:
         # Cleanup temp dir and socket

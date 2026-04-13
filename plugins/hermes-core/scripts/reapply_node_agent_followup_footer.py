@@ -378,6 +378,7 @@ STEP_BLOCK = """                # COLMEIO_NODE_AGENT_STEP_SUMMARY_BEGIN
                         if isinstance(_parsed_result, dict):
                             if _parsed_result.get("error") or _parsed_result.get("success") is False:
                                 _error_count += 1
+                            _record_followup_tool_result(_tool_entry.get("name"), _tool_result)
                             continue
                         if isinstance(_tool_result, str) and _tool_result.strip().lower().startswith("error"):
                             _error_count += 1
@@ -427,6 +428,8 @@ NOTIFY_BLOCK = """                # COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_BEGIN
                         _notify_message,
                         metadata=_status_thread_metadata,
                     )
+                    if _followup_summary_enabled:
+                        _reset_followup_window()
                 # COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_END
 """
 
@@ -459,6 +462,22 @@ RICH_HELPER_BLOCK = """        def _push_recent_line(bucket_key: str, value: str
             bucket.append(text)
             if len(bucket) > limit:
                 del bucket[:-limit]
+
+        def _reset_followup_window() -> None:
+            _followup_state["window_started_at"] = time.time()
+            _followup_state["window_tool_calls"] = 0
+            _followup_state["window_errors"] = 0
+            _followup_state["window_actions"] = []
+            _followup_state["window_tool_names"] = []
+            _followup_state["window_paths"] = []
+            _followup_state["window_files"] = {}
+            _followup_state["window_result_notes"] = []
+            _followup_state["window_phase_counts"] = {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            }
 
         def _path_hint_from_text(raw_text: Any) -> str:
             text = str(raw_text or "")
@@ -561,6 +580,9 @@ RICH_HELPER_BLOCK = """        def _push_recent_line(bucket_key: str, value: str
             elif name in ("clarify", "delegate_task"):
                 phase = "coordination"
                 note = "coordinating next decisions and task split"
+            elif name in ("execute_code", "python_exec", "code_interpreter"):
+                phase = "validation"
+                note = "running focused code probes and inspecting outputs"
             elif name in ("web_search", "browser_navigate", "browser_snapshot"):
                 phase = "investigation"
                 note = "gathering external context"
@@ -573,13 +595,19 @@ RICH_HELPER_BLOCK = """        def _push_recent_line(bucket_key: str, value: str
 
         def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None:
             info = _describe_tool_activity(tool_name, preview, raw_args)
+            name = str(tool_name or "").strip()
+            if name:
+                _push_recent_line("window_tool_names", name, 10)
+
             note = str(info.get("note") or "").strip()
             if note:
                 _push_recent_line("recent_actions", note, 6)
+                _push_recent_line("window_actions", note, 8)
 
             path_hint = str(info.get("path") or "").strip()
             if path_hint:
                 _push_recent_line("recent_paths", path_hint, 4)
+                _push_recent_line("window_paths", path_hint, 6)
 
             phase = str(info.get("phase") or "").strip().lower()
             counts = _followup_state.get("phase_counts")
@@ -588,6 +616,70 @@ RICH_HELPER_BLOCK = """        def _push_recent_line(bucket_key: str, value: str
                 _followup_state["phase_counts"] = counts
             if phase:
                 counts[phase] = int(counts.get(phase, 0) or 0) + 1
+                window_counts = _followup_state.get("window_phase_counts")
+                if not isinstance(window_counts, dict):
+                    window_counts = {}
+                    _followup_state["window_phase_counts"] = window_counts
+                window_counts[phase] = int(window_counts.get(phase, 0) or 0) + 1
+            _followup_state["window_tool_calls"] = int(_followup_state.get("window_tool_calls", 0) or 0) + 1
+
+        def _record_followup_tool_result(tool_name: Any, raw_result: Any) -> None:
+            payload = _safe_parse_json_obj(raw_result)
+            if not payload:
+                return
+
+            name = str(tool_name or "").strip()
+            has_error = bool(payload.get("error")) or payload.get("success") is False
+            if has_error:
+                _followup_state["window_errors"] = int(_followup_state.get("window_errors", 0) or 0) + 1
+                reason = str(payload.get("error") or "").strip()
+                if reason:
+                    compact_reason = reason.replace("\\n", " ").strip()
+                    if len(compact_reason) > 140:
+                        compact_reason = compact_reason[:137] + "..."
+                    _push_recent_line("window_result_notes", f"tool error: {compact_reason}", 6)
+
+            window_files_raw = _followup_state.get("window_files")
+            if not isinstance(window_files_raw, dict):
+                window_files_raw = {}
+                _followup_state["window_files"] = window_files_raw
+            window_files: Dict[str, Dict[str, int]] = window_files_raw
+
+            changed_paths: List[str] = []
+            for key in ("files_modified", "files_created", "files_deleted"):
+                raw_paths = payload.get(key)
+                if isinstance(raw_paths, list):
+                    for raw_path in raw_paths:
+                        path = _normalize_changed_path(raw_path)
+                        if path:
+                            changed_paths.append(path)
+
+            diff_stats = _count_unified_diff(str(payload.get("diff") or ""))
+            for path in changed_paths:
+                _push_recent_line("window_paths", path, 6)
+                window_files.setdefault(path, {"add": 0, "del": 0})
+
+            if diff_stats:
+                matched_any = False
+                for path in changed_paths:
+                    if path in diff_stats:
+                        window_files[path]["add"] += int(diff_stats[path].get("add", 0) or 0)
+                        window_files[path]["del"] += int(diff_stats[path].get("del", 0) or 0)
+                        matched_any = True
+                if not matched_any and changed_paths:
+                    total_add = sum(int(v.get("add", 0) or 0) for v in diff_stats.values())
+                    total_del = sum(int(v.get("del", 0) or 0) for v in diff_stats.values())
+                    window_files[changed_paths[0]]["add"] += total_add
+                    window_files[changed_paths[0]]["del"] += total_del
+
+            if name in ("patch", "write_file") and changed_paths:
+                _push_recent_line(
+                    "window_result_notes",
+                    f"captured edits in {len(set(changed_paths))} file(s)",
+                    6,
+                )
+            elif has_error and not str(payload.get("error") or "").strip():
+                _push_recent_line("window_result_notes", f"{name or 'tool'} returned an unsuccessful result", 6)
 
         def _followup_phase_summary() -> str:
             counts_raw = _followup_state.get("phase_counts")
@@ -624,13 +716,22 @@ RICH_HELPER_BLOCK = """        def _push_recent_line(bucket_key: str, value: str
             if current_tool:
                 if current_tool == "terminal":
                     return "running the next terminal command and checking results"
+                if current_tool in ("execute_code", "python_exec", "code_interpreter"):
+                    return "running the next code probe and validating the output"
                 return f"running the next {current_tool} step"
 
             last_desc = str(activity.get("last_activity_desc") or "").strip()
             if not last_desc:
                 return ""
             if last_desc.lower().startswith("starting api call"):
-                return "starting the next reasoning and tool-selection cycle"
+                window_errors = int(_followup_state.get("window_errors", 0) or 0)
+                window_files_raw = _followup_state.get("window_files")
+                window_files = window_files_raw if isinstance(window_files_raw, dict) else {}
+                if window_errors > 0:
+                    return "triaging recent tool errors and choosing the safest recovery step"
+                if window_files:
+                    return "choosing the next validation pass for the files changed in this window"
+                return "selecting the next concrete tool step from the latest evidence"
             return last_desc
 """
 
@@ -643,34 +744,147 @@ RICH_SUMMARY_BLOCK = """        def _build_followup_summary_lines(activity: Opti
                     sentence += "."
                 return sentence
 
+            def _top_counts(entries: List[str], limit: int = 2) -> List[str]:
+                counts: Dict[str, int] = {}
+                order: List[str] = []
+                for entry in entries:
+                    text = str(entry or "").strip()
+                    if not text:
+                        continue
+                    if text not in counts:
+                        counts[text] = 0
+                        order.append(text)
+                    counts[text] += 1
+                ranked = sorted(order, key=lambda item: (-counts[item], order.index(item)))
+                result: List[str] = []
+                for item in ranked[:limit]:
+                    count = counts[item]
+                    result.append(f"{item} ({count}x)" if count > 1 else item)
+                return result
+
             lines: List[str] = []
             phase_summary = _followup_phase_summary()
             if phase_summary:
-                lines.append(_as_sentence(f"I'm {phase_summary}"))
+                lines.append(_as_sentence(f"Objective: {phase_summary}"))
             else:
-                lines.append("I'm keeping momentum while I work through the current plan.")
+                lines.append("Objective: keeping momentum while I work through the current plan.")
 
-            recent_actions = _followup_state.get("recent_actions")
-            if isinstance(recent_actions, list):
-                compact_actions = [str(entry).strip() for entry in recent_actions if str(entry).strip()]
-                if compact_actions:
-                    lines.append(_as_sentence(f"Recent work: {'; then '.join(compact_actions[-2:])}"))
+            window_started_at = float(_followup_state.get("window_started_at") or time.time())
+            window_minutes = max(1, int((time.time() - window_started_at) // 60))
+            window_tools = int(_followup_state.get("window_tool_calls", 0) or 0)
+            window_files_raw = _followup_state.get("window_files")
+            window_files = window_files_raw if isinstance(window_files_raw, dict) else {}
+            window_tool_names_raw = _followup_state.get("window_tool_names")
+            window_tool_names = [str(entry).strip() for entry in window_tool_names_raw] if isinstance(window_tool_names_raw, list) else []
+            top_tool_names = _top_counts(window_tool_names, limit=3)
+            window_notes_raw = _followup_state.get("window_result_notes")
+            window_notes = [str(entry).strip() for entry in window_notes_raw] if isinstance(window_notes_raw, list) else []
+            top_notes = _top_counts(window_notes, limit=2)
 
-            error_count = int(_followup_state.get("error_count") or 0)
-            if error_count > 0:
+            if window_files:
+                total_add = sum(int(v.get("add", 0) or 0) for v in window_files.values())
+                total_del = sum(int(v.get("del", 0) or 0) for v in window_files.values())
+                ranked_paths = sorted(
+                    window_files.keys(),
+                    key=lambda path: (
+                        -(int(window_files[path].get("add", 0) or 0) + int(window_files[path].get("del", 0) or 0)),
+                        path,
+                    ),
+                )
+                path_bits: List[str] = []
+                for path in ranked_paths[:3]:
+                    add = int(window_files[path].get("add", 0) or 0)
+                    dele = int(window_files[path].get("del", 0) or 0)
+                    delta_bits: List[str] = []
+                    if add:
+                        delta_bits.append(f"+{add}")
+                    if dele:
+                        delta_bits.append(f"-{dele}")
+                    suffix = f" ({' '.join(delta_bits)})" if delta_bits else ""
+                    path_bits.append(f"{path}{suffix}")
                 lines.append(
                     _as_sentence(
-                        f"I found {error_count} recent tool result(s) with issues and I'm adjusting the plan"
+                        f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s) and captured edits across "
+                        f"{len(window_files)} file(s) (+{total_add} -{total_del}) in {'; '.join(path_bits)}"
                     )
                 )
+            else:
+                window_actions_raw = _followup_state.get("window_actions")
+                window_actions = [str(entry).strip() for entry in window_actions_raw] if isinstance(window_actions_raw, list) else []
+                top_actions = _top_counts(window_actions, limit=2)
+                evidence_bits: List[str] = []
+                if top_tool_names:
+                    evidence_bits.append(f"tools: {', '.join(top_tool_names)}")
+                if top_actions:
+                    evidence_bits.append(f"activity: {'; '.join(top_actions)}")
+                if evidence_bits:
+                    lines.append(
+                        _as_sentence(
+                            f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s); {'; '.join(evidence_bits)}"
+                        )
+                    )
+                elif window_tools > 0:
+                    lines.append(_as_sentence(f"Evidence: in the last {window_minutes} min I ran {window_tools} tool step(s) and collected partial outputs"))
+                else:
+                    lines.append(_as_sentence(f"Evidence: minimal external progress in the last {window_minutes} min while preparing the next move"))
+
+            error_count = int(_followup_state.get("error_count") or 0)
+            window_errors = int(_followup_state.get("window_errors", 0) or 0)
+            window_phase_counts_raw = _followup_state.get("window_phase_counts")
+            window_phase_counts = window_phase_counts_raw if isinstance(window_phase_counts_raw, dict) else {}
+            investigation_count = int(window_phase_counts.get("investigation", 0) or 0)
+            implementation_count = int(window_phase_counts.get("implementation", 0) or 0)
+            validation_count = int(window_phase_counts.get("validation", 0) or 0)
+            coordination_count = int(window_phase_counts.get("coordination", 0) or 0)
+            decision = ""
+            if window_errors > 0:
+                if implementation_count > 0:
+                    decision = "prioritize corrective edits before broadening scope"
+                else:
+                    decision = "inspect failing outputs first, then pick a targeted recovery path"
+            elif window_files:
+                if validation_count > 0:
+                    decision = "shift toward validation to confirm recent edits"
+                else:
+                    decision = "finish patching on touched files, then run targeted validation"
+            elif investigation_count > 0 and implementation_count == 0:
+                decision = "continue narrowing root cause before committing edits"
+            elif implementation_count > 0 and validation_count == 0:
+                decision = "translate gathered evidence into concrete file changes"
+            elif coordination_count > 0 and (investigation_count + implementation_count + validation_count) == 0:
+                decision = "stabilize task decomposition before the next tool sequence"
+            elif window_tools > 0:
+                decision = "keep iterating on the highest-signal tool path"
+            elif error_count > 0:
+                decision = "revisit recent failures to recover forward progress"
+
+            if decision and top_notes:
+                lines.append(_as_sentence(f"Decision: {decision}; latest signal: {'; '.join(top_notes)}"))
+            elif decision:
+                lines.append(_as_sentence(f"Decision: {decision}"))
 
             next_hint = _next_followup_hint(activity)
+            looking_for_hint = ""
+            if top_notes and not window_files:
+                looking_for_hint = f"confirming {'; '.join(top_notes)}"
+            else:
+                window_paths_raw = _followup_state.get("window_paths")
+                window_paths = [str(entry).strip() for entry in window_paths_raw] if isinstance(window_paths_raw, list) else []
+                unique_window_paths: List[str] = []
+                for path in window_paths:
+                    if path and path not in unique_window_paths:
+                        unique_window_paths.append(path)
+                if unique_window_paths:
+                    looking_for_hint = f"progress on {', '.join(unique_window_paths[:3])}"
+
             if next_hint:
-                lines.append(_as_sentence(f"Next: {next_hint}"))
+                looking_for_hint = next_hint
+            if looking_for_hint:
+                lines.append(_as_sentence(f"Next step: {looking_for_hint}"))
 
             cleaned = [line for line in lines if line]
             if not cleaned:
-                cleaned.append("I'm collecting progress details for the next checkpoint.")
+                cleaned.append("Objective: collecting progress details for the next checkpoint.")
             return cleaned[:4]
 """
 
@@ -740,6 +954,22 @@ def _replace_once(content: str, old: str, new: str, label: str) -> tuple[str, bo
     if old not in content:
         raise RuntimeError(f"anchor not found for {label}")
     return content.replace(old, new, 1), True
+
+
+def _replace_between(content: str, start_anchor: str, end_anchor: str, new_block: str, label: str) -> tuple[str, bool]:
+    start = content.find(start_anchor)
+    if start < 0:
+        return content, False
+    end = content.find(end_anchor, start)
+    if end < 0:
+        raise RuntimeError(f"anchor not found for {label}: {end_anchor!r}")
+    replacement = new_block
+    if not replacement.endswith("\n"):
+        replacement += "\n"
+    original = content[start:end]
+    if original == replacement:
+        return content, False
+    return content[:start] + replacement + content[end:], True
 
 
 def _apply_runtime_block(content: str) -> tuple[str, bool]:
@@ -812,6 +1042,14 @@ def _apply_notify_block(content: str) -> tuple[str, bool]:
     content, did = _replace_once(content, old_interval, new_interval, "notify interval")
     changed |= did
 
+    if NOTIFY_START in content and NOTIFY_END in content:
+        _start = content.find(NOTIFY_START)
+        _end = content.find(NOTIFY_END, _start)
+        if _start >= 0 and _end >= 0:
+            _existing_notify = content[_start:_end]
+            if "_build_followup_summary_lines" in _existing_notify and "_reset_followup_window()" in _existing_notify:
+                return content, changed
+
     content, did, found = _replace_marker_block(content, NOTIFY_START, NOTIFY_END, NOTIFY_BLOCK)
     if found:
         changed |= did
@@ -876,7 +1114,13 @@ def _apply_richer_followup_summary(content: str) -> tuple[str, bool]:
                 except Exception:
                     return default
 """
-    content, did = _replace_once(content, old_coerce, new_coerce, "rich coerce int")
+    if new_coerce in content:
+        did = False
+    elif old_coerce in content:
+        content = content.replace(old_coerce, new_coerce, 1)
+        did = True
+    else:
+        did = False
     changed |= did
 
     old_env_merge = """            for candidate in candidates:
@@ -895,7 +1139,13 @@ def _apply_richer_followup_summary(content: str) -> tuple[str, bool]:
                         merged[key] = str(value).strip()
             return merged
 """
-    content, did = _replace_once(content, old_env_merge, new_env_merge, "rich env merge")
+    if new_env_merge in content:
+        did = False
+    elif old_env_merge in content:
+        content = content.replace(old_env_merge, new_env_merge, 1)
+        did = True
+    else:
+        did = False
     changed |= did
 
     old_state = """        _followup_state: Dict[str, Any] = {
@@ -904,12 +1154,19 @@ def _apply_richer_followup_summary(content: str) -> tuple[str, bool]:
             "error_count": 0,
         }
 """
-    new_state = """        _followup_state: Dict[str, Any] = {
+    old_state_with_windows = """        _followup_state: Dict[str, Any] = {
             "iteration": 0,
             "tool_names": [],
             "error_count": 0,
             "recent_actions": [],
             "recent_paths": [],
+            "window_started_at": time.time(),
+            "window_tool_calls": 0,
+            "window_errors": 0,
+            "window_actions": [],
+            "window_paths": [],
+            "window_files": {},
+            "window_result_notes": [],
             "phase_counts": {
                 "investigation": 0,
                 "implementation": 0,
@@ -918,7 +1175,46 @@ def _apply_richer_followup_summary(content: str) -> tuple[str, bool]:
             },
         }
 """
-    content, did = _replace_once(content, old_state, new_state, "rich followup state")
+    new_state = """        _followup_state: Dict[str, Any] = {
+            "iteration": 0,
+            "tool_names": [],
+            "error_count": 0,
+            "recent_actions": [],
+            "recent_paths": [],
+            "window_started_at": time.time(),
+            "window_tool_calls": 0,
+            "window_errors": 0,
+            "window_actions": [],
+            "window_tool_names": [],
+            "window_paths": [],
+            "window_files": {},
+            "window_result_notes": [],
+            "window_phase_counts": {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            },
+            "phase_counts": {
+                "investigation": 0,
+                "implementation": 0,
+                "validation": 0,
+                "coordination": 0,
+            },
+        }
+"""
+    if "\"window_tool_names\": []" in content and "\"window_phase_counts\": {" in content:
+        did = False
+    elif new_state in content:
+        did = False
+    elif old_state_with_windows in content:
+        content = content.replace(old_state_with_windows, new_state, 1)
+        did = True
+    elif old_state in content:
+        content = content.replace(old_state, new_state, 1)
+        did = True
+    else:
+        did = False
     changed |= did
 
     content, did = _insert_before_anchor(
@@ -929,100 +1225,13 @@ def _apply_richer_followup_summary(content: str) -> tuple[str, bool]:
     )
     changed |= did
 
-    old_summary = """        def _build_followup_summary_lines(activity: Optional[Dict[str, Any]]) -> List[str]:
-            lines: List[str] = []
-            iteration = int(_followup_state.get("iteration") or 0)
-            if activity:
-                api_call_count = int(activity.get("api_call_count") or 0)
-                max_iterations = int(activity.get("max_iterations") or 0)
-                if api_call_count and max_iterations:
-                    lines.append(f"iteration {api_call_count}/{max_iterations} in progress")
-                elif iteration:
-                    lines.append(f"iteration {iteration} in progress")
-
-                current_tool = str(activity.get("current_tool") or "").strip()
-                if current_tool:
-                    lines.append(f"running tool: {current_tool}")
-            elif iteration:
-                lines.append(f"iteration {iteration} in progress")
-
-            tool_names = _followup_state.get("tool_names") or []
-            if isinstance(tool_names, list):
-                trimmed = [str(name).strip() for name in tool_names if str(name).strip()]
-                if trimmed:
-                    lines.append(f"last tools: {', '.join(trimmed[:4])}")
-
-            error_count = int(_followup_state.get("error_count") or 0)
-            if error_count > 0:
-                lines.append(f"tool errors detected: {error_count}")
-
-            if activity:
-                last_desc = str(activity.get("last_activity_desc") or "").strip()
-                if last_desc:
-                    lines.append(f"next: {last_desc}")
-
-            if not lines:
-                lines.append("collecting progress details")
-            return lines[:4]
-"""
-    old_rich_summary = """        def _build_followup_summary_lines(activity: Optional[Dict[str, Any]]) -> List[str]:
-            lines: List[str] = []
-            iteration = int(_followup_state.get("iteration") or 0)
-            progress_label = ""
-            if activity:
-                api_call_count = int(activity.get("api_call_count") or 0)
-                max_iterations = int(activity.get("max_iterations") or 0)
-                if api_call_count and max_iterations:
-                    progress_label = f"iteration {api_call_count}/{max_iterations}"
-                elif iteration:
-                    progress_label = f"iteration {iteration}"
-            elif iteration:
-                progress_label = f"iteration {iteration}"
-
-            phase_summary = _followup_phase_summary()
-            if phase_summary and progress_label:
-                lines.append(f"{phase_summary} ({progress_label})")
-            elif phase_summary:
-                lines.append(phase_summary)
-            elif progress_label:
-                lines.append(f"working through {progress_label}")
-
-            recent_actions = _followup_state.get("recent_actions")
-            if isinstance(recent_actions, list):
-                compact_actions = [str(entry).strip() for entry in recent_actions if str(entry).strip()]
-                if compact_actions:
-                    lines.append(f"recent work: {'; '.join(compact_actions[-3:])}")
-
-            recent_paths = _followup_state.get("recent_paths")
-            if isinstance(recent_paths, list):
-                compact_paths = [str(entry).strip() for entry in recent_paths if str(entry).strip()]
-                if compact_paths:
-                    lines.append(f"focus paths: {', '.join(compact_paths[-3:])}")
-
-            error_count = int(_followup_state.get("error_count") or 0)
-            if error_count > 0:
-                lines.append(
-                    f"issues detected in {error_count} recent tool result(s); adjusting the plan"
-                )
-
-            next_hint = _next_followup_hint(activity)
-            if next_hint:
-                lines.append(f"next: {next_hint}")
-
-            if not lines:
-                lines.append("collecting progress details for the next checkpoint")
-            return lines[:4]
-"""
-    if RICH_SUMMARY_BLOCK in content:
-        did = False
-    elif old_rich_summary in content:
-        content = content.replace(old_rich_summary, RICH_SUMMARY_BLOCK, 1)
-        did = True
-    elif old_summary in content:
-        content = content.replace(old_summary, RICH_SUMMARY_BLOCK, 1)
-        did = True
-    else:
-        raise RuntimeError("anchor not found for rich followup summary")
+    content, did = _replace_between(
+        content,
+        "        def _build_followup_summary_lines(activity: Optional[Dict[str, Any]]) -> List[str]:\n",
+        "\n        # COLMEIO_NODE_AGENT_RUNTIME_END",
+        RICH_SUMMARY_BLOCK,
+        "rich followup summary",
+    )
     changed |= did
 
     old_footer_tail = """            if not file_stats:

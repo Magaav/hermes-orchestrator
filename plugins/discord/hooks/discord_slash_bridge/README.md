@@ -61,7 +61,7 @@ Then run:
 
 ```bash
 bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/commands/<node>.json
-bash /local/plugins/discord/scripts/prestart_reapply.sh --strict
+bash /local/plugins/hermes-core/scripts/prestart_reapply.sh --strict
 python3 /local/plugins/discord/scripts/verify_discord_customizations.py
 ```
 

@@ -21,8 +21,11 @@ for arg in "$@"; do
 done
 
 HERMES_REPO="/home/ubuntu/.hermes/hermes-agent"
-REAPPLY_SCRIPT="/local/plugins/discord/scripts/prestart_reapply.sh"
+REAPPLY_SCRIPT="/local/plugins/hermes-core/scripts/prestart_reapply.sh"
 VERIFY_SCRIPT="/local/plugins/discord/scripts/verify_discord_customizations.py"
+if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/plugins/discord/scripts/prestart_reapply.sh" ]]; then
+  REAPPLY_SCRIPT="/local/plugins/discord/scripts/prestart_reapply.sh"
+fi
 if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/workspace/discord/scripts/prestart_reapply.sh" ]]; then
   REAPPLY_SCRIPT="/local/workspace/discord/scripts/prestart_reapply.sh"
 fi

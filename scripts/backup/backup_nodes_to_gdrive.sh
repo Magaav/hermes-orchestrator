@@ -14,6 +14,10 @@ DEFAULT_CONFIG_FILE="/local/state/orchestrator/backup_nodes_to_gdrive.env"
 CONFIG_FILE="${BACKUP_CONFIG_FILE:-$DEFAULT_CONFIG_FILE}"
 TIMESTAMP="$(date '+%Y%m%d_%H%M%S')"
 
+# Hard timeout for the entire script (seconds). Prevents runaway backups.
+# Cron-level timeout is the outer safety net; this is the inner one.
+SCRIPT_TIMEOUT="${SCRIPT_TIMEOUT:-900}"
+
 # Defaults can be overridden from config/env.
 BACKUP_LOG_ROOT="${BACKUP_LOG_ROOT:-/logs/attention}"
 BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/backups/orchestrator/daily}"
@@ -22,6 +26,9 @@ ORCHESTRATOR_ENV_FILE="${ORCHESTRATOR_ENV_FILE:-/local/agents/envs/orchestrator.
 
 LOGFILE="${BACKUP_LOG_ROOT}/backup_nodes_${TIMESTAMP}.log"
 ERROR_LOG="${BACKUP_LOG_ROOT}/backup_nodes_ERROR.log"
+
+# Global — set inside main() after ARCHIVE_PATH is known.
+ARCHIVE_PATH=""
 
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -207,6 +214,19 @@ on_error() {
 }
 trap on_error ERR
 
+on_timeout() {
+    local exit_code=$?
+    log "ERROR: Backup timed out after ${SCRIPT_TIMEOUT}s"
+    echo "FAIL timeout ${SCRIPT_TIMEOUT}s $(date)" >> "$ERROR_LOG"
+    # If upload marker exists but upload_done doesn't, the upload was killed mid-flight.
+    if [[ -f "${ARCHIVE_PATH}.upload_done" ]]; then
+        notify_discord "Backup TIMEOUT at ${TIMESTAMP}. Upload completed but was killed before cleanup. Drive may have the file — verify manually."
+    else
+        notify_discord "Backup TIMEOUT at ${TIMESTAMP}. Upload likely not complete. Previous Drive backup was NOT deleted (safe). Check ${LOGFILE}."
+    fi
+    exit "$exit_code"
+}
+
 main() {
     load_config
 
@@ -299,20 +319,23 @@ main() {
     ARCHIVE_SIZE="$(du -sh "$ARCHIVE_PATH" | cut -f1)"
     log "Archive created: ${ARCHIVE_SIZE}"
 
-    # Step 5: Delete prior daily backups in Drive (keep only latest).
-    log "Removing previous daily backups in Drive..."
-    gdrive_delete_all_backups "$DAILY_FOLDER_ID" "$ACCESS_TOKEN"
-
-    # Step 6: Upload new backup.
+    # Step 5: Upload new backup (never delete old until new is confirmed).
     log "Uploading archive to Google Drive..."
     UPLOAD_RESULT="$(gdrive_upload "$ARCHIVE_PATH" "$DAILY_FOLDER_ID" "$ACCESS_TOKEN")"
     if [[ "$UPLOAD_RESULT" == "OK" ]]; then
         log "Upload successful"
+        # Write completion marker so a SIGKILL from timeout can still be detected.
+        echo "done" > "${ARCHIVE_PATH}.upload_done"
     else
         log "ERROR: Upload failed: $UPLOAD_RESULT"
         notify_discord "Backup FAILED at ${TIMESTAMP}. Upload to Google Drive failed: ${UPLOAD_RESULT}"
         exit 1
     fi
+
+    # Step 6: Delete prior daily backups in Drive ONLY AFTER successful upload.
+    log "Removing previous daily backups in Drive (new upload confirmed)..."
+    gdrive_delete_all_backups "$DAILY_FOLDER_ID" "$ACCESS_TOKEN"
+    rm -f "${ARCHIVE_PATH}.upload_done"
 
     # Step 7: Delete local archive to avoid disk bloat.
     log "Removing local archive..."
@@ -329,4 +352,39 @@ main() {
     log "========== Backup completed successfully =========="
 }
 
-main "$@"
+# Wall-clock timeout wrapper: runs main in a subshell; if SCRIPT_TIMEOUT seconds
+# pass without main exiting, kills main and invokes on_timeout.
+# Exit code 124 = timeout, 0 = clean exit.
+export ARCHIVE_PATH LOGFILE ERROR_LOG TIMESTAMP SCRIPT_TIMEOUT
+
+(
+    # SIGALRM打断wait，使on_timeout被执行
+    trap 'exit 124' ALRM
+    main "$@" &
+    main_pid=$!
+    # 等待main完成，最多SCRIPT_TIMEOUT秒
+    wait $main_pid 2>/dev/null
+    exit $?
+) &
+runner_pid=$!
+
+(
+    sleep "$SCRIPT_TIMEOUT"
+    kill -ALRM $runner_pid 2>/dev/null || true
+) &
+timer_pid=$!
+
+# 等待runner完成
+wait $runner_pid 2>/dev/null
+runner_exit=$?
+
+# 无论runner是否完成，都杀掉timer
+kill $timer_pid 2>/dev/null || true
+wait $timer_pid 2>/dev/null || true
+
+# runner_exit=0 正常，=124 超时，>0 其他错误
+if [[ $runner_exit -eq 124 ]]; then
+    on_timeout
+elif [[ $runner_exit -gt 0 ]]; then
+    exit $runner_exit
+fi

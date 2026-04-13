@@ -110,8 +110,10 @@ class ReapplyNodeAgentPatchTests(unittest.TestCase):
         self.assertIn('(_hooks_ref.loaded_hooks or _followup_summary_enabled)', content)
         self.assertIn('_NOTIFY_INTERVAL = _followup_elapsed_minutes * 60', content)
         self.assertIn('def _push_recent_line(bucket_key: str, value: str, limit: int)', content)
-        self.assertIn('Recent work:', content)
-        self.assertNotIn('focus paths:', content)
+        self.assertIn('Objective:', content)
+        self.assertIn('Decision:', content)
+        self.assertIn('"window_tool_names": []', content)
+        self.assertIn('def _record_followup_tool_result(tool_name: Any, raw_result: Any) -> None', content)
         self.assertIn('def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any)', content)
 
         # Reapplying should be a no-op.

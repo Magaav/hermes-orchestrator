@@ -69,7 +69,7 @@ Then:
 - `bash /local/plugins/discord/scripts/register_discord_commands.sh /local/plugins/discord/commands/<node>.json`
   If omitted, the script auto-resolves node payloads from `DISCORD_COMMANDS_FILE` or `NODE_NAME`.
 2. Reapply + verify:
-- `bash /local/plugins/discord/scripts/prestart_reapply.sh --strict`
+- `bash /local/plugins/hermes-core/scripts/prestart_reapply.sh --strict`
 - `python3 /local/plugins/discord/scripts/verify_discord_customizations.py`
 
 No new per-command core patch script is needed.
@@ -85,13 +85,14 @@ Threads inherit parent restrictions via `chat_id_alt`.
 
 ## Prestart Apply Chain
 
-`/local/plugins/discord/scripts/prestart_reapply.sh` applies:
+`/local/plugins/hermes-core/scripts/prestart_reapply.sh` applies:
 
 1. channel ACL patch/hooks
 2. session info hook
 3. thread parent context patch
-4. guild sync patch
-5. single Discord command bootstrap
+4. auto-thread-ignore-channels patch
+5. guild sync patch
+6. single Discord command bootstrap
 
 ## One-Command Update
 
@@ -106,7 +107,7 @@ bash /local/plugins/discord/scripts/update_hermes_force_sync_and_repatch.sh
 `~/.hermes/BOOT.md` should run:
 
 ```bash
-bash /local/plugins/discord/scripts/prestart_reapply.sh
+bash /local/plugins/hermes-core/scripts/prestart_reapply.sh
 ```
 
 ## Debug

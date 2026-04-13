@@ -172,6 +172,51 @@ print(f"file lines: {r2['total_lines']}")
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["tool_calls_made"], 2)
 
+    def test_nested_patch_changes_are_reported(self):
+        """execute_code should surface nested patch file metadata."""
+        code = """
+from hermes_tools import patch
+patch(path="demo.txt", old_string="old", new_string="new")
+print("patched")
+"""
+        nested_result = json.dumps({
+            "success": True,
+            "files_modified": ["demo.txt"],
+            "diff": (
+                "diff --git a/demo.txt b/demo.txt\n"
+                "--- a/demo.txt\n"
+                "+++ b/demo.txt\n"
+                "@@ -1 +1 @@\n"
+                "-old\n"
+                "+new\n"
+            ),
+        })
+        with patch("model_tools.handle_function_call", return_value=nested_result):
+            result = json.loads(execute_code(
+                code=code,
+                task_id="test-task",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            ))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result.get("files_modified"), ["demo.txt"])
+        self.assertIn("diff --git a/demo.txt b/demo.txt", result.get("diff", ""))
+
+    def test_nested_patch_falls_back_to_path_when_metadata_missing(self):
+        """When nested patch omits files_modified, execute_code should still report path."""
+        code = """
+from hermes_tools import patch
+patch(path="fallback.txt", old_string="a", new_string="b")
+print("patched")
+"""
+        with patch("model_tools.handle_function_call", return_value=json.dumps({"status": "ok"})):
+            result = json.loads(execute_code(
+                code=code,
+                task_id="test-task",
+                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
+            ))
+        self.assertEqual(result["status"], "success")
+        self.assertIn("fallback.txt", result.get("files_modified", []))
+
     def test_syntax_error(self):
         """Script with a syntax error returns error status."""
         result = self._run("def broken(")

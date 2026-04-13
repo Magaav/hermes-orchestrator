@@ -24,6 +24,8 @@ At runtime, each setting is resolved in this order:
 
 ## Scripts
 
+- Prestart reapply pipeline (canonical):
+  - `bash /local/plugins/hermes-core/scripts/prestart_reapply.sh [--strict]`
 - Reapply patch:
   - `python3 /local/plugins/hermes-core/scripts/reapply_node_agent_followup_footer.py`
 - Verify markers:

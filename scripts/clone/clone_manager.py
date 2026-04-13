@@ -106,6 +106,7 @@ HERMES_AGENT_UPSTREAM_BRANCH = str(
     os.getenv("HERMES_AGENT_UPSTREAM_BRANCH", "main") or "main"
 ).strip() or "main"
 DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
+DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
 HOST_BOOTSTRAP_ENV_FILE = Path(os.getenv("HERMES_BOOTSTRAP_ENV_FILE", "/local/.env"))
 
 DEFAULT_DOCKER_IMAGE = os.getenv("HERMES_CLONE_DOCKER_IMAGE", "ubuntu:24.04")
@@ -1162,7 +1163,7 @@ def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> s
         f"- Shared plugins root: {SHARED_PLUGINS_ROOT}",
         f"- Shared scripts root: {SHARED_SCRIPTS_ROOT}",
         f"- Bootstrap metadata: /local/.clone-meta/bootstrap.json",
-        f"- Prestart patch pipeline: {SHARED_PLUGINS_ROOT}/discord/scripts/prestart_reapply.sh",
+        f"- Prestart patch pipeline: {SHARED_PLUGINS_ROOT}/hermes-core/scripts/prestart_reapply.sh",
         "",
         "## Framework Roles",
         "- Orchestrator node owns shared framework assets and node lifecycle controls.",
@@ -1200,7 +1201,7 @@ def _build_node_governance_prompt(clone_name: str, env: Dict[str, str]) -> str:
         "they are orchestrator-managed infrastructure.\n"
         f"{role_line}\n"
         "When proposing shared changes, provide exact file edits, rollout+rollback, and verification.\n"
-        "Bootstrap note: gateway startup runs /local/plugins/discord/scripts/prestart_reapply.sh "
+        "Bootstrap note: gateway startup runs /local/plugins/hermes-core/scripts/prestart_reapply.sh "
         "so plugin hooks are re-applied on restart.\n"
         "Reference contract file: /local/.hermes/NODE_RUNTIME_CONTRACT.md"
     ).strip()
@@ -1788,6 +1789,34 @@ def _discord_plugin_script(relpath: str) -> Path:
         if candidate.exists():
             return candidate
     return _discord_plugin_roots()[0] / rel
+
+
+def _prestart_script_path() -> Path:
+    configured_core = str(os.getenv("HERMES_CORE_PLUGIN_DIR", "") or "").strip()
+    candidates: list[Path] = []
+    if configured_core:
+        candidates.append(Path(configured_core).expanduser() / "scripts" / "prestart_reapply.sh")
+    candidates.extend(
+        [
+            DEFAULT_HERMES_CORE_PLUGIN_ROOT / "scripts" / "prestart_reapply.sh",
+            DEFAULT_DISCORD_PLUGIN_ROOT / "scripts" / "prestart_reapply.sh",
+            LEGACY_DISCORD_PLUGIN_ROOT / "scripts" / "prestart_reapply.sh",
+        ]
+    )
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+
+    for candidate in deduped:
+        if candidate.exists():
+            return candidate
+    return deduped[0]
 
 
 def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
@@ -2820,7 +2849,7 @@ def _build_docker_run_cmd(
         "export CURL_CA_BUNDLE=\"$CA_BUNDLE\"; "
         "fi; "
         "PRESTART_SCRIPT=\"\"; "
-        "for _p in /local/plugins/discord/scripts/prestart_reapply.sh /local/workspace/discord/scripts/prestart_reapply.sh; do "
+        "for _p in /local/plugins/hermes-core/scripts/prestart_reapply.sh /local/plugins/discord/scripts/prestart_reapply.sh /local/workspace/discord/scripts/prestart_reapply.sh; do "
         "if [ -x \"${_p}\" ]; then PRESTART_SCRIPT=\"${_p}\"; break; fi; "
         "done; "
         "if [ -n \"${PRESTART_SCRIPT}\" ]; then "
@@ -2887,6 +2916,8 @@ def _build_docker_run_cmd(
         f"NODE_NAME={clone_name}",
         "-e",
         "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/discord",
+        "-e",
+        "HERMES_CORE_PLUGIN_DIR=/local/plugins/hermes-core",
         "-e",
         "PYTHONUNBUFFERED=1",
         "-v",
@@ -3050,12 +3081,13 @@ def _orchestrator_start_gateway(
     proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
     proc_env["NODE_NAME"] = str(proc_env.get("NODE_NAME") or clone_name)
     proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
+    proc_env["HERMES_CORE_PLUGIN_DIR"] = str(DEFAULT_HERMES_CORE_PLUGIN_ROOT)
     proc_env["HERMES_AGENT_ROOT"] = str(runtime_agent_root)
     proc_env["PYTHONUNBUFFERED"] = "1"
 
     # Keep host-layer orchestrator behavior aligned with container nodes:
     # reapply Discord/runtime patches before gateway launch.
-    prestart_script = _discord_plugin_script("scripts/prestart_reapply.sh")
+    prestart_script = _prestart_script_path()
     if prestart_script.exists():
         try:
             prestart_proc = subprocess.run(

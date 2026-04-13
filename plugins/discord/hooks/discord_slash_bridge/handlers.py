@@ -1010,6 +1010,63 @@ def _normalize_model_choices(settings: Optional[Dict[str, Any]]) -> Dict[str, Di
     return out
 
 
+def _canonical_model_choice_token(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    # Accept legacy typo variants and user-entered labels.
+    text = text.replace("openia", "openai")
+    return re.sub(r"[^a-z0-9:/]+", "", text)
+
+
+def _find_model_choice(
+    model_input: str,
+    choices_map: Dict[str, Dict[str, str]],
+) -> Optional[Dict[str, str]]:
+    selected_key = str(model_input or "").strip()
+    if not selected_key:
+        return None
+
+    selected = choices_map.get(selected_key)
+    if selected:
+        return selected
+
+    lowered = selected_key.lower()
+    canonical = _canonical_model_choice_token(selected_key)
+    for entry in choices_map.values():
+        candidates = (
+            str(entry.get("key") or ""),
+            str(entry.get("label") or ""),
+            str(entry.get("model") or ""),
+            f"{entry.get('provider', '')}:{entry.get('model', '')}",
+        )
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if lowered == candidate.lower():
+                return entry
+            if canonical and canonical == _canonical_model_choice_token(candidate):
+                return entry
+
+    return None
+
+
+def _extract_bridge_model_key(option_values: Dict[str, Any]) -> str:
+    for key in ("modelo", "model", "name", "key"):
+        raw = option_values.get(key)
+        text = str(raw or "").strip()
+        if text:
+            return text
+
+    if len(option_values) == 1:
+        only_value = next(iter(option_values.values()))
+        text = str(only_value or "").strip()
+        if text:
+            return text
+
+    return ""
+
+
 def _extract_usage_hint(payload: Any, depth: int = 0) -> Optional[str]:
     if depth > 5:
         return None
@@ -1185,7 +1242,7 @@ async def handle_model_switch(
         )
         return True
 
-    selected = choices_map.get(selected_key)
+    selected = _find_model_choice(selected_key, choices_map)
     if not selected:
         await safe_edit_or_followup(
             interaction,
@@ -1246,6 +1303,15 @@ async def run_bridge_handler(
             option_values,
             settings=cfg,
             command_name=command_name,
+        )
+
+    if handler in ("model", "model_switch", "model-switch"):
+        model_key = _extract_bridge_model_key(option_values)
+        return await handle_model_switch(
+            adapter,
+            interaction,
+            model_key=model_key,
+            settings=cfg,
         )
 
     custom_fn = _resolve_custom_handler(handler)

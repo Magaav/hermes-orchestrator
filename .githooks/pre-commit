@@ -22,10 +22,39 @@ match_stdin() {
 print_matches_stdin() {
   local pattern="$1"
   if [[ "${has_rg}" -eq 1 ]]; then
-    rg --pcre2 "${pattern}"
+    rg --pcre2 --no-line-number --color=never "${pattern}"
   else
     grep -E "${pattern}"
   fi
+}
+
+staged_added_lines_with_location() {
+  git diff --cached --unified=0 --no-color | awk '
+    BEGIN { file = ""; line = 0 }
+    /^\+\+\+ b\// {
+      file = substr($0, 7)
+      next
+    }
+    /^@@ / {
+      header = $0
+      sub(/^.*\+/, "", header)
+      sub(/,.*/, "", header)
+      sub(/ .*/, "", header)
+      line = header + 0
+      next
+    }
+    /^\+/ && $0 !~ /^\+\+\+/ {
+      if (file != "") {
+        printf "%s:%d:%s\n", file, line, substr($0, 2)
+      }
+      line++
+      next
+    }
+    /^ / {
+      line++
+      next
+    }
+  '
 }
 
 staged_files="$(git diff --cached --name-only)"
@@ -56,13 +85,18 @@ secret_patterns=(
   'AIza[0-9A-Za-z_-]{35}'
 )
 
-patch="$(git diff --cached --text)"
 for pattern in "${secret_patterns[@]}"; do
-  if echo "${patch}" | match_stdin "${pattern}"; then
+  match_file="$(mktemp)"
+  staged_added_lines_with_location | print_matches_stdin "${pattern}" > "${match_file}" || true
+  if [[ -s "${match_file}" ]]; then
     echo "pre-commit: potential secret detected (pattern: ${pattern})." >&2
+    echo "Matched staged lines:" >&2
+    cat "${match_file}" >&2
     echo "Rotate and remove the secret before committing." >&2
+    rm -f "${match_file}"
     exit 1
   fi
+  rm -f "${match_file}"
 done
 
 exit 0

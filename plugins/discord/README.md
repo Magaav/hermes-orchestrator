@@ -34,6 +34,17 @@ Use this command to sync Hermes from `main` and reapply Discord customizations:
 bash /local/plugins/discord/scripts/update_hermes_force_sync_and_repatch.sh
 ```
 
+## Auto-Thread Ignore Channels
+
+The plugin prestart chain patches `gateway/platforms/discord.py` to support:
+
+- `DISCORD_AUTO_THREAD_IGNORE_CHANNELS=<id1,id2,...>`
+
+Behavior in those channels:
+
+- no `@mention` -> bot replies inline in the same channel
+- explicit `@bot` mention -> bot auto-creates a thread (when `DISCORD_AUTO_THREAD=true`)
+
 ## Slash Command Architecture
 
 Custom slash behavior is managed by a single bootstrap patch plus external runtime files:
@@ -51,7 +62,7 @@ For new slash commands:
 1. Run scaffold script to create payload + registry route:
    - `bash /local/plugins/discord/scripts/new_command_scaffold.sh --name meu-comando --mode dispatch --dispatch-target faltas --acl-command faltas`
 2. Register payload (`register_discord_commands.sh`)
-3. Run `prestart_reapply.sh --strict` + verify script
+3. Run `/local/plugins/hermes-core/scripts/prestart_reapply.sh --strict` + verify script
 
 Command policy:
 

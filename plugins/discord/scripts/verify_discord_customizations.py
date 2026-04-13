@@ -297,6 +297,30 @@ def main() -> int:
             "discord.py marker: auto_thread_parent_channel",
             "parent_channel_id = self._get_parent_channel_id(thread) or str(message.channel.id)",
         )
+        _contains_marker(
+            results,
+            discord_text,
+            "discord.py marker: auto_thread_ignore_channels_env",
+            "DISCORD_AUTO_THREAD_IGNORE_CHANNELS",
+        )
+        _contains_marker(
+            results,
+            discord_text,
+            "discord.py marker: auto_thread_ignore_channels_free_channel",
+            "is_auto_thread_ignore_channel",
+        )
+        _contains_marker(
+            results,
+            discord_text,
+            "discord.py marker: auto_thread_ignore_channels_skip_thread",
+            "skip_thread_for_auto_thread_ignore",
+        )
+        _contains_marker(
+            results,
+            discord_text,
+            "discord.py marker: auto_thread_ignore_channels_explicit_mention",
+            "explicit_bot_mention",
+        )
         parent_count = discord_text.count("chat_id_alt=parent_channel_id")
         _check(
             results,

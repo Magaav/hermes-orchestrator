@@ -61,7 +61,9 @@ def main() -> int:
         ),
         ("notify_interval_env", "_NOTIFY_INTERVAL = _followup_elapsed_minutes * 60"),
         ("rich_activity_recorder", "def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None"),
-        ("rich_summary_line", "Recent work:"),
+        ("rich_summary_objective", "Objective:"),
+        ("rich_summary_decision", "Decision:"),
+        ("rich_window_tools", "\"window_tool_names\": []"),
         ("rich_progress_hook", "_record_followup_activity(tool_name, preview, args)"),
     ]
 
