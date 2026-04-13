@@ -86,12 +86,12 @@ Nodes maintain their own runtime copies of Hermes Agent to avoid corruption of s
 
 Every node receives a runtime contract on start/restart:
 - `/local/.hermes/NODE_RUNTIME_CONTRACT.md`
-- `/local/workspace/NODE_RUNTIME_CONTRACT.md`
+- `/local/agents/nodes/<node>/workspace/NODE_RUNTIME_CONTRACT.md` (node-local convenience mirror)
 
 This contract defines:
 - node role (`orchestrator` vs `worker`)
 - bootstrap mode (`NODE_STATE`)
-- shared framework ownership (`/local/plugins`, `/local/scripts`)
+- shared framework ownership (`/local/agents/public/plugins`, `/local/agents/public/scripts`)
 - collaboration protocol for plugin/framework changes
 
 Operational rule:
@@ -107,6 +107,18 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 /local/
 ├── agents/
 │   ├── registry.json
+│   ├── public/
+│   │   ├── plugins/                   # canonical shared plugin code
+│   │   └── scripts/                   # canonical shared script code
+│   ├── private/
+│   │   ├── shared/
+│   │   │   └── wiki/                  # runtime wiki state (not versioned)
+│   │   ├── crons/                     # node cron state buckets (not versioned)
+│   │   ├── plugins/
+│   │   │   └── memory/                # OpenViking/Viking runtime state (not versioned)
+│   │   ├── skills/                    # shared skills pool mounted by all nodes
+│   │   └── scripts/
+│   │       └── backup/                # local backup entrypoints
 │   ├── envs/
 │   │   ├── orchestrator.env # runs inside host VM
 │   │   ├── node1.env        # runs inside docker container (sandboxed)
@@ -114,36 +126,32 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
+│       │   ├── wiki -> /local/agents/private/shared/wiki
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/ # node-local runtime copy (not symlinked to /local/hermes-agent)
 │       │   ├── .hermes/
-│       │   ├── scripts ->(symlink) /local/scripts
-│       │   ├── crons   ->(symlink) /local/crons/orchestrator
-│       │   └── plugins ->(symlink) /local/plugins
+│       │   ├── scripts ->(symlink) /local/agents/public/scripts
+│       │   ├── cron    ->(symlink) /local/agents/private/crons/orchestrator
+│       │   └── plugins ->(symlink) /local/agents/public/plugins
 │       ├── node1/
+│       │   ├── wiki/     # mounted from /local/agents/private/shared/wiki when NODE_WIKI_ENABLED=true
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
-│       │   ├── scripts/   # mounted from host (ro)
-│       │   ├── crons/     # mounted from host node bucket
-│       │   └── plugins/   # mounted from host (ro)
+│       │   ├── scripts/  # mounted from /local/agents/public/scripts (ro)
+│       │   ├── plugins/  # mounted from /local/agents/public/plugins (ro)
+│       │   └── cron/     # mounted from /local/agents/private/crons/<node>
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
-├── scripts/      # triggered directly from discord native slash command/cronjobs/etc...
-├── plugins/      # used to modify hermes-agent core on node start
-│   ├── memory/   # optional setted in /agents/envs/<node>.env
-│   │   ├── openviking/
-│   │   ├── vectordb/
-│   │   └── viking/
-│   └── discord/
+├── scripts -> /local/agents/public/scripts   # compatibility alias
+├── plugins -> /local/agents/public/plugins   # compatibility alias
 ├── state/        # deployment-specific orchestrator state (local-first)
 │   └── orchestrator/
 │       ├── backup_nodes_to_gdrive.env.example
 │       └── backup_nodes_to_gdrive.env # local runtime config (not tracked)
 ├── backups/ # used for rollback/versioning
-├── crons/   # nodes centralized cronjobs
 └── logs/    # nodes centralized debugging interface
     ├── nodes/
     │   ├── orchestrator/
@@ -164,13 +172,16 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 
 Important characteristics:
 - node-local runtime copies prevent template corruption
-- shared scripts/plugins enable coordinated automation
+- shared public scripts/plugins enable coordinated automation
+- private roots isolate deployment state (wiki, crons, memory, skills)
 - state folder isolates deployment-specific assumptions from reusable framework code
 - centralized logs simplify debugging and monitoring
 
 ## Public vs Local State
 
-- `/local/scripts` and `/local/plugins` are the reusable/public framework surface.
+- `/local/agents/public/scripts` and `/local/agents/public/plugins` are the reusable/public framework surface.
+- `/local/scripts` and `/local/plugins` are symlink aliases to `agents/public/{scripts,plugins}`.
+- `/local/agents/private/*` is deployment-local state (backup/restore domain).
 - `/local/state` is for orchestrator-local values and implementation assumptions.
 
 ## Bootstrap
@@ -188,10 +199,11 @@ Node env conventions and defaults are documented in [`agents/README.md`](agents/
 ## Node Lifecycle
 
 ```bash
-# orchestrator
+# control plane + fleet
 horc start
 horc status
 horc restart
+horc restart orchestrator
 horc logs --lines 120
 horc logs clean
 
@@ -227,9 +239,10 @@ horc restore /local/backups/horc-backup-node-node1-YYYYMMDDTHHMMSSZ.tar.gz
 
 Restore behavior:
 - If you pass a relative path, `horc restore` resolves it under `/local/backups/`
-- `backup node <name>` captures that node env/root plus node-scoped `plugins/memory/{openviking,viking}/<name>` and `crons/<name>`
-- `backup all` captures all envs/nodes plus full shared `plugins/memory/*` and `crons/*`
-- Restore reapplies whatever is present in the archive (`agents/*`, memory paths, and crons paths)
+- `backup node <name>` captures node env/root plus private orchestrator state (including shared skills/wiki/crons/memory roots)
+- `backup all` captures all envs/nodes plus full private orchestrator state
+- Node-local `.hermes/skills` trees are excluded from node archives; shared skills come from `/local/agents/private/skills`
+- Restore reapplies whatever is present in the archive (`agents/*` and legacy memory/crons compatibility payloads)
 - Stops included running nodes before restore and restarts those that were running
 
 ## Updates
@@ -259,7 +272,7 @@ hord restart
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `logs/`, `plugins/memory/`, `backups/`, `crons/`, `state/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `agents/private/shared/wiki/`, `agents/private/crons/`, `agents/private/plugins/memory/`, `agents/private/skills/*`, `logs/`, `plugins/memory/`, `backups/`, `state/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 

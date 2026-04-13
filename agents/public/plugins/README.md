@@ -1,0 +1,28 @@
+# Plugins
+
+Canonical shared plugin surface for Hermes Orchestrator.
+
+## Purpose
+
+- Keep shared plugin code in one place for all nodes.
+- Keep runtime state separated from repository code.
+- Canonical shared host root is `/local/agents/public/plugins`.
+- `/local/plugins` is a symlink alias to this directory.
+
+## Layout
+
+- `discord/`: Discord integration hooks, scripts, and runtime templates.
+- `hermes-core/`: Durable Hermes core behavior patches (gateway followups/final footer).
+- `memory/`: legacy compatibility path (canonical runtime store is `/local/agents/private/plugins/memory`).
+
+## Versioning Rules
+
+- Commit code and templates only.
+- Never commit runtime memory or local generated state.
+- Never commit credentials/secrets under `plugins/`.
+
+Examples:
+
+- tracked template: `plugins/discord/discord_users.json.example`
+- not tracked runtime state: `plugins/discord/discord_users.json`
+- not tracked runtime memory: `agents/private/plugins/memory/**`

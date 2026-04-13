@@ -1,0 +1,3 @@
+# Private plugin runtime/state only.
+*
+!.gitignore

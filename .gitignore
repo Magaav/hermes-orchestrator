@@ -3,10 +3,15 @@
 /tmp
 agents/nodes/
 agents/registry.json
+agents/private/shared/wiki/
+agents/private/crons/
+agents/private/plugins/*
+!agents/private/plugins/.gitignore
+agents/private/skills/*
+!agents/private/skills/.gitignore
 logs/
 /plugins/memory/
-/memory/
-/memory
+workspace/
 hermes-agent/plugins/memory/
 hermes-agent/tests/plugins/
 backups/
