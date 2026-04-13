@@ -1,5 +1,6 @@
 # Hermes Orchestrator
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
+![Hermes Orchestrator Hero](docs/assets/hero.png)
 **Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
 Hermes Orchestrator is a lightweight host-level operational layer for running Hermes agents at scale: spawning isolated nodes, managing environments, handling upgrades/rollbacks, centralizing logs, and coordinating multi-agent workflows.
