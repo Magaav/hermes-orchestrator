@@ -91,7 +91,7 @@ Every node receives a runtime contract on start/restart:
 This contract defines:
 - node role (`orchestrator` vs `worker`)
 - bootstrap mode (`NODE_STATE`)
-- shared framework ownership (`/local/agents/public/plugins`, `/local/agents/public/scripts`)
+- shared framework ownership (`/local/plugins/public`, `/local/scripts/public`)
 - collaboration protocol for plugin/framework changes
 
 Operational rule:
@@ -107,18 +107,6 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 /local/
 ├── agents/
 │   ├── registry.json
-│   ├── public/
-│   │   ├── plugins/                   # canonical shared plugin code
-│   │   └── scripts/                   # canonical shared script code
-│   ├── private/
-│   │   ├── shared/
-│   │   │   └── wiki/                  # runtime wiki state (not versioned)
-│   │   ├── crons/                     # node cron state buckets (not versioned)
-│   │   ├── plugins/
-│   │   │   └── memory/                # OpenViking/Viking runtime state (not versioned)
-│   │   ├── skills/                    # shared skills pool mounted by all nodes
-│   │   └── scripts/
-│   │       └── backup/                # local backup entrypoints
 │   ├── envs/
 │   │   ├── orchestrator.env # runs inside host VM
 │   │   ├── node1.env        # runs inside docker container (sandboxed)
@@ -126,27 +114,36 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │   │   └── ...
 │   └── nodes/
 │       ├── orchestrator/
-│       │   ├── wiki -> /local/agents/private/shared/wiki
+│       │   ├── wiki -> /local/plugins/private/wiki
+│       │   ├── wiki-public -> /local/plugins/public/wiki
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/ # node-local runtime copy (not symlinked to /local/hermes-agent)
 │       │   ├── .hermes/
-│       │   ├── scripts ->(symlink) /local/agents/public/scripts
-│       │   ├── cron    ->(symlink) /local/agents/private/crons/orchestrator
-│       │   └── plugins ->(symlink) /local/agents/public/plugins
+│       │   ├── scripts ->(symlink) /local/scripts
+│       │   ├── cron    ->(symlink) /local/scripts/private/crons/orchestrator
+│       │   └── plugins ->(symlink) /local/plugins
 │       ├── node1/
-│       │   ├── wiki/     # mounted from /local/agents/private/shared/wiki when NODE_WIKI_ENABLED=true
+│       │   ├── wiki/          # mounted from /local/plugins/private/wiki when NODE_WIKI_ENABLED=true
+│       │   ├── wiki-public/   # mounted from /local/plugins/public/wiki when NODE_WIKI_ENABLED=true
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/
 │       │   ├── .hermes/
-│       │   ├── scripts/  # mounted from /local/agents/public/scripts (ro)
-│       │   ├── plugins/  # mounted from /local/agents/public/plugins (ro)
-│       │   └── cron/     # mounted from /local/agents/private/crons/<node>
+│       │   ├── scripts/public/  # mounted from /local/scripts/public (ro)
+│       │   ├── scripts/private/ # mounted from /local/scripts/private (rw)
+│       │   ├── plugins/public/   # mounted from /local/plugins/public (ro)
+│       │   ├── plugins/private/  # mounted from /local/plugins/private (rw)
+│       │   └── cron/     # mounted from /local/scripts/private/crons/<node>
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
-├── scripts -> /local/agents/public/scripts   # compatibility alias
-├── plugins -> /local/agents/public/plugins   # compatibility alias
+├── scripts/
+│   ├── public/       # canonical git-tracked script code
+│   └── private/      # canonical local-only script state/entrypoints
+├── plugins/
+│   ├── public/       # canonical git-tracked plugin code
+│   └── private/      # canonical local-only plugin runtime/config
+├── skills/           # canonical shared mutable skills pool
 ├── state/        # deployment-specific orchestrator state (local-first)
 │   └── orchestrator/
 │       ├── backup_nodes_to_gdrive.env.example
@@ -179,9 +176,9 @@ Important characteristics:
 
 ## Public vs Local State
 
-- `/local/agents/public/scripts` and `/local/agents/public/plugins` are the reusable/public framework surface.
-- `/local/scripts` and `/local/plugins` are symlink aliases to `agents/public/{scripts,plugins}`.
-- `/local/agents/private/*` is deployment-local state (backup/restore domain).
+- `/local/scripts/public` and `/local/plugins/public` are the reusable/public framework surface.
+- `/local/scripts/private` and `/local/plugins/private` are deployment-local script/plugin state surfaces.
+- `/local/skills` is the shared mutable skills pool mounted across nodes.
 - `/local/state` is for orchestrator-local values and implementation assumptions.
 
 ## Bootstrap
@@ -239,9 +236,9 @@ horc restore /local/backups/horc-backup-node-node1-YYYYMMDDTHHMMSSZ.tar.gz
 
 Restore behavior:
 - If you pass a relative path, `horc restore` resolves it under `/local/backups/`
-- `backup node <name>` captures node env/root plus private orchestrator state (including shared skills/wiki/crons/memory roots)
-- `backup all` captures all envs/nodes plus full private orchestrator state
-- Node-local `.hermes/skills` trees are excluded from node archives; shared skills come from `/local/agents/private/skills`
+- `backup node <name>` captures node env/root plus private orchestrator state (including shared skills/wiki/crons/memory roots and `plugins/private`, `scripts/private`, `skills`)
+- `backup all` captures all envs/nodes plus full private orchestrator state (including `plugins/private`, `scripts/private`, `skills`)
+- Node-local `.hermes/skills` trees are excluded from node archives; shared skills come from `/local/skills`
 - Restore reapplies whatever is present in the archive (`agents/*` and legacy memory/crons compatibility payloads)
 - Stops included running nodes before restore and restarts those that were running
 
@@ -272,7 +269,7 @@ hord restart
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `agents/private/shared/wiki/`, `agents/private/crons/`, `agents/private/plugins/memory/`, `agents/private/skills/*`, `logs/`, `plugins/memory/`, `backups/`, `state/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `scripts/private/crons/`, `plugins/private/memory/`, `logs/`, `plugins/private/`, `skills/`, `backups/`, `state/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 

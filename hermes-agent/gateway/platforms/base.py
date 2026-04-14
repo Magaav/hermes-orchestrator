@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Deque
+from collections import deque
 from enum import Enum
 
 import sys
@@ -414,6 +415,9 @@ class MessageEvent:
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # Interrupt flag - set when this message should interrupt an active session
+    interrupt: bool = False
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -496,7 +500,7 @@ class BasePlatformAdapter(ABC):
         # Track active message handlers per session for interrupt support
         # Key: session_key (e.g., chat_id), Value: (event, asyncio.Event for interrupt)
         self._active_sessions: Dict[str, asyncio.Event] = {}
-        self._pending_messages: Dict[str, MessageEvent] = {}
+        self._pending_messages: Dict[str, Deque[MessageEvent]] = {}
         # Background message-processing tasks spawned by handle_message().
         # Gateway shutdown cancels these so an old gateway instance doesn't keep
         # working on a task after --replace or manual restarts.
@@ -1194,19 +1198,34 @@ class BasePlatformAdapter(ABC):
             # then process them immediately after the current task finishes.
             if event.message_type == MessageType.PHOTO:
                 logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
-                existing = self._pending_messages.get(session_key)
-                if existing and existing.message_type == MessageType.PHOTO:
-                    existing.media_urls.extend(event.media_urls)
-                    existing.media_types.extend(event.media_types)
-                    if event.text:
-                        existing.text = self._merge_caption(existing.text, event.text)
-                else:
-                    self._pending_messages[session_key] = event
+                self.enqueue_pending_message(
+                    session_key=session_key,
+                    event=event,
+                    interrupt=False,
+                    merge_photo=True,
+                )
+                return  # Don't interrupt now - will run after current task completes
+
+            # Voice/audio follow-ups should queue sequentially.
+            # This avoids dropping media while the current turn is still running.
+            if event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                logger.debug("[%s] Queuing voice/audio follow-up for session %s without interrupt", self.name, session_key)
+                self.enqueue_pending_message(
+                    session_key=session_key,
+                    event=event,
+                    interrupt=False,
+                    merge_photo=False,
+                )
                 return  # Don't interrupt now - will run after current task completes
 
             # Default behavior for non-photo follow-ups: interrupt the running agent
             logger.debug("[%s] New message while session %s is active — triggering interrupt", self.name, session_key)
-            self._pending_messages[session_key] = event
+            self.enqueue_pending_message(
+                session_key=session_key,
+                event=event,
+                interrupt=True,
+                merge_photo=False,
+            )
             # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
             return  # Don't process now - will be handled after current task finishes
@@ -1459,8 +1478,8 @@ class BasePlatformAdapter(ABC):
             await self._run_processing_hook("on_processing_complete", event, processing_ok)
 
             # Check if there's a pending message that was queued during our processing
-            if session_key in self._pending_messages:
-                pending_event = self._pending_messages.pop(session_key)
+            pending_event = self.get_pending_message(session_key)
+            if pending_event is not None:
                 logger.debug("[%s] Processing queued message from interrupt", self.name)
                 # Clean up current session before processing pending
                 if session_key in self._active_sessions:
@@ -1532,10 +1551,104 @@ class BasePlatformAdapter(ABC):
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
-    
+
+    def _ensure_pending_queue(self, session_key: str) -> Deque[MessageEvent]:
+        """Get or create a FIFO queue for a session."""
+        queue = self._pending_messages.get(session_key)
+        if queue is None:
+            queue = deque()
+            self._pending_messages[session_key] = queue
+            return queue
+
+        # Backward compatibility: legacy callers may have written a single
+        # MessageEvent directly into _pending_messages.
+        if isinstance(queue, deque):
+            return queue
+
+        legacy_event = queue
+        queue = deque()
+        if legacy_event is not None:
+            queue.append(legacy_event)
+        self._pending_messages[session_key] = queue
+        return queue
+
+    def enqueue_pending_message(
+        self,
+        session_key: str,
+        event: MessageEvent,
+        interrupt: bool = False,
+        merge_photo: bool = False,
+    ) -> None:
+        """Add a message to the pending FIFO queue for a session."""
+        queue = self._ensure_pending_queue(session_key)
+
+        # Merge photo bursts into the last queued photo event.
+        if merge_photo and event.message_type == MessageType.PHOTO and queue:
+            last = queue[-1]
+            if last.message_type == MessageType.PHOTO:
+                last.media_urls.extend(event.media_urls)
+                last.media_types.extend(event.media_types)
+                if event.text:
+                    if not last.text:
+                        last.text = event.text
+                    elif event.text not in last.text:
+                        last.text = f"{last.text}\n\n{event.text}".strip()
+                return
+
+        event.interrupt = bool(interrupt)
+        queue.append(event)
+
+    def prepend_pending_message(self, session_key: str, event: MessageEvent) -> None:
+        """Put a message back at the front of the session queue."""
+        queue = self._ensure_pending_queue(session_key)
+        queue.appendleft(event)
+
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
-        """Get and clear any pending message for a session."""
-        return self._pending_messages.pop(session_key, None)
+        """Get the next pending message (FIFO) for a session."""
+        queue = self._pending_messages.get(session_key)
+        if not queue:
+            return None
+
+        # Backward compatibility for legacy single-event storage.
+        if not isinstance(queue, deque):
+            self._pending_messages.pop(session_key, None)
+            return queue
+
+        event = queue.popleft()
+        if not queue:
+            self._pending_messages.pop(session_key, None)
+        return event
+
+    def pop_pending_interrupt_message(self, session_key: str) -> Optional[MessageEvent]:
+        """Pop the oldest pending interrupt event for this session."""
+        queue = self._pending_messages.get(session_key)
+        if not queue:
+            return None
+
+        # Backward compatibility for legacy single-event storage.
+        if not isinstance(queue, deque):
+            event = queue
+            if getattr(event, "interrupt", False):
+                self._pending_messages.pop(session_key, None)
+                return event
+            return None
+
+        for idx, event in enumerate(queue):
+            if getattr(event, "interrupt", False):
+                del queue[idx]
+                if not queue:
+                    self._pending_messages.pop(session_key, None)
+                return event
+        return None
+
+    def clear_pending_messages(self, session_key: str) -> int:
+        """Clear all pending messages for a session and return count."""
+        queue = self._pending_messages.pop(session_key, None)
+        if not queue:
+            return 0
+        if isinstance(queue, deque):
+            return len(queue)
+        return 1
     
     def build_source(
         self,

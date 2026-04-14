@@ -548,9 +548,92 @@ class DiscordAdapter(BasePlatformAdapter):
                 try:
                     synced = await adapter_self._client.tree.sync()
                     logger.info("[%s] Synced %d slash command(s)", adapter_self.name, len(synced))
+                    # COLMEIO_DISCORD_GUILD_SYNC_BEGIN
+                    _enable_guild_copy = os.getenv(
+                        "DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD", ""
+                    ).strip().lower() in ("1", "true", "yes", "on")
+                    if _enable_guild_copy:
+                        guilds = list(getattr(adapter_self._client, "guilds", []) or [])
+                        if guilds:
+                            for _guild in guilds:
+                                try:
+                                    adapter_self._client.tree.copy_global_to(guild=_guild)
+                                    _g_synced = await adapter_self._client.tree.sync(guild=_guild)
+                                    logger.info(
+                                        "[%s] Synced %d guild slash command(s) for guild %s",
+                                        adapter_self.name,
+                                        len(_g_synced),
+                                        getattr(_guild, "id", "unknown"),
+                                    )
+                                except Exception as _g_exc:
+                                    logger.debug(
+                                        "[%s] Guild slash sync failed for guild %s: %s",
+                                        adapter_self.name,
+                                        getattr(_guild, "id", "unknown"),
+                                        _g_exc,
+                                    )
+                    # COLMEIO_DISCORD_GUILD_SYNC_END
                 except Exception as e:  # pragma: no cover - defensive logging
                     logger.warning("[%s] Slash command sync failed: %s", adapter_self.name, e, exc_info=True)
+                # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_SYNC_BEGIN
+                try:
+                    runtime = adapter_self._colmeio_load_discord_slash_runtime()
+                    if runtime is not None:
+                        sync_payload = getattr(runtime, "sync_external_payload_commands", None)
+                        if callable(sync_payload):
+                            _merged = await sync_payload()
+                            if _merged:
+                                logger.info(
+                                    "[%s] Upserted %d external payload slash command(s)",
+                                    adapter_self.name,
+                                    _merged,
+                                )
+                except Exception as _col_exc:
+                    logger.debug("[%s] External payload upsert failed: %s", adapter_self.name, _col_exc)
+                # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_SYNC_END
+
                 adapter_self._ready_event.set()
+
+            # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_INTERACTION_BEGIN
+            @self._client.event
+            async def on_interaction(interaction: discord.Interaction):
+                try:
+                    if int(getattr(interaction, "type", 0) or 0) != 2:
+                        return
+
+                    if await self._colmeio_runtime_on_interaction(interaction):
+                        return
+
+                    # Legacy fallback if helper still exists in this runtime file.
+                    fallback = getattr(self, "_handle_unknown_slash_command", None)
+                    if callable(fallback):
+                        data = {}
+                        parser = getattr(self, "_interaction_data_to_dict", None)
+                        if callable(parser):
+                            try:
+                                data = parser(interaction)
+                            except Exception:
+                                data = {}
+                        command_name = str((data or {}).get("name") or "").strip().lower()
+                        if command_name:
+                            tree = getattr(self._client, "tree", None)
+                            known = False
+                            if tree is not None:
+                                try:
+                                    guild = getattr(interaction, "guild", None)
+                                    if guild is not None:
+                                        known = tree.get_command(command_name, guild=guild) is not None
+                                    if not known:
+                                        known = tree.get_command(command_name) is not None
+                                except Exception:
+                                    known = False
+                            if not known:
+                                handled = await fallback(interaction)
+                                if handled:
+                                    return
+                except Exception as e:
+                    logger.debug("Colmeio interaction bridge hook failed: %s", e)
+            # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_INTERACTION_END
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1564,12 +1647,110 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.debug("Discord interaction cleanup failed: %s", e)
 
+    # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_BEGIN
+    def _colmeio_load_discord_slash_runtime(self):
+        runtime = getattr(self, "_colmeio_discord_slash_runtime", None)
+        if runtime is not None:
+            return runtime
+
+        try:
+            hook_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+            hook_path = hook_home / "hooks" / "discord_slash_bridge" / "runtime.py"
+            if not hook_path.exists():
+                self._colmeio_discord_slash_runtime = None
+                return None
+
+            import importlib.util
+            import sys as _sys
+
+            spec = importlib.util.spec_from_file_location("colmeio_discord_slash_runtime", hook_path)
+            if not spec or not spec.loader:
+                self._colmeio_discord_slash_runtime = None
+                return None
+
+            mod = importlib.util.module_from_spec(spec)
+            _sys.modules["colmeio_discord_slash_runtime"] = mod
+            spec.loader.exec_module(mod)
+
+            factory = getattr(mod, "create_runtime", None)
+            if callable(factory):
+                runtime = factory(self)
+            else:
+                cls = getattr(mod, "DiscordSlashRuntime", None)
+                runtime = cls(self) if cls else None
+
+            self._colmeio_discord_slash_runtime = runtime
+            return runtime
+        except Exception as e:
+            logger.debug("Failed to load Colmeio Discord slash runtime: %s", e)
+            self._colmeio_discord_slash_runtime = None
+            return None
+
+    async def _colmeio_runtime_on_interaction(self, interaction: discord.Interaction) -> bool:
+        runtime = self._colmeio_load_discord_slash_runtime()
+        if runtime is None:
+            return False
+        handler = getattr(runtime, "on_interaction", None)
+        if not callable(handler):
+            return False
+        try:
+            return bool(await handler(interaction))
+        except Exception as e:
+            logger.debug("Colmeio slash runtime interaction hook failed: %s", e)
+            return False
+
+    async def _colmeio_runtime_on_app_command_error(self, interaction: discord.Interaction, error: Exception) -> bool:
+        runtime = self._colmeio_load_discord_slash_runtime()
+        if runtime is None:
+            return False
+        handler = getattr(runtime, "on_app_command_error", None)
+        if not callable(handler):
+            return False
+        try:
+            return bool(await handler(interaction, error))
+        except Exception as e:
+            logger.debug("Colmeio slash runtime app-command error hook failed: %s", e)
+            return False
+
+    def _colmeio_runtime_bootstrap_tree(self, tree: Any) -> None:
+        runtime = self._colmeio_load_discord_slash_runtime()
+        if runtime is None:
+            return
+        bootstrap = getattr(runtime, "bootstrap_tree", None)
+        if not callable(bootstrap):
+            return
+        try:
+            bootstrap(tree)
+        except Exception as e:
+            logger.debug("Colmeio slash runtime tree bootstrap failed: %s", e)
+    # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_END
+
     def _register_slash_commands(self) -> None:
         """Register Discord slash commands on the command tree."""
         if not self._client:
             return
 
         tree = self._client.tree
+
+        # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_BEGIN
+        @tree.error
+        async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+            try:
+                if await self._colmeio_runtime_on_app_command_error(interaction, error):
+                    return
+            except Exception as bridge_exc:
+                logger.debug("Colmeio app command error hook failed: %s", bridge_exc)
+
+            logger.warning("Discord slash command error: %s", error, exc_info=True)
+            try:
+                msg = "❌ Erro ao executar o comando."
+                if interaction.response.is_done():
+                    await interaction.followup.send(msg, ephemeral=True)
+                else:
+                    await interaction.response.send_message(msg, ephemeral=True)
+            except Exception:
+                pass
+        # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_END
 
         @tree.command(name="new", description="Start a new conversation")
         async def slash_new(interaction: discord.Interaction):
@@ -1783,6 +1964,13 @@ class DiscordAdapter(BasePlatformAdapter):
                     )
             except Exception as exc:
                 logger.warning("[%s] Failed to register skill slash commands: %s", self.name, exc)
+
+        # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_TREE_BEGIN
+        try:
+            self._colmeio_runtime_bootstrap_tree(tree)
+        except Exception as e:
+            logger.debug("Colmeio runtime bootstrap invocation failed: %s", e)
+        # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_TREE_END
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
@@ -2282,21 +2470,27 @@ class DiscordAdapter(BasePlatformAdapter):
 
             free_channels_raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
+            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")
+            auto_thread_ignore_channels = {
+                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()
+            }
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
 
             require_mention = os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")
-            is_free_channel = bool(channel_ids & free_channels)
+            is_auto_thread_ignore_channel = bool(channel_ids & auto_thread_ignore_channels)
+            is_free_channel = bool(channel_ids & free_channels) or is_auto_thread_ignore_channel
 
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
             in_bot_thread = is_thread and thread_id in self._bot_participated_threads
+            bot_mentioned = bool(self._client.user and self._client.user in message.mentions)
 
             if require_mention and not is_free_channel and not in_bot_thread:
-                if self._client.user not in message.mentions:
+                if not bot_mentioned:
                     return
 
-            if self._client.user and self._client.user in message.mentions:
+            if bot_mentioned:
                 message.content = message.content.replace(f"<@{self._client.user.id}>", "").strip()
                 message.content = message.content.replace(f"<@!{self._client.user.id}>", "").strip()
 
@@ -2308,7 +2502,21 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_ids & no_thread_channels)
+            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")
+            auto_thread_ignore_channels = {
+                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()
+            }
+            explicit_bot_mention = bool(
+                self._client.user
+                and (
+                    f"<@{self._client.user.id}>" in (message.content or "")
+                    or f"<@!{self._client.user.id}>" in (message.content or "")
+                )
+            )
+            skip_thread_for_auto_thread_ignore = (
+                bool(channel_ids & auto_thread_ignore_channels) and not explicit_bot_mention
+            )
+            skip_thread = bool(channel_ids & no_thread_channels) or skip_thread_for_auto_thread_ignore
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in ("true", "1", "yes")
             if auto_thread and not skip_thread:
                 thread = await self._auto_create_thread(message)

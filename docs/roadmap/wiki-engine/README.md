@@ -4,7 +4,7 @@ Status: `Delivered`
 
 ## Purpose
 
-Build a production-grade autonomous knowledge engine for Hermes Orchestrator that provides a shared, markdown-native wiki at `/local/agents/private/shared/wiki/`.
+Build a production-grade autonomous knowledge engine for Hermes Orchestrator that provides a shared, markdown-native wiki at `/local/plugins/private/wiki/`.
 
 The wiki is the durable knowledge layer for the orchestrator fleet:
 
@@ -22,9 +22,9 @@ The wiki is the durable knowledge layer for the orchestrator fleet:
 
 The implementation is anchored to the current repository rather than a greenfield design:
 
-1. Node lifecycle and mount topology are owned by `/local/scripts/clone/clone_manager.py` (compatibility alias to `/local/agents/public/scripts/clone/clone_manager.py`).
-2. Shared orchestrator plugin code lives under `/local/agents/public/plugins/` (with `/local/plugins` as alias).
-3. Hermes-core startup automation already runs through `/local/agents/public/plugins/hermes-core/scripts/prestart_reapply.sh`.
+1. Node lifecycle and mount topology are owned by `/local/scripts/public/clone/clone_manager.py`.
+2. Shared orchestrator plugin code lives under `/local/plugins/public/`.
+3. Hermes-core startup automation already runs through `/local/plugins/public/hermes-core/scripts/prestart_reapply.sh`.
 4. Node opt-in configuration is already expressed through `/local/agents/envs/<node>.env`.
 5. Runtime node roots under `/local/agents/nodes/<node>/` are already treated as generated state.
 6. Roadmap docs live under `/local/docs/roadmap/`, while feature docs belong under `/local/docs/features/`.
@@ -32,7 +32,7 @@ The implementation is anchored to the current repository rather than a greenfiel
 
 ### Existing Patterns To Preserve
 
-- Keep shared operational logic in `/local/agents/public/scripts` and `/local/agents/public/plugins` (with `/local/scripts` and `/local/plugins` as compatibility aliases).
+- Keep shared operational logic in `/local/scripts/public` and `/local/plugins/public`.
 - Keep runtime state outside tracked framework code.
 - Use deterministic filesystem contracts under `/local/agents/...`.
 - Prefer bootstrap/reapply scripts over brittle edits to upstream Hermes files.
@@ -56,22 +56,26 @@ The repository currently has:
 
 Canonical, durable knowledge:
 
-- markdown pages under `/local/agents/private/shared/wiki/`
-- page history snapshots under `/local/agents/private/shared/wiki/meta/history/`
-- proposal records under `/local/agents/private/shared/wiki/meta/proposals/`
+- markdown pages under `/local/plugins/private/wiki/`
+- page history snapshots under `/local/plugins/private/wiki/meta/history/`
+- proposal records under `/local/plugins/private/wiki/meta/proposals/`
 
 Derived, rebuildable artifacts:
 
-- graph manifests under `/local/agents/private/shared/wiki/meta/graph/`
-- compression manifests under `/local/agents/private/shared/wiki/meta/compression/`
-- health/lint/observability reports under `/local/agents/private/shared/wiki/meta/{health_reports,observability,self_heal}/`
-- generated routing indexes under `/local/agents/private/shared/wiki/indexes/`
+- graph manifests under `/local/plugins/private/wiki/meta/graph/`
+- compression manifests under `/local/plugins/private/wiki/meta/compression/`
+- health/lint/observability reports under `/local/plugins/private/wiki/meta/{health_reports,observability,self_heal}/`
+- generated routing indexes under `/local/plugins/private/wiki/indexes/`
+
+Reusable, versioned guidance:
+
+- markdown doctrine/templates under `/local/plugins/public/wiki/`
 
 Tracked implementation assets stay outside the live wiki root:
 
-- engine code under `/local/agents/public/plugins/hermes-core/`
-- seed templates under `/local/agents/public/plugins/hermes-core/wiki_seed/`
-- tests under `/local/agents/public/plugins/hermes-core/tests/`
+- engine code under `/local/plugins/public/hermes-core/`
+- seed templates under `/local/plugins/public/hermes-core/wiki_seed/`
+- tests under `/local/plugins/public/hermes-core/tests/`
 - docs under `/local/docs/...`
 
 The live wiki root is intentionally ignored by git because its evolving knowledge is deployment-specific.
@@ -81,7 +85,7 @@ The live wiki root is intentionally ignored by git because its evolving knowledg
 Canonical wiki root:
 
 ```text
-/local/agents/private/shared/wiki/
+/local/plugins/private/wiki/
 ├── index.md
 ├── indexes/
 ├── global/
@@ -106,15 +110,16 @@ Canonical wiki root:
 Node integration:
 
 1. Workers mount the host wiki into the container at `/local/wiki` when `NODE_WIKI_ENABLED=true`.
-2. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/agents/private/shared/wiki`.
-3. Enabled nodes may also get the same node-root symlink for ergonomic access, while `/local/agents/private/shared/wiki` remains canonical.
+2. Workers mount `/local/wiki-public` read-only from `/local/plugins/public/wiki`.
+3. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
+4. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki-public -> /local/plugins/public/wiki`.
 
 ### Plugin Boundary
 
 The wiki engine is implemented as a self-contained Hermes-core plugin extension:
 
 ```text
-/local/agents/public/plugins/hermes-core/
+/local/plugins/public/hermes-core/
 ├── README.md
 ├── scripts/
 │   ├── prestart_reapply.sh
@@ -369,8 +374,8 @@ Spec amendments after this point must be explicit and documented rather than sil
 
 Delivery is complete only when all of the following are true:
 
-1. `/local/agents/private/shared/wiki/` exists and bootstraps itself safely.
-2. `/local/agents/public/plugins/hermes-core/` contains the engine code and startup hook integration.
+1. `/local/plugins/private/wiki/` exists and bootstraps itself safely.
+2. `/local/plugins/public/hermes-core/` contains the engine code and startup hook integration.
 3. `NODE_WIKI_ENABLED=true` enables the feature and default behavior remains disabled.
 4. Worker nodes receive the shared wiki as a read/write mount and orchestrator gets a clean symlinked view.
 5. wiki content is excluded from git while engine code/docs/tests remain tracked.
@@ -382,14 +387,14 @@ Delivery is complete only when all of the following are true:
 
 ## Delivered
 
-Implementation now ships in `/local/agents/public/plugins/hermes-core/` with:
+Implementation now ships in `/local/plugins/public/hermes-core/` with:
 
 - `hermes_wiki/` runtime modules for bootstrap, governance, graph compilation, maintenance, observability, and query routing
 - `scripts/wiki_engine.py` for operational CLI access
-- prestart integration in `plugins/hermes-core/scripts/prestart_reapply.sh`
+- prestart integration in `plugins/public/hermes-core/scripts/prestart_reapply.sh`
 - worker mount + orchestrator symlink integration in `scripts/clone/clone_manager.py`
-- ignored live wiki runtime content under `/local/agents/private/shared/wiki/`
-- tests under `plugins/hermes-core/tests/test_wiki_engine.py`
+- ignored live wiki runtime content under `/local/plugins/private/wiki/`
+- tests under `plugins/public/hermes-core/tests/test_wiki_engine.py`
 
 ## Delivered Behavior
 
@@ -398,11 +403,11 @@ Implementation now ships in `/local/agents/public/plugins/hermes-core/` with:
 - Nodes opt in with `NODE_WIKI_ENABLED=true` in `/local/agents/envs/<node>.env`.
 - Disabled nodes remain on the previous behavior and the engine no-ops safely.
 - Workers mount `/local/wiki` read/write into the container only when enabled.
-- The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/agents/private/shared/wiki`.
+- The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
 
 ### Canonical and Derived Layers
 
-- Canonical knowledge remains markdown under `/local/agents/private/shared/wiki/`.
+- Canonical knowledge remains markdown under `/local/plugins/private/wiki/`.
 - Graph, compression, health, observability, proposals, and maintenance artifacts are rebuilt under `meta/`.
 - Generated routing indexes are rebuilt under `indexes/`.
 
@@ -423,8 +428,8 @@ Implementation now ships in `/local/agents/public/plugins/hermes-core/` with:
 
 Validated with:
 
-- `/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/hermes-core/tests -q`
-- real bootstrap of `/local/agents/private/shared/wiki`
+- `/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/public/hermes-core/tests -q`
+- real bootstrap of `/local/plugins/private/wiki`
 - real rebuild of graph/compression/observability artifacts
 
 ## Remaining Limitations

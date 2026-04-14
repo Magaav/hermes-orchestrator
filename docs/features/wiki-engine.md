@@ -1,6 +1,8 @@
 # Shared Wiki Engine
 
-The Hermes shared wiki engine gives the orchestrator fleet a durable, markdown-native knowledge layer at `/local/agents/private/shared/wiki/`.
+The Hermes shared wiki engine gives the orchestrator fleet:
+- a durable instance runtime knowledge layer at `/local/plugins/private/wiki/`
+- a reusable public doctrine/reference layer at `/local/plugins/public/wiki/`
 
 It exists so many Hermes nodes can accumulate durable knowledge without turning the repository, chat logs, or transient memory into a dumping ground. The engine keeps canonical truth in markdown, rebuilds everything else from that markdown, and coordinates knowledge evolution through proposals instead of direct page mutation.
 
@@ -18,7 +20,7 @@ It exists so many Hermes nodes can accumulate durable knowledge without turning 
 Canonical wiki root:
 
 ```text
-/local/agents/private/shared/wiki/
+/local/plugins/private/wiki/
 ├── index.md
 ├── indexes/
 ├── global/
@@ -61,9 +63,11 @@ Default behavior remains disabled and safe.
 When enabled:
 
 1. Worker nodes mount `/local/wiki` read/write into the container.
-2. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/agents/private/shared/wiki`.
-3. `plugins/hermes-core/scripts/prestart_reapply.sh` runs wiki bootstrap/self-heal at startup.
-4. Derived graph/compression/observability layers can rebuild automatically.
+2. Worker nodes also mount `/local/wiki-public` read-only from `/local/plugins/public/wiki`.
+3. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
+4. The orchestrator node also gets `/local/agents/nodes/orchestrator/wiki-public -> /local/plugins/public/wiki`.
+5. `plugins/public/hermes-core/scripts/prestart_reapply.sh` runs wiki bootstrap/self-heal at startup.
+6. Derived graph/compression/observability layers can rebuild automatically.
 
 When disabled:
 
@@ -78,7 +82,7 @@ Participating nodes should treat the wiki as shared knowledge infrastructure, no
 Supported operational entrypoint:
 
 ```bash
-python3 /local/plugins/hermes-core/scripts/wiki_engine.py --help
+python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py --help
 ```
 
 Key commands:
@@ -351,21 +355,21 @@ Important rule:
 Backup:
 
 ```bash
-tar -czf wiki-backup.tgz -C /local/agents/private/shared wiki
+tar -czf wiki-backup.tgz -C /local/plugins/private wiki
 ```
 
 Restore:
 
 ```bash
-mkdir -p /local/agents/private/shared
-tar -xzf wiki-backup.tgz -C /local/agents/private/shared
-NODE_WIKI_ENABLED=1 python3 /local/plugins/hermes-core/scripts/wiki_engine.py self-heal --json
+mkdir -p /local/plugins/private
+tar -xzf wiki-backup.tgz -C /local/plugins/private
+NODE_WIKI_ENABLED=1 python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py self-heal --json
 ```
 
 Migration to a new host:
 
-1. Copy `/local/agents/private/shared/wiki`
-2. Copy `/local/plugins/hermes-core/`
+1. Copy `/local/plugins/private/wiki`
+2. Copy `/local/plugins/public/hermes-core/`
 3. Set `NODE_WIKI_ENABLED=true` on participating nodes
 4. Restart nodes or run `bootstrap` and `self-heal`
 
@@ -384,7 +388,7 @@ Reapply flow:
 2. restart the node, or run:
 
 ```bash
-bash /local/plugins/hermes-core/scripts/prestart_reapply.sh
+bash /local/plugins/public/hermes-core/scripts/prestart_reapply.sh
 ```
 
 That prestart pipeline reruns wiki bootstrap/repair along with the other Hermes-core customizations.
@@ -394,7 +398,7 @@ That prestart pipeline reruns wiki bootstrap/repair along with the other Hermes-
 Primary suite:
 
 ```bash
-/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/hermes-core/tests -q
+/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/public/hermes-core/tests -q
 ```
 
 What it covers:

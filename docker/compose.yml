@@ -13,7 +13,7 @@ services:
     ports:
       - "1933:1933"
     volumes:
-      - /local/agents/private/plugins/memory:/data
+      - /local/plugins/private/memory:/data
       - /local/logs/openviking:/var/log/openviking
       - /local/docker/containers.conf/openviking/ov.conf:/etc/openviking/ov.conf:ro
     healthcheck:

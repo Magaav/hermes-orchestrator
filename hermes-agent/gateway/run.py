@@ -1937,8 +1937,10 @@ class GatewayRunner:
                     running_agent.interrupt("Stop requested")
                 # Force-clean: remove the session lock regardless of agent state
                 adapter = self.adapters.get(source.platform)
-                if adapter and hasattr(adapter, 'get_pending_message'):
-                    adapter.get_pending_message(_quick_key)  # consume and discard
+                if adapter and hasattr(adapter, 'clear_pending_messages'):
+                    adapter.clear_pending_messages(_quick_key)
+                elif adapter and hasattr(adapter, 'get_pending_message'):
+                    adapter.get_pending_message(_quick_key)  # legacy fallback: consume one
                 self._pending_messages.pop(_quick_key, None)
                 if _quick_key in self._running_agents:
                     del self._running_agents[_quick_key]
@@ -1981,7 +1983,15 @@ class GatewayRunner:
                         source=event.source,
                         message_id=event.message_id,
                     )
-                    adapter._pending_messages[_quick_key] = queued_event
+                    if hasattr(adapter, "enqueue_pending_message"):
+                        adapter.enqueue_pending_message(
+                            session_key=_quick_key,
+                            event=queued_event,
+                            interrupt=False,
+                            merge_photo=False,
+                        )
+                    else:
+                        adapter._pending_messages[_quick_key] = queued_event
                 return "Queued for the next turn."
 
             # /model must not be used while the agent is running.
@@ -2001,16 +2011,28 @@ class GatewayRunner:
                 logger.debug("PRIORITY photo follow-up for session %s — queueing without interrupt", _quick_key[:20])
                 adapter = self.adapters.get(source.platform)
                 if adapter:
-                    # Reuse adapter queue semantics so photo bursts merge cleanly.
-                    if _quick_key in adapter._pending_messages:
-                        existing = adapter._pending_messages[_quick_key]
-                        if getattr(existing, "message_type", None) == MessageType.PHOTO:
-                            existing.media_urls.extend(event.media_urls)
-                            existing.media_types.extend(event.media_types)
-                            if event.text:
-                                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
-                        else:
-                            adapter._pending_messages[_quick_key] = event
+                    if hasattr(adapter, "enqueue_pending_message"):
+                        adapter.enqueue_pending_message(
+                            session_key=_quick_key,
+                            event=event,
+                            interrupt=False,
+                            merge_photo=True,
+                        )
+                    else:
+                        adapter._pending_messages[_quick_key] = event
+                return None
+
+            if event.message_type in (MessageType.VOICE, MessageType.AUDIO):
+                logger.debug("PRIORITY voice/audio follow-up for session %s — queueing without interrupt", _quick_key[:20])
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    if hasattr(adapter, "enqueue_pending_message"):
+                        adapter.enqueue_pending_message(
+                            session_key=_quick_key,
+                            event=event,
+                            interrupt=False,
+                            merge_photo=False,
+                        )
                     else:
                         adapter._pending_messages[_quick_key] = event
                 return None
@@ -2028,7 +2050,15 @@ class GatewayRunner:
                 # agent starts.
                 adapter = self.adapters.get(source.platform)
                 if adapter:
-                    adapter._pending_messages[_quick_key] = event
+                    if hasattr(adapter, "enqueue_pending_message"):
+                        adapter.enqueue_pending_message(
+                            session_key=_quick_key,
+                            event=event,
+                            interrupt=False,
+                            merge_photo=(event.message_type == MessageType.PHOTO),
+                        )
+                    else:
+                        adapter._pending_messages[_quick_key] = event
                 return None
             logger.debug("PRIORITY interrupt for session %s", _quick_key[:20])
             running_agent.interrupt(event.text)
@@ -2916,6 +2946,47 @@ class GatewayRunner:
                 except Exception as exc:
                     logger.debug("@ context reference expansion failed: %s", exc)
 
+            # COLMEIO_CHANNEL_ACL_NORMALIZE_BEGIN
+            # Channel ACL: normalize text to channel purpose.
+            _normalized = None
+            _blocked = False
+            _block_msg = None
+            try:
+                _hook_home = Path(__import__("os").getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+                _hook_path = _hook_home / "hooks" / "channel_acl" / "handler.py"
+                if _hook_path.exists():
+                    import importlib.util, sys as _sys
+                    _spec = importlib.util.spec_from_file_location("colmeio_channel_acl", _hook_path)
+                    if _spec and _spec.loader:
+                        _mod = importlib.util.module_from_spec(_spec)
+                        _sys.modules["colmeio_channel_acl"] = _mod
+                        _spec.loader.exec_module(_mod)
+                        _norm = getattr(_mod, "normalize_to_channel_skill", None)
+                        if callable(_norm):
+                            _action, _result = _norm(source, message_text)
+                            if _action == "BLOCK":
+                                _blocked = True
+                                _block_msg = _result
+                            elif _action in ("FALTAS_ADD", "SKILL_ADD"):
+                                _normalized = _result
+                                if source and source.user_id:
+                                    _normalized = f"{_normalized} [author_id:{source.user_id}]"
+            except Exception:
+                pass
+            if _normalized is not None:
+                message_text = _normalized
+            if _blocked:
+                _adapter = self.adapters.get(source.platform)
+                if _adapter:
+                    _meta = {"thread_id": source.thread_id} if source.thread_id else None
+                    await _adapter.send(source.chat_id, _block_msg or "Blocked.", metadata=_meta)
+                return
+            # COLMEIO_CHANNEL_ACL_NORMALIZE_END
+
+
+
+
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -3410,6 +3481,83 @@ class GatewayRunner:
             "",
             f"**Connected Platforms:** {', '.join(connected_platforms)}",
         ])
+
+        # COLMEIO_CHANNEL_ACL_STATUS_BEGIN
+        # Add channel context and model routing details to /status output.
+        _raw_channel_id = str(getattr(source, "chat_id", "") or "")
+        _thread_id = str(getattr(source, "thread_id", "") or "")
+        _parent_id = str(getattr(source, "chat_id_alt", "") or "")
+        _channel_id = _parent_id or _raw_channel_id
+
+        _channel_info_lines = [
+            "",
+            "**Channel Info**",
+            f"  channel_id: `{_channel_id or 'n/a'}`",
+        ]
+        if _thread_id:
+            _channel_info_lines.append(f"  thread_id: `{_thread_id}`")
+        lines.extend(_channel_info_lines)
+
+        try:
+            _route_model = _resolve_gateway_model()
+        except Exception:
+            _route_model = "MiniMax-M2.7"
+        try:
+            _base_runtime = _resolve_runtime_agent_kwargs() or {}
+        except Exception:
+            _base_runtime = {}
+        _route_provider = str(_base_runtime.get("provider", "") or "")
+        _routing_note = "default (no channel rule matched)"
+        try:
+            _hook_home = Path(__import__("os").getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+            _hook_path = _hook_home / "hooks" / "channel_acl" / "handler.py"
+            if _hook_path.exists():
+                import importlib.util, sys as _sys
+                _spec = importlib.util.spec_from_file_location("colmeio_channel_acl", _hook_path)
+                if _spec and _spec.loader:
+                    _mod = importlib.util.module_from_spec(_spec)
+                    _sys.modules["colmeio_channel_acl"] = _mod
+                    _spec.loader.exec_module(_mod)
+                    _enforce = getattr(_mod, "enforce_channel_model", None)
+                    if callable(_enforce):
+                        _primary = {
+                            "model": _route_model,
+                            "provider": _route_provider,
+                            "runtime": dict(_base_runtime),
+                        }
+                        _fake_route = _enforce(source, dict(_primary))
+                        _forced_model = _fake_route.get("model") or _route_model
+                        _forced_provider = (_fake_route.get("runtime") or {}).get("provider") or _route_provider
+
+                        if _forced_model != _route_model or _forced_provider != _route_provider:
+                            _routing_note = "channel-acl forced (condicionado)"
+                        else:
+                            _get_routing = getattr(_mod, "get_channel_routing", None)
+                            if callable(_get_routing):
+                                _mode, _cfg = _get_routing(
+                                    _channel_id,
+                                    _thread_id or None,
+                                    _parent_id or None,
+                                )
+                                if _mode == "condicionado":
+                                    _routing_note = "channel-acl matched (condicionado)"
+                        _route_model = _forced_model
+                        _route_provider = _forced_provider
+        except Exception:
+            pass
+
+        lines.extend([
+            "",
+            "**Model Routing**",
+            f"  model: `{_route_model or 'n/a'}`",
+            f"  provider: `{_route_provider or 'n/a'}`",
+            f"  route: {_routing_note}",
+        ])
+        # COLMEIO_CHANNEL_ACL_STATUS_END
+
+
+
+
 
         return "\n".join(lines)
     
@@ -7487,6 +7635,32 @@ class GatewayRunner:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+            # COLMEIO_CHANNEL_ACL_MODEL_BEGIN
+            try:
+                _hook_home = Path(__import__("os").getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+                _hook_path = _hook_home / "hooks" / "channel_acl" / "handler.py"
+                if _hook_path.exists():
+                    import importlib.util, sys as _sys
+                    _spec = importlib.util.spec_from_file_location("colmeio_channel_acl", _hook_path)
+                    if _spec and _spec.loader:
+                        _mod = importlib.util.module_from_spec(_spec)
+                        _sys.modules["colmeio_channel_acl"] = _mod
+                        _spec.loader.exec_module(_mod)
+                        _enforce = getattr(_mod, "enforce_channel_model", None)
+                        if callable(_enforce):
+                            turn_route = _enforce(source, turn_route)
+            except Exception:
+                pass
+
+            _sp_addon = turn_route.get("system_prompt_addon")
+            if _sp_addon:
+                combined_ephemeral = (combined_ephemeral + "\n\n" + _sp_addon).strip()
+            # COLMEIO_CHANNEL_ACL_MODEL_END
+
+
+
+
+
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
@@ -7910,7 +8084,10 @@ class GatewayRunner:
                 if hasattr(adapter, 'has_pending_interrupt') and adapter.has_pending_interrupt(session_key):
                     agent = agent_holder[0]
                     if agent:
-                        pending_event = adapter.get_pending_message(session_key)
+                        if hasattr(adapter, "pop_pending_interrupt_message"):
+                            pending_event = adapter.pop_pending_interrupt_message(session_key)
+                        else:
+                            pending_event = adapter.get_pending_message(session_key)
                         pending_text = pending_event.text if pending_event else None
                         logger.debug("Interrupt detected from adapter, signaling agent...")
                         agent.interrupt(pending_text)
@@ -8141,13 +8318,42 @@ class GatewayRunner:
             pending = None
             if result and adapter and session_key:
                 if result.get("interrupted"):
-                    pending = _dequeue_pending_text(adapter, session_key)
+                    if hasattr(adapter, "pop_pending_interrupt_message"):
+                        pending_event = adapter.pop_pending_interrupt_message(session_key)
+                    else:
+                        pending_event = adapter.get_pending_message(session_key)
+                    pending = None
+                    if pending_event:
+                        pending = pending_event.text
+                        if not pending and getattr(pending_event, "media_urls", None):
+                            pending = _build_media_placeholder(pending_event)
                     if not pending and result.get("interrupt_message"):
                         pending = result.get("interrupt_message")
                 else:
-                    pending = _dequeue_pending_text(adapter, session_key)
-                    if pending:
-                        logger.debug("Processing queued message after agent completion: '%s...'", pending[:40])
+                    pending_event = adapter.get_pending_message(session_key)
+                    if pending_event:
+                        _is_text_only = (
+                            pending_event.message_type in (MessageType.TEXT, MessageType.COMMAND)
+                            and not pending_event.media_urls
+                        )
+                        if _is_text_only:
+                            pending = pending_event.text
+                            logger.debug(
+                                "Processing queued text message after agent completion: '%s...'",
+                                pending[:40],
+                            )
+                        else:
+                            if hasattr(adapter, "prepend_pending_message"):
+                                adapter.prepend_pending_message(session_key, pending_event)
+                            elif hasattr(adapter, "enqueue_pending_message"):
+                                adapter.enqueue_pending_message(
+                                    session_key=session_key,
+                                    event=pending_event,
+                                    interrupt=False,
+                                    merge_photo=False,
+                                )
+                            else:
+                                adapter._pending_messages[session_key] = pending_event
             
             # Safety net: if the pending text is a slash command (e.g. "/stop",
             # "/new"), discard it — commands should never be passed to the agent
@@ -8191,6 +8397,19 @@ class GatewayRunner:
                     adapter = self.adapters.get(source.platform)
                     if adapter and hasattr(adapter, 'queue_message'):
                         adapter.queue_message(session_key, pending)
+                    elif adapter and hasattr(adapter, "enqueue_pending_message"):
+                        queued_event = MessageEvent(
+                            text=pending,
+                            message_type=MessageType.TEXT,
+                            source=source,
+                            message_id=event_message_id,
+                        )
+                        adapter.enqueue_pending_message(
+                            session_key=session_key,
+                            event=queued_event,
+                            interrupt=False,
+                            merge_photo=False,
+                        )
                     return result_holder[0] or {"final_response": response, "messages": history}
 
                 was_interrupted = result.get("interrupted")

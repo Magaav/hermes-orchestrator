@@ -15,7 +15,7 @@ Run these before opening a PR:
 
 ```bash
 bash -n scripts/install.sh scripts/clone/clone.sh scripts/clone/hord.sh scripts/clone/horc.sh docker/entrypoint.sh docker/dockerfiles/openviking-entrypoint.sh
-python3 -m compileall -q scripts plugins/discord
+python3 -m compileall -q scripts plugins/public
 ```
 
 ## Security And Secrets
@@ -27,5 +27,5 @@ python3 -m compileall -q scripts plugins/discord
 ## Documentation Expectations
 
 - Update docs when behavior changes.
-- Prefer canonical paths under `/local/plugins/discord/*` for Discord assets.
+- Prefer canonical paths under `/local/plugins/public/discord/*` for Discord assets.
 - Keep examples tenant-neutral when possible.
