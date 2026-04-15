@@ -1,7 +1,7 @@
 # Hermes Orchestrator
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 ![Hermes Orchestrator Hero](docs/assets/hero.png)
-**Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
+**Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Feature Docs](#feature-docs) | [Command Reference](docs/commands/horc.md) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
 Hermes Orchestrator is a lightweight host-level operational layer for running Hermes agents at scale: spawning isolated nodes, managing environments, handling upgrades/rollbacks, centralizing logs, and coordinating multi-agent workflows.
 
@@ -115,17 +115,15 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │   └── nodes/
 │       ├── orchestrator/
 │       │   ├── wiki -> /local/plugins/private/wiki
-│       │   ├── wiki-public -> /local/plugins/public/wiki
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/ # node-local runtime copy (not symlinked to /local/hermes-agent)
 │       │   ├── .hermes/
 │       │   ├── scripts ->(symlink) /local/scripts
-│       │   ├── cron    ->(symlink) /local/scripts/private/crons/orchestrator
+│       │   ├── cron    ->(symlink) /local/crons/orchestrator
 │       │   └── plugins ->(symlink) /local/plugins
 │       ├── node1/
 │       │   ├── wiki/          # mounted from /local/plugins/private/wiki when NODE_WIKI_ENABLED=true
-│       │   ├── wiki-public/   # mounted from /local/plugins/public/wiki when NODE_WIKI_ENABLED=true
 │       │   ├── workspace/
 │       │   ├── data/
 │       │   ├── hermes-agent/
@@ -134,12 +132,13 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │       │   ├── scripts/private/ # mounted from /local/scripts/private (rw)
 │       │   ├── plugins/public/   # mounted from /local/plugins/public (ro)
 │       │   ├── plugins/private/  # mounted from /local/plugins/private (rw)
-│       │   └── cron/     # mounted from /local/scripts/private/crons/<node>
+│       │   └── cron/     # mounted from /local/crons/<node>
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
 ├── scripts/
 │   ├── public/       # canonical git-tracked script code
 │   └── private/      # canonical local-only script state/entrypoints
+├── crons/            # canonical node cron roots mounted at /local/agents/nodes/<node>/cron
 ├── plugins/
 │   ├── public/       # canonical git-tracked plugin code
 │   └── private/      # canonical local-only plugin runtime/config
@@ -178,14 +177,23 @@ Important characteristics:
 
 - `/local/scripts/public` and `/local/plugins/public` are the reusable/public framework surface.
 - `/local/scripts/private` and `/local/plugins/private` are deployment-local script/plugin state surfaces.
+- `/local/crons` is the canonical cron runtime root consumed by every node via `/local/agents/nodes/<node>/cron`.
 - `/local/skills` is the shared mutable skills pool mounted across nodes.
 - `/local/state` is for orchestrator-local values and implementation assumptions.
+
+## Feature Docs
+
+- [Scripts Feature Guide](docs/features/scripts.md)
+- [Plugins Feature Guide](docs/features/plugins.md)
+- [horc Command Reference](docs/commands/horc.md)
 
 ## Bootstrap
 
 ```bash
 horc start
 ```
+
+See more: [horc command reference](docs/commands/horc.md)
 
 Default `horc start` target is `orchestrator` and it reads:
 - `/local/agents/envs/orchestrator.env` (auto-created from `agents/envs/orchestrator.env.example` if missing)
@@ -213,6 +221,8 @@ horc stop node2
 horc delete node2
 ```
 
+See more: [horc command reference](docs/commands/horc.md)
+
 ## Logging Topology
 
 - Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.
@@ -234,11 +244,13 @@ horc backup all
 horc restore /local/backups/horc-backup-node-node1-YYYYMMDDTHHMMSSZ.tar.gz
 ```
 
+See more: [horc command reference](docs/commands/horc.md)
+
 Restore behavior:
 - If you pass a relative path, `horc restore` resolves it under `/local/backups/`
-- `backup node <name>` captures node env/root plus private orchestrator state (including shared skills/wiki/crons/memory roots and `plugins/private`, `scripts/private`, `skills`)
-- `backup all` captures all envs/nodes plus full private orchestrator state (including `plugins/private`, `scripts/private`, `skills`)
-- Node-local `.hermes/skills` trees are excluded from node archives; shared skills come from `/local/skills`
+- `backup node <name>` captures node env/root plus private orchestrator state (including `plugins/private`, `scripts/private`, `/local/crons`, and `/local/skills`)
+- `backup all` captures nodes that have an env profile (`agents/envs/<node>.env`) plus the same private orchestrator roots
+- Node archives are intentionally lean: shared mirrors (`plugins/`, `scripts/`, `skills/`, `wiki/`, `cron/`) and transient bloat (`.cache`, logs, `.hermes` runtime caches) are excluded
 - Restore reapplies whatever is present in the archive (`agents/*` and legacy memory/crons compatibility payloads)
 - Stops included running nodes before restore and restarts those that were running
 
@@ -258,6 +270,8 @@ horc agent update node2
 horc agent update orchestrator
 ```
 
+See more: [horc command reference](docs/commands/horc.md)
+
 Compatibility alias:
 
 ```bash
@@ -269,7 +283,7 @@ hord restart
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `scripts/private/crons/`, `plugins/private/memory/`, `logs/`, `plugins/private/`, `skills/`, `backups/`, `state/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/`, `plugins/private/memory/`, `logs/`, `plugins/private/`, `skills/`, `backups/`, `state/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 

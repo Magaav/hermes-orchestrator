@@ -110,9 +110,7 @@ Canonical wiki root:
 Node integration:
 
 1. Workers mount the host wiki into the container at `/local/wiki` when `NODE_WIKI_ENABLED=true`.
-2. Workers mount `/local/wiki-public` read-only from `/local/plugins/public/wiki`.
-3. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
-4. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki-public -> /local/plugins/public/wiki`.
+2. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
 
 ### Plugin Boundary
 

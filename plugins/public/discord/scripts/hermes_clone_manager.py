@@ -672,10 +672,29 @@ def _discord_plugin_script(relpath: str) -> Path:
 
 
 def _link_clone_workspace_discord(clone_root: Path) -> None:
-    """Remove legacy workspace/discord mirror from existing clone roots."""
+    """Ensure workspace/discord exists for node-local Discord settings."""
     workspace_discord = clone_root / "workspace" / "discord"
-    if workspace_discord.exists() or workspace_discord.is_symlink():
+    if workspace_discord.is_symlink():
         _remove_path(workspace_discord)
+    workspace_discord.mkdir(parents=True, exist_ok=True)
+
+
+def _parse_csv_env_list(value: str) -> list[str]:
+    return [entry.strip() for entry in str(value or "").split(",") if entry.strip()]
+
+
+def _seed_discord_settings_file(clone_root: Path, env: Dict[str, str]) -> None:
+    settings_path = clone_root / "workspace" / "discord" / "discord_settings.json"
+    if settings_path.exists():
+        return
+    payload = {
+        "DISCORD_ALLOWED_USERS": _parse_csv_env_list(env.get("DISCORD_ALLOWED_USERS", "")),
+        "DISCORD_AUTO_THREAD_IGNORE_CHANNELS": _parse_csv_env_list(
+            env.get("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")
+        ),
+    }
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
 
 
 def _bootstrap_camofox_for_clone(clone_name: str, env_path: Path) -> Dict[str, Any]:
@@ -1287,6 +1306,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         workspace_seeded = _seed_clone_workspace_integrations(clone_root)
         _normalize_clone_skills_layout(clone_root)
         _link_clone_workspace_discord(clone_root)
+        _seed_discord_settings_file(clone_root, env)
         _seed_clone_runtime(clone_root, allow_parent_seed=True)
 
         _atomic_write_json(
@@ -1315,6 +1335,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
                 )
         _normalize_clone_skills_layout(clone_root)
         _link_clone_workspace_discord(clone_root)
+        _seed_discord_settings_file(clone_root, env)
         _seed_clone_runtime(clone_root, allow_parent_seed=False)
 
     # Keep clone-local .hermes/.env aligned with the clone profile.

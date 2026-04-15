@@ -3,30 +3,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+import json
 from pathlib import Path
 from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
 _ENV_KEY = "DISCORD_ALLOWED_USERS"
-
-
-def _resolve_hermes_home() -> Path:
-    raw = str(os.getenv("HERMES_HOME", "") or "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return Path.home() / ".hermes"
-
-
-_HERMES_HOME = _resolve_hermes_home()
-
-_ENV_PATHS = (
-    _HERMES_HOME / ".env",
-    Path("/local/.env"),
-    Path("/local/workspace/.env"),
-    Path("/local/workspace/colmeio/.env"),
-)
-
 
 def _normalize_discord_user_id(raw: Any) -> str:
     text = str(raw or "").strip()
@@ -67,51 +50,53 @@ def _collect_runtime_allowed_ids(adapter: Any) -> set[str]:
     return allowed
 
 
-def _append_user_to_env_file(path: Path, user_id: str) -> bool:
-    if not path.exists():
-        return False
-
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    out_lines: list[str] = []
-    found = False
-    changed = False
-
-    for line in lines:
-        stripped = line.lstrip()
-        if not stripped.startswith(f"{_ENV_KEY}="):
-            out_lines.append(line)
-            continue
-
-        found = True
-        key, _, value = line.partition("=")
-        entries = [part.strip() for part in value.split(",") if part.strip()]
-        normalized = {_normalize_discord_user_id(part) for part in entries}
-        if user_id not in normalized and user_id not in entries:
-            entries.append(user_id)
-            changed = True
-        out_lines.append(f"{key}={','.join(entries)}")
-
-    if not found:
-        out_lines.append(f"{_ENV_KEY}={user_id}")
-        changed = True
-
-    if not changed:
-        return False
-
-    path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
-    return True
+def _discord_settings_path() -> Path:
+    configured = str(os.getenv("DISCORD_SETTINGS_FILE", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    node_root = str(os.getenv("HERMES_NODE_ROOT", "") or "").strip()
+    if node_root:
+        return Path(node_root) / "workspace" / "discord" / "discord_settings.json"
+    return Path("/local/workspace/discord/discord_settings.json")
 
 
 def _persist_allowed_user(user_id: str) -> list[str]:
-    updated: list[str] = []
-    for path in _ENV_PATHS:
-        try:
-            if _append_user_to_env_file(path, user_id):
-                updated.append(str(path))
-        except Exception as exc:
-            logger.warning("Failed to persist paired user in %s: %s", path, exc)
-    return updated
+    settings_path = _discord_settings_path()
+    try:
+        payload: Dict[str, Any] = {}
+        if settings_path.exists():
+            raw = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                payload = dict(raw)
+
+        raw_allowed = payload.get("DISCORD_ALLOWED_USERS")
+        if isinstance(raw_allowed, list):
+            entries = [str(entry).strip() for entry in raw_allowed if str(entry).strip()]
+        elif isinstance(raw_allowed, str):
+            entries = [part.strip() for part in raw_allowed.split(",") if part.strip()]
+        else:
+            entries = []
+
+        normalized = {_normalize_discord_user_id(entry) for entry in entries}
+        normalized = {entry for entry in normalized if entry}
+        if user_id in normalized:
+            return []
+
+        normalized.add(user_id)
+        payload["DISCORD_ALLOWED_USERS"] = sorted(normalized)
+
+        if "DISCORD_AUTO_THREAD_IGNORE_CHANNELS" not in payload:
+            payload["DISCORD_AUTO_THREAD_IGNORE_CHANNELS"] = []
+
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return [str(settings_path)]
+    except Exception as exc:
+        logger.warning("Failed to persist paired user in %s: %s", settings_path, exc)
+        return []
 
 
 def _is_invoker_authorized(adapter: Any, interaction: Any) -> bool:
@@ -260,7 +245,7 @@ async def handle(
             f"já_autorizado: `{str(already_allowed).lower()}`\n"
             f"pairing_store: `{'updated' if pairing_ok else 'unavailable'}`\n"
             f"env_runtime: `{_ENV_KEY}` atualizado\n"
-            f"persisted_files: `{len(updated_files)}`"
+            f"settings_files: `{len(updated_files)}`"
         ),
     )
     return True

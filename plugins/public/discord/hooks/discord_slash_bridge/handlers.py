@@ -688,8 +688,8 @@ async def handle_backup_version(
         "/local/cron/scripts/backup/drive_backup.py",
         "/local/cron/colmeio/scripts/backup/drive_backup.py",
         "/local/cron/catatau/scripts/backup/drive_backup.py",
-        "/local/scripts/private/crons/colmeio/scripts/backup/drive_backup.py",
-        "/local/scripts/private/crons/catatau/scripts/backup/drive_backup.py",
+        "/local/crons/colmeio/scripts/backup/drive_backup.py",
+        "/local/crons/catatau/scripts/backup/drive_backup.py",
     )
     local_backup_root = Path(str(cfg.get("local_backup_root") or "/local/backups"))
     drive_folder_path = str(cfg.get("drive_folder_path") or "backups/orchestrator")

@@ -10,7 +10,7 @@
 - `nodes/<node>/`: generated runtime state (not versioned)
 - `nodes/<node>/scripts/{public,private}`: host-visible mirrors of `/local/scripts/{public,private}`
 - `nodes/<node>/plugins/{public,private}`: worker mount anchors to `/local/plugins/{public,private}`
-- `nodes/<node>/cron`: mountpoint from `/local/scripts/private/crons/<node>`
+- `nodes/<node>/cron`: mountpoint from `/local/crons/<node>`
 - `nodes/<node>/data`: node-local mutable runtime data (canonical)
 - logs are centralized under `/local/logs/nodes/<node>/` and `/local/logs/attention/nodes/<node>/`
 

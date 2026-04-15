@@ -105,6 +105,45 @@ NORMALIZE_BLOCK = """\
                     _meta = {"thread_id": source.thread_id} if source.thread_id else None
                     await _adapter.send(source.chat_id, _block_msg or "Blocked.", metadata=_meta)
                 return
+            # If channel ACL normalized free text into a slash command (e.g. /faltas),
+            # route it through the same skill-command resolver used for real slash input.
+            # Without this, normalized commands are treated as plain chat and can drift.
+            _normalized_text = str(message_text or "").strip()
+            if _normalized is not None and _normalized_text.startswith("/"):
+                try:
+                    from agent.skill_commands import (
+                        get_skill_commands,
+                        build_skill_invocation_message,
+                        resolve_skill_command_key,
+                    )
+                    _parts = _normalized_text.split(maxsplit=1)
+                    _norm_cmd = _parts[0][1:].strip().lower() if _parts else ""
+                    _norm_args = _parts[1].strip() if len(_parts) > 1 else ""
+                    _cmd_key = resolve_skill_command_key(_norm_cmd) if _norm_cmd else None
+                    if _cmd_key is not None:
+                        _skill_cmds = get_skill_commands()
+                        _skill_name = _skill_cmds.get(_cmd_key, {}).get("name", "")
+                        _plat = source.platform.value if source.platform else None
+                        if _plat and _skill_name:
+                            from agent.skill_utils import get_disabled_skill_names as _get_plat_disabled
+                            if _skill_name in _get_plat_disabled(platform=_plat):
+                                _adapter = self.adapters.get(source.platform)
+                                if _adapter:
+                                    _meta = {"thread_id": source.thread_id} if source.thread_id else None
+                                    await _adapter.send(
+                                        source.chat_id,
+                                        f"The **{_skill_name}** skill is disabled for {_plat}.\\n"
+                                        f"Enable it with: `hermes skills config`",
+                                        metadata=_meta,
+                                    )
+                                return
+                        _skill_msg = build_skill_invocation_message(
+                            _cmd_key, _norm_args, task_id=_quick_key
+                        )
+                        if _skill_msg:
+                            message_text = _skill_msg
+                except Exception as _normalize_cmd_exc:
+                    logger.debug("ACL normalized command bridge failed: %s", _normalize_cmd_exc)
             # COLMEIO_CHANNEL_ACL_NORMALIZE_END
 
 """

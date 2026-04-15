@@ -63,11 +63,9 @@ Default behavior remains disabled and safe.
 When enabled:
 
 1. Worker nodes mount `/local/wiki` read/write into the container.
-2. Worker nodes also mount `/local/wiki-public` read-only from `/local/plugins/public/wiki`.
-3. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
-4. The orchestrator node also gets `/local/agents/nodes/orchestrator/wiki-public -> /local/plugins/public/wiki`.
-5. `plugins/public/hermes-core/scripts/prestart_reapply.sh` runs wiki bootstrap/self-heal at startup.
-6. Derived graph/compression/observability layers can rebuild automatically.
+2. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
+3. `plugins/public/hermes-core/scripts/prestart_reapply.sh` runs wiki bootstrap/self-heal at startup.
+4. Derived graph/compression/observability layers can rebuild automatically.
 
 When disabled:
 

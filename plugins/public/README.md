@@ -1,27 +1,32 @@
 # Public Plugins
 
-Canonical git-tracked plugin root for Hermes Orchestrator.
+`/local/plugins/public` is the canonical git-tracked plugin root for Hermes Orchestrator.
 
-## Canonical Roots
+## Public vs Private
 
-- Public plugins (tracked): `/local/plugins/public`
-- Private plugin runtime/config (local-only): `/local/plugins/private`
+- Public (`/local/plugins/public`): reusable runtime hooks, patchers, automation scripts, and templates.
+- Private (`/local/plugins/private`): deployment-local command payloads, runtime stores, memory/wiki content, and mutable config.
 
-## Plugin Ownership
+## Plugin Surface
 
-- `discord/`
-  - Public: hook/runtime code, scripts, tests, docs, `*.example` templates.
-  - Private: node command payloads and runtime config/state under `/local/plugins/private/discord`.
-- `hermes-core/`
-  - Public: shared orchestrator startup/verification logic and wiki engine code.
-- `wiki/`
-  - Public: reusable doctrine/templates/reference pages shared across instances.
-  - Private runtime evolution: `/local/plugins/private/wiki`.
-- `memory/`
-  - Runtime data remains private/local and is never committed.
+- `discord/`: Discord gateway hooks, slash bridge runtime, and related operational scripts.
+- `hermes-core/`: orchestrator prestart pipelines and shared runtime patch orchestration.
+- `wiki/`: legacy seed/templates only; canonical runtime wiki is private.
+
+## Hermes-Orchestrator Synergy
+
+- `horc` startup paths execute prestart scripts from this tree.
+- Backup/restore workflows preserve the private plugin root while public plugin code stays in git.
+- Script capabilities in `/local/scripts/public` are consumed by plugin hooks here for lifecycle, sync, and recovery routines.
 
 ## Versioning Rules
 
 - Commit only public code and templates under `/local/plugins/public/**`.
-- Do not commit runtime data under `/local/plugins/private/**`.
+- Do not commit runtime state under `/local/plugins/private/**`.
 - Keep secrets out of both trees.
+
+## See Also
+
+- [`../README.md`](../README.md)
+- [`../private/README.md`](../private/README.md)
+- [`../../docs/features/plugins.md`](../../docs/features/plugins.md)

@@ -1,7 +1,5 @@
-# Public Wiki
+# Wiki Seed (Legacy)
 
-Public, versioned wiki guidance for Hermes Orchestrator instances.
+Legacy seed/templates for bootstrap compatibility.
 
-Use this tree for durable operational doctrine/templates that should be reusable across deployments.
-
-Runtime evolving instance knowledge is stored under `/local/plugins/private/wiki`.
+Runtime evolving instance knowledge is canonical under `/local/plugins/private/wiki`.

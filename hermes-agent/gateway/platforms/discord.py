@@ -431,6 +431,9 @@ class DiscordAdapter(BasePlatformAdapter):
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
         self._allowed_user_ids: set = set()  # For button approval authorization
+        self._discord_settings_cache: Dict[str, Any] = {}
+        self._discord_settings_mtime_ns: Optional[int] = None
+        self._discord_settings_cache_loaded = False
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
         self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
@@ -458,6 +461,86 @@ class DiscordAdapter(BasePlatformAdapter):
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+
+    @staticmethod
+    def _parse_csv(raw: str) -> list[str]:
+        return [entry.strip() for entry in str(raw or "").split(",") if entry.strip()]
+
+    def _discord_settings_path(self) -> Path:
+        configured = str(os.getenv("DISCORD_SETTINGS_FILE", "") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        node_root = str(os.getenv("HERMES_NODE_ROOT", "") or "").strip()
+        if node_root:
+            return Path(node_root) / "workspace" / "discord" / "discord_settings.json"
+        return Path("/local/workspace/discord/discord_settings.json")
+
+    def _load_discord_settings(self) -> Dict[str, Any]:
+        settings_path = self._discord_settings_path()
+        try:
+            stat = settings_path.stat()
+        except Exception:
+            self._discord_settings_mtime_ns = None
+            self._discord_settings_cache = {}
+            self._discord_settings_cache_loaded = False
+            return {}
+
+        if (
+            self._discord_settings_cache_loaded
+            and self._discord_settings_mtime_ns is not None
+            and self._discord_settings_mtime_ns == stat.st_mtime_ns
+        ):
+            return dict(self._discord_settings_cache)
+
+        try:
+            payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("Failed to read Discord settings file %s: %s", settings_path, exc)
+            self._discord_settings_mtime_ns = stat.st_mtime_ns
+            self._discord_settings_cache = {}
+            self._discord_settings_cache_loaded = True
+            return {}
+
+        if not isinstance(payload, dict):
+            self._discord_settings_mtime_ns = stat.st_mtime_ns
+            self._discord_settings_cache = {}
+            self._discord_settings_cache_loaded = True
+            return {}
+
+        self._discord_settings_mtime_ns = stat.st_mtime_ns
+        self._discord_settings_cache = dict(payload)
+        self._discord_settings_cache_loaded = True
+        return dict(payload)
+
+    def _settings_list(self, key: str) -> Optional[list[str]]:
+        settings = self._load_discord_settings()
+        if key not in settings:
+            return None
+        value = settings.get(key)
+        if isinstance(value, list):
+            return [str(entry).strip() for entry in value if str(entry).strip()]
+        if isinstance(value, str):
+            return self._parse_csv(value)
+        return []
+
+    def _allowed_users_from_sources(self) -> set[str]:
+        from_settings = self._settings_list("DISCORD_ALLOWED_USERS")
+        entries = from_settings if from_settings is not None else self._parse_csv(os.getenv("DISCORD_ALLOWED_USERS", ""))
+        return {_clean_discord_id(uid) for uid in entries if _clean_discord_id(uid)}
+
+    def _auto_thread_ignore_channels_from_sources(self) -> set[str]:
+        from_settings = self._settings_list("DISCORD_AUTO_THREAD_IGNORE_CHANNELS")
+        entries = (
+            from_settings
+            if from_settings is not None
+            else self._parse_csv(os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", ""))
+        )
+        return {entry.strip() for entry in entries if str(entry).strip()}
+
+    def _refresh_allowed_users_from_sources(self) -> None:
+        allowed = self._allowed_users_from_sources()
+        self._allowed_user_ids = allowed
+        os.environ["DISCORD_ALLOWED_USERS"] = ",".join(sorted(allowed))
 
     async def connect(self) -> bool:
         """Connect to Discord and start receiving events."""
@@ -507,13 +590,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 return False
 
 
-            # Parse allowed user entries (may contain usernames or IDs)
-            allowed_env = os.getenv("DISCORD_ALLOWED_USERS", "")
-            if allowed_env:
-                self._allowed_user_ids = {
-                    _clean_discord_id(uid) for uid in allowed_env.split(",")
-                    if uid.strip()
-                }
+            # Parse allowed user entries (json source of truth, env fallback)
+            self._refresh_allowed_users_from_sources()
 
             # Set up intents.
             # Message Content is required for normal text replies.
@@ -1342,6 +1420,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _is_allowed_user(self, user_id: str) -> bool:
         """Check if user is in DISCORD_ALLOWED_USERS."""
+        self._refresh_allowed_users_from_sources()
         if not self._allowed_user_ids:
             return True
         return user_id in self._allowed_user_ids
@@ -2470,10 +2549,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
             free_channels_raw = os.getenv("DISCORD_FREE_RESPONSE_CHANNELS", "")
             free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}
-            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")
-            auto_thread_ignore_channels = {
-                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()
-            }
+            auto_thread_ignore_channels = self._auto_thread_ignore_channels_from_sources()
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
 
@@ -2502,10 +2578,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")
-            auto_thread_ignore_channels = {
-                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()
-            }
+            auto_thread_ignore_channels = self._auto_thread_ignore_channels_from_sources()
             explicit_bot_mention = bool(
                 self._client.user
                 and (
@@ -2682,9 +2755,35 @@ class DiscordAdapter(BasePlatformAdapter):
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
 
         # Defense-in-depth: prevent empty user messages from entering session
-        # (can happen when user sends @mention-only with no other text)
+        # (can happen when user sends @mention-only with no other text).
+        # For attachment-only messages, include sender + media context so
+        # multi-user channels don't collapse into the same generic sentinel.
         if not event_text or not event_text.strip():
-            event_text = "(The user sent a message with no text content)"
+            if message.attachments:
+                media_kinds = []
+                for i, att in enumerate(message.attachments):
+                    mtype = media_types[i] if i < len(media_types) else (att.content_type or "")
+                    kind = ""
+                    if mtype.startswith("image/"):
+                        kind = "image"
+                    elif mtype.startswith("audio/"):
+                        kind = "audio"
+                    elif mtype.startswith("video/"):
+                        kind = "video"
+                    elif mtype:
+                        kind = mtype
+                    elif getattr(att, "filename", None):
+                        kind = f"file:{att.filename}"
+                    else:
+                        kind = "attachment"
+                    media_kinds.append(kind)
+                kinds_label = ", ".join(media_kinds[:5]) if media_kinds else "attachment"
+                if len(media_kinds) > 5:
+                    kinds_label = f"{kinds_label}, +{len(media_kinds) - 5} more"
+                sender = str(getattr(message.author, "display_name", "") or "user").strip()
+                event_text = f"[{sender}] sent attachment(s): {kinds_label}"
+            else:
+                event_text = "(The user sent a message with no text content)"
 
         event = MessageEvent(
             text=event_text,

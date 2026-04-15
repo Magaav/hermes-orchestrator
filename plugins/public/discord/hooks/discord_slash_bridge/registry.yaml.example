@@ -46,7 +46,7 @@ native_overrides:
       - catatau
       - all
     clone_manager_script: /local/scripts/public/clone/clone_manager.py
-    drive_script: /local/cron/scripts/backup/drive_backup.py
+    drive_script: /local/crons/colmeio/scripts/backup/drive_backup.py
     local_backup_root: /local/backups
     drive_folder_path: backups/orchestrator
     timeout_backup_sec: 1800

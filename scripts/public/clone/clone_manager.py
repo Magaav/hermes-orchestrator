@@ -125,20 +125,15 @@ SHARED_CRONS_ROOT = Path(
     str(
         os.getenv("HERMES_PRIVATE_CRONS_ROOT", "")
         or os.getenv("HERMES_CRONS_ROOT", "")
-        or (PRIVATE_SCRIPTS_ROOT / "crons")
+        or "/local/crons"
     )
 )
+LEGACY_SHARED_CRONS_ROOT = PRIVATE_SCRIPTS_ROOT / "crons"
 SHARED_WIKI_ROOT = Path(
     str(
         os.getenv("HERMES_SHARED_WIKI_ROOT", "")
         or os.getenv("HERMES_PRIVATE_WIKI_ROOT", "")
         or (PRIVATE_PLUGINS_ROOT / "wiki")
-    )
-)
-PUBLIC_WIKI_ROOT = Path(
-    str(
-        os.getenv("HERMES_PUBLIC_WIKI_ROOT", "")
-        or (SHARED_PLUGINS_ROOT / "wiki")
     )
 )
 PRIVATE_SKILLS_ROOT = Path(
@@ -198,6 +193,7 @@ DISCORD_DEFAULT_RESTART_DELAY_SEC = "0.1"
 DISCORD_DEFAULT_REBOOT_DELAY_SEC = "0.1"
 NODE_WORKSPACE_ROOT_IN_CONTAINER = "/local/workspace"
 NODE_WORKSPACE_DB_PATH_IN_CONTAINER = "/local/data/colmeio_db.sqlite3"
+NODE_WORKSPACE_DISCORD_SETTINGS_IN_CONTAINER = "/local/workspace/discord/discord_settings.json"
 # Canonical shared Discord ACL/users table now lives in the private plugin root.
 # Keep variable name stable to avoid touching unrelated call sites.
 NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = "/local/plugins/private/discord/discord_users.json"
@@ -216,6 +212,38 @@ STATE_LABELS = {
     3: "seed_from_backup",
     4: "fresh",                  # fresh containerized clone for testing/benchmarking/lab
 }
+
+NODE_BACKUP_EXCLUDE_PREFIXES: tuple[str, ...] = (
+    # Shared host mirrors and mount anchors (canonical roots are backed up once).
+    "plugins",
+    "scripts",
+    "skills",
+    "wiki",
+    "cron",
+    "crons",
+    # Node-local transient/runtime noise.
+    "logs",
+    ".cache",
+    ".local",
+    "workspace/skills",
+    ".hermes/skills",
+    ".hermes/logs",
+    ".hermes/audio_cache",
+    ".hermes/browser_screenshots",
+    ".hermes/sandboxes",
+    ".hermes/hermes-agent",
+    ".hermes/node",
+    ".hermes/skills.backup-",
+    # Source checkout metadata/docs that bloat archives without affecting restore state.
+    "hermes-agent/.git",
+    "hermes-agent/tests",
+    "hermes-agent/docs",
+    "hermes-agent/website",
+    "hermes-agent/optional-skills",
+    "hermes-agent/skills",
+    "hermes-agent/plugins",
+    "hermes-agent/__pycache__",
+)
 
 
 class CloneManagerError(RuntimeError):
@@ -245,6 +273,41 @@ def _ensure_root_dir(target: Path) -> None:
         _remove_path(target)
     target.mkdir(parents=True, exist_ok=True)
 
+
+def _migrate_legacy_crons_root() -> None:
+    legacy = LEGACY_SHARED_CRONS_ROOT
+    target = SHARED_CRONS_ROOT
+    if legacy == target:
+        return
+    if not (legacy.exists() or legacy.is_symlink()):
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.move(str(legacy), str(target))
+        return
+
+    if legacy.is_symlink():
+        _remove_path(legacy)
+        return
+    if not legacy.is_dir():
+        _remove_path(legacy)
+        return
+
+    for item in sorted(legacy.iterdir(), key=lambda p: p.name):
+        dst = target / item.name
+        if dst.exists() or dst.is_symlink():
+            continue
+        if item.is_symlink():
+            os.symlink(os.readlink(item), dst)
+            continue
+        if item.is_dir():
+            shutil.copytree(item, dst, symlinks=True)
+            continue
+        shutil.copy2(item, dst)
+    _remove_path(legacy)
+
+
 def _ensure_dirs() -> None:
     AGENTS_ROOT.mkdir(parents=True, exist_ok=True)
     ENVS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -260,11 +323,11 @@ def _ensure_dirs() -> None:
     PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
     _ensure_root_dir(SHARED_SCRIPTS_ROOT)
     _ensure_root_dir(PRIVATE_SCRIPTS_ROOT)
+    _migrate_legacy_crons_root()
     _ensure_root_dir(SHARED_CRONS_ROOT)
     _ensure_root_dir(SHARED_PLUGINS_ROOT)
     _ensure_root_dir(PRIVATE_PLUGINS_ROOT)
     _ensure_root_dir(SHARED_WIKI_ROOT)
-    _ensure_root_dir(PUBLIC_WIKI_ROOT)
     _ensure_root_dir(PRIVATE_SKILLS_ROOT)
     _ensure_root_dir(SHARED_MEMORY_ROOT)
 
@@ -707,7 +770,11 @@ def _archive_add_path(
             rel_name = raw_name
         rel_posix = str(PurePosixPath(rel_name))
         for prefix in cleaned_prefixes:
-            if rel_posix == prefix or rel_posix.startswith(f"{prefix}/"):
+            if (
+                rel_posix == prefix
+                or rel_posix.startswith(f"{prefix}/")
+                or (prefix.endswith("-") and rel_posix.startswith(prefix))
+            ):
                 return None
         return member
 
@@ -756,7 +823,9 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
     registry_present = False
     plugins_private_present = False
     scripts_private_present = False
+    crons_present = False
     skills_present = False
+    legacy_private_present = False
     member_count = 0
 
     with tarfile.open(archive_path, "r:*") as tf:
@@ -789,6 +858,9 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
                     continue
                 if len(parts) == 1:
                     continue
+                if len(parts) >= 2 and parts[1] == "private":
+                    legacy_private_present = True
+                    continue
                 if len(parts) >= 2 and parts[1] in {"envs", "nodes"}:
                     continue
                 raise CloneManagerError(
@@ -807,6 +879,10 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
 
             if parts[0] == "skills":
                 skills_present = True
+                continue
+
+            if parts[0] == "crons":
+                crons_present = True
                 continue
 
             if parts[0] == "scripts":
@@ -831,7 +907,9 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
         "registry_present": registry_present,
         "plugins_private_present": plugins_private_present,
         "scripts_private_present": scripts_private_present,
+        "crons_present": crons_present,
         "skills_present": skills_present,
+        "legacy_private_present": legacy_private_present,
         "member_count": member_count,
     }
 
@@ -1214,6 +1292,7 @@ def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> s
         f"- Private plugins root (host): {PRIVATE_PLUGINS_ROOT}",
         f"- Shared scripts root (host): {SHARED_SCRIPTS_ROOT}",
         f"- Private scripts root (host): {PRIVATE_SCRIPTS_ROOT}",
+        f"- Shared crons root (host): {SHARED_CRONS_ROOT}",
         "- Shared container plugin mounts: /local/plugins/public (ro), /local/plugins/private (rw)",
         "- Shared container script mounts: /local/scripts/public (ro), /local/scripts/private (rw)",
         f"- Bootstrap metadata: /local/.clone-meta/bootstrap.json",
@@ -1397,6 +1476,9 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     )
     overrides["DISCORD_USERS_DB"] = (
         _env_first_nonempty(env, "DISCORD_USERS_DB") or NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER
+    )
+    overrides["DISCORD_SETTINGS_FILE"] = (
+        _env_first_nonempty(env, "DISCORD_SETTINGS_FILE") or NODE_WORKSPACE_DISCORD_SETTINGS_IN_CONTAINER
     )
 
     discord_home = _effective_discord_home_channel(env)
@@ -1799,21 +1881,13 @@ def _is_wiki_enabled_env(env: Dict[str, str]) -> bool:
 
 
 def _ensure_shared_wiki_root() -> None:
-    PUBLIC_WIKI_ROOT.parent.mkdir(parents=True, exist_ok=True)
-    PUBLIC_WIKI_ROOT.mkdir(parents=True, exist_ok=True)
     SHARED_WIKI_ROOT.parent.mkdir(parents=True, exist_ok=True)
     SHARED_WIKI_ROOT.mkdir(parents=True, exist_ok=True)
-    placeholder_names = {".gitignore", ".gitkeep", ".keep", "README.md"}
-    if (
-        _dir_has_entries(PUBLIC_WIKI_ROOT, ignored_names=placeholder_names)
-        and not _dir_has_entries(SHARED_WIKI_ROOT, ignored_names=placeholder_names)
-    ):
-        _sync_dir(PUBLIC_WIKI_ROOT, SHARED_WIKI_ROOT, delete=False)
 
 
 def _sync_node_wiki_link(clone_root: Path, env: Dict[str, str], *, containerized: bool) -> None:
     node_wiki = clone_root / "wiki"
-    node_wiki_public = clone_root / "wiki-public"
+    legacy_node_wiki_public = clone_root / "wiki-public"
     workspace_wiki = clone_root / "workspace" / "wiki"
     if _is_wiki_enabled_env(env):
         _ensure_shared_wiki_root()
@@ -1823,25 +1897,21 @@ def _sync_node_wiki_link(clone_root: Path, env: Dict[str, str], *, containerized
             if node_wiki.exists() and not node_wiki.is_dir():
                 _remove_path(node_wiki)
             node_wiki.mkdir(parents=True, exist_ok=True)
-            if node_wiki_public.is_symlink():
-                _remove_path(node_wiki_public)
-            if node_wiki_public.exists() and not node_wiki_public.is_dir():
-                _remove_path(node_wiki_public)
-            node_wiki_public.mkdir(parents=True, exist_ok=True)
         else:
             _set_symlink(node_wiki, SHARED_WIKI_ROOT)
-            _set_symlink(node_wiki_public, PUBLIC_WIKI_ROOT)
     elif node_wiki.exists() or node_wiki.is_symlink():
         _remove_path(node_wiki)
-    if (not _is_wiki_enabled_env(env)) and (node_wiki_public.exists() or node_wiki_public.is_symlink()):
-        _remove_path(node_wiki_public)
+
+    # Legacy topology cleanup: nodes now expose a single wiki root.
+    if legacy_node_wiki_public.exists() or legacy_node_wiki_public.is_symlink():
+        _remove_path(legacy_node_wiki_public)
 
     # Always clean up the old workspace/wiki link from legacy layouts.
     if workspace_wiki.exists() or workspace_wiki.is_symlink():
         _remove_path(workspace_wiki)
 
 
-def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str) -> None:
+def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str, *, refresh_mirrors: bool = True) -> None:
     """Ensure worker node host tree has deterministic plugin/script mount anchors.
 
     Worker nodes (colmeio, catatau, etc.) access shared plugins and scripts
@@ -1880,6 +1950,20 @@ def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str) -> None
         "public": SHARED_SCRIPTS_ROOT,
         "private": PRIVATE_SCRIPTS_ROOT,
     }
+    host_mirrors: dict[str, tuple[Path, str]] = {
+        "skills": (
+            PRIVATE_SKILLS_ROOT,
+            "# Node Mount Mirror: skills\n\n"
+            "Host-visible mirror of shared skills mounted into worker containers.\n"
+            "Canonical source: /local/skills\n",
+        ),
+        "wiki": (
+            SHARED_WIKI_ROOT,
+            "# Node Mount Mirror: wiki\n\n"
+            "Host-visible mirror of shared private wiki data mounted at /local/wiki.\n"
+            "Canonical source: /local/plugins/private/wiki\n",
+        ),
+    }
 
     for subdir in ("plugins", "scripts"):
         subdir_path = clone_root / subdir
@@ -1894,10 +1978,20 @@ def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str) -> None
             if ns.is_symlink() or (ns.exists() and not ns.is_dir()):
                 _remove_path(ns)
             ns.mkdir(parents=True, exist_ok=True)
-            if subdir == "scripts":
+            if subdir == "scripts" and refresh_mirrors:
                 src = script_mirrors[namespace]
                 if src.exists():
                     _sync_dir(src, ns, delete=True)
+
+    for dirname, (src, note) in host_mirrors.items():
+        dst = clone_root / dirname
+        if dst.is_symlink() or (dst.exists() and not dst.is_dir()):
+            _remove_path(dst)
+        dst.mkdir(parents=True, exist_ok=True)
+        if refresh_mirrors and src.exists():
+            _sync_dir(src, dst, delete=True)
+        elif note.strip():
+            (dst / "README.md").write_text(note.strip() + "\n", encoding="utf-8")
 
     _set_symlink(clone_root / "cron", worker_crons)
 
@@ -2061,6 +2155,35 @@ def _seed_discord_state_file(
     _log(clone_name, f"created discord state file: {target_file}")
 
 
+def _parse_csv_env_list(value: str) -> list[str]:
+    return [entry.strip() for entry in str(value or "").split(",") if entry.strip()]
+
+
+def _seed_discord_settings_file(
+    *,
+    clone_root: Path,
+    clone_name: str = "",
+    env: Dict[str, str] | None = None,
+) -> None:
+    settings_path = clone_root / "workspace" / "discord" / "discord_settings.json"
+    if settings_path.exists():
+        return
+
+    env_data = env or {}
+    payload = {
+        "DISCORD_ALLOWED_USERS": _parse_csv_env_list(
+            _env_first_nonempty(env_data, "DISCORD_ALLOWED_USERS") or ""
+        ),
+        "DISCORD_AUTO_THREAD_IGNORE_CHANNELS": _parse_csv_env_list(
+            _env_first_nonempty(env_data, "DISCORD_AUTO_THREAD_IGNORE_CHANNELS") or ""
+        ),
+    }
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    if clone_name:
+        _log(clone_name, f"created discord settings file: {settings_path}")
+
+
 def _ensure_workspace_data_layout(clone_root: Path, clone_name: str = "") -> None:
     data_dir = clone_root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -2107,7 +2230,11 @@ def _ensure_workspace_data_layout(clone_root: Path, clone_name: str = "") -> Non
             pass
 
 
-def _sync_discord_runtime_layout(clone_root: Path, clone_name: str = "") -> None:
+def _sync_discord_runtime_layout(
+    clone_root: Path,
+    clone_name: str = "",
+    env: Dict[str, str] | None = None,
+) -> None:
     """Use private plugin runtime state and remove stale workspace mirrors."""
     shared_discord_root = _discord_private_dir(require_exists=False)
     shared_discord_root.mkdir(parents=True, exist_ok=True)
@@ -2125,10 +2252,12 @@ def _sync_discord_runtime_layout(clone_root: Path, clone_name: str = "") -> None
         seed_candidates=_discord_runtime_seed_candidates("discord_webhooks_table.json"),
     )
 
-    # Remove stale legacy mirrors.
-    workspace_discord = clone_root / "workspace" / "discord"
-    if workspace_discord.exists() or workspace_discord.is_symlink():
-        _remove_path(workspace_discord)
+    # Discord pairing/channel settings are now node-local source of truth.
+    _seed_discord_settings_file(
+        clone_root=clone_root,
+        clone_name=clone_name,
+        env=env,
+    )
 
 
 def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[str, str], env_path: Path) -> Dict[str, Any]:
@@ -2139,7 +2268,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
     - Lives under /local/agents/nodes/orchestrator/
     - Stores state in /local/agents/nodes/orchestrator/.hermes
     - Uses a clone-local hermes-agent runtime copy under node root
-    - Uses shared host assets via symlinks: /local/plugins, /local/scripts, and /local/scripts/private/crons/orchestrator
+    - Uses shared host assets via symlinks: /local/plugins, /local/scripts, and /local/crons/orchestrator
     - Can bootstrap other nodes
     """
     _log_spawn_event(clone_name, "orchestrator", "setup_start", f"clone_root={clone_root}")
@@ -2215,7 +2344,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
             f"source={state_source} dest={orchestrator_home}",
         )
 
-    _sync_discord_runtime_layout(clone_root, clone_name)
+    _sync_discord_runtime_layout(clone_root, clone_name, env)
     _ensure_workspace_data_layout(clone_root, clone_name)
     _sync_node_wiki_link(clone_root, env, containerized=False)
     try:
@@ -2906,7 +3035,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             _remove_path(legacy_path)
 
     _ensure_worker_shared_mount_links(clone_root, clone_name)
-    _sync_discord_runtime_layout(clone_root, clone_name)
+    _sync_discord_runtime_layout(clone_root, clone_name, env)
     _ensure_workspace_data_layout(clone_root, clone_name)
     _sync_node_wiki_link(clone_root, env, containerized=True)
     _write_node_runtime_contract(clone_root, clone_name, env)
@@ -3185,9 +3314,7 @@ def _build_docker_run_cmd(
     if _is_wiki_enabled_env(env):
         _ensure_shared_wiki_root()
         cmd.extend(["-e", "HERMES_WIKI_ROOT=/local/wiki"])
-        cmd.extend(["-e", "HERMES_WIKI_PUBLIC_ROOT=/local/wiki-public"])
         cmd.extend(["-v", f"{SHARED_WIKI_ROOT}:/local/wiki"])
-        cmd.extend(["-v", f"{PUBLIC_WIKI_ROOT}:/local/wiki-public:ro"])
 
     for key in sorted(runtime_env_overrides):
         value = str(runtime_env_overrides.get(key, "") or "")
@@ -3341,7 +3468,6 @@ def _orchestrator_start_gateway(
     proc_env["HERMES_AGENT_ROOT"] = str(runtime_agent_root)
     proc_env["HERMES_NODE_ROOT"] = str(clone_root)
     proc_env["HERMES_WIKI_ROOT"] = str(clone_root / "wiki")
-    proc_env["HERMES_WIKI_PUBLIC_ROOT"] = str(clone_root / "wiki-public")
     proc_env["PYTHONUNBUFFERED"] = "1"
 
     # Keep host-layer orchestrator behavior aligned with container nodes:
@@ -3544,7 +3670,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         missing_mounts = _missing_required_worker_mounts(container, clone_name, clone_root)
         status = str(state.get("status") or "").strip().lower()
         if status != "restarting" and not missing_mounts:
-            _ensure_worker_shared_mount_links(clone_root, clone_name)
+            _ensure_worker_shared_mount_links(clone_root, clone_name, refresh_mirrors=False)
             return {
                 "ok": True,
                 "action": "start",
@@ -4102,8 +4228,15 @@ def _discover_node_names() -> list[str]:
 
 def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any]:
     target_nodes: list[str]
+    skipped_nodes: list[str] = []
     if backup_all:
-        target_nodes = _discover_node_names()
+        discovered = _discover_node_names()
+        target_nodes = []
+        for node in discovered:
+            if _clone_env_path(node).exists():
+                target_nodes.append(node)
+            else:
+                skipped_nodes.append(node)
         if not target_nodes:
             raise CloneManagerError("no node profiles found to back up")
     else:
@@ -4176,7 +4309,7 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
             node_added = _archive_add_path(
                 tf,
                 node_root,
-                exclude_relative_prefixes=(".hermes/skills", "workspace/skills", "skills"),
+                exclude_relative_prefixes=NODE_BACKUP_EXCLUDE_PREFIXES,
             )
             if node_added is not None:
                 included.append(node_added)
@@ -4192,6 +4325,7 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
         "action": "backup",
         "scope": "all" if backup_all else "node",
         "nodes": target_nodes,
+        "skipped_nodes": skipped_nodes,
         "archive": str(archive_path),
         "size_bytes": int(size_bytes),
         "included_paths": included,
@@ -4235,14 +4369,43 @@ def _collect_restore_source(restore_root: Path) -> Dict[str, Any]:
             f"restore source has no registry/envs/nodes payload: {restore_root}"
         )
 
+    legacy_private_root = agents_root / "private"
+
     return {
         "agents_root": agents_root,
         "registry_path": registry_path if registry_path.exists() else None,
         "env_files": env_files,
         "node_dirs": node_dirs,
-        "private_scripts_path": (restore_root / "scripts" / "private") if (restore_root / "scripts" / "private").exists() else None,
-        "private_plugins_path": (restore_root / "plugins" / "private") if (restore_root / "plugins" / "private").exists() else None,
-        "skills_path": (restore_root / "skills") if (restore_root / "skills").exists() else None,
+        "private_scripts_path": (
+            (restore_root / "scripts" / "private")
+            if (restore_root / "scripts" / "private").exists()
+            else ((legacy_private_root / "scripts") if (legacy_private_root / "scripts").exists() else None)
+        ),
+        "private_plugins_path": (
+            (restore_root / "plugins" / "private")
+            if (restore_root / "plugins" / "private").exists()
+            else ((legacy_private_root / "plugins") if (legacy_private_root / "plugins").exists() else None)
+        ),
+        "skills_path": (
+            (restore_root / "skills")
+            if (restore_root / "skills").exists()
+            else ((legacy_private_root / "skills") if (legacy_private_root / "skills").exists() else None)
+        ),
+        "crons_path": (
+            (restore_root / "crons")
+            if (restore_root / "crons").exists()
+            else ((legacy_private_root / "crons") if (legacy_private_root / "crons").exists() else None)
+        ),
+        "legacy_shared_wiki_path": (
+            (legacy_private_root / "shared" / "wiki")
+            if (legacy_private_root / "shared" / "wiki").exists()
+            else None
+        ),
+        "legacy_shared_memory_path": (
+            (legacy_private_root / "shared" / "memory")
+            if (legacy_private_root / "shared" / "memory").exists()
+            else None
+        ),
     }
 
 
@@ -4269,6 +4432,9 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
         private_scripts_path: Path | None = source.get("private_scripts_path")
         private_plugins_path: Path | None = source.get("private_plugins_path")
         skills_path: Path | None = source.get("skills_path")
+        crons_path: Path | None = source.get("crons_path")
+        legacy_shared_wiki_path: Path | None = source.get("legacy_shared_wiki_path")
+        legacy_shared_memory_path: Path | None = source.get("legacy_shared_memory_path")
 
         target_nodes = sorted(set(env_files) | set(node_dirs))
         running_before: list[str] = []
@@ -4325,7 +4491,7 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
                     _remove_path(legacy_crons)
             else:
                 _ensure_worker_shared_mount_links(node_dst, node)
-            _sync_discord_runtime_layout(node_dst, node)
+            _sync_discord_runtime_layout(node_dst, node, node_env)
             _sync_node_wiki_link(node_dst, node_env, containerized=(restored_mode != 1))
             _log(node, f"restore applied from {resolved}")
             restored_nodes.append(node)
@@ -4335,6 +4501,18 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
             PRIVATE_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
             _sync_dir(private_plugins_path, PRIVATE_PLUGINS_ROOT, delete=False)
             restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
+        if isinstance(legacy_shared_wiki_path, Path) and legacy_shared_wiki_path.exists():
+            target = PRIVATE_PLUGINS_ROOT / "wiki"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True)
+            _sync_dir(legacy_shared_wiki_path, target, delete=False)
+            restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
+        if isinstance(legacy_shared_memory_path, Path) and legacy_shared_memory_path.exists():
+            target = PRIVATE_PLUGINS_ROOT / "memory"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.mkdir(parents=True, exist_ok=True)
+            _sync_dir(legacy_shared_memory_path, target, delete=False)
+            restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
 
         restored_private_scripts_root = ""
         if isinstance(private_scripts_path, Path) and private_scripts_path.exists():
@@ -4342,9 +4520,7 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
             _sync_dir(private_scripts_path, PRIVATE_SCRIPTS_ROOT, delete=False)
             restored_private_scripts_root = str(PRIVATE_SCRIPTS_ROOT)
 
-        restored_memory_root = ""
-        if SHARED_MEMORY_ROOT.exists():
-            restored_memory_root = str(SHARED_MEMORY_ROOT)
+        restored_memory_root = str(SHARED_MEMORY_ROOT) if SHARED_MEMORY_ROOT.exists() else ""
 
         restored_skills_root = ""
         if isinstance(skills_path, Path) and skills_path.exists():
@@ -4353,7 +4529,14 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
             _sync_dir(skills_path, PRIVATE_SKILLS_ROOT, delete=False)
             restored_skills_root = str(PRIVATE_SKILLS_ROOT)
 
-        restored_crons_root = str(SHARED_CRONS_ROOT) if SHARED_CRONS_ROOT.exists() else ""
+        restored_crons_root = ""
+        if isinstance(crons_path, Path) and crons_path.exists():
+            SHARED_CRONS_ROOT.parent.mkdir(parents=True, exist_ok=True)
+            SHARED_CRONS_ROOT.mkdir(parents=True, exist_ok=True)
+            _sync_dir(crons_path, SHARED_CRONS_ROOT, delete=False)
+            restored_crons_root = str(SHARED_CRONS_ROOT)
+        elif SHARED_CRONS_ROOT.exists():
+            restored_crons_root = str(SHARED_CRONS_ROOT)
 
         restarted_nodes: list[str] = []
         restart_errors: Dict[str, str] = {}

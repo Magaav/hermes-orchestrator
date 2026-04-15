@@ -115,8 +115,7 @@ class WikiEngineTests(unittest.TestCase):
              patch.object(CLONE_MANAGER, "PRIVATE_SCRIPTS_ROOT", root / "scripts" / "private"), \
              patch.object(CLONE_MANAGER, "SHARED_PLUGINS_ROOT", root / "plugins"), \
              patch.object(CLONE_MANAGER, "PRIVATE_PLUGINS_ROOT", root / "plugins-private"), \
-             patch.object(CLONE_MANAGER, "SHARED_WIKI_ROOT", root / "plugins-private" / "wiki"), \
-             patch.object(CLONE_MANAGER, "PUBLIC_WIKI_ROOT", root / "plugins" / "wiki"):
+             patch.object(CLONE_MANAGER, "SHARED_WIKI_ROOT", root / "plugins-private" / "wiki"):
             cmd = CLONE_MANAGER._build_docker_run_cmd(
                 "test-node",
                 clone_root,
@@ -131,7 +130,7 @@ class WikiEngineTests(unittest.TestCase):
         joined = " ".join(str(part) for part in cmd)
         self.assertIn("/local/wiki", joined)
         self.assertIn("HERMES_WIKI_ROOT=/local/wiki", joined)
-        self.assertIn("HERMES_WIKI_PUBLIC_ROOT=/local/wiki-public", joined)
+        self.assertNotIn("/local/wiki-public", joined)
 
         env_path.write_text("NODE_WIKI_ENABLED=false\n", encoding="utf-8")
         with patch.object(CLONE_MANAGER, "_ensure_node_log_topology", lambda *args, **kwargs: None), \
@@ -143,8 +142,7 @@ class WikiEngineTests(unittest.TestCase):
              patch.object(CLONE_MANAGER, "PRIVATE_SCRIPTS_ROOT", root / "scripts" / "private"), \
              patch.object(CLONE_MANAGER, "SHARED_PLUGINS_ROOT", root / "plugins"), \
              patch.object(CLONE_MANAGER, "PRIVATE_PLUGINS_ROOT", root / "plugins-private"), \
-             patch.object(CLONE_MANAGER, "SHARED_WIKI_ROOT", root / "plugins-private" / "wiki"), \
-             patch.object(CLONE_MANAGER, "PUBLIC_WIKI_ROOT", root / "plugins" / "wiki"):
+             patch.object(CLONE_MANAGER, "SHARED_WIKI_ROOT", root / "plugins-private" / "wiki"):
             cmd_disabled = CLONE_MANAGER._build_docker_run_cmd(
                 "test-node-off",
                 clone_root,
@@ -157,6 +155,48 @@ class WikiEngineTests(unittest.TestCase):
             )
 
         self.assertNotIn("/local/wiki", " ".join(str(part) for part in cmd_disabled))
+
+    def test_clone_manager_worker_host_mirrors_include_skills_and_wikis(self):
+        root = self._temp_root()
+        clone_root = root / "node"
+        clone_root.mkdir(parents=True, exist_ok=True)
+
+        scripts_public = root / "scripts" / "public"
+        scripts_private = root / "scripts" / "private"
+        skills_root = root / "skills"
+        private_wiki = root / "plugins-private" / "wiki"
+        crons_root = root / "crons"
+
+        for path in (scripts_public, scripts_private, skills_root, private_wiki, crons_root):
+            path.mkdir(parents=True, exist_ok=True)
+
+        (scripts_public / "hello.sh").write_text("echo public\n", encoding="utf-8")
+        (scripts_private / "secret.sh").write_text("echo private\n", encoding="utf-8")
+        (skills_root / "skill.md").write_text("# skill\n", encoding="utf-8")
+        (private_wiki / "index.md").write_text("# private wiki\n", encoding="utf-8")
+        # Legacy topology migration should remove this path when normalizing links.
+        (clone_root / "wiki-public").mkdir(parents=True, exist_ok=True)
+        (clone_root / "wiki-public" / "legacy.md").write_text("legacy\n", encoding="utf-8")
+
+        with patch.object(CLONE_MANAGER, "SHARED_SCRIPTS_ROOT", scripts_public), \
+             patch.object(CLONE_MANAGER, "PRIVATE_SCRIPTS_ROOT", scripts_private), \
+             patch.object(CLONE_MANAGER, "PRIVATE_SKILLS_ROOT", skills_root), \
+             patch.object(CLONE_MANAGER, "SHARED_WIKI_ROOT", private_wiki), \
+             patch.object(CLONE_MANAGER, "SHARED_CRONS_ROOT", crons_root):
+            CLONE_MANAGER._ensure_worker_shared_mount_links(clone_root, "worker-a")
+            CLONE_MANAGER._sync_node_wiki_link(
+                clone_root,
+                {"NODE_WIKI_ENABLED": "true"},
+                containerized=True,
+            )
+
+        self.assertTrue((clone_root / "scripts" / "public" / "hello.sh").exists())
+        self.assertTrue((clone_root / "scripts" / "private" / "secret.sh").exists())
+        self.assertTrue((clone_root / "skills" / "skill.md").exists())
+        self.assertTrue((clone_root / "wiki" / "index.md").exists())
+        self.assertFalse((clone_root / "wiki-public").exists())
+        self.assertTrue((clone_root / "cron").is_symlink())
+        self.assertEqual((clone_root / "cron").resolve(), (crons_root / "worker-a").resolve())
 
     def test_proposal_pipeline_moderation_and_consolidation_gate(self):
         root, settings, node_root = self._settings(enabled=True)
