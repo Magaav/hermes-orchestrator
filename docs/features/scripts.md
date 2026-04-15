@@ -20,6 +20,7 @@ The scripts feature is the operational command and automation layer of Hermes Or
 - Lifecycle engine: `/local/scripts/public/clone/clone_manager.py`
 - Backup compatibility wrappers: `/local/scripts/public/backup/*.sh`
 - Canonical local backup scripts: `/local/scripts/private/backup/*.sh`
+- Orchestrator backup retention cron payload: `/local/crons/orchestrator/backup_daily_brt.sh`
 
 Node mount behavior:
 
@@ -31,6 +32,7 @@ Node mount behavior:
 
 - Plugins in `/local/plugins/public` call scripts for startup patching, backup dispatch, and lifecycle orchestration.
 - Node profiles in `/local/agents/envs/*.env` configure script-driven behavior.
+- `NODE_TIME_ZONE` from node env profiles aligns scheduler/runtime time (mapped to `HERMES_TIMEZONE`).
 - Backup and restore workflows include script-private state plus shared cron roots.
 
 ## Related Docs

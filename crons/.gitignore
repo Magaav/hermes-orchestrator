@@ -1,0 +1,8 @@
+# Node cron runtime state only.
+*
+!.gitignore
+!README.md
+!orchestrator/
+orchestrator/*
+!orchestrator/backup_daily_brt.sh
+!orchestrator/backup_daily_brt.cron

@@ -35,6 +35,7 @@ Primary keys:
 - `HERMES_YOLO_MODE` (optional, `1` to bypass command approvals)
 - `NODE_STATE`
 - `NODE_STATE_FROM_BACKUP_PATH`
+- `NODE_TIME_ZONE` (IANA timezone, for example `America/Sao_Paulo`)
 - `NODE_WIKI_ENABLED`
 - `OPENVIKING_ENABLED`
 - `OPENVIKING_ENDPOINT`
@@ -45,6 +46,7 @@ Primary keys:
 Defaults handled automatically by orchestrator:
 
 - `NODE_NAME` inferred from `<node>.env` filename
+- `NODE_TIME_ZONE` is injected as `HERMES_TIMEZONE` (and `TZ`) at runtime
 - node paths (`HERMES_NODE_ROOT`, `HERMES_HOME`, `HERMES_DATA_DIR`) derived from standard topology
 - `COLMEIO_LOGS_DIR` defaults to `/local/logs/nodes/<node>`
 - `HERMES_WIKI_ROOT` resolves to `/local/wiki` inside worker containers and `/local/agents/nodes/<node>/wiki` on host

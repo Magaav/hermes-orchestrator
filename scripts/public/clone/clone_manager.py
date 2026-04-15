@@ -198,6 +198,7 @@ NODE_WORKSPACE_DISCORD_SETTINGS_IN_CONTAINER = "/local/workspace/discord/discord
 # Keep variable name stable to avoid touching unrelated call sites.
 NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = "/local/plugins/private/discord/discord_users.json"
 NODE_SKILLS_PATH_IN_CONTAINER = "/local/skills"
+ORCHESTRATOR_BACKUP_CRON_SCRIPT = "backup_daily_brt.sh"
 
 VALID_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -222,6 +223,8 @@ NODE_BACKUP_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "cron",
     "crons",
     # Node-local transient/runtime noise.
+    ".runtime",
+    "hermes-agent",
     "logs",
     ".cache",
     ".local",
@@ -231,6 +234,7 @@ NODE_BACKUP_EXCLUDE_PREFIXES: tuple[str, ...] = (
     ".hermes/audio_cache",
     ".hermes/browser_screenshots",
     ".hermes/sandboxes",
+    ".hermes/sessions/request_dump_",
     ".hermes/hermes-agent",
     ".hermes/node",
     ".hermes/skills.backup-",
@@ -325,6 +329,7 @@ def _ensure_dirs() -> None:
     _ensure_root_dir(PRIVATE_SCRIPTS_ROOT)
     _migrate_legacy_crons_root()
     _ensure_root_dir(SHARED_CRONS_ROOT)
+    _ensure_orchestrator_backup_cron_script()
     _ensure_root_dir(SHARED_PLUGINS_ROOT)
     _ensure_root_dir(PRIVATE_PLUGINS_ROOT)
     _ensure_root_dir(SHARED_WIKI_ROOT)
@@ -345,6 +350,58 @@ def _parent_hermes_home_source() -> Path:
 
 def _orchestrator_cron_host_dir(clone_name: str = "orchestrator") -> Path:
     return SHARED_CRONS_ROOT / clone_name
+
+
+def _orchestrator_backup_cron_script_path() -> Path:
+    return _orchestrator_cron_host_dir("orchestrator") / ORCHESTRATOR_BACKUP_CRON_SCRIPT
+
+
+def _orchestrator_backup_cron_script_content() -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "\n"
+        "# Daily backup policy (00:00 America/Sao_Paulo):\n"
+        "# - Keep only the latest 3 archives under /local/backups\n"
+        "# - Prune old request_dump_* files before archiving\n"
+        "export NODE_TIME_ZONE=\"${NODE_TIME_ZONE:-America/Sao_Paulo}\"\n"
+        "export HERMES_TIMEZONE=\"${HERMES_TIMEZONE:-${NODE_TIME_ZONE}}\"\n"
+        "export TZ=\"${TZ:-${HERMES_TIMEZONE}}\"\n"
+        "export HERMES_BACKUP_KEEP_LAST=\"${HERMES_BACKUP_KEEP_LAST:-3}\"\n"
+        "export HERMES_REQUEST_DUMP_KEEP_DAYS=\"${HERMES_REQUEST_DUMP_KEEP_DAYS:-14}\"\n"
+        "export HERMES_REQUEST_DUMP_KEEP_LAST=\"${HERMES_REQUEST_DUMP_KEEP_LAST:-200}\"\n"
+        "\n"
+        "/local/scripts/public/clone/horc.sh backup all\n"
+    )
+
+
+def _ensure_orchestrator_backup_cron_script() -> Path:
+    cron_dir = _orchestrator_cron_host_dir("orchestrator")
+    cron_dir.mkdir(parents=True, exist_ok=True)
+    script_path = _orchestrator_backup_cron_script_path()
+    content = _orchestrator_backup_cron_script_content()
+    current = script_path.read_text(encoding="utf-8") if script_path.exists() else ""
+    if current != content:
+        script_path.write_text(content, encoding="utf-8")
+    try:
+        script_path.chmod(0o755)
+    except Exception:
+        pass
+
+    schedule_path = cron_dir / "backup_daily_brt.cron"
+    schedule_content = (
+        "# Cron schedule (BRT): daily at 00:00\n"
+        "CRON_TZ=America/Sao_Paulo\n"
+        "0 0 * * * /local/crons/orchestrator/backup_daily_brt.sh\n"
+    )
+    if not schedule_path.exists() or schedule_path.read_text(encoding="utf-8") != schedule_content:
+        schedule_path.write_text(schedule_content, encoding="utf-8")
+    try:
+        schedule_path.chmod(0o644)
+    except Exception:
+        pass
+
+    return script_path
 
 
 def _orchestrator_memory_home(clone_name: str = "orchestrator") -> Path:
@@ -737,11 +794,15 @@ def _archive_add_path(
     tf: tarfile.TarFile,
     source: Path,
     *,
+    archive_name: str | None = None,
     exclude_relative_prefixes: tuple[str, ...] = (),
 ) -> str | None:
     if not source.exists():
         return None
-    arcname = _to_archive_relative(source)
+    if archive_name:
+        arcname = str(PurePosixPath(str(archive_name).strip("/")))
+    else:
+        arcname = _to_archive_relative(source)
     archive_source = source
     if source.is_symlink():
         try:
@@ -769,11 +830,14 @@ def _archive_add_path(
         else:
             rel_name = raw_name
         rel_posix = str(PurePosixPath(rel_name))
+        rel_parts = PurePosixPath(rel_posix).parts
+        if "__pycache__" in rel_parts or rel_posix.endswith((".pyc", ".pyo")):
+            return None
         for prefix in cleaned_prefixes:
             if (
                 rel_posix == prefix
                 or rel_posix.startswith(f"{prefix}/")
-                or (prefix.endswith("-") and rel_posix.startswith(prefix))
+                or (prefix and prefix[-1] in {"-", "_"} and rel_posix.startswith(prefix))
             ):
                 return None
         return member
@@ -798,6 +862,150 @@ def _resolve_backup_path(raw_path: str) -> Path:
 
     tried = ", ".join(str(c) for c in candidates)
     raise CloneManagerError(f"backup path not found: {value} (tried: {tried})")
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _prune_request_dump_files(
+    node: str,
+    node_root: Path,
+    *,
+    keep_last: int,
+    keep_days: int,
+) -> Dict[str, Any]:
+    sessions_dir = node_root / ".hermes" / "sessions"
+    if not sessions_dir.exists() or not sessions_dir.is_dir():
+        return {
+            "node": node,
+            "sessions_dir": str(sessions_dir),
+            "scanned": 0,
+            "removed": 0,
+            "removed_bytes": 0,
+            "kept": 0,
+            "keep_last": max(0, keep_last),
+            "keep_days": max(0, keep_days),
+            "policy_enabled": False,
+        }
+
+    keep_last = max(0, int(keep_last))
+    keep_days = max(0, int(keep_days))
+    policy_enabled = keep_last > 0 or keep_days > 0
+    if not policy_enabled:
+        files = [
+            path
+            for path in sessions_dir.glob("request_dump_*")
+            if path.is_file()
+        ]
+        return {
+            "node": node,
+            "sessions_dir": str(sessions_dir),
+            "scanned": len(files),
+            "removed": 0,
+            "removed_bytes": 0,
+            "kept": len(files),
+            "keep_last": keep_last,
+            "keep_days": keep_days,
+            "policy_enabled": False,
+        }
+
+    snapshots: list[tuple[Path, float, int]] = []
+    for path in sessions_dir.glob("request_dump_*"):
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except Exception:
+            continue
+        snapshots.append((path, float(stat.st_mtime), int(stat.st_size)))
+
+    snapshots.sort(key=lambda item: item[1], reverse=True)
+    cutoff_ts = (
+        time.time() - (keep_days * 86400)
+        if keep_days > 0
+        else None
+    )
+    removed = 0
+    removed_bytes = 0
+
+    for idx, (path, mtime, size) in enumerate(snapshots):
+        should_remove = False
+        if keep_last > 0 and idx >= keep_last:
+            should_remove = True
+        if cutoff_ts is not None and mtime < cutoff_ts:
+            should_remove = True
+        if not should_remove:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+            removed_bytes += size
+        except Exception:
+            continue
+
+    scanned = len(snapshots)
+    kept = max(0, scanned - removed)
+    return {
+        "node": node,
+        "sessions_dir": str(sessions_dir),
+        "scanned": scanned,
+        "removed": removed,
+        "removed_bytes": removed_bytes,
+        "kept": kept,
+        "keep_last": keep_last,
+        "keep_days": keep_days,
+        "policy_enabled": policy_enabled,
+    }
+
+
+def _prune_backup_archives(*, keep_last: int) -> Dict[str, Any]:
+    keep_last = max(0, int(keep_last))
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for pattern in ("horc-backup-*.tar.gz", "horc-backup-*.tgz", "horc-backup-*.tar"):
+        for path in BACKUPS_ROOT.glob(pattern):
+            if not path.is_file():
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(path)
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if keep_last <= 0:
+        return {
+            "enabled": False,
+            "keep_last": 0,
+            "scanned": len(candidates),
+            "deleted": 0,
+            "errors": {},
+        }
+
+    stale = candidates[keep_last:]
+    deleted = 0
+    errors: Dict[str, str] = {}
+    for path in stale:
+        try:
+            path.unlink()
+            deleted += 1
+        except Exception as exc:
+            errors[str(path)] = str(exc)
+
+    return {
+        "enabled": True,
+        "keep_last": keep_last,
+        "scanned": len(candidates),
+        "deleted": deleted,
+        "errors": errors,
+    }
 
 
 def _is_safe_archive_member(name: str) -> bool:
@@ -826,6 +1034,9 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
     crons_present = False
     skills_present = False
     legacy_private_present = False
+    runtime_seed_hermes_present = False
+    runtime_seed_venv_present = False
+    runtime_seed_uv_present = False
     member_count = 0
 
     with tarfile.open(archive_path, "r:*") as tf:
@@ -895,6 +1106,22 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
                     f"unsupported path in backup archive: {member_name}"
                 )
 
+            if parts[0] == "runtime_seed":
+                if len(parts) == 1:
+                    continue
+                if parts[1] == "hermes-agent":
+                    runtime_seed_hermes_present = True
+                    continue
+                if parts[1] == "venv":
+                    runtime_seed_venv_present = True
+                    continue
+                if parts[1] == "uv":
+                    runtime_seed_uv_present = True
+                    continue
+                raise CloneManagerError(
+                    f"unsupported path in backup archive: {member_name}"
+                )
+
             raise CloneManagerError(
                 f"unsupported path in backup archive: {member_name}"
             )
@@ -910,6 +1137,9 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
         "crons_present": crons_present,
         "skills_present": skills_present,
         "legacy_private_present": legacy_private_present,
+        "runtime_seed_hermes_present": runtime_seed_hermes_present,
+        "runtime_seed_venv_present": runtime_seed_venv_present,
+        "runtime_seed_uv_present": runtime_seed_uv_present,
         "member_count": member_count,
     }
 
@@ -1279,6 +1509,7 @@ def _resolve_state_mode_info(env: Dict[str, str]) -> tuple[int | None, str]:
 def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> str:
     state_code, state_label = _resolve_state_mode_info(env)
     role = "orchestrator-control-plane" if state_code == 1 else "worker-node"
+    node_timezone = _env_first_nonempty(env, "NODE_TIME_ZONE", "HERMES_TIMEZONE") or "system-default"
     lines = [
         "# Node Runtime Contract",
         "",
@@ -1293,6 +1524,7 @@ def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> s
         f"- Shared scripts root (host): {SHARED_SCRIPTS_ROOT}",
         f"- Private scripts root (host): {PRIVATE_SCRIPTS_ROOT}",
         f"- Shared crons root (host): {SHARED_CRONS_ROOT}",
+        f"- Node timezone: {node_timezone} (exported as HERMES_TIMEZONE)",
         "- Shared container plugin mounts: /local/plugins/public (ro), /local/plugins/private (rw)",
         "- Shared container script mounts: /local/scripts/public (ro), /local/scripts/private (rw)",
         f"- Bootstrap metadata: /local/.clone-meta/bootstrap.json",
@@ -1461,6 +1693,10 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     overrides: Dict[str, str] = {}
     node_logs_dir = _node_log_dir(clone_name)
     overrides["NODE_NAME"] = _env_first_nonempty(env, "NODE_NAME") or clone_name
+    node_timezone = _env_first_nonempty(env, "NODE_TIME_ZONE", "HERMES_TIMEZONE")
+    if node_timezone:
+        overrides["HERMES_TIMEZONE"] = node_timezone
+        overrides["TZ"] = node_timezone
 
     overrides["COLMEIO_PROJECT_DIR"] = (
         _env_first_nonempty(env, "COLMEIO_PROJECT_DIR") or NODE_WORKSPACE_ROOT_IN_CONTAINER
@@ -4253,6 +4489,8 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
     included: list[str] = []
     missing: list[str] = []
     included_global: list[str] = []
+    included_runtime_seed: list[str] = []
+    request_dump_pruning: Dict[str, Any] = {}
 
     global_candidates: list[Path] = [
         PRIVATE_SCRIPTS_ROOT,
@@ -4271,6 +4509,18 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
                 SHARED_CRONS_ROOT / node_name,
             ]
         )
+
+    dump_keep_last = _int_env("HERMES_REQUEST_DUMP_KEEP_LAST", 200)
+    dump_keep_days = _int_env("HERMES_REQUEST_DUMP_KEEP_DAYS", 14)
+    for node in target_nodes:
+        prune_meta = _prune_request_dump_files(
+            node,
+            _clone_root_path(node),
+            keep_last=dump_keep_last,
+            keep_days=dump_keep_days,
+        )
+        if prune_meta.get("scanned", 0) > 0 or prune_meta.get("policy_enabled"):
+            request_dump_pruning[node] = prune_meta
 
     with tarfile.open(archive_path, "w:gz") as tf:
         registry_added = _archive_add_path(tf, REGISTRY_PATH)
@@ -4296,6 +4546,37 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
                 included_global.append(added)
                 seen_global_roots.append(resolved)
 
+        runtime_seed_specs = [
+            {
+                "source": HERMES_SOURCE_ROOT,
+                "archive_name": "runtime_seed/hermes-agent",
+                "exclude": (".venv", ".pytest_cache"),
+            },
+            {
+                "source": HERMES_SOURCE_ROOT / ".venv",
+                "archive_name": "runtime_seed/venv",
+                "exclude": (),
+            },
+            {
+                "source": PARENT_UV_STORE,
+                "archive_name": "runtime_seed/uv",
+                "exclude": (),
+            },
+        ]
+        for spec in runtime_seed_specs:
+            runtime_added = _archive_add_path(
+                tf,
+                Path(spec["source"]),
+                archive_name=str(spec["archive_name"]),
+                exclude_relative_prefixes=tuple(spec["exclude"]),
+            )
+            if runtime_added is not None:
+                included.append(runtime_added)
+                included_global.append(runtime_added)
+                included_runtime_seed.append(runtime_added)
+            else:
+                missing.append(str(spec["source"]))
+
         for node in target_nodes:
             env_path = _clone_env_path(node)
             node_root = _clone_root_path(node)
@@ -4316,6 +4597,9 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
             else:
                 missing.append(str(node_root))
 
+    backup_retention = _prune_backup_archives(
+        keep_last=_int_env("HERMES_BACKUP_KEEP_LAST", 0),
+    )
     size_bytes = archive_path.stat().st_size if archive_path.exists() else 0
     for node in target_nodes:
         _log(node, f"backup created: {archive_path}")
@@ -4330,7 +4614,10 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
         "size_bytes": int(size_bytes),
         "included_paths": included,
         "included_global_paths": included_global,
+        "included_runtime_seed_paths": included_runtime_seed,
         "missing_paths": missing,
+        "request_dump_pruning": request_dump_pruning,
+        "backup_retention": backup_retention,
     }
 
 
@@ -4370,6 +4657,7 @@ def _collect_restore_source(restore_root: Path) -> Dict[str, Any]:
         )
 
     legacy_private_root = agents_root / "private"
+    runtime_seed_root = restore_root / "runtime_seed"
 
     return {
         "agents_root": agents_root,
@@ -4406,6 +4694,21 @@ def _collect_restore_source(restore_root: Path) -> Dict[str, Any]:
             if (legacy_private_root / "shared" / "memory").exists()
             else None
         ),
+        "runtime_seed_hermes_path": (
+            (runtime_seed_root / "hermes-agent")
+            if (runtime_seed_root / "hermes-agent").exists()
+            else None
+        ),
+        "runtime_seed_venv_path": (
+            (runtime_seed_root / "venv")
+            if (runtime_seed_root / "venv").exists()
+            else None
+        ),
+        "runtime_seed_uv_path": (
+            (runtime_seed_root / "uv")
+            if (runtime_seed_root / "uv").exists()
+            else None
+        ),
     }
 
 
@@ -4435,6 +4738,9 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
         crons_path: Path | None = source.get("crons_path")
         legacy_shared_wiki_path: Path | None = source.get("legacy_shared_wiki_path")
         legacy_shared_memory_path: Path | None = source.get("legacy_shared_memory_path")
+        runtime_seed_hermes_path: Path | None = source.get("runtime_seed_hermes_path")
+        runtime_seed_venv_path: Path | None = source.get("runtime_seed_venv_path")
+        runtime_seed_uv_path: Path | None = source.get("runtime_seed_uv_path")
 
         target_nodes = sorted(set(env_files) | set(node_dirs))
         running_before: list[str] = []
@@ -4469,7 +4775,29 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
                 pass
             restored_envs.append(str(env_dst))
 
+        restored_runtime_seed: Dict[str, str] = {}
+        if isinstance(runtime_seed_hermes_path, Path) and runtime_seed_hermes_path.exists():
+            HERMES_SOURCE_ROOT.parent.mkdir(parents=True, exist_ok=True)
+            _sync_dir(runtime_seed_hermes_path, HERMES_SOURCE_ROOT, delete=True)
+            restored_runtime_seed["hermes_agent_root"] = str(HERMES_SOURCE_ROOT)
+        if isinstance(runtime_seed_venv_path, Path) and runtime_seed_venv_path.exists():
+            target_venv = HERMES_SOURCE_ROOT / ".venv"
+            target_venv.parent.mkdir(parents=True, exist_ok=True)
+            _sync_dir(runtime_seed_venv_path, target_venv, delete=True)
+            restored_runtime_seed["seed_venv"] = str(target_venv)
+        if isinstance(runtime_seed_uv_path, Path) and runtime_seed_uv_path.exists():
+            PARENT_UV_STORE.parent.mkdir(parents=True, exist_ok=True)
+            _sync_dir(runtime_seed_uv_path, PARENT_UV_STORE, delete=True)
+            restored_runtime_seed["seed_uv_store"] = str(PARENT_UV_STORE)
+
+        runtime_seed_source: Path | None
+        try:
+            runtime_seed_source = _parent_hermes_agent_source(clone_name="orchestrator")
+        except CloneManagerError:
+            runtime_seed_source = None
+
         restored_nodes: list[str] = []
+        runtime_reseeded_nodes: list[str] = []
         for node, node_src in sorted(node_dirs.items()):
             node_dst = CLONES_ROOT / node
             if node_dst.exists() or node_dst.is_symlink():
@@ -4491,6 +4819,29 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
                     _remove_path(legacy_crons)
             else:
                 _ensure_worker_shared_mount_links(node_dst, node)
+
+            runtime_missing = (
+                not (node_dst / "hermes-agent" / "cli.py").exists()
+                or not (node_dst / RUNTIME_UV_REL).exists()
+            )
+            if runtime_missing:
+                if runtime_seed_source is None:
+                    raise CloneManagerError(
+                        "restore payload requires runtime reseed but no seed source is available. "
+                        "Expected /local/hermes-agent or runtime_seed/hermes-agent in the backup."
+                    )
+                if restored_mode == 1:
+                    _prepare_orchestrator_runtime_agent_tree(
+                        clone_name=node,
+                        clone_root=node_dst,
+                        source_tree=runtime_seed_source,
+                    )
+                    _ensure_orchestrator_runtime(node)
+                else:
+                    _seed_code_tree(runtime_seed_source, node_dst / "hermes-agent")
+                    _seed_clone_runtime(node_dst, allow_parent_seed=True)
+                runtime_reseeded_nodes.append(node)
+
             _sync_discord_runtime_layout(node_dst, node, node_env)
             _sync_node_wiki_link(node_dst, node_env, containerized=(restored_mode != 1))
             _log(node, f"restore applied from {resolved}")
@@ -4565,6 +4916,8 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
         "restored_memory_root": restored_memory_root,
         "restored_skills_root": restored_skills_root,
         "restored_crons_root": restored_crons_root,
+        "restored_runtime_seed": restored_runtime_seed,
+        "runtime_reseeded_nodes": runtime_reseeded_nodes,
         "stopped_before_restore": running_before,
         "stop_results": stop_results,
         "restarted_after_restore": restarted_nodes,

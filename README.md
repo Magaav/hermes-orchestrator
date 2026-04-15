@@ -3,7 +3,22 @@
 ![Hermes Orchestrator Hero](docs/assets/hero.png)
 **Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Feature Docs](#feature-docs) | [Command Reference](docs/commands/horc.md) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
-Hermes Orchestrator is a lightweight host-level operational layer for running Hermes agents at scale: spawning isolated nodes, managing environments, handling upgrades/rollbacks, centralizing logs, and coordinating multi-agent workflows.
+A control plane for managing fleets of Hermes agents across infrastructure.
+
+                ┌───────────────────┐
+                │ Hermes Workspace  │
+                │  (UI / Discord)   │
+                └─────────┬─────────┘
+                          │
+                ┌─────────▼───────────┐
+                │ Hermes Orchestrator │
+                │(Fleet Control Plane)│
+                └─────────┬───────────┘
+                          │
+        ┌────────────┬────────────┬────────────┐
+        │ Agent Node │ Agent Node │ Agent Node │
+        │   Sales    │   DevOps   │  Research  │
+        └────────────┴────────────┴────────────┘
 
 Hermes Agent focuses on reasoning and tool execution inside a single runtime.
 Hermes Orchestrator focuses on operating many Hermes runtimes safely and reliably.
@@ -32,11 +47,14 @@ The orchestrator allows Hermes agents to operate as a coordinated distributed sy
 
 ## Key Capabilities
 
-- **Agent Fleet Management:** spawn Hermes nodes on demand; start, stop, restart, and delete nodes; isolate environments per tenant/project.
-- **Operational Safety:** upgrade agents safely; rollback node environments; maintain node-local runtime copies.
-- **Observability:** centralized logging; attention-level warning mirrors; skill execution tracing.
-- **Infrastructure Automation:** shared scripts/plugins; centralized cron orchestration; automated maintenance workflows.
-- **Multi-Agent Systems:** orchestrate multiple Hermes runtimes; enable cooperation patterns; maintain operational boundaries.
+- **Fleet management of Hermes agents:** spawn Hermes nodes on demand; start, stop, restart, and delete nodes; isolate environments per tenant/project.
+- **Node isolation:** each agent runs in its own environment with dedicated configuration and resources.
+- **Shared host capabilities:** expose common scripts, tools, and host-level assets to all nodes.
+- **Plugin propagation:** distribute and update plugins consistently across the entire fleet.
+- **Fleet-wide upgrades:** perform coordinated upgrades and rollbacks across nodes.
+- **Observability & logs:** centralized metrics, logs, and health monitoring for all agents.
+- **Policy enforcement:** enforce operational rules and guardrails across the fleet.
+- **Secrets management:** securely manage environment variables, credentials, and per-node secrets.
 
 ## Install
 
@@ -143,10 +161,6 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 │   ├── public/       # canonical git-tracked plugin code
 │   └── private/      # canonical local-only plugin runtime/config
 ├── skills/           # canonical shared mutable skills pool
-├── state/        # deployment-specific orchestrator state (local-first)
-│   └── orchestrator/
-│       ├── backup_nodes_to_gdrive.env.example
-│       └── backup_nodes_to_gdrive.env # local runtime config (not tracked)
 ├── backups/ # used for rollback/versioning
 └── logs/    # nodes centralized debugging interface
     ├── nodes/
@@ -178,6 +192,7 @@ Important characteristics:
 - `/local/scripts/public` and `/local/plugins/public` are the reusable/public framework surface.
 - `/local/scripts/private` and `/local/plugins/private` are deployment-local script/plugin state surfaces.
 - `/local/crons` is the canonical cron runtime root consumed by every node via `/local/agents/nodes/<node>/cron`.
+- `/local/crons/orchestrator/backup_daily_brt.sh` is the default orchestrator backup+retention cron payload.
 - `/local/skills` is the shared mutable skills pool mounted across nodes.
 - `/local/state` is for orchestrator-local values and implementation assumptions.
 
@@ -198,6 +213,7 @@ See more: [horc command reference](docs/commands/horc.md)
 Default `horc start` target is `orchestrator` and it reads:
 - `/local/agents/envs/orchestrator.env` (auto-created from `agents/envs/orchestrator.env.example` if missing)
 - `/local/agents/nodes/orchestrator/`
+- `NODE_TIME_ZONE` from each node env is mapped to runtime `HERMES_TIMEZONE` (for cron/schedule alignment)
 
 Node env conventions and defaults are documented in [`agents/README.md`](agents/README.md).
 
@@ -250,9 +266,20 @@ Restore behavior:
 - If you pass a relative path, `horc restore` resolves it under `/local/backups/`
 - `backup node <name>` captures node env/root plus private orchestrator state (including `plugins/private`, `scripts/private`, `/local/crons`, and `/local/skills`)
 - `backup all` captures nodes that have an env profile (`agents/envs/<node>.env`) plus the same private orchestrator roots
-- Node archives are intentionally lean: shared mirrors (`plugins/`, `scripts/`, `skills/`, `wiki/`, `cron/`) and transient bloat (`.cache`, logs, `.hermes` runtime caches) are excluded
+- Node archives are intentionally lean: shared mirrors (`plugins/`, `scripts/`, `skills/`, `wiki/`, `cron/`), per-node runtime trees (`hermes-agent/`, `.runtime/`), and transient bloat (`.cache`, logs, request dump spillover) are excluded
+- Backup now carries a single shared runtime seed (`runtime_seed/hermes-agent`, `runtime_seed/venv`, `runtime_seed/uv`) used to reseed nodes on restore
+- Request dump cleanup runs before archive creation (`HERMES_REQUEST_DUMP_KEEP_LAST`, `HERMES_REQUEST_DUMP_KEEP_DAYS`)
+- Backup retention is configurable via `HERMES_BACKUP_KEEP_LAST` (keep last N `horc-backup-*` archives; `0` disables)
 - Restore reapplies whatever is present in the archive (`agents/*` and legacy memory/crons compatibility payloads)
+- Restore reseeds node runtime from the shared runtime seed when per-node runtime folders are absent
 - Stops included running nodes before restore and restarts those that were running
+
+## Backup Automation (BRT)
+
+- Default orchestrator cron payload: `/local/crons/orchestrator/backup_daily_brt.sh`
+- Default schedule file: `/local/crons/orchestrator/backup_daily_brt.cron`
+- Schedule: `0 0 * * *` at `America/Sao_Paulo` (00:00 BRT)
+- Policy: backup all nodes, keep last 3 archives, prune old `request_dump_*`
 
 ## Updates
 
@@ -283,7 +310,7 @@ hord restart
 ## Versioning Hygiene
 
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `crons/`, `plugins/private/memory/`, `logs/`, `plugins/private/`, `skills/`, `backups/`, `state/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `plugins/private/memory/`, `logs/`, `plugins/private/`, `skills/`, `backups/`, `state/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
 

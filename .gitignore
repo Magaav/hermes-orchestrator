@@ -16,13 +16,13 @@ workspace/
 hermes-agent/plugins/memory/
 hermes-agent/tests/plugins/
 backups/
-crons/
-state/**
-!state/
-!state/**/
-!state/README.md
-!state/**/*.md
-!state/**/*.example
+crons/*
+!crons/.gitignore
+!crons/README.md
+!crons/orchestrator/
+crons/orchestrator/*
+!crons/orchestrator/backup_daily_brt.sh
+!crons/orchestrator/backup_daily_brt.cron
 
 # Secrets / machine-local envs
 .env
