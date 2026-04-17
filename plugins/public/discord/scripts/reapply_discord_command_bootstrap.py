@@ -74,7 +74,8 @@ HELPER_BLOCK = """\
             return runtime
 
         try:
-            hook_home = Path(os.getenv("HERMES_HOME") or (Path.home() / ".hermes"))
+            from pathlib import Path as _BootPath
+            hook_home = _BootPath(os.getenv("HERMES_HOME") or (_BootPath.home() / ".hermes"))
             hook_path = hook_home / "hooks" / "discord_slash_bridge" / "runtime.py"
             if not hook_path.exists():
                 self._colmeio_discord_slash_runtime = None
@@ -102,7 +103,7 @@ HELPER_BLOCK = """\
             self._colmeio_discord_slash_runtime = runtime
             return runtime
         except Exception as e:
-            logger.debug("Failed to load Colmeio Discord slash runtime: %s", e)
+            logger.warning("Failed to load Colmeio Discord slash runtime: %s", e, exc_info=True)
             self._colmeio_discord_slash_runtime = None
             return None
 
@@ -129,7 +130,21 @@ HELPER_BLOCK = """\
         try:
             return bool(await handler(interaction, error))
         except Exception as e:
-            logger.debug("Colmeio slash runtime app-command error hook failed: %s", e)
+            _idata = {}
+            try:
+                parser = getattr(self, "_interaction_data_to_dict", None)
+                if callable(parser):
+                    _idata = parser(interaction) or {}
+            except Exception:
+                _idata = {}
+            _cmd = str((_idata or {}).get("name") or "").strip().lower()
+            logger.warning(
+                "Colmeio slash runtime app-command error hook failed: command=%s interaction_id=%s error=%s",
+                _cmd or "unknown",
+                str(getattr(interaction, "id", "") or "unknown"),
+                e,
+                exc_info=True,
+            )
             return False
 
     def _colmeio_runtime_bootstrap_tree(self, tree: Any) -> None:
@@ -193,15 +208,51 @@ ERROR_BLOCK = """\
         # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_BEGIN
         @tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+            data = {}
+            try:
+                parser = getattr(self, "_interaction_data_to_dict", None)
+                if callable(parser):
+                    data = parser(interaction) or {}
+                elif isinstance(getattr(interaction, "data", None), dict):
+                    data = dict(getattr(interaction, "data", {}) or {})
+            except Exception:
+                data = {}
+
+            command_name = str((data or {}).get("name") or "").strip().lower().lstrip("/")
+            options = (data or {}).get("options")
+            error_ref = f"dcerr-{int(time.time())}-{str(getattr(interaction, 'id', 'na'))}"
+
             try:
                 if await self._colmeio_runtime_on_app_command_error(interaction, error):
                     return
             except Exception as bridge_exc:
-                logger.debug("Colmeio app command error hook failed: %s", bridge_exc)
+                logger.warning(
+                    "Colmeio app command error bridge failed: ref=%s command=%s interaction_id=%s error=%s",
+                    error_ref,
+                    command_name or "unknown",
+                    str(getattr(interaction, "id", "") or "unknown"),
+                    bridge_exc,
+                    exc_info=True,
+                )
 
-            logger.warning("Discord slash command error: %s", error, exc_info=True)
+            logger.warning(
+                "Discord slash command error: ref=%s type=%s command=%s user_id=%s channel_id=%s guild_id=%s options=%s response_done=%s error=%s",
+                error_ref,
+                type(error).__name__,
+                command_name or "unknown",
+                str(getattr(getattr(interaction, "user", None), "id", "") or "unknown"),
+                str(getattr(getattr(interaction, "channel", None), "id", "") or "unknown"),
+                str(getattr(getattr(interaction, "guild", None), "id", "") or "unknown"),
+                str(options)[:1200],
+                bool(getattr(getattr(interaction, "response", None), "is_done", lambda: False)()),
+                error,
+                exc_info=True,
+            )
             try:
-                msg = "❌ Erro ao executar o comando."
+                if type(error).__name__ == "CommandNotFound":
+                    msg = f"❌ Comando não reconhecido pelo gateway: `/{command_name or 'desconhecido'}`. Ref: `{error_ref}`"
+                else:
+                    msg = f"❌ Erro ao executar o comando. Ref: `{error_ref}`"
                 if interaction.response.is_done():
                     await interaction.followup.send(msg, ephemeral=True)
                 else:
@@ -218,6 +269,17 @@ TREE_BOOTSTRAP_BLOCK = """\
         except Exception as e:
             logger.debug("Colmeio runtime bootstrap invocation failed: %s", e)
         # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_TREE_END
+        try:
+            _metricas_known = tree.get_command("metricas") is not None
+            _runtime_loaded = self._colmeio_load_discord_slash_runtime() is not None
+            logger.info(
+                "[%s] Slash bootstrap check: runtime_loaded=%s metricas_registered=%s",
+                self.name,
+                _runtime_loaded,
+                _metricas_known,
+            )
+        except Exception as e:
+            logger.debug("[%s] Slash bootstrap verification failed: %s", self.name, e)
 """
 
 SYNC_BLOCK = """\

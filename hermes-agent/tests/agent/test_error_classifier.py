@@ -75,28 +75,6 @@ class TestClassifiedError:
         e3 = ClassifiedError(reason=FailoverReason.billing)
         assert e3.is_auth is False
 
-    def test_is_transient_property(self):
-        transient_reasons = [
-            FailoverReason.rate_limit,
-            FailoverReason.overloaded,
-            FailoverReason.server_error,
-            FailoverReason.timeout,
-            FailoverReason.unknown,
-        ]
-        for reason in transient_reasons:
-            e = ClassifiedError(reason=reason)
-            assert e.is_transient is True, f"{reason} should be transient"
-
-        non_transient = [
-            FailoverReason.auth,
-            FailoverReason.billing,
-            FailoverReason.model_not_found,
-            FailoverReason.format_error,
-        ]
-        for reason in non_transient:
-            e = ClassifiedError(reason=reason)
-            assert e.is_transient is False, f"{reason} should NOT be transient"
-
     def test_defaults(self):
         e = ClassifiedError(reason=FailoverReason.unknown)
         assert e.retryable is True
@@ -270,6 +248,22 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.rate_limit
         assert result.should_fallback is True
+
+    def test_alibaba_rate_increased_too_quickly(self):
+        """Alibaba/DashScope returns a unique throttling message.
+
+        Port from anomalyco/opencode#21355.
+        """
+        msg = (
+            "Upstream error from Alibaba: Request rate increased too quickly. "
+            "To ensure system stability, please adjust your client logic to "
+            "scale requests more smoothly over time."
+        )
+        e = MockAPIError(msg, status_code=400)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+        assert result.should_rotate_credential is True
 
     # ── Server errors ──
 
@@ -480,6 +474,39 @@ class TestClassifyApiError:
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 
+    # ── Message-only usage limit disambiguation (no status code) ──
+
+    def test_message_usage_limit_transient_is_rate_limit(self):
+        """'usage limit' + 'try again' with no status code → rate_limit, not billing."""
+        e = Exception("usage limit exceeded, try again in 5 minutes")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+        assert result.should_rotate_credential is True
+        assert result.should_fallback is True
+
+    def test_message_usage_limit_no_retry_signal_is_billing(self):
+        """'usage limit' with no transient signal and no status code → billing."""
+        e = Exception("usage limit reached")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+        assert result.should_rotate_credential is True
+
+    def test_message_quota_with_reset_window_is_rate_limit(self):
+        """'quota' + 'resets at' with no status code → rate_limit."""
+        e = Exception("quota exceeded, resets at midnight UTC")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
+    def test_message_limit_exceeded_with_wait_is_rate_limit(self):
+        """'limit exceeded' + 'wait' with no status code → rate_limit."""
+        e = Exception("key limit exceeded, please wait before retrying")
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+
     # ── Unknown / fallback ──
 
     def test_generic_exception_is_unknown(self):
@@ -507,6 +534,38 @@ class TestClassifyApiError:
         assert result.reason == FailoverReason.format_error
         assert result.retryable is False
 
+    def test_400_flat_body_descriptive_not_context_overflow(self):
+        """Responses API flat body with descriptive error + large session → format error.
+
+        The Codex Responses API returns errors in flat body format:
+        {"message": "...", "type": "..."} without an "error" wrapper.
+        A descriptive 400 must NOT be misclassified as context overflow
+        just because the session is large.
+        """
+        e = MockAPIError(
+            "Invalid 'input[index].name': string does not match pattern.",
+            status_code=400,
+            body={"message": "Invalid 'input[index].name': string does not match pattern.",
+                  "type": "invalid_request_error"},
+        )
+        result = classify_api_error(e, approx_tokens=200000, context_length=400000, num_messages=500)
+        assert result.reason == FailoverReason.format_error
+        assert result.retryable is False
+
+    def test_400_flat_body_generic_large_session_still_context_overflow(self):
+        """Flat body with generic 'Error' message + large session → context overflow.
+
+        Regression: the flat-body fallback must not break the existing heuristic
+        for genuinely generic errors from providers that use flat bodies.
+        """
+        e = MockAPIError(
+            "Error",
+            status_code=400,
+            body={"message": "Error"},
+        )
+        result = classify_api_error(e, approx_tokens=100000, context_length=200000)
+        assert result.reason == FailoverReason.context_overflow
+
     # ── Peer closed + large session ──
 
     def test_peer_closed_large_session(self):
@@ -518,6 +577,48 @@ class TestClassifyApiError:
 
     def test_chinese_context_overflow(self):
         e = MockAPIError("超过最大长度限制", status_code=400)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+
+    # ── vLLM / local inference server error messages ──
+
+    def test_vllm_max_model_len_overflow(self):
+        """vLLM's 'exceeds the max_model_len' error → context_overflow."""
+        e = MockAPIError(
+            "The engine prompt length 1327246 exceeds the max_model_len 131072. "
+            "Please reduce prompt.",
+            status_code=400,
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+
+    def test_vllm_prompt_length_exceeds(self):
+        """vLLM prompt length error → context_overflow."""
+        e = MockAPIError(
+            "prompt length 200000 exceeds maximum model length 131072",
+            status_code=400,
+        )
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+
+    def test_vllm_input_too_long(self):
+        """vLLM 'input is too long' error → context_overflow."""
+        e = MockAPIError("input is too long for model", status_code=400)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+
+    def test_ollama_context_length_exceeded(self):
+        """Ollama 'context length exceeded' error → context_overflow."""
+        e = MockAPIError("context length exceeded", status_code=400)
+        result = classify_api_error(e)
+        assert result.reason == FailoverReason.context_overflow
+
+    def test_llamacpp_slot_context(self):
+        """llama.cpp / llama-server 'slot context' error → context_overflow."""
+        e = MockAPIError(
+            "slot context: 4096 tokens, prompt 8192 tokens — not enough space",
+            status_code=400,
+        )
         result = classify_api_error(e)
         assert result.reason == FailoverReason.context_overflow
 

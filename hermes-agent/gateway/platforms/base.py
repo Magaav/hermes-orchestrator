@@ -6,23 +6,236 @@ and implement the required methods.
 """
 
 import asyncio
+import ipaddress
 import logging
 import os
 import random
 import re
+import socket as _socket
+import subprocess
+import sys
 import uuid
 from abc import ABC, abstractmethod
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
+
+
+def utf16_len(s: str) -> int:
+    """Count UTF-16 code units in *s*.
+
+    Telegram's message-length limit (4 096) is measured in UTF-16 code units,
+    **not** Unicode code-points.  Characters outside the Basic Multilingual
+    Plane (emoji like 😀, CJK Extension B, musical symbols, …) are encoded as
+    surrogate pairs and therefore consume **two** UTF-16 code units each, even
+    though Python's ``len()`` counts them as one.
+
+    Ported from nearai/ironclaw#2304 which discovered the same discrepancy in
+    Rust's ``chars().count()``.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _prefix_within_utf16_limit(s: str, limit: int) -> str:
+    """Return the longest prefix of *s* whose UTF-16 length ≤ *limit*.
+
+    Unlike a plain ``s[:limit]``, this respects surrogate-pair boundaries so
+    we never slice a multi-code-unit character in half.
+    """
+    if utf16_len(s) <= limit:
+        return s
+    # Binary search for the longest safe prefix
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if utf16_len(s[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return s[:lo]
+
+
+def _custom_unit_to_cp(s: str, budget: int, len_fn) -> int:
+    """Return the largest codepoint offset *n* such that ``len_fn(s[:n]) <= budget``.
+
+    Used by :meth:`BasePlatformAdapter.truncate_message` when *len_fn* measures
+    length in units different from Python codepoints (e.g. UTF-16 code units).
+    Falls back to binary search which is O(log n) calls to *len_fn*.
+    """
+    if len_fn(s) <= budget:
+        return len(s)
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if len_fn(s[:mid]) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
+
+
+def is_network_accessible(host: str) -> bool:
+    """Return True if *host* would expose the server beyond loopback.
+
+    Loopback addresses (127.0.0.1, ::1, IPv4-mapped ::ffff:127.0.0.1)
+    are local-only.  Unspecified addresses (0.0.0.0, ::) bind all
+    interfaces.  Hostnames are resolved; DNS failure fails closed.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+        if addr.is_loopback:
+            return False
+        # ::ffff:127.0.0.1 — Python reports is_loopback=False for mapped
+        # addresses, so check the underlying IPv4 explicitly.
+        if getattr(addr, "ipv4_mapped", None) and addr.ipv4_mapped.is_loopback:
+            return False
+        return True
+    except ValueError:
+        # when host variable is a hostname, we should try to resolve below
+        pass
+
+    try:
+        resolved = _socket.getaddrinfo(
+            host, None, _socket.AF_UNSPEC, _socket.SOCK_STREAM,
+        )
+        # if the hostname resolves into at least one non-loopback address,
+        # then we consider it to be network accessible
+        for _family, _type, _proto, _canonname, sockaddr in resolved:
+            addr = ipaddress.ip_address(sockaddr[0])
+            if not addr.is_loopback:
+                return True
+        return False
+    except (_socket.gaierror, OSError):
+        return True
+
+
+def _detect_macos_system_proxy() -> str | None:
+    """Read the macOS system HTTP(S) proxy via ``scutil --proxy``.
+
+    Returns an ``http://host:port`` URL string if an HTTP or HTTPS proxy is
+    enabled, otherwise *None*.  Falls back silently on non-macOS or on any
+    subprocess error.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.check_output(
+            ["scutil", "--proxy"], timeout=3, text=True, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+
+    props: dict[str, str] = {}
+    for line in out.splitlines():
+        line = line.strip()
+        if " : " in line:
+            key, _, val = line.partition(" : ")
+            props[key.strip()] = val.strip()
+
+    # Prefer HTTPS, fall back to HTTP
+    for enable_key, host_key, port_key in (
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ):
+        if props.get(enable_key) == "1":
+            host = props.get(host_key)
+            port = props.get(port_key)
+            if host and port:
+                return f"http://{host}:{port}"
+    return None
+
+
+def resolve_proxy_url(platform_env_var: str | None = None) -> str | None:
+    """Return a proxy URL from env vars, or macOS system proxy.
+
+    Check order:
+      0. *platform_env_var* (e.g. ``DISCORD_PROXY``) — highest priority
+      1. HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (and lowercase variants)
+      2. macOS system proxy via ``scutil --proxy`` (auto-detect)
+
+    Returns *None* if no proxy is found.
+    """
+    if platform_env_var:
+        value = (os.environ.get(platform_env_var) or "").strip()
+        if value:
+            return value
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+                "https_proxy", "http_proxy", "all_proxy"):
+        value = (os.environ.get(key) or "").strip()
+        if value:
+            return value
+    return _detect_macos_system_proxy()
+
+
+def proxy_kwargs_for_bot(proxy_url: str | None) -> dict:
+    """Build kwargs for ``commands.Bot()`` / ``discord.Client()`` with proxy.
+
+    Returns:
+      - SOCKS URL  → ``{"connector": ProxyConnector(..., rdns=True)}``
+      - HTTP URL   → ``{"proxy": url}``
+      - *None*     → ``{}``
+
+    ``rdns=True`` forces remote DNS resolution through the proxy — required
+    by many SOCKS implementations (Shadowrocket, Clash) and essential for
+    bypassing DNS pollution behind the GFW.
+    """
+    if not proxy_url:
+        return {}
+    if proxy_url.lower().startswith("socks"):
+        try:
+            from aiohttp_socks import ProxyConnector
+
+            connector = ProxyConnector.from_url(proxy_url, rdns=True)
+            return {"connector": connector}
+        except ImportError:
+            logger.warning(
+                "aiohttp_socks not installed — SOCKS proxy %s ignored. "
+                "Run: pip install aiohttp-socks",
+                proxy_url,
+            )
+            return {}
+    return {"proxy": proxy_url}
+
+
+def proxy_kwargs_for_aiohttp(proxy_url: str | None) -> tuple[dict, dict]:
+    """Build kwargs for standalone ``aiohttp.ClientSession`` with proxy.
+
+    Returns ``(session_kwargs, request_kwargs)`` where:
+      - SOCKS → ``({"connector": ProxyConnector(...)}, {})``
+      - HTTP  → ``({}, {"proxy": url})``
+      - None  → ``({}, {})``
+
+    Usage::
+
+        sess_kw, req_kw = proxy_kwargs_for_aiohttp(proxy_url)
+        async with aiohttp.ClientSession(**sess_kw) as session:
+            async with session.get(url, **req_kw) as resp:
+                ...
+    """
+    if not proxy_url:
+        return {}, {}
+    if proxy_url.lower().startswith("socks"):
+        try:
+            from aiohttp_socks import ProxyConnector
+
+            connector = ProxyConnector.from_url(proxy_url, rdns=True)
+            return {"connector": connector}, {}
+        except ImportError:
+            logger.warning(
+                "aiohttp_socks not installed — SOCKS proxy %s ignored. "
+                "Run: pip install aiohttp-socks",
+                proxy_url,
+            )
+            return {}, {}
+    return {}, {"proxy": proxy_url}
+
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple, Deque
-from collections import deque
+from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple
 from enum import Enum
 
-import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
@@ -37,7 +250,7 @@ GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
 )
 
 
-def _safe_url_for_log(url: str, max_len: int = 80) -> str:
+def safe_url_for_log(url: str, max_len: int = 80) -> str:
     """Return a URL string safe for logs (no query/fragment/userinfo)."""
     if max_len <= 0:
         return ""
@@ -74,6 +287,23 @@ def _safe_url_for_log(url: str, max_len: int = 80) -> str:
     return f"{safe[:max_len - 3]}..."
 
 
+async def _ssrf_redirect_guard(response):
+    """Re-validate each redirect target to prevent redirect-based SSRF.
+
+    Without this, an attacker can host a public URL that 302-redirects to
+    http://169.254.169.254/ and bypass the pre-flight is_safe_url() check.
+
+    Must be async because httpx.AsyncClient awaits response event hooks.
+    """
+    if response.is_redirect and response.next_request:
+        redirect_url = str(response.next_request.url)
+        from tools.url_safety import is_safe_url
+        if not is_safe_url(redirect_url):
+            raise ValueError(
+                f"Blocked redirect to private/internal address: {safe_url_for_log(redirect_url)}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Image cache utilities
 #
@@ -93,6 +323,23 @@ def get_image_cache_dir() -> Path:
     return IMAGE_CACHE_DIR
 
 
+def _looks_like_image(data: bytes) -> bool:
+    """Return True if *data* starts with a known image magic-byte sequence."""
+    if len(data) < 4:
+        return False
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return True
+    if data[:2] == b"BM":
+        return True
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return True
+    return False
+
+
 def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
     """
     Save raw image bytes to the cache and return the absolute file path.
@@ -103,7 +350,17 @@ def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
 
     Returns:
         Absolute path to the cached image file as a string.
+
+    Raises:
+        ValueError: If *data* does not look like a valid image (e.g. an HTML
+            error page returned by the upstream server).
     """
+    if not _looks_like_image(data):
+        snippet = data[:80].decode("utf-8", errors="replace")
+        raise ValueError(
+            f"Refusing to cache non-image data as {ext} "
+            f"(starts with: {snippet!r})"
+        )
     cache_dir = get_image_cache_dir()
     filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
     filepath = cache_dir / filename
@@ -131,7 +388,7 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
     """
     from tools.url_safety import is_safe_url
     if not is_safe_url(url):
-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {_safe_url_for_log(url)}")
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
 
     import asyncio
     import httpx
@@ -139,7 +396,11 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
     _log = _logging.getLogger(__name__)
 
     last_exc = None
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=True,
+        event_hooks={"response": [_ssrf_redirect_guard]},
+    ) as client:
         for attempt in range(retries + 1):
             try:
                 response = await client.get(
@@ -161,7 +422,7 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
                         "Media cache retry %d/%d for %s (%.1fs): %s",
                         attempt + 1,
                         retries,
-                        _safe_url_for_log(url),
+                        safe_url_for_log(url),
                         wait,
                         exc,
                     )
@@ -246,7 +507,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
     """
     from tools.url_safety import is_safe_url
     if not is_safe_url(url):
-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {_safe_url_for_log(url)}")
+        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
 
     import asyncio
     import httpx
@@ -254,7 +515,11 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
     _log = _logging.getLogger(__name__)
 
     last_exc = None
-    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=30.0,
+        follow_redirects=True,
+        event_hooks={"response": [_ssrf_redirect_guard]},
+    ) as client:
         for attempt in range(retries + 1):
             try:
                 response = await client.get(
@@ -276,7 +541,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
                         "Audio cache retry %d/%d for %s (%.1fs): %s",
                         attempt + 1,
                         retries,
-                        _safe_url_for_log(url),
+                        safe_url_for_log(url),
                         wait,
                         exc,
                     )
@@ -379,6 +644,14 @@ class MessageType(Enum):
     COMMAND = "command"  # /command style
 
 
+class ProcessingOutcome(Enum):
+    """Result classification for message-processing lifecycle hooks."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class MessageEvent:
     """
@@ -406,8 +679,13 @@ class MessageEvent:
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
     
-    # Auto-loaded skill for topic/channel bindings (e.g., Telegram DM Topics)
-    auto_skill: Optional[str] = None
+    # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
+    # Discord channel_skill_bindings).  A single name or ordered list.
+    auto_skill: Optional[str | list[str]] = None
+
+    # Per-channel ephemeral system prompt (e.g. Discord channel_prompts).
+    # Applied at API call time and never persisted to transcript history.
+    channel_prompt: Optional[str] = None
     
     # Internal flag — set for synthetic events (e.g. background process
     # completion notifications) that must bypass user authorization checks.
@@ -415,9 +693,6 @@ class MessageEvent:
 
     # Timestamps
     timestamp: datetime = field(default_factory=datetime.now)
-
-    # Interrupt flag - set when this message should interrupt an active session
-    interrupt: bool = False
     
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -432,6 +707,9 @@ class MessageEvent:
         raw = parts[0][1:].lower() if parts else None
         if raw and "@" in raw:
             raw = raw.split("@", 1)[0]
+        # Reject file paths: valid command names never contain /
+        if raw and "/" in raw:
+            return None
         return raw
     
     def get_command_args(self) -> str:
@@ -450,6 +728,63 @@ class SendResult:
     error: Optional[str] = None
     raw_response: Any = None
     retryable: bool = False  # True for transient connection errors — base will retry automatically
+
+
+def merge_pending_message_event(
+    pending_messages: Dict[str, MessageEvent],
+    session_key: str,
+    event: MessageEvent,
+    *,
+    merge_text: bool = False,
+) -> None:
+    """Store or merge a pending event for a session.
+
+    Photo bursts/albums often arrive as multiple near-simultaneous PHOTO
+    events. Merge those into the existing queued event so the next turn sees
+    the whole burst.
+
+    When ``merge_text`` is enabled, rapid follow-up TEXT events are appended
+    instead of replacing the pending turn. This is used for Telegram bursty
+    follow-ups so a multi-part user thought is not silently truncated to only
+    the last queued fragment.
+    """
+    existing = pending_messages.get(session_key)
+    if existing:
+        existing_is_photo = getattr(existing, "message_type", None) == MessageType.PHOTO
+        incoming_is_photo = event.message_type == MessageType.PHOTO
+        existing_has_media = bool(existing.media_urls)
+        incoming_has_media = bool(event.media_urls)
+
+        if existing_is_photo and incoming_is_photo:
+            existing.media_urls.extend(event.media_urls)
+            existing.media_types.extend(event.media_types)
+            if event.text:
+                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            return
+
+        if existing_has_media or incoming_has_media:
+            if incoming_has_media:
+                existing.media_urls.extend(event.media_urls)
+                existing.media_types.extend(event.media_types)
+            if event.text:
+                if existing.text:
+                    existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+                else:
+                    existing.text = event.text
+            if existing_is_photo or incoming_is_photo:
+                existing.message_type = MessageType.PHOTO
+            return
+
+        if (
+            merge_text
+            and getattr(existing, "message_type", None) == MessageType.TEXT
+            and event.message_type == MessageType.TEXT
+        ):
+            if event.text:
+                existing.text = f"{existing.text}\n{event.text}" if existing.text else event.text
+            return
+
+    pending_messages[session_key] = event
 
 
 # Error substrings that indicate a transient *connection* failure worth retrying.
@@ -476,6 +811,36 @@ _RETRYABLE_ERROR_PATTERNS = (
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[str]]]
 
 
+def resolve_channel_prompt(
+    config_extra: dict,
+    channel_id: str,
+    parent_id: str | None = None,
+) -> str | None:
+    """Resolve a per-channel ephemeral prompt from platform config.
+
+    Looks up ``channel_prompts`` in the adapter's ``config.extra`` dict.
+    Prefers an exact match on *channel_id*; falls back to *parent_id*
+    (useful for forum threads / child channels inheriting a parent prompt).
+
+    Returns the prompt string, or None if no match is found.  Blank/whitespace-
+    only prompts are treated as absent.
+    """
+    prompts = config_extra.get("channel_prompts") or {}
+    if not isinstance(prompts, dict):
+        return None
+
+    for key in (channel_id, parent_id):
+        if not key:
+            continue
+        prompt = prompts.get(key)
+        if prompt is None:
+            continue
+        prompt = str(prompt).strip()
+        if prompt:
+            return prompt
+    return None
+
+
 class BasePlatformAdapter(ABC):
     """
     Base class for platform adapters.
@@ -500,11 +865,18 @@ class BasePlatformAdapter(ABC):
         # Track active message handlers per session for interrupt support
         # Key: session_key (e.g., chat_id), Value: (event, asyncio.Event for interrupt)
         self._active_sessions: Dict[str, asyncio.Event] = {}
-        self._pending_messages: Dict[str, Deque[MessageEvent]] = {}
+        self._pending_messages: Dict[str, MessageEvent] = {}
         # Background message-processing tasks spawned by handle_message().
         # Gateway shutdown cancels these so an old gateway instance doesn't keep
         # working on a task after --replace or manual restarts.
         self._background_tasks: set[asyncio.Task] = set()
+        # One-shot callbacks to fire after the main response is delivered.
+        # Keyed by session_key.  GatewayRunner uses this to defer
+        # background-review notifications ("💾 Skill created") until the
+        # primary reply has been sent.
+        self._post_delivery_callbacks: Dict[str, Callable] = {}
+        self._expected_cancelled_tasks: set[asyncio.Task] = set()
+        self._busy_session_handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]] = None
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
         # Chats where typing indicator is paused (e.g. during approval waits).
@@ -574,7 +946,36 @@ class BasePlatformAdapter(ABC):
         result = handler(self)
         if asyncio.iscoroutine(result):
             await result
-    
+
+    def _acquire_platform_lock(self, scope: str, identity: str, resource_desc: str) -> bool:
+        """Acquire a scoped lock for this adapter. Returns True on success."""
+        from gateway.status import acquire_scoped_lock
+        self._platform_lock_scope = scope
+        self._platform_lock_identity = identity
+        acquired, existing = acquire_scoped_lock(
+            scope, identity, metadata={'platform': self.platform.value}
+        )
+        if acquired:
+            return True
+        owner_pid = existing.get('pid') if isinstance(existing, dict) else None
+        message = (
+            f'{resource_desc} already in use'
+            + (f' (PID {owner_pid})' if owner_pid else '')
+            + '. Stop the other gateway first.'
+        )
+        logger.error('[%s] %s', self.name, message)
+        self._set_fatal_error(f'{scope}_lock', message, retryable=False)
+        return False
+
+    def _release_platform_lock(self) -> None:
+        """Release the scoped lock acquired by _acquire_platform_lock."""
+        identity = getattr(self, '_platform_lock_identity', None)
+        if not identity:
+            return
+        from gateway.status import release_scoped_lock
+        release_scoped_lock(self._platform_lock_scope, identity)
+        self._platform_lock_identity = None
+
     @property
     def name(self) -> str:
         """Human-readable name for this adapter."""
@@ -593,6 +994,10 @@ class BasePlatformAdapter(ABC):
         an optional response string.
         """
         self._message_handler = handler
+
+    def set_busy_session_handler(self, handler: Optional[Callable[[MessageEvent, str], Awaitable[bool]]]) -> None:
+        """Set an optional handler for messages arriving during active sessions."""
+        self._busy_session_handler = handler
     
     def set_session_store(self, session_store: Any) -> None:
         """
@@ -1013,7 +1418,7 @@ class BasePlatformAdapter(ABC):
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Hook called when background processing begins."""
 
-    async def on_processing_complete(self, event: MessageEvent, success: bool) -> None:
+    async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Hook called when background processing completes."""
 
     async def _run_processing_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> None:
@@ -1174,7 +1579,7 @@ class BasePlatformAdapter(ABC):
             # session lifecycle and its cleanup races with the running task
             # (see PR #4926).
             cmd = event.get_command()
-            if cmd in ("approve", "deny", "status", "stop", "new", "reset"):
+            if cmd in ("approve", "deny", "status", "stop", "new", "reset", "background", "restart"):
                 logger.debug(
                     "[%s] Command '/%s' bypassing active-session guard for %s",
                     self.name, cmd, session_key,
@@ -1193,39 +1598,24 @@ class BasePlatformAdapter(ABC):
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
                 return
 
+            if self._busy_session_handler is not None:
+                try:
+                    if await self._busy_session_handler(event, session_key):
+                        return
+                except Exception as e:
+                    logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)
+
             # Special case: photo bursts/albums frequently arrive as multiple near-
             # simultaneous messages. Queue them without interrupting the active run,
             # then process them immediately after the current task finishes.
             if event.message_type == MessageType.PHOTO:
                 logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
-                self.enqueue_pending_message(
-                    session_key=session_key,
-                    event=event,
-                    interrupt=False,
-                    merge_photo=True,
-                )
-                return  # Don't interrupt now - will run after current task completes
-
-            # Voice/audio follow-ups should queue sequentially.
-            # This avoids dropping media while the current turn is still running.
-            if event.message_type in (MessageType.VOICE, MessageType.AUDIO):
-                logger.debug("[%s] Queuing voice/audio follow-up for session %s without interrupt", self.name, session_key)
-                self.enqueue_pending_message(
-                    session_key=session_key,
-                    event=event,
-                    interrupt=False,
-                    merge_photo=False,
-                )
+                merge_pending_message_event(self._pending_messages, session_key, event)
                 return  # Don't interrupt now - will run after current task completes
 
             # Default behavior for non-photo follow-ups: interrupt the running agent
             logger.debug("[%s] New message while session %s is active — triggering interrupt", self.name, session_key)
-            self.enqueue_pending_message(
-                session_key=session_key,
-                event=event,
-                interrupt=True,
-                merge_photo=False,
-            )
+            self._pending_messages[session_key] = event
             # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
             return  # Don't process now - will be handled after current task finishes
@@ -1247,6 +1637,7 @@ class BasePlatformAdapter(ABC):
             return
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(self._expected_cancelled_tasks.discard)
     
     @staticmethod
     def _get_human_delay() -> float:
@@ -1303,6 +1694,21 @@ class BasePlatformAdapter(ABC):
             # streaming already delivered the text (already_sent=True) or
             # when the message was queued behind an active agent.  Log at
             # DEBUG to avoid noisy warnings for expected behavior.
+            #
+            # Suppress stale response when the session was interrupted by a
+            # new message that hasn't been consumed yet.  The pending message
+            # is processed by the pending-message handler below (#8221/#2483).
+            if (
+                response
+                and interrupt_event.is_set()
+                and session_key in self._pending_messages
+            ):
+                logger.info(
+                    "[%s] Suppressing stale response for interrupted session %s",
+                    self.name,
+                    session_key,
+                )
+                response = None
             if not response:
                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
             if response:
@@ -1383,7 +1789,7 @@ class BasePlatformAdapter(ABC):
                         logger.info(
                             "[%s] Sending image: %s (alt=%s)",
                             self.name,
-                            _safe_url_for_log(image_url),
+                            safe_url_for_log(image_url),
                             alt_text[:30] if alt_text else "",
                         )
                         # Route animated GIFs through send_animation for proper playback
@@ -1475,11 +1881,15 @@ class BasePlatformAdapter(ABC):
 
             # Determine overall success for the processing hook
             processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
-            await self._run_processing_hook("on_processing_complete", event, processing_ok)
+            await self._run_processing_hook(
+                "on_processing_complete",
+                event,
+                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE,
+            )
 
             # Check if there's a pending message that was queued during our processing
-            pending_event = self.get_pending_message(session_key)
-            if pending_event is not None:
+            if session_key in self._pending_messages:
+                pending_event = self._pending_messages.pop(session_key)
                 logger.debug("[%s] Processing queued message from interrupt", self.name)
                 # Clean up current session before processing pending
                 if session_key in self._active_sessions:
@@ -1494,10 +1904,14 @@ class BasePlatformAdapter(ABC):
                 return  # Already cleaned up
                 
         except asyncio.CancelledError:
-            await self._run_processing_hook("on_processing_complete", event, False)
+            current_task = asyncio.current_task()
+            outcome = ProcessingOutcome.CANCELLED
+            if current_task is None or current_task not in self._expected_cancelled_tasks:
+                outcome = ProcessingOutcome.FAILURE
+            await self._run_processing_hook("on_processing_complete", event, outcome)
             raise
         except Exception as e:
-            await self._run_processing_hook("on_processing_complete", event, False)
+            await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:
@@ -1516,6 +1930,14 @@ class BasePlatformAdapter(ABC):
             except Exception:
                 pass  # Last resort — don't let error reporting crash the handler
         finally:
+            # Fire any one-shot post-delivery callback registered for this
+            # session (e.g. deferred background-review notifications).
+            _post_cb = getattr(self, "_post_delivery_callbacks", {}).pop(session_key, None)
+            if callable(_post_cb):
+                try:
+                    _post_cb()
+                except Exception:
+                    pass
             # Stop typing indicator
             typing_task.cancel()
             try:
@@ -1541,114 +1963,22 @@ class BasePlatformAdapter(ABC):
         """
         tasks = [task for task in self._background_tasks if not task.done()]
         for task in tasks:
+            self._expected_cancelled_tasks.add(task)
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
+        self._expected_cancelled_tasks.clear()
         self._pending_messages.clear()
         self._active_sessions.clear()
 
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
-
-    def _ensure_pending_queue(self, session_key: str) -> Deque[MessageEvent]:
-        """Get or create a FIFO queue for a session."""
-        queue = self._pending_messages.get(session_key)
-        if queue is None:
-            queue = deque()
-            self._pending_messages[session_key] = queue
-            return queue
-
-        # Backward compatibility: legacy callers may have written a single
-        # MessageEvent directly into _pending_messages.
-        if isinstance(queue, deque):
-            return queue
-
-        legacy_event = queue
-        queue = deque()
-        if legacy_event is not None:
-            queue.append(legacy_event)
-        self._pending_messages[session_key] = queue
-        return queue
-
-    def enqueue_pending_message(
-        self,
-        session_key: str,
-        event: MessageEvent,
-        interrupt: bool = False,
-        merge_photo: bool = False,
-    ) -> None:
-        """Add a message to the pending FIFO queue for a session."""
-        queue = self._ensure_pending_queue(session_key)
-
-        # Merge photo bursts into the last queued photo event.
-        if merge_photo and event.message_type == MessageType.PHOTO and queue:
-            last = queue[-1]
-            if last.message_type == MessageType.PHOTO:
-                last.media_urls.extend(event.media_urls)
-                last.media_types.extend(event.media_types)
-                if event.text:
-                    if not last.text:
-                        last.text = event.text
-                    elif event.text not in last.text:
-                        last.text = f"{last.text}\n\n{event.text}".strip()
-                return
-
-        event.interrupt = bool(interrupt)
-        queue.append(event)
-
-    def prepend_pending_message(self, session_key: str, event: MessageEvent) -> None:
-        """Put a message back at the front of the session queue."""
-        queue = self._ensure_pending_queue(session_key)
-        queue.appendleft(event)
-
+    
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
-        """Get the next pending message (FIFO) for a session."""
-        queue = self._pending_messages.get(session_key)
-        if not queue:
-            return None
-
-        # Backward compatibility for legacy single-event storage.
-        if not isinstance(queue, deque):
-            self._pending_messages.pop(session_key, None)
-            return queue
-
-        event = queue.popleft()
-        if not queue:
-            self._pending_messages.pop(session_key, None)
-        return event
-
-    def pop_pending_interrupt_message(self, session_key: str) -> Optional[MessageEvent]:
-        """Pop the oldest pending interrupt event for this session."""
-        queue = self._pending_messages.get(session_key)
-        if not queue:
-            return None
-
-        # Backward compatibility for legacy single-event storage.
-        if not isinstance(queue, deque):
-            event = queue
-            if getattr(event, "interrupt", False):
-                self._pending_messages.pop(session_key, None)
-                return event
-            return None
-
-        for idx, event in enumerate(queue):
-            if getattr(event, "interrupt", False):
-                del queue[idx]
-                if not queue:
-                    self._pending_messages.pop(session_key, None)
-                return event
-        return None
-
-    def clear_pending_messages(self, session_key: str) -> int:
-        """Clear all pending messages for a session and return count."""
-        queue = self._pending_messages.pop(session_key, None)
-        if not queue:
-            return 0
-        if isinstance(queue, deque):
-            return len(queue)
-        return 1
+        """Get and clear any pending message for a session."""
+        return self._pending_messages.pop(session_key, None)
     
     def build_source(
         self,
@@ -1702,7 +2032,11 @@ class BasePlatformAdapter(ABC):
         return content
     
     @staticmethod
-    def truncate_message(content: str, max_length: int = 4096) -> List[str]:
+    def truncate_message(
+        content: str,
+        max_length: int = 4096,
+        len_fn: Optional["Callable[[str], int]"] = None,
+    ) -> List[str]:
         """
         Split a long message into chunks, preserving code block boundaries.
 
@@ -1714,11 +2048,16 @@ class BasePlatformAdapter(ABC):
         Args:
             content: The full message content
             max_length: Maximum length per chunk (platform-specific)
+            len_fn: Optional length function for measuring string length.
+                     Defaults to ``len`` (Unicode code-points).  Pass
+                     ``utf16_len`` for platforms that measure message
+                     length in UTF-16 code units (e.g. Telegram).
 
         Returns:
             List of message chunks
         """
-        if len(content) <= max_length:
+        _len = len_fn or len
+        if _len(content) <= max_length:
             return [content]
 
         INDICATOR_RESERVE = 10   # room for " (XX/XX)"
@@ -1737,22 +2076,33 @@ class BasePlatformAdapter(ABC):
 
             # How much body text we can fit after accounting for the prefix,
             # a potential closing fence, and the chunk indicator.
-            headroom = max_length - INDICATOR_RESERVE - len(prefix) - len(FENCE_CLOSE)
+            headroom = max_length - INDICATOR_RESERVE - _len(prefix) - _len(FENCE_CLOSE)
             if headroom < 1:
                 headroom = max_length // 2
 
             # Everything remaining fits in one final chunk
-            if len(prefix) + len(remaining) <= max_length - INDICATOR_RESERVE:
+            if _len(prefix) + _len(remaining) <= max_length - INDICATOR_RESERVE:
                 chunks.append(prefix + remaining)
                 break
 
-            # Find a natural split point (prefer newlines, then spaces)
-            region = remaining[:headroom]
+            # Find a natural split point (prefer newlines, then spaces).
+            # When _len != len (e.g. utf16_len for Telegram), headroom is
+            # measured in the custom unit.  We need codepoint-based slice
+            # positions that stay within the custom-unit budget.
+            #
+            # _safe_slice_pos() maps a custom-unit budget to the largest
+            # codepoint offset whose custom length ≤ budget.
+            if _len is not len:
+                # Map headroom (custom units) → codepoint slice length
+                _cp_limit = _custom_unit_to_cp(remaining, headroom, _len)
+            else:
+                _cp_limit = headroom
+            region = remaining[:_cp_limit]
             split_at = region.rfind("\n")
-            if split_at < headroom // 2:
+            if split_at < _cp_limit // 2:
                 split_at = region.rfind(" ")
             if split_at < 1:
-                split_at = headroom
+                split_at = _cp_limit
 
             # Avoid splitting inside an inline code span (`...`).
             # If the text before split_at has an odd number of unescaped
@@ -1772,7 +2122,7 @@ class BasePlatformAdapter(ABC):
                     safe_split = candidate.rfind(" ", 0, last_bt)
                     nl_split = candidate.rfind("\n", 0, last_bt)
                     safe_split = max(safe_split, nl_split)
-                    if safe_split > headroom // 4:
+                    if safe_split > _cp_limit // 4:
                         split_at = safe_split
 
             chunk_body = remaining[:split_at]

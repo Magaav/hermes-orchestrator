@@ -1,0 +1,221 @@
+[2026-04-16T17:25:20Z] using python runtime: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python
+[2026-04-16T17:25:20Z] using discord plugin root: /local/plugins/public/discord
+[2026-04-16T17:25:20Z] using hermes-core plugin root: /local/plugins/public/hermes-core
+[2026-04-16T17:25:20Z] STEP camofox_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/camofox_env_bootstrap.py --env-file /local/agents/nodes/node-dummy/.hermes/.env --default-url http://127.0.0.1:9377
+{"ok": true, "env_file": "/local/agents/nodes/node-dummy/.hermes/.env", "enabled": false, "enable_var": "CAMOFOX_ENABLED", "enable_source": "CAMOFOX_ENABLED", "url_var": "CAMOFOX_URL", "default_url": "http://127.0.0.1:9377", "changed": false, "effective_url": "http://host.docker.internal:9377", "service": {"attempted": false, "message": "not requested"}}
+[2026-04-16T17:25:20Z] OK   camofox_bootstrap
+[2026-04-16T17:25:20Z] STEP openviking_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/openviking_env_bootstrap.py --env-file /local/agents/nodes/node-dummy/.hermes/.env --config-file /local/agents/nodes/node-dummy/.hermes/config.yaml --default-endpoint http://127.0.0.1:1933 --default-account node-dummy --default-user node-dummy
+{"ok": true, "env_file": "/local/agents/nodes/node-dummy/.hermes/.env", "config_file": "/local/agents/nodes/node-dummy/.hermes/config.yaml", "agent_root": "/local/agents/nodes/node-dummy/hermes-agent", "enabled": false, "enable_var": "OPENVIKING_ENABLED", "enable_source": "OPENVIKING_ENABLED", "provider": "openviking", "changed": false, "env_changed": false, "provider_changed": false, "effective": {"endpoint": "http://host.docker.internal:1933", "account": "node-dummy", "user": "node-dummy"}, "compatibility": {"supported": true, "message": "ok"}, "health": {"attempted": false, "reachable": false, "message": "not checked"}, "degraded": false}
+[2026-04-16T17:25:20Z] OK   openviking_bootstrap
+[2026-04-16T17:25:20Z] STEP model_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/model_env_bootstrap.py --env-file /local/agents/nodes/node-dummy/.hermes/.env --config-file /local/agents/nodes/node-dummy/.hermes/config.yaml
+{"ok": true, "env_file": "/local/agents/nodes/node-dummy/.hermes/.env", "config_file": "/local/agents/nodes/node-dummy/.hermes/config.yaml", "changed": true, "model_changed": true, "fallback_changed": true, "effective": {"default": {"provider": "minimax", "model": "MiniMax-M2.7", "base_url": "", "api_mode": ""}, "fallback": {"provider": "kimi-coding", "model": "moonshotai/kimi-k2.5", "base_url": "", "api_mode": ""}}, "before": {"default": {"provider": "", "model": "", "base_url": "", "api_mode": ""}, "fallback": {}}, "source": {"default": {"provider": "NODE_AGENT_DEFAULT_MODEL_PROVIDER", "model": "NODE_AGENT_DEFAULT_MODEL"}, "fallback": {"provider": "NODE_AGENT_FALLBACK_MODEL_PROVIDER", "model": "NODE_AGENT_FALLBACK_MODEL"}}, "warnings": []}
+[2026-04-16T17:25:20Z] OK   model_bootstrap
+[2026-04-16T17:25:20Z] STEP stt_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/stt_env_bootstrap.py --env-file /local/agents/nodes/node-dummy/.hermes/.env --config-file /local/agents/nodes/node-dummy/.hermes/config.yaml
+{"ok": true, "env_file": "/local/agents/nodes/node-dummy/.hermes/.env", "config_file": "/local/agents/nodes/node-dummy/.hermes/config.yaml", "changed": false, "effective": {"model": "", "language": ""}, "source": {"model": "config.yaml", "language": "config.yaml"}}
+[2026-04-16T17:25:20Z] OK   stt_bootstrap
+[2026-04-16T17:25:20Z] STEP channel_acl: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/hooks/apply_channel_acl_run_py.py
+[apply] Channel ACL hook + run.py patches
+[apply] source(public): /local/plugins/public/discord/hooks/channel_acl
+[apply] source(private): /local/plugins/private/discord/hooks/channel_acl
+[apply] run.py: /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+  [ok] handler.py -> /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/handler.py
+  [ok] config.yaml -> /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/config.yaml
+  [ok] HOOK.yaml -> /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/HOOK.yaml
+  [ok] run.py patched: /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+  [ok] backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/run.py.colmeio_channel_acl.20260416T172520Z.bak
+  [ok] applied blocks: normalize, model, status
+[2026-04-16T17:25:20Z] OK   channel_acl
+[2026-04-16T17:25:20Z] STEP gateway_fifo_queue: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_gateway_queue_fifo.py
+⚠️  Skipping run.py FIFO patch due anchor drift: anchor not found for run photo+voice priority queue
+✅ Applied FIFO queue patch to: /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/base.py
+   Backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/base.py.fifo_queue_patch.20260416T172520Z.bak
+[2026-04-16T17:25:20Z] OK   gateway_fifo_queue
+[2026-04-16T17:25:20Z] STEP session_info: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_session_info_hook.py
+✅ Hook files installed at: /local/agents/nodes/node-dummy/.hermes/hooks/session_info_hook
+⚠️  Legacy '/status token usage' block not found in discord.py; skipping patch.
+   (Expected on newer hermes-agent versions where /status is handled in run.py.)
+
+Done. Restart the gateway: /restart
+[2026-04-16T17:25:21Z] OK   session_info
+[2026-04-16T17:25:21Z] STEP discord_thread_parent: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_discord_thread_parent_context.py
+✅ Applied Discord thread parent context patch to: /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+   Backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/discord.py.thread_parent_context.20260416T172521Z.bak
+[2026-04-16T17:25:21Z] OK   discord_thread_parent
+[2026-04-16T17:25:21Z] STEP discord_auto_thread_ignore_channels: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_discord_auto_thread_ignore_channels.py
+✅ Applied Discord auto-thread-ignore-channel patch to: /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+   Backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/discord.py.auto_thread_ignore_channels.20260416T172521Z.bak
+[2026-04-16T17:25:21Z] OK   discord_auto_thread_ignore_channels
+[2026-04-16T17:25:21Z] STEP discord_guild_sync: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_discord_guild_sync.py
+✅ Applied Discord guild sync patch to: /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+   Backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/discord.py.guild_sync_patch.20260416T172521Z.bak
+   Blocks: guild_sync
+[2026-04-16T17:25:21Z] OK   discord_guild_sync
+[2026-04-16T17:25:21Z] STEP discord_command_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_discord_command_bootstrap.py
+✅ Applied Discord command bootstrap to: /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+   Hook runtime synced to: /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge
+   Backup: /local/agents/nodes/node-dummy/.hermes/logs/patch-backups/discord.py.command_bootstrap.20260416T172521Z.bak
+[2026-04-16T17:25:21Z] OK   discord_command_bootstrap
+[2026-04-16T17:25:21Z] STEP faltas_confirmation_view: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/reapply_faltas_confirmation_view.py
+[OK] Confirmation files re-applied: 2
+[2026-04-16T17:25:21Z] OK   faltas_confirmation_view
+[2026-04-16T17:25:21Z] STEP node_agent_followup_footer: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/hermes-core/scripts/reapply_node_agent_followup_footer.py
+[apply] Node-agent followup/footer patch
+[apply] run.py: /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+  [warn] legacy node-agent followup anchors not found; modern run.py flow detected, skipping patch.
+[2026-04-16T17:25:21Z] OK   node_agent_followup_footer
+[2026-04-16T17:25:21Z] STEP wiki_bootstrap: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/hermes-core/scripts/wiki_engine.py bootstrap --node-name node-dummy --node-root /local/agents/nodes/node-dummy --repair
+[wiki] status=disabled root=/local/plugins/private/wiki
+[2026-04-16T17:25:21Z] OK   wiki_bootstrap
+[2026-04-16T17:25:21Z] STEP verify_customizations: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/discord/scripts/verify_discord_customizations.py
+[OK  ] run.py exists
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+[OK  ] discord.py exists
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+[OK  ] base.py exists
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/base.py
+[OK  ] base.py marker: pending_queue_deque
+       self._pending_messages: Dict[str, Deque[MessageEvent]] = {}
+[OK  ] base.py marker: enqueue_pending_message
+       def enqueue_pending_message(
+[OK  ] base.py marker: pop_pending_interrupt_message
+       def pop_pending_interrupt_message(
+[OK  ] base.py marker: voice_audio_queue
+       Queuing voice/audio follow-up for session
+[OK  ] python_compiles:base.py
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/base.py
+[OK  ] run.py marker: acl_normalize_block
+       COLMEIO_CHANNEL_ACL_NORMALIZE_BEGIN
+[OK  ] run.py marker: skill_add
+       SKILL_ADD
+[OK  ] run.py marker: author_id
+       author_id:{source.user_id}
+[OK  ] run.py marker: acl_model_block
+       COLMEIO_CHANNEL_ACL_MODEL_BEGIN
+[OK  ] run.py marker: system_prompt_addon
+       system_prompt_addon
+[OK  ] run.py marker: acl_status_block
+       COLMEIO_CHANNEL_ACL_STATUS_BEGIN
+[OK  ] run.py marker: status_route
+       _fake_route = _enforce(source
+[OK  ] run.py marker: status_channel_info
+       **Channel Info**
+[OK  ] run.py marker: status_model_routing
+       **Model Routing**
+[OK  ] run.py marker: acl_module
+       colmeio_channel_acl
+[OK  ] run.py marker: voice_audio_priority_queue
+       merge_pending_message_event(adapter._pending_messages, _quick_key, event)
+[OK  ] run.py marker: interrupt_pop_helper
+       _dequeue_pending_event(adapter, session_key)
+[OK  ] run.py marker: preserve_media_pending
+       merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
+[OK  ] python_compiles:run.py
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+[OK  ] discord.py marker: guild_sync_hook
+       COLMEIO_DISCORD_GUILD_SYNC_BEGIN
+[OK  ] discord.py marker: guild_sync_call
+       tree.sync(guild=_guild)
+[OK  ] discord.py marker: guild_copy_global
+       tree.copy_global_to(guild=_guild)
+[OK  ] discord.py marker: command_bootstrap_helper
+       COLMEIO_DISCORD_COMMAND_BOOTSTRAP_BEGIN
+[OK  ] discord.py marker: command_bootstrap_interaction
+       COLMEIO_DISCORD_COMMAND_BOOTSTRAP_INTERACTION_BEGIN
+[OK  ] discord.py marker: command_bootstrap_error
+       COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_BEGIN
+[OK  ] discord.py marker: command_bootstrap_tree
+       COLMEIO_DISCORD_COMMAND_BOOTSTRAP_TREE_BEGIN
+[OK  ] discord.py marker: command_bootstrap_sync
+       COLMEIO_DISCORD_COMMAND_BOOTSTRAP_SYNC_BEGIN
+[OK  ] discord.py marker: runtime_loader_method
+       def _colmeio_load_discord_slash_runtime
+[OK  ] discord.py marker: runtime_interaction_method
+       def _colmeio_runtime_on_interaction
+[OK  ] discord.py marker: runtime_error_method
+       def _colmeio_runtime_on_app_command_error
+[OK  ] discord.py marker: runtime_bootstrap_method
+       def _colmeio_runtime_bootstrap_tree
+[OK  ] discord.py marker: runtime_sync_call
+       sync_external_payload_commands
+[OK  ] discord.py marker: runtime_tree_bootstrap_call
+       self._colmeio_runtime_bootstrap_tree(tree)
+[OK  ] discord.py marker: slash_parent_channel
+       parent_channel_id = self._get_parent_channel_id(interaction.channel) if is_thread else None
+[OK  ] discord.py marker: dispatch_parent_channel
+       chat_id_alt=str(getattr(self._thread_parent_channel(_chan), "id", "") or "") or None
+[OK  ] discord.py marker: auto_thread_parent_channel
+       parent_channel_id = self._get_parent_channel_id(message.channel)
+[OK  ] discord.py marker: auto_thread_ignore_channels_env
+       DISCORD_AUTO_THREAD_IGNORE_CHANNELS
+[OK  ] discord.py marker: auto_thread_ignore_channels_free_channel
+       is_auto_thread_ignore_channel
+[OK  ] discord.py marker: auto_thread_ignore_channels_skip_thread
+       skip_thread_for_auto_thread_ignore
+[OK  ] discord.py marker: auto_thread_ignore_channels_explicit_mention
+       explicit_bot_mention
+[OK  ] discord.py marker: parent_channel_in_sources
+       chat_id_alt=parent_channel_id count=2 (expected >= 2)
+[OK  ] discord.py marker: legacy_unknown_bridge_optional
+       not present
+[OK  ] python_compiles:discord.py
+       /local/agents/nodes/node-dummy/hermes-agent/gateway/platforms/discord.py
+[OK  ] discord.py marker: legacy_session_info_hook_optional
+       not present (expected on newer upstream)
+[OK  ] channel_acl handler synced
+       /local/plugins/public/discord/hooks/channel_acl/handler.py == /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/handler.py
+[OK  ] channel_acl config synced
+       /local/plugins/private/discord/hooks/channel_acl/config.yaml == /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/config.yaml
+[OK  ] channel_acl manifest synced
+       /local/plugins/public/discord/hooks/channel_acl/HOOK.yaml == /local/agents/nodes/node-dummy/.hermes/hooks/channel_acl/HOOK.yaml
+[OK  ] session_info handler exists
+       /local/agents/nodes/node-dummy/.hermes/hooks/session_info_hook/handler.py
+[OK  ] session_info manifest exists
+       /local/agents/nodes/node-dummy/.hermes/hooks/session_info_hook/HOOK.yaml
+[OK  ] session_info handler synced
+       /local/plugins/public/discord/hooks/session_info_hook/handler.py == /local/agents/nodes/node-dummy/.hermes/hooks/session_info_hook/handler.py
+[OK  ] slash_bridge config synced
+       /local/plugins/private/discord/hooks/discord_slash_bridge/config.yaml == /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/config.yaml
+[OK  ] slash_bridge registry synced
+       /local/plugins/private/discord/hooks/discord_slash_bridge/registry.yaml == /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/registry.yaml
+[OK  ] slash_bridge handlers synced
+       /local/plugins/public/discord/hooks/discord_slash_bridge/handlers.py == /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/handlers.py
+[OK  ] slash_bridge runtime synced
+       /local/plugins/public/discord/hooks/discord_slash_bridge/runtime.py == /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/runtime.py
+[OK  ] slash_bridge runtime exists
+       /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/runtime.py
+[OK  ] slash_bridge handlers exists
+       /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/handlers.py
+[OK  ] python_compiles:runtime.py
+       /local/plugins/public/discord/hooks/discord_slash_bridge/runtime.py
+[OK  ] python_compiles:handlers.py
+       /local/plugins/public/discord/hooks/discord_slash_bridge/handlers.py
+[OK  ] python_compiles:runtime.py
+       /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/runtime.py
+[OK  ] python_compiles:handlers.py
+       /local/agents/nodes/node-dummy/.hermes/hooks/discord_slash_bridge/handlers.py
+[OK  ] node discord payload exists
+       optional/not found resolved=None (DISCORD_COMMANDS_FILE=, NODE_NAME=node-dummy, DISCORD_ENV_FILE=)
+[OK  ] slash_bridge runtime marker: bootstrap_model_method
+       def _bootstrap_model(
+[OK  ] slash_bridge runtime marker: bootstrap_model_call
+       self._bootstrap_model(tree, native.get("model") or {})
+[OK  ] slash_bridge handlers marker: handle_model_switch
+       async def handle_model_switch(
+[OK  ] slash_bridge registry has native /model
+       present=True
+[OK  ] slash_bridge registry model choices keys
+       keys=['gpt53codex', 'gpt54', 'kimik25', 'minimaxm27', 'nemotron120b']
+
+checks: 69
+failed: 0
+[2026-04-16T17:25:21Z] OK   verify_customizations
+[2026-04-16T17:25:21Z] STEP verify_node_agent_followup_footer: /local/agents/nodes/node-dummy/hermes-agent/.venv/bin/python /local/plugins/public/hermes-core/scripts/verify_node_agent_followup_footer.py
+[verify] run.py: /local/agents/nodes/node-dummy/hermes-agent/gateway/run.py
+  [info] mode=modern-upstream
+  [ok] modern_step_callback_fn: def _step_callback_sync(
+  [ok] modern_step_callback_gate: agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
+  [ok] modern_notify_interval_env: HERMES_AGENT_NOTIFY_INTERVAL
+  [ok] modern_followup_send_typing: await _followup_adapter.send_typing(
+[verify] success
+[2026-04-16T17:25:21Z] OK   verify_node_agent_followup_footer
+[2026-04-16T17:25:21Z] DONE all prestart patch steps succeeded

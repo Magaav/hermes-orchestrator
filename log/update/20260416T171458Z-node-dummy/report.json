@@ -1,0 +1,62 @@
+{
+  "ok": false,
+  "action": "test-update",
+  "clone_name": "node-dummy",
+  "run_id": "20260416T171458Z",
+  "result": false,
+  "report_path": "/local/log/update/20260416T171458Z-node-dummy/report.json",
+  "log_root_requested": "/log/update",
+  "log_root": "/local/log/update",
+  "log_root_warning": "requested log root not writable (/log/update): [Errno 13] Permission denied: '/log'",
+  "run_dir": "/local/log/update/20260416T171458Z-node-dummy",
+  "template_update": {
+    "ok": true,
+    "action": "update",
+    "target": "template",
+    "source_root": "/local/hermes-agent",
+    "branch_requested": "main",
+    "branch_before": "main",
+    "branch_after": "main",
+    "commit_before": "22c9338a2adfd000d0bf73a50c88862b7e8c1889",
+    "commit_after": "22c9338a2adfd000d0bf73a50c88862b7e8c1889",
+    "upstream_commit": "1ccd0637864ddede3603007c7a3c68c8d16e67ce",
+    "source_mode": "snapshot_sync",
+    "changed": false,
+    "applies_to_new_nodes": true
+  },
+  "env_path": "/local/agents/envs/node-dummy.env",
+  "clone_root": "/local/agents/nodes/node-dummy",
+  "container_name": "hermes-node-node-dummy",
+  "env_seed": {
+    "env_path": "/local/agents/envs/node-dummy.env",
+    "seed_source": "/local/agents/envs/node.env.example",
+    "seed_source_exists": false
+  },
+  "filesystem": {
+    "clone_root_created": true,
+    "state_mode": "fresh",
+    "state_code": 4,
+    "bootstrapped": true,
+    "force_reseed": false
+  },
+  "prestart": {
+    "script": "/local/plugins/public/hermes-core/scripts/prestart_reapply.sh",
+    "returncode": 1,
+    "failed_marker_path": "/local/agents/nodes/node-dummy/.hermes/logs/colmeio-prestart.failed",
+    "failed_marker_exists": true,
+    "prestart_log_path": "/local/agents/nodes/node-dummy/.hermes/logs/colmeio-prestart.log",
+    "failures": [
+      "gateway_fifo_queue",
+      "discord_thread_parent",
+      "discord_auto_thread_ignore_channels",
+      "discord_guild_sync",
+      "node_agent_followup_footer",
+      "verify_customizations",
+      "verify_node_agent_followup_footer"
+    ]
+  },
+  "prestart_stdout_log": "/local/log/update/20260416T171458Z-node-dummy/prestart.stdout.log",
+  "prestart_stderr_log": "/local/log/update/20260416T171458Z-node-dummy/prestart.stderr.log",
+  "prestart_log_copy": "/local/log/update/20260416T171458Z-node-dummy/colmeio-prestart.log",
+  "error": "prestart reapply failed steps: gateway_fifo_queue, discord_thread_parent, discord_auto_thread_ignore_channels, discord_guild_sync, node_agent_followup_footer, verify_customizations, verify_node_agent_followup_footer"
+}

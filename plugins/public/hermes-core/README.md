@@ -10,6 +10,7 @@ Durable core customizations for Hermes gateway behavior, kept outside `hermes-ag
   - `NODE_AGENT_FOLLOWUP_SUMMARY` (`true/false`, default `false`)
 - Optional final response file-change footer:
   - `NODE_AGENT_FINALRESPONSE_ENFORCE_FILES_CHANGED` (`true/false`, default `false`)
+  - Footer includes updated, created, and deleted file sections when available
 - Shared wiki engine:
   - `NODE_WIKI_ENABLED` (`true/false`, default `false`)
   - private runtime root: `/local/plugins/private/wiki`

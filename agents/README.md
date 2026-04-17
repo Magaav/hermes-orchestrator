@@ -11,7 +11,7 @@
 - `nodes/<node>/scripts/{public,private}`: host-visible mirrors of `/local/scripts/{public,private}`
 - `nodes/<node>/plugins/{public,private}`: worker mount anchors to `/local/plugins/{public,private}`
 - `nodes/<node>/cron`: mountpoint from `/local/crons/<node>`
-- `nodes/<node>/data`: node-local mutable runtime data (canonical)
+- `/local/datas/<node>`: centralized private node data root (mounted in runtime as `/local/data`)
 - logs are centralized under `/local/logs/nodes/<node>/` and `/local/logs/attention/nodes/<node>/`
 
 Canonical shared roots now live outside `agents/`:
@@ -21,10 +21,14 @@ Canonical shared roots now live outside `agents/`:
 - `/local/plugins/public`
 - `/local/plugins/private`
 - `/local/skills`
+- `/local/datas`
 
 ## Env Contract
 
 Use lean node profiles. Keep only values that differ from defaults.
+
+For strict bootstrap requirements and mention-routing controls, see:
+- `/local/docs/agents/node.env.md`
 
 Primary keys:
 

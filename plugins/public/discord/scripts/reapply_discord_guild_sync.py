@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -44,33 +45,40 @@ DISCORD_PATH_CANDIDATES = (
 MARKER_START = "COLMEIO_DISCORD_GUILD_SYNC_BEGIN"
 MARKER_END = "COLMEIO_DISCORD_GUILD_SYNC_END"
 
-INSERT_BLOCK = """\
-                    # COLMEIO_DISCORD_GUILD_SYNC_BEGIN
-                    _enable_guild_copy = os.getenv(
-                        "DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD", ""
-                    ).strip().lower() in ("1", "true", "yes", "on")
-                    if _enable_guild_copy:
-                        guilds = list(getattr(adapter_self._client, "guilds", []) or [])
-                        if guilds:
-                            for _guild in guilds:
-                                try:
-                                    adapter_self._client.tree.copy_global_to(guild=_guild)
-                                    _g_synced = await adapter_self._client.tree.sync(guild=_guild)
-                                    logger.info(
-                                        "[%s] Synced %d guild slash command(s) for guild %s",
-                                        adapter_self.name,
-                                        len(_g_synced),
-                                        getattr(_guild, "id", "unknown"),
-                                    )
-                                except Exception as _g_exc:
-                                    logger.debug(
-                                        "[%s] Guild slash sync failed for guild %s: %s",
-                                        adapter_self.name,
-                                        getattr(_guild, "id", "unknown"),
-                                        _g_exc,
-                                    )
-                    # COLMEIO_DISCORD_GUILD_SYNC_END
-"""
+INSERT_BLOCK_TEMPLATE = textwrap.dedent(
+    """\
+    # COLMEIO_DISCORD_GUILD_SYNC_BEGIN
+    _enable_guild_copy = os.getenv(
+        "DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+    if _enable_guild_copy:
+        guilds = list(getattr(self._client, "guilds", []) or [])
+        if guilds:
+            for _guild in guilds:
+                try:
+                    self._client.tree.copy_global_to(guild=_guild)
+                    _g_synced = await self._client.tree.sync(guild=_guild)
+                    logger.info(
+                        "[%s] Synced %d guild slash command(s) for guild %s",
+                        self.name,
+                        len(_g_synced),
+                        getattr(_guild, "id", "unknown"),
+                    )
+                except Exception as _g_exc:
+                    logger.debug(
+                        "[%s] Guild slash sync failed for guild %s: %s",
+                        self.name,
+                        getattr(_guild, "id", "unknown"),
+                        _g_exc,
+                    )
+    # COLMEIO_DISCORD_GUILD_SYNC_END
+    """
+)
+
+
+def _render_block(indent: str) -> str:
+    lines = INSERT_BLOCK_TEMPLATE.rstrip("\n").splitlines()
+    return "".join(f"{indent}{line}\n" for line in lines)
 
 
 def _find_discord_py() -> Path:
@@ -83,7 +91,7 @@ def _find_discord_py() -> Path:
     )
 
 
-def _replace_marker_block(content: str, start_marker: str, end_marker: str, block: str) -> tuple[str, bool]:
+def _replace_marker_block(content: str, start_marker: str, end_marker: str) -> tuple[str, bool]:
     start = content.find(start_marker)
     if start == -1:
         return content, False
@@ -96,6 +104,14 @@ def _replace_marker_block(content: str, start_marker: str, end_marker: str, bloc
     block_end = content.find("\n", end)
     block_end = len(content) if block_end == -1 else block_end + 1
 
+    marker_line_start = content.rfind("\n", 0, start)
+    marker_line_start = 0 if marker_line_start == -1 else marker_line_start + 1
+    marker_line_end = content.find("\n", marker_line_start)
+    marker_line_end = len(content) if marker_line_end == -1 else marker_line_end
+    marker_line = content[marker_line_start:marker_line_end]
+    indent = re.match(r"[ \t]*", marker_line).group(0)
+    block = _render_block(indent)
+
     old_block = content[block_start:block_end]
     if old_block == block:
         return content, False
@@ -107,13 +123,13 @@ def _insert_after_global_sync_log(content: str) -> tuple[str, bool]:
         return content, False
 
     pattern = re.compile(
-        r'(?P<line>[ \t]*logger\.info\("\[%s\] Synced %d slash command\(s\)", adapter_self\.name, len\(synced\)\)\n)'
+        r'(?P<line>(?P<indent>[ \t]*)logger\.info\("\[%s\] Synced %d slash command\(s\)",\s*(?:adapter_self|self)\.name,\s*len\(synced\)\)\n)'
     )
     m = pattern.search(content)
     if not m:
         raise RuntimeError("Could not find global slash sync log line to anchor guild sync patch.")
     insert_at = m.end("line")
-    return content[:insert_at] + INSERT_BLOCK + content[insert_at:], True
+    return content[:insert_at] + _render_block(m.group("indent")) + content[insert_at:], True
 
 
 def reapply() -> int:
@@ -128,7 +144,7 @@ def reapply() -> int:
     applied: list[str] = []
 
     try:
-        content, changed = _replace_marker_block(content, MARKER_START, MARKER_END, INSERT_BLOCK)
+        content, changed = _replace_marker_block(content, MARKER_START, MARKER_END)
         if changed:
             applied.append("guild_sync(refresh)")
         if MARKER_START not in content:

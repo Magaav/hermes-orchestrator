@@ -44,6 +44,7 @@ from tools.code_execution_tool import (
     build_execute_code_schema,
     EXECUTE_CODE_SCHEMA,
     _TOOL_DOC_LINES,
+    _execute_remote,
 )
 
 
@@ -115,6 +116,48 @@ class TestHermesToolsGeneration(unittest.TestCase):
         self.assertIn("def retry(", src)
         self.assertIn("import json, os, socket, shlex, time", src)
 
+    def test_file_transport_uses_tempfile_fallback_for_rpc_dir(self):
+        src = generate_hermes_tools_module(["terminal"], transport="file")
+        self.assertIn("import json, os, shlex, tempfile, time", src)
+        self.assertIn("os.path.join(tempfile.gettempdir(), \"hermes_rpc\")", src)
+        self.assertNotIn('os.environ.get("HERMES_RPC_DIR", "/tmp/hermes_rpc")', src)
+
+
+class TestExecuteCodeRemoteTempDir(unittest.TestCase):
+    def test_execute_remote_uses_backend_temp_dir_for_sandbox(self):
+        class FakeEnv:
+            def __init__(self):
+                self.commands = []
+
+            def get_temp_dir(self):
+                return "/data/data/com.termux/files/usr/tmp"
+
+            def execute(self, command, cwd=None, timeout=None):
+                self.commands.append((command, cwd, timeout))
+                if "command -v python3" in command:
+                    return {"output": "OK\n"}
+                if "python3 script.py" in command:
+                    return {"output": "hello\n", "returncode": 0}
+                return {"output": ""}
+
+        env = FakeEnv()
+        fake_thread = MagicMock()
+
+        with patch("tools.code_execution_tool._load_config", return_value={"timeout": 30, "max_tool_calls": 5}), \
+             patch("tools.code_execution_tool._get_or_create_env", return_value=(env, "ssh")), \
+             patch("tools.code_execution_tool._ship_file_to_remote"), \
+             patch("tools.code_execution_tool.threading.Thread", return_value=fake_thread):
+            result = json.loads(_execute_remote("print('hello')", "task-1", ["terminal"]))
+
+        self.assertEqual(result["status"], "success")
+        mkdir_cmd = env.commands[1][0]
+        run_cmd = next(cmd for cmd, _, _ in env.commands if "python3 script.py" in cmd)
+        cleanup_cmd = env.commands[-1][0]
+        self.assertIn("mkdir -p /data/data/com.termux/files/usr/tmp/hermes_exec_", mkdir_cmd)
+        self.assertIn("HERMES_RPC_DIR=/data/data/com.termux/files/usr/tmp/hermes_exec_", run_cmd)
+        self.assertIn("rm -rf /data/data/com.termux/files/usr/tmp/hermes_exec_", cleanup_cmd)
+        self.assertNotIn("mkdir -p /tmp/hermes_exec_", mkdir_cmd)
+
 
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestExecuteCode(unittest.TestCase):
@@ -171,51 +214,6 @@ print(f"file lines: {r2['total_lines']}")
         result = self._run(code)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["tool_calls_made"], 2)
-
-    def test_nested_patch_changes_are_reported(self):
-        """execute_code should surface nested patch file metadata."""
-        code = """
-from hermes_tools import patch
-patch(path="demo.txt", old_string="old", new_string="new")
-print("patched")
-"""
-        nested_result = json.dumps({
-            "success": True,
-            "files_modified": ["demo.txt"],
-            "diff": (
-                "diff --git a/demo.txt b/demo.txt\n"
-                "--- a/demo.txt\n"
-                "+++ b/demo.txt\n"
-                "@@ -1 +1 @@\n"
-                "-old\n"
-                "+new\n"
-            ),
-        })
-        with patch("model_tools.handle_function_call", return_value=nested_result):
-            result = json.loads(execute_code(
-                code=code,
-                task_id="test-task",
-                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
-            ))
-        self.assertEqual(result["status"], "success")
-        self.assertEqual(result.get("files_modified"), ["demo.txt"])
-        self.assertIn("diff --git a/demo.txt b/demo.txt", result.get("diff", ""))
-
-    def test_nested_patch_falls_back_to_path_when_metadata_missing(self):
-        """When nested patch omits files_modified, execute_code should still report path."""
-        code = """
-from hermes_tools import patch
-patch(path="fallback.txt", old_string="a", new_string="b")
-print("patched")
-"""
-        with patch("model_tools.handle_function_call", return_value=json.dumps({"status": "ok"})):
-            result = json.loads(execute_code(
-                code=code,
-                task_id="test-task",
-                enabled_tools=list(SANDBOX_ALLOWED_TOOLS),
-            ))
-        self.assertEqual(result["status"], "success")
-        self.assertIn("fallback.txt", result.get("files_modified", []))
 
     def test_syntax_error(self):
         """Script with a syntax error returns error status."""
@@ -281,6 +279,10 @@ raise RuntimeError("deliberate crash")
                 ))
         self.assertEqual(result["status"], "timeout")
         self.assertIn("timed out", result.get("error", ""))
+        # The timeout message must also appear in output so the LLM always
+        # surfaces it to the user (#10807).
+        self.assertIn("timed out", result.get("output", ""))
+        self.assertIn("\u23f0", result.get("output", ""))
 
     def test_web_search_tool(self):
         """Script calls web_search and processes results."""
@@ -382,7 +384,7 @@ class TestStubSchemaDrift(unittest.TestCase):
     # Parameters that are internal (injected by the handler, not user-facing)
     _INTERNAL_PARAMS = {"task_id", "user_task"}
     # Parameters intentionally blocked in the sandbox
-    _BLOCKED_TERMINAL_PARAMS = {"background", "check_interval", "pty", "notify_on_complete"}
+    _BLOCKED_TERMINAL_PARAMS = {"background", "pty", "notify_on_complete", "watch_patterns"}
 
     def test_stubs_cover_all_schema_params(self):
         """Every user-facing parameter in the real schema must appear in the
@@ -782,14 +784,18 @@ class TestLoadConfig(unittest.TestCase):
 @unittest.skipIf(sys.platform == "win32", "UDS not available on Windows")
 class TestInterruptHandling(unittest.TestCase):
     def test_interrupt_event_stops_execution(self):
-        """When _interrupt_event is set, execute_code should stop the script."""
+        """When interrupt is set for the execution thread, execute_code should stop."""
         code = "import time; time.sleep(60); print('should not reach')"
+        from tools.interrupt import set_interrupt
+
+        # Capture the main thread ID so we can target the interrupt correctly.
+        # execute_code runs in the current thread; set_interrupt needs its ID.
+        main_tid = threading.current_thread().ident
 
         def set_interrupt_after_delay():
             import time as _t
             _t.sleep(1)
-            from tools.terminal_tool import _interrupt_event
-            _interrupt_event.set()
+            set_interrupt(True, main_tid)
 
         t = threading.Thread(target=set_interrupt_after_delay, daemon=True)
         t.start()
@@ -806,8 +812,7 @@ class TestInterruptHandling(unittest.TestCase):
             self.assertEqual(result["status"], "interrupted")
             self.assertIn("interrupted", result["output"])
         finally:
-            from tools.terminal_tool import _interrupt_event
-            _interrupt_event.clear()
+            set_interrupt(False, main_tid)
             t.join(timeout=3)
 
 

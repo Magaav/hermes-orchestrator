@@ -46,32 +46,60 @@ def main() -> int:
 
     text = run_path.read_text(encoding="utf-8")
 
-    checks = [
-        ("runtime_marker_begin", "COLMEIO_NODE_AGENT_RUNTIME_BEGIN"),
-        ("runtime_marker_end", "COLMEIO_NODE_AGENT_RUNTIME_END"),
-        ("step_marker_begin", "COLMEIO_NODE_AGENT_STEP_SUMMARY_BEGIN"),
-        ("step_marker_end", "COLMEIO_NODE_AGENT_STEP_SUMMARY_END"),
-        ("notify_marker_begin", "COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_BEGIN"),
-        ("notify_marker_end", "COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_END"),
-        ("footer_marker_begin", "COLMEIO_NODE_AGENT_FINAL_FOOTER_BEGIN"),
-        ("footer_marker_end", "COLMEIO_NODE_AGENT_FINAL_FOOTER_END"),
-        (
-            "step_callback_gate",
-            "agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or _followup_summary_enabled) else None",
-        ),
-        ("notify_interval_env", "_NOTIFY_INTERVAL = _followup_elapsed_minutes * 60"),
-        ("rich_activity_recorder", "def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None"),
-        ("rich_summary_objective", "Objective:"),
-        ("rich_summary_decision", "Decision:"),
-        ("rich_window_tools", "\"window_tool_names\": []"),
-        ("rich_progress_hook", "_record_followup_activity(tool_name, preview, args)"),
-    ]
+    legacy_mode = "COLMEIO_NODE_AGENT_RUNTIME_BEGIN" in text
+
+    if legacy_mode:
+        checks: list[tuple[str, list[str]]] = [
+            ("runtime_marker_begin", ["COLMEIO_NODE_AGENT_RUNTIME_BEGIN"]),
+            ("runtime_marker_end", ["COLMEIO_NODE_AGENT_RUNTIME_END"]),
+            ("step_marker_begin", ["COLMEIO_NODE_AGENT_STEP_SUMMARY_BEGIN"]),
+            ("step_marker_end", ["COLMEIO_NODE_AGENT_STEP_SUMMARY_END"]),
+            ("notify_marker_begin", ["COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_BEGIN"]),
+            ("notify_marker_end", ["COLMEIO_NODE_AGENT_FOLLOWUP_NOTIFY_END"]),
+            ("footer_marker_begin", ["COLMEIO_NODE_AGENT_FINAL_FOOTER_BEGIN"]),
+            ("footer_marker_end", ["COLMEIO_NODE_AGENT_FINAL_FOOTER_END"]),
+            (
+                "step_callback_gate",
+                ["agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or _followup_summary_enabled) else None"],
+            ),
+            ("notify_interval_env", ["_NOTIFY_INTERVAL = _followup_elapsed_minutes * 60"]),
+            ("rich_activity_recorder", ["def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any) -> None"]),
+            ("rich_summary_objective", ["Objective:"]),
+            ("rich_summary_decision", ["Decision:"]),
+            ("rich_window_tools", ['"window_tool_names": []']),
+            ("rich_progress_hook", ["_record_followup_activity(tool_name, preview, args)"]),
+        ]
+    else:
+        checks = [
+            ("modern_step_callback_fn", ["def _step_callback_sync("]),
+            (
+                "modern_step_callback_gate",
+                [
+                    "agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None",
+                    "agent.step_callback = _step_callback_sync if (_hooks_ref.loaded_hooks or _followup_summary_enabled) else None",
+                ],
+            ),
+            (
+                "modern_notify_interval_env",
+                [
+                    "HERMES_AGENT_NOTIFY_INTERVAL",
+                    "_NOTIFY_INTERVAL = _followup_elapsed_minutes * 60",
+                ],
+            ),
+            (
+                "modern_followup_send_typing",
+                ["await _followup_adapter.send_typing("],
+            ),
+        ]
 
     failed = 0
     print(f"[verify] run.py: {run_path}")
-    for label, marker in checks:
-        ok = marker in text
-        print(f"  {'[ok]' if ok else '[!!]'} {label}: {marker}")
+    print(f"  [info] mode={'legacy-patched' if legacy_mode else 'modern-upstream'}")
+    for label, markers in checks:
+        matched = next((marker for marker in markers if marker in text), "")
+        ok = bool(matched)
+        detail = matched if matched else " | ".join(markers)
+        print(f"  {'[ok]' if ok else '[!!]'} {label}: {detail}")
         if not ok:
             failed += 1
 

@@ -55,6 +55,7 @@ Legacy keys remain supported for compatibility:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -149,6 +150,14 @@ SHARED_MEMORY_ROOT = Path(
         or (PRIVATE_PLUGINS_ROOT / "memory")
     )
 )
+SHARED_NODE_DATA_ROOT = Path(
+    str(
+        os.getenv("HERMES_SHARED_NODE_DATA_ROOT", "")
+        or os.getenv("HERMES_DATAS_ROOT", "")
+        or os.getenv("HERMES_DATA_ROOT", "")
+        or "/local/datas"
+    )
+)
 BACKUPS_ROOT = Path(os.getenv("HERMES_BACKUPS_ROOT", "/local/backups"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
 HERMES_AGENT_UPSTREAM_REPO = str(
@@ -162,6 +171,26 @@ DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
 DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
 DEFAULT_DISCORD_PRIVATE_ROOT = PRIVATE_PLUGINS_ROOT / "discord"
 HOST_BOOTSTRAP_ENV_FILE = Path(os.getenv("HERMES_BOOTSTRAP_ENV_FILE", "/local/.env"))
+UPDATE_TEST_NODE_DEFAULT = str(os.getenv("HERMES_UPDATE_TEST_NODE", "node-dummy") or "node-dummy").strip() or "node-dummy"
+UPDATE_TEST_ENV_SOURCE = Path(
+    str(os.getenv("HERMES_UPDATE_TEST_ENV_FILE", "/local/dummy/dummy.env") or "/local/dummy/dummy.env")
+)
+UPDATE_TEST_LOG_ROOT = Path(
+    str(os.getenv("HERMES_UPDATE_TEST_LOG_ROOT", "/log/update") or "/log/update")
+)
+UPDATE_TEST_LOG_FALLBACK_ROOT = Path(
+    str(os.getenv("HERMES_UPDATE_TEST_LOG_FALLBACK", "/local/log/update") or "/local/log/update")
+)
+UPDATE_DUMMY_ROOT = Path(
+    str(os.getenv("HERMES_UPDATE_DUMMY_ROOT", "/local/dummy") or "/local/dummy")
+)
+UPDATE_DUMMY_HERMES_ROOT = UPDATE_DUMMY_ROOT / "hermes-agent"
+UPDATE_DUMMY_PLUGINS_ROOT = UPDATE_DUMMY_ROOT / "plugins"
+UPDATE_DUMMY_SCRIPTS_ROOT = UPDATE_DUMMY_ROOT / "scripts"
+UPDATE_DUMMY_PUBLIC_PLUGINS_ROOT = UPDATE_DUMMY_PLUGINS_ROOT / "public"
+UPDATE_DUMMY_PRIVATE_PLUGINS_ROOT = UPDATE_DUMMY_PLUGINS_ROOT / "private"
+UPDATE_DUMMY_PUBLIC_SCRIPTS_ROOT = UPDATE_DUMMY_SCRIPTS_ROOT / "public"
+UPDATE_DUMMY_PRIVATE_SCRIPTS_ROOT = UPDATE_DUMMY_SCRIPTS_ROOT / "private"
 
 DEFAULT_DOCKER_IMAGE = os.getenv("HERMES_CLONE_DOCKER_IMAGE", "ubuntu:24.04")
 CONTAINER_PREFIX = "hermes-node-"
@@ -206,6 +235,7 @@ ATTENTION_LINE_RE = re.compile(
     r"\b(warn(?:ing)?|error|critical|fatal|panic|emerg(?:ency)?|alert)\b",
     re.IGNORECASE,
 )
+PLUGIN_PATH_RE = re.compile(r"/plugins/(?:public|private)/([^/\s]+)/")
 
 STATE_LABELS = {
     1: "orchestrator",           # bare-metal bootstrap node, syncs local hermes-agent copy + shared asset symlinks
@@ -222,6 +252,7 @@ NODE_BACKUP_EXCLUDE_PREFIXES: tuple[str, ...] = (
     "wiki",
     "cron",
     "crons",
+    "data",
     # Node-local transient/runtime noise.
     ".runtime",
     "hermes-agent",
@@ -335,6 +366,7 @@ def _ensure_dirs() -> None:
     _ensure_root_dir(SHARED_WIKI_ROOT)
     _ensure_root_dir(PRIVATE_SKILLS_ROOT)
     _ensure_root_dir(SHARED_MEMORY_ROOT)
+    _ensure_root_dir(SHARED_NODE_DATA_ROOT)
 
 
 def _parent_hermes_home_source() -> Path:
@@ -1034,6 +1066,8 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
     crons_present = False
     skills_present = False
     legacy_private_present = False
+    datas_present = False
+    legacy_data_present = False
     runtime_seed_hermes_present = False
     runtime_seed_venv_present = False
     runtime_seed_uv_present = False
@@ -1106,6 +1140,14 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
                     f"unsupported path in backup archive: {member_name}"
                 )
 
+            if parts[0] == "datas":
+                datas_present = True
+                continue
+
+            if parts[0] == "data":
+                legacy_data_present = True
+                continue
+
             if parts[0] == "runtime_seed":
                 if len(parts) == 1:
                     continue
@@ -1137,6 +1179,8 @@ def _extract_backup_archive(archive_path: Path, destination: Path) -> Dict[str, 
         "crons_present": crons_present,
         "skills_present": skills_present,
         "legacy_private_present": legacy_private_present,
+        "datas_present": datas_present,
+        "legacy_data_present": legacy_data_present,
         "runtime_seed_hermes_present": runtime_seed_hermes_present,
         "runtime_seed_venv_present": runtime_seed_venv_present,
         "runtime_seed_uv_present": runtime_seed_uv_present,
@@ -1291,6 +1335,11 @@ def _required_worker_mount_specs(clone_name: str, clone_root: Path) -> list[Dict
             "read_only": False,
         },
         {
+            "destination": "/local/data",
+            "source": str(_shared_node_data_dir(clone_name)),
+            "read_only": False,
+        },
+        {
             "destination": f"/local/logs/nodes/{clone_name}",
             "source": str(_node_log_dir(clone_name)),
             "read_only": False,
@@ -1391,6 +1440,14 @@ def _clone_env_path(clone_name: str) -> Path:
 
 def _clone_root_path(clone_name: str) -> Path:
     return CLONES_ROOT / clone_name
+
+
+def _shared_node_data_dir(clone_name: str) -> Path:
+    return SHARED_NODE_DATA_ROOT / clone_name
+
+
+def _legacy_node_data_dir(clone_root: Path) -> Path:
+    return clone_root / "data"
 
 
 def _container_name(clone_name: str) -> str:
@@ -2337,6 +2394,425 @@ def _prestart_script_path() -> Path:
     return deduped[0]
 
 
+def _resolve_update_test_log_root() -> tuple[Path, str]:
+    requested = UPDATE_TEST_LOG_ROOT.expanduser()
+    try:
+        requested.mkdir(parents=True, exist_ok=True)
+        return requested, ""
+    except Exception as exc:
+        fallback = UPDATE_TEST_LOG_FALLBACK_ROOT.expanduser()
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except Exception as fallback_exc:
+            raise CloneManagerError(
+                "unable to initialize update log roots "
+                f"(requested={requested}, fallback={fallback}): {fallback_exc}"
+            ) from fallback_exc
+        warning = f"requested log root not writable ({requested}): {exc}"
+        return fallback, warning
+
+
+def _new_update_run_id(prefix: str) -> str:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return f"{prefix}-{stamp}-{int(time.time() * 1000)}"
+
+
+def _create_update_run_dir(prefix: str) -> tuple[Path, str, str]:
+    log_root, log_root_warning = _resolve_update_test_log_root()
+    run_id = _new_update_run_id(prefix)
+    run_dir = log_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir, run_id, log_root_warning
+
+
+def _parse_deprecate_plugins(raw: str) -> list[str]:
+    entries: list[str] = []
+    seen: set[str] = set()
+    for item in str(raw or "").split(","):
+        name = str(item or "").strip()
+        if not name or name == "deprecated":
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        entries.append(name)
+    return entries
+
+
+def _list_public_plugins(public_plugins_root: Path) -> list[str]:
+    if not public_plugins_root.exists() or not public_plugins_root.is_dir():
+        return []
+    names: list[str] = []
+    for child in sorted(public_plugins_root.iterdir(), key=lambda p: p.name):
+        if child.name == "deprecated":
+            continue
+        if child.is_dir():
+            names.append(child.name)
+    return names
+
+
+def _list_deprecated_plugins(public_plugins_root: Path) -> list[str]:
+    deprecated_root = public_plugins_root / "deprecated"
+    if not deprecated_root.exists() or not deprecated_root.is_dir():
+        return []
+    names: list[str] = []
+    for child in sorted(deprecated_root.iterdir(), key=lambda p: p.name):
+        if child.is_dir():
+            names.append(child.name)
+    return names
+
+
+def _deprecate_plugins(
+    *,
+    public_plugins_root: Path,
+    plugin_names: list[str],
+) -> Dict[str, Any]:
+    deprecated_root = public_plugins_root / "deprecated"
+    deprecated_root.mkdir(parents=True, exist_ok=True)
+
+    applied: list[str] = []
+    already_present: list[str] = []
+    missing: list[str] = []
+
+    for plugin in plugin_names:
+        source = public_plugins_root / plugin
+        target = deprecated_root / plugin
+        if target.exists():
+            if source.exists():
+                _sync_dir(source, target, delete=False)
+                _remove_path(source)
+            already_present.append(plugin)
+            continue
+        if not source.exists():
+            missing.append(plugin)
+            continue
+        shutil.move(str(source), str(target))
+        applied.append(plugin)
+
+    return {
+        "deprecated_plugins_root": str(deprecated_root),
+        "deprecated_plugins_applied": applied,
+        "deprecated_plugins_already_present": already_present,
+        "deprecated_plugins_missing": missing,
+    }
+
+
+@contextmanager
+def _temporary_runtime_roots(
+    *,
+    source_root: Path,
+    plugins_root: Path,
+    scripts_root: Path,
+):
+    # This context manager is intentionally narrow and only used by update
+    # preflight to run the full clone bootstrap path against dummy snapshots.
+    global HERMES_SOURCE_ROOT
+    global PLUGINS_ROOT
+    global SHARED_PLUGINS_ROOT
+    global PRIVATE_PLUGINS_ROOT
+    global SCRIPTS_ROOT
+    global SHARED_SCRIPTS_ROOT
+    global PRIVATE_SCRIPTS_ROOT
+    global DEFAULT_DISCORD_PLUGIN_ROOT
+    global DEFAULT_HERMES_CORE_PLUGIN_ROOT
+    global DEFAULT_DISCORD_PRIVATE_ROOT
+    global SHARED_WIKI_ROOT
+    global SHARED_MEMORY_ROOT
+    global LEGACY_SHARED_CRONS_ROOT
+
+    previous = {
+        "HERMES_SOURCE_ROOT": HERMES_SOURCE_ROOT,
+        "PLUGINS_ROOT": PLUGINS_ROOT,
+        "SHARED_PLUGINS_ROOT": SHARED_PLUGINS_ROOT,
+        "PRIVATE_PLUGINS_ROOT": PRIVATE_PLUGINS_ROOT,
+        "SCRIPTS_ROOT": SCRIPTS_ROOT,
+        "SHARED_SCRIPTS_ROOT": SHARED_SCRIPTS_ROOT,
+        "PRIVATE_SCRIPTS_ROOT": PRIVATE_SCRIPTS_ROOT,
+        "DEFAULT_DISCORD_PLUGIN_ROOT": DEFAULT_DISCORD_PLUGIN_ROOT,
+        "DEFAULT_HERMES_CORE_PLUGIN_ROOT": DEFAULT_HERMES_CORE_PLUGIN_ROOT,
+        "DEFAULT_DISCORD_PRIVATE_ROOT": DEFAULT_DISCORD_PRIVATE_ROOT,
+        "SHARED_WIKI_ROOT": SHARED_WIKI_ROOT,
+        "SHARED_MEMORY_ROOT": SHARED_MEMORY_ROOT,
+        "LEGACY_SHARED_CRONS_ROOT": LEGACY_SHARED_CRONS_ROOT,
+    }
+
+    try:
+        HERMES_SOURCE_ROOT = source_root
+        PLUGINS_ROOT = plugins_root
+        SHARED_PLUGINS_ROOT = plugins_root / "public"
+        PRIVATE_PLUGINS_ROOT = plugins_root / "private"
+        SCRIPTS_ROOT = scripts_root
+        SHARED_SCRIPTS_ROOT = scripts_root / "public"
+        PRIVATE_SCRIPTS_ROOT = scripts_root / "private"
+        DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
+        DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
+        DEFAULT_DISCORD_PRIVATE_ROOT = PRIVATE_PLUGINS_ROOT / "discord"
+        SHARED_WIKI_ROOT = PRIVATE_PLUGINS_ROOT / "wiki"
+        SHARED_MEMORY_ROOT = PRIVATE_PLUGINS_ROOT / "memory"
+        LEGACY_SHARED_CRONS_ROOT = PRIVATE_SCRIPTS_ROOT / "crons"
+        yield
+    finally:
+        HERMES_SOURCE_ROOT = previous["HERMES_SOURCE_ROOT"]
+        PLUGINS_ROOT = previous["PLUGINS_ROOT"]
+        SHARED_PLUGINS_ROOT = previous["SHARED_PLUGINS_ROOT"]
+        PRIVATE_PLUGINS_ROOT = previous["PRIVATE_PLUGINS_ROOT"]
+        SCRIPTS_ROOT = previous["SCRIPTS_ROOT"]
+        SHARED_SCRIPTS_ROOT = previous["SHARED_SCRIPTS_ROOT"]
+        PRIVATE_SCRIPTS_ROOT = previous["PRIVATE_SCRIPTS_ROOT"]
+        DEFAULT_DISCORD_PLUGIN_ROOT = previous["DEFAULT_DISCORD_PLUGIN_ROOT"]
+        DEFAULT_HERMES_CORE_PLUGIN_ROOT = previous["DEFAULT_HERMES_CORE_PLUGIN_ROOT"]
+        DEFAULT_DISCORD_PRIVATE_ROOT = previous["DEFAULT_DISCORD_PRIVATE_ROOT"]
+        SHARED_WIKI_ROOT = previous["SHARED_WIKI_ROOT"]
+        SHARED_MEMORY_ROOT = previous["SHARED_MEMORY_ROOT"]
+        LEGACY_SHARED_CRONS_ROOT = previous["LEGACY_SHARED_CRONS_ROOT"]
+
+
+def _plugin_name_from_step_command(command: str) -> str:
+    match = PLUGIN_PATH_RE.search(str(command or ""))
+    if match:
+        return str(match.group(1) or "").strip() or "unknown"
+    return "unknown"
+
+
+def _build_plugin_matrix(
+    *,
+    prestart_log_path: Path,
+    deprecated_plugins: list[str],
+) -> Dict[str, Any]:
+    deprecated_set = set(deprecated_plugins)
+    steps: list[Dict[str, Any]] = []
+    by_name: Dict[str, Dict[str, Any]] = {}
+
+    if prestart_log_path.exists():
+        for raw in prestart_log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = str(raw or "")
+            step_match = re.search(r"STEP\s+([A-Za-z0-9._-]+):\s*(.*)$", line)
+            if step_match:
+                name = str(step_match.group(1) or "").strip()
+                command = str(step_match.group(2) or "").strip()
+                plugin = _plugin_name_from_step_command(command)
+                row = {
+                    "step": name,
+                    "plugin": plugin,
+                    "command": command,
+                    "status": "pending",
+                }
+                steps.append(row)
+                by_name[name] = row
+                continue
+
+            ok_match = re.search(r"OK\s+([A-Za-z0-9._-]+)\s*$", line)
+            if ok_match:
+                name = str(ok_match.group(1) or "").strip()
+                row = by_name.get(name)
+                if row is not None:
+                    row["status"] = "passed"
+                continue
+
+            fail_match = re.search(r"FAIL\s+([A-Za-z0-9._-]+)\s*$", line)
+            if fail_match:
+                name = str(fail_match.group(1) or "").strip()
+                row = by_name.get(name)
+                if row is not None:
+                    row["status"] = "failed"
+                continue
+
+    for row in steps:
+        if str(row.get("plugin") or "") in deprecated_set:
+            row["status"] = "skipped_deprecated"
+
+    for plugin in deprecated_plugins:
+        has_rows = any(str(row.get("plugin") or "") == plugin for row in steps)
+        if has_rows:
+            continue
+        steps.append(
+            {
+                "step": f"plugin::{plugin}",
+                "plugin": plugin,
+                "command": "",
+                "status": "skipped_deprecated",
+                "reason": "plugin moved under deprecated/",
+            }
+        )
+
+    summary = {
+        "passed": sum(1 for row in steps if row.get("status") == "passed"),
+        "failed": sum(1 for row in steps if row.get("status") == "failed"),
+        "skipped_deprecated": sum(1 for row in steps if row.get("status") == "skipped_deprecated"),
+        "pending": sum(1 for row in steps if row.get("status") == "pending"),
+        "total": len(steps),
+    }
+
+    return {
+        "steps": steps,
+        "summary": summary,
+        "deprecated_plugins": list(deprecated_plugins),
+    }
+
+
+def _refresh_dummy_snapshot(source_branch: str, deprecated_plugins: list[str]) -> Dict[str, Any]:
+    UPDATE_DUMMY_ROOT.mkdir(parents=True, exist_ok=True)
+
+    _sync_dir(PLUGINS_ROOT, UPDATE_DUMMY_PLUGINS_ROOT, delete=True)
+    _sync_dir(SCRIPTS_ROOT, UPDATE_DUMMY_SCRIPTS_ROOT, delete=True)
+
+    with _temporary_runtime_roots(
+        source_root=UPDATE_DUMMY_HERMES_ROOT,
+        plugins_root=UPDATE_DUMMY_PLUGINS_ROOT,
+        scripts_root=UPDATE_DUMMY_SCRIPTS_ROOT,
+    ):
+        template_payload = _action_update_template(source_branch)
+
+    deprecate_payload = _deprecate_plugins(
+        public_plugins_root=UPDATE_DUMMY_PUBLIC_PLUGINS_ROOT,
+        plugin_names=deprecated_plugins,
+    )
+
+    return {
+        "dummy_root": str(UPDATE_DUMMY_ROOT),
+        "dummy_hermes_root": str(UPDATE_DUMMY_HERMES_ROOT),
+        "dummy_plugins_root": str(UPDATE_DUMMY_PLUGINS_ROOT),
+        "dummy_scripts_root": str(UPDATE_DUMMY_SCRIPTS_ROOT),
+        "template_update": template_payload,
+        "snapshot_plugins": {
+            "source": str(PLUGINS_ROOT),
+            "target": str(UPDATE_DUMMY_PLUGINS_ROOT),
+        },
+        "snapshot_scripts": {
+            "source": str(SCRIPTS_ROOT),
+            "target": str(UPDATE_DUMMY_SCRIPTS_ROOT),
+        },
+        **deprecate_payload,
+        "active_plugins_after_snapshot": _list_public_plugins(UPDATE_DUMMY_PUBLIC_PLUGINS_ROOT),
+        "deprecated_plugins_present": _list_deprecated_plugins(UPDATE_DUMMY_PUBLIC_PLUGINS_ROOT),
+    }
+
+
+def _seed_update_test_env_profile(clone_name: str, env_path: Path) -> Dict[str, Any]:
+    source = UPDATE_TEST_ENV_SOURCE.expanduser()
+    if source.exists():
+        seed_text = source.read_text(encoding="utf-8")
+        seed_source = source
+    elif NODE_ENV_TEMPLATE_PATH.exists():
+        seed_text = NODE_ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
+        seed_source = NODE_ENV_TEMPLATE_PATH
+    else:
+        raise CloneManagerError(
+            "could not build dummy env profile; no seed found at "
+            f"{source} or {NODE_ENV_TEMPLATE_PATH}"
+        )
+
+    text = seed_text if seed_text.endswith("\n") else f"{seed_text}\n"
+    overrides = {
+        "NODE_STATE": "4",
+        "NODE_STATE_FROM_BACKUP_PATH": "''",
+        "NODE_WIKI_ENABLED": "false",
+        "OPENVIKING_ENABLED": "0",
+        "CAMOFOX_ENABLED": "0",
+        "DISCORD_HOME_CHANNEL": "000000000000000000",
+        "DISCORD_APP_ID": "000000000000000000",
+        "DISCORD_SERVER_ID": "000000000000000000",
+        "DISCORD_BOT_TOKEN": "DUMMY_TOKEN",
+        "NODE_PLUGINS_STRICT": "1",
+    }
+    for key, value in overrides.items():
+        text = _replace_or_append_env_line(text, key, value)
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text(text, encoding="utf-8")
+    try:
+        env_path.chmod(0o600)
+    except Exception:
+        pass
+
+    _log(
+        clone_name,
+        f"update test env prepared: {env_path} (seed={seed_source})",
+    )
+    return {
+        "env_path": str(env_path),
+        "seed_source": str(seed_source),
+        "seed_source_exists": source.exists(),
+    }
+
+
+def _extract_prestart_failures(prestart_log_path: Path) -> list[str]:
+    if not prestart_log_path.exists():
+        return []
+    failures: list[str] = []
+    for raw in prestart_log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        idx = raw.find("FAIL ")
+        if idx < 0:
+            continue
+        name = raw[idx + len("FAIL ") :].strip()
+        if not name:
+            continue
+        if name not in failures:
+            failures.append(name)
+    return failures
+
+
+def _run_prestart_reapply(
+    clone_name: str,
+    *,
+    clone_root: Path,
+    env_path: Path,
+    strict: bool,
+    capture_output: bool,
+) -> Dict[str, Any]:
+    prestart_script = _prestart_script_path()
+    if not prestart_script.exists():
+        raise CloneManagerError(f"prestart reapply script not found: {prestart_script}")
+
+    env = _read_env_file(env_path)
+    runtime_env_overrides = _runtime_env_overrides(clone_name, env)
+    proc_env = os.environ.copy()
+    proc_env.update(env)
+    proc_env.update(runtime_env_overrides)
+    proc_env["HERMES_HOME"] = str(clone_root / ".hermes")
+    proc_env["HOME"] = str(clone_root)
+    proc_env["USER"] = str(proc_env.get("USER") or "ubuntu")
+    proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
+    proc_env["NODE_NAME"] = str(proc_env.get("NODE_NAME") or clone_name)
+    proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
+    proc_env["HERMES_CORE_PLUGIN_DIR"] = str(DEFAULT_HERMES_CORE_PLUGIN_ROOT)
+    proc_env["HERMES_DISCORD_PRIVATE_DIR"] = str(DEFAULT_DISCORD_PRIVATE_ROOT)
+    proc_env["HERMES_PUBLIC_PLUGINS_ROOT"] = str(SHARED_PLUGINS_ROOT)
+    proc_env["HERMES_PRIVATE_PLUGINS_ROOT"] = str(PRIVATE_PLUGINS_ROOT)
+    proc_env["HERMES_PUBLIC_SCRIPTS_ROOT"] = str(SHARED_SCRIPTS_ROOT)
+    proc_env["HERMES_PRIVATE_SCRIPTS_ROOT"] = str(PRIVATE_SCRIPTS_ROOT)
+    proc_env["HERMES_AGENT_ROOT"] = str(clone_root / "hermes-agent")
+    proc_env["HERMES_NODE_ROOT"] = str(clone_root)
+    proc_env["NODE_PLUGINS_STRICT"] = "1" if strict else str(proc_env.get("NODE_PLUGINS_STRICT", "0"))
+    proc_env["PYTHONUNBUFFERED"] = "1"
+
+    cmd = ["bash", str(prestart_script)]
+    if strict:
+        cmd.append("--strict")
+
+    proc = subprocess.run(
+        cmd,
+        cwd=str(clone_root / "hermes-agent"),
+        env=proc_env,
+        capture_output=capture_output,
+        text=True,
+        check=False,
+    )
+
+    prestart_log_path = clone_root / ".hermes" / "logs" / "colmeio-prestart.log"
+    failed_marker_path = clone_root / ".hermes" / "logs" / "colmeio-prestart.failed"
+    return {
+        "script": str(prestart_script),
+        "returncode": int(proc.returncode),
+        "stdout": str(proc.stdout or ""),
+        "stderr": str(proc.stderr or ""),
+        "prestart_log_path": str(prestart_log_path),
+        "failed_marker_path": str(failed_marker_path),
+        "failed_marker_exists": failed_marker_path.exists(),
+        "failures": _extract_prestart_failures(prestart_log_path),
+    }
+
+
 def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
     target = _discord_plugin_roots()[0]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -2414,6 +2890,10 @@ def _seed_discord_settings_file(
             _env_first_nonempty(env_data, "DISCORD_AUTO_THREAD_IGNORE_CHANNELS") or ""
         ),
     }
+    if "DISCORD_REQUIRE_MENTION_CHANNELS" in env_data:
+        payload["DISCORD_REQUIRE_MENTION_CHANNELS"] = _parse_csv_env_list(
+            str(env_data.get("DISCORD_REQUIRE_MENTION_CHANNELS", "") or "")
+        )
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
     if clone_name:
@@ -2421,49 +2901,59 @@ def _seed_discord_settings_file(
 
 
 def _ensure_workspace_data_layout(clone_root: Path, clone_name: str = "") -> None:
-    data_dir = clone_root / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    workspace_data_dir = clone_root / "workspace" / "data"
-    if not workspace_data_dir.exists() or workspace_data_dir.is_symlink():
-        return
-    if not workspace_data_dir.is_dir():
+    if not clone_name:
         return
 
+    data_dir = _shared_node_data_dir(clone_name)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_data_dirs = [
+        _legacy_node_data_dir(clone_root),
+        clone_root / "workspace" / "data",
+    ]
     migrated_items: list[str] = []
     dropped_duplicates: list[str] = []
-    for legacy_item in sorted(workspace_data_dir.iterdir(), key=lambda p: p.name):
-        target_item = data_dir / legacy_item.name
-        if target_item.exists() or target_item.is_symlink():
-            if legacy_item.is_dir() and not legacy_item.is_symlink():
-                shutil.rmtree(legacy_item, ignore_errors=True)
-            else:
-                try:
-                    legacy_item.unlink()
-                except Exception:
-                    pass
-            dropped_duplicates.append(legacy_item.name)
+    migrated_from: list[str] = []
+    data_root_norm = _normalized_path_str(data_dir)
+
+    for legacy_dir in legacy_data_dirs:
+        if not legacy_dir.exists():
             continue
-        shutil.move(str(legacy_item), str(target_item))
-        migrated_items.append(legacy_item.name)
+        if legacy_dir.is_symlink():
+            _remove_path(legacy_dir)
+            continue
+        if not legacy_dir.is_dir():
+            continue
+        if _normalized_path_str(legacy_dir) == data_root_norm:
+            continue
+
+        migrated_from.append(str(legacy_dir))
+        for legacy_item in sorted(legacy_dir.iterdir(), key=lambda p: p.name):
+            target_item = data_dir / legacy_item.name
+            if target_item.exists() or target_item.is_symlink():
+                _remove_path(legacy_item)
+                dropped_duplicates.append(legacy_item.name)
+                continue
+            shutil.move(str(legacy_item), str(target_item))
+            migrated_items.append(legacy_item.name)
+
+        try:
+            has_entries = any(legacy_dir.iterdir())
+        except Exception:
+            has_entries = True
+        if not has_entries:
+            try:
+                legacy_dir.rmdir()
+            except Exception:
+                pass
 
     if clone_name and migrated_items:
         joined = ", ".join(migrated_items)
-        _log(clone_name, f"migrated workspace/data/* -> data ({joined})")
+        sources = ", ".join(migrated_from) if migrated_from else "legacy paths"
+        _log(clone_name, f"migrated node data ({joined}) from {sources} -> {data_dir}")
     if clone_name and dropped_duplicates:
         joined = ", ".join(dropped_duplicates)
-        _log(clone_name, f"removed workspace/data duplicates already present in data ({joined})")
-
-    try:
-        has_entries = any(workspace_data_dir.iterdir())
-    except Exception:
-        has_entries = True
-    if not has_entries:
-        try:
-            workspace_data_dir.rmdir()
-            if clone_name:
-                _log(clone_name, "removed legacy workspace/data directory after migration")
-        except Exception:
-            pass
+        _log(clone_name, f"removed legacy data duplicates already present in {data_dir} ({joined})")
 
 
 def _sync_discord_runtime_layout(
@@ -2810,7 +3300,7 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
         _log(
             clone_name,
             "openviking compatibility warning: provider plugin missing in clone code; "
-            "run 'horc agent update <node>' to refresh node code.",
+            "run 'horc update apply node <node>' to refresh node code.",
         )
     return {
         "enabled": True,
@@ -2824,7 +3314,7 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
             "supported": supported,
             "message": "fallback mode (env only)" if supported else (
                 "provider plugin missing; refresh node code "
-                "(run 'horc agent update <node>' and start again)."
+                "(run 'horc update apply node <node>' and start again)."
             ),
         },
         "degraded": not supported,
@@ -3038,7 +3528,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
         if not allow_parent_seed:
             raise CloneManagerError(
                 "clone runtime venv missing at /local/hermes-agent/.venv. "
-                "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
+                "Run 'horc update apply node <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
             )
         src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -3050,7 +3540,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
             required = ", ".join(GATEWAY_REQUIRED_MODULES)
             raise CloneManagerError(
                 f"clone runtime venv is missing required modules ({required}). "
-                "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to refresh runtime."
+                "Run 'horc update apply node <node>' or set NODE_FORCE_RESEED=1 to refresh runtime."
             )
         src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -3264,7 +3754,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             _remove_path(legacy_path)
 
     # Drop legacy workspace compatibility trees that conflict with agents-v2.
-    # Node-local mutable runtime state lives under /local/data.
+    # Runtime mutable state is mounted at /local/data from /local/datas/<node>.
     for legacy_rel in ("cron", "crons", "skills", "plugins", "colmeio"):
         legacy_path = clone_root / "workspace" / legacy_rel
         if legacy_path.exists() or legacy_path.is_symlink():
@@ -3356,7 +3846,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             if not path.exists():
                 raise CloneManagerError(
                     f"clone local path missing: {path}. "
-                    "Run 'horc agent update <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
+                    "Run 'horc update apply node <node>' or set NODE_FORCE_RESEED=1 to re-bootstrap."
                 )
         _normalize_clone_skills_layout(clone_root, containerized=True)
         _seed_clone_runtime(clone_root, allow_parent_seed=False)
@@ -3410,6 +3900,8 @@ def _build_docker_run_cmd(
 
     node_crons_host = SHARED_CRONS_ROOT / clone_name
     node_crons_host.mkdir(parents=True, exist_ok=True)
+    node_data_host = _shared_node_data_dir(clone_name)
+    node_data_host.mkdir(parents=True, exist_ok=True)
 
     gateway_cmd = (
         "set -euo pipefail; "
@@ -3526,6 +4018,8 @@ def _build_docker_run_cmd(
         "-v",
         f"{clone_root}:/local",
         "-v",
+        f"{node_data_host}:/local/data",
+        "-v",
         f"{node_log_host}:/local/logs/nodes/{clone_name}",
         "-v",
         f"{attention_log_host}:/local/logs/attention/nodes/{clone_name}",
@@ -3566,18 +4060,18 @@ def _build_docker_run_cmd(
 
 
 def _orchestrator_pid_path(clone_root: Path) -> Path:
-    return clone_root / "data" / "gateway.pid"
+    return _shared_node_data_dir("orchestrator") / "gateway.pid"
 
 
-def _orchestrator_legacy_pid_path(clone_root: Path) -> Path:
-    return clone_root / "workspace" / "data" / "gateway.pid"
+def _orchestrator_legacy_pid_paths(clone_root: Path) -> list[Path]:
+    return [
+        clone_root / "data" / "gateway.pid",
+        clone_root / "workspace" / "data" / "gateway.pid",
+    ]
 
 
 def _orchestrator_pid_candidates(clone_root: Path) -> list[Path]:
-    return [
-        _orchestrator_pid_path(clone_root),
-        _orchestrator_legacy_pid_path(clone_root),
-    ]
+    return [_orchestrator_pid_path(clone_root), *_orchestrator_legacy_pid_paths(clone_root)]
 
 
 def _read_pid(path: Path) -> int | None:
@@ -3750,8 +4244,9 @@ def _orchestrator_start_gateway(
     pid_path = _orchestrator_pid_path(clone_root)
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_path.write_text(f"{proc.pid}\n", encoding="utf-8")
-    legacy_pid = _orchestrator_legacy_pid_path(clone_root)
-    if legacy_pid != pid_path and legacy_pid.exists():
+    for legacy_pid in _orchestrator_legacy_pid_paths(clone_root):
+        if legacy_pid == pid_path or not legacy_pid.exists():
+            continue
         try:
             legacy_pid.unlink()
         except Exception:
@@ -4490,6 +4985,7 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
     missing: list[str] = []
     included_global: list[str] = []
     included_runtime_seed: list[str] = []
+    included_workspace_paths: list[str] = []
     request_dump_pruning: Dict[str, Any] = {}
 
     global_candidates: list[Path] = [
@@ -4499,6 +4995,7 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
         SHARED_WIKI_ROOT,
         SHARED_CRONS_ROOT,
         SHARED_MEMORY_ROOT,
+        SHARED_NODE_DATA_ROOT if backup_all else _shared_node_data_dir(target_nodes[0]),
     ]
     if not backup_all:
         node_name = target_nodes[0]
@@ -4594,6 +5091,12 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
             )
             if node_added is not None:
                 included.append(node_added)
+                workspace_arc = f"{node_added}/workspace"
+                workspace_src = node_root / "workspace"
+                if workspace_src.exists():
+                    included_workspace_paths.append(workspace_arc)
+                else:
+                    missing.append(str(workspace_src))
             else:
                 missing.append(str(node_root))
 
@@ -4615,6 +5118,7 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
         "included_paths": included,
         "included_global_paths": included_global,
         "included_runtime_seed_paths": included_runtime_seed,
+        "included_workspace_paths": included_workspace_paths,
         "missing_paths": missing,
         "request_dump_pruning": request_dump_pruning,
         "backup_retention": backup_retention,
@@ -4694,6 +5198,11 @@ def _collect_restore_source(restore_root: Path) -> Dict[str, Any]:
             if (legacy_private_root / "shared" / "memory").exists()
             else None
         ),
+        "datas_path": (
+            (restore_root / "datas")
+            if (restore_root / "datas").exists()
+            else ((restore_root / "data") if (restore_root / "data").exists() else None)
+        ),
         "runtime_seed_hermes_path": (
             (runtime_seed_root / "hermes-agent")
             if (runtime_seed_root / "hermes-agent").exists()
@@ -4738,6 +5247,7 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
         crons_path: Path | None = source.get("crons_path")
         legacy_shared_wiki_path: Path | None = source.get("legacy_shared_wiki_path")
         legacy_shared_memory_path: Path | None = source.get("legacy_shared_memory_path")
+        datas_path: Path | None = source.get("datas_path")
         runtime_seed_hermes_path: Path | None = source.get("runtime_seed_hermes_path")
         runtime_seed_venv_path: Path | None = source.get("runtime_seed_venv_path")
         runtime_seed_uv_path: Path | None = source.get("runtime_seed_uv_path")
@@ -4873,6 +5383,15 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
 
         restored_memory_root = str(SHARED_MEMORY_ROOT) if SHARED_MEMORY_ROOT.exists() else ""
 
+        restored_datas_root = ""
+        if isinstance(datas_path, Path) and datas_path.exists():
+            SHARED_NODE_DATA_ROOT.parent.mkdir(parents=True, exist_ok=True)
+            SHARED_NODE_DATA_ROOT.mkdir(parents=True, exist_ok=True)
+            _sync_dir(datas_path, SHARED_NODE_DATA_ROOT, delete=False)
+            restored_datas_root = str(SHARED_NODE_DATA_ROOT)
+        elif SHARED_NODE_DATA_ROOT.exists():
+            restored_datas_root = str(SHARED_NODE_DATA_ROOT)
+
         restored_skills_root = ""
         if isinstance(skills_path, Path) and skills_path.exists():
             PRIVATE_SKILLS_ROOT.parent.mkdir(parents=True, exist_ok=True)
@@ -4914,6 +5433,7 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
         "restored_private_scripts_root": restored_private_scripts_root,
         "restored_private_plugins_root": restored_private_plugins_root,
         "restored_memory_root": restored_memory_root,
+        "restored_datas_root": restored_datas_root,
         "restored_skills_root": restored_skills_root,
         "restored_crons_root": restored_crons_root,
         "restored_runtime_seed": restored_runtime_seed,
@@ -4938,6 +5458,174 @@ def _git_branch(path: Path) -> str:
     if proc.returncode != 0:
         return ""
     return str(proc.stdout or "").strip()
+
+
+def _action_update_test(
+    clone_name: str | None,
+    source_branch: str,
+    deprecate_plugins: list[str],
+) -> Dict[str, Any]:
+    requested_name = str(clone_name or UPDATE_TEST_NODE_DEFAULT).strip() or UPDATE_TEST_NODE_DEFAULT
+    test_node = _normalize_clone_name(requested_name)
+    if test_node == "orchestrator":
+        raise CloneManagerError("update test target cannot be orchestrator; use a dedicated dummy node")
+
+    run_dir, run_id, log_root_warning = _create_update_run_dir("test")
+    report_path = run_dir / "report.json"
+    plugin_matrix_path = run_dir / "plugin_matrix.json"
+    prestart_stdout_log = run_dir / "prestart.stdout.log"
+    prestart_stderr_log = run_dir / "prestart.stderr.log"
+    prestart_log_copy = run_dir / "colmeio-prestart.log"
+
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "action": "update-test",
+        "clone_name": test_node,
+        "run_id": run_id,
+        "result": False,
+        "report_path": str(report_path),
+        "plugin_matrix_path": str(plugin_matrix_path),
+        "log_root_requested": str(UPDATE_TEST_LOG_ROOT.expanduser()),
+        "log_root": str(run_dir.parent),
+        "log_root_warning": log_root_warning,
+        "run_dir": str(run_dir),
+        "source_branch": str(source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
+        "deprecate_plugins": list(deprecate_plugins),
+    }
+    prestart_stdout_log.write_text("", encoding="utf-8")
+    prestart_stderr_log.write_text("", encoding="utf-8")
+    _atomic_write_json(
+        plugin_matrix_path,
+        {
+            "steps": [],
+            "summary": {
+                "passed": 0,
+                "failed": 0,
+                "skipped_deprecated": 0,
+                "pending": 0,
+                "total": 0,
+            },
+            "deprecated_plugins": list(deprecate_plugins),
+        },
+    )
+
+    error_message = ""
+    try:
+        snapshot_payload = _refresh_dummy_snapshot(source_branch, deprecate_plugins)
+        payload["dummy_snapshot"] = snapshot_payload
+        effective_deprecated_plugins = sorted(
+            set(
+                list(deprecate_plugins)
+                + list(snapshot_payload.get("deprecated_plugins_present") or [])
+            )
+        )
+        payload["effective_deprecated_plugins"] = effective_deprecated_plugins
+        payload["deprecated_plugins_applied"] = list(snapshot_payload.get("deprecated_plugins_applied") or [])
+        payload["deprecated_plugins_already_present"] = list(
+            snapshot_payload.get("deprecated_plugins_already_present") or []
+        )
+        payload["deprecated_plugins_missing"] = list(snapshot_payload.get("deprecated_plugins_missing") or [])
+
+        env_path = _clone_env_path(test_node)
+        clone_root = _clone_root_path(test_node)
+        container_name = _container_name(test_node)
+
+        payload["env_path"] = str(env_path)
+        payload["clone_root"] = str(clone_root)
+        payload["container_name"] = container_name
+
+        if _docker_exists(container_name):
+            _run(["docker", "rm", "-f", container_name], check=False)
+            _log(test_node, "update test: removed stale dummy container")
+
+        env_seed = _seed_update_test_env_profile(test_node, env_path)
+        payload["env_seed"] = env_seed
+
+        if clone_root.exists():
+            shutil.rmtree(clone_root, ignore_errors=True)
+        node_data_root = _shared_node_data_dir(test_node)
+        if node_data_root.exists():
+            shutil.rmtree(node_data_root, ignore_errors=True)
+
+        with _temporary_runtime_roots(
+            source_root=UPDATE_DUMMY_HERMES_ROOT,
+            plugins_root=UPDATE_DUMMY_PLUGINS_ROOT,
+            scripts_root=UPDATE_DUMMY_SCRIPTS_ROOT,
+        ):
+            env = _read_env_file(env_path)
+            fs_meta = _prepare_clone_filesystem(test_node, clone_root, env, env_path)
+            prestart = _run_prestart_reapply(
+                test_node,
+                clone_root=clone_root,
+                env_path=env_path,
+                strict=True,
+                capture_output=True,
+            )
+
+        payload["filesystem"] = fs_meta
+        payload["prestart"] = {
+            "script": prestart.get("script"),
+            "returncode": prestart.get("returncode"),
+            "failed_marker_path": prestart.get("failed_marker_path"),
+            "failed_marker_exists": prestart.get("failed_marker_exists"),
+            "prestart_log_path": prestart.get("prestart_log_path"),
+            "failures": prestart.get("failures"),
+        }
+
+        prestart_stdout_log.write_text(str(prestart.get("stdout", "")), encoding="utf-8")
+        prestart_stderr_log.write_text(str(prestart.get("stderr", "")), encoding="utf-8")
+        payload["prestart_stdout_log"] = str(prestart_stdout_log)
+        payload["prestart_stderr_log"] = str(prestart_stderr_log)
+
+        prestart_log_path = Path(str(prestart.get("prestart_log_path") or ""))
+        if prestart_log_path.exists():
+            shutil.copy2(prestart_log_path, prestart_log_copy)
+            payload["prestart_log_copy"] = str(prestart_log_copy)
+
+        plugin_matrix = _build_plugin_matrix(
+            prestart_log_path=prestart_log_path,
+            deprecated_plugins=effective_deprecated_plugins,
+        )
+        _atomic_write_json(plugin_matrix_path, plugin_matrix)
+        payload["plugin_matrix"] = plugin_matrix.get("summary", {})
+        payload["plugin_matrix_path"] = str(plugin_matrix_path)
+
+        failed_steps = prestart.get("failures")
+        failed_list = failed_steps if isinstance(failed_steps, list) else []
+        matrix_summary = plugin_matrix.get("summary", {}) if isinstance(plugin_matrix, dict) else {}
+        matrix_failed = int(matrix_summary.get("failed", 0) or 0)
+        matrix_pending = int(matrix_summary.get("pending", 0) or 0)
+        failed = (
+            bool(prestart.get("returncode"))
+            or bool(prestart.get("failed_marker_exists"))
+            or matrix_failed > 0
+            or matrix_pending > 0
+        )
+        if failed:
+            if failed_list:
+                error_message = "prestart reapply failed steps: " + ", ".join(str(step) for step in failed_list)
+            elif matrix_failed > 0:
+                error_message = f"plugin matrix failed with {matrix_failed} failed step(s)"
+            elif matrix_pending > 0:
+                error_message = f"plugin matrix has {matrix_pending} unresolved step(s)"
+            else:
+                error_message = "prestart reapply failed in strict mode"
+        else:
+            payload["ok"] = True
+            payload["result"] = True
+            payload["message"] = "update preflight passed"
+    except Exception as exc:
+        error_message = str(exc) or "unexpected update-test failure"
+
+    if error_message:
+        payload["ok"] = False
+        payload["result"] = False
+        payload["error"] = error_message
+
+    _atomic_write_json(report_path, payload)
+    if error_message:
+        raise CloneManagerError(f"update test failed; see {report_path} ({error_message})")
+    return payload
 
 
 def _action_update_template(source_branch: str) -> Dict[str, Any]:
@@ -5007,7 +5695,226 @@ def _action_update_template(source_branch: str) -> Dict[str, Any]:
     }
 
 
-def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
+def _promote_dummy_source_to_runtime() -> Dict[str, Any]:
+    if not UPDATE_DUMMY_HERMES_ROOT.exists():
+        raise CloneManagerError(
+            f"dummy hermes snapshot not found: {UPDATE_DUMMY_HERMES_ROOT} "
+            "(run 'horc update test' first)"
+        )
+
+    before_commit = _git_commit(HERMES_SOURCE_ROOT) if HERMES_SOURCE_ROOT.exists() else ""
+    before_branch = _git_branch(HERMES_SOURCE_ROOT) if HERMES_SOURCE_ROOT.exists() else ""
+    HERMES_SOURCE_ROOT.parent.mkdir(parents=True, exist_ok=True)
+    _sync_dir(UPDATE_DUMMY_HERMES_ROOT, HERMES_SOURCE_ROOT, delete=True)
+    after_commit = _git_commit(HERMES_SOURCE_ROOT)
+    after_branch = _git_branch(HERMES_SOURCE_ROOT)
+
+    changed = bool(before_commit and after_commit and before_commit != after_commit)
+    if not before_commit and after_commit:
+        changed = True
+
+    return {
+        "source": str(UPDATE_DUMMY_HERMES_ROOT),
+        "target": str(HERMES_SOURCE_ROOT),
+        "commit_before": before_commit,
+        "commit_after": after_commit,
+        "branch_before": before_branch,
+        "branch_after": after_branch,
+        "changed": changed,
+    }
+
+
+def _resolve_apply_target_nodes(target_mode: str, target_nodes_csv: str) -> list[str]:
+    mode = str(target_mode or "").strip().lower()
+    if mode == "all":
+        targets = [name for name in _discover_node_names() if _clone_env_path(name).exists()]
+        if not targets:
+            raise CloneManagerError("update apply all found no node profiles under /local/agents/envs")
+        return targets
+
+    if mode != "node":
+        raise CloneManagerError("update apply target mode must be 'all' or 'node'")
+
+    parsed: list[str] = []
+    seen: set[str] = set()
+    for raw in str(target_nodes_csv or "").split(","):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        node = _normalize_clone_name(value)
+        if node in seen:
+            continue
+        seen.add(node)
+        parsed.append(node)
+
+    if not parsed:
+        raise CloneManagerError("update apply node requires a comma-separated node list")
+
+    missing_env = [node for node in parsed if not _clone_env_path(node).exists()]
+    if missing_env:
+        raise CloneManagerError(
+            "update apply node includes targets without env profiles: "
+            + ", ".join(missing_env)
+        )
+    return parsed
+
+
+def _action_restart_node_for_rollout(node_name: str) -> Dict[str, Any]:
+    stop_payload = _action_stop(node_name)
+    start_payload = _action_start(node_name, image=DEFAULT_DOCKER_IMAGE)
+    return {
+        "stop": stop_payload,
+        "start": start_payload,
+    }
+
+
+def _action_update_apply(
+    *,
+    target_mode: str,
+    target_nodes_csv: str,
+    source_branch: str,
+    deprecate_plugins: list[str],
+) -> Dict[str, Any]:
+    run_dir, run_id, log_root_warning = _create_update_run_dir("apply")
+    report_path = run_dir / "report.json"
+    plugin_matrix_path = run_dir / "plugin_matrix.json"
+
+    payload: Dict[str, Any] = {
+        "ok": False,
+        "action": "update-apply",
+        "run_id": run_id,
+        "result": False,
+        "target_mode": str(target_mode or ""),
+        "target_nodes_csv": str(target_nodes_csv or ""),
+        "source_branch": str(source_branch or HERMES_AGENT_UPSTREAM_BRANCH),
+        "deprecate_plugins": list(deprecate_plugins),
+        "report_path": str(report_path),
+        "plugin_matrix_path": str(plugin_matrix_path),
+        "run_dir": str(run_dir),
+        "log_root_requested": str(UPDATE_TEST_LOG_ROOT.expanduser()),
+        "log_root": str(run_dir.parent),
+        "log_root_warning": log_root_warning,
+    }
+    _atomic_write_json(
+        plugin_matrix_path,
+        {
+            "steps": [],
+            "summary": {
+                "passed": 0,
+                "failed": 0,
+                "skipped_deprecated": 0,
+                "pending": 0,
+                "total": 0,
+            },
+            "deprecated_plugins": list(deprecate_plugins),
+        },
+    )
+
+    error_message = ""
+    targets: list[str] = []
+    updated_nodes: list[str] = []
+    pending_nodes: list[str] = []
+    rollout_results: list[Dict[str, Any]] = []
+
+    try:
+        targets = _resolve_apply_target_nodes(target_mode, target_nodes_csv)
+        payload["targets"] = targets
+
+        preflight = _action_update_test(
+            clone_name=UPDATE_TEST_NODE_DEFAULT,
+            source_branch=source_branch,
+            deprecate_plugins=deprecate_plugins,
+        )
+        payload["preflight"] = {
+            "ok": bool(preflight.get("ok")),
+            "run_id": preflight.get("run_id"),
+            "report_path": preflight.get("report_path"),
+            "plugin_matrix_path": preflight.get("plugin_matrix_path"),
+            "run_dir": preflight.get("run_dir"),
+            "clone_name": preflight.get("clone_name"),
+        }
+
+        preflight_matrix_path = Path(str(preflight.get("plugin_matrix_path") or ""))
+        if preflight_matrix_path.exists():
+            shutil.copy2(preflight_matrix_path, plugin_matrix_path)
+            payload["plugin_matrix_path"] = str(plugin_matrix_path)
+
+        backup = _action_backup(clone_name=None, backup_all=True)
+        payload["backup"] = {
+            "ok": bool(backup.get("ok")),
+            "archive": backup.get("archive"),
+            "scope": backup.get("scope"),
+            "nodes": backup.get("nodes"),
+        }
+
+        payload["promote_source"] = _promote_dummy_source_to_runtime()
+        payload["runtime_deprecations"] = _deprecate_plugins(
+            public_plugins_root=SHARED_PLUGINS_ROOT,
+            plugin_names=deprecate_plugins,
+        )
+        payload["deprecated_plugins_applied"] = list(
+            payload["runtime_deprecations"].get("deprecated_plugins_applied") or []
+        )
+        payload["deprecated_plugins_already_present"] = list(
+            payload["runtime_deprecations"].get("deprecated_plugins_already_present") or []
+        )
+        payload["deprecated_plugins_missing"] = list(
+            payload["runtime_deprecations"].get("deprecated_plugins_missing") or []
+        )
+
+        for idx, node_name in enumerate(targets):
+            node_payload: Dict[str, Any] = {"node": node_name, "status": "pending"}
+            try:
+                update_payload = _action_update_node(
+                    node_name,
+                    source_branch=source_branch,
+                    refresh_template=False,
+                )
+                restart_payload = _action_restart_node_for_rollout(node_name)
+                node_payload["update"] = update_payload
+                node_payload["restart"] = restart_payload
+                node_payload["status"] = "updated"
+                updated_nodes.append(node_name)
+                rollout_results.append(node_payload)
+            except Exception as exc:
+                node_payload["status"] = "failed"
+                node_payload["error"] = str(exc)
+                rollout_results.append(node_payload)
+                pending_nodes = targets[idx + 1 :]
+                raise CloneManagerError(
+                    f"update apply failed on node '{node_name}' (fail-fast): {exc}"
+                ) from exc
+
+        payload["rollout"] = rollout_results
+        payload["updated_nodes"] = updated_nodes
+        payload["pending_nodes"] = pending_nodes
+        payload["ok"] = True
+        payload["result"] = True
+        payload["message"] = "update apply completed"
+    except Exception as exc:
+        error_message = str(exc) or "unexpected update-apply failure"
+        payload["ok"] = False
+        payload["result"] = False
+        payload["error"] = error_message
+        payload["rollout"] = rollout_results
+        if targets:
+            payload["updated_nodes"] = updated_nodes
+            if not pending_nodes:
+                pending_nodes = [node for node in targets if node not in updated_nodes]
+            payload["pending_nodes"] = pending_nodes
+
+    _atomic_write_json(report_path, payload)
+    if error_message:
+        raise CloneManagerError(f"update apply failed; see {report_path} ({error_message})")
+    return payload
+
+
+def _action_update_node(
+    clone_name: str,
+    source_branch: str,
+    *,
+    refresh_template: bool = True,
+) -> Dict[str, Any]:
     env_path = _clone_env_path(clone_name)
     clone_root = _clone_root_path(clone_name)
     if not env_path.exists():
@@ -5017,8 +5924,20 @@ def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
 
     env = _read_env_file(env_path)
     state_code = _extract_state_mode(env)
-    if state_code == 1:
+    template_payload: Dict[str, Any]
+    if refresh_template:
         template_payload = _action_update_template(source_branch)
+    else:
+        template_payload = {
+            "ok": True,
+            "action": "update",
+            "target": "template",
+            "skipped": True,
+            "reason": "template refresh skipped by caller",
+            "source_root": str(HERMES_SOURCE_ROOT),
+        }
+
+    if state_code == 1:
         source_root = _parent_hermes_agent_source(clone_name=clone_name)
         runtime_root = _prepare_orchestrator_runtime_agent_tree(
             clone_name=clone_name,
@@ -5059,7 +5978,6 @@ def _action_update_node(clone_name: str, source_branch: str) -> Dict[str, Any]:
             ),
         }
 
-    template_payload = _action_update_template(source_branch)
     source_root = _parent_hermes_agent_source(clone_name=clone_name)
     source_commit = _git_commit(source_root)
     clone_commit_before = _git_commit(clone_root / "hermes-agent")
@@ -5125,7 +6043,29 @@ def _dispatch(
     backup_all: bool,
     restore_path: str,
     logs_clean: bool,
+    target_mode: str,
+    target_nodes_csv: str,
+    deprecate_plugins_raw: str,
 ) -> Dict[str, Any]:
+    deprecate_plugins = _parse_deprecate_plugins(deprecate_plugins_raw)
+    if action == "update-test":
+        return _action_update_test(
+            clone_name,
+            source_branch=source_branch,
+            deprecate_plugins=deprecate_plugins,
+        )
+    if action == "update-apply":
+        return _action_update_apply(
+            target_mode=target_mode,
+            target_nodes_csv=target_nodes_csv,
+            source_branch=source_branch,
+            deprecate_plugins=deprecate_plugins,
+        )
+    if action in {"update", "test-update"}:
+        raise CloneManagerError(
+            "legacy update action rejected. Use 'horc update test' or "
+            "'horc update apply all|node <csv>'"
+        )
     if action == "start":
         if not clone_name:
             raise CloneManagerError("start requires clone name")
@@ -5148,8 +6088,6 @@ def _dispatch(
         if not clone_name:
             raise CloneManagerError("logs requires clone name")
         return _action_logs(clone_name, lines=lines)
-    if action == "update":
-        return _action_update(clone_name, source_branch=source_branch)
     if action == "backup":
         return _action_backup(clone_name, backup_all=backup_all)
     if action == "restore":
@@ -5159,7 +6097,22 @@ def _dispatch(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hermes clone lifecycle manager")
-    parser.add_argument("action", choices=["start", "status", "stop", "delete", "logs", "update", "backup", "restore"])
+    parser.add_argument(
+        "action",
+        choices=[
+            "start",
+            "status",
+            "stop",
+            "delete",
+            "logs",
+            "backup",
+            "restore",
+            "update-test",
+            "update-apply",
+            "update",
+            "test-update",
+        ],
+    )
     parser.add_argument(
         "name_positional",
         nargs="?",
@@ -5190,7 +6143,22 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-branch",
         default=str(os.getenv("HERMES_AGENT_UPDATE_BRANCH", HERMES_AGENT_UPSTREAM_BRANCH) or HERMES_AGENT_UPSTREAM_BRANCH),
-        help="Source git branch used by 'update' when syncing /local/hermes-agent",
+        help="Source git branch used by update test/apply when syncing hermes-agent",
+    )
+    parser.add_argument(
+        "--target-mode",
+        default="",
+        help="Update apply target mode: all or node",
+    )
+    parser.add_argument(
+        "--target-nodes",
+        default="",
+        help="Comma-separated node names for update apply --target-mode node",
+    )
+    parser.add_argument(
+        "--deprecate-plugins",
+        default="",
+        help="Comma-separated plugin names to move under plugins/public/deprecated/",
     )
     return parser
 
@@ -5216,11 +6184,20 @@ def main() -> int:
                 clone_name = _normalize_clone_name(raw_name)
             else:
                 clone_name = None
-        elif args.action in {"update", "backup"}:
+        elif args.action == "update-test":
+            raw_name = (
+                args.name_flag
+                or args.name_positional
+                or str(os.getenv("HERMES_UPDATE_TEST_NODE", UPDATE_TEST_NODE_DEFAULT) or UPDATE_TEST_NODE_DEFAULT)
+            )
+            clone_name = _normalize_clone_name(raw_name)
+        elif args.action in {"backup"}:
             raw_name = args.name_flag or args.name_positional
             clone_name = _normalize_clone_name(raw_name) if raw_name else None
             if args.action == "backup" and args.backup_all:
                 clone_name = None
+        elif args.action == "update-apply":
+            clone_name = None
         else:
             raw_name = (
                 args.name_flag
@@ -5238,6 +6215,9 @@ def main() -> int:
             backup_all=bool(args.backup_all),
             restore_path=restore_path,
             logs_clean=bool(args.logs_clean),
+            target_mode=str(args.target_mode or ""),
+            target_nodes_csv=str(args.target_nodes or ""),
+            deprecate_plugins_raw=str(args.deprecate_plugins or ""),
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0

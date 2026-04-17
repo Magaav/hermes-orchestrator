@@ -153,6 +153,19 @@ def _patch_base(content: str) -> tuple[str, bool]:
                 "            self._active_sessions[session_key].set()\n"
                 "            return  # Don't process now - will be handled after current task finishes\n"
             ),
+            (
+                "            if event.message_type == MessageType.PHOTO:\n"
+                "                logger.debug(\"[%s] Queuing photo follow-up for session %s without interrupt\", self.name, session_key)\n"
+                "                merge_pending_message_event(self._pending_messages, session_key, event)\n"
+                "                return  # Don't interrupt now - will run after current task completes\n"
+                "\n"
+                "            # Default behavior for non-photo follow-ups: interrupt the running agent\n"
+                "            logger.debug(\"[%s] New message while session %s is active — triggering interrupt\", self.name, session_key)\n"
+                "            self._pending_messages[session_key] = event\n"
+                "            # Signal the interrupt (the processing task checks this)\n"
+                "            self._active_sessions[session_key].set()\n"
+                "            return  # Don't process now - will be handled after current task finishes\n"
+            ),
         ]
         new = (
             "            if event.message_type == MessageType.PHOTO:\n"
@@ -700,13 +713,25 @@ def reapply() -> int:
 
     try:
         base_new, base_changed = _patch_base(base_original)
-        run_new, run_changed = _patch_run(run_original)
     except Exception as exc:
         if _already_patched(base_original, run_original):
             print("✅ Gateway FIFO queue patch already present (anchor drift tolerated).")
             return 0
-        print(f"❌ Failed to patch FIFO queue behavior: {exc}", file=sys.stderr)
+        print(f"❌ Failed to patch FIFO queue behavior (base.py): {exc}", file=sys.stderr)
         return 1
+
+    run_new = run_original
+    run_changed = False
+    try:
+        run_new, run_changed = _patch_run(run_original)
+    except Exception as exc:
+        # Newer hermes-agent builds moved run.py interrupt/queue flow and no longer
+        # expose the legacy anchors this patch relied on. Keep startup resilient.
+        if "anchor not found" in str(exc):
+            print(f"⚠️  Skipping run.py FIFO patch due anchor drift: {exc}")
+        else:
+            print(f"❌ Failed to patch FIFO queue behavior (run.py): {exc}", file=sys.stderr)
+            return 1
 
     if not base_changed and not run_changed:
         print("✅ Gateway FIFO queue patch already applied.")

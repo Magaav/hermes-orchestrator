@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import platform
+import shlex
 import signal
 import socket
 import subprocess
@@ -67,132 +68,11 @@ DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
-MAX_CHANGE_DIFF_BYTES = 120_000
-MAX_CHANGED_PATHS = 200
 
 
 def check_sandbox_requirements() -> bool:
     """Code execution sandbox requires a POSIX OS for Unix domain sockets."""
     return SANDBOX_AVAILABLE
-
-
-def _safe_parse_json_obj(raw_payload: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw_payload, str):
-        return None
-    payload = raw_payload.strip()
-    if not payload or not payload.startswith("{"):
-        return None
-    try:
-        parsed = json.loads(payload)
-    except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _normalize_changed_path(raw_path: Any) -> str:
-    if raw_path is None:
-        return ""
-    path = str(raw_path).strip()
-    if not path:
-        return ""
-    if " -> " in path:
-        left, right = path.split(" -> ", 1)
-        path = right.strip() or left.strip()
-    if path.startswith("a/") or path.startswith("b/"):
-        path = path[2:]
-    if path.startswith("./"):
-        path = path[2:]
-    return path
-
-
-def _init_file_change_tracker() -> Dict[str, Any]:
-    return {
-        "files_modified": set(),
-        "files_created": set(),
-        "files_deleted": set(),
-        "diff_chunks": [],
-    }
-
-
-def _truncate_combined_diff(diff_text: str, limit: int = MAX_CHANGE_DIFF_BYTES) -> str:
-    text = str(diff_text or "")
-    if len(text) <= limit:
-        return text
-    head = int(limit * 0.4)
-    tail = limit - head
-    omitted = len(text) - head - tail
-    return (
-        text[:head]
-        + f"\n\n... [DIFF TRUNCATED - {omitted:,} chars omitted out of {len(text):,} total] ...\n\n"
-        + text[-tail:]
-    )
-
-
-def _record_tool_file_changes(
-    tool_name: str,
-    tool_args: Any,
-    tool_result: str,
-    tracker: Dict[str, Any],
-) -> None:
-    if not isinstance(tracker, dict):
-        return
-    payload = _safe_parse_json_obj(tool_result)
-    if not payload:
-        return
-
-    touched = False
-    for key in ("files_modified", "files_created", "files_deleted"):
-        raw_paths = payload.get(key)
-        if not isinstance(raw_paths, list):
-            continue
-        bucket = tracker.get(key)
-        if not isinstance(bucket, set):
-            bucket = set()
-            tracker[key] = bucket
-        for raw_path in raw_paths:
-            path = _normalize_changed_path(raw_path)
-            if path:
-                bucket.add(path)
-                touched = True
-
-    diff_text = payload.get("diff")
-    if isinstance(diff_text, str) and diff_text.strip():
-        chunks = tracker.get("diff_chunks")
-        if not isinstance(chunks, list):
-            chunks = []
-            tracker["diff_chunks"] = chunks
-        chunks.append(diff_text)
-
-    # Fallback for write tools that succeeded but didn't return explicit files.
-    if not touched and tool_name in ("patch", "write_file") and isinstance(tool_args, dict):
-        if payload.get("error") or payload.get("success") is False:
-            return
-        path = _normalize_changed_path(tool_args.get("path"))
-        if path:
-            modified = tracker.get("files_modified")
-            if not isinstance(modified, set):
-                modified = set()
-                tracker["files_modified"] = modified
-            modified.add(path)
-
-
-def _build_file_change_payload(tracker: Dict[str, Any]) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {}
-    if not isinstance(tracker, dict):
-        return payload
-
-    for key in ("files_modified", "files_created", "files_deleted"):
-        bucket = tracker.get(key)
-        if isinstance(bucket, set) and bucket:
-            payload[key] = sorted(bucket)[:MAX_CHANGED_PATHS]
-
-    chunks = tracker.get("diff_chunks")
-    if isinstance(chunks, list) and chunks:
-        merged = "\n".join(str(chunk or "").strip() for chunk in chunks if str(chunk or "").strip())
-        if merged:
-            payload["diff"] = _truncate_combined_diff(merged)
-
-    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -367,9 +247,9 @@ def _call(tool_name, args):
 
 _FILE_TRANSPORT_HEADER = '''\
 """Auto-generated Hermes tools RPC stubs (file-based transport)."""
-import json, os, shlex, time
+import json, os, shlex, tempfile, time
 
-_RPC_DIR = os.environ.get("HERMES_RPC_DIR", "/tmp/hermes_rpc")
+_RPC_DIR = os.environ.get("HERMES_RPC_DIR") or os.path.join(tempfile.gettempdir(), "hermes_rpc")
 _seq = 0
 ''' + _COMMON_HELPERS + '''\
 
@@ -421,7 +301,7 @@ def _call(tool_name, args):
 # ---------------------------------------------------------------------------
 
 # Terminal parameters that must not be used from ephemeral sandbox scripts
-_TERMINAL_BLOCKED_PARAMS = {"background", "check_interval", "pty", "notify_on_complete"}
+_TERMINAL_BLOCKED_PARAMS = {"background", "pty", "notify_on_complete", "watch_patterns"}
 
 
 def _rpc_server_loop(
@@ -431,7 +311,6 @@ def _rpc_server_loop(
     tool_call_counter: list,   # mutable [int] so the thread can increment
     max_tool_calls: int,
     allowed_tools: frozenset,
-    file_change_tracker: Dict[str, Any],
 ):
     """
     Accept one client connection and dispatch tool-call requests until
@@ -530,12 +409,6 @@ def _rpc_server_loop(
                     "args_preview": args_preview,
                     "duration": round(call_duration, 2),
                 })
-                _record_tool_file_changes(
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    tool_result=result,
-                    tracker=file_change_tracker,
-                )
 
                 conn.sendall((result + "\n").encode())
 
@@ -664,11 +537,28 @@ def _ship_file_to_remote(env, remote_path: str, content: str) -> None:
     quotes are fine.
     """
     encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    quoted_remote_path = shlex.quote(remote_path)
     env.execute(
-        f"echo '{encoded}' | base64 -d > {remote_path}",
+        f"echo '{encoded}' | base64 -d > {quoted_remote_path}",
         cwd="/",
         timeout=30,
     )
+
+
+def _env_temp_dir(env: Any) -> str:
+    """Return a writable temp dir for env-backed execute_code sandboxes."""
+    get_temp_dir = getattr(env, "get_temp_dir", None)
+    if callable(get_temp_dir):
+        try:
+            temp_dir = get_temp_dir()
+            if isinstance(temp_dir, str) and temp_dir.startswith("/"):
+                return temp_dir.rstrip("/") or "/"
+        except Exception as exc:
+            logger.debug("Could not resolve execute_code env temp dir: %s", exc)
+    candidate = tempfile.gettempdir()
+    if isinstance(candidate, str) and candidate.startswith("/"):
+        return candidate.rstrip("/") or "/"
+    return "/tmp"
 
 
 def _rpc_poll_loop(
@@ -680,7 +570,6 @@ def _rpc_poll_loop(
     max_tool_calls: int,
     allowed_tools: frozenset,
     stop_event: threading.Event,
-    file_change_tracker: Dict[str, Any],
 ):
     """Poll the remote filesystem for tool call requests and dispatch them.
 
@@ -692,11 +581,12 @@ def _rpc_poll_loop(
 
     poll_interval = 0.1  # 100 ms
 
+    quoted_rpc_dir = shlex.quote(rpc_dir)
     while not stop_event.is_set():
         try:
             # List pending request files (skip .tmp partials)
             ls_result = env.execute(
-                f"ls -1 {rpc_dir}/req_* 2>/dev/null || true",
+                f"ls -1 {quoted_rpc_dir}/req_* 2>/dev/null || true",
                 cwd="/",
                 timeout=10,
             )
@@ -718,9 +608,10 @@ def _rpc_poll_loop(
 
                 call_start = time.monotonic()
 
+                quoted_req_file = shlex.quote(req_file)
                 # Read request
                 read_result = env.execute(
-                    f"cat {req_file}",
+                    f"cat {quoted_req_file}",
                     cwd="/",
                     timeout=10,
                 )
@@ -729,7 +620,7 @@ def _rpc_poll_loop(
                 except (json.JSONDecodeError, ValueError):
                     logger.debug("Malformed RPC request in %s", req_file)
                     # Remove bad request to avoid infinite retry
-                    env.execute(f"rm -f {req_file}", cwd="/", timeout=5)
+                    env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
                     continue
 
                 tool_name = request.get("tool", "")
@@ -737,6 +628,7 @@ def _rpc_poll_loop(
                 seq = request.get("seq", 0)
                 seq_str = f"{seq:06d}"
                 res_file = f"{rpc_dir}/res_{seq_str}"
+                quoted_res_file = shlex.quote(res_file)
 
                 # Enforce allow-list
                 if tool_name not in allowed_tools:
@@ -786,12 +678,6 @@ def _rpc_poll_loop(
                         "args_preview": str(tool_args)[:80],
                         "duration": round(call_duration, 2),
                     })
-                    _record_tool_file_changes(
-                        tool_name=tool_name,
-                        tool_args=tool_args,
-                        tool_result=tool_result,
-                        tracker=file_change_tracker,
-                    )
 
                 # Write response atomically (tmp + rename).
                 # Use echo piping (not stdin_data) because Modal doesn't
@@ -800,14 +686,14 @@ def _rpc_poll_loop(
                     tool_result.encode("utf-8")
                 ).decode("ascii")
                 env.execute(
-                    f"echo '{encoded_result}' | base64 -d > {res_file}.tmp"
-                    f" && mv {res_file}.tmp {res_file}",
+                    f"echo '{encoded_result}' | base64 -d > {quoted_res_file}.tmp"
+                    f" && mv {quoted_res_file}.tmp {quoted_res_file}",
                     cwd="/",
                     timeout=60,
                 )
 
                 # Remove the request file
-                env.execute(f"rm -f {req_file}", cwd="/", timeout=5)
+                env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
 
         except Exception as e:
             if not stop_event.is_set():
@@ -842,11 +728,13 @@ def _execute_remote(
     env, env_type = _get_or_create_env(effective_task_id)
 
     sandbox_id = uuid.uuid4().hex[:12]
-    sandbox_dir = f"/tmp/hermes_exec_{sandbox_id}"
+    temp_dir = _env_temp_dir(env)
+    sandbox_dir = f"{temp_dir}/hermes_exec_{sandbox_id}"
+    quoted_sandbox_dir = shlex.quote(sandbox_dir)
+    quoted_rpc_dir = shlex.quote(f"{sandbox_dir}/rpc")
 
     tool_call_log: list = []
     tool_call_counter = [0]
-    file_change_tracker = _init_file_change_tracker()
     exec_start = time.monotonic()
     stop_event = threading.Event()
     rpc_thread = None
@@ -871,7 +759,7 @@ def _execute_remote(
 
         # Create sandbox directory on remote
         env.execute(
-            f"mkdir -p {sandbox_dir}/rpc", cwd="/", timeout=10,
+            f"mkdir -p {quoted_rpc_dir}", cwd="/", timeout=10,
         )
 
         # Generate and ship files
@@ -887,7 +775,7 @@ def _execute_remote(
             args=(
                 env, f"{sandbox_dir}/rpc", effective_task_id,
                 tool_call_log, tool_call_counter, max_tool_calls,
-                sandbox_tools, stop_event, file_change_tracker,
+                sandbox_tools, stop_event,
             ),
             daemon=True,
         )
@@ -895,7 +783,7 @@ def _execute_remote(
 
         # Build environment variable prefix for the script
         env_prefix = (
-            f"HERMES_RPC_DIR={sandbox_dir}/rpc "
+            f"HERMES_RPC_DIR={shlex.quote(f'{sandbox_dir}/rpc')} "
             f"PYTHONDONTWRITEBYTECODE=1"
         )
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
@@ -906,7 +794,7 @@ def _execute_remote(
         logger.info("Executing code on %s backend (task %s)...",
                      env_type, effective_task_id[:8])
         script_result = env.execute(
-            f"cd {sandbox_dir} && {env_prefix} python3 script.py",
+            f"cd {quoted_sandbox_dir} && {env_prefix} python3 script.py",
             timeout=timeout,
         )
 
@@ -927,14 +815,12 @@ def _execute_remote(
             duration, tool_call_counter[0], type(exc).__name__, exc,
             exc_info=True,
         )
-        error_result = {
+        return json.dumps({
             "status": "error",
             "error": str(exc),
             "tool_calls_made": tool_call_counter[0],
             "duration_seconds": duration,
-        }
-        error_result.update(_build_file_change_payload(file_change_tracker))
-        return json.dumps(error_result, ensure_ascii=False)
+        }, ensure_ascii=False)
 
     finally:
         # Stop the polling thread
@@ -945,7 +831,7 @@ def _execute_remote(
         # Clean up remote sandbox dir
         try:
             env.execute(
-                f"rm -rf {sandbox_dir}", cwd="/", timeout=15,
+                f"rm -rf {quoted_sandbox_dir}", cwd="/", timeout=15,
             )
         except Exception:
             logger.debug("Failed to clean up remote sandbox %s", sandbox_dir)
@@ -985,7 +871,18 @@ def _execute_remote(
     }
 
     if status == "timeout":
-        result["error"] = f"Script timed out after {timeout}s and was killed."
+        timeout_msg = f"Script timed out after {timeout}s and was killed."
+        result["error"] = timeout_msg
+        # Include timeout message in output so the LLM always surfaces it
+        # to the user (see local path comment — same reasoning, #10807).
+        if stdout_text:
+            result["output"] = stdout_text + f"\n\n⏰ {timeout_msg}"
+        else:
+            result["output"] = f"⏰ {timeout_msg}"
+        logger.warning(
+            "execute_code (remote) timed out after %ss (limit %ss) with %d tool calls",
+            duration, timeout, tool_call_counter[0],
+        )
     elif status == "interrupted":
         result["output"] = (
             stdout_text + "\n[execution interrupted — user sent a new message]"
@@ -994,7 +891,6 @@ def _execute_remote(
         result["status"] = "error"
         result["error"] = f"Script exited with code {exit_code}"
 
-    result.update(_build_file_change_payload(file_change_tracker))
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -1039,8 +935,8 @@ def execute_code(
 
     # --- Local execution path (UDS) --- below this line is unchanged ---
 
-    # Import interrupt event from terminal_tool (cooperative cancellation)
-    from tools.terminal_tool import _interrupt_event
+    # Import per-thread interrupt check (cooperative cancellation)
+    from tools.interrupt import is_interrupted as _is_interrupted
 
     # Resolve config
     _cfg = _load_config()
@@ -1064,7 +960,6 @@ def execute_code(
 
     tool_call_log: list = []
     tool_call_counter = [0]  # mutable so the RPC thread can increment
-    file_change_tracker = _init_file_change_tracker()
     exec_start = time.monotonic()
     server_sock = None
 
@@ -1090,7 +985,6 @@ def execute_code(
             args=(
                 server_sock, task_id, tool_call_log,
                 tool_call_counter, max_tool_calls, sandbox_tools,
-                file_change_tracker,
             ),
             daemon=True,
         )
@@ -1105,7 +999,8 @@ def execute_code(
         # (terminal.env_passthrough) are passed through.
         _SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
                               "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                              "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+                              "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA",
+                              "HERMES_")
         _SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
                               "PASSWD", "AUTH")
         try:
@@ -1132,10 +1027,20 @@ def execute_code(
         _existing_pp = child_env.get("PYTHONPATH", "")
         child_env["PYTHONPATH"] = _hermes_root + (os.pathsep + _existing_pp if _existing_pp else "")
         # Inject user's configured timezone so datetime.now() in sandboxed
-        # code reflects the correct wall-clock time.
+        # code reflects the correct wall-clock time.  Only TZ is set —
+        # HERMES_TIMEZONE is an internal Hermes setting and must not leak
+        # into child processes.
         _tz_name = os.getenv("HERMES_TIMEZONE", "").strip()
         if _tz_name:
             child_env["TZ"] = _tz_name
+        child_env.pop("HERMES_TIMEZONE", None)
+
+        # Per-profile HOME isolation: redirect system tool configs into
+        # {HERMES_HOME}/home/ when that directory exists.
+        from hermes_constants import get_subprocess_home
+        _profile_home = get_subprocess_home()
+        if _profile_home:
+            child_env["HOME"] = _profile_home
 
         proc = subprocess.Popen(
             [sys.executable, "script.py"],
@@ -1223,8 +1128,12 @@ def execute_code(
         stderr_reader.start()
 
         status = "success"
+        _activity_state = {
+            "last_touch": time.monotonic(),
+            "start": exec_start,
+        }
         while proc.poll() is None:
-            if _interrupt_event.is_set():
+            if _is_interrupted():
                 _kill_process_group(proc)
                 status = "interrupted"
                 break
@@ -1232,6 +1141,13 @@ def execute_code(
                 _kill_process_group(proc, escalate=True)
                 status = "timeout"
                 break
+            # Periodic activity touch so the gateway's inactivity timeout
+            # doesn't kill the agent during long code execution (#10807).
+            try:
+                from tools.environments.base import touch_activity_if_due
+                touch_activity_if_due(_activity_state, "execute_code running")
+            except Exception:
+                pass
             time.sleep(0.2)
 
         # Wait for readers to finish draining
@@ -1285,7 +1201,20 @@ def execute_code(
         }
 
         if status == "timeout":
-            result["error"] = f"Script timed out after {timeout}s and was killed."
+            timeout_msg = f"Script timed out after {timeout}s and was killed."
+            result["error"] = timeout_msg
+            # Include timeout message in output so the LLM always surfaces it
+            # to the user.  When output is empty, models often treat the result
+            # as "nothing happened" and produce an empty response, which the
+            # gateway stream consumer silently drops (#10807).
+            if stdout_text:
+                result["output"] = stdout_text + f"\n\n⏰ {timeout_msg}"
+            else:
+                result["output"] = f"⏰ {timeout_msg}"
+            logger.warning(
+                "execute_code timed out after %ss (limit %ss) with %d tool calls",
+                duration, timeout, tool_call_counter[0],
+            )
         elif status == "interrupted":
             result["output"] = stdout_text + "\n[execution interrupted — user sent a new message]"
         elif exit_code != 0:
@@ -1295,7 +1224,6 @@ def execute_code(
             if stderr_text:
                 result["output"] = stdout_text + "\n--- stderr ---\n" + stderr_text
 
-        result.update(_build_file_change_payload(file_change_tracker))
         return json.dumps(result, ensure_ascii=False)
 
     except Exception as exc:
@@ -1308,14 +1236,12 @@ def execute_code(
             exc,
             exc_info=True,
         )
-        error_result = {
+        return json.dumps({
             "status": "error",
             "error": str(exc),
             "tool_calls_made": tool_call_counter[0],
             "duration_seconds": duration,
-        }
-        error_result.update(_build_file_change_payload(file_change_tracker))
-        return json.dumps(error_result, ensure_ascii=False)
+        }, ensure_ascii=False)
 
     finally:
         # Cleanup temp dir and socket
@@ -1440,8 +1366,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None) -> dict:
         f"Available via `from hermes_tools import ...`:\n\n"
         f"{tool_lines}\n\n"
         "Limits: 5-minute timeout, 50KB stdout cap, max 50 tool calls per script. "
-        "terminal() is foreground-only (no background or pty). "
-        "If the session uses a cloud sandbox backend, treat it as resumable task state rather than a durable always-on machine.\n\n"
+        "terminal() is foreground-only (no background or pty).\n\n"
         "Print your final result to stdout. Use Python stdlib (json, re, math, csv, "
         "datetime, collections, etc.) for processing between tool calls.\n\n"
         "Also available (no import needed — built into hermes_tools):\n"

@@ -115,6 +115,10 @@ class ReapplyNodeAgentPatchTests(unittest.TestCase):
         self.assertIn('"window_tool_names": []', content)
         self.assertIn('def _record_followup_tool_result(tool_name: Any, raw_result: Any) -> None', content)
         self.assertIn('def _record_followup_activity(tool_name: Any, preview: Any, raw_args: Any)', content)
+        self.assertIn('created_paths: List[str] = []', content)
+        self.assertIn('deleted_paths: List[str] = []', content)
+        self.assertIn('_append_paths("Created", created_paths)', content)
+        self.assertIn('_append_paths("Deleted", deleted_paths)', content)
 
         # Reapplying should be a no-op.
         second = content

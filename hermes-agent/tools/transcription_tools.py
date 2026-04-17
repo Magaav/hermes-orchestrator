@@ -37,8 +37,6 @@ from utils import is_truthy_value
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, resolve_openai_audio_api_key
 
-from hermes_constants import get_hermes_home
-
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -67,29 +65,7 @@ DEFAULT_PROVIDER = "local"
 DEFAULT_LOCAL_MODEL = "base"
 DEFAULT_LOCAL_STT_LANGUAGE = "en"
 DEFAULT_STT_MODEL = os.getenv("STT_OPENAI_MODEL", "whisper-1")
-
-# NODE_SST_MODEL: short name from the Whisper model table (e.g. "large-v3", "medium").
-# If set, prepends "whisper-" and uses it as the Groq STT model, overriding STT_GROQ_MODEL.
-_NODE_SST_MODEL_SHORT = os.getenv("NODE_SST_MODEL", "").strip()
-if _NODE_SST_MODEL_SHORT:
-    # Map short table names to the canonical Groq model name.
-    _SHORT_TO_GROQ = {
-        "tiny": "whisper-large-v3",  # no tiny on Groq; fall back to large-v3
-        "base": "whisper-large-v3",
-        "small": "whisper-large-v3",
-        "medium": "whisper-large-v3",
-        "large-v2": "whisper-large-v3",
-        "large-v3": "whisper-large-v3",
-        "large-v3-turbo": "whisper-large-v3-turbo",
-    }
-    DEFAULT_GROQ_STT_MODEL = _SHORT_TO_GROQ.get(_NODE_SST_MODEL_SHORT, f"whisper-{_NODE_SST_MODEL_SHORT}")
-else:
-    DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
-
-# NODE_SST_LANGUAGE: BCP-47 language tag (e.g. "pt", "en", "es") to force STT language.
-# Applies to Groq and OpenAI API providers. Local faster-whisper reads stt.local.language
-# from config.yaml via _load_stt_config().
-NODE_SST_LANGUAGE = os.getenv("NODE_SST_LANGUAGE", "").strip() or None
+DEFAULT_GROQ_STT_MODEL = os.getenv("STT_GROQ_MODEL", "whisper-large-v3-turbo")
 DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest")
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
@@ -114,19 +90,6 @@ _local_model_name: Optional[str] = None
 # Config helpers
 # ---------------------------------------------------------------------------
 
-
-def get_stt_model_from_config() -> Optional[str]:
-    """Read the STT model name from ~/.hermes/config.yaml.
-
-    Returns the value of ``stt.model`` if present, otherwise ``None``.
-    Silently returns ``None`` on any error (missing file, bad YAML, etc.).
-    """
-    try:
-        from hermes_cli.config import read_raw_config
-        return read_raw_config().get("stt", {}).get("model")
-    except Exception:
-        pass
-    return None
 
 
 def _load_stt_config() -> dict:
@@ -471,7 +434,6 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
                     model=model_name,
                     file=audio_file,
                     response_format="text",
-                    language=NODE_SST_LANGUAGE,
                 )
 
             transcript_text = str(transcription).strip()
@@ -529,7 +491,6 @@ def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
                     model=model_name,
                     file=audio_file,
                     response_format="text" if model_name == "whisper-1" else "json",
-                    language=NODE_SST_LANGUAGE,
                 )
 
             transcript_text = _extract_transcript_text(transcription)

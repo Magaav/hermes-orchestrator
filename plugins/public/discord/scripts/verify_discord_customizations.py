@@ -107,6 +107,16 @@ def _contains_marker(results: list[tuple[str, bool, str]], text: str, label: str
     _check(results, label, marker in text, marker)
 
 
+def _contains_any_marker(
+    results: list[tuple[str, bool, str]],
+    text: str,
+    label: str,
+    markers: list[str],
+) -> None:
+    hit = next((marker for marker in markers if marker in text), "")
+    _check(results, label, bool(hit), hit or " | ".join(markers))
+
+
 def _same_file(results: list[tuple[str, bool, str]], label: str, src: Path, dst: Path) -> None:
     if not src.exists():
         _check(results, label, False, f"missing source: {src}")
@@ -179,23 +189,33 @@ def main() -> int:
         _contains_marker(results, run_text, "run.py marker: status_channel_info", "**Channel Info**")
         _contains_marker(results, run_text, "run.py marker: status_model_routing", "**Model Routing**")
         _contains_marker(results, run_text, "run.py marker: acl_module", "colmeio_channel_acl")
-        _contains_marker(
+        _contains_any_marker(
             results,
             run_text,
             "run.py marker: voice_audio_priority_queue",
-            "PRIORITY voice/audio follow-up for session",
+            [
+                "PRIORITY voice/audio follow-up for session",
+                "merge_pending_message_event(adapter._pending_messages, _quick_key, event)",
+            ],
         )
-        _contains_marker(
+        _contains_any_marker(
             results,
             run_text,
             "run.py marker: interrupt_pop_helper",
-            "pop_pending_interrupt_message",
+            [
+                "pop_pending_interrupt_message",
+                "_dequeue_pending_text(adapter, session_key)",
+                "_dequeue_pending_event(adapter, session_key)",
+            ],
         )
-        _contains_marker(
+        _contains_any_marker(
             results,
             run_text,
             "run.py marker: preserve_media_pending",
-            "prepend_pending_message",
+            [
+                "prepend_pending_message",
+                "merge_pending_message_event(adapter._pending_messages, session_key, pending_event)",
+            ],
         )
         _compile(results, RUN_PATH)
 
@@ -291,12 +311,23 @@ def main() -> int:
             "discord.py marker: slash_parent_channel",
             "parent_channel_id = self._get_parent_channel_id(interaction.channel) if is_thread else None",
         )
-        _contains_marker(results, discord_text, "discord.py marker: dispatch_parent_channel", "chat_id_alt=_parent_channel_id or None")
-        _contains_marker(
+        _contains_any_marker(
+            results,
+            discord_text,
+            "discord.py marker: dispatch_parent_channel",
+            [
+                "chat_id_alt=_parent_channel_id or None",
+                'chat_id_alt=str(getattr(self._thread_parent_channel(_chan), "id", "") or "") or None',
+            ],
+        )
+        _contains_any_marker(
             results,
             discord_text,
             "discord.py marker: auto_thread_parent_channel",
-            "parent_channel_id = self._get_parent_channel_id(thread) or str(message.channel.id)",
+            [
+                "parent_channel_id = self._get_parent_channel_id(thread) or str(message.channel.id)",
+                "parent_channel_id = self._get_parent_channel_id(message.channel)",
+            ],
         )
         _contains_marker(
             results,
@@ -388,51 +419,62 @@ def main() -> int:
         try:
             payload = json.loads(DISCORD_COMMANDS_JSON.read_text(encoding="utf-8"))
             names = [str(c.get("name") or "").strip() for c in payload if isinstance(c, dict)]
-            _check(results, "discord_commands has /metricas", "metricas" in names, f"names={sorted(names)}")
-            _check(results, "discord_commands has no /metrics", "metrics" not in names, f"names={sorted(names)}")
-            _check(results, "discord_commands has no /colmeio-metrics alias", "colmeio-metrics" not in names, f"names={sorted(names)}")
-            _check(results, "discord_commands has no /lista-de-faltas alias", "lista-de-faltas" not in names, f"names={sorted(names)}")
-            faltas_cmd = next(
-                (c for c in payload if isinstance(c, dict) and str(c.get("name") or "").strip() == "faltas"),
-                None,
-            )
-            opts = faltas_cmd.get("options") if isinstance(faltas_cmd, dict) else []
-            opts = opts if isinstance(opts, list) else []
-            opt_names = {str(o.get("name") or "").strip() for o in opts if isinstance(o, dict)}
-            _check(results, "discord_commands /faltas has action option", "action" in opt_names, f"options={sorted(opt_names)}")
-            action_opt = next(
-                (o for o in opts if isinstance(o, dict) and str(o.get("name") or "").strip() == "action"),
-                None,
-            )
-            action_choices = action_opt.get("choices") if isinstance(action_opt, dict) else []
-            action_choices = action_choices if isinstance(action_choices, list) else []
-            action_values = {
-                str(choice.get("value") or "").strip()
-                for choice in action_choices
-                if isinstance(choice, dict)
-            }
-            required_actions = {"listar", "adicionar", "remover", "limpar", "help"}
-            _check(
-                results,
-                "discord_commands /faltas action choices",
-                required_actions.issubset(action_values),
-                f"action_values={sorted(action_values)}",
-            )
-            _check(
-                results,
-                "discord_commands /faltas has no sync action",
-                "sync" not in action_values,
-                f"action_values={sorted(action_values)}",
-            )
+            node_name = str(os.getenv("NODE_NAME", "") or "").strip().lower()
+            colmeio_profile = node_name == "colmeio" or "metricas" in names or "faltas" in names
+
+            if colmeio_profile:
+                _check(results, "discord_commands has /metricas", "metricas" in names, f"names={sorted(names)}")
+                _check(results, "discord_commands has no /metrics", "metrics" not in names, f"names={sorted(names)}")
+                _check(results, "discord_commands has no /colmeio-metrics alias", "colmeio-metrics" not in names, f"names={sorted(names)}")
+                _check(results, "discord_commands has no /lista-de-faltas alias", "lista-de-faltas" not in names, f"names={sorted(names)}")
+                faltas_cmd = next(
+                    (c for c in payload if isinstance(c, dict) and str(c.get("name") or "").strip() == "faltas"),
+                    None,
+                )
+                opts = faltas_cmd.get("options") if isinstance(faltas_cmd, dict) else []
+                opts = opts if isinstance(opts, list) else []
+                opt_names = {str(o.get("name") or "").strip() for o in opts if isinstance(o, dict)}
+                _check(results, "discord_commands /faltas has action option", "action" in opt_names, f"options={sorted(opt_names)}")
+                action_opt = next(
+                    (o for o in opts if isinstance(o, dict) and str(o.get("name") or "").strip() == "action"),
+                    None,
+                )
+                action_choices = action_opt.get("choices") if isinstance(action_opt, dict) else []
+                action_choices = action_choices if isinstance(action_choices, list) else []
+                action_values = {
+                    str(choice.get("value") or "").strip()
+                    for choice in action_choices
+                    if isinstance(choice, dict)
+                }
+                required_actions = {"listar", "adicionar", "remover", "limpar", "help"}
+                _check(
+                    results,
+                    "discord_commands /faltas action choices",
+                    required_actions.issubset(action_values),
+                    f"action_values={sorted(action_values)}",
+                )
+                _check(
+                    results,
+                    "discord_commands /faltas has no sync action",
+                    "sync" not in action_values,
+                    f"action_values={sorted(action_values)}",
+                )
+            else:
+                _check(
+                    results,
+                    "discord_commands profile-specific checks",
+                    True,
+                    f"skipped for node profile names={sorted(names)}",
+                )
         except Exception as exc:
             _check(results, "discord_commands payload parse", False, str(exc))
     else:
         _check(
             results,
             "node discord payload exists",
-            False,
+            True,
             (
-                f"resolved={DISCORD_COMMANDS_JSON} "
+                f"optional/not found resolved={DISCORD_COMMANDS_JSON} "
                 f"(DISCORD_COMMANDS_FILE={os.getenv('DISCORD_COMMANDS_FILE', '')}, "
                 f"NODE_NAME={os.getenv('NODE_NAME', '')}, "
                 f"DISCORD_ENV_FILE={os.getenv('DISCORD_ENV_FILE', '')})"

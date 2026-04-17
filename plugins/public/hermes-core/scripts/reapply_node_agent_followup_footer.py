@@ -240,6 +240,7 @@ RUNTIME_BLOCK = """        # COLMEIO_NODE_AGENT_RUNTIME_BEGIN
                 start_idx = max(0, min(history_offset, len(agent_messages)))
 
             file_stats: Dict[str, Dict[str, int]] = {}
+            file_kinds: Dict[str, Dict[str, bool]] = {}
             for msg in agent_messages[start_idx:]:
                 if msg.get("role") != "tool":
                     continue
@@ -253,18 +254,32 @@ RUNTIME_BLOCK = """        # COLMEIO_NODE_AGENT_RUNTIME_BEGIN
                 tool_args = meta.get("args") if isinstance(meta.get("args"), dict) else {}
 
                 paths: List[str] = []
-                for key in ("files_modified", "files_created", "files_deleted"):
+                for key, kind in (
+                    ("files_modified", "modified"),
+                    ("files_created", "created"),
+                    ("files_deleted", "deleted"),
+                ):
                     raw_paths = payload.get(key)
                     if isinstance(raw_paths, list):
                         for raw_path in raw_paths:
                             normalized = _normalize_changed_path(raw_path)
                             if normalized:
                                 paths.append(normalized)
+                                path_kinds = file_kinds.setdefault(
+                                    normalized,
+                                    {"modified": False, "created": False, "deleted": False},
+                                )
+                                path_kinds[kind] = True
 
                 if not paths and isinstance(tool_args, dict):
                     arg_path = _normalize_changed_path(tool_args.get("path"))
                     if arg_path and tool_name in ("write_file", "patch"):
                         paths.append(arg_path)
+                        path_kinds = file_kinds.setdefault(
+                            arg_path,
+                            {"modified": False, "created": False, "deleted": False},
+                        )
+                        path_kinds["modified"] = True
 
                 unique_paths: List[str] = []
                 seen_paths = set()
@@ -279,6 +294,10 @@ RUNTIME_BLOCK = """        # COLMEIO_NODE_AGENT_RUNTIME_BEGIN
                 diff_stats = _count_unified_diff(str(payload.get("diff") or ""))
                 for path in paths:
                     file_stats.setdefault(path, {"add": 0, "del": 0})
+                    file_kinds.setdefault(
+                        path,
+                        {"modified": True, "created": False, "deleted": False},
+                    )
 
                 if diff_stats:
                     matched_any = False
@@ -300,29 +319,69 @@ RUNTIME_BLOCK = """        # COLMEIO_NODE_AGENT_RUNTIME_BEGIN
                             line_count += 1
                         file_stats[paths[0]]["add"] += max(1, line_count)
 
-            nonzero_stats = {
-                path: stats
-                for path, stats in file_stats.items()
-                if int(stats.get("add", 0) or 0) or int(stats.get("del", 0) or 0)
-            }
-            if not nonzero_stats:
+            touched_stats: Dict[str, Dict[str, int]] = {}
+            for path, stats in file_stats.items():
+                path_kinds = file_kinds.get(path) or {}
+                has_delta = bool(int(stats.get("add", 0) or 0) or int(stats.get("del", 0) or 0))
+                has_kind = bool(
+                    path_kinds.get("modified")
+                    or path_kinds.get("created")
+                    or path_kinds.get("deleted")
+                )
+                if has_delta or has_kind:
+                    touched_stats[path] = stats
+            if not touched_stats:
                 return ""
 
-            ordered_paths = sorted(nonzero_stats.keys())
-            total_add = sum(int(v.get("add", 0) or 0) for v in nonzero_stats.values())
-            total_del = sum(int(v.get("del", 0) or 0) for v in nonzero_stats.values())
-            lines = [f"## 📁 {len(ordered_paths)} Files Changed +{total_add} -{total_del}"]
+            ordered_paths = sorted(touched_stats.keys())
+            total_add = sum(int(v.get("add", 0) or 0) for v in touched_stats.values())
+            total_del = sum(int(v.get("del", 0) or 0) for v in touched_stats.values())
+
+            updated_paths: List[str] = []
+            created_paths: List[str] = []
+            deleted_paths: List[str] = []
             for path in ordered_paths:
-                add = int(nonzero_stats[path].get("add", 0) or 0)
-                dele = int(nonzero_stats[path].get("del", 0) or 0)
-                deltas = []
-                if add:
-                    deltas.append(f"+{add}")
-                if dele:
-                    deltas.append(f"-{dele}")
-                if not deltas:
-                    continue
-                lines.append(f"- {path} {' '.join(deltas)}")
+                path_kinds = file_kinds.get(path) or {}
+                is_created = bool(path_kinds.get("created"))
+                is_deleted = bool(path_kinds.get("deleted"))
+                if is_created and not is_deleted:
+                    created_paths.append(path)
+                elif is_deleted and not is_created:
+                    deleted_paths.append(path)
+                else:
+                    updated_paths.append(path)
+
+            summary_bits: List[str] = []
+            if updated_paths:
+                summary_bits.append(f"{len(updated_paths)} updated")
+            if created_paths:
+                summary_bits.append(f"{len(created_paths)} created")
+            if deleted_paths:
+                summary_bits.append(f"{len(deleted_paths)} deleted")
+            summary_suffix = f" ({', '.join(summary_bits)})" if summary_bits else ""
+
+            lines = [f"## 📁 {len(ordered_paths)} Files Changed +{total_add} -{total_del}{summary_suffix}"]
+
+            def _append_paths(section_name: str, section_paths: List[str]) -> None:
+                if not section_paths:
+                    return
+                lines.append(f"### {section_name} ({len(section_paths)})")
+                for section_path in section_paths:
+                    add = int(touched_stats[section_path].get("add", 0) or 0)
+                    dele = int(touched_stats[section_path].get("del", 0) or 0)
+                    deltas = []
+                    if add:
+                        deltas.append(f"+{add}")
+                    if dele:
+                        deltas.append(f"-{dele}")
+                    if deltas:
+                        lines.append(f"- {section_path} {' '.join(deltas)}")
+                    else:
+                        lines.append(f"- {section_path}")
+
+            _append_paths("Updated", updated_paths)
+            _append_paths("Created", created_paths)
+            _append_paths("Deleted", deleted_paths)
             return "\\n".join(lines)
 
         def _build_followup_summary_lines(activity: Optional[Dict[str, Any]]) -> List[str]:
@@ -975,7 +1034,13 @@ def _replace_between(content: str, start_anchor: str, end_anchor: str, new_block
 def _apply_runtime_block(content: str) -> tuple[str, bool]:
     # If the richer summary helpers are already present inside the runtime
     # marker block, keep it as-is instead of downgrading to the base block.
-    if RUNTIME_START in content and RUNTIME_END in content and "def _push_recent_line(bucket_key: str, value: str, limit: int) -> None:" in content:
+    if (
+        RUNTIME_START in content
+        and RUNTIME_END in content
+        and "def _push_recent_line(bucket_key: str, value: str, limit: int) -> None:" in content
+        and '_append_paths("Created", created_paths)' in content
+        and '_append_paths("Deleted", deleted_paths)' in content
+    ):
         return content, False
 
     content, changed, found = _replace_marker_block(content, RUNTIME_START, RUNTIME_END, RUNTIME_BLOCK)
@@ -1372,6 +1437,17 @@ def reapply() -> int:
             content, changed = patch_fn(content)
             changed_any |= changed
     except Exception as exc:
+        modern_markers = (
+            "def _step_callback_sync(iteration: int, prev_tools: list) -> None:",
+            "agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None",
+            "HERMES_AGENT_NOTIFY_INTERVAL",
+        )
+        if all(marker in original for marker in modern_markers):
+            print(
+                "  [warn] legacy node-agent followup anchors not found; "
+                "modern run.py flow detected, skipping patch."
+            )
+            return 0
         print(f"[error] failed to patch run.py: {exc}", file=sys.stderr)
         return 1
 

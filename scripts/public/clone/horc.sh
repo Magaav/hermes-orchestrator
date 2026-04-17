@@ -4,11 +4,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${HORC_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 DEFAULT_MANAGER="${SCRIPT_DIR}/clone_manager.py"
 HERMES_CLONE_MANAGER_SCRIPT="${HERMES_CLONE_MANAGER_SCRIPT:-${DEFAULT_MANAGER}}"
 DEFAULT_NODE="${HERMES_DEFAULT_NODE:-orchestrator}"
-HORC_REPO_BRANCH="${HORC_REPO_BRANCH:-main}"
 
 if [[ ! -f "${HERMES_CLONE_MANAGER_SCRIPT}" ]]; then
   for path in \
@@ -66,8 +64,9 @@ Usage:
   horc backup <name>
   horc restore <path>
 
-  horc update
-  horc agent update [name] [--source-branch BRANCH]
+  horc update test [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
+  horc update apply all [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
+  horc update apply node <node1,node2,...> [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
 
 Examples:
   horc start
@@ -81,40 +80,21 @@ Examples:
   horc backup node node1
   horc restore /local/backups/horc-backup-node-node1-20260101T000000Z.tar.gz
 
-  horc update
-  horc agent update
-  horc agent update node1
+  horc update test
+  horc update test --source-branch main --deprecate-plugins plugin-a,plugin-b
+  horc update apply all
+  horc update apply node node1,node2 --deprecate-plugins old-plugin
 
 Notes:
   - For start/status/stop/delete/logs, if name is omitted, 'orchestrator' is used.
   - For restart, omitted name means "restart all nodes".
-  - 'horc update' updates this repository (/local) from origin/main.
-  - 'horc agent update' updates /local/hermes-agent (template for new nodes).
-  - 'horc agent update <node>' also syncs that node's hermes-agent and restarts it if running.
+  - 'horc update test' refreshes /local/dummy/hermes-agent from upstream, snapshots plugins/scripts into /local/dummy, applies optional deprecations in snapshot only, and runs strict preflight.
+  - 'horc update apply ...' is hard-gated: it always runs update test first, then backup all, then promotes tested source and rolls out nodes fail-fast.
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
+  - Use --deprecate-plugins to move runtime plugins into /local/plugins/public/deprecated/ during apply.
   - Compatibility alias: 'hord' runs the same commands as 'horc'.
 TXT
-}
-
-ensure_repo_clean() {
-  if ! git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    echo "horc: ${REPO_ROOT} is not a git repository" >&2
-    exit 1
-  fi
-  if ! git -C "${REPO_ROOT}" diff --quiet || ! git -C "${REPO_ROOT}" diff --cached --quiet; then
-    echo "horc: repository has local changes at ${REPO_ROOT}" >&2
-    echo "commit/stash/discard changes before running 'horc update'" >&2
-    exit 1
-  fi
-}
-
-self_update() {
-  ensure_repo_clean
-  git -C "${REPO_ROOT}" fetch origin "${HORC_REPO_BRANCH}"
-  git -C "${REPO_ROOT}" checkout "${HORC_REPO_BRANCH}"
-  git -C "${REPO_ROOT}" pull --ff-only origin "${HORC_REPO_BRANCH}"
-  echo "horc: repository updated at ${REPO_ROOT} (${HORC_REPO_BRANCH})"
 }
 
 resolve_name_and_exec() {
@@ -260,37 +240,73 @@ case "${ACTION}" in
     resolve_name_and_exec start "$@"
     ;;
   update)
-    if [[ $# -gt 0 && "${1}" != --* ]]; then
-      # Compatibility for older docs: `horc update node1`
-      NAME="${1}"
-      shift
-      exec_manager update --name "${NAME}" "$@"
-    fi
-    self_update
-    ;;
-  agent)
     SUBACTION="${1:-}"
     if [[ $# -gt 0 ]]; then
       shift
     fi
+    if [[ -z "${SUBACTION}" ]]; then
+      echo "horc: update requires subcommand 'test' or 'apply'" >&2
+      usage >&2
+      exit 2
+    fi
     case "${SUBACTION}" in
-      update)
+      test)
         if [[ "${1:-}" == "--name" ]]; then
-          exec_manager update "$@"
+          exec_manager update-test "$@"
         fi
         if [[ $# -gt 0 && "${1}" != --* ]]; then
           NAME="${1}"
           shift
-          exec_manager update --name "${NAME}" "$@"
+          exec_manager update-test --name "${NAME}" "$@"
         fi
-        exec_manager update "$@"
+        exec_manager update-test "$@"
+        ;;
+      apply)
+        TARGET_MODE="${1:-}"
+        if [[ $# -gt 0 ]]; then
+          shift
+        fi
+        case "${TARGET_MODE}" in
+          all)
+            exec_manager update-apply --target-mode all "$@"
+            ;;
+          node)
+            TARGET_NODES="${1:-}"
+            if [[ -z "${TARGET_NODES}" || "${TARGET_NODES}" == --* ]]; then
+              echo "horc: update apply node requires <node1,node2,...>" >&2
+              usage >&2
+              exit 2
+            fi
+            shift
+            exec_manager update-apply --target-mode node --target-nodes "${TARGET_NODES}" "$@"
+            ;;
+          *)
+            echo "horc: update apply requires explicit target mode: 'all' or 'node <csv>'" >&2
+            usage >&2
+            exit 2
+            ;;
+        esac
         ;;
       *)
-        echo "horc: unknown agent subcommand '${SUBACTION}'" >&2
+        echo "horc: unknown update subcommand '${SUBACTION}'" >&2
         usage >&2
         exit 2
         ;;
     esac
+    ;;
+  agent|test|test-update)
+    LEGACY_ACTION="${ACTION}"
+    if [[ "${ACTION}" == "agent" || "${ACTION}" == "test" ]]; then
+      LEGACY_ACTION+=" ${1:-}"
+    fi
+    echo "horc: legacy command '${LEGACY_ACTION}' has been removed." >&2
+    echo "use 'horc update test' and 'horc update apply all|node <csv>'." >&2
+    exit 2
+    ;;
+  update-test|update-apply)
+    # Internal actions are intentionally not user-facing through horc.
+    echo "horc: use 'horc update test' or 'horc update apply ...'." >&2
+    exit 2
     ;;
   backup)
     MODE="${1:-all}"

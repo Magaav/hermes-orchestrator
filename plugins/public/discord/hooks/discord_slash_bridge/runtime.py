@@ -280,6 +280,13 @@ class DiscordSlashRuntime:
             command_name = self.handlers.unknown_slash_name_from_error(error)
 
         if not command_name:
+            logger.warning(
+                "Slash bridge could not resolve command from app-command error: type=%s interaction_id=%s error=%s data=%s",
+                type(error).__name__,
+                str(getattr(interaction, "id", "") or "unknown"),
+                error,
+                str(data)[:1200],
+            )
             return False
 
         try:
@@ -294,7 +301,33 @@ class DiscordSlashRuntime:
                 data = {"name": command_name, "options": []}
             elif not data.get("name"):
                 data["name"] = command_name
-            return await self._dispatch_bridge_command(interaction, command_name, data)
+            try:
+                handled = await self._dispatch_bridge_command(interaction, command_name, data)
+            except Exception as dispatch_exc:
+                logger.warning(
+                    "Slash bridge dispatch exception: command=%s type=%s not_found=%s known=%s interaction_id=%s error=%s data=%s",
+                    command_name,
+                    type(error).__name__,
+                    not_found,
+                    known,
+                    str(getattr(interaction, "id", "") or "unknown"),
+                    dispatch_exc,
+                    str(data)[:1200],
+                    exc_info=True,
+                )
+                raise
+
+            if not handled:
+                logger.warning(
+                    "Slash bridge dispatch returned unhandled: command=%s type=%s not_found=%s known=%s interaction_id=%s data=%s",
+                    command_name,
+                    type(error).__name__,
+                    not_found,
+                    known,
+                    str(getattr(interaction, "id", "") or "unknown"),
+                    str(data)[:1200],
+                )
+            return handled
 
         return False
 

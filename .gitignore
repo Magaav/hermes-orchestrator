@@ -16,6 +16,8 @@ workspace/
 hermes-agent/plugins/memory/
 hermes-agent/tests/plugins/
 backups/
+datas/**
+!datas/.gitignore
 crons/*
 !crons/.gitignore
 !crons/README.md

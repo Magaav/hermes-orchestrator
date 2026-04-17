@@ -12,7 +12,7 @@
 - `clone/horc.sh`: primary CLI wrapper (`horc`).
 - `clone/hord.sh`: compatibility alias for `horc`.
 - `clone/clone.sh`: compatibility alias to `horc`.
-- `clone/clone_manager.py`: lifecycle engine for start/stop/status/logs/backup/restore/update.
+- `clone/clone_manager.py`: lifecycle engine for start/stop/status/logs/backup/restore/update/test-update.
 - `install.sh`: bootstrap installer for orchestrator host setup.
 - `backup/backup_nodes_to_gdrive.sh`: compatibility wrapper to private backup script.
 - `backup/restore_hermes_state.sh`: compatibility wrapper to private restore script.
@@ -38,6 +38,7 @@ horc backup node node1
 horc restore /local/backups/<archive>.tar.gz
 horc update
 horc agent update
+horc test update
 ```
 
 See more: [`../../docs/commands/horc.md`](../../docs/commands/horc.md)
