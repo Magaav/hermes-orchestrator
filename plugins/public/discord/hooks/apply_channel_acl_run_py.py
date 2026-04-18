@@ -30,20 +30,28 @@ HOOK_PUBLIC_SOURCE = DISCORD_PLUGIN_ROOT / "hooks" / "channel_acl"
 HOOK_PRIVATE_SOURCE = DISCORD_PRIVATE_ROOT / "hooks" / "channel_acl"
 HOOK_DEST = HERMES_HOME / "hooks" / "channel_acl"
 
+def _candidate_agent_roots() -> list[Path]:
+    env_root = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
+    roots: list[Path] = []
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    if HERMES_HOME.name == ".hermes":
+        roots.append(HERMES_HOME.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
 
 def _run_path_candidates() -> list[Path]:
-    env_root = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
-    candidates: list[Path] = []
-    if env_root:
-        candidates.append(Path(env_root).expanduser() / "gateway" / "run.py")
-    candidates.extend(
-        [
-            Path("/local/hermes-agent/gateway/run.py"),
-            HERMES_HOME / "hermes-agent" / "gateway" / "run.py",
-            Path("/local/.hermes/hermes-agent/gateway/run.py"),
-            Path("/home/ubuntu/.hermes/hermes-agent/gateway/run.py"),
-        ]
-    )
+    candidates = [root / "gateway" / "run.py" for root in _candidate_agent_roots()]
 
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -73,8 +81,10 @@ NORMALIZE_BLOCK = """\
             # COLMEIO_CHANNEL_ACL_NORMALIZE_BEGIN
             # Channel ACL: normalize text to channel purpose.
             _normalized = None
+            _normalized_action = ""
             _blocked = False
             _block_msg = None
+            _channel_acl_module = None
             try:
                 _hook_home = Path(__import__("os").getenv("HERMES_HOME") or (Path.home() / ".hermes"))
                 _hook_path = _hook_home / "hooks" / "channel_acl" / "handler.py"
@@ -85,6 +95,7 @@ NORMALIZE_BLOCK = """\
                         _mod = importlib.util.module_from_spec(_spec)
                         _sys.modules["colmeio_channel_acl"] = _mod
                         _spec.loader.exec_module(_mod)
+                        _channel_acl_module = _mod
                         _norm = getattr(_mod, "normalize_to_channel_skill", None)
                         if callable(_norm):
                             _action, _result = _norm(source, message_text)
@@ -93,8 +104,7 @@ NORMALIZE_BLOCK = """\
                                 _block_msg = _result
                             elif _action in ("FALTAS_ADD", "SKILL_ADD"):
                                 _normalized = _result
-                                if source and source.user_id:
-                                    _normalized = f"{_normalized} [author_id:{source.user_id}]"
+                                _normalized_action = _action
             except Exception:
                 pass
             if _normalized is not None:
@@ -105,45 +115,41 @@ NORMALIZE_BLOCK = """\
                     _meta = {"thread_id": source.thread_id} if source.thread_id else None
                     await _adapter.send(source.chat_id, _block_msg or "Blocked.", metadata=_meta)
                 return
-            # If channel ACL normalized free text into a slash command (e.g. /faltas),
-            # route it through the same skill-command resolver used for real slash input.
-            # Without this, normalized commands are treated as plain chat and can drift.
             _normalized_text = str(message_text or "").strip()
             if _normalized is not None and _normalized_text.startswith("/"):
+                _handled_normalized = False
                 try:
-                    from agent.skill_commands import (
-                        get_skill_commands,
-                        build_skill_invocation_message,
-                        resolve_skill_command_key,
+                    _dispatch_norm = (
+                        getattr(_channel_acl_module, "dispatch_normalized_command", None)
+                        if _channel_acl_module is not None
+                        else None
                     )
-                    _parts = _normalized_text.split(maxsplit=1)
-                    _norm_cmd = _parts[0][1:].strip().lower() if _parts else ""
-                    _norm_args = _parts[1].strip() if len(_parts) > 1 else ""
-                    _cmd_key = resolve_skill_command_key(_norm_cmd) if _norm_cmd else None
-                    if _cmd_key is not None:
-                        _skill_cmds = get_skill_commands()
-                        _skill_name = _skill_cmds.get(_cmd_key, {}).get("name", "")
-                        _plat = source.platform.value if source.platform else None
-                        if _plat and _skill_name:
-                            from agent.skill_utils import get_disabled_skill_names as _get_plat_disabled
-                            if _skill_name in _get_plat_disabled(platform=_plat):
-                                _adapter = self.adapters.get(source.platform)
-                                if _adapter:
-                                    _meta = {"thread_id": source.thread_id} if source.thread_id else None
-                                    await _adapter.send(
-                                        source.chat_id,
-                                        f"The **{_skill_name}** skill is disabled for {_plat}.\\n"
-                                        f"Enable it with: `hermes skills config`",
-                                        metadata=_meta,
-                                    )
-                                return
-                        _skill_msg = build_skill_invocation_message(
-                            _cmd_key, _norm_args, task_id=_quick_key
+                    if callable(_dispatch_norm):
+                        _handled_normalized, _normalized_reply = await _dispatch_norm(source, _normalized_text)
+                        if _handled_normalized:
+                            _adapter = self.adapters.get(source.platform)
+                            if _adapter:
+                                _meta = {"thread_id": source.thread_id} if source.thread_id else None
+                                await _adapter.send(
+                                    source.chat_id,
+                                    str(_normalized_reply or "✅ Comando processado."),
+                                    metadata=_meta,
+                                )
+                            return
+                except Exception as _normalize_dispatch_exc:
+                    logger.debug("ACL deterministic normalized dispatch failed: %s", _normalize_dispatch_exc)
+
+                # Fail closed for normalized restricted-channel skill:add flow.
+                if _normalized_action in ("FALTAS_ADD", "SKILL_ADD"):
+                    _adapter = self.adapters.get(source.platform)
+                    if _adapter:
+                        _meta = {"thread_id": source.thread_id} if source.thread_id else None
+                        await _adapter.send(
+                            source.chat_id,
+                            "🚫 Falha ao processar comando normalizado do canal restrito.",
+                            metadata=_meta,
                         )
-                        if _skill_msg:
-                            message_text = _skill_msg
-                except Exception as _normalize_cmd_exc:
-                    logger.debug("ACL normalized command bridge failed: %s", _normalize_cmd_exc)
+                    return
             # COLMEIO_CHANNEL_ACL_NORMALIZE_END
 
 """
@@ -165,6 +171,14 @@ MODEL_BLOCK = """\
                             turn_route = _enforce(source, turn_route)
             except Exception:
                 pass
+
+            _channel_acl_blocked_msg = str(turn_route.get("channel_acl_blocked", "") or "").strip()
+            if _channel_acl_blocked_msg:
+                return {
+                    "final_response": _channel_acl_blocked_msg,
+                    "summary": _channel_acl_blocked_msg,
+                    "interrupted": False,
+                }
 
             _sp_addon = turn_route.get("system_prompt_addon")
             if _sp_addon:

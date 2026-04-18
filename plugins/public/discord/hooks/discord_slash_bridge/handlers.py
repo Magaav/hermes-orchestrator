@@ -16,6 +16,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 _CUSTOM_HANDLER_CACHE: Dict[str, Any] = {}
+_ROLE_ACL_MODULE_CACHE: Any = None
 _LOCAL_PREFIX = "/local/"
 _WORKSPACE_PREFIX = "/local/workspace/"
 _WORKSPACE_LEGACY_PREFIX = "/local/workspace/colmeio/"
@@ -100,6 +101,137 @@ def _format_path_attempts(attempts: list[Path], limit: int = 6) -> str:
     if len(attempts) > limit:
         lines.append(f"- `... +{len(attempts) - limit} caminhos`")
     return "\n".join(lines)
+
+
+def _runtime_node_name() -> str:
+    raw = str(os.getenv("NODE_NAME", "") or "").strip().lower()
+    if raw.endswith(".json"):
+        raw = raw[:-5]
+    return raw or "orchestrator"
+
+
+def _resolve_private_discord_root() -> Path:
+    configured = str(os.getenv("HERMES_DISCORD_PRIVATE_DIR", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path("/local/plugins/private/discord")
+
+
+def _resolve_private_models_path(node_name: Optional[str] = None) -> Path:
+    node = str(node_name or _runtime_node_name()).strip().lower() or "orchestrator"
+    return _resolve_private_discord_root() / "models" / f"{node}_models.json"
+
+
+def _resolve_private_channel_acl_config_path() -> Path:
+    return _resolve_private_discord_root() / "hooks" / "channel_acl" / "config.yaml"
+
+
+def _parse_csv_tokens(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw or "").split(",")
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        token = str(item or "").strip()
+        if not token:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(token)
+    return out
+
+
+def _parse_csv_commands(raw: Any) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for token in _parse_csv_tokens(raw):
+        cmd = str(token).strip().lower().lstrip("/")
+        if not cmd or cmd in seen:
+            continue
+        seen.add(cmd)
+        out.append(cmd)
+    return out
+
+
+def _load_yaml_dict(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _atomic_write_yaml(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(serialized, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _normalize_model_choices_from_raw(raw: Any) -> Dict[str, Dict[str, str]]:
+    out: Dict[str, Dict[str, str]] = {}
+
+    entries: list[Dict[str, Any]] = []
+    if isinstance(raw, dict):
+        if isinstance(raw.get("models"), dict):
+            for key, value in (raw.get("models") or {}).items():
+                if isinstance(value, dict):
+                    item = dict(value)
+                    item.setdefault("key", str(key))
+                    entries.append(item)
+        elif isinstance(raw.get("models"), list):
+            entries.extend(item for item in raw.get("models", []) if isinstance(item, dict))
+        elif {"key", "provider", "model"} <= set(raw.keys()):
+            entries.append(dict(raw))
+    elif isinstance(raw, list):
+        entries.extend(item for item in raw if isinstance(item, dict))
+
+    for item in entries:
+        key = str(item.get("key") or "").strip()
+        label = str(item.get("label") or key).strip()
+        provider = str(item.get("provider") or "").strip()
+        model = str(item.get("model") or "").strip()
+        usage_left = str(item.get("usage_left") or "").strip()
+        if not key or not provider or not model:
+            continue
+        out[key] = {
+            "key": key,
+            "label": label or key,
+            "provider": provider,
+            "model": model,
+            "usage_left": usage_left,
+        }
+
+    return out
+
+
+def load_private_model_choices(settings: Optional[Dict[str, Any]] = None) -> tuple[Dict[str, Dict[str, str]], str]:
+    del settings
+    models_path = _resolve_private_models_path()
+    if not models_path.exists():
+        raise ValueError(f"catálogo de modelos não encontrado: `{models_path}`.")
+    try:
+        raw = json.loads(models_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"catálogo de modelos inválido em `{models_path}`: {exc}") from exc
+    parsed = _normalize_model_choices_from_raw(raw)
+    if not parsed:
+        raise ValueError(f"catálogo de modelos vazio em `{models_path}`.")
+    return parsed, str(models_path)
+
+
+def list_model_choice_specs(settings: Optional[Dict[str, Any]] = None) -> list[Dict[str, str]]:
+    choices_map, _path = load_private_model_choices(settings=settings)
+    return list(choices_map.values())
 
 
 def interaction_data_to_dict(interaction: Any) -> Dict[str, Any]:
@@ -247,26 +379,224 @@ def _load_channel_acl_module() -> Any:
     return mod
 
 
+def _load_role_acl_module() -> Any:
+    global _ROLE_ACL_MODULE_CACHE
+    if _ROLE_ACL_MODULE_CACHE is not None:
+        return _ROLE_ACL_MODULE_CACHE
+
+    hook_path = Path(__file__).with_name("role_acl.py")
+    if not hook_path.exists():
+        return None
+
+    spec = importlib.util.spec_from_file_location("colmeio_discord_role_acl_runtime", hook_path)
+    if not spec or not spec.loader:
+        return None
+
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _ROLE_ACL_MODULE_CACHE = mod
+    return mod
+
+
+def resolve_role_acl_path() -> str:
+    try:
+        mod = _load_role_acl_module()
+        if mod is None:
+            return ""
+        resolver = getattr(mod, "resolve_acl_path", None)
+        node_name = str(os.getenv("NODE_NAME", "") or "")
+        if callable(resolver):
+            path = resolver(node_name=node_name)
+            return str(path) if path else ""
+    except Exception as exc:
+        logger.debug("Failed to resolve role ACL path: %s", exc)
+    return ""
+
+
+def list_acl_role_specs() -> list[Dict[str, str]]:
+    out: list[Dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        mod = _load_role_acl_module()
+        if mod is None:
+            return []
+        path_text = resolve_role_acl_path()
+        if not path_text:
+            return []
+        load_acl = getattr(mod, "load_acl", None)
+        available_roles = getattr(mod, "available_hierarchy_roles", None)
+        if not callable(load_acl) or not callable(available_roles):
+            return []
+        acl = load_acl(Path(path_text))
+        for item in available_roles(acl):
+            if not isinstance(item, dict):
+                continue
+            token = str(item.get("token") or "").strip()
+            label = str(item.get("label") or token).strip() or token
+            if not token or token in seen:
+                continue
+            seen.add(token)
+            out.append({"token": token, "label": label})
+    except Exception as exc:
+        logger.debug("Failed to list ACL role specs: %s", exc)
+    return out
+
+
+def list_acl_command_names(extra_commands: Optional[list[str]] = None) -> list[str]:
+    commands: set[str] = set()
+
+    for item in extra_commands or []:
+        normalized = _normalize_acl_command_value(item)
+        if normalized:
+            commands.add(normalized)
+
+    try:
+        mod = _load_role_acl_module()
+        path_text = resolve_role_acl_path()
+        if mod is not None and path_text:
+            load_acl = getattr(mod, "load_acl", None)
+            if callable(load_acl):
+                acl = load_acl(Path(path_text))
+                acl_commands = acl.get("commands") if isinstance(acl, dict) else {}
+                if isinstance(acl_commands, dict):
+                    for key in acl_commands.keys():
+                        normalized = _normalize_acl_command_value(key)
+                        if normalized:
+                            commands.add(normalized)
+    except Exception as exc:
+        logger.debug("Failed to list ACL command names: %s", exc)
+
+    if not commands:
+        commands.add("status")
+    return sorted(commands)
+
+
+def list_skill_name_choices() -> list[str]:
+    out: set[str] = set()
+    roots = [
+        Path("/local/skills/custom"),
+        _HERMES_HOME / "skills" / "custom",
+    ]
+    for root in roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            org_dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
+        except Exception:
+            continue
+        for org in org_dirs:
+            try:
+                skill_dirs = sorted((p for p in org.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
+            except Exception:
+                continue
+            for skill in skill_dirs:
+                if (skill / "SKILL.md").exists() or (skill / "scripts").is_dir():
+                    out.add(skill.name)
+
+    try:
+        cfg_path = _resolve_private_channel_acl_config_path()
+        cfg = _load_yaml_dict(cfg_path)
+        channels = cfg.get("channels") if isinstance(cfg.get("channels"), dict) else {}
+        if isinstance(channels, dict):
+            for row in channels.values():
+                if not isinstance(row, dict):
+                    continue
+                for skill in _parse_csv_tokens(row.get("allowed_skills")):
+                    if skill:
+                        out.add(skill)
+    except Exception as exc:
+        logger.debug("Failed to include configured allowed_skills in autocomplete list: %s", exc)
+
+    return sorted(out)
+
+
+async def check_role_acl(interaction: Any, command_name: str) -> tuple[bool, str, Dict[str, Any]]:
+    cmd = str(command_name or "").strip().lower().lstrip("/")
+    if not cmd:
+        return False, "🚫 ACL: comando inválido.", {"decision": "invalid_command"}
+
+    try:
+        mod = _load_role_acl_module()
+        if mod is None:
+            # Safe-by-default for missing runtime file.
+            acl_path = resolve_role_acl_path()
+            msg = (
+                "🚫 ACL: runtime de autorização não encontrado. "
+                f"Verifique `{acl_path or 'discord role acl runtime'}`."
+            )
+            return False, msg, {"decision": "missing_role_acl_module", "acl_path": acl_path}
+
+        checker = getattr(mod, "authorize_interaction", None)
+        if not callable(checker):
+            acl_path = resolve_role_acl_path()
+            msg = (
+                "🚫 ACL: checker de autorização indisponível. "
+                f"Verifique `{acl_path or 'discord role acl runtime'}`."
+            )
+            return False, msg, {"decision": "missing_role_acl_checker", "acl_path": acl_path}
+
+        result = await checker(interaction, cmd)
+        if not isinstance(result, dict):
+            return False, "🚫 ACL: resposta inválida do checker.", {"decision": "invalid_checker_payload"}
+        allowed = bool(result.get("allowed"))
+        message = str(result.get("message") or "")
+        return allowed, message, result
+    except Exception as exc:
+        logger.warning("Role ACL checker failed for /%s: %s", cmd, exc, exc_info=True)
+        return False, f"🚫 ACL: falha interna ao validar `/{cmd}`.", {"decision": "role_acl_exception", "error": str(exc)}
+
+
+async def ensure_slash_acl_allowed(
+    adapter: Any,
+    interaction: Any,
+    *,
+    acl_command: str,
+    command_name: str,
+) -> bool:
+    cmd = str(acl_command or command_name or "").strip().lower().lstrip("/")
+    if not cmd:
+        await send_ephemeral(interaction, "🚫 ACL: comando inválido.")
+        return False
+
+    role_allowed, role_msg, role_ctx = await check_role_acl(interaction, cmd)
+    if not role_allowed:
+        msg = role_msg or f"🚫 ACL: `/{cmd}` não permitido."
+        await send_ephemeral(interaction, msg)
+        return False
+
+    channel_allowed, channel_msg = check_command_acl(adapter, interaction, cmd)
+    if not channel_allowed:
+        msg = channel_msg or f"🚫 O comando `/{command_name}` não é permitido neste canal."
+        await send_ephemeral(interaction, msg)
+        return False
+
+    return True
+
+
 def _resolve_interaction_channel_ids(adapter: Any, interaction: Any) -> tuple[str, Optional[str], Optional[str]]:
     channel_id = str(getattr(interaction, "channel_id", "") or "")
 
     parent_id: Optional[str] = None
     thread_id: Optional[str] = None
+    channel_obj = getattr(interaction, "channel", None)
+    channel_type = str(getattr(getattr(channel_obj, "type", None), "name", getattr(channel_obj, "type", "")) or "").lower()
+    class_name = str(getattr(getattr(channel_obj, "__class__", None), "__name__", "") or "").lower()
 
     try:
         import discord  # type: ignore
-        is_thread = isinstance(getattr(interaction, "channel", None), discord.Thread)
+        is_thread = isinstance(channel_obj, discord.Thread)
     except Exception:
         is_thread = False
+    is_thread_like = bool(is_thread or "thread" in channel_type or "thread" in class_name)
 
-    if is_thread:
+    if is_thread_like:
         thread_id = channel_id or None
         try:
             parent_getter = getattr(adapter, "_get_parent_channel_id", None)
             if callable(parent_getter):
-                parent_id = parent_getter(interaction.channel)
-            else:
-                parent_id = str(getattr(interaction.channel, "parent_id", "") or "") or None
+                parent_id = str(parent_getter(channel_obj) or "").strip() or None
+            if not parent_id:
+                parent_id = str(getattr(channel_obj, "parent_id", "") or "").strip() or None
         except Exception:
             parent_id = None
 
@@ -355,7 +685,6 @@ async def run_metrics_dashboard(
         cfg.get("script_path"),
         "/local/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py",
         str(_HERMES_HOME / "skills" / "custom" / "colmeio" / "colmeio-metrics" / "scripts" / "metrics_logger.py"),
-        "/local/.hermes/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py",
     )
     timeout_sec = int(cfg.get("timeout_sec") or 45)
 
@@ -398,6 +727,8 @@ async def run_metrics_dashboard(
         "--actor-user-name",
         actor_user_name,
     ]
+    if bool(cfg.get("skip_dashboard_admin_check", True)):
+        cmd.append("--skip-dashboard-admin-check")
     if skill_name:
         cmd.extend(["--skill-name", skill_name])
 
@@ -465,13 +796,16 @@ async def handle_metricas(
 ) -> bool:
     cfg = settings or {}
     acl_command = str(cfg.get("acl_command") or command_name)
-    allowed, acl_msg = check_command_acl(adapter, interaction, acl_command)
+    try:
+        allowed = await ensure_slash_acl_allowed(
+            adapter,
+            interaction,
+            acl_command=acl_command,
+            command_name=command_name,
+        )
+    except Exception:
+        allowed = False
     if not allowed:
-        msg = acl_msg or f"🚫 O comando `/{command_name}` não é permitido neste canal."
-        try:
-            await send_ephemeral(interaction, msg)
-        except Exception:
-            pass
         return True
 
     try:
@@ -498,6 +832,19 @@ async def handle_metricas(
 
 async def handle_restart(adapter: Any, interaction: Any, settings: Optional[Dict[str, Any]] = None) -> bool:
     cfg = settings or {}
+    acl_command = str(cfg.get("acl_command") or "restart")
+    try:
+        allowed = await ensure_slash_acl_allowed(
+            adapter,
+            interaction,
+            acl_command=acl_command,
+            command_name="restart",
+        )
+    except Exception:
+        allowed = False
+    if not allowed:
+        return True
+
     restart_cmd_env = str(cfg.get("restart_cmd_env") or "COLMEIO_DISCORD_RESTART_CMD")
     restart_delay_env = str(cfg.get("restart_delay_env") or "COLMEIO_DISCORD_RESTART_DELAY_SEC")
     default_restart_cmd = str(cfg.get("default_restart_cmd") or "sudo hermes gateway restart --system")
@@ -567,6 +914,19 @@ def _format_reboot_ack(cfg: Dict[str, Any]) -> str:
 
 async def handle_reboot(adapter: Any, interaction: Any, settings: Optional[Dict[str, Any]] = None) -> bool:
     cfg = settings or {}
+    acl_command = str(cfg.get("acl_command") or "reboot")
+    try:
+        allowed = await ensure_slash_acl_allowed(
+            adapter,
+            interaction,
+            acl_command=acl_command,
+            command_name="reboot",
+        )
+    except Exception:
+        allowed = False
+    if not allowed:
+        return True
+
     reboot_cmd_env = str(cfg.get("reboot_cmd_env") or "COLMEIO_DISCORD_REBOOT_CMD")
     reboot_delay_env = str(cfg.get("reboot_delay_env") or "COLMEIO_DISCORD_REBOOT_DELAY_SEC")
     default_reboot_cmd = str(cfg.get("default_reboot_cmd") or "kill -TERM 1")
@@ -622,13 +982,13 @@ async def handle_backup_version(
 ) -> bool:
     cfg = settings or {}
     acl_command = str(cfg.get("acl_command") or "backup")
-    allowed, acl_msg = check_command_acl(adapter, interaction, acl_command)
+    allowed = await ensure_slash_acl_allowed(
+        adapter,
+        interaction,
+        acl_command=acl_command,
+        command_name="backup",
+    )
     if not allowed:
-        msg = acl_msg or "🚫 O comando `/backup` não é permitido neste canal."
-        try:
-            await send_ephemeral(interaction, msg)
-        except Exception:
-            pass
         return True
 
     if not interaction.response.is_done():
@@ -985,30 +1345,8 @@ async def handle_backup_version(
 
 
 def _normalize_model_choices(settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
-    cfg = settings or {}
-    raw = cfg.get("choices")
-    if not isinstance(raw, list):
-        raw = []
-
-    out: Dict[str, Dict[str, str]] = {}
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("key") or "").strip()
-        label = str(item.get("label") or "").strip()
-        provider = str(item.get("provider") or "").strip()
-        model = str(item.get("model") or "").strip()
-        usage_left = str(item.get("usage_left") or "").strip()
-        if not key or not label or not provider or not model:
-            continue
-        out[key] = {
-            "key": key,
-            "label": label,
-            "provider": provider,
-            "model": model,
-            "usage_left": usage_left,
-        }
-    return out
+    choices_map, _path = load_private_model_choices(settings=settings)
+    return choices_map
 
 
 def _canonical_model_choice_token(raw: Any) -> str:
@@ -1138,6 +1476,199 @@ def _resolve_usage_left(provider: str, selected: Dict[str, str], settings: Optio
     return default_label
 
 
+def _normalize_acl_command_value(raw: Any) -> str:
+    return str(raw or "").strip().lower().lstrip("/")
+
+
+def _normalize_role_value(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text == "@everyone":
+        return text
+    return text
+
+
+def _normalize_channel_id(raw: Any) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("channel:"):
+        text = text.split(":", 1)[1].strip()
+    if text.startswith("<#") and text.endswith(">"):
+        text = text[2:-1].strip()
+    return text if text.isdigit() else ""
+
+
+def _normalize_acl_channel_mode(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    mapping = {
+        "default": "default",
+        "livre": "default",
+        "free": "default",
+        "specific": "specific",
+        "especifico": "specific",
+        "específico": "specific",
+        "condicionado": "specific",
+    }
+    return mapping.get(text, "")
+
+
+def _normalize_label_value(raw: Any) -> str:
+    text = str(raw or "").strip().lower()
+    if text in {"", "none", "null"}:
+        return ""
+    compact = re.sub(r"[^0-9a-z]+", "", text)
+    mapping = {
+        "l1": "loja1",
+        "1": "loja1",
+        "loja1": "loja1",
+        "store1": "loja1",
+        "l2": "loja2",
+        "2": "loja2",
+        "loja2": "loja2",
+        "store2": "loja2",
+        "ambas": "ambas",
+        "todas": "ambas",
+    }
+    if compact in mapping:
+        return mapping[compact]
+    return mapping.get(text, text)
+
+
+def _should_apply_value(raw: Any) -> bool:
+    return str(raw or "").strip() != ""
+
+
+def _refresh_runtime_channel_acl_copy(payload: Dict[str, Any]) -> None:
+    runtime_path = _HERMES_HOME / "hooks" / "channel_acl" / "config.yaml"
+    if runtime_path.exists():
+        _atomic_write_yaml(runtime_path, payload)
+
+    mod = _load_channel_acl_module()
+    if mod is None:
+        return
+    clear_cache = getattr(mod, "clear_cache", None)
+    if callable(clear_cache):
+        try:
+            clear_cache()
+        except Exception:
+            pass
+
+
+def update_channel_acl_policy(
+    *,
+    channel_id: str,
+    mode: str,
+    model_key: str,
+    instructions: str,
+    allowed_commands: str,
+    allowed_skills: str,
+    always_allowed_commands: str,
+    default_action: str,
+    free_text_policy: str,
+    label: str,
+    settings: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    del settings  # reserved for future policy defaults
+
+    normalized_channel = _normalize_channel_id(channel_id)
+    if not normalized_channel:
+        raise ValueError("channel inválido. Use um channel_id numérico.")
+
+    normalized_mode = _normalize_acl_channel_mode(mode)
+    if normalized_mode not in {"default", "specific"}:
+        raise ValueError("mode inválido. Use `default` ou `specific`.")
+
+    config_path = _resolve_private_channel_acl_config_path()
+    cfg = _load_yaml_dict(config_path)
+    raw_channels = cfg.get("channels") if isinstance(cfg.get("channels"), dict) else {}
+    channels: Dict[str, Any] = {}
+    if isinstance(raw_channels, dict):
+        for key, value in raw_channels.items():
+            skey = str(key or "").strip()
+            if not skey or not isinstance(value, dict):
+                continue
+            channels[skey] = dict(value)
+    row_raw = channels.get(normalized_channel) if isinstance(channels, dict) else {}
+    row = dict(row_raw) if isinstance(row_raw, dict) else {}
+
+    selected_model: Optional[Dict[str, str]] = None
+    models_path = _resolve_private_models_path()
+    if normalized_mode == "specific":
+        model_value = str(model_key or "").strip()
+        if not model_value:
+            raise ValueError("mode:specific exige `model_key`.")
+        choices_map, _catalog_path = load_private_model_choices()
+        selected_model = _find_model_choice(model_value, choices_map)
+        if not selected_model:
+            available = ", ".join(sorted(choices_map.keys())) or "(vazio)"
+            raise ValueError(
+                f"model_key inválido: `{model_value}`. Disponíveis em `{models_path}`: {available}"
+            )
+
+    if normalized_mode == "default":
+        row = {"mode": "livre"}
+    else:
+        assert selected_model is not None
+        row["mode"] = "condicionado"
+        row["model_key"] = selected_model["key"]
+        row["model"] = selected_model["model"]
+        row["provider"] = selected_model["provider"]
+        row.setdefault("allowed_commands", ["faltas"])
+        row.setdefault("always_allowed_commands", ["status"])
+        row.setdefault("default_action", "skill:add")
+        row.setdefault("free_text_policy", "strict_item")
+        if not _should_apply_value(label):
+            migrated_label = _normalize_label_value(row.get("label") or row.get("store"))
+            if migrated_label:
+                row["label"] = migrated_label
+                row["store"] = migrated_label
+
+    if _should_apply_value(instructions):
+        row["instructions"] = str(instructions).strip()
+
+    if normalized_mode == "specific":
+        if _should_apply_value(allowed_commands):
+            row["allowed_commands"] = _parse_csv_commands(allowed_commands)
+        if _should_apply_value(allowed_skills):
+            row["allowed_skills"] = _parse_csv_tokens(allowed_skills)
+        if _should_apply_value(always_allowed_commands):
+            row["always_allowed_commands"] = _parse_csv_commands(always_allowed_commands)
+        if _should_apply_value(default_action):
+            row["default_action"] = str(default_action).strip()
+        if _should_apply_value(free_text_policy):
+            row["free_text_policy"] = str(free_text_policy).strip().lower()
+        if _should_apply_value(label):
+            label_value = _normalize_label_value(label)
+            if not label_value:
+                raise ValueError("label inválido.")
+            row["label"] = label_value
+            # Keep legacy `store` in sync for backward-compatibility.
+            row["store"] = label_value
+        elif row.get("label") or row.get("store"):
+            migrated_label = _normalize_label_value(row.get("label") or row.get("store"))
+            if migrated_label:
+                row["label"] = migrated_label
+                row["store"] = migrated_label
+
+    channels[normalized_channel] = row
+    cfg["channels"] = channels
+    _atomic_write_yaml(config_path, cfg)
+    _refresh_runtime_channel_acl_copy(cfg)
+
+    return {
+        "ok": True,
+        "channel_id": normalized_channel,
+        "mode": normalized_mode,
+        "channel_mode": row.get("mode", "livre"),
+        "model_key": row.get("model_key", ""),
+        "model": row.get("model", ""),
+        "provider": row.get("provider", ""),
+        "label": row.get("label", ""),
+        "config_path": str(config_path),
+        "models_path": str(models_path),
+    }
+
+
 def _load_gateway_config() -> tuple[Path, Dict[str, Any]]:
     cfg_path = _HERMES_HOME / "config.yaml"
     if not cfg_path.exists():
@@ -1199,19 +1730,23 @@ async def handle_model_switch(
 ) -> bool:
     cfg = settings or {}
     acl_command = str(cfg.get("acl_command") or "model")
-    allowed, acl_msg = check_command_acl(adapter, interaction, acl_command)
+    allowed = await ensure_slash_acl_allowed(
+        adapter,
+        interaction,
+        acl_command=acl_command,
+        command_name="model",
+    )
     if not allowed:
-        msg = acl_msg or "🚫 O comando `/model` não é permitido neste canal."
-        try:
-            await send_ephemeral(interaction, msg)
-        except Exception:
-            pass
         return True
 
     if not interaction.response.is_done():
         await interaction.response.defer(ephemeral=True)
 
-    choices_map = _normalize_model_choices(cfg)
+    try:
+        choices_map = _normalize_model_choices(cfg)
+    except ValueError as exc:
+        await safe_edit_or_followup(interaction, f"❌ {exc}")
+        return True
     config_path, config = _load_gateway_config()
 
     model_cfg = config.get("model")
@@ -1280,6 +1815,162 @@ async def handle_model_switch(
             f"model: `{selected['model']}`\n"
             f"provider: `{selected['provider']}`\n"
             f"usage_left: `{usage_left}`"
+        ),
+    )
+    return True
+
+
+async def handle_acl_command_update(
+    adapter: Any,
+    interaction: Any,
+    command_value: str,
+    role_value: str,
+    settings: Optional[Dict[str, Any]] = None,
+) -> bool:
+    cfg = settings or {}
+    acl_command = str(cfg.get("acl_command") or "acl")
+    allowed = await ensure_slash_acl_allowed(
+        adapter,
+        interaction,
+        acl_command=acl_command,
+        command_name="acl",
+    )
+    if not allowed:
+        return True
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    command_target = _normalize_acl_command_value(command_value)
+    requested_role = _normalize_role_value(role_value)
+    if not command_target:
+        await safe_edit_or_followup(interaction, "❌ comando inválido. Informe o slash command (ex.: `metricas`).")
+        return True
+    if not requested_role:
+        await safe_edit_or_followup(interaction, "❌ role inválida. Informe uma role do hierarchy (ex.: `gerente`).")
+        return True
+
+    mod = _load_role_acl_module()
+    if mod is None:
+        await safe_edit_or_followup(interaction, "❌ Runtime de ACL indisponível para atualizar permissões.")
+        return True
+
+    updater = getattr(mod, "update_command_min_role", None)
+    if not callable(updater):
+        await safe_edit_or_followup(interaction, "❌ Atualizador de ACL indisponível no runtime.")
+        return True
+
+    acl_path = resolve_role_acl_path()
+    if not acl_path:
+        await safe_edit_or_followup(interaction, "❌ Não consegui resolver o caminho do ACL deste node.")
+        return True
+
+    try:
+        result = updater(Path(acl_path), command_target, requested_role)
+    except ValueError as exc:
+        await safe_edit_or_followup(interaction, f"❌ {exc}")
+        return True
+    except Exception as exc:
+        logger.warning("ACL update failed for command=%s role=%s: %s", command_value, role_value, exc, exc_info=True)
+        await safe_edit_or_followup(interaction, f"❌ Falha ao atualizar ACL: {exc}")
+        return True
+
+    command_name = str(result.get("command") or "").strip()
+    min_role_label = str(result.get("min_role_label") or result.get("min_role") or "").strip()
+    min_role_token = str(result.get("min_role") or "").strip()
+    previous = str(result.get("previous_min_role") or "").strip() or "(sem min_role)"
+    acl_path_text = str(result.get("acl_path") or acl_path)
+
+    await safe_edit_or_followup(
+        interaction,
+        (
+            "✅ ACL de comando atualizado com sucesso.\n"
+            f"comando: `/{command_name}`\n"
+            f"min_role: `{min_role_label}` (`{min_role_token}`)\n"
+            f"anterior: `{previous}`\n"
+            f"arquivo: `{acl_path_text}`"
+        ),
+    )
+    return True
+
+
+async def handle_acl_channel_update(
+    adapter: Any,
+    interaction: Any,
+    *,
+    channel_value: str,
+    mode_value: str,
+    model_key: str = "",
+    instructions: str = "",
+    allowed_commands: str = "",
+    allowed_skills: str = "",
+    always_allowed_commands: str = "",
+    default_action: str = "",
+    free_text_policy: str = "",
+    label: str = "",
+    settings: Optional[Dict[str, Any]] = None,
+) -> bool:
+    cfg = settings or {}
+    acl_command = str(cfg.get("acl_command") or "acl")
+    allowed = await ensure_slash_acl_allowed(
+        adapter,
+        interaction,
+        acl_command=acl_command,
+        command_name="acl",
+    )
+    if not allowed:
+        return True
+
+    if not interaction.response.is_done():
+        await interaction.response.defer(ephemeral=True)
+
+    try:
+        result = update_channel_acl_policy(
+            channel_id=channel_value,
+            mode=mode_value,
+            model_key=model_key,
+            instructions=instructions,
+            allowed_commands=allowed_commands,
+            allowed_skills=allowed_skills,
+            always_allowed_commands=always_allowed_commands,
+            default_action=default_action,
+            free_text_policy=free_text_policy,
+            label=label,
+            settings=cfg,
+        )
+    except ValueError as exc:
+        await safe_edit_or_followup(interaction, f"❌ {exc}")
+        return True
+    except Exception as exc:
+        logger.warning(
+            "ACL channel update failed channel=%s mode=%s: %s",
+            channel_value,
+            mode_value,
+            exc,
+            exc_info=True,
+        )
+        await safe_edit_or_followup(interaction, f"❌ Falha ao atualizar ACL de canal: {exc}")
+        return True
+
+    channel_mode = str(result.get("channel_mode") or "")
+    model_info = ""
+    if channel_mode == "condicionado":
+        model_info = (
+            f"\nmodel_key: `{result.get('model_key')}`"
+            f"\nprovider/model: `{result.get('provider')}` / `{result.get('model')}`"
+        )
+        label_value = str(result.get("label") or "").strip()
+        if label_value:
+            model_info += f"\nlabel: `{label_value}`"
+
+    await safe_edit_or_followup(
+        interaction,
+        (
+            "✅ ACL de canal atualizado com sucesso.\n"
+            f"channel: `{result.get('channel_id')}`\n"
+            f"mode: `{result.get('mode')}` ({channel_mode})"
+            f"{model_info}\n"
+            f"arquivo: `{result.get('config_path')}`"
         ),
     )
     return True

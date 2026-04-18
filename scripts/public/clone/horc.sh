@@ -64,9 +64,10 @@ Usage:
   horc backup <name>
   horc restore <path>
 
-  horc update test [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
-  horc update apply all [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
-  horc update apply node <node1,node2,...> [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
+  horc update run <prod-node> --stage <stage-node> [--source-branch BRANCH] [--deprecate-plugins p1,p2,...]
+  horc update validate <run-id> --phase stage|prod
+  horc update resume <run-id>
+  horc update status <run-id>
 
 Examples:
   horc start
@@ -80,16 +81,16 @@ Examples:
   horc backup node node1
   horc restore /local/backups/horc-backup-node-node1-20260101T000000Z.tar.gz
 
-  horc update test
-  horc update test --source-branch main --deprecate-plugins plugin-a,plugin-b
-  horc update apply all
-  horc update apply node node1,node2 --deprecate-plugins old-plugin
+  horc update run colmeio --stage colmeio-stage --source-branch main
+  horc update validate update-colmeio-20260418T150000Z-1 --phase stage
+  horc update validate update-colmeio-20260418T150000Z-1 --phase prod
+  horc update status update-colmeio-20260418T150000Z-1
 
 Notes:
   - For start/status/stop/delete/logs, if name is omitted, 'orchestrator' is used.
   - For restart, omitted name means "restart all nodes".
-  - 'horc update test' refreshes /local/dummy/hermes-agent from upstream, snapshots plugins/scripts into /local/dummy, applies optional deprecations in snapshot only, and runs strict preflight.
-  - 'horc update apply ...' is hard-gated: it always runs update test first, then backup all, then promotes tested source and rolls out nodes fail-fast.
+  - Guided updates are one node at a time: preflight -> stage -> validate -> promote -> validate.
+  - Update artifacts are written under /local/logs/update/<run-id>/.
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
   - Use --deprecate-plugins to move runtime plugins into /local/plugins/public/deprecated/ during apply.
@@ -245,50 +246,77 @@ case "${ACTION}" in
       shift
     fi
     if [[ -z "${SUBACTION}" ]]; then
-      echo "horc: update requires subcommand 'test' or 'apply'" >&2
+      echo "horc: update requires subcommand 'run', 'validate', 'resume', or 'status'" >&2
       usage >&2
       exit 2
     fi
     case "${SUBACTION}" in
-      test)
-        if [[ "${1:-}" == "--name" ]]; then
-          exec_manager update-test "$@"
+      run)
+        TARGET_NAME="${1:-}"
+        if [[ -z "${TARGET_NAME}" || "${TARGET_NAME}" == --* ]]; then
+          echo "horc: update run requires <prod-node>" >&2
+          usage >&2
+          exit 2
         fi
-        if [[ $# -gt 0 && "${1}" != --* ]]; then
-          NAME="${1}"
-          shift
-          exec_manager update-test --name "${NAME}" "$@"
+        shift
+        STAGE_NAME=""
+        EXTRA_ARGS=()
+        while [[ $# -gt 0 ]]; do
+          case "${1}" in
+            --stage)
+              if [[ $# -lt 2 || "${2}" == --* ]]; then
+                echo "horc: update run requires a value for --stage" >&2
+                exit 2
+              fi
+              STAGE_NAME="${2}"
+              shift 2
+              ;;
+            *)
+              EXTRA_ARGS+=("${1}")
+              shift
+              ;;
+          esac
+        done
+        if [[ -z "${STAGE_NAME}" ]]; then
+          echo "horc: update run requires --stage <stage-node>" >&2
+          usage >&2
+          exit 2
         fi
-        exec_manager update-test "$@"
+        exec_manager update-run --name "${TARGET_NAME}" --stage-name "${STAGE_NAME}" "${EXTRA_ARGS[@]}"
         ;;
-      apply)
-        TARGET_MODE="${1:-}"
-        if [[ $# -gt 0 ]]; then
-          shift
+      validate)
+        RUN_ID="${1:-}"
+        if [[ -z "${RUN_ID}" || "${RUN_ID}" == --* ]]; then
+          echo "horc: update validate requires <run-id>" >&2
+          usage >&2
+          exit 2
         fi
-        case "${TARGET_MODE}" in
-          all)
-            exec_manager update-apply --target-mode all "$@"
-            ;;
-          node)
-            TARGET_NODES="${1:-}"
-            if [[ -z "${TARGET_NODES}" || "${TARGET_NODES}" == --* ]]; then
-              echo "horc: update apply node requires <node1,node2,...>" >&2
-              usage >&2
-              exit 2
-            fi
-            shift
-            exec_manager update-apply --target-mode node --target-nodes "${TARGET_NODES}" "$@"
-            ;;
-          *)
-            echo "horc: update apply requires explicit target mode: 'all' or 'node <csv>'" >&2
-            usage >&2
-            exit 2
-            ;;
-        esac
+        shift
+        exec_manager update-validate --run-id "${RUN_ID}" "$@"
+        ;;
+      resume)
+        RUN_ID="${1:-}"
+        if [[ -z "${RUN_ID}" || "${RUN_ID}" == --* ]]; then
+          echo "horc: update resume requires <run-id>" >&2
+          usage >&2
+          exit 2
+        fi
+        shift
+        exec_manager update-resume --run-id "${RUN_ID}" "$@"
+        ;;
+      status)
+        RUN_ID="${1:-}"
+        if [[ -z "${RUN_ID}" || "${RUN_ID}" == --* ]]; then
+          echo "horc: update status requires <run-id>" >&2
+          usage >&2
+          exit 2
+        fi
+        shift
+        exec_manager update-run-status --run-id "${RUN_ID}" "$@"
         ;;
       *)
         echo "horc: unknown update subcommand '${SUBACTION}'" >&2
+        echo "retired subcommands: test, apply" >&2
         usage >&2
         exit 2
         ;;
@@ -300,12 +328,12 @@ case "${ACTION}" in
       LEGACY_ACTION+=" ${1:-}"
     fi
     echo "horc: legacy command '${LEGACY_ACTION}' has been removed." >&2
-    echo "use 'horc update test' and 'horc update apply all|node <csv>'." >&2
+    echo "use 'horc update run <prod-node> --stage <stage-node>'." >&2
     exit 2
     ;;
-  update-test|update-apply)
+  update-test|update-apply|update-run|update-validate|update-resume|update-run-status)
     # Internal actions are intentionally not user-facing through horc.
-    echo "horc: use 'horc update test' or 'horc update apply ...'." >&2
+    echo "horc: use 'horc update run', 'horc update validate', 'horc update resume', or 'horc update status'." >&2
     exit 2
     ;;
   backup)
@@ -342,6 +370,11 @@ case "${ACTION}" in
     fi
     shift
     exec_manager restore --path "${BACKUP_PATH}" "$@"
+    ;;
+  profile)
+    echo "horc: profile clone has been retired from operator use." >&2
+    echo "use 'horc update run <prod-node> --stage <stage-node>'." >&2
+    exit 2
     ;;
   help|-h|--help)
     usage

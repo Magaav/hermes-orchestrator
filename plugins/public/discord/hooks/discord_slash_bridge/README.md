@@ -14,7 +14,7 @@ This folder is the external command engine loaded by the Discord bootstrap patch
 `registry.yaml` supports two layers:
 
 1. `native_overrides`
-- for commands we want as native tree commands (`/restart`, `/metricas`, `/backup version`, `/model`)
+- for commands we want as native tree commands (`/restart`, `/metricas`, `/backup version`, `/model`, `/acl`)
 - `/backup version` is orchestrator-only and now accepts:
   - `version` (optional label)
   - `node` (`orchestrator`, `colmeio`, `catatau`, `all`)
@@ -34,6 +34,31 @@ Current custom handlers include:
 - `custom:clean`
 - `custom:pair`
 - `custom:clone` (Dockerized Hermes node lifecycle via `/clone`)
+
+## Role ACL (Fail-Closed)
+
+All slash commands pass through role ACL checks.
+
+- Public engine: `hooks/discord_slash_bridge/role_acl.py`
+- Private node policy: `/local/plugins/private/discord/acl/<node>_acl.json`
+- Bootstrap/refresh script: `/local/plugins/public/discord/scripts/discord_role_acl_sync.py`
+
+Behavior:
+
+- Command missing from ACL (`commands.<name>.min_role`) is denied for everyone.
+- `@everyone` is supported for low-risk commands.
+- Live Discord roles are checked first, then optional `user_overrides` from ACL are applied.
+- `/acl command command:<cmd> role:<role>` updates `commands.<cmd>.min_role` in node ACL JSON.
+- `/acl channel channel:<channel_id> mode:<default|specific> ...` updates private channel policy.
+- `/acl` has autocomplete for command/role/model_key/allowed_commands/allowed_skills.
+- `/acl channel` uses `label` (automation tag) instead of `store`.
+
+## Private Model Catalog
+
+- Canonical per-instance model map:
+  - `/local/plugins/private/discord/models/<node>_models.json`
+- `mode:specific` in `/acl channel` is fail-closed and requires a valid `model_key` from this file.
+- `/model` command choices also resolve from this private catalog.
 
 ## Add A New Command Quickly
 

@@ -1,13 +1,12 @@
 # horc Command Reference
 
-`horc` is the Hermes Orchestrator command surface for lifecycle, logs, backup/restore, and update flows.
+`horc` is the Hermes Orchestrator CLI for lifecycle, logs, backup/restore, and the guided one-node-at-a-time update flow.
 
 ## Defaults
 
-- Default node for most commands: `orchestrator`
+- Default node for most lifecycle commands: `orchestrator`
 - Backup destination: `/local/backups`
-- Restore path resolution: absolute path, or relative path under `/local/backups`
-- Runtime timezone: `NODE_TIME_ZONE` (mapped to `HERMES_TIMEZONE`)
+- Canonical update artifact root: `/local/logs/update`
 
 ## Lifecycle Commands
 
@@ -31,51 +30,32 @@ horc logs clean [name|all]
 ```bash
 horc backup all
 horc backup node <name>
-horc backup <name>          # convenience alias for one node
+horc backup <name>
 horc restore <path>
 ```
 
-## Update Commands
+## Guided Update Commands
 
 ```bash
-horc update test [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
-horc update apply all [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
-horc update apply node <node1,node2,...> [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
+horc update run <prod-node> --stage <stage-node> [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
+horc update validate <run-id> --phase stage|prod
+horc update resume <run-id>
+horc update status <run-id>
 ```
 
-## Legacy Command Removal
+## Retired Update Commands
 
-```bash
-hord <same horc args>
-# removed (rejected):
-# horc agent update ...
-# horc test update ...
-# horc test-update
-# horc update <node>
-```
+Older legacy update entrypoints are intentionally rejected. Operators should always start with `horc update run`.
 
 ## Notes
 
 - `horc restart` with no node restarts all nodes in orchestrator-first order.
-- `horc backup` produces a lean archive by excluding node-local mirrors, per-node `hermes-agent`, per-node `.runtime`, legacy per-node `data/` mirrors, and transient cache/log bloat.
-- `horc backup` includes a single shared runtime seed (`runtime_seed/hermes-agent`, `runtime_seed/venv`, `runtime_seed/uv`) used to reseed nodes during restore.
-- `horc backup all` includes nodes that have an env profile under `/local/agents/envs/*.env`; node dirs without env files are skipped.
-- Centralized node data is backed up from `/local/datas/` (`/local/datas/<node>`), not from `agents/nodes/<node>/data`.
-- Node `workspace/` remains included in backups and is surfaced in backup output as `included_workspace_paths`.
-- Request dump pruning runs before backup with:
-  - `HERMES_REQUEST_DUMP_KEEP_LAST` (default `200`)
-  - `HERMES_REQUEST_DUMP_KEEP_DAYS` (default `14`)
-- Backup retention can be enabled with `HERMES_BACKUP_KEEP_LAST` (default `0` = disabled) for `horc-backup-*` archives under `/local/backups`.
-- `horc restore` stops included running nodes, restores payloads, then restarts nodes that were running.
-- `horc restore` reseeds node runtime from the shared runtime seed when per-node runtime folders are absent in the archive.
-- `horc update test` performs strict preflight with a dummy snapshot:
-  - refreshes `/local/dummy/hermes-agent`
-  - snapshots `/local/plugins` and `/local/scripts` into `/local/dummy/*`
-  - applies optional dummy-only plugin deprecations
-  - runs strict plugin reapply and emits matrix/report artifacts
-- `horc update apply` is hard-gated and always runs preflight + backup before any runtime mutations.
-- If update artifacts cannot be written under `/log/update/`, fallback path is `/local/log/update/`.
-- Full workflow and report schema: [`update-engine.md`](/local/docs/commands/update-engine.md)
+- `horc backup` produces lean archives and includes a shared runtime seed for reseeding nodes during restore.
+- `horc restore` stops included running nodes, restores payloads, and restarts nodes that were running.
+- `horc update run` is the only supported operator path for updates.
+- Guided updates are one node at a time and require manual validation after stage and production.
+- Update artifacts are written only under `/local/logs/update/<run-id>/`.
+- Full runbook and troubleshooting guidance: [`update-engine.md`](/local/docs/commands/update-engine.md)
 
 ## Source of Truth
 

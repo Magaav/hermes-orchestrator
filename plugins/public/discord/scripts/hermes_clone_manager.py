@@ -41,7 +41,9 @@ LEGACY_LOG_ROOT = Path("/local/logs/clones")
 REGISTRY_PATH = CLONES_ROOT / "registry.json"
 LEGACY_REGISTRY_PATH = LEGACY_CLONES_ROOT / "registry.json"
 
-PARENT_HERMES_HOME = Path("/local/.hermes")
+PARENT_HERMES_HOME = Path(
+    os.getenv("HERMES_ORCHESTRATOR_HOME", "/local/agents/nodes/orchestrator/.hermes")
+)
 PARENT_UV_STORE = Path("/home/ubuntu/.local/share/uv")
 PARENT_WORKSPACE_ROOT = Path("/local/workspace")
 PARENT_WORKSPACE_BACKUP_SCRIPTS = PARENT_WORKSPACE_ROOT / "crons" / "scripts" / "backup"
@@ -409,7 +411,7 @@ def _parent_hermes_agent_source() -> Path:
     """Preferred source tree for clone seeding.
 
     Priority:
-    1) /local/.hermes/hermes-agent  (runtime-patched source used by parent gateway)
+    1) /local/agents/nodes/orchestrator/hermes-agent  (runtime-patched source used by parent gateway)
     2) /local/hermes-agent          (base source fallback)
     """
     candidates = [
@@ -478,7 +480,7 @@ def _select_seed_venv_source(required_module: str | None = None) -> Path:
             return venv_dir
 
     raise CloneManagerError(
-        "could not locate parent seed venv (expected one of /local/hermes-agent/.venv or /local/.hermes/hermes-agent/.venv)."
+        "could not locate parent seed venv (expected one of /local/hermes-agent/.venv or /local/agents/nodes/orchestrator/hermes-agent/.venv)."
     )
 
 
@@ -1000,7 +1002,7 @@ def _parent_skills_source() -> Path:
             if resolved.is_dir():
                 return resolved
     raise CloneManagerError(
-        "no valid skills source found (expected /local/skills or /local/.hermes/skills)."
+        "no valid skills source found (expected /local/skills or /local/agents/nodes/orchestrator/.hermes/skills)."
     )
 
 
@@ -1008,7 +1010,7 @@ def _normalize_clone_skills_layout(clone_root: Path) -> None:
     """Ensure deterministic clone skills layout.
 
     - Canonical skills source: /local/skills
-    - Node-local runtime dir:  /local/.hermes/skills
+    - Node-local runtime dir:  /local/agents/nodes/<node>/.hermes/skills
     """
     home_skills = clone_root / ".hermes" / "skills"
     source = _parent_skills_source()

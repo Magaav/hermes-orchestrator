@@ -1,4 +1,4 @@
-# Discord Channel Routing Hook — survives hermes-agent updates
+# Discord Channel ACL Hook — survives hermes-agent updates
 # Maps Discord channel/thread IDs to routing behavior.
 #
 # Thread inherits from parent channel unless explicitly overridden.
@@ -9,14 +9,13 @@
 #
 # Fields per channel:
 #   mode: livre | condicionado
-#   model: model name to force (e.g. nemotron, gpt-5.3-codex)
-#   provider: provider (e.g. nvidia, openai, minimax)
+#   model_key: model key from private catalog /local/plugins/private/discord/models/<node>_models.json
 #   allowed_skills: list of permitted skill names (only for condicionado)
 #   allowed_commands: list of permitted slash commands (only for condicionado)
 #   always_allowed_commands: passthrough commands even in condicionado mode (default: status)
 #   default_action: when message doesn't match allowed scope (e.g. "skill:add")
 #   free_text_policy: auto_add | strict_item (strict_item blocks greetings/chatty text)
-#   store: optional fixed store for the channel (loja1 | loja2) used in auto-add normalization
+#   label: optional fixed label attached during auto-add normalization (e.g. loja1)
 
 channels:
   # ── Free channels ──────────────────────────────────────────────────────────
@@ -29,9 +28,8 @@ channels:
   # ── Faltas — condicionado (forced nemotron + only faltas skill) ────────────
   1487099467726328038:   # 📃faltas (loja 1)
     mode: condicionado
-    store: loja1
-    model: nemotron
-    provider: nvidia
+    label: loja1
+    model_key: nemotron120b
     allowed_skills:
       - colmeio-lista-de-faltas
     allowed_commands:
@@ -48,9 +46,8 @@ channels:
 
   1487099552636080201:   # 📃faltas (loja 2)
     mode: condicionado
-    store: loja2
-    model: nemotron
-    provider: nvidia
+    label: loja2
+    model_key: nemotron120b
     allowed_skills:
       - colmeio-lista-de-faltas
     allowed_commands:

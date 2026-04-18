@@ -13,7 +13,7 @@ This tree is intentionally separated from public framework code so deployment-sp
 ## Hermes-Orchestrator Integration
 
 - Public wrappers in `/local/scripts/public/backup/` delegate to this folder.
-- Runtime configuration for backup flows is loaded from `/local/state/orchestrator/backup_nodes_to_gdrive.env`.
+- Runtime configuration for backup flows is loaded from `/local/scripts/private/backup/backup_nodes_to_gdrive.env`.
 
 ## Synergies With Other Modules
 

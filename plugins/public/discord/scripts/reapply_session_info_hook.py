@@ -26,6 +26,26 @@ def _resolve_hermes_home() -> Path:
 HERMES_HOME = _resolve_hermes_home()
 DISCORD_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
+
+def _candidate_agent_roots() -> list[Path]:
+    env_root = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
+    roots: list[Path] = []
+    if env_root:
+        roots.append(Path(env_root).expanduser())
+    if HERMES_HOME.name == ".hermes":
+        roots.append(HERMES_HOME.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
 HOOK_BLOCK = '''            # ── Session info via hook (survives hermes-agent updates) ───────
             # Hook lives at ~/.hermes/hooks/session_info_hook/handler.py
             # Loaded via importlib so it survives hermes-agent pip -U updates
@@ -110,15 +130,7 @@ events:
 
 def find_discord_py():
     """Find the discord.py platform adapter."""
-    env_root = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
-    possible = [
-        Path(env_root).expanduser() / "gateway" / "platforms" / "discord.py" if env_root else None,
-        Path("/local/hermes-agent/gateway/platforms/discord.py"),
-        HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "discord.py",
-        Path("/local/.hermes/hermes-agent/gateway/platforms/discord.py"),
-        Path("/home/ubuntu/.hermes/hermes-agent/gateway/platforms/discord.py"),
-    ]
-    possible = [p for p in possible if p is not None]
+    possible = [root / "gateway" / "platforms" / "discord.py" for root in _candidate_agent_roots()]
     for p in possible:
         if p.exists():
             return p

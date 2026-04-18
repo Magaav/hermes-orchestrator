@@ -25,15 +25,26 @@ def _resolve_hermes_home() -> Path:
 HERMES_HOME = _resolve_hermes_home()
 _ENV_AGENT_ROOT = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
 
-DISCORD_PATH_CANDIDATES = (
-    *((
-        Path(_ENV_AGENT_ROOT).expanduser() / "gateway" / "platforms" / "discord.py",
-    ) if _ENV_AGENT_ROOT else ()),
-    Path("/local/hermes-agent/gateway/platforms/discord.py"),
-    HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "discord.py",
-    Path("/local/.hermes/hermes-agent/gateway/platforms/discord.py"),
-    Path("/home/ubuntu/.hermes/hermes-agent/gateway/platforms/discord.py"),
-)
+def _candidate_agent_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    if _ENV_AGENT_ROOT:
+        roots.append(Path(_ENV_AGENT_ROOT).expanduser())
+    if HERMES_HOME.name == ".hermes":
+        roots.append(HERMES_HOME.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return tuple(out)
+
+
+DISCORD_PATH_CANDIDATES = tuple(root / "gateway" / "platforms" / "discord.py" for root in _candidate_agent_roots())
 
 
 def _find_discord_py() -> Path:
@@ -63,20 +74,24 @@ def _patch_handle_message(section: str) -> tuple[str, bool]:
     changed = False
 
     if "DISCORD_AUTO_THREAD_IGNORE_CHANNELS" not in section:
-        anchor = (
-            '            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}\n'
+        anchors = (
+            "            free_channels = self._discord_free_response_channels()\n",
+            '            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}\n',
         )
-        inject = (
-            '            free_channels = {ch.strip() for ch in free_channels_raw.split(",") if ch.strip()}\n'
-            '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
-            "            auto_thread_ignore_channels = {\n"
-            '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
-            "            }\n"
-        )
-        if anchor not in section:
+        for anchor in anchors:
+            if anchor in section:
+                inject = (
+                    anchor
+                    + '            auto_thread_ignore_channels_raw = os.getenv("DISCORD_AUTO_THREAD_IGNORE_CHANNELS", "")\n'
+                    + "            auto_thread_ignore_channels = {\n"
+                    + '                ch.strip() for ch in auto_thread_ignore_channels_raw.split(",") if ch.strip()\n'
+                    + "            }\n"
+                )
+                section = section.replace(anchor, inject, 1)
+                changed = True
+                break
+        else:
             raise RuntimeError("_handle_message free-channel anchor not found")
-        section = section.replace(anchor, inject, 1)
-        changed = True
 
     old_free = (
         "            is_free_channel = bool(channel_ids & free_channels) or is_voice_linked_channel\n"
@@ -118,6 +133,11 @@ def _patch_handle_message(section: str) -> tuple[str, bool]:
         '            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}\n'
         "            skip_thread = bool(channel_ids & no_thread_channels)\n"
     )
+    old_thread_current = (
+        '            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")\n'
+        '            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}\n'
+        "            skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel\n"
+    )
     new_thread = (
         '            no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")\n'
         '            no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}\n'
@@ -135,6 +155,9 @@ def _patch_handle_message(section: str) -> tuple[str, bool]:
     )
     if old_thread in section:
         section = section.replace(old_thread, new_thread, 1)
+        changed = True
+    elif old_thread_current in section:
+        section = section.replace(old_thread_current, new_thread, 1)
         changed = True
 
     if "skip_thread_for_auto_thread_ignore" not in section:

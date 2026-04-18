@@ -211,6 +211,10 @@ run_step "discord_guild_sync" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_guild_sync.py" || FAILED=1
 run_step "discord_command_bootstrap" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_command_bootstrap.py" || FAILED=1
+run_step "discord_role_acl_sync" \
+  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_role_acl_sync.py" || FAILED=1
+run_step "discord_acl_contract_check" \
+  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_acl_contract_check.py" || FAILED=1
 run_step "faltas_confirmation_view" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_faltas_confirmation_view.py" || FAILED=1
 

@@ -56,7 +56,6 @@ def _resolve_acl_path(project_dir: Path) -> Path:
 
 
 PROJECT_DIR = _resolve_project_dir()
-HERMES_HOME = Path(os.getenv("HERMES_HOME", str(PROJECT_DIR / ".hermes"))).resolve()
 ACL_PATH = _resolve_acl_path(PROJECT_DIR)
 STATE_PATH = Path(
     os.getenv(
@@ -66,23 +65,19 @@ STATE_PATH = Path(
 ).resolve()
 ENV_PATH = PROJECT_DIR / ".env"
 
+def _resolve_skill_dir(skill_name: str) -> Path:
+    configured = str(os.getenv("COLMEIO_SKILL_DIR", "") or "").strip()
+    if configured:
+        return Path(configured).resolve().parent / skill_name
+    return Path("/local/skills/custom/colmeio") / skill_name
+
+
+_FALTAS_SKILL_DIR = _resolve_skill_dir("colmeio-lista-de-faltas")
 PIPELINE_LOG = (
-    HERMES_HOME
-    / "skills"
-    / "custom"
-    / "colmeio"
-    / "colmeio-lista-de-faltas"
-    / "logs"
-    / "pipeline.log"
+    _FALTAS_SKILL_DIR / "logs" / "pipeline.log"
 )
 PIPELINE_ERROR_LOG = (
-    HERMES_HOME
-    / "skills"
-    / "custom"
-    / "colmeio"
-    / "colmeio-lista-de-faltas"
-    / "logs"
-    / "pipeline.error.log"
+    _FALTAS_SKILL_DIR / "logs" / "pipeline.error.log"
 )
 
 

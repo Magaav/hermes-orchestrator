@@ -7,6 +7,7 @@ This document defines the bootstrap contract for node profiles used by `horc`.
 | Variable | Required | Why |
 |---|---|---|
 | `DISCORD_BOT_TOKEN` | Yes | `horc start <node>` fails fast if missing. |
+| `DISCORD_SERVER_ID` or `DISCORD_GUILD_ID` | Yes for Discord role ACL | Role ACL bootstrap (`discord_role_acl_sync.py`) requires a canonical guild ID. |
 | `NODE_STATE` | Conditionally required | If set, it must be one of `1`, `2`, `3`, `4`. Invalid values fail bootstrap. |
 | `NODE_STATE_FROM_BACKUP_PATH` | Required when `NODE_STATE=3` | Backup-seed mode requires a restore archive path. |
 
@@ -30,6 +31,19 @@ These are the minimum practical values for a usable node profile.
 - `DISCORD_APP_ID`
 - `DISCORD_SERVER_ID`
 - `DISCORD_ALLOWED_USERS` (recommended; if omitted, allowlist is open)
+
+### Discord role ACL (slash command authorization)
+- `DISCORD_SERVER_ID` (preferred) or `DISCORD_GUILD_ID`
+- Optional: `DISCORD_ROLE_ACL_SAFE_COMMANDS` (CSV, default `status,help,usage,provider`)
+- Optional: `DISCORD_ROLE_ACL_FALLBACK_HIERARCHY` (CSV role-name fallback when live role fetch is unavailable)
+- Required contract file: `/local/plugins/private/discord/acl/<node>_acl.json`
+
+### Discord channel ACL + private model catalog
+- Required contract file: `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
+- Required contract file: `/local/plugins/private/discord/models/<node>_models.json`
+- `mode:specific` channel policies must reference a valid `model_key` from the private models file.
+- Channel policies may set `label` (for example `loja1`) for deterministic per-channel automation tagging.
+- Prestart validates this contract via `discord_acl_contract_check`; failure blocks update promotion.
 
 ### LLM credentials (pick at least one provider path)
 | Provider path | Minimum variables |

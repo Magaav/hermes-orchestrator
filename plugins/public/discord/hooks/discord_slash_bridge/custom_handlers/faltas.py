@@ -24,6 +24,14 @@ def _resolve_hermes_home() -> Path:
     raw = str(os.getenv("HERMES_HOME", "") or "").strip()
     if raw:
         return Path(raw).expanduser()
+    node_name = str(os.getenv("NODE_NAME", "") or "").strip()
+    if node_name:
+        candidate = Path("/local/agents/nodes") / node_name / ".hermes"
+        if candidate.exists():
+            return candidate
+    orchestrator_home = Path("/local/agents/nodes/orchestrator/.hermes")
+    if orchestrator_home.exists():
+        return orchestrator_home
     return Path.home() / ".hermes"
 
 
@@ -40,14 +48,11 @@ def _resolve_python_bin() -> str:
 
 
 def _resolve_pipeline_script(config: Dict[str, Any]) -> Path:
-    import sys
-    print(f"[FALTAS_DEBUG _resolve_pipeline_script] START pid={os.getpid()} HERMES_HOME={os.environ.get('HERMES_HOME','unset')}", file=sys.stderr, flush=True)
     hermes_home = _resolve_hermes_home()
-    print(f"[FALTAS_DEBUG _resolve_pipeline_script] hermes_home={hermes_home}", file=sys.stderr, flush=True)
     configured = str(config.get("pipeline_script") or "").strip()
-    print(f"[FALTAS_DEBUG _resolve_pipeline_script] configured={repr(configured)}", file=sys.stderr, flush=True)
     candidates = [
         configured,
+        "/local/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
         str(
             hermes_home
             / "skills"
@@ -57,21 +62,14 @@ def _resolve_pipeline_script(config: Dict[str, Any]) -> Path:
             / "scripts"
             / "faltas_pipeline.py"
         ),
-        "/local/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
-        "/local/.hermes/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
         "/local/agents/nodes/colmeio/.hermes/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
         "/opt/data/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
     ]
-    for i, raw in enumerate(candidates):
+    for raw in candidates:
         path = Path(str(raw).strip()) if raw else Path("")
-        exists = path.exists() if raw else False
-        is_file = path.is_file() if exists else False
-        print(f"[FALTAS_DEBUG candidate[{i}]={repr(raw)}] path={path} exists={exists} is_file={is_file}", file=sys.stderr, flush=True)
-        if raw and exists and is_file:
-            print(f"[FALTAS_DEBUG] ==> RETURNING: {path}", file=sys.stderr, flush=True)
+        if raw and path.exists() and path.is_file():
             return path
     fallback = Path(candidates[1])
-    print(f"[FALTAS_DEBUG] ALL CANDIDATES FAILED, FALLBACK: {fallback}", file=sys.stderr, flush=True)
     return fallback
 
 
@@ -458,9 +456,7 @@ async def handle(
     normalized_action = _normalize_action(action)
     output_format = _normalize_format(values.get("formato"))
 
-    import sys
     script_path = _resolve_pipeline_script(command_config)
-    print(f"[FALTAS_DEBUG _handle_faltas_command] script_path={script_path} exists={script_path.exists()} is_file={script_path.is_file() if script_path.exists() else 'N/A'} cwd={os.getcwd()} HERMES_HOME={os.environ.get('HERMES_HOME','unset')}", file=sys.stderr, flush=True)
     if not script_path.exists():
         await _send_ephemeral(
             interaction,
@@ -483,7 +479,6 @@ async def handle(
         script_path,
         parent_channel_id=parent_id,
     )
-    print(f"[FALTAS_DEBUG _handle_faltas_command] cmd={cmd!r} err={err!r}", file=sys.stderr, flush=True)
     if err:
         await _send_ephemeral(interaction, err)
         return True
@@ -492,13 +487,6 @@ async def handle(
     try:
         if not interaction.response.is_done():
             await interaction.response.defer(ephemeral=True)
-
-        import traceback
-        print(f"[FALTAS_DEBUG PRE-SUBPROC] cmd={cmd!r}", file=sys.stderr, flush=True)
-        print(f"[FALTAS_DEBUG PRE-SUBPROC] script_path={script_path!r} type={type(script_path).__name__}", file=sys.stderr, flush=True)
-        print(f"[FALTAS_DEBUG PRE-SUBPROC] str(script_path)={str(script_path)!r}", file=sys.stderr, flush=True)
-        print(f"[FALTAS_DEBUG PRE-SUBPROC] cwd={os.getcwd()!r}", file=sys.stderr, flush=True)
-        print(f"[FALTAS_DEBUG PRE-SUBPROC] trace={traceback.format_stack()[-4:]}", file=sys.stderr, flush=True)
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

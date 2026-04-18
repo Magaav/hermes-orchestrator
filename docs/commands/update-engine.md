@@ -1,108 +1,98 @@
-# Update Engine (`horc update`)
+# Safe Node Update Runbook
 
-## Overview
+`horc update` now has one canonical operator workflow. Older multi-step manual update flows are retired from operator use.
 
-The update engine is now strict **test-then-apply**:
+## Standard Flow
 
-1. `horc update test`
-2. `horc update apply all|node <csv>`
+Update one production node at a time:
 
-`apply` is hard-gated and will not mutate runtime state unless preflight succeeds and backup succeeds.
-
-## Command Surface
+1. Start a guided run:
 
 ```bash
-horc update test [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
-horc update apply all [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
-horc update apply node <node1,node2,...> [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
+horc update run <prod-node> --stage <stage-node> [--source-branch <branch>] [--deprecate-plugins p1,p2,...]
 ```
 
-Legacy update commands are rejected:
+What this does:
+- refreshes and validates the Hermes source against the dummy preflight snapshot
+- refreshes the stage node from production
+- stops the production node first when the stage is expected to share Discord credentials
+- updates only the stage node
+- stops at `stage validation required`
 
-- `horc agent update ...`
-- `horc test update ...`
-- `horc test-update`
-- `horc update <node>`
+2. Validate the stage node manually in Discord.
 
-## Lifecycle
+3. Record the stage approval:
 
-### 1) `horc update test`
+```bash
+horc update validate <run-id> --phase stage
+```
 
-Preflight pipeline:
+What this does:
+- promotes the validated source into the production node rollout
+- stops the stage node first when stage and prod share Discord credentials
+- updates only the production node
+- stops at `prod validation required`
 
-1. Refresh `/local/dummy/hermes-agent` from upstream (`--source-branch`).
-2. Snapshot `/local/plugins -> /local/dummy/plugins` and `/local/scripts -> /local/dummy/scripts`.
-3. Apply optional `--deprecate-plugins` only inside dummy snapshot.
-4. Build fresh dummy node profile/bootstrap and run strict prestart reapply against dummy roots.
-5. Emit report + plugin matrix artifacts.
+4. Validate production manually in Discord.
 
-### 2) `horc update apply ...`
+5. Close the run:
 
-Apply pipeline:
+```bash
+horc update validate <run-id> --phase prod
+```
 
-1. Resolve targets (`all` from env-backed nodes, or explicit CSV list).
-2. Re-run full preflight (`update test`) with the same branch + deprecations.
-3. Run `horc backup all` automatically; abort on backup failure.
-4. Promote tested source `/local/dummy/hermes-agent -> /local/hermes-agent`.
-5. Apply runtime plugin deprecations (`/local/plugins/public/<plugin> -> /local/plugins/public/deprecated/<plugin>`).
-6. Roll out target nodes fail-fast:
-   - sync node runtime from promoted source
-   - restart node
-   - stop immediately on first failure, report remaining nodes as pending
+6. Only after the run is complete, start a new run for the next node.
 
-## Plugin Deprecation Flag
+## Status and Recovery
 
-`--deprecate-plugins` accepts comma-separated plugin names under:
+Inspect a guided run:
 
-`/local/plugins/public/<name>`
+```bash
+horc update status <run-id>
+```
 
-Behavior:
+Resume a failed run:
 
-- `update test`: deprecates only in dummy snapshot.
-- `update apply`: deprecates in runtime root before node rollout.
-- Move is idempotent and non-destructive (no deletion).
-- Report fields include:
-  - `deprecated_plugins_applied`
-  - `deprecated_plugins_already_present`
-  - `deprecated_plugins_missing`
+```bash
+horc update resume <run-id>
+```
 
-Deprecated plugins are represented as `skipped_deprecated` in plugin matrix outputs.
-Plugins already present under `plugins/public/deprecated/` are auto-detected and skipped in future tests even when `--deprecate-plugins` is omitted.
+The updater persists checkpoints and the exact next safe command in the run report, so recovery should come from `status` and `resume`, not from ad hoc manual steps.
+
+Checkpoint meanings:
+- `stage_validation_pending`: stage is updated and waiting for manual validation
+- `prod_validation_pending`: production is updated and waiting for manual validation
+- `completed`: the node rollout is finished
+- `stage_prepare_failed`, `stage_rollout_failed`, `prod_rollout_failed`: resume is allowed
 
 ## Artifacts
 
-Each run writes to:
+All update artifacts now live only under:
 
-- `/log/update/<run-id>/...`
-- fallback: `/local/log/update/<run-id>/...` (when `/log/update` is unavailable)
+```text
+/local/logs/update/<run-id>/
+```
 
 Core files:
-
 - `report.json`
-- `plugin_matrix.json`
+- `plugin_matrix.json` for nested preflight/apply runs when available
 - `prestart.stdout.log`
 - `prestart.stderr.log`
-- `colmeio-prestart.log` (copied when available)
+- `colmeio-prestart.log` when copied from strict preflight
 
-Plugin matrix statuses:
+Historical mistaken update roots may still exist from older runs, but new automation must write only to `/local/logs/update`.
 
-- `passed`
-- `failed`
-- `skipped_deprecated`
+## Failure Rules
 
-## Runbook
+- Preflight failure: no stage or production rollout should continue
+- Stage rollout failure: fix the issue, then `horc update resume <run-id>`
+- Production rollout failure: do not start another node; fix or resume the same run
+- Shared Discord credentials: never leave stage and production running at the same time
 
-Recommended operator flow:
+## Migration Notes
 
-1. `horc update test --source-branch <branch> [--deprecate-plugins ...]`
-2. Inspect `report.json` and `plugin_matrix.json`.
-3. If green, run:
-   - `horc update apply all ...`
-   - or `horc update apply node <csv> ...`
-4. On failure, use run artifacts to isolate failed plugin step or failed node and retry after fix.
+Retired operator paths:
+- legacy profile-clone flows
+- legacy test/apply update flows
 
-## Failure Handling
-
-- Preflight failure: no runtime mutations.
-- Backup failure: no source promotion, no deprecation move, no rollout.
-- Rollout failure: fail-fast, keep `updated_nodes` and `pending_nodes` in apply report for deterministic recovery.
+If older update artifacts still exist outside `/local/logs/update`, keep them only as historical records or move/archive them manually. New automation must read and write `/local/logs/update`.

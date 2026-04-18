@@ -143,11 +143,15 @@ class SuspiciousItemConfirmationView(ui.View):
 
     @staticmethod
     def _resolve_pipeline_script() -> Path:
-        hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes")))
+        hermes_home_raw = str(os.getenv("HERMES_HOME", "") or "").strip()
+        hermes_home = Path(hermes_home_raw).expanduser() if hermes_home_raw else None
         candidates = [
-            hermes_home / "skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
-            "/local/.hermes/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py",
+            Path("/local/skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py"),
         ]
+        if hermes_home is not None:
+            candidates.append(
+                hermes_home / "skills/custom/colmeio/colmeio-lista-de-faltas/scripts/faltas_pipeline.py"
+            )
         for p in candidates:
             if p.exists():
                 return p

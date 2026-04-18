@@ -39,56 +39,58 @@ def _run_horc(tmp_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
     )
 
 
-def test_update_test_command_contract(tmp_path: Path) -> None:
+def test_update_run_command_contract(tmp_path: Path) -> None:
     proc = _run_horc(
         tmp_path,
-        ["update", "test", "--source-branch", "feature-x", "--deprecate-plugins", "p1,p2"],
+        ["update", "run", "colmeio", "--stage", "colmeio-stage", "--source-branch", "main"],
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"][0] == "update-test"
+    assert payload["argv"][:5] == [
+        "update-run",
+        "--name",
+        "colmeio",
+        "--stage-name",
+        "colmeio-stage",
+    ]
     assert "--source-branch" in payload["argv"]
-    assert "feature-x" in payload["argv"]
-    assert "--deprecate-plugins" in payload["argv"]
-    assert "p1,p2" in payload["argv"]
+    assert "main" in payload["argv"]
 
 
-def test_update_apply_all_contract(tmp_path: Path) -> None:
-    proc = _run_horc(
-        tmp_path,
-        ["update", "apply", "all", "--source-branch", "main"],
-    )
+def test_update_validate_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "validate", "run-123", "--phase", "stage"])
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"][:3] == ["update-apply", "--target-mode", "all"]
+    assert payload["argv"][:3] == ["update-validate", "--run-id", "run-123"]
+    assert "--phase" in payload["argv"]
+    assert "stage" in payload["argv"]
 
 
-def test_update_apply_node_contract(tmp_path: Path) -> None:
-    proc = _run_horc(
-        tmp_path,
-        ["update", "apply", "node", "node1,node2", "--deprecate-plugins", "legacy"],
-    )
+def test_update_resume_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "resume", "run-123"])
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"][:3] == ["update-apply", "--target-mode", "node"]
-    assert "--target-nodes" in payload["argv"]
-    assert "node1,node2" in payload["argv"]
+    assert payload["argv"] == ["update-resume", "--run-id", "run-123"]
 
 
-def test_legacy_commands_rejected(tmp_path: Path) -> None:
+def test_update_status_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "status", "run-123"])
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == ["update-run-status", "--run-id", "run-123"]
+
+
+def test_retired_update_commands_rejected(tmp_path: Path) -> None:
     cases = [
+        ["update", "test"],
+        ["update", "apply", "node", "node1"],
+        ["profile", "clone", "colmeio", "colmeio-stage"],
         ["agent", "update"],
         ["test", "update"],
         ["test-update"],
-        ["update", "node1"],
-        ["update"],
     ]
     for args in cases:
         proc = _run_horc(tmp_path, args)
         assert proc.returncode != 0
         err = proc.stderr.lower()
-        assert (
-            "removed" in err
-            or "unknown update subcommand" in err
-            or "requires subcommand" in err
-        )
+        assert "retired" in err or "removed" in err

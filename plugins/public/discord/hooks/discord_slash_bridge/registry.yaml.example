@@ -51,6 +51,22 @@ native_overrides:
     drive_folder_path: backups/orchestrator
     timeout_backup_sec: 1800
     timeout_drive_sec: 3600
+  acl:
+    enabled: true
+    description: Gerenciar ACL de comandos e canais
+    acl_command: acl
+    command_description: "Slash command alvo (ex.: metricas)"
+    role_description: "Role mínima (ex.: gerente, admin ou @everyone)"
+    channel_description: "Canal alvo (channel_id numérico)"
+    mode_description: "Modo: default (livre) ou specific (condicionado)"
+    model_key_description: "Obrigatório em mode:specific"
+    instructions_description: "Instruções extras do canal (opcional)"
+    allowed_commands_description: "CSV de comandos permitidos (opcional)"
+    allowed_skills_description: "CSV de skills permitidas (opcional)"
+    always_allowed_description: "CSV de comandos sempre permitidos (opcional)"
+    default_action_description: "Ação padrão para texto livre (opcional)"
+    free_text_policy_description: "Política de texto livre (opcional)"
+    label_description: "Label fixa para automações do canal (opcional)"
   model:
     enabled: true
     description: Trocar o modelo padrão do gateway
@@ -80,6 +96,7 @@ native_overrides:
         model: moonshotai/kimi-k2.5
 slash_bridge:
   enabled: true
+  hide_skill_group: true
   force_bridge_commands: []
   commands:
     model:

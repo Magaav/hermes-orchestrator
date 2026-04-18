@@ -26,15 +26,26 @@ def _resolve_hermes_home() -> Path:
 HERMES_HOME = _resolve_hermes_home()
 _ENV_AGENT_ROOT = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
 
-DISCORD_PATH_CANDIDATES = (
-    *((
-        Path(_ENV_AGENT_ROOT).expanduser() / "gateway" / "platforms" / "discord.py",
-    ) if _ENV_AGENT_ROOT else ()),
-    Path("/local/hermes-agent/gateway/platforms/discord.py"),
-    HERMES_HOME / "hermes-agent" / "gateway" / "platforms" / "discord.py",
-    Path("/local/.hermes/hermes-agent/gateway/platforms/discord.py"),
-    Path("/home/ubuntu/.hermes/hermes-agent/gateway/platforms/discord.py"),
-)
+def _candidate_agent_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    if _ENV_AGENT_ROOT:
+        roots.append(Path(_ENV_AGENT_ROOT).expanduser())
+    if HERMES_HOME.name == ".hermes":
+        roots.append(HERMES_HOME.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return tuple(out)
+
+
+DISCORD_PATH_CANDIDATES = tuple(root / "gateway" / "platforms" / "discord.py" for root in _candidate_agent_roots())
 
 
 def _find_discord_py() -> Path:
@@ -76,15 +87,28 @@ def _patch_build_slash_event(section: str) -> tuple[str, bool]:
         changed = True
 
     if "chat_id_alt=parent_channel_id," not in section:
-        anchor = "            thread_id=thread_id,\n            chat_topic=chat_topic,\n        )"
-        if anchor not in section:
-            raise RuntimeError("_build_slash_event build_source anchor not found for chat_id_alt insertion")
-        section = section.replace(
-            anchor,
-            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n        )",
-            1,
+        anchors = (
+            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n        )",
+            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            is_bot=",
         )
-        changed = True
+        for anchor in anchors:
+            if anchor in section:
+                if anchor.endswith("is_bot="):
+                    section = section.replace(
+                        anchor,
+                        "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n            is_bot=",
+                        1,
+                    )
+                else:
+                    section = section.replace(
+                        anchor,
+                        "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n        )",
+                        1,
+                    )
+                changed = True
+                break
+        else:
+            raise RuntimeError("_build_slash_event build_source anchor not found for chat_id_alt insertion")
 
     return section, changed
 
@@ -119,16 +143,28 @@ def _patch_handle_message(section: str) -> tuple[str, bool]:
     changed = False
 
     if "chat_id_alt=parent_channel_id," not in section:
-        anchor = "            thread_id=thread_id,\n            chat_topic=chat_topic,\n        )"
-        if anchor not in section:
-            raise RuntimeError("_handle_message build_source anchor not found for thread parent chat_id_alt")
-
-        section = section.replace(
-            anchor,
-            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n        )",
-            1,
+        anchors = (
+            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            is_bot=",
+            "            thread_id=thread_id,\n            chat_topic=chat_topic,\n        )",
         )
-        changed = True
+        for anchor in anchors:
+            if anchor in section:
+                if anchor.endswith("is_bot="):
+                    section = section.replace(
+                        anchor,
+                        "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n            is_bot=",
+                        1,
+                    )
+                else:
+                    section = section.replace(
+                        anchor,
+                        "            thread_id=thread_id,\n            chat_topic=chat_topic,\n            chat_id_alt=parent_channel_id,\n        )",
+                        1,
+                    )
+                changed = True
+                break
+        else:
+            raise RuntimeError("_handle_message build_source anchor not found for thread parent chat_id_alt")
 
     return section, changed
 

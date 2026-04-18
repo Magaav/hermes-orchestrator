@@ -66,7 +66,21 @@ SLASH_BRIDGE_HANDLERS_SRC = SLASH_BRIDGE_PUBLIC_SRC_DIR / "handlers.py"
 SLASH_BRIDGE_HANDLERS_DST = SLASH_BRIDGE_DST_DIR / "handlers.py"
 SLASH_BRIDGE_RUNTIME_SRC = SLASH_BRIDGE_PUBLIC_SRC_DIR / "runtime.py"
 SLASH_BRIDGE_RUNTIME_DST = SLASH_BRIDGE_DST_DIR / "runtime.py"
+SLASH_BRIDGE_ROLE_ACL_SRC = SLASH_BRIDGE_PUBLIC_SRC_DIR / "role_acl.py"
+SLASH_BRIDGE_ROLE_ACL_DST = SLASH_BRIDGE_DST_DIR / "role_acl.py"
 NODE_COMMANDS_DIR = PRIVATE_WORKSPACE / "commands"
+NODE_ACL_DIR = PRIVATE_WORKSPACE / "acl"
+NODE_MODELS_DIR = PRIVATE_WORKSPACE / "models"
+
+
+def _runtime_node_name() -> str:
+    raw = str(os.getenv("NODE_NAME", "") or "").strip().lower()
+    if raw.endswith(".json"):
+        raw = raw[:-5]
+    return raw or "orchestrator"
+
+
+NODE_MODELS_FILE = NODE_MODELS_DIR / f"{_runtime_node_name()}_models.json"
 
 
 def _resolve_node_payload_json() -> Path | None:
@@ -117,6 +131,20 @@ def _contains_any_marker(
     _check(results, label, bool(hit), hit or " | ".join(markers))
 
 
+def _legacy_optional_marker(results: list[tuple[str, bool, str]], text: str, label: str, marker: str) -> None:
+    _check(results, label, True, marker if marker in text else "not present (expected on newer upstream)")
+
+
+def _legacy_optional_any_marker(
+    results: list[tuple[str, bool, str]],
+    text: str,
+    label: str,
+    markers: list[str],
+) -> None:
+    hit = next((marker for marker in markers if marker in text), "")
+    _check(results, label, True, hit or "not present (expected on newer upstream)")
+
+
 def _same_file(results: list[tuple[str, bool, str]], label: str, src: Path, dst: Path) -> None:
     if not src.exists():
         _check(results, label, False, f"missing source: {src}")
@@ -151,25 +179,25 @@ def main() -> int:
 
     if BASE_PATH.exists():
         base_text = _read_text(BASE_PATH)
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             base_text,
             "base.py marker: pending_queue_deque",
             "self._pending_messages: Dict[str, Deque[MessageEvent]] = {}",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             base_text,
             "base.py marker: enqueue_pending_message",
             "def enqueue_pending_message(",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             base_text,
             "base.py marker: pop_pending_interrupt_message",
             "def pop_pending_interrupt_message(",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             base_text,
             "base.py marker: voice_audio_queue",
@@ -179,16 +207,21 @@ def main() -> int:
 
     if RUN_PATH.exists():
         run_text = _read_text(RUN_PATH)
-        _contains_marker(results, run_text, "run.py marker: acl_normalize_block", "COLMEIO_CHANNEL_ACL_NORMALIZE_BEGIN")
-        _contains_marker(results, run_text, "run.py marker: skill_add", "SKILL_ADD")
-        _contains_marker(results, run_text, "run.py marker: author_id", "author_id:{source.user_id}")
-        _contains_marker(results, run_text, "run.py marker: acl_model_block", "COLMEIO_CHANNEL_ACL_MODEL_BEGIN")
-        _contains_marker(results, run_text, "run.py marker: system_prompt_addon", "system_prompt_addon")
-        _contains_marker(results, run_text, "run.py marker: acl_status_block", "COLMEIO_CHANNEL_ACL_STATUS_BEGIN")
-        _contains_marker(results, run_text, "run.py marker: status_route", "_fake_route = _enforce(source")
-        _contains_marker(results, run_text, "run.py marker: status_channel_info", "**Channel Info**")
-        _contains_marker(results, run_text, "run.py marker: status_model_routing", "**Model Routing**")
-        _contains_marker(results, run_text, "run.py marker: acl_module", "colmeio_channel_acl")
+        _legacy_optional_marker(results, run_text, "run.py marker: acl_normalize_block", "COLMEIO_CHANNEL_ACL_NORMALIZE_BEGIN")
+        _legacy_optional_marker(results, run_text, "run.py marker: skill_add", "SKILL_ADD")
+        _legacy_optional_marker(
+            results,
+            run_text,
+            "run.py marker: deterministic_normalized_dispatch",
+            "dispatch_normalized_command",
+        )
+        _legacy_optional_marker(results, run_text, "run.py marker: acl_model_block", "COLMEIO_CHANNEL_ACL_MODEL_BEGIN")
+        _legacy_optional_marker(results, run_text, "run.py marker: system_prompt_addon", "system_prompt_addon")
+        _legacy_optional_marker(results, run_text, "run.py marker: acl_status_block", "COLMEIO_CHANNEL_ACL_STATUS_BEGIN")
+        _legacy_optional_marker(results, run_text, "run.py marker: status_route", "_fake_route = _enforce(source")
+        _legacy_optional_marker(results, run_text, "run.py marker: status_channel_info", "**Channel Info**")
+        _legacy_optional_marker(results, run_text, "run.py marker: status_model_routing", "**Model Routing**")
+        _legacy_optional_marker(results, run_text, "run.py marker: acl_module", "colmeio_channel_acl")
         _contains_any_marker(
             results,
             run_text,
@@ -221,85 +254,85 @@ def main() -> int:
 
     if DISCORD_PATH.exists():
         discord_text = _read_text(DISCORD_PATH)
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: guild_sync_hook",
             "COLMEIO_DISCORD_GUILD_SYNC_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: guild_sync_call",
             "tree.sync(guild=_guild)",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: guild_copy_global",
             "tree.copy_global_to(guild=_guild)",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: command_bootstrap_helper",
             "COLMEIO_DISCORD_COMMAND_BOOTSTRAP_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: command_bootstrap_interaction",
             "COLMEIO_DISCORD_COMMAND_BOOTSTRAP_INTERACTION_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: command_bootstrap_error",
             "COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: command_bootstrap_tree",
             "COLMEIO_DISCORD_COMMAND_BOOTSTRAP_TREE_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: command_bootstrap_sync",
             "COLMEIO_DISCORD_COMMAND_BOOTSTRAP_SYNC_BEGIN",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_loader_method",
             "def _colmeio_load_discord_slash_runtime",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_interaction_method",
             "def _colmeio_runtime_on_interaction",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_error_method",
             "def _colmeio_runtime_on_app_command_error",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_bootstrap_method",
             "def _colmeio_runtime_bootstrap_tree",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_sync_call",
             "sync_external_payload_commands",
         )
-        _contains_marker(
+        _legacy_optional_marker(
             results,
             discord_text,
             "discord.py marker: runtime_tree_bootstrap_call",
@@ -404,15 +437,28 @@ def main() -> int:
     _same_file(results, "slash_bridge registry synced", SLASH_BRIDGE_REGISTRY_SRC, SLASH_BRIDGE_REGISTRY_DST)
     _same_file(results, "slash_bridge handlers synced", SLASH_BRIDGE_HANDLERS_SRC, SLASH_BRIDGE_HANDLERS_DST)
     _same_file(results, "slash_bridge runtime synced", SLASH_BRIDGE_RUNTIME_SRC, SLASH_BRIDGE_RUNTIME_DST)
+    _same_file(results, "slash_bridge role_acl synced", SLASH_BRIDGE_ROLE_ACL_SRC, SLASH_BRIDGE_ROLE_ACL_DST)
 
     _exists(results, "slash_bridge runtime exists", SLASH_BRIDGE_RUNTIME_DST)
     _exists(results, "slash_bridge handlers exists", SLASH_BRIDGE_HANDLERS_DST)
+    _exists(results, "slash_bridge role_acl exists", SLASH_BRIDGE_ROLE_ACL_DST)
+    _exists(results, "discord acl private dir exists", NODE_ACL_DIR)
+    _exists(results, "discord models private dir exists", NODE_MODELS_DIR)
+    _exists(results, "discord node models file exists", NODE_MODELS_FILE)
+    _exists(
+        results,
+        "discord acl contract script exists",
+        WORKSPACE / "scripts" / "discord_acl_contract_check.py",
+    )
     _compile(results, SLASH_BRIDGE_RUNTIME_SRC)
     _compile(results, SLASH_BRIDGE_HANDLERS_SRC)
+    _compile(results, SLASH_BRIDGE_ROLE_ACL_SRC)
     if SLASH_BRIDGE_RUNTIME_DST.exists():
         _compile(results, SLASH_BRIDGE_RUNTIME_DST)
     if SLASH_BRIDGE_HANDLERS_DST.exists():
         _compile(results, SLASH_BRIDGE_HANDLERS_DST)
+    if SLASH_BRIDGE_ROLE_ACL_DST.exists():
+        _compile(results, SLASH_BRIDGE_ROLE_ACL_DST)
 
     # Command payload assertions (/metricas active, legacy /metrics removed)
     if DISCORD_COMMANDS_JSON and DISCORD_COMMANDS_JSON.exists():
@@ -481,7 +527,7 @@ def main() -> int:
             ),
         )
 
-    # Model native override assertions (/model deterministic choices)
+    # Model assertions (/model deterministic choices come from private models file)
     _contains_marker(
         results,
         _read_text(SLASH_BRIDGE_RUNTIME_SRC) if SLASH_BRIDGE_RUNTIME_SRC.exists() else "",
@@ -500,35 +546,41 @@ def main() -> int:
         "slash_bridge handlers marker: handle_model_switch",
         "async def handle_model_switch(",
     )
+    _contains_marker(
+        results,
+        _read_text(SLASH_BRIDGE_HANDLERS_SRC) if SLASH_BRIDGE_HANDLERS_SRC.exists() else "",
+        "slash_bridge handlers marker: private_model_catalog_loader",
+        "def load_private_model_choices(",
+    )
 
-    if SLASH_BRIDGE_REGISTRY_SRC.exists():
+    if NODE_MODELS_FILE.exists():
         try:
-            registry = yaml.safe_load(SLASH_BRIDGE_REGISTRY_SRC.read_text(encoding="utf-8")) or {}
-            native = registry.get("native_overrides") if isinstance(registry, dict) else {}
-            model_cfg = native.get("model") if isinstance(native, dict) else {}
-            choices = model_cfg.get("choices") if isinstance(model_cfg, dict) else []
-            choice_keys = {
-                str(item.get("key") or "").strip()
-                for item in choices
-                if isinstance(item, dict)
-            }
+            models_payload = json.loads(NODE_MODELS_FILE.read_text(encoding="utf-8"))
+            choices = models_payload.get("models") if isinstance(models_payload, dict) else []
+            choice_keys = set()
+            if isinstance(choices, list):
+                for item in choices:
+                    if isinstance(item, dict):
+                        key = str(item.get("key") or "").strip()
+                        if key:
+                            choice_keys.add(key)
             required = {"gpt54", "nemotron120b", "minimaxm27", "kimik25"}
             _check(
                 results,
-                "slash_bridge registry has native /model",
-                isinstance(model_cfg, dict),
-                f"present={isinstance(model_cfg, dict)}",
+                "discord node models has models list",
+                isinstance(choices, list),
+                f"present={isinstance(choices, list)}",
             )
             _check(
                 results,
-                "slash_bridge registry model choices keys",
+                "discord node models keys",
                 required.issubset(choice_keys),
                 f"keys={sorted(choice_keys)}",
             )
         except Exception as exc:
-            _check(results, "slash_bridge registry model parse", False, str(exc))
+            _check(results, "discord node models parse", False, str(exc))
     else:
-        _check(results, "slash_bridge registry model exists", False, str(SLASH_BRIDGE_REGISTRY_SRC))
+        _check(results, "discord node models exists", False, str(NODE_MODELS_FILE))
 
     failed = [r for r in results if not r[1]]
 

@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "node": "orchestrator",
+  "guild_id": "000000000000000000",
+  "updated_at": "2026-04-17T00:00:00Z",
+  "seed_source": "discord_role_position",
+  "safe_commands": [
+    "status",
+    "help",
+    "usage",
+    "provider"
+  ],
+  "policy": {
+    "unmapped_command": "deny"
+  },
+  "hierarchy": [
+    {
+      "role_id": "111111111111111111",
+      "role_name": "admin"
+    },
+    {
+      "role_id": "222222222222222222",
+      "role_name": "gerente"
+    },
+    {
+      "role_id": "333333333333333333",
+      "role_name": "loja1"
+    },
+    {
+      "role_id": "444444444444444444",
+      "role_name": "loja2"
+    },
+    {
+      "role_id": "555555555555555555",
+      "role_name": "aprovado"
+    },
+    {
+      "role_id": "@everyone",
+      "role_name": "@everyone"
+    }
+  ],
+  "commands": {
+    "status": {
+      "min_role": "@everyone",
+      "notes": "safe command"
+    },
+    "model": {
+      "min_role": "111111111111111111"
+    },
+    "faltas": {
+      "min_role": "222222222222222222"
+    }
+  },
+  "user_overrides": {
+    "123456789012345678": {
+      "roles": [
+        "111111111111111111"
+      ],
+      "replace": false
+    }
+  }
+}

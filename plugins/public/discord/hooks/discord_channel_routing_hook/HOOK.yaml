@@ -1,8 +1,0 @@
-name: discord-channel-routing
-description: >
-  Deterministic per-channel routing: classifies channels as livre (default model)
-  or condicionado (forced model + restricted skill scope). Thread inherits from
-  parent channel. Lives in /local/plugins/public/discord/hooks/ — survives
-  hermes-agent updates via reapply script.
-events:
-  - gateway:startup

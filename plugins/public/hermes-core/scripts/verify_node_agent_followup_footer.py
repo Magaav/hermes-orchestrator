@@ -15,18 +15,29 @@ def _resolve_hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
-def _candidate_run_paths() -> list[Path]:
+def _candidate_agent_roots() -> list[Path]:
     home = _resolve_hermes_home()
     env_root = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
-    out: list[Path] = []
+    roots: list[Path] = []
     if env_root:
-        out.append(Path(env_root).expanduser() / "gateway" / "run.py")
-    out.extend([
-        Path("/local/hermes-agent/gateway/run.py"),
-        home / "hermes-agent" / "gateway" / "run.py",
-        Path("/local/.hermes/hermes-agent/gateway/run.py"),
-        Path("/home/ubuntu/.hermes/hermes-agent/gateway/run.py"),
-    ])
+        roots.append(Path(env_root).expanduser())
+    if home.name == ".hermes":
+        roots.append(home.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return out
+
+
+def _candidate_run_paths() -> list[Path]:
+    out = [root / "gateway" / "run.py" for root in _candidate_agent_roots()]
     return out
 
 

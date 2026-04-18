@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "node": "orchestrator",
+  "models": [
+    {
+      "key": "gpt54",
+      "label": "GPT-5.4 (OpenAI Codex)",
+      "provider": "openai-codex",
+      "model": "gpt-5.4"
+    },
+    {
+      "key": "nemotron120b",
+      "label": "Nemotron 120B (NVIDIA)",
+      "provider": "nvidia",
+      "model": "nvidia/nemotron-3-super-120b-a12b"
+    }
+  ]
+}

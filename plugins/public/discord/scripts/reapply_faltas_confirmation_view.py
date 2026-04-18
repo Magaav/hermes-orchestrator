@@ -5,7 +5,22 @@ import os
 import sys
 from pathlib import Path
 
-HERMES_HOME = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).resolve()
+def _resolve_hermes_home() -> Path:
+    raw = str(os.getenv("HERMES_HOME", "") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    node_name = str(os.getenv("NODE_NAME", "") or "").strip()
+    if node_name:
+        candidate = Path("/local/agents/nodes") / node_name / ".hermes"
+        if candidate.exists():
+            return candidate.resolve()
+    orchestrator_home = Path("/local/agents/nodes/orchestrator/.hermes")
+    if orchestrator_home.exists():
+        return orchestrator_home.resolve()
+    return (Path.home() / ".hermes").resolve()
+
+
+HERMES_HOME = _resolve_hermes_home()
 if HERMES_HOME.is_symlink():
     HERMES_HOME = HERMES_HOME.resolve()
 DISCORD_PLUGIN = Path(os.getenv("DISCORD_PLUGIN_DIR", "/local/plugins/public/discord")).resolve()

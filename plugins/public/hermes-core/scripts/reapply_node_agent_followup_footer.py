@@ -25,17 +25,26 @@ def _resolve_hermes_home() -> Path:
 HERMES_HOME = _resolve_hermes_home()
 _ENV_AGENT_ROOT = str(os.getenv("HERMES_AGENT_ROOT", "") or "").strip()
 
-RUN_PATH_CANDIDATES = (
-    *(
-        (Path(_ENV_AGENT_ROOT).expanduser() / "gateway" / "run.py",)
-        if _ENV_AGENT_ROOT
-        else ()
-    ),
-    Path("/local/hermes-agent/gateway/run.py"),
-    HERMES_HOME / "hermes-agent" / "gateway" / "run.py",
-    Path("/local/.hermes/hermes-agent/gateway/run.py"),
-    Path("/home/ubuntu/.hermes/hermes-agent/gateway/run.py"),
-)
+def _candidate_agent_roots() -> tuple[Path, ...]:
+    roots: list[Path] = []
+    if _ENV_AGENT_ROOT:
+        roots.append(Path(_ENV_AGENT_ROOT).expanduser())
+    if HERMES_HOME.name == ".hermes":
+        roots.append(HERMES_HOME.parent / "hermes-agent")
+    roots.append(Path("/local/hermes-agent"))
+
+    out: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(root)
+    return tuple(out)
+
+
+RUN_PATH_CANDIDATES = tuple(root / "gateway" / "run.py" for root in _candidate_agent_roots())
 
 RUNTIME_START = "COLMEIO_NODE_AGENT_RUNTIME_BEGIN"
 RUNTIME_END = "COLMEIO_NODE_AGENT_RUNTIME_END"
