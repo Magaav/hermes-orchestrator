@@ -32,6 +32,10 @@ export function listNodes() {
   return request('/api/fleet/nodes')
 }
 
+export function getGuardStatus() {
+  return request('/api/fleet/guard/status')
+}
+
 export function getNodeStatus(node) {
   return request(`/api/fleet/nodes/${encodeURIComponent(node)}/status`)
 }
@@ -42,6 +46,20 @@ export function getNodeLogs(node, channel, tail) {
     tail: String(tail),
   })
   return request(`/api/fleet/nodes/${encodeURIComponent(node)}/logs?${q.toString()}`)
+}
+
+export function getNodeGuard(node, limit = 12) {
+  const q = new URLSearchParams({
+    limit: String(limit),
+  })
+  return request(`/api/fleet/nodes/${encodeURIComponent(node)}/guard?${q.toString()}`)
+}
+
+export function getNodeActivity(node, limit = 40) {
+  const q = new URLSearchParams({
+    limit: String(limit),
+  })
+  return request(`/api/fleet/nodes/${encodeURIComponent(node)}/activity?${q.toString()}`)
 }
 
 export function runNodeAction(node, action) {

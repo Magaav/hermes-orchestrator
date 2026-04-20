@@ -26,6 +26,8 @@ class GatewaySettings:
     logs_root: Path
     node_logs_root: Path
     attention_logs_root: Path
+    node_activity_root: Path
+    guard_logs_root: Path
     ui_root: Path
     api_token: str
     experimental: bool
@@ -43,7 +45,8 @@ def _default_python_bin() -> str:
 
 
 def load_settings() -> GatewaySettings:
-    repo_root = Path(__file__).resolve().parents[3]
+    # settings.py lives under scripts/public/ui-gateway/ui_gateway/, so repo root is parents[4]
+    repo_root = Path(__file__).resolve().parents[4]
     logs_root = Path(str(os.getenv("HERMES_LOGS_ROOT", "/local/logs"))).resolve()
     agents_root = Path(str(os.getenv("HERMES_AGENTS_ROOT", "/local/agents"))).resolve()
     ui_root = Path(str(os.getenv("WASM_UI_ROOT", str(repo_root / "apps" / "wasm-ui")))).resolve()
@@ -52,7 +55,7 @@ def load_settings() -> GatewaySettings:
         str(
             os.getenv(
                 "WASM_UI_CLONE_MANAGER_SCRIPT",
-                str(repo_root / "scripts" / "clone" / "clone_manager.py"),
+                str(repo_root / "scripts" / "public" / "clone" / "clone_manager.py"),
             )
         )
     ).resolve()
@@ -74,6 +77,22 @@ def load_settings() -> GatewaySettings:
                 os.getenv(
                     "HERMES_AGENTS_ATTENTION_LOG_ROOT",
                     str(logs_root / "attention" / "nodes"),
+                )
+            )
+        ).resolve(),
+        node_activity_root=Path(
+            str(
+                os.getenv(
+                    "HERMES_AGENTS_ACTIVITY_LOG_ROOT",
+                    str(logs_root / "nodes" / "activities"),
+                )
+            )
+        ).resolve(),
+        guard_logs_root=Path(
+            str(
+                os.getenv(
+                    "HERMES_GUARD_LOG_ROOT",
+                    str(logs_root / "guard"),
                 )
             )
         ).resolve(),

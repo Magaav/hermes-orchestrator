@@ -59,6 +59,7 @@ from contextlib import contextmanager
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tarfile
@@ -76,6 +77,9 @@ NODE_ENV_TEMPLATE_PATH = ENVS_ROOT / "node.env.example"
 ORCHESTRATOR_ENV_TEMPLATE_PATH = ENVS_ROOT / "orchestrator.env.example"
 LOGS_ROOT = Path(os.getenv("HERMES_LOGS_ROOT", "/local/logs"))
 NODE_LOG_ROOT = Path(os.getenv("HERMES_AGENTS_NODE_LOG_ROOT", str(LOGS_ROOT / "nodes")))
+NODE_ACTIVITY_LOG_ROOT = Path(
+    os.getenv("HERMES_AGENTS_ACTIVITY_LOG_ROOT", str(NODE_LOG_ROOT / "activities"))
+)
 ATTENTION_LOG_ROOT = Path(
     os.getenv("HERMES_AGENTS_ATTENTION_LOG_ROOT", str(LOGS_ROOT / "attention" / "nodes"))
 )
@@ -177,6 +181,9 @@ UPDATE_TEST_ENV_SOURCE = Path(
 )
 UPDATE_TEST_LOG_ROOT = Path(
     str(os.getenv("HERMES_UPDATE_LOG_ROOT", str(LOGS_ROOT / "update")) or (LOGS_ROOT / "update"))
+)
+NODE_PURGE_REQUEST_ROOT = Path(
+    str(os.getenv("HERMES_NODE_PURGE_REQUEST_ROOT", str(LOGS_ROOT / "node-purge")) or (LOGS_ROOT / "node-purge"))
 )
 UPDATE_TEST_LOG_FALLBACK_ROOT = Path(
     str(UPDATE_TEST_LOG_ROOT)
@@ -361,7 +368,9 @@ def _ensure_dirs() -> None:
 
     LOGS_ROOT.mkdir(parents=True, exist_ok=True)
     NODE_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    NODE_ACTIVITY_LOG_ROOT.mkdir(parents=True, exist_ok=True)
     ATTENTION_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    NODE_PURGE_REQUEST_ROOT.mkdir(parents=True, exist_ok=True)
     BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
     PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
     _ensure_root_dir(SHARED_SCRIPTS_ROOT)
@@ -1292,6 +1301,80 @@ def _save_registry(data: Dict[str, Any]) -> None:
     _atomic_write_json(REGISTRY_PATH, data)
 
 
+def _hermes_agent_version_info(clone_root: Path) -> Dict[str, Any]:
+    agent_root = clone_root / "hermes-agent"
+    info: Dict[str, Any] = {
+        "package_version": "",
+        "git_commit": "",
+        "git_branch": "",
+        "git_describe": "",
+        "engines_node": "",
+    }
+    package_path = agent_root / "package.json"
+    if package_path.exists():
+        try:
+            package_data = json.loads(package_path.read_text(encoding="utf-8"))
+            if isinstance(package_data, dict):
+                info["package_version"] = str(package_data.get("version") or "")
+                engines = package_data.get("engines")
+                if isinstance(engines, dict):
+                    info["engines_node"] = str(engines.get("node") or "")
+        except Exception:
+            pass
+
+    git_probe_root = agent_root if (agent_root / ".git").exists() else None
+    if git_probe_root is None:
+        bootstrap_meta = clone_root / BOOTSTRAP_META_REL
+        if bootstrap_meta.exists():
+            try:
+                meta = json.loads(bootstrap_meta.read_text(encoding="utf-8"))
+            except Exception:
+                meta = {}
+            raw_source = str(meta.get("seed_code_source") or "").strip()
+            source_path = Path(raw_source) if raw_source else None
+            if source_path is not None and (source_path / ".git").exists():
+                git_probe_root = source_path
+
+    if git_probe_root is not None:
+        info["git_commit"] = _git_commit(git_probe_root)
+        info["git_branch"] = _git_branch(git_probe_root)
+        proc = _run(["git", "-C", str(git_probe_root), "describe", "--tags", "--always", "--dirty"], check=False)
+        if proc.returncode == 0:
+            info["git_describe"] = str(proc.stdout or "").strip()
+    return info
+
+
+def _registry_node_record(
+    clone_name: str,
+    clone_root: Path,
+    env_path: Path,
+    *,
+    container_name: str,
+    container_id: str,
+    runtime_type: str = "container",
+    host_pid: int | None = None,
+    state_mode: str,
+    state_code: Any,
+    docker_image: str,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "clone_name": clone_name,
+        "container_name": container_name,
+        "container_id": container_id,
+        "runtime_type": runtime_type,
+        "clone_root": str(clone_root),
+        "env_path": str(env_path),
+        "state_mode": state_mode,
+        "state_code": state_code,
+        "docker_image": docker_image,
+        "updated_at": _utc_now(),
+        "hermes_agent": _hermes_agent_version_info(clone_root),
+    }
+    if host_pid is not None:
+        payload["host_pid"] = host_pid
+    return payload
+
+
 def _run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if check and proc.returncode != 0:
@@ -1646,6 +1729,34 @@ def _resolve_state_mode_info(env: Dict[str, str]) -> tuple[int | None, str]:
         return mode, STATE_LABELS.get(mode, "invalid")
 
 
+SHARED_CHANGE_EXECUTION_DISCIPLINE: tuple[tuple[str, str], ...] = (
+    (
+        "Think before acting",
+        "Inspect current state first, state assumptions explicitly, surface tradeoffs "
+        "and blast radius, and stop for clarification when ambiguity would change "
+        "shared rollout scope.",
+    ),
+    (
+        "Simplicity first",
+        "Prefer the smallest reversible change that solves the problem. Avoid "
+        "speculative abstractions, extra configuration knobs, or wider framework "
+        "changes that were not requested.",
+    ),
+    (
+        "Surgical changes",
+        "Touch only the files required for the current task. Do not refactor "
+        "adjacent shared infrastructure unless the task requires it, and only "
+        "clean up fallout created by your own change.",
+    ),
+    (
+        "Goal-driven execution",
+        "Define success checks before editing. For shared changes, include rollout "
+        "steps, rollback trigger, and post-restart verification, and do not claim "
+        "success without evidence.",
+    ),
+)
+
+
 def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> str:
     state_code, state_label = _resolve_state_mode_info(env)
     role = "orchestrator-control-plane" if state_code == 1 else "worker-node"
@@ -1681,6 +1792,12 @@ def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> s
         "- Workers should propose exact file diffs, rollout plan, rollback plan, and verification steps.",
         "- Orchestrator should apply approved shared changes, restart affected nodes, and verify outcomes.",
         "",
+        "## Execution Discipline",
+        *[
+            f"- {title}: {description}"
+            for title, description in SHARED_CHANGE_EXECUTION_DISCIPLINE
+        ],
+        "",
         "## Collaboration Protocol",
         "1. Detect issue or improvement opportunity.",
         "2. Draft a scoped change proposal (what/why/risk/tests).",
@@ -1699,12 +1816,20 @@ def _build_node_governance_prompt(clone_name: str, env: Dict[str, str]) -> str:
         if state_code == 1
         else "Do not execute or claim direct shared plugin/framework mutations; escalate to orchestrator."
     )
+    execution_discipline = "\n".join(
+        f"{idx}. {title}: {description}"
+        for idx, (title, description) in enumerate(
+            SHARED_CHANGE_EXECUTION_DISCIPLINE, start=1
+        )
+    )
     return (
         f"[Node governance contract]\n"
         f"Node={clone_name}; role={role}; NODE_STATE={state_code if state_code is not None else '?'} ({state_label}).\n"
         f"Shared framework assets live at {SHARED_PLUGINS_ROOT} and {SHARED_SCRIPTS_ROOT}; "
         "they are orchestrator-managed infrastructure.\n"
         f"{role_line}\n"
+        "Execution discipline for shared infrastructure:\n"
+        f"{execution_discipline}\n"
         "When proposing shared changes, provide exact file edits, rollout+rollback, and verification.\n"
         f"Bootstrap note: gateway startup runs {SHARED_PLUGINS_ROOT}/hermes-core/scripts/prestart_reapply.sh "
         "so plugin hooks are re-applied on restart.\n"
@@ -2190,6 +2315,119 @@ def _remove_path(path: Path) -> None:
         return
     if path.is_dir():
         shutil.rmtree(path, ignore_errors=True)
+
+
+def _node_purge_request_path(request_id: str) -> Path:
+    return NODE_PURGE_REQUEST_ROOT / f"{request_id}.json"
+
+
+def _node_purge_targets(clone_name: str) -> dict[str, str]:
+    return {
+        "env_path": str(_clone_env_path(clone_name)),
+        "clone_root": str(_clone_root_path(clone_name)),
+        "shared_data_dir": str(_shared_node_data_dir(clone_name)),
+        "shared_cron_dir": str(SHARED_CRONS_ROOT / clone_name),
+        "node_log_dir": str(_node_log_dir(clone_name)),
+        "attention_log_dir": str(_node_attention_dir(clone_name)),
+    }
+
+
+def _action_purge_node_request(clone_name: str) -> Dict[str, Any]:
+    if clone_name == "orchestrator":
+        raise CloneManagerError("purge-node refuses to target orchestrator")
+
+    targets = _node_purge_targets(clone_name)
+    exists = {key: Path(path).exists() for key, path in targets.items()}
+    if not any(exists.values()):
+        raise CloneManagerError(f"node '{clone_name}' has no purgeable footprint")
+
+    status = _action_status(clone_name)
+    container_state = status.get("container_state") if isinstance(status, dict) else {}
+    if isinstance(container_state, dict) and container_state.get("running"):
+        raise CloneManagerError(
+            f"node '{clone_name}' is still running; stop it before requesting purge"
+        )
+
+    request_id = (
+        f"purge-{clone_name}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{secrets.token_hex(3)}"
+    )
+    confirm_token = secrets.token_hex(8)
+    payload = {
+        "request_id": request_id,
+        "clone_name": clone_name,
+        "confirm_token": confirm_token,
+        "created_at": _utc_now(),
+        "targets": targets,
+        "existing_targets": exists,
+        "status_snapshot": status,
+    }
+    request_path = _node_purge_request_path(request_id)
+    request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _log(clone_name, f"purge-node request created request_id={request_id}")
+    return {
+        "ok": True,
+        "action": "purge-node-request",
+        "clone_name": clone_name,
+        "request_id": request_id,
+        "request_path": str(request_path),
+        "targets": targets,
+        "existing_targets": exists,
+        "next_safe_command": f"horc purge-node confirm {request_id} --token {confirm_token}",
+        "warning": "This will permanently delete the node env, root, data, cron, and logs after confirmation.",
+    }
+
+
+def _action_purge_node_confirm(request_id: str, confirm_token: str) -> Dict[str, Any]:
+    request_path = _node_purge_request_path(request_id)
+    if not request_path.exists():
+        raise CloneManagerError(f"purge-node request not found: {request_id}")
+    try:
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise CloneManagerError(f"purge-node request is unreadable: {request_path}") from exc
+
+    clone_name = str(payload.get("clone_name") or "").strip()
+    if not clone_name:
+        raise CloneManagerError(f"purge-node request is missing clone name: {request_path}")
+    if clone_name == "orchestrator":
+        raise CloneManagerError("purge-node refuses to target orchestrator")
+    if str(payload.get("confirm_token") or "") != str(confirm_token or ""):
+        raise CloneManagerError("purge-node confirmation token mismatch")
+
+    status = _action_status(clone_name)
+    container_state = status.get("container_state") if isinstance(status, dict) else {}
+    if isinstance(container_state, dict) and container_state.get("running"):
+        raise CloneManagerError(
+            f"node '{clone_name}' is still running; stop it before confirming purge"
+        )
+
+    targets = payload.get("targets") if isinstance(payload.get("targets"), dict) else _node_purge_targets(clone_name)
+    removed: dict[str, bool] = {}
+    for key, raw_path in targets.items():
+        target = Path(str(raw_path))
+        existed = target.exists() or target.is_symlink()
+        if existed:
+            _remove_path(target)
+        removed[key] = existed and not (target.exists() or target.is_symlink())
+
+    reg = _load_registry()
+    clones = reg.get("clones") if isinstance(reg.get("clones"), dict) else {}
+    registry_removed = clone_name in clones
+    if registry_removed:
+        clones.pop(clone_name, None)
+        reg["clones"] = clones
+        _save_registry(reg)
+
+    _remove_path(request_path)
+    return {
+        "ok": True,
+        "action": "purge-node-confirm",
+        "clone_name": clone_name,
+        "request_id": request_id,
+        "removed": removed,
+        "registry_removed": registry_removed,
+    }
 
 
 def _set_symlink(path: Path, target: Path) -> None:
@@ -3097,6 +3335,7 @@ def _run_prestart_reapply(
     proc_env["HERMES_PRIVATE_SCRIPTS_ROOT"] = str(PRIVATE_SCRIPTS_ROOT)
     proc_env["HERMES_AGENT_ROOT"] = str(clone_root / "hermes-agent")
     proc_env["HERMES_NODE_ROOT"] = str(clone_root)
+    proc_env["HERMES_AGENTS_ACTIVITY_LOG_ROOT"] = str(NODE_ACTIVITY_LOG_ROOT)
     proc_env["NODE_PLUGINS_STRICT"] = "1" if strict else str(proc_env.get("NODE_PLUGINS_STRICT", "0"))
     proc_env["PYTHONUNBUFFERED"] = "1"
 
@@ -4271,15 +4510,18 @@ def _build_docker_run_cmd(
     node_crons_host.mkdir(parents=True, exist_ok=True)
     node_data_host = _shared_node_data_dir(clone_name)
     node_data_host.mkdir(parents=True, exist_ok=True)
+    node_activity_host = NODE_ACTIVITY_LOG_ROOT
+    node_activity_host.mkdir(parents=True, exist_ok=True)
 
     gateway_cmd = (
         "set -euo pipefail; "
         f"NODE_LOG_DIR=/local/logs/nodes/{clone_name}; "
+        "ACTIVITY_LOG_ROOT=/local/logs/nodes/activities; "
         f"ATTN_LOG_DIR=/local/logs/attention/nodes/{clone_name}; "
         "RUNTIME_LOG=\"${NODE_LOG_DIR}/runtime.log\"; "
         "ATTN_LOG=\"${ATTN_LOG_DIR}/warning-plus.log\"; "
         "ATTN_REGEX='warn(ing)?|error|critical|fatal|panic|emerg(ency)?|alert'; "
-        "mkdir -p \"${NODE_LOG_DIR}\" \"${ATTN_LOG_DIR}\" /local/.hermes/logs; "
+        "mkdir -p \"${NODE_LOG_DIR}\" \"${ACTIVITY_LOG_ROOT}\" \"${ATTN_LOG_DIR}\" /local/.hermes/logs; "
         "CA_BUNDLE=\"$("
         "/local/hermes-agent/.venv/bin/python -c "
         "\"import os, importlib.util; "
@@ -4357,7 +4599,9 @@ def _build_docker_run_cmd(
         "-e",
         "HERMES_NODE_ROOT=/local",
         "-e",
-        "HOME=/local",
+        "HERMES_AGENTS_ACTIVITY_LOG_ROOT=/local/logs/nodes/activities",
+        "-e",
+        "HOME=/tmp",
         "-e",
         "USER=ubuntu",
         "-e",
@@ -4388,6 +4632,8 @@ def _build_docker_run_cmd(
         f"{clone_root}:/local",
         "-v",
         f"{node_data_host}:/local/data",
+        "-v",
+        f"{node_activity_host}:/local/logs/nodes/activities",
         "-v",
         f"{node_log_host}:/local/logs/nodes/{clone_name}",
         "-v",
@@ -4831,19 +5077,18 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 runtime_env_overrides=runtime_env_overrides,
             )
             registry_after.setdefault("clones", {})
-            registry_after["clones"][clone_name] = {
-                "clone_name": clone_name,
-                "container_name": "",
-                "container_id": "",
-                "runtime_type": "baremetal",
-                "host_pid": host_start.get("pid"),
-                "clone_root": str(clone_root),
-                "env_path": str(env_path),
-                "state_mode": fs_meta["state_mode"],
-                "state_code": fs_meta["state_code"],
-                "docker_image": "",
-                "updated_at": _utc_now(),
-            }
+            registry_after["clones"][clone_name] = _registry_node_record(
+                clone_name,
+                clone_root,
+                env_path,
+                container_name="",
+                container_id="",
+                runtime_type="baremetal",
+                host_pid=host_start.get("pid"),
+                state_mode=fs_meta["state_mode"],
+                state_code=fs_meta["state_code"],
+                docker_image="",
+            )
             _save_registry(registry_after)
 
             process_state = _orchestrator_process_state(clone_root)
@@ -4892,17 +5137,16 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         container_id = (proc.stdout or "").strip()
 
         registry_after.setdefault("clones", {})
-        registry_after["clones"][clone_name] = {
-            "clone_name": clone_name,
-            "container_name": container,
-            "container_id": container_id,
-            "clone_root": str(clone_root),
-            "env_path": str(env_path),
-            "state_mode": fs_meta["state_mode"],
-            "state_code": fs_meta["state_code"],
-            "docker_image": image,
-            "updated_at": _utc_now(),
-        }
+        registry_after["clones"][clone_name] = _registry_node_record(
+            clone_name,
+            clone_root,
+            env_path,
+            container_name=container,
+            container_id=container_id,
+            state_mode=fs_meta["state_mode"],
+            state_code=fs_meta["state_code"],
+            docker_image=image,
+        )
         _save_registry(registry_after)
 
         state = _docker_state(container)
@@ -6717,6 +6961,21 @@ def _action_update_node(
             )
 
         process_state_after = _orchestrator_process_state(clone_root)
+        reg = _load_registry()
+        reg.setdefault("clones", {})
+        reg["clones"][clone_name] = _registry_node_record(
+            clone_name,
+            clone_root,
+            env_path,
+            container_name="",
+            container_id="",
+            runtime_type="baremetal",
+            host_pid=process_state_after.get("pid") if isinstance(process_state_after.get("pid"), int) else None,
+            state_mode=STATE_LABELS.get(state_code, "unknown"),
+            state_code=state_code,
+            docker_image="",
+        )
+        _save_registry(reg)
         return {
             "ok": True,
             "action": "update",
@@ -6767,6 +7026,22 @@ def _action_update_node(
     if clone_commit_before and clone_commit_after:
         changed = clone_commit_before != clone_commit_after
 
+    reg = _load_registry()
+    reg.setdefault("clones", {})
+    existing = reg["clones"].get(clone_name) if isinstance(reg["clones"], dict) else {}
+    reg["clones"][clone_name] = _registry_node_record(
+        clone_name,
+        clone_root,
+        env_path,
+        container_name=str((existing or {}).get("container_name") or container),
+        container_id=str((existing or {}).get("container_id") or ""),
+        runtime_type="container",
+        state_mode=STATE_LABELS.get(state_code, "unknown"),
+        state_code=state_code,
+        docker_image=str((existing or {}).get("docker_image") or DEFAULT_DOCKER_IMAGE),
+    )
+    _save_registry(reg)
+
     return {
         "ok": True,
         "action": "update",
@@ -6810,6 +7085,7 @@ def _dispatch(
     stage_name: str,
     run_id: str,
     phase: str,
+    confirm_token: str,
 ) -> Dict[str, Any]:
     deprecate_plugins = _parse_deprecate_plugins(deprecate_plugins_raw)
     if action == "update-run":
@@ -6874,6 +7150,16 @@ def _dispatch(
         if not clone_name:
             raise CloneManagerError("delete requires clone name")
         return _action_delete(clone_name)
+    if action == "purge-node-request":
+        if not clone_name:
+            raise CloneManagerError("purge-node-request requires clone name")
+        return _action_purge_node_request(clone_name)
+    if action == "purge-node-confirm":
+        if not run_id:
+            raise CloneManagerError("purge-node-confirm requires request id")
+        if not confirm_token:
+            raise CloneManagerError("purge-node-confirm requires --token")
+        return _action_purge_node_confirm(run_id, confirm_token)
     if action == "logs":
         if logs_clean:
             return _action_logs_clean(clone_name, clean_all=backup_all or not clone_name)
@@ -6896,6 +7182,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "status",
             "stop",
             "delete",
+            "purge-node-request",
+            "purge-node-confirm",
             "logs",
             "backup",
             "restore",
@@ -6978,6 +7266,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Guided update validation phase: stage or prod",
     )
     parser.add_argument(
+        "--token",
+        default="",
+        help="Confirmation token for destructive two-step actions",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Allow profile-clone to replace an existing staged target",
@@ -7028,7 +7321,7 @@ def main() -> int:
             if not raw_name:
                 raise CloneManagerError("update run requires production node name")
             clone_name = _normalize_clone_name(raw_name)
-        elif args.action in {"update-validate", "update-resume", "update-run-status"}:
+        elif args.action in {"update-validate", "update-resume", "update-run-status", "purge-node-confirm"}:
             clone_name = None
         elif args.action in {"backup"}:
             raw_name = args.name_flag or args.name_positional
@@ -7062,6 +7355,7 @@ def main() -> int:
             stage_name=str(args.stage_name or ""),
             run_id=str(args.run_id or args.name_positional or ""),
             phase=str(args.phase or ""),
+            confirm_token=str(args.token or ""),
         )
         print(json.dumps(payload, ensure_ascii=False))
         return 0

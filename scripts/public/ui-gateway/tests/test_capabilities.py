@@ -32,6 +32,8 @@ class CapabilityTests(unittest.TestCase):
                 logs_root=root / "logs",
                 node_logs_root=root / "logs" / "nodes",
                 attention_logs_root=root / "logs" / "attention" / "nodes",
+                node_activity_root=root / "logs" / "nodes" / "activities",
+                guard_logs_root=root / "logs" / "guard",
                 ui_root=ui_root,
                 api_token="",
                 experimental=True,
@@ -46,6 +48,8 @@ class CapabilityTests(unittest.TestCase):
             self.assertIn("core", caps)
             self.assertIn("enhanced", caps)
             self.assertTrue(caps["core"]["logs"])
+            self.assertTrue(caps["core"]["guard"])
+            self.assertTrue(caps["core"]["activity_timeline"])
             self.assertTrue(caps["enhanced"]["wasm_worker_rust_source"])
 
 

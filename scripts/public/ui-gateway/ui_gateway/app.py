@@ -19,6 +19,7 @@ from .clone_manager import (
     validate_action,
     validate_node_name,
 )
+from .guard import read_activity_entries, read_guard_node_detail, read_guard_status
 from .contracts import (
     FleetActionRequest,
     FleetActionResult,
@@ -81,6 +82,8 @@ def build_capabilities(context: GatewayContext) -> FleetCapabilities:
         "nodes": True,
         "status": True,
         "logs": True,
+        "guard": True,
+        "activity_timeline": True,
         "sse": True,
         "safe_actions": sorted(ALLOWED_ACTIONS),
         "auth_required": bool(settings.api_token),
@@ -217,6 +220,10 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
             self._list_nodes()
             return
 
+        if parsed.path == "/api/fleet/guard/status":
+            self._guard_status()
+            return
+
         if parsed.path == "/api/fleet/stream":
             self._stream_events(parsed)
             return
@@ -267,6 +274,16 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
                 "count": len(summaries),
                 "nodes": summaries,
                 "errors": errors,
+            },
+        )
+
+    def _guard_status(self) -> None:
+        payload = read_guard_status(self.server.context.settings)
+        self._json_response(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "guard": payload,
             },
         )
 
@@ -337,6 +354,44 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
                     "tail": tail,
                     "events": events,
                     "channels": channels,
+                },
+            )
+            return
+
+        if len(path_parts) == 5 and path_parts[4] == "guard":
+            query = parse_qs(parsed.query)
+            limit_raw = str((query.get("limit") or ["12"])[0] or "12")
+            try:
+                limit = max(1, min(int(limit_raw), 80))
+            except Exception:
+                self._json_error(HTTPStatus.BAD_REQUEST, "invalid limit value")
+                return
+
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "node": node,
+                    "guard": read_guard_node_detail(node, settings, limit=limit),
+                },
+            )
+            return
+
+        if len(path_parts) == 5 and path_parts[4] == "activity":
+            query = parse_qs(parsed.query)
+            limit_raw = str((query.get("limit") or ["40"])[0] or "40")
+            try:
+                limit = max(1, min(int(limit_raw), 200))
+            except Exception:
+                self._json_error(HTTPStatus.BAD_REQUEST, "invalid limit value")
+                return
+
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "node": node,
+                    "activity": read_activity_entries(node, settings, limit=limit),
                 },
             )
             return

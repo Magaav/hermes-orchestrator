@@ -49,6 +49,8 @@ class DiscoverNodesTests(unittest.TestCase):
                 logs_root=root / "logs",
                 node_logs_root=root / "logs" / "nodes",
                 attention_logs_root=root / "logs" / "attention" / "nodes",
+                node_activity_root=root / "logs" / "nodes" / "activities",
+                guard_logs_root=root / "logs" / "guard",
                 ui_root=root / "apps" / "wasm-ui",
                 api_token="",
                 experimental=True,

@@ -1450,7 +1450,7 @@ def _build_docker_run_cmd(
         "-e",
         "HERMES_HOME=/local/.hermes",
         "-e",
-        "HOME=/local",
+        "HOME=/tmp",
         "-e",
         "USER=ubuntu",
         "-e",

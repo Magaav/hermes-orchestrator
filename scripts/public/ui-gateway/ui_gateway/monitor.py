@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import Event, Thread
+import json
 import time
 
 from .broker import EventBroker
 from .clone_manager import CloneManagerClient, CloneManagerError, discover_nodes
+from .guard import activity_log_path, read_guard_status
 from .logs import allowed_channels, channel_log_path, normalize_log_line
 from .settings import GatewaySettings
 
@@ -25,6 +27,8 @@ class FleetMonitor(Thread):
         self._stop_event = Event()
         self._status_snapshot: dict[str, tuple[bool, str]] = {}
         self._file_offsets: dict[tuple[str, str], int] = {}
+        self._activity_offsets: dict[str, int] = {}
+        self._guard_state_mtime_ns: int | None = None
 
     def shutdown(self) -> None:
         self._stop_event.set()
@@ -42,6 +46,8 @@ class FleetMonitor(Thread):
                 nodes = discover_nodes(self.settings)
                 self._poll_status(nodes)
                 self._poll_logs(nodes)
+                self._poll_activity(nodes)
+                self._poll_guard()
             except Exception as exc:
                 self.broker.publish(
                     "monitor",
@@ -129,3 +135,64 @@ class FleetMonitor(Thread):
         for line in lines:
             event = normalize_log_line(node, channel, line)
             self.broker.publish("log", event.to_dict())
+
+    def _poll_activity(self, nodes: list[str]) -> None:
+        for node in nodes:
+            self._emit_new_activity_entries(node, activity_log_path(node, self.settings))
+
+    def _emit_new_activity_entries(self, node: str, path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            self._activity_offsets.pop(node, None)
+            return
+
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return
+
+        offset = self._activity_offsets.get(node, 0)
+        if size < offset:
+            offset = 0
+        if size == offset:
+            return
+
+        entries: list[dict[str, object]] = []
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            handle.seek(offset)
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(parsed, dict):
+                    entries.append(parsed)
+            offset = handle.tell()
+
+        self._activity_offsets[node] = offset
+        if len(entries) > 120:
+            entries = entries[-120:]
+
+        for entry in entries:
+            payload = dict(entry)
+            payload.setdefault("node", node)
+            self.broker.publish("activity", payload)
+
+    def _poll_guard(self) -> None:
+        path = self.settings.guard_logs_root / "state.json"
+        if not path.exists() or not path.is_file():
+            self._guard_state_mtime_ns = None
+            return
+
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return
+
+        if self._guard_state_mtime_ns == mtime_ns:
+            return
+
+        self._guard_state_mtime_ns = mtime_ns
+        self.broker.publish("guard", read_guard_status(self.settings))

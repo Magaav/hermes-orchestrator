@@ -66,6 +66,19 @@ class HookRegistry:
         except Exception as e:
             print(f"[hooks] Could not load built-in boot-md hook: {e}", flush=True)
 
+        try:
+            from gateway.builtin_hooks.activity_timeline import handle as activity_timeline_handle
+
+            self._handlers.setdefault("agent:end", []).append(activity_timeline_handle)
+            self._loaded_hooks.append({
+                "name": "activity-timeline",
+                "description": "Append one structured per-cycle activity summary to /local/logs/nodes/activities/",
+                "events": ["agent:end"],
+                "path": "(builtin)",
+            })
+        except Exception as e:
+            print(f"[hooks] Could not load built-in activity-timeline hook: {e}", flush=True)
+
     def discover_and_load(self) -> None:
         """
         Scan the hooks directory for hook directories and load their handlers.
@@ -76,9 +89,8 @@ class HookRegistry:
           - HOOK.yaml with at least 'name' and 'events' keys
           - handler.py with a top-level 'handle' function (sync or async)
         """
-        self._register_builtin_hooks()
-
         if not HOOKS_DIR.exists():
+            self._register_builtin_hooks()
             return
 
         for hook_dir in sorted(HOOKS_DIR.iterdir()):
@@ -134,6 +146,8 @@ class HookRegistry:
 
             except Exception as e:
                 print(f"[hooks] Error loading hook {hook_dir.name}: {e}", flush=True)
+
+        self._register_builtin_hooks()
 
     async def emit(self, event_type: str, context: Optional[Dict[str, Any]] = None) -> None:
         """

@@ -9,66 +9,194 @@
   <body>
     <div class="app-shell">
       <header class="app-header">
-        <div>
+        <div class="header-copy">
           <p class="eyebrow">Hermes Orchestrator</p>
-          <h1>WASM Fleet Control Surface</h1>
+          <h1>Fleet Control Surface</h1>
           <p class="subtitle">
-            CLI-backed observability and safe operations for orchestrator + worker nodes.
+            Freshness-first node operations, live diagnostics, and guided debugging layered over
+            <code>clone_manager.py</code>.
           </p>
         </div>
         <div class="header-meta">
           <span id="featureBadge" class="badge muted">Loading capabilities...</span>
           <span id="connectionBadge" class="badge">Connecting stream...</span>
+          <p class="header-note">Safe actions only. CLI remains canonical.</p>
         </div>
       </header>
 
-      <main class="grid-layout">
-        <section class="panel panel-fleet">
-          <div class="panel-head">
-            <h2>Fleet Overview</h2>
+      <section class="summary-grid">
+        <article class="summary-card tone-neutral" id="fleetPostureCard">
+          <p class="summary-label">Fleet Posture</p>
+          <strong id="fleetPostureValue" class="summary-value">Discovering...</strong>
+          <p id="fleetPostureMeta" class="summary-meta">Waiting for fleet inventory.</p>
+        </article>
+
+        <article class="summary-card tone-neutral" id="fleetCoverageCard">
+          <p class="summary-label">Coverage</p>
+          <strong id="fleetCoverageValue" class="summary-value">0 / 0 active</strong>
+          <p id="fleetCoverageMeta" class="summary-meta">No running nodes reported yet.</p>
+        </article>
+
+        <article class="summary-card tone-neutral" id="fleetAttentionCard">
+          <p class="summary-label">Attention Queue</p>
+          <strong id="fleetAttentionValue" class="summary-value">0 nodes</strong>
+          <p id="fleetAttentionMeta" class="summary-meta">No active issues identified.</p>
+        </article>
+
+        <article class="summary-card tone-neutral" id="guardStatusCard">
+          <p class="summary-label">Guard Doctor</p>
+          <strong id="guardStatusValue" class="summary-value">Checking...</strong>
+          <p id="guardStatusMeta" class="summary-meta">Waiting for the latest doctor cycle.</p>
+        </article>
+
+        <article class="summary-card tone-neutral" id="opsModeCard">
+          <p class="summary-label">Live Ops Mode</p>
+          <strong id="opsModeValue" class="summary-value">Connecting...</strong>
+          <p id="opsModeMeta" class="summary-meta">Analyzer pending.</p>
+        </article>
+      </section>
+
+      <main class="workspace-layout">
+        <aside class="panel panel-fleet">
+          <div class="panel-head panel-head-wrap">
+            <div>
+              <h2>Fleet Overview</h2>
+              <p class="panel-subtitle">
+                Nodes are sorted by operational urgency so the riskiest systems rise first.
+              </p>
+            </div>
             <button id="refreshNodesBtn" class="btn ghost">Refresh</button>
           </div>
           <div id="fleetError" class="callout hidden"></div>
           <div id="nodesList" class="nodes-list"></div>
-        </section>
+        </aside>
 
-        <section class="panel panel-node">
-          <div class="panel-head">
-            <h2 id="nodeTitle">Node Detail</h2>
-            <div class="actions-wrap">
-              <button data-action="start" class="btn" id="startActionBtn">Start</button>
-              <button data-action="stop" class="btn warning" id="stopActionBtn">Stop</button>
-              <button data-action="restart" class="btn danger" id="restartActionBtn">Restart</button>
+        <section class="main-column">
+          <section class="panel panel-hero">
+            <div class="panel-head panel-head-wrap">
+              <div>
+                <p class="eyebrow">Selected Node</p>
+                <h2 id="nodeTitle">Node Detail</h2>
+                <p id="nodeSummary" class="panel-subtitle">
+                  Select a node to inspect posture, incidents, and logs.
+                </p>
+              </div>
+              <div class="actions-wrap">
+                <button data-action="start" class="btn" id="startActionBtn">Start</button>
+                <button data-action="stop" class="btn warning" id="stopActionBtn">Stop</button>
+                <button data-action="restart" class="btn danger" id="restartActionBtn">Restart</button>
+              </div>
             </div>
-          </div>
-
-          <div id="nodeMeta" class="node-meta empty">Select a node to inspect status and logs.</div>
-
-          <div class="logs-controls">
-            <div class="tabs" id="logChannelTabs">
-              <button class="tab is-active" data-channel="runtime">Runtime</button>
-              <button class="tab" data-channel="management">Management</button>
-              <button class="tab" data-channel="attention">Attention</button>
-              <button class="tab" data-channel="hermes_errors">Hermes Errors</button>
-              <button class="tab" data-channel="hermes_gateway">Hermes Gateway</button>
-              <button class="tab" data-channel="hermes_agent">Hermes Agent</button>
+            <div id="nodeSignalStrip" class="signal-strip">
+              <span class="signal-chip muted">Awaiting selection</span>
             </div>
-            <label>
-              Tail
-              <input id="tailInput" type="number" min="20" max="1500" value="220" />
-            </label>
-            <button id="reloadLogsBtn" class="btn ghost">Reload Logs</button>
+          </section>
+
+          <div class="insight-grid">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Operational Snapshot</h2>
+                  <p class="panel-subtitle">
+                    Fresh status, runtime, guardrails, and current log route.
+                  </p>
+                </div>
+                <span id="statusFreshness" class="mini-badge">No node selected</span>
+              </div>
+              <div id="nodeMetaGrid" class="meta-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>What Needs Attention</h2>
+                  <p class="panel-subtitle">
+                    Important signals surfaced above raw log hunting.
+                  </p>
+                </div>
+                <span id="incidentSummary" class="mini-badge">0 active issues</span>
+              </div>
+              <div id="incidentList" class="incident-list"></div>
+            </section>
           </div>
 
-          <div class="analysis-strip" id="analysisStrip">
-            <p>Analyzer: <strong id="analyzerName">pending</strong></p>
-            <p>Events: <strong id="eventCount">0</strong></p>
-            <p>Warnings: <strong id="warnCount">0</strong></p>
-            <p>Errors: <strong id="errorCount">0</strong></p>
+          <div class="insight-grid secondary">
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Doctor Loop</h2>
+                  <p class="panel-subtitle">
+                    Guard findings and the latest bounded remediation attempts for this node.
+                  </p>
+                </div>
+                <span id="doctorSummary" class="mini-badge">No node selected</span>
+              </div>
+              <div id="doctorList" class="doctor-list"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-head">
+                <div>
+                  <h2>Agent Timeline</h2>
+                  <p class="panel-subtitle">
+                    One structured summary per interaction cycle, sourced from node activity logs.
+                  </p>
+                </div>
+                <span id="activitySummary" class="mini-badge">No node selected</span>
+              </div>
+              <div id="activityTimeline" class="timeline-list"></div>
+            </section>
           </div>
 
-          <div id="logOutput" class="log-output"></div>
-          <div id="heatmap" class="heatmap"></div>
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>Analyzer Pulse</h2>
+                <p class="panel-subtitle">
+                  Channel-level signal counts and hourly concentration.
+                </p>
+              </div>
+              <span id="analysisSummary" class="mini-badge">Analyzer pending</span>
+            </div>
+
+            <div class="analysis-strip">
+              <p>Analyzer: <strong id="analyzerName">pending</strong></p>
+              <p>Events: <strong id="eventCount">0</strong></p>
+              <p>Warnings: <strong id="warnCount">0</strong></p>
+              <p>Errors: <strong id="errorCount">0</strong></p>
+            </div>
+
+            <div id="heatmap" class="heatmap"></div>
+          </section>
+
+          <section class="panel panel-logs">
+            <div class="panel-head">
+              <div>
+                <h2>Live Log Drilldown</h2>
+                <p class="panel-subtitle">
+                  Jump between channels once the situation is clear.
+                </p>
+              </div>
+            </div>
+
+            <div class="logs-controls">
+              <div class="tabs" id="logChannelTabs">
+                <button class="tab is-active" data-channel="runtime">Runtime</button>
+                <button class="tab" data-channel="management">Management</button>
+                <button class="tab" data-channel="attention">Attention</button>
+                <button class="tab" data-channel="hermes_errors">Hermes Errors</button>
+                <button class="tab" data-channel="hermes_gateway">Hermes Gateway</button>
+                <button class="tab" data-channel="hermes_agent">Hermes Agent</button>
+              </div>
+              <label>
+                Tail
+                <input id="tailInput" type="number" min="20" max="1500" value="220" />
+              </label>
+              <button id="reloadLogsBtn" class="btn ghost">Reload Logs</button>
+            </div>
+
+            <div id="logOutput" class="log-output"></div>
+          </section>
         </section>
       </main>
     </div>

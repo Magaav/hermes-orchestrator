@@ -95,17 +95,24 @@ This contract defines:
 - bootstrap mode (`NODE_STATE`)
 - shared framework ownership (`/local/plugins/public`, `/local/scripts/public`)
 - collaboration protocol for plugin/framework changes
+- execution discipline for shared infrastructure changes
 Operational rule:
 - Worker nodes should treat shared plugins/scripts as orchestrator-managed infrastructure.
 - Workers should propose changes (diff + rollout/rollback + verification), then request orchestrator execution.
 - Orchestrator applies approved shared changes and coordinates restarts/verification.
 At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL_SYSTEM_PROMPT` so agent decisions stay aligned with this contract.
 
+Execution discipline for the orchestrator and any shared framework mutation:
+- Think before acting: inspect current state first, make assumptions explicit, and surface blast radius before changing shared assets.
+- Simplicity first: prefer the smallest reversible change that solves the problem; avoid speculative framework churn.
+- Surgical changes: touch only the files required for the current task and avoid opportunistic refactors in shared infrastructure.
+- Goal-driven execution: define success checks up front and require rollout steps, rollback trigger, and post-restart verification before claiming success.
+
 ## Filesystem Topology
 ```text
 /local/
 ├── agents/
-│   ├── registry.json             # all orchestrated nodes
+│   ├── registry.json             # canonical node inventory + runtime metadata + hermes-agent version snapshot
 │   ├── envs/                     # used for bootstrapping/starting/restarting nodes
 │   │   ├── orchestrator.env      # runs inside host VM
 │   │   ├── node1.env             # runs inside docker container (sandboxed)
@@ -160,6 +167,28 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
                 └── hermes-errors.log # hardlinked mirror of /local/logs/nodes/<node>/hermes/errors.log
 ```
 
+`/local/agents/registry.json` is the orchestrator's canonical fleet inventory. It is derived operational state maintained by the clone manager during start, update, restore, and delete flows.
+
+What it tracks:
+- node identity and topology: `clone_name`, `clone_root`, `env_path`, `state_mode`, `state_code`
+- runtime attachment: `container_name`, `container_id`, `runtime_type`, and `host_pid` for bare-metal nodes
+- reconciliation time: `updated_at`
+- per-node Hermes runtime version under `hermes_agent`
+
+The `hermes_agent` block is for quick fleet auditing and includes:
+- `package_version`
+- `git_commit`
+- `git_branch`
+- `git_describe`
+- `engines_node`
+
+When a node runtime tree has no `.git` checkout, the version snapshot falls back to the bootstrap source recorded in `.clone-meta/bootstrap.json`.
+
+Operational rule:
+- do not hand-edit `registry.json` as configuration
+- use it as the canonical answer to “which nodes are active?” and “which Hermes build is each node running?”
+- remove stale entries when a node is removed from the fleet
+
 ## Public vs Private State
 **Public** folders are used as global shared features for hermes-orchestrator.
 **Private** folders are used as global shared features applyed for users runtime instance of hermes-orchestrator specificities.
@@ -170,6 +199,8 @@ At runtime, a condensed governance prompt is also injected via `HERMES_EPHEMERAL
 - `/local/datas/<node>` is the canonical private node data root (mounted in runtime at `/local/data`) used to hold databases.
 
 ## Feature Docs
+- [Guard Feature Guide](docs/features/guard.md)
+- [Activity Timeline Guide](docs/features/activity-timeline.md)
 - [Scripts Feature Guide](docs/features/scripts.md)
 - [Plugins Feature Guide](docs/features/plugins.md)
 - [horc Command Reference](docs/commands/horc.md)
@@ -211,8 +242,10 @@ horc delete node2
 
 ## Logging Topology
 - Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.
+- Node interaction timelines are centralized at `/local/logs/nodes/activities/<node>.jsonl`.
 - Node skill mirrors are centralized at `/local/logs/nodes/<node>/skills/`.
 - Warning-and-above mirrors are centralized at `/local/logs/attention/nodes/<node>/`.
+- Guard doctor logs are centralized at `/local/logs/guard/`.
 - `horc logs <node>` tails management, runtime, attention, and Hermes logs from this canonical tree.
 
 ## Backups & Restore
@@ -280,8 +313,8 @@ Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token pa
 ## Roadmap
 Roadmap work is intentionally tracked in dedicated docs to keep this README operational and implementation-focused.
 Current roadmap themes:
-- Visual control plane and high-performance observability exploration.
-- Runtime guard monitoring, alert routing, and bounded remediation.
+- Visual control plane with Guard observability and per-agent activity timelines.
+- Runtime guard monitoring, Discord alert routing, and bounded remediation.
 - Shared knowledge and collaboration workflows for larger multi-node operations.
 
 ## Roadmap Workspace

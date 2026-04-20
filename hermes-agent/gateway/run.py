@@ -4096,14 +4096,48 @@ class GatewayRunner:
         if message_text is None:
             return
 
-        try:
-            # Emit agent:start hook
-            hook_ctx = {
+        def _build_hook_context_base() -> Dict[str, Any]:
+            return {
                 "platform": source.platform.value if source.platform else "",
                 "user_id": source.user_id,
+                "user_name": source.user_name,
+                "chat_id": source.chat_id,
+                "chat_type": source.chat_type,
+                "thread_id": source.thread_id,
                 "session_id": session_entry.session_id,
+                "session_key": session_key,
                 "message": message_text[:500],
+                "source_is_bot": bool(getattr(source, "is_bot", False)),
+                "internal": bool(getattr(event, "internal", False)),
+                "node": str(os.getenv("NODE_NAME", "") or "").strip(),
             }
+
+        def _summarize_tool_usage(turn_messages: List[Dict[str, Any]], history_offset: int) -> Dict[str, Any]:
+            start_idx = max(0, min(int(history_offset or 0), len(turn_messages)))
+            tool_names: List[str] = []
+            for msg in turn_messages[start_idx:]:
+                if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                    continue
+                tool_calls = msg.get("tool_calls") or []
+                if not isinstance(tool_calls, list):
+                    continue
+                for tool_call in tool_calls:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function_data = tool_call.get("function") or {}
+                    name = str(function_data.get("name") or "").strip()
+                    if name:
+                        tool_names.append(name)
+
+            return {
+                "tool_count": len(tool_names),
+                "unique_tool_count": len(set(tool_names)),
+                "names": tool_names[:16],
+            }
+
+        try:
+            # Emit agent:start hook
+            hook_ctx = _build_hook_context_base()
             await self.hooks.emit("agent:start", hook_ctx)
 
             # Run the agent
@@ -4212,9 +4246,24 @@ class GatewayRunner:
                     response = f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
 
             # Emit agent:end hook
+            cycle_outcome = "completed"
+            if agent_result.get("interrupted"):
+                cycle_outcome = "interrupted"
+            elif agent_result.get("failed"):
+                cycle_outcome = "errored"
+            elif not response and not agent_result.get("completed", False):
+                cycle_outcome = "waiting"
+
             await self.hooks.emit("agent:end", {
                 **hook_ctx,
+                "finished_at": f"{datetime.utcnow().isoformat()}Z",
                 "response": (response or "")[:500],
+                "cycle_outcome": cycle_outcome,
+                "activity_summary": agent_result.get("activity_summary") or {},
+                "tool_usage": _summarize_tool_usage(
+                    agent_messages,
+                    agent_result.get("history_offset", len(history)),
+                ),
             })
             
             # Check for pending process watchers (check_interval on background processes)
@@ -4391,6 +4440,19 @@ class GatewayRunner:
             except Exception:
                 pass
             logger.exception("Agent error in session %s", session_key)
+            try:
+                await self.hooks.emit("agent:end", {
+                    **_build_hook_context_base(),
+                    "finished_at": f"{datetime.utcnow().isoformat()}Z",
+                    "response": "",
+                    "cycle_outcome": "errored",
+                    "error_type": type(e).__name__,
+                    "error_detail": str(e)[:300] if str(e) else "",
+                    "activity_summary": {},
+                    "tool_usage": {"tool_count": 0, "unique_tool_count": 0, "names": []},
+                })
+            except Exception:
+                pass
             error_type = type(e).__name__
             error_detail = str(e)[:300] if str(e) else "no details available"
             status_hint = ""

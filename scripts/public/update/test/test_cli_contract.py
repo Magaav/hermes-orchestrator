@@ -80,6 +80,20 @@ def test_update_status_contract(tmp_path: Path) -> None:
     assert payload["argv"] == ["update-run-status", "--run-id", "run-123"]
 
 
+def test_purge_node_request_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["purge-node", "colmeio"])
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == ["purge-node-request", "--name", "colmeio"]
+
+
+def test_purge_node_confirm_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["purge-node", "confirm", "purge-colmeio-123", "--token", "deadbeef"])
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == ["purge-node-confirm", "--run-id", "purge-colmeio-123", "--token", "deadbeef"]
+
+
 def test_retired_update_commands_rejected(tmp_path: Path) -> None:
     cases = [
         ["update", "test"],

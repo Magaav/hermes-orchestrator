@@ -57,6 +57,8 @@ Usage:
   horc stop [name]
   horc restart [all|name] [--image IMAGE]
   horc delete [name]
+  horc purge-node <name>
+  horc purge-node confirm <request-id> --token TOKEN
   horc logs [name] [--lines N]
   horc logs clean [name|all]
   horc backup all
@@ -77,6 +79,8 @@ Examples:
   horc logs node1 --lines 120
   horc logs clean
   horc logs clean node1
+  horc purge-node node1
+  horc purge-node confirm purge-node1-20260418T150000Z-abc123 --token deadbeefcafebabe
   horc backup all
   horc backup node node1
   horc restore /local/backups/horc-backup-node-node1-20260101T000000Z.tar.gz
@@ -88,6 +92,7 @@ Examples:
 
 Notes:
   - For start/status/stop/delete/logs, if name is omitted, 'orchestrator' is used.
+  - 'purge-node' is destructive and always requires an explicit second confirmation step.
   - For restart, omitted name means "restart all nodes".
   - Guided updates are one node at a time: preflight -> stage -> validate -> promote -> validate.
   - Update artifacts are written under /local/logs/update/<run-id>/.
@@ -205,6 +210,27 @@ fi
 case "${ACTION}" in
   start|status|stop|delete)
     resolve_name_and_exec "${ACTION}" "$@"
+    ;;
+  purge-node)
+    SUBACTION="${1:-}"
+    if [[ "${SUBACTION}" == "confirm" ]]; then
+      if [[ $# -lt 2 ]]; then
+        echo "horc: purge-node confirm requires <request-id>" >&2
+        usage >&2
+        exit 2
+      fi
+      REQUEST_ID="${2}"
+      shift 2
+      exec_manager purge-node-confirm --run-id "${REQUEST_ID}" "$@"
+    fi
+    TARGET_NAME="${1:-}"
+    if [[ -z "${TARGET_NAME}" || "${TARGET_NAME}" == --* ]]; then
+      echo "horc: purge-node requires <name>" >&2
+      usage >&2
+      exit 2
+    fi
+    shift
+    exec_manager purge-node-request --name "${TARGET_NAME}" "$@"
     ;;
   logs)
     if [[ "${1:-}" == "clean" ]]; then
