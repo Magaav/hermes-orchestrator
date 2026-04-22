@@ -45,7 +45,19 @@ Primary keys:
 - `OPENVIKING_ENDPOINT`
 - `CAMOFOX_ENABLED`
 - `CAMOFOX_URL`
+- `PLUGIN_CANVA`
+- `CANVA_REFRESH_TOKEN`
+- `CANVA_CLIENT_ID`
+- `CANVA_CLIENT_SECRET`
+- `PLUGIN_BROWSER_PLUS`
+- `PLUGIN_DISCORD_GOVERNANCE`
+- `PLUGIN_DISCORD_SLASH_COMMANDS`
+- `PLUGIN_WIKI_ENGINE`
+- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES`
 - `DISCORD_HOME_CHANNEL`
+
+Discord note:
+- `PLUGIN_DISCORD_GOVERNANCE` and `PLUGIN_DISCORD_SLASH_COMMANDS` now sync plugin-owned compatibility runtimes into `nodes/<node>/.hermes/hooks/...` so `/acl` and `/metricas` survive Hermes upgrades without adding new core patches.
 
 Defaults handled automatically by orchestrator:
 

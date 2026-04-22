@@ -1,0 +1,6 @@
+name: discord-slash-commands
+version: 0.1.0
+description: "Hermes-native packaging for Discord slash-command runtime ownership, including the legacy bootstrap compatibility wrappers."
+author: "Hermes Orchestrator"
+provides_hooks: []
+provides_tools: []

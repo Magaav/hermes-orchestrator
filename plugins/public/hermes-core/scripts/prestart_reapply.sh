@@ -114,6 +114,30 @@ run_step() {
   return 1
 }
 
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+PLUGIN_DISCORD_GOVERNANCE_ENABLED=0
+if is_truthy "${PLUGIN_DISCORD_GOVERNANCE:-0}"; then
+  PLUGIN_DISCORD_GOVERNANCE_ENABLED=1
+fi
+
+PLUGIN_DISCORD_SLASH_COMMANDS_ENABLED=0
+if is_truthy "${PLUGIN_DISCORD_SLASH_COMMANDS:-0}"; then
+  PLUGIN_DISCORD_SLASH_COMMANDS_ENABLED=1
+fi
+
+PLUGIN_DISCORD_NATIVE_RUNTIME_ENABLED=0
+if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 || "$PLUGIN_DISCORD_SLASH_COMMANDS_ENABLED" -eq 1 ]]; then
+  PLUGIN_DISCORD_NATIVE_RUNTIME_ENABLED=1
+fi
+
 FAILED=0
 rm -f "$FAILED_MARKER"
 log "using python runtime: $PYTHON_BIN"
@@ -124,6 +148,8 @@ CAMOFOX_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/camofox_env_bootstrap.py"
 OPENVIKING_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/openviking_env_bootstrap.py"
 MODEL_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/model_env_bootstrap.py"
 SST_BOOTSTRAP="$DISCORD_PLUGIN_ROOT/scripts/stt_env_bootstrap.py"
+NATIVE_DISCORD_GOVERNANCE_ROOT="${HERMES_NATIVE_DISCORD_GOVERNANCE_DIR:-/local/plugins/public/native/discord-governance}"
+NATIVE_DISCORD_SLASH_COMMANDS_ROOT="${HERMES_NATIVE_DISCORD_SLASH_COMMANDS_DIR:-/local/plugins/public/native/discord-slash-commands}"
 if [[ -n "${HERMES_HOME:-}" ]]; then
   HERMES_ENV_FILE="${HERMES_HOME}/.env"
   HERMES_CONFIG_FILE="${HERMES_HOME}/config.yaml"
@@ -197,24 +223,53 @@ if [[ -f "$SST_BOOTSTRAP" ]]; then
       --config-file "$HERMES_CONFIG_FILE" || FAILED=1
 fi
 
-run_step "channel_acl" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/hooks/apply_channel_acl_run_py.py" || FAILED=1
+if [[ "$PLUGIN_DISCORD_NATIVE_RUNTIME_ENABLED" -eq 1 ]]; then
+  log "SKIP legacy channel_acl patcher (native Discord runtime enabled)"
+else
+  run_step "channel_acl" \
+    "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/hooks/apply_channel_acl_run_py.py" || FAILED=1
+fi
 run_step "gateway_fifo_queue" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_gateway_queue_fifo.py" || FAILED=1
-run_step "session_info" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_session_info_hook.py" || FAILED=1
+if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 ]]; then
+  log "SKIP session_info (native discord-governance enabled)"
+  rm -rf "${HERMES_HOME:-${HOME:-/root}/.hermes}/hooks/session_info_hook"
+else
+  run_step "session_info" \
+    "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_session_info_hook.py" || FAILED=1
+fi
 run_step "discord_thread_parent" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_thread_parent_context.py" || FAILED=1
 run_step "discord_auto_thread_ignore_channels" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_auto_thread_ignore_channels.py" || FAILED=1
 run_step "discord_guild_sync" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_guild_sync.py" || FAILED=1
-run_step "discord_command_bootstrap" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_command_bootstrap.py" || FAILED=1
-run_step "discord_role_acl_sync" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_role_acl_sync.py" || FAILED=1
-run_step "discord_acl_contract_check" \
-  "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_acl_contract_check.py" || FAILED=1
+if [[ "$PLUGIN_DISCORD_NATIVE_RUNTIME_ENABLED" -eq 1 ]]; then
+  log "SKIP legacy discord_command_bootstrap patcher (native Discord runtime enabled)"
+else
+  run_step "discord_command_bootstrap" \
+    "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_discord_command_bootstrap.py" || FAILED=1
+fi
+if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 ]]; then
+  run_step "native_discord_governance_runtime" \
+    "$PYTHON_BIN" "$NATIVE_DISCORD_GOVERNANCE_ROOT/scripts/apply_discord_governance_runtime.py" || FAILED=1
+fi
+if [[ "$PLUGIN_DISCORD_SLASH_COMMANDS_ENABLED" -eq 1 ]]; then
+  run_step "native_discord_slash_runtime" \
+    "$PYTHON_BIN" "$NATIVE_DISCORD_SLASH_COMMANDS_ROOT/scripts/apply_discord_slash_commands_runtime.py" || FAILED=1
+fi
+if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 ]]; then
+  log "SKIP discord_role_acl_sync (native discord-governance enabled)"
+else
+  run_step "discord_role_acl_sync" \
+    "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_role_acl_sync.py" || FAILED=1
+fi
+if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 ]]; then
+  log "SKIP discord_acl_contract_check (native discord-governance enabled)"
+else
+  run_step "discord_acl_contract_check" \
+    "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/discord_acl_contract_check.py" || FAILED=1
+fi
 run_step "faltas_confirmation_view" \
   "$PYTHON_BIN" "$DISCORD_PLUGIN_ROOT/scripts/reapply_faltas_confirmation_view.py" || FAILED=1
 
@@ -246,8 +301,12 @@ fi
 
 VERIFY_SCRIPT="$DISCORD_PLUGIN_ROOT/scripts/verify_discord_customizations.py"
 if [[ -f "$VERIFY_SCRIPT" ]]; then
-  run_step "verify_customizations" \
-    "$PYTHON_BIN" "$VERIFY_SCRIPT" || FAILED=1
+  if [[ "$PLUGIN_DISCORD_GOVERNANCE_ENABLED" -eq 1 ]]; then
+    log "SKIP verify_customizations (legacy governance verifier disabled)"
+  else
+    run_step "verify_customizations" \
+      "$PYTHON_BIN" "$VERIFY_SCRIPT" || FAILED=1
+  fi
 fi
 
 NODE_AGENT_VERIFY_SCRIPT="$HERMES_CORE_PLUGIN_ROOT/scripts/verify_node_agent_followup_footer.py"

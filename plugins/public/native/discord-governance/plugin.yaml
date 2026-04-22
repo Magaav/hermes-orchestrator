@@ -1,0 +1,6 @@
+name: discord-governance
+version: 0.1.0
+description: "Hermes-native packaging for Discord ACL governance, channel policy validation, and node-scoped authorization bootstrap."
+author: "Hermes Orchestrator"
+provides_hooks: []
+provides_tools: []

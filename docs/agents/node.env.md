@@ -54,6 +54,85 @@ These are the minimum practical values for a usable node profile.
 
 If provider credentials are missing, the node may boot but fail at first model call.
 
+## Native Canva Plugin
+
+Use the Hermes-native Canva plugin contract:
+
+- `PLUGIN_CANVA=true|false`
+- `CANVA_REFRESH_TOKEN`
+- `CANVA_CLIENT_ID`
+- `CANVA_CLIENT_SECRET`
+
+Behavior:
+- `PLUGIN_CANVA=true` tells orchestrator bootstrap to sync the canonical plugin into the node runtime at `./.hermes/plugins/canva`.
+- Bootstrap also enables `HERMES_ENABLE_PROJECT_PLUGINS=true` and ensures `canva` exists in Hermes `config.yaml` `plugins.enabled`.
+- Exported Canva files are written under `/workspace/canva/`.
+- If `PLUGIN_CANVA=true` and any Canva secret is missing, bootstrap fails clearly.
+
+## Native Browser Plus Plugin
+
+Use the Hermes-native Browser Plus plugin contract:
+
+- `PLUGIN_BROWSER_PLUS=true|false`
+- `BROWSER_USE_API_KEY` optional, only needed for Browser Use cloud/profile tools
+
+Behavior:
+- `PLUGIN_BROWSER_PLUS=true` tells orchestrator bootstrap to sync the canonical plugin into the node runtime at `./.hermes/plugins/browser-plus`.
+- Bootstrap also enables `HERMES_ENABLE_PROJECT_PLUGINS=true` and ensures `browser-plus` exists in Hermes `config.yaml` `plugins.enabled`.
+- Local real-browser CDP mode does not require any additional secret.
+- Browser Use cloud helpers become available automatically when `BROWSER_USE_API_KEY` is present.
+
+## Native Discord Governance Plugin
+
+Use the Hermes-native Discord governance plugin contract:
+
+- `PLUGIN_DISCORD_GOVERNANCE=true|false`
+
+Behavior:
+- `PLUGIN_DISCORD_GOVERNANCE=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/discord-governance`.
+- Existing private contract files remain unchanged:
+  - `/local/plugins/private/discord/acl/<node>_acl.json`
+  - `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
+  - `/local/plugins/private/discord/models/<node>_models.json`
+- Prestart syncs the plugin-owned Discord compatibility runtime into:
+  - `./.hermes/hooks/discord_slash_bridge/`
+  - `./.hermes/hooks/channel_acl/`
+- `/acl` stays on the Discord-native compatibility path rather than Hermes `ctx.register_command(...)`.
+
+## Native Discord Slash Commands Plugin
+
+Use the Hermes-native Discord slash-commands plugin contract:
+
+- `PLUGIN_DISCORD_SLASH_COMMANDS=true|false`
+
+Behavior:
+- `PLUGIN_DISCORD_SLASH_COMMANDS=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/discord-slash-commands`.
+- Prestart syncs the plugin-owned Discord compatibility runtime into `./.hermes/hooks/discord_slash_bridge/`.
+- `/metricas` stays on the Discord-native compatibility path rather than Hermes `ctx.register_command(...)`.
+
+## Native Wiki Engine Plugin
+
+Use the Hermes-native wiki-engine plugin contract:
+
+- `PLUGIN_WIKI_ENGINE=true|false`
+
+Behavior:
+- `PLUGIN_WIKI_ENGINE=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/wiki-engine`.
+
+## Native Final Response Changed Files Plugin
+
+Use the Hermes-native final-response changed-files plugin contract:
+
+- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES=true|false`
+
+Behavior:
+- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/final-response-changed-files`.
+- The footer contract still includes:
+  - created files
+  - deleted files
+  - updated files whose contents changed
+- Full native runtime ownership is still blocked on Hermes exposing a plugin hook that can transform the final assistant response before delivery.
+
 ## Discord Mention Routing Controls
 
 ### `DISCORD_REQUIRE_MENTION_CHANNELS`

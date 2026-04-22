@@ -6,11 +6,11 @@ This directory contains Discord customizations that survive `hermes-agent` updat
 
 Hermes core may be overwritten by updates, so custom behavior lives in `/local/plugins/public/discord` and is reapplied automatically by a prestart script.
 
-## Single Bootstrap Architecture (Discord Slash)
+## Discord Compatibility Runtime
 
-Custom slash behavior uses one bootstrap patch + external runtime registry:
+Custom slash behavior now has two layers:
 
-- Bootstrap patch script:
+- legacy Hermes-core bootstrap patch script:
   - `/local/plugins/public/discord/scripts/reapply_discord_command_bootstrap.py`
 - External runtime files (source of truth):
   - `/local/plugins/public/discord/hooks/discord_slash_bridge/runtime.py`
@@ -20,8 +20,13 @@ Custom slash behavior uses one bootstrap patch + external runtime registry:
 - Runtime destination in Hermes home:
   - `~/.hermes/hooks/discord_slash_bridge/`
 
-The bootstrap patches `gateway/platforms/discord.py` only to load this runtime.
-Actual command logic stays external.
+Preferred path for `/acl` and `/metricas`:
+
+- the native plugins under `/local/plugins/public/native/{discord-governance,discord-slash-commands}`
+- prestart syncs this runtime into `~/.hermes/hooks/...`
+- command logic stays external and plugin-owned
+
+The legacy bootstrap patcher still exists for older flows, but new node setups with the native Discord plugins enabled should rely on the plugin-owned runtime sync path instead of adding fresh core patches.
 
 ## What Bootstrap Runtime Does
 
@@ -92,7 +97,8 @@ Threads inherit parent restrictions via `chat_id_alt`.
 3. thread parent context patch
 4. auto-thread-ignore-channels patch
 5. guild sync patch
-6. single Discord command bootstrap
+6. legacy Discord command bootstrap when native Discord plugins are not enabled
+7. native Discord runtime sync when `PLUGIN_DISCORD_GOVERNANCE` and/or `PLUGIN_DISCORD_SLASH_COMMANDS` are enabled
 
 ## One-Command Update
 

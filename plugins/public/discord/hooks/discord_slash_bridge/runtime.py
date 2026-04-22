@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import logging
 import os
@@ -104,13 +105,17 @@ class DiscordSlashRuntime:
         if bool(getattr(tree, "_colmeio_role_acl_check_installed", False)):
             return
 
-        checker_decorator = getattr(tree, "interaction_check", None)
-        if not callable(checker_decorator):
+        original_check = getattr(tree, "interaction_check", None)
+        if not callable(original_check):
             return
 
-        @checker_decorator
         async def _colmeio_role_acl_interaction_check(interaction: Any) -> bool:
             try:
+                if inspect.iscoroutinefunction(original_check):
+                    base_allowed = await original_check(interaction)
+                    if not base_allowed:
+                        return False
+
                 if not self._is_chat_input(interaction):
                     return True
 
@@ -137,6 +142,17 @@ class DiscordSlashRuntime:
                 except Exception:
                     pass
                 return False
+
+        if inspect.iscoroutinefunction(original_check):
+            try:
+                setattr(tree, "interaction_check", _colmeio_role_acl_interaction_check)
+            except Exception:
+                return
+        else:
+            try:
+                original_check(_colmeio_role_acl_interaction_check)
+            except Exception:
+                return
 
         try:
             setattr(tree, "_colmeio_role_acl_check_installed", True)
