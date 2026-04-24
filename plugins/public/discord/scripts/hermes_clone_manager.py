@@ -877,7 +877,7 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
         _log(
             clone_name,
             "openviking compatibility warning: provider plugin missing in clone code; "
-            "set CLONE_FORCE_RESEED=1 and start again to upgrade.",
+            "set NODE_RESEED=true and start again to upgrade.",
         )
     return {
         "enabled": True,
@@ -891,7 +891,7 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
             "supported": supported,
             "message": "fallback mode (env only)" if supported else (
                 "provider plugin missing; explicit reseed required "
-                "(set CLONE_FORCE_RESEED=1 and start again)."
+                "(set NODE_RESEED=true and start again)."
             ),
         },
         "degraded": not supported,
@@ -1054,7 +1054,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
         if not allow_parent_seed:
             raise CloneManagerError(
                 "clone runtime venv missing at /local/hermes-agent/.venv. "
-                "Set CLONE_FORCE_RESEED=1 in clone env to re-bootstrap."
+                "Set NODE_RESEED=true in clone env to re-bootstrap."
             )
         src_venv = _select_seed_venv_source(required_module="discord")
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -1065,7 +1065,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
         if not allow_parent_seed:
             raise CloneManagerError(
                 "clone runtime venv does not include discord.py. "
-                "Set CLONE_FORCE_RESEED=1 in clone env to refresh runtime."
+                "Set NODE_RESEED=true in clone env to refresh runtime."
             )
         src_venv = _select_seed_venv_source(required_module="discord")
         _sync_dir(src_venv, dst_venv, delete=True)
@@ -1267,7 +1267,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
 
     _ensure_clone_ownership(clone_root)
     mode = _extract_state_mode(env)
-    force_reseed = _is_truthy(env.get("CLONE_FORCE_RESEED", "0"))
+    force_reseed = _is_truthy(env.get("NODE_RESEED", "0"))
     bootstrap_meta_path = _clone_bootstrap_meta_path(clone_root)
     has_local_code = (clone_root / "hermes-agent" / "cli.py").exists()
     has_local_home = (clone_root / ".hermes").exists()
@@ -1333,7 +1333,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
             if not path.exists():
                 raise CloneManagerError(
                     f"clone local path missing: {path}. "
-                    "Set CLONE_FORCE_RESEED=1 in clone env to re-bootstrap."
+                    "Set NODE_RESEED=true in clone env to re-bootstrap."
                 )
         _normalize_clone_skills_layout(clone_root)
         _link_clone_workspace_discord(clone_root)
@@ -1396,7 +1396,7 @@ def _build_docker_run_cmd(
         "export CURL_CA_BUNDLE=\"$CA_BUNDLE\"; "
         "fi; "
         "PRESTART_SCRIPT=\"\"; "
-        "for _p in /local/plugins/public/hermes-core/scripts/prestart_reapply.sh /local/plugins/public/discord/scripts/prestart_reapply.sh; do "
+        "for _p in /local/plugins/public/native/scripts/prestart_reapply.sh /local/plugins/public/hermes-core/scripts/prestart_reapply.sh /local/plugins/public/discord/scripts/prestart_reapply.sh; do "
         "if [ -x \"${_p}\" ]; then PRESTART_SCRIPT=\"${_p}\"; break; fi; "
         "done; "
         "if [ -n \"${PRESTART_SCRIPT}\" ]; then "

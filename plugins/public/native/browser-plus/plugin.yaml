@@ -1,0 +1,39 @@
+name: browser-plus
+version: 0.1.0
+description: "Hermes-native port of browser-use/browser-harness with persistent CDP control, Browser Use cloud sessions, and bundled browser interaction/domain knowledge."
+author: "Hermes Orchestrator"
+provides_tools:
+  - browser_plus_status
+  - browser_plus_goto
+  - browser_plus_page_info
+  - browser_plus_click
+  - browser_plus_type_text
+  - browser_plus_press_key
+  - browser_plus_scroll
+  - browser_plus_screenshot
+  - browser_plus_list_tabs
+  - browser_plus_current_tab
+  - browser_plus_switch_tab
+  - browser_plus_new_tab
+  - browser_plus_ensure_real_tab
+  - browser_plus_wait
+  - browser_plus_wait_for_load
+  - browser_plus_eval_js
+  - browser_plus_dispatch_key
+  - browser_plus_upload_file
+  - browser_plus_http_get
+  - browser_plus_cdp
+  - browser_plus_drain_events
+  - browser_plus_get_dialog
+  - browser_plus_handle_dialog
+  - browser_plus_extract_text
+  - browser_plus_list_cloud_profiles
+  - browser_plus_list_local_profiles
+  - browser_plus_sync_local_profile
+  - browser_plus_start_remote_daemon
+  - browser_plus_stop_remote_daemon
+  - browser_plus_restart_daemon
+  - browser_plus_search_knowledge
+  - browser_plus_read_knowledge
+provides_hooks:
+  - pre_llm_call

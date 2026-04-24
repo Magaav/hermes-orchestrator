@@ -1,27 +1,37 @@
 # Discord Slash Commands Native Plugin
 
-`discord-slash-commands` is the Hermes-native home for the Discord slash
-command bridge and the session-policy behavior that rides with it.
+`discord-slash-commands` now registers Discord-visible slash commands through
+the official Hermes plugin command interface.
 
 ## Env Contract
 
 - `PLUGIN_DISCORD_SLASH_COMMANDS=true|false`
 
-`PLUGIN_DISCORD_SLASH_COMMANDS=true` is the intended enable flag for this
-package.
+## Current Behavior
 
-## Current Status
+- registers `/metricas` through `ctx.register_command(...)`
+- registers `/faltas` through `ctx.register_command(...)`
+- registers `/discord-slash-status` for node-local registration diagnostics
+- captures Discord request context during `pre_gateway_dispatch`
+- reconstructs handler arguments from Discord interaction options when needed
+- keeps Hermes' built-in Discord slash registration authoritative instead of
+  patching the live Discord adapter in memory
+- lets Hermes' built-in global slash sync continue to publish the generic
+  plugin command entries Hermes knows how to auto-register
+- uses `scripts/register_guild_plugin_commands.py` during prestart to patch or
+  create guild-scoped overlays for the plugin-owned commands without deleting
+  global commands
+- keeps `/metricas` and `/faltas` visible with structured Discord options like
+  `dias`, `formato`, `action`, and `loja` instead of collapsing everything
+  into a single `args` field
+- works whether `DISCORD_COMMAND_SYNC_POLICY` is `safe`, `bulk`, or `off`
+- uses the current private Discord contracts as inputs
+- does not sync files into `~/.hermes/hooks/...`
+- keeps a no-op compatibility shim only for diagnostics/tests
 
-This package now owns the Discord slash-command compatibility runtime from the
-plugin side:
+## Notes
 
-- syncs the Discord slash-bridge runtime into `~/.hermes/hooks/discord_slash_bridge/`
-- keeps `/metricas` on the Discord-native compatibility path instead of the
-  generic Hermes plugin-command path
-- runs the legacy metrics dashboard script through the external bridge runtime
-- is applied during node prestart by `scripts/apply_discord_slash_commands_runtime.py`
-
-Current limitation:
-
-- this still depends on Hermes builds that already expose the external
-  Discord hook runtime loader; it no longer adds new core patches itself
+- the metrics dashboard still reuses the existing Colmeio metrics script
+- the faltas command reuses the existing faltas pipeline script
+- private-path resolution is centralized so we can migrate later to a
+  plugin-owned private namespace without another broad refactor

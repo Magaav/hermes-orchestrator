@@ -39,45 +39,60 @@ def _run_horc(tmp_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
     )
 
 
-def test_update_run_command_contract(tmp_path: Path) -> None:
+def test_update_help_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update"])
+    assert proc.returncode == 0, proc.stderr
+    assert "horc update" in proc.stdout.lower()
+    assert "update all" in proc.stdout.lower()
+    assert "update node <name>" in proc.stdout.lower()
+
+
+def test_update_help_subcommand_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "help"])
+    assert proc.returncode == 0, proc.stderr
+    assert "horc update" in proc.stdout.lower()
+    assert "update all" in proc.stdout.lower()
+    assert "update node <name>" in proc.stdout.lower()
+
+
+def test_update_all_command_contract(tmp_path: Path) -> None:
     proc = _run_horc(
         tmp_path,
-        ["update", "run", "colmeio", "--stage", "colmeio-stage", "--source-branch", "main"],
+        ["update", "all"],
     )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"][:5] == [
-        "update-run",
-        "--name",
-        "colmeio",
-        "--stage-name",
-        "colmeio-stage",
-    ]
-    assert "--source-branch" in payload["argv"]
-    assert "main" in payload["argv"]
+    assert payload["argv"] == ["update-all"]
 
 
-def test_update_validate_contract(tmp_path: Path) -> None:
-    proc = _run_horc(tmp_path, ["update", "validate", "run-123", "--phase", "stage"])
+def test_update_all_force_contract(tmp_path: Path) -> None:
+    proc = _run_horc(
+        tmp_path,
+        ["update", "all", "--force"],
+    )
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"][:3] == ["update-validate", "--run-id", "run-123"]
-    assert "--phase" in payload["argv"]
-    assert "stage" in payload["argv"]
+    assert payload["argv"] == ["update-all", "--force"]
 
 
-def test_update_resume_contract(tmp_path: Path) -> None:
-    proc = _run_horc(tmp_path, ["update", "resume", "run-123"])
+def test_update_node_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "node", "orchestrator"])
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"] == ["update-resume", "--run-id", "run-123"]
+    assert payload["argv"] == ["update-node", "--name", "orchestrator"]
 
 
-def test_update_status_contract(tmp_path: Path) -> None:
-    proc = _run_horc(tmp_path, ["update", "status", "run-123"])
+def test_update_node_force_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "node", "orchestrator", "--force"])
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
-    assert payload["argv"] == ["update-run-status", "--run-id", "run-123"]
+    assert payload["argv"] == ["update-node", "--name", "orchestrator", "--force"]
+
+
+def test_update_node_requires_name(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["update", "node"])
+    assert proc.returncode != 0
+    assert "update node requires <name>" in proc.stderr.lower()
 
 
 def test_purge_node_request_contract(tmp_path: Path) -> None:
@@ -96,9 +111,10 @@ def test_purge_node_confirm_contract(tmp_path: Path) -> None:
 
 def test_retired_update_commands_rejected(tmp_path: Path) -> None:
     cases = [
-        ["update", "test"],
-        ["update", "apply", "node", "node1"],
-        ["profile", "clone", "colmeio", "colmeio-stage"],
+        ["update", "run", "colmeio"],
+        ["update", "status", "run-123"],
+        ["update", "resume", "run-123"],
+        ["update", "validate", "run-123"],
         ["agent", "update"],
         ["test", "update"],
         ["test-update"],
@@ -107,4 +123,4 @@ def test_retired_update_commands_rejected(tmp_path: Path) -> None:
         proc = _run_horc(tmp_path, args)
         assert proc.returncode != 0
         err = proc.stderr.lower()
-        assert "retired" in err or "removed" in err
+        assert "retired" in err or "removed" in err or "unknown update subcommand" in err

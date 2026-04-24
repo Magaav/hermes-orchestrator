@@ -8,8 +8,12 @@
         inherit (inputs) uv2nix pyproject-nix pyproject-build-systems;
       };
 
-      hermesTui = pkgs.callPackage ./tui.nix {
+      hermesNpmLib = pkgs.callPackage ./lib.nix {
         npm-lockfile-fix = inputs'.npm-lockfile-fix.packages.default;
+      };
+
+      hermesTui = pkgs.callPackage ./tui.nix {
+        inherit hermesNpmLib;
       };
 
       # Import bundled skills, excluding runtime caches
@@ -19,7 +23,7 @@
       };
 
       hermesWeb = pkgs.callPackage ./web.nix {
-        npm-lockfile-fix = inputs'.npm-lockfile-fix.packages.default;
+        inherit hermesNpmLib;
       };
 
       runtimeDeps = with pkgs; [
@@ -87,7 +91,7 @@
             STAMP_VALUE="${pyprojectHash}:${uvLockHash}"
             if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$STAMP_VALUE" ]; then
               echo "hermes-agent: installing Python dependencies..."
-              uv venv .venv --python ${pkgs.python311}/bin/python3 2>/dev/null || true
+              uv venv .venv --python ${pkgs.python312}/bin/python3 2>/dev/null || true
               source .venv/bin/activate
               uv pip install -e ".[all]"
               [ -d mini-swe-agent ] && uv pip install -e ./mini-swe-agent 2>/dev/null || true
@@ -111,6 +115,10 @@
 
         tui = hermesTui;
         web = hermesWeb;
+
+        fix-lockfiles = hermesNpmLib.mkFixLockfiles {
+          packages = [ hermesTui hermesWeb ];
+        };
       };
     };
 }

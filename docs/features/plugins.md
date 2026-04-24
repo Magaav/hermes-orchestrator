@@ -29,22 +29,25 @@ Current native migration flags:
 - `PLUGIN_DISCORD_GOVERNANCE`
 - `PLUGIN_DISCORD_SLASH_COMMANDS`
 - `PLUGIN_WIKI_ENGINE`
-- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES`
+- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED`
 - `PLUGIN_CANVA`
 - `PLUGIN_BROWSER_PLUS`
 
-The native plugin directories under `/local/plugins/public/native` now cover the upgrade-safer compatibility path for:
+The native plugin directories under `/local/plugins/public/native` now cover the Hermes-native path for:
 
-- `discord-governance` via plugin-owned sync of the Discord slash bridge and channel ACL runtime for `/acl`
-- `discord-slash-commands` via plugin-owned sync of the Discord slash bridge runtime for `/metricas`
+- `discord-governance` via official Hermes hooks for `/acl`, slash-command ACL, and channel routing
+- `discord-slash-commands` via official Hermes plugin command registration for `/metricas`
 
 Current Discord shape:
 
-- Hermes project plugins own the runtime sync and enable flags.
-- The live Discord interaction/runtime logic is loaded from `~/.hermes/hooks/...`.
-- New node starts no longer depend on adding fresh code into Hermes core for these two commands.
+- Hermes project plugins own the enable flags and project-plugin sync into `./.hermes/plugins/<name>`.
+- The live Discord governance and slash-command behavior runs from Hermes-native plugin registration and hooks.
+- Discord-enabled nodes no longer depend on `~/.hermes/hooks/discord_slash_bridge` or `~/.hermes/hooks/channel_acl`.
 
-Future Hermes extension points are still desirable so this compatibility runtime can eventually become a pure upstream plugin API integration with no `prestart_reapply.sh` dependency.
+Future cleanup still remains:
+
+- move private Discord data from the shared `/local/plugins/private/discord/...` tree into plugin-owned namespaces
+- replace the remaining legacy helper imports inside the native plugins with fully self-contained plugin modules
 
 ## Discord Role ACL
 

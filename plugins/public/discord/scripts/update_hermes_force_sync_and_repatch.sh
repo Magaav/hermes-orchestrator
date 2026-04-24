@@ -21,11 +21,7 @@ for arg in "$@"; do
 done
 
 HERMES_REPO="/home/ubuntu/.hermes/hermes-agent"
-REAPPLY_SCRIPT="/local/plugins/public/hermes-core/scripts/prestart_reapply.sh"
-VERIFY_SCRIPT="/local/plugins/public/discord/scripts/verify_discord_customizations.py"
-if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/plugins/public/discord/scripts/prestart_reapply.sh" ]]; then
-  REAPPLY_SCRIPT="/local/plugins/public/discord/scripts/prestart_reapply.sh"
-fi
+REAPPLY_SCRIPT="/local/plugins/public/native/scripts/prestart_reapply.sh"
 LOG_DIR="/home/ubuntu/.hermes/logs"
 LOG_FILE="$LOG_DIR/colmeio-update-and-repatch.log"
 
@@ -57,12 +53,14 @@ if [[ ! -d "$HERMES_REPO/.git" ]]; then
   echo "[error] hermes-agent git repo not found: $HERMES_REPO" >&2
   exit 1
 fi
+if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/plugins/public/hermes-core/scripts/prestart_reapply.sh" ]]; then
+  REAPPLY_SCRIPT="/local/plugins/public/hermes-core/scripts/prestart_reapply.sh"
+fi
+if [[ ! -x "$REAPPLY_SCRIPT" && -x "/local/plugins/public/discord/scripts/prestart_reapply.sh" ]]; then
+  REAPPLY_SCRIPT="/local/plugins/public/discord/scripts/prestart_reapply.sh"
+fi
 if [[ ! -x "$REAPPLY_SCRIPT" ]]; then
   echo "[error] reapply script not executable: $REAPPLY_SCRIPT" >&2
-  exit 1
-fi
-if [[ ! -f "$VERIFY_SCRIPT" ]]; then
-  echo "[error] verify script missing: $VERIFY_SCRIPT" >&2
   exit 1
 fi
 
@@ -85,7 +83,6 @@ else
 fi
 
 run_step "reapply_colmeio_patches" /bin/bash "$REAPPLY_SCRIPT" --strict
-run_step "verify_customizations" /usr/bin/python3 "$VERIFY_SCRIPT"
 
 if [[ "$SKIP_RESTART" -eq 0 ]]; then
   run_step "restart_gateway" sudo hermes gateway restart --system

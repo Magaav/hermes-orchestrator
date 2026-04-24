@@ -2,6 +2,16 @@
 
 Public Discord plugin code lives here. Instance runtime/config state lives in `/local/plugins/private/discord`.
 
+## Status
+
+This tree is now deprecated as a runtime owner.
+
+- Node startup and reapply flow must go through `/local/plugins/public/native/*`
+- Legacy bridge/runtime files here are retained only as compatibility source
+  material while the native plugins finish absorbing the remaining helpers
+- Restart/update paths should not sync `hooks/discord_slash_bridge` back into
+  `~/.hermes/hooks`
+
 ## Public (Tracked)
 
 - `scripts/`

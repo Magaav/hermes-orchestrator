@@ -12,7 +12,7 @@
 - `clone/horc.sh`: primary CLI wrapper (`horc`).
 - `clone/hord.sh`: compatibility alias for `horc`.
 - `clone/clone.sh`: compatibility alias to `horc`.
-- `clone/clone_manager.py`: lifecycle engine for start/stop/status/logs/backup/restore and guided updates.
+- `clone/clone_manager.py`: lifecycle engine for start/stop/status/logs/backup/restore and simplified updates.
 - `install.sh`: bootstrap installer for orchestrator host setup.
 - `backup/backup_nodes_to_gdrive.sh`: compatibility wrapper to private backup script.
 - `backup/restore_hermes_state.sh`: compatibility wrapper to private restore script.
@@ -36,8 +36,9 @@ horc logs clean
 horc backup all
 horc backup node node1
 horc restore /local/backups/<archive>.tar.gz
-horc update run colmeio --stage colmeio-stage
-horc update status <run-id>
+horc update help
+horc update all
+horc update node colmeio
 ```
 
 See more: [`../../docs/commands/horc.md`](../../docs/commands/horc.md)

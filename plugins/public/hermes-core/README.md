@@ -2,6 +2,16 @@
 
 Durable core customizations for Hermes gateway behavior, kept outside `hermes-agent/` so they can be re-applied after upstream updates.
 
+## Status
+
+This tree is now deprecated as a runtime owner.
+
+- Canonical startup and plugin sync now run through `/local/plugins/public/native/*`
+- `scripts/prestart_reapply.sh` is a compatibility shim that delegates to the
+  native prestart pipeline
+- The files here remain as compatibility/reference sources while the native
+  plugins absorb the last helper modules
+
 ## Features
 
 - Per-node followup interval:

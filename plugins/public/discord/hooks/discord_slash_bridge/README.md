@@ -14,7 +14,8 @@ This folder is the external command engine loaded by the Discord bootstrap patch
 `registry.yaml` supports two layers:
 
 1. `native_overrides`
-- for commands we want as native tree commands (`/restart`, `/metricas`, `/backup version`, `/model`, `/acl`)
+- for commands we want as native tree commands (`/restart`, `/backup version`, `/model`, `/acl`)
+- migrated commands such as `/metricas` and `/faltas` should stay in the native `discord-slash-commands` plugin instead of this bridge
 - `/backup version` is orchestrator-only and now accepts:
   - `version` (optional label)
   - `node` (`orchestrator`, `colmeio`, `catatau`, `all`)

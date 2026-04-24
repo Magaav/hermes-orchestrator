@@ -31,6 +31,7 @@ crons/orchestrator/*
 .env.*
 !.env.example
 agents/envs/*
+!agents/envs/README.md
 !agents/envs/node.env.example
 !agents/envs/orchestrator.env.example
 docker/.env
@@ -57,3 +58,5 @@ hermes-agent/venv/
 
 # Local upstream contribution workspace
 dummy/
+.worktrees/
+.worktrees/

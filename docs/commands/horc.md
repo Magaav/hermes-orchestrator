@@ -1,6 +1,6 @@
 # horc Command Reference
 
-`horc` is the Hermes Orchestrator CLI for lifecycle, logs, backup/restore, and the guided one-node-at-a-time update flow.
+`horc` is the Hermes Orchestrator CLI for lifecycle, logs, backup/restore, and simplified fleet updates.
 
 ## Defaults
 
@@ -34,28 +34,26 @@ horc backup <name>
 horc restore <path>
 ```
 
-## Guided Update Commands
+## Update Commands
 
 ```bash
-horc update run <prod-node> --stage <stage-node> [--source-branch <branch>] [--deprecate-plugins <p1,p2,...>]
-horc update validate <run-id> --phase stage|prod
-horc update resume <run-id>
-horc update status <run-id>
+horc update [help]
+horc update all [--force]
+horc update node <name> [--force]
 ```
-
-## Retired Update Commands
-
-Older legacy update entrypoints are intentionally rejected. Operators should always start with `horc update run`.
 
 ## Notes
 
 - `horc restart` with no node restarts all nodes in orchestrator-first order.
 - `horc backup` produces lean archives and includes a shared runtime seed for reseeding nodes during restore.
 - `horc restore` stops included running nodes, restores payloads, and restarts nodes that were running.
-- `horc update run` is the only supported operator path for updates.
-- Guided updates are one node at a time and require manual validation after stage and production.
-- Update artifacts are written only under `/local/logs/update/<run-id>/`.
-- Full runbook and troubleshooting guidance: [`update-engine.md`](/local/docs/commands/update-engine.md)
+- Every update refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch before reseeding nodes.
+- `horc update all` reseeds every node and reconciles `/local/agents/registry.json`.
+- `horc update node <name>` reseeds only the named node and leaves others untouched.
+- Add `--force` to discard local `/local/hermes-agent` checkout changes when the upstream refresh would otherwise fail on a dirty working tree.
+- Nodes that were already running are restarted through the normal lifecycle; stopped nodes keep their stopped state.
+- `NODE_RESEED=true` in `/local/agents/envs/<node>.env` forces a one-shot reseed from `/local/hermes-agent` on the next start/restart.
+- Update reports are written under `/local/logs/update/<run-id>/`.
 
 ## Governance
 

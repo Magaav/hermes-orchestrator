@@ -1,0 +1,6 @@
+name: wiki-engine
+version: 0.1.0
+description: "Hermes-native packaging for the shared wiki bootstrap and repair flow."
+author: "Hermes Orchestrator"
+provides_hooks: []
+provides_tools: []

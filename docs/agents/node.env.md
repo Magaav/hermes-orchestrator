@@ -13,6 +13,7 @@ This document defines the bootstrap contract for node profiles used by `horc`.
 
 Notes:
 - `NODE_STATE` defaults to `1` when omitted.
+- `NODE_RESEED` defaults to `false` when omitted.
 - For non-orchestrator nodes, `/local/agents/envs/<node>.env` must exist before start.
 
 ## Minimum Operational Set (node starts and can answer)
@@ -24,6 +25,7 @@ These are the minimum practical values for a usable node profile.
 - `NODE_AGENT_DEFAULT_MODEL`
 - `NODE_AGENT_FALLBACK_MODEL_PROVIDER`
 - `NODE_AGENT_FALLBACK_MODEL`
+- `NODE_RESEED`
 - `NODE_TIME_ZONE`
 
 ### Discord transport
@@ -94,10 +96,10 @@ Behavior:
   - `/local/plugins/private/discord/acl/<node>_acl.json`
   - `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
   - `/local/plugins/private/discord/models/<node>_models.json`
-- Prestart syncs the plugin-owned Discord compatibility runtime into:
-  - `./.hermes/hooks/discord_slash_bridge/`
-  - `./.hermes/hooks/channel_acl/`
-- `/acl` stays on the Discord-native compatibility path rather than Hermes `ctx.register_command(...)`.
+- Project-plugin bootstrap syncs the plugin into `./.hermes/plugins/discord-governance`.
+- Hermes loads `/acl` through `ctx.register_command(...)`.
+- Slash-command authorization runs through Hermes `command:*` hooks.
+- Channel normalization and routing run through Hermes-native plugin hooks, not `./.hermes/hooks/...`.
 
 ## Native Discord Slash Commands Plugin
 
@@ -107,8 +109,9 @@ Use the Hermes-native Discord slash-commands plugin contract:
 
 Behavior:
 - `PLUGIN_DISCORD_SLASH_COMMANDS=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/discord-slash-commands`.
-- Prestart syncs the plugin-owned Discord compatibility runtime into `./.hermes/hooks/discord_slash_bridge/`.
-- `/metricas` stays on the Discord-native compatibility path rather than Hermes `ctx.register_command(...)`.
+- Project-plugin bootstrap syncs the plugin into `./.hermes/plugins/discord-slash-commands`.
+- Hermes registers `/metricas` through `ctx.register_command(...)`.
+- No Discord slash bridge runtime is synced into `./.hermes/hooks/...`.
 
 ## Native Wiki Engine Plugin
 
@@ -123,10 +126,10 @@ Behavior:
 
 Use the Hermes-native final-response changed-files plugin contract:
 
-- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES=true|false`
+- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED=true|false`
 
 Behavior:
-- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/final-response-changed-files`.
+- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/final-response-changed-files`.
 - The footer contract still includes:
   - created files
   - deleted files
@@ -178,3 +181,17 @@ DISCORD_REQUIRE_MENTION_CHANNELS=1487073289137553581,1487099467726328038
 Result:
 - In those two channels, users must `@mention` the bot.
 - In every other channel, the bot responds to normal messages.
+
+## Runtime reseed override
+
+Use `NODE_RESEED=true` when you want the next `horc start <node>` or `horc restart <node>` to force a one-shot runtime refresh from `/local/hermes-agent`.
+
+```bash
+NODE_RESEED=true
+```
+
+Behavior:
+- If omitted, `NODE_RESEED` behaves as `false`.
+- A successful reseed preserves the node's local `.hermes` state and credentials.
+- After a successful reseed, `horc` writes `NODE_RESEED=false` back into the env file so future normal starts do not reseed again.
+- `horc update all` and `horc update node <name>` use this same mechanism internally after refreshing `/local/hermes-agent` from upstream.

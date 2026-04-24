@@ -15,6 +15,7 @@ import yaml
 
 
 VALID_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DEFAULT_PRIVATE_DISCORD_ROOT = Path("/local/plugins/private/discord")
 
 
 def _is_truthy(value: object) -> bool:
@@ -76,6 +77,28 @@ def _infer_config_file(env_file: Path) -> Path:
     if env_file.suffix == ".env":
         return Path("/local/agents/nodes") / env_file.stem / ".hermes" / "config.yaml"
     return env_file.parent / "config.yaml"
+
+
+def _infer_node_name(env_file: Path) -> str:
+    if env_file.name == ".env" and env_file.parent.name == ".hermes":
+        try:
+            parts = env_file.parts
+            idx = parts.index("nodes")
+            if idx + 1 < len(parts):
+                return str(parts[idx + 1]).strip()
+        except Exception:
+            return ""
+        return ""
+    if env_file.suffix == ".env":
+        return env_file.stem.strip()
+    return env_file.parent.name.strip()
+
+
+def _resolve_commands_file(node_name: str) -> str:
+    clean = str(node_name or "").strip()
+    if not clean:
+        return ""
+    return str(DEFAULT_PRIVATE_DISCORD_ROOT / "commands" / f"{clean}.json")
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -166,6 +189,12 @@ def main() -> int:
 
     if enabled:
         changed = _upsert_env_value(env_file, "HERMES_ENABLE_PROJECT_PLUGINS", "true") or changed
+        node_name = _infer_node_name(env_file)
+        if node_name:
+            changed = _upsert_env_value(env_file, "NODE_NAME", node_name) or changed
+            commands_file = _resolve_commands_file(node_name)
+            if commands_file:
+                changed = _upsert_env_value(env_file, "DISCORD_COMMANDS_FILE", commands_file) or changed
         synced = _sync_tree(plugin_source, plugin_target)
         changed = synced or changed
         changed = _ensure_in_list(enabled_list, plugin_name) or changed
@@ -178,6 +207,7 @@ def main() -> int:
             "plugin_target": str(plugin_target),
             "config_file": str(config_file),
             "env_file": str(env_file),
+            "node_name": node_name,
         }))
         return 0
 

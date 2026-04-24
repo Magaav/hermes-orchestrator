@@ -1,0 +1,9 @@
+name: final-response-changed-files
+version: 0.1.0
+description: "Hermes-native deterministic file-change tracking plugin built on official pre_tool_call, post_tool_call, and pre_llm_call hooks."
+author: "Hermes Orchestrator"
+provides_hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+provides_tools: []

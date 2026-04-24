@@ -1,0 +1,33 @@
+name: canva
+version: 0.2.0
+description: "Canva Connect plugin for efficient design creation, asset import, review comments, template autofill, export, and download workflows."
+author: "Hermes Orchestrator"
+requires_env:
+  - CANVA_REFRESH_TOKEN
+  - CANVA_CLIENT_ID
+  - CANVA_CLIENT_SECRET
+provides_tools:
+  - canva_get_capabilities
+  - canva_create_design
+  - canva_list_designs
+  - canva_get_design
+  - canva_update_design
+  - canva_export_design
+  - canva_list_export_formats
+  - canva_upload_asset
+  - canva_upload_asset_from_url
+  - canva_get_asset
+  - canva_update_asset
+  - canva_delete_asset
+  - canva_list_brand_templates
+  - canva_get_brand_template_dataset
+  - canva_autofill_design
+  - canva_normalize_design_brief
+  - canva_qa_design_brief
+  - canva_make_poster_from_asset
+  - canva_make_social_post
+  - canva_make_cover_from_image
+  - canva_create_comment_thread
+  - canva_get_comment_thread
+  - canva_create_comment_reply
+  - canva_list_comment_replies

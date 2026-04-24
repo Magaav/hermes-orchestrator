@@ -79,3 +79,39 @@ def test_bootstrap_enabled_syncs_plugin_and_updates_env(monkeypatch, tmp_path, c
     assert "discord-slash-commands" in cfg["plugins"]["enabled"]
     assert (config_file.parent / "plugins" / "discord-slash-commands" / "plugin.yaml").exists()
     assert "HERMES_ENABLE_PROJECT_PLUGINS=true" in env_file.read_text(encoding="utf-8")
+
+
+def test_bootstrap_enabled_normalizes_node_env_payload_path(monkeypatch, tmp_path, capsys):
+    env_root = tmp_path / "agents" / "envs"
+    env_root.mkdir(parents=True)
+    env_file = env_root / "colmeio.env"
+    config_file = tmp_path / "config.yaml"
+    plugin_source = _plugin_source(tmp_path)
+
+    env_file.write_text(
+        "PLUGIN_DISCORD_SLASH_COMMANDS=true\n"
+        "DISCORD_COMMANDS_FILE=/bad/path/colmeio.json.\n",
+        encoding="utf-8",
+    )
+    config_file.write_text(yaml.safe_dump({"plugins": {"enabled": []}}), encoding="utf-8")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "discord_slash_commands_env_bootstrap.py",
+            "--env-file",
+            str(env_file),
+            "--config-file",
+            str(config_file),
+            "--plugin-source",
+            str(plugin_source),
+        ],
+    )
+    assert main() == 0
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["enabled"] is True
+    assert payload["node_name"] == "colmeio"
+    env_text = env_file.read_text(encoding="utf-8")
+    assert "NODE_NAME=colmeio" in env_text
+    assert "DISCORD_COMMANDS_FILE=/local/plugins/private/discord/commands/colmeio.json" in env_text

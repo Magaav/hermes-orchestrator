@@ -140,7 +140,7 @@ def _provider_supported(agent_root: Path) -> Tuple[bool, str]:
         return True, "ok"
     return False, (
         f"openviking provider plugin missing in {agent_root}. "
-        "Older node code detected; run 'horc agent update <node>' and start again."
+        "Older node code detected; set NODE_RESEED=true and start the node again."
     )
 
 

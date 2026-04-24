@@ -3,12 +3,16 @@
 Reapply Discord guild-level slash sync after hermes-agent updates.
 
 Why:
-- Global slash command propagation can be delayed in Discord clients.
-- Guild-level sync can make new commands appear immediately.
+- Older Hermes builds used coarse-grained startup sync and optional
+  guild-copy behavior.
+- Newer Hermes builds support native drift-based sync policies, which
+  should not be overwritten by this compatibility patcher.
 
 Default behavior:
-- Keep global commands only (no guild copy) to avoid duplicate entries in
-  Discord's slash picker.
+- If Hermes already provides `DISCORD_COMMAND_SYNC_POLICY`, this patcher is a
+  no-op and leaves the native sync implementation in place.
+- On older builds, keep global commands only (no guild copy) to avoid
+  duplicate entries in Discord's slash picker.
 - Enable copy-global-to-guild only when explicitly requested via:
   DISCORD_GUILD_SYNC_GLOBAL_TO_GUILD=true
 """
@@ -151,6 +155,9 @@ def reapply() -> int:
         return 1
 
     original = discord_path.read_text(encoding="utf-8")
+    if "def _get_discord_command_sync_policy" in original:
+        print("✅ Native Discord command sync policy detected; skipping guild sync compatibility patch.")
+        return 0
     content = original
     applied: list[str] = []
 

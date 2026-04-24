@@ -102,14 +102,6 @@ slash_bridge:
     model:
       acl_command: model
       handler: model_switch
-    faltas:
-      acl_command: faltas
-      handler: custom:faltas
-    metricas:
-      handler: metrics_dashboard
-      acl_command: metricas
-      script_path: /local/skills/custom/colmeio/colmeio-metrics/scripts/metrics_logger.py
-      timeout_sec: 45
     clean:
       acl_command: clean
       handler: custom:clean

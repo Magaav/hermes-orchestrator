@@ -3,7 +3,10 @@ set -euo pipefail
 
 DROPIN_DIR="/etc/systemd/system/hermes-gateway.service.d"
 DROPIN_FILE="$DROPIN_DIR/10-colmeio-prestart.conf"
-PRESTART_SCRIPT="/local/plugins/public/hermes-core/scripts/prestart_reapply.sh"
+PRESTART_SCRIPT="/local/plugins/public/native/scripts/prestart_reapply.sh"
+if [[ ! -x "$PRESTART_SCRIPT" && -x "/local/plugins/public/hermes-core/scripts/prestart_reapply.sh" ]]; then
+  PRESTART_SCRIPT="/local/plugins/public/hermes-core/scripts/prestart_reapply.sh"
+fi
 if [[ ! -x "$PRESTART_SCRIPT" && -x "/local/plugins/public/discord/scripts/prestart_reapply.sh" ]]; then
   PRESTART_SCRIPT="/local/plugins/public/discord/scripts/prestart_reapply.sh"
 fi

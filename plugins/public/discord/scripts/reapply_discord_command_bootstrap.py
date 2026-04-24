@@ -217,7 +217,6 @@ INTERACTION_BLOCK = """\
 
 ERROR_BLOCK = """\
         # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_BEGIN
-        @tree.error
         async def on_app_command_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
             data = {}
             try:
@@ -270,6 +269,8 @@ ERROR_BLOCK = """\
                     await interaction.response.send_message(msg, ephemeral=True)
             except Exception:
                 pass
+        if callable(getattr(tree, "error", None)):
+            tree.error(on_app_command_error)
         # COLMEIO_DISCORD_COMMAND_BOOTSTRAP_ERROR_END
 """
 

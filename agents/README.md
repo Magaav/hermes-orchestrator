@@ -4,6 +4,7 @@
 
 ## Structure
 
+- `envs/README.md`: documentation for the env directory and node variable reference
 - `envs/<node>.env`: node profile (secrets + node-level toggles)
 - `envs/orchestrator.env.example`: host orchestrator template
 - `envs/node.env.example`: worker node template
@@ -28,22 +29,28 @@ Canonical shared roots now live outside `agents/`:
 Use lean node profiles. Keep only values that differ from defaults.
 
 For strict bootstrap requirements and mention-routing controls, see:
+- `/local/agents/envs/README.md`
 - `/local/docs/agents/node.env.md`
 
-Primary keys:
+Core keys:
 
 - `NODE_AGENT_DEFAULT_MODEL_PROVIDER`
 - `NODE_AGENT_DEFAULT_MODEL`
 - `NODE_AGENT_FALLBACK_MODEL_PROVIDER`
 - `NODE_AGENT_FALLBACK_MODEL`
+- `NODE_RESEED`
 - `HERMES_YOLO_MODE` (optional, `1` to bypass command approvals)
 - `NODE_STATE`
 - `NODE_STATE_FROM_BACKUP_PATH`
 - `NODE_TIME_ZONE` (IANA timezone, for example `America/Sao_Paulo`)
-- `NODE_WIKI_ENABLED`
-- `OPENVIKING_ENABLED`
+- `DISCORD_HOME_CHANNEL`
+
+Plugins and plugin-owned settings:
+
+- `PLUGIN_WIKI` (default `false`; current runtime still has legacy `NODE_WIKI_ENABLED` and `PLUGIN_WIKI_ENGINE` references)
+- `PLUGIN_OPENVIKING` (default `false`; current runtime still reads legacy `OPENVIKING_ENABLED`)
 - `OPENVIKING_ENDPOINT`
-- `CAMOFOX_ENABLED`
+- `PLUGIN_CAMOFOX` (default `false`; current runtime still reads legacy `CAMOFOX_ENABLED`)
 - `CAMOFOX_URL`
 - `PLUGIN_CANVA`
 - `CANVA_REFRESH_TOKEN`
@@ -52,9 +59,8 @@ Primary keys:
 - `PLUGIN_BROWSER_PLUS`
 - `PLUGIN_DISCORD_GOVERNANCE`
 - `PLUGIN_DISCORD_SLASH_COMMANDS`
-- `PLUGIN_WIKI_ENGINE`
-- `PLUGIN_FINAL_RESPONSE_CHANGED_FILES`
-- `DISCORD_HOME_CHANNEL`
+- `PLUGIN_WIKI_ENGINE` (legacy runtime/native plugin key still present today)
+- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED`
 
 Discord note:
 - `PLUGIN_DISCORD_GOVERNANCE` and `PLUGIN_DISCORD_SLASH_COMMANDS` now sync plugin-owned compatibility runtimes into `nodes/<node>/.hermes/hooks/...` so `/acl` and `/metricas` survive Hermes upgrades without adding new core patches.
@@ -62,6 +68,7 @@ Discord note:
 Defaults handled automatically by orchestrator:
 
 - `NODE_NAME` inferred from `<node>.env` filename
+- `NODE_RESEED=false` when omitted; set `NODE_RESEED=true` for a one-shot runtime reseed from `/local/hermes-agent`
 - `NODE_TIME_ZONE` is injected as `HERMES_TIMEZONE` (and `TZ`) at runtime
 - node paths (`HERMES_NODE_ROOT`, `HERMES_HOME`, `HERMES_DATA_DIR`) derived from standard topology
 - `COLMEIO_LOGS_DIR` defaults to `/local/logs/nodes/<node>`
@@ -75,3 +82,9 @@ Defaults handled automatically by orchestrator:
 2. Worker profile: copy `envs/node.env.example` to `envs/<node>.env`.
 3. Fill secrets and node-specific values.
 4. Start with `horc start` (orchestrator) and `horc start <node>` (workers).
+
+## Update behavior
+
+- `horc update all` refreshes `/local/hermes-agent`, reseeds every node, and reconciles `/local/agents/registry.json`.
+- `horc update node <name>` refreshes `/local/hermes-agent`, reseeds only the named node, and leaves others untouched.
+- Reseeds preserve node-local `.hermes` state and automatically reset `NODE_RESEED=false` after success.

@@ -264,39 +264,32 @@ Restore behavior:
 
 ## Updates
 ```bash
-# update hermes-orchestrator repo itself (/local)
-horc update
-# update hermes-agent template source (/local/hermes-agent)
-horc agent update
-# update one existing node to latest template and restart it if running
-horc agent update node2
-# refresh orchestrator runtime copy from template and restart host gateway if running
-horc agent update orchestrator
-
-# strict dummy-gated preflight
-horc update test
-horc update test --source-branch main --deprecate-plugins old-plugin
-
-# hard-gated rollout (always runs preflight + backup internally)
-horc update apply all
-horc update apply node colmeio,orchestrator --deprecate-plugins old-plugin
+# show update-specific help
+horc update help
+# refresh /local/hermes-agent, then reseed every node
+horc update all
+# same, but discard local /local/hermes-agent checkout changes first
+horc update all --force
+# refresh /local/hermes-agent, then reseed only one node
+horc update node orchestrator
+horc update node colmeio --force
 ```
 
-Safe update workflow (recommended):
-1. Run `horc update test` (or let `horc update apply ...` trigger it).
-2. If preflight passes, run `horc update apply all` or `horc update apply node <csv>`.
-3. Validate rollout with `horc status <node>` and review artifacts under `/log/update/<run-id>/`.
+Update behavior:
+- Every update first refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch.
+- `horc update all` reseeds every node from `/local/hermes-agent` and reconciles `/local/agents/registry.json`.
+- `horc update node <name>` reseeds only that node and also updates `/local/agents/registry.json`.
+- Add `--force` when `/local/hermes-agent` has local checkout changes that should be discarded during the refresh.
+- Update-driven reseeds preserve node-local `.hermes` state; the refresh targets code/runtime, not node identity.
+- Nodes that were already running are restarted through the normal lifecycle. Stopped nodes keep their stopped state after reseed.
 
-Preflight logging:
-- Failed preflight writes a JSON + logs under `/log/update/`.
-- If `/log/update/` is not writable on your host, fallback path is `/local/log/update/`.
+Manual reseed override:
+- Set `NODE_RESEED=true` in `/local/agents/envs/<node>.env` to force a one-shot runtime reseed from `/local/hermes-agent` on the next start or restart.
+- If `NODE_RESEED` is absent, it defaults to `false`.
+- After a successful reseed, `horc` resets `NODE_RESEED=false` automatically.
 
-Best practices to prevent breaking updates:
-- Never roll Hermes node updates without a successful `horc update test` on the same branch/version you plan to deploy.
-- Keep a dedicated dummy profile at `/local/dummy/dummy.env` for deterministic preflight runs.
-- Prefer updating one worker first (`colmeio` or another canary), validate, then fan out.
-- Keep rollback artifacts fresh with `horc backup all` before fleet-wide updates.
-- Full engine details: [`docs/commands/update-engine.md`](docs/commands/update-engine.md).
+Operational tip:
+- Run `horc backup all` before a fleet-wide update if you want fresh rollback artifacts.
 ## Versioning Hygiene
 Runtime and secret files are intentionally excluded:
 - `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `skills/`, `datas/`, `backups/`, (except docs/examples)
