@@ -1,0 +1,7 @@
+name: discord-slash-commands
+version: 0.1.0
+description: "Canonical Discord slash and governance runtime owning `/status`, `/acl`, `/slash`, and deployment-local custom commands."
+author: "Hermes Orchestrator"
+provides_hooks:
+  - pre_gateway_dispatch
+provides_tools: []

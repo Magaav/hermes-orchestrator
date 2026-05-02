@@ -72,8 +72,8 @@ These variables are not mandatory for every node, but they are part of the suppo
 | `DISCORD_IGNORED_CHANNELS` | `csv string` | comma-separated channel ids | unset | Channels ignored by the bot. |
 | `DISCORD_AUTO_THREAD` | `bool` | `true` or `false` | runtime-defined | Enables thread-first responses. |
 | `DISCORD_AUTO_THREAD_IGNORE_CHANNELS` | `csv string` | comma-separated channel ids | unset | Channels excluded from auto-thread behavior. |
-| `DISCORD_ROLE_ACL_SAFE_COMMANDS` | `csv string` | command names such as `status,help,usage,provider` | `status,help,usage,provider` | Still used by `/local/plugins/public/discord/scripts/discord_role_acl_sync.py` to define slash commands that remain allowed under ACL-safe mode. Documented in `/local/docs/agents/node.env.md`. |
-| `DISCORD_ROLE_ACL_FALLBACK_HIERARCHY` | `csv string` | role names in priority order | unset | Still used by `/local/plugins/public/discord/scripts/discord_role_acl_sync.py` as a role-name fallback when live role fetch is unavailable. Documented in `/local/docs/agents/node.env.md`. |
+| `DISCORD_ROLE_ACL_SAFE_COMMANDS` | `csv string` | command names such as `status,help,usage,provider` | `status,help,usage,provider` | Used by the Discord slash governance runtime to define commands that remain allowed under ACL-safe mode. Documented in `/local/docs/agents/node.env.md`. |
+| `DISCORD_ROLE_ACL_FALLBACK_HIERARCHY` | `csv string` | role names in priority order | unset | Used by the Discord slash governance runtime as a role-name fallback when live role fetch is unavailable. Documented in `/local/docs/agents/node.env.md`. |
 | `NVIDIA_API_KEY` | `string` | API key | none | NVIDIA provider credential. |
 | `OPENROUTER_API_KEY` | `string` | API key | none | OpenRouter credential. |
 | `MINIMAX_API_KEY` | `string` | API key | none | MiniMax credential. |

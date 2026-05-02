@@ -1,0 +1,243 @@
+version: 1
+commands:
+  - name: status
+    namespace: global
+    handler: status
+    description: Show Hermes gateway status for this node
+    help_text: |
+      Uso do `/status`:
+      - `/status`
+      - `/status help`
+
+      Comportamento:
+      - mostra status da sessão atual, atividade, tokens e roteamento de modelo
+      - quando o override do plugin está habilitado, responde com status governado por canal
+      - quando desabilitado via `/slash`, o Hermes builtin `/status` volta a ser usado
+    default_enabled: true
+    can_disable: true
+    builtin_fallback: true
+    type: 1
+    options:
+      - type: 3
+        name: action
+        description: Optional status action
+        required: false
+        choices:
+          - name: help
+            value: help
+  - name: model
+    namespace: global
+    handler: model
+    description: Switch Hermes models from Discord and save successful selections
+    help_text: |
+      Uso do `/model`:
+      - `/model name:deepseek-ai/deepseek-v4-pro provider:nvidia`
+      - `/model provider:nvidia`
+      - `/model list:configured`
+      - `/model list:available`
+      - `/model name:gpt-5.4 provider:openai-codex global:true`
+
+      Comportamento:
+      - usa o runtime nativo do Hermes para validar e trocar provider/model
+      - quando a troca funciona, grava provider/model em `governance/models.json`
+      - `/model list:configured` mostra o catálogo salvo pelo plugin
+      - `/model list:available` mostra os catálogos dos providers autenticados
+    default_enabled: true
+    can_disable: true
+    builtin_fallback: true
+    type: 1
+    options:
+      - type: 3
+        name: name
+        description: Model id to switch to
+        required: false
+      - type: 3
+        name: provider
+        description: Optional provider slug
+        required: false
+      - type: 3
+        name: list
+        description: configured, available or help
+        required: false
+        choices:
+          - name: configured
+            value: configured
+          - name: available
+            value: available
+          - name: help
+            value: help
+      - type: 5
+        name: global
+        description: Persist this model switch to config.yaml
+        required: false
+  - name: acl
+    namespace: global
+    handler: acl
+    description: Manage Discord command and channel ACL policy
+    help_text: |
+      Uso do `/acl`:
+      - `/acl command:faltas role:gerente`
+      - `/acl command command:metricas role:gerente`
+      - `/acl channel channel:123456 mode:specific model_key:nemotron120b allowed_commands:faltas always_allowed_commands:status default_action:skill:add free_text_policy:strict_item`
+      - `/acl channel channel:1497340589191204898 mode:specific model_key:gpt54 allowed_commands:scientific-paper-meta-analysis allowed_skills:scientific-paper-meta-analysis always_allowed_commands:status default_action:command:scientific-paper-meta-analysis`
+      - `/acl channel channel:123456 mode:default`
+
+      Comportamento:
+      - `/acl command` atualiza a role mínima do comando no node atual
+      - `/acl channel` atualiza a política do canal no node atual
+      - `default_action:command:<nome>` transforma texto livre em `/<nome> ...`
+      - `/acl help` mostra esta ajuda
+    default_enabled: true
+    can_disable: true
+    type: 1
+    options:
+      - type: 3
+        name: action
+        description: help, command ou channel
+        required: false
+        choices:
+          - name: help
+            value: help
+          - name: command
+            value: command
+          - name: channel
+            value: channel
+      - type: 3
+        name: channel
+        description: Discord channel id for action:channel
+        required: false
+      - type: 3
+        name: mode
+        description: default or specific for action:channel
+        required: false
+        choices:
+          - name: default
+            value: default
+          - name: specific
+            value: specific
+      - type: 3
+        name: model_key
+        description: Model key for action:channel mode:specific
+        required: false
+      - type: 3
+        name: allowed_commands
+        description: CSV of allowed slash commands
+        required: false
+      - type: 3
+        name: allowed_skills
+        description: CSV of allowed skills
+        required: false
+      - type: 3
+        name: always_allowed_commands
+        description: CSV of always-allowed commands
+        required: false
+      - type: 3
+        name: default_action
+        description: skill:add or command:<name>
+        required: false
+      - type: 3
+        name: free_text_policy
+        description: auto_add or strict_item
+        required: false
+      - type: 3
+        name: instructions
+        description: Extra instructions for the conditioned channel
+        required: false
+      - type: 3
+        name: label
+        description: Optional fixed label for channel automation
+        required: false
+      - type: 3
+        name: command
+        description: Target slash command for action:command
+        required: false
+      - type: 3
+        name: role
+        description: Required role token for action:command
+        required: false
+      - type: 3
+        name: args
+        description: Legacy free-form ACL arguments
+        required: false
+  - name: slash
+    namespace: global
+    handler: slash
+    description: List and toggle plugin-owned Discord slash commands
+    help_text: |
+      Uso do `/slash`:
+      - `/slash`
+      - `/slash help`
+      - `/slash command:faltas enable:true`
+      - `/slash command:status enable:false`
+
+      Namespaces:
+      - `global`: comandos distribuíveis pelo plugin e habilitados por padrão
+      - `custom`: comandos específicos deste deployment/node, habilitados por node
+
+      Comportamento:
+      - `/slash` lista comandos `global` e `custom`
+      - `/slash` não pode ser desabilitado
+      - desabilitar `/status` remove apenas o override do plugin e mantém o builtin do Hermes
+    default_enabled: true
+    can_disable: false
+    type: 1
+    options:
+      - type: 3
+        name: command
+        description: Command name to inspect or toggle
+        required: false
+      - type: 5
+        name: enable
+        description: Enable or disable the selected command
+        required: false
+  - name: clean
+    namespace: global
+    handler: clean
+    description: Clean all deletable messages in the current Discord channel
+    help_text: |
+      Uso do `/clean`:
+      - `/clean confirm:true`
+
+      Comportamento:
+      - exige confirmação explícita
+      - exige permissão `Administrator` ou `Manage Messages` do usuário
+      - exige permissão `Manage Messages` do bot no canal/thread
+      - apaga mensagens deletáveis do canal/thread atual e reporta o resumo de forma efêmera
+    default_enabled: true
+    can_disable: true
+    default_member_permissions: "8192"
+    dm_permission: false
+    type: 1
+    options:
+      - type: 5
+        name: confirm
+        description: Confirm deletion of all deletable messages in this channel
+        required: true
+  - name: scientific-paper-meta-analysis
+    namespace: global
+    handler: scientific-paper-meta-analysis
+    description: Run the scientific paper meta-analysis workflow
+    help_text: |
+      Uso do `/scientific-paper-meta-analysis`:
+      - `/scientific-paper-meta-analysis help`
+      - `/scientific-paper-meta-analysis query:"tema do paper"`
+
+      Comportamento:
+      - executa o pipeline cientifico canonico do Paracelsus
+      - persiste resultados em `/local/datas/paracelsus/`
+      - retorna um relatório final de meta-analysis com ranking, caveats e estatísticas de cache
+    default_enabled: false
+    can_disable: true
+    type: 1
+    options:
+      - type: 3
+        name: query
+        description: Topic or query for the future meta-analysis workflow
+        required: false
+      - type: 3
+        name: action
+        description: Optional action
+        required: false
+        choices:
+          - name: help
+            value: help

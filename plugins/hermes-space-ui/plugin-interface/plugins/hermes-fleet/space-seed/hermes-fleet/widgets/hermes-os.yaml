@@ -1,0 +1,152 @@
+schema: space-widget/v1
+id: hermes-os
+name: Resources Monitor
+cols: 5
+rows: 7
+col: -11
+row: -5
+renderer: |-
+  async (parent) => {
+    const HERMES_URL = "__HERMES_SPACE_URL__";
+    if (parent.__hermesResourcesTimer) clearInterval(parent.__hermesResourcesTimer);
+    parent.innerHTML = "";
+    parent.style.cssText = "height:100%;overflow:hidden;color:#eff6ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+
+    const style = document.createElement("style");
+    style.textContent = `
+      .hrm-root{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px;}
+      .hrm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
+      .hrm-title{font-size:18px;font-weight:750;line-height:1.15;}
+      .hrm-sub{font-size:11px;color:#9fb0c9;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:250px;}
+      .hrm-live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#a9bbd3;white-space:nowrap;}
+      .hrm-dot{width:8px;height:8px;border-radius:50%;background:#7ce4b0;box-shadow:0 0 0 3px rgba(124,228,176,.12);}
+      .hrm-dot.warn{background:#facc15;box-shadow:0 0 0 3px rgba(250,204,21,.12);}
+      .hrm-body{min-height:0;display:grid;grid-template-rows:repeat(6,minmax(0,1fr));gap:8px;}
+      .hrm-row{min-height:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;border-top:1px solid rgba(148,167,201,.08);padding-top:8px;}
+      .hrm-row:first-child{border-top:0;padding-top:0;}
+      .hrm-label{font-size:12px;color:#dceaff;font-weight:650;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .hrm-detail{font-size:11px;color:#8fa4bf;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .hrm-value{font-size:12px;color:#eff6ff;font-weight:750;text-align:right;white-space:nowrap;}
+      .hrm-bar{grid-column:1/-1;height:6px;border-radius:999px;background:rgba(148,167,201,.12);overflow:hidden;}
+      .hrm-fill{height:100%;width:0%;border-radius:999px;background:linear-gradient(90deg,#7ddcff,#7ce4b0);transition:width .28s ease;}
+      .hrm-fill.hot{background:linear-gradient(90deg,#facc15,#f87171);}
+      .hrm-error{font-size:12px;color:#fca5a5;line-height:1.35;}
+    `;
+    parent.appendChild(style);
+
+    const root = document.createElement("div");
+    root.className = "hrm-root";
+    root.innerHTML = `
+      <div class="hrm-head">
+        <div>
+          <div class="hrm-title">Resources Monitor</div>
+          <div class="hrm-sub" data-role="host">Bridge: ${HERMES_URL}</div>
+        </div>
+        <div class="hrm-live"><span class="hrm-dot" data-role="dot"></span><span data-role="freshness">Live</span></div>
+      </div>
+      <div class="hrm-body" data-role="body"></div>
+    `;
+    parent.appendChild(root);
+
+    const bodyEl = root.querySelector("[data-role='body']");
+    const hostEl = root.querySelector("[data-role='host']");
+    const freshnessEl = root.querySelector("[data-role='freshness']");
+    const dotEl = root.querySelector("[data-role='dot']");
+
+    function formatBytes(value) {
+      const bytes = Number(value || 0);
+      if (!bytes) return "0 B";
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+      return `${(bytes / Math.pow(1024, index)).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+    }
+
+    function pct(value) {
+      if (value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
+      return `${Number(value).toFixed(1)}%`;
+    }
+
+    const rowKeys = [
+      ["nodes", "Nodes"],
+      ["cpu", "CPU"],
+      ["memory", "Memory"],
+      ["disk", "Disk"],
+      ["processes", "Processes"],
+      ["uptime", "Uptime"]
+    ];
+
+    bodyEl.innerHTML = rowKeys.map(([key, label]) => `
+      <div class="hrm-row" data-row="${key}">
+        <div>
+          <div class="hrm-label" data-role="label">${label}</div>
+          <div class="hrm-detail" data-role="detail">Waiting for bridge telemetry</div>
+        </div>
+        <div class="hrm-value" data-role="value">...</div>
+        <div class="hrm-bar"><div class="hrm-fill" data-role="fill"></div></div>
+      </div>
+    `).join("");
+
+    const rows = Object.fromEntries(Array.from(bodyEl.querySelectorAll("[data-row]")).map((el) => [el.dataset.row, el]));
+
+    function updateRow(key, label, value, detail, percentValue) {
+      const row = rows[key];
+      if (!row) return;
+      const hot = Number(percentValue || 0) >= 85;
+      const safePercent = Math.max(0, Math.min(100, Number(percentValue || 0)));
+      row.querySelector("[data-role='label']").textContent = label;
+      row.querySelector("[data-role='value']").textContent = value;
+      row.querySelector("[data-role='detail']").textContent = detail || "";
+      const fill = row.querySelector("[data-role='fill']");
+      fill.classList.toggle("hot", hot);
+      fill.style.width = `${safePercent}%`;
+    }
+
+    async function hermes(path) {
+      const response = await space.fetchExternal(HERMES_URL + path, {
+        headers: { "Content-Type": "application/json" }
+      });
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; }
+      catch { data = { ok: false, error: { message: text.slice(0, 500) } }; }
+      if (!response.ok || data.ok === false) {
+        throw new Error(data?.error?.message || `HTTP ${response.status}`);
+      }
+      return data;
+    }
+
+    async function refresh() {
+      try {
+        freshnessEl.textContent = "Updating";
+        dotEl.classList.remove("warn");
+        const [resourceData, nodeData] = await Promise.all([
+          hermes("/resources"),
+          hermes("/nodes").catch(() => ({ nodes: [] }))
+        ]);
+        const resources = resourceData.resources || {};
+        const nodes = Array.isArray(nodeData.nodes) ? nodeData.nodes : [];
+        const runningNodes = nodes.filter((node) => node.running).length;
+        const memory = resources.memory || {};
+        const disk = resources.disk || {};
+        const cpu = resources.cpu || {};
+        const uptime = resources.uptime || {};
+        const processes = resources.processes || {};
+        const load = cpu.load_avg || {};
+        hostEl.textContent = resources.host?.root || "/local";
+        updateRow("nodes", "Nodes", `${runningNodes}/${nodes.length}`, "running Hermes nodes", nodes.length ? runningNodes * 100 / nodes.length : 0);
+        updateRow("cpu", "CPU", pct(cpu.percent), `${cpu.cores || 1} cores / load ${load["1m"] ?? "n/a"}, ${load["5m"] ?? "n/a"}, ${load["15m"] ?? "n/a"}`, cpu.percent);
+        updateRow("memory", "Memory", pct(memory.percent), `${formatBytes(memory.used_bytes)} used / ${formatBytes(memory.total_bytes)} total`, memory.percent);
+        updateRow("disk", "Disk", pct(disk.percent), `${formatBytes(disk.used_bytes)} used / ${formatBytes(disk.total_bytes)} total`, disk.percent);
+        updateRow("processes", "Processes", String(processes.count || 0), "host VM process table", Math.min(100, Number(processes.count || 0) / 6));
+        updateRow("uptime", "Uptime", uptime.display || "n/a", "orchestrator host VM", 100);
+        freshnessEl.textContent = new Date().toLocaleTimeString();
+      } catch (error) {
+        dotEl.classList.add("warn");
+        freshnessEl.textContent = "Stale";
+        updateRow("nodes", "Bridge", "Stale", `Error: ${error.message || error}`, 0);
+      }
+    }
+
+    await refresh();
+    parent.__hermesResourcesTimer = setInterval(refresh, 3000);
+  }

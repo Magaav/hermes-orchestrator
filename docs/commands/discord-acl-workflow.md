@@ -3,8 +3,8 @@
 ## 1) Role Mapping
 
 1. Run ACL sync:
-   - `python3 /local/plugins/public/discord/scripts/discord_role_acl_sync.py`
-2. Open `/local/plugins/private/discord/acl/<node>_acl.json`.
+   - use `/slash` or the canonical `discord-slash-commands` bootstrap to reconcile commands
+2. Open `/local/agents/nodes/<node>/workspace/plugins/discord-slash-commands/cache/governance/acl.json`.
 3. Confirm hierarchy order (`admin` on top, `@everyone` at bottom).
 4. Map commands with `/acl command`.
 
@@ -23,7 +23,7 @@ Tips:
 
 Policy is persisted in:
 
-- `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
+- `/local/agents/nodes/<node>/workspace/plugins/discord-slash-commands/cache/governance/channel_acl.yaml`
 
 ## 3) New Command Onboarding
 
@@ -32,7 +32,7 @@ Policy is persisted in:
 3. Map permission:
    - `/acl command command:<new_command> role:<discord_role>`
 4. Validate prestart contract:
-   - `python3 /local/plugins/public/discord/scripts/discord_acl_contract_check.py`
+   - confirm `/slash` lists the command and `/acl command` enforces the expected role
 
 ## 4) Thread/Channel Block Troubleshooting
 
@@ -42,7 +42,7 @@ If a thread in an allowed parent channel is blocked:
 2. Ensure `chat_id_alt` is populated for thread invocations.
 3. Ensure parent channel is in `FALTAS_OPERATIONAL_CHANNEL_IDS`.
 4. Ensure restricted channel `model_key` exists in:
-   - `/local/plugins/private/discord/models/<node>_models.json`
+   - `/local/agents/nodes/<node>/workspace/plugins/discord-slash-commands/cache/governance/models.json`
 5. Run strict prestart and verify ACL steps pass:
-   - `discord_role_acl_sync`
-   - `discord_acl_contract_check`
+   - command reconciliation
+   - ACL/channel governance validation

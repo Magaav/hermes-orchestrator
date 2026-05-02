@@ -1,0 +1,36 @@
+id: hermes/fleet
+name: Hermes Fleet
+version: 0.1.0
+description: Hermes Orchestrator fleet controls for Space Agent.
+capabilities:
+  - theme
+  - actions
+  - browser-runtime
+  - bridge-sync
+extension_points:
+  - _core/framework/theme/end
+  - _core/framework/head/end
+  - _core/framework/initializer.js/initialize/end
+  - _core/web_browsing/browser-guest-runtime.js/buildBrowserGuestRuntimeScriptPaths/end
+compatibility:
+  space_agent: ">=0.65"
+config_defaults:
+  bridge_url: http://127.0.0.1:8790
+  fleet_space_id: hermes-os
+actions:
+  - id: hermes.fleet.open
+    title: Open Hermes OS
+    capability: actions
+    description: Open the Hermes OS workspace.
+  - id: hermes.node.inspect
+    title: Inspect Hermes node
+    capability: actions
+    description: Read status for one Hermes Orchestrator node.
+  - id: hermes.node.tail_logs
+    title: Tail Hermes node logs
+    capability: actions
+    description: Read recent logs for one Hermes Orchestrator node.
+  - id: hermes.node.restart
+    title: Restart Hermes node
+    capability: actions
+    description: Request a safe orchestrator-managed node restart.

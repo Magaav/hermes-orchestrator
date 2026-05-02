@@ -1,10 +1,14 @@
 import {
+  getDashboardChannelDetail,
+  getDashboardChannelSeries,
+  getDashboardNodeChannels,
   getCapabilities,
   getGuardStatus,
   getNodeActivity,
   getNodeGuard,
   getNodeLogs,
   getNodeStatus,
+  listDashboardNodes,
   listNodes,
   runNodeAction,
 } from './api.js'
@@ -21,6 +25,19 @@ const CHANNEL_LABELS = {
 const TONE_CLASSES = ['tone-good', 'tone-watch', 'tone-critical', 'tone-neutral']
 const GOOD_STATUSES = new Set(['running', 'healthy', 'ok'])
 const ACTIVITY_LIMIT = 18
+const DASHBOARD_REFRESH_SECONDS = 12
+const HEADER_COPY = {
+  ops: {
+    title: 'Fleet Control Surface',
+    subtitle: 'Freshness-first node operations, live diagnostics, and guided debugging layered over clone_manager.py.',
+    note: 'Safe actions only. CLI remains canonical.',
+  },
+  dashboards: {
+    title: 'Paracelsus Monitoring Surface',
+    subtitle: 'One scientific dashboard: tokens in, papers in, and the evidence trail that explains how the registry is compounding.',
+    note: 'Dashboard mode stays ACL-scoped and plugin-owned.',
+  },
+}
 
 const state = {
   capabilities: null,
@@ -44,11 +61,34 @@ const state = {
   connectionMuted: true,
   analyzerLabel: 'pending',
   actionLocked: false,
+  view: 'dashboards',
+  dashboardNodes: [],
+  dashboardSelectedNode: null,
+  dashboardSelectedChannel: '',
+  dashboardNodeOverview: null,
+  dashboardChannelDetail: null,
+  dashboardSeries: {
+    day: [],
+    week: [],
+    month: [],
+  },
+  dashboardRefreshRemaining: 12,
+  dashboardLastRefreshAt: null,
+  dashboardRefreshing: false,
 }
+
+let dashboardChart = null
+let dashboardChartHost = null
+let dashboardChartResizeObserver = null
+let dashboardChartResizeTimer = 0
+let dashboardWindowResizeBound = false
 
 const elements = {
   featureBadge: document.getElementById('featureBadge'),
   connectionBadge: document.getElementById('connectionBadge'),
+  headerTitle: document.getElementById('headerTitle'),
+  headerSubtitle: document.getElementById('headerSubtitle'),
+  headerNote: document.getElementById('headerNote'),
   fleetPostureCard: document.getElementById('fleetPostureCard'),
   fleetPostureValue: document.getElementById('fleetPostureValue'),
   fleetPostureMeta: document.getElementById('fleetPostureMeta'),
@@ -92,6 +132,26 @@ const elements = {
   logOutput: document.getElementById('logOutput'),
   heatmap: document.getElementById('heatmap'),
   toastRack: document.getElementById('toastRack'),
+  opsModeBtn: document.getElementById('opsModeBtn'),
+  dashboardsModeBtn: document.getElementById('dashboardsModeBtn'),
+  opsWorkspace: document.getElementById('opsWorkspace'),
+  dashboardWorkspace: document.getElementById('dashboardWorkspace'),
+  refreshDashboardBtn: document.getElementById('refreshDashboardBtn'),
+  dashboardRefreshBadge: document.getElementById('dashboardRefreshBadge'),
+  dashboardRefreshStatus: document.getElementById('dashboardRefreshStatus'),
+  dashboardLastEventValue: document.getElementById('dashboardLastEventValue'),
+  dashboardLastPaperValue: document.getElementById('dashboardLastPaperValue'),
+  dashboardNodesList: document.getElementById('dashboardNodesList'),
+  dashboardNodeTitle: document.getElementById('dashboardNodeTitle'),
+  dashboardNodeSummary: document.getElementById('dashboardNodeSummary'),
+  dashboardNodeSignalStrip: document.getElementById('dashboardNodeSignalStrip'),
+  dashboardSummaryGrid: document.getElementById('dashboardSummaryGrid'),
+  dashboardChannelsList: document.getElementById('dashboardChannelsList'),
+  dashboardSeriesStrip: document.getElementById('dashboardSeriesStrip'),
+  dashboardCacheList: document.getElementById('dashboardCacheList'),
+  dashboardSessionsList: document.getElementById('dashboardSessionsList'),
+  dashboardProcessingList: document.getElementById('dashboardProcessingList'),
+  dashboardLatestPapersList: document.getElementById('dashboardLatestPapersList'),
 }
 
 const actionButtons = [
@@ -113,6 +173,16 @@ function pluralize(count, singular, plural = `${singular}s`) {
   return count === 1 ? singular : plural
 }
 
+function formatNumber(value) {
+  return Number(value || 0).toLocaleString()
+}
+
+function formatPercent(value, fractionDigits = 0) {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 'n/a'
+  return `${numeric.toFixed(fractionDigits)}%`
+}
+
 function startCase(value) {
   const normalized = String(value || '').trim().replaceAll('_', ' ').replaceAll('-', ' ')
   if (!normalized) return 'Unknown'
@@ -127,6 +197,26 @@ function truncateText(value, max = 160) {
 
 function humanizeChannel(channel) {
   return CHANNEL_LABELS[channel] || startCase(channel)
+}
+
+function isDefaultDashboardChannelLabel(label) {
+  return /^channel-\d{4,}$/.test(String(label || '').trim())
+}
+
+function dashboardChannelDisplayName(channel) {
+  if (!channel) return 'No channel selected'
+
+  const label = String(channel.label || '').trim()
+  if (label && !isDefaultDashboardChannelLabel(label)) {
+    return label
+  }
+
+  const commandLabel = asArray(channel.allowed_commands)[0] || asArray(channel.allowed_skills)[0] || ''
+  if (commandLabel) {
+    return startCase(String(commandLabel).replaceAll('-', ' '))
+  }
+
+  return label || String(channel.channel_id || 'Unknown Channel')
 }
 
 function toneFromGuardDecision(decision) {
@@ -180,6 +270,28 @@ function formatClock(ts) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function formatRelativeTime(ts) {
+  if (!ts) return 'waiting'
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return String(ts)
+  const diffMs = Date.now() - date.getTime()
+  const diffSeconds = Math.max(0, Math.round(diffMs / 1000))
+  if (diffSeconds < 60) return `${diffSeconds}s ago`
+  const diffMinutes = Math.round(diffSeconds / 60)
+  if (diffMinutes < 60) return `${diffMinutes}m ago`
+  const diffHours = Math.round(diffMinutes / 60)
+  if (diffHours < 48) return `${diffHours}h ago`
+  const diffDays = Math.round(diffHours / 24)
+  return `${diffDays}d ago`
+}
+
+function formatDashboardStamp(ts) {
+  if (!ts) return 'Waiting'
+  const date = new Date(ts)
+  if (Number.isNaN(date.getTime())) return String(ts)
+  return `${formatRelativeTime(ts)} · ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
 }
 
 function shortenPath(path, parts = 3) {
@@ -244,6 +356,68 @@ function metricCardHtml(title, headline, tone, rows) {
     <article class="meta-card tone-${tone}">
       <p class="meta-kicker">${escapeHtml(title)}</p>
       <h3>${escapeHtml(headline)}</h3>
+      <div class="meta-rows">${rowsHtml}</div>
+    </article>
+  `
+}
+
+function sumSeries(points, key) {
+  return asArray(points).reduce((sum, point) => sum + Number(point?.[key] || 0), 0)
+}
+
+function peakSeriesPoint(points, key) {
+  return asArray(points).reduce((best, point) => {
+    const value = Number(point?.[key] || 0)
+    if (!best || value > Number(best?.[key] || 0)) {
+      return point
+    }
+    return best
+  }, null)
+}
+
+function sparklineSvg(points, key, tone = 'watch') {
+  const values = asArray(points).map((point) => Number(point?.[key] || 0))
+  if (!values.length) {
+    return '<div class="dashboard-sparkline is-empty">No curve yet</div>'
+  }
+  const width = 180
+  const height = 56
+  const padding = 6
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = Math.max(1, max - min)
+  const path = values
+    .map((value, index) => {
+      const x = padding + ((width - padding * 2) * index) / Math.max(1, values.length - 1)
+      const y = height - padding - ((value - min) / span) * (height - padding * 2)
+      return `${index === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`
+    })
+    .join(' ')
+  const area = `${path} L ${width - padding} ${height - padding} L ${padding} ${height - padding} Z`
+  return `
+    <div class="dashboard-sparkline tone-${tone}">
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-hidden="true">
+        <path class="dashboard-sparkline-area" d="${area}"></path>
+        <path class="dashboard-sparkline-line" d="${path}"></path>
+      </svg>
+    </div>
+  `
+}
+
+function dashboardCurveCardHtml(title, headline, tone, points, valueKey, rows) {
+  const rowsHtml = rows
+    .map((row) => `
+      <div class="meta-row">
+        <span>${escapeHtml(row.label)}</span>
+        <strong>${escapeHtml(row.value)}</strong>
+      </div>
+    `)
+    .join('')
+  return `
+    <article class="meta-card tone-${tone} dashboard-curve-card">
+      <p class="meta-kicker">${escapeHtml(title)}</p>
+      <h3>${escapeHtml(headline)}</h3>
+      ${sparklineSvg(points, valueKey, tone)}
       <div class="meta-rows">${rowsHtml}</div>
     </article>
   `
@@ -1051,7 +1225,7 @@ function renderHeatmap(buckets) {
 
     const cell = document.createElement('div')
     cell.className = 'heat-cell'
-    cell.style.background = `rgba(73, 214, 195, ${alpha.toFixed(3)})`
+    cell.style.background = `rgba(248, 149, 33, ${alpha.toFixed(3)})`
     cell.title = `${String(hour).padStart(2, '0')}:00 count=${count} warning=${Number(
       bucket.warning || 0,
     )} error=${Number(bucket.error || 0)}`
@@ -1166,6 +1340,861 @@ function updateActionButtons() {
     const availability = getActionAvailability(action)
     button.disabled = !availability.enabled
     button.title = availability.reason
+  }
+}
+
+function setView(view) {
+  state.view = view === 'dashboards' ? 'dashboards' : 'ops'
+  elements.opsWorkspace.classList.toggle('hidden', state.view !== 'ops')
+  elements.dashboardWorkspace.classList.toggle('hidden', state.view !== 'dashboards')
+  elements.opsModeBtn.classList.toggle('is-active', state.view === 'ops')
+  elements.dashboardsModeBtn.classList.toggle('is-active', state.view === 'dashboards')
+  document.body.classList.toggle('dashboard-mode', state.view === 'dashboards')
+  renderModeHeader()
+  renderDashboardRefreshState()
+}
+
+function renderModeHeader() {
+  const copy = state.view === 'dashboards' ? HEADER_COPY.dashboards : HEADER_COPY.ops
+  if (elements.headerTitle) {
+    elements.headerTitle.textContent = copy.title
+  }
+  if (elements.headerSubtitle) {
+    elements.headerSubtitle.textContent = copy.subtitle
+  }
+  if (elements.headerNote) {
+    elements.headerNote.textContent = copy.note
+  }
+}
+
+function dashboardNodeTone(node) {
+  const totalPapers = Number(node?.extras?.cache?.total_papers || 0)
+  const totalQueries = asArray(node?.extras?.cache?.event_series).reduce(
+    (sum, point) => sum + Number(point?.query_count || 0),
+    0,
+  )
+  const totalTokens = Number(node?.totals?.total_tokens || 0)
+  const sessions = Number(node?.totals?.session_count || 0)
+  if (totalPapers > 0 || totalQueries > 0) return 'good'
+  if (totalTokens > 0 || sessions > 0) return 'good'
+  return 'neutral'
+}
+
+function dashboardCache() {
+  return state.dashboardChannelDetail?.extras?.cache || state.dashboardNodeOverview?.extras?.cache || null
+}
+
+function dashboardHitRate(cache) {
+  const hits = Number(cache?.cache_hits || 0)
+  const misses = Number(cache?.cache_misses || 0)
+  const total = hits + misses
+  return total > 0 ? (hits / total) * 100 : NaN
+}
+
+function dashboardCacheModeTone(mode) {
+  const text = String(mode || '').toLowerCase()
+  if (text === 'hit') return 'good'
+  if (text === 'mixed') return 'watch'
+  if (text === 'miss') return 'neutral'
+  return 'neutral'
+}
+
+function dashboardQueryHtml(query) {
+  const tone = dashboardCacheModeTone(query.cache_mode)
+  return `
+    <article class="dashboard-feed-card tone-${tone}">
+      <div class="dashboard-feed-head">
+        <strong>${escapeHtml(truncateText(query.query || 'Scientific cache event', 88))}</strong>
+        <span>${escapeHtml(formatDashboardStamp(query.ts))}</span>
+      </div>
+      <p>${escapeHtml(`report ${query.report_id || 'pending'} · raw ${formatNumber(query.total_raw || 0)} · ranked ${formatNumber(query.total_deduplicated || query.papers_returned || 0)}`)}</p>
+      <div class="timeline-meta-row">
+        ${signalChipHtml(startCase(query.cache_mode || 'tracked'), tone)}
+        ${signalChipHtml(`hit ${formatNumber(query.cache_hits || 0)}`, 'neutral')}
+        ${signalChipHtml(`new ${formatNumber(query.asset_downloads || 0)} assets`, 'watch')}
+      </div>
+    </article>
+  `
+}
+
+function dashboardSessionActivityTone(session) {
+  const stamp = session?.ended_at || session?.started_at || ''
+  if (!stamp) return 'neutral'
+  const ageMs = Date.now() - new Date(stamp).getTime()
+  if (!Number.isFinite(ageMs)) return 'neutral'
+  if (ageMs <= 3 * 60 * 1000) return 'good'
+  if (ageMs <= 20 * 60 * 1000) return 'watch'
+  return 'neutral'
+}
+
+function dashboardProcessingHtml(session, peakTokens = 1) {
+  const totalTokens = Number(session?.total_tokens || 0)
+  const width = Math.max(8, Math.round((totalTokens / Math.max(1, peakTokens)) * 100))
+  const tone = dashboardSessionActivityTone(session)
+  const actor = String(session?.user_name || session?.display_name || 'session').trim()
+  return `
+    <article class="dashboard-processing-card tone-${tone}">
+      <div class="dashboard-feed-head">
+        <strong>${escapeHtml(truncateText(actor, 48))}</strong>
+        <span>${escapeHtml(formatDashboardStamp(session?.ended_at || session?.started_at || ''))}</span>
+      </div>
+      <div class="dashboard-processing-bar">
+        <span class="dashboard-processing-fill tone-${tone}" style="width:${width}%"></span>
+      </div>
+      <div class="timeline-meta-row">
+        ${signalChipHtml(`${formatNumber(totalTokens)} tokens`, 'good')}
+        ${signalChipHtml(`${formatNumber(session?.message_count || 0)} messages`, 'neutral')}
+        ${signalChipHtml(`${formatNumber(session?.tool_call_count || 0)} tools`, 'watch')}
+      </div>
+    </article>
+  `
+}
+
+function dashboardPaperHtml(paper) {
+  const sources = asArray(paper.sources).filter(Boolean)
+  const tone = sources.includes('pubmed') ? 'good' : 'watch'
+  return `
+    <article class="dashboard-paper-card tone-${tone}">
+      <div class="dashboard-feed-head">
+        <strong>${escapeHtml(truncateText(paper.title || 'Untitled paper', 96))}</strong>
+        <span>${escapeHtml(formatDashboardStamp(paper.created_at))}</span>
+      </div>
+      <p>${escapeHtml(truncateText(paper.journal || 'Journal not tagged', 96))}</p>
+      <div class="timeline-meta-row">
+        ${paper.year ? signalChipHtml(String(paper.year), 'neutral') : ''}
+        ${sources.slice(0, 2).map((source) => signalChipHtml(startCase(source), 'good')).join('')}
+      </div>
+      <div class="timeline-detail">${escapeHtml(paper.http_link || '')}</div>
+    </article>
+  `
+}
+
+function dashboardSessionHtml(session) {
+  return `
+    <article class="dashboard-feed-card tone-neutral">
+      <div class="dashboard-feed-head">
+        <strong>${escapeHtml(session.display_name || session.session_id || 'Session')}</strong>
+        <span>${escapeHtml(formatDashboardStamp(session.started_at))}</span>
+      </div>
+      <p>${escapeHtml(`${formatNumber(session.message_count)} messages · ${formatNumber(session.tool_call_count)} tools · ${formatNumber(session.input_tokens)} in · ${formatNumber(session.output_tokens)} out`)}</p>
+      <div class="timeline-meta-row">
+        ${signalChipHtml(`${formatNumber(session.total_tokens || 0)} tokens`, 'neutral')}
+        ${signalChipHtml(`${formatNumber(session.api_call_count || 0)} API`, 'watch')}
+      </div>
+    </article>
+  `
+}
+
+function renderDashboardRefreshState() {
+  if (!elements.dashboardRefreshBadge || !elements.dashboardRefreshStatus) {
+    return
+  }
+  if (state.dashboardRefreshing) {
+    elements.dashboardRefreshBadge.textContent = 'Refreshing live data...'
+    elements.dashboardRefreshStatus.textContent = 'Refreshing'
+    return
+  }
+  if (state.view !== 'dashboards') {
+    elements.dashboardRefreshBadge.textContent = 'Dashboard paused'
+    elements.dashboardRefreshStatus.textContent = 'Paused'
+    return
+  }
+  const seconds = Math.max(0, Number(state.dashboardRefreshRemaining || 0))
+  elements.dashboardRefreshBadge.textContent = state.dashboardLastRefreshAt
+    ? `Refresh in ${seconds}s`
+    : 'Initial refresh pending'
+  elements.dashboardRefreshStatus.textContent = state.dashboardLastRefreshAt
+    ? formatDashboardStamp(state.dashboardLastRefreshAt)
+    : 'Waiting'
+}
+
+function startDashboardRefreshLoop() {
+  window.setInterval(async () => {
+    if (state.view !== 'dashboards' || state.dashboardRefreshing) {
+      renderDashboardRefreshState()
+      return
+    }
+    state.dashboardRefreshRemaining = Math.max(0, Number(state.dashboardRefreshRemaining || DASHBOARD_REFRESH_SECONDS) - 1)
+    renderDashboardRefreshState()
+    if (state.dashboardRefreshRemaining > 0) {
+      return
+    }
+    state.dashboardRefreshRemaining = DASHBOARD_REFRESH_SECONDS
+    await refreshDashboardNodes()
+  }, 1000)
+}
+
+function renderDashboardNodes() {
+  elements.dashboardNodesList.innerHTML = ''
+
+  if (!state.dashboardNodes.length) {
+    elements.dashboardNodesList.innerHTML = `
+      <article class="empty-state">
+        <strong>No dashboard nodes discovered.</strong>
+        <p>Enable <code>PLUGIN_DASHBOARD=true</code> on a node and refresh this view.</p>
+      </article>
+    `
+    return
+  }
+
+  for (const node of state.dashboardNodes) {
+    const tone = dashboardNodeTone(node)
+    const displayName = startCase(node.node || 'node')
+    const cache = node?.extras?.cache || null
+    const totalQueries = asArray(cache?.event_series).reduce(
+      (sum, point) => sum + Number(point?.query_count || 0),
+      0,
+    )
+    const monthlyTokens = asArray(node?.channels)
+      .reduce((sum, channel) => sum + Number(channel?.total_tokens || 0), 0)
+    const headline = cache
+      ? `${formatNumber(cache.total_papers || 0)} papers`
+      : `${formatNumber(monthlyTokens || node?.totals?.total_tokens || 0)} tokens`
+    const card = document.createElement('button')
+    card.type = 'button'
+    card.className = `node-card tone-${tone}`
+    if (node.node === state.dashboardSelectedNode) {
+      card.classList.add('is-selected')
+    }
+    card.innerHTML = `
+      <div class="node-card-top">
+        <div>
+          <div class="node-title-row">
+            <span class="node-name">${escapeHtml(displayName)}</span>
+            <span class="node-priority tone-${tone}">${escapeHtml(startCase(tone))}</span>
+          </div>
+          <p class="node-subline">
+            ${cache
+              ? `${formatNumber(totalQueries)} queries · ${formatNumber(monthlyTokens)} tokens tracked`
+              : `${formatNumber(node?.totals?.channel_count || 0)} channels · ${formatNumber(monthlyTokens)} tokens`}
+          </p>
+        </div>
+        <span class="node-status-pill tone-${tone}">
+          ${escapeHtml(headline)}
+        </span>
+      </div>
+      <div class="node-chip-row">
+        ${cache
+          ? signalChipHtml(`${formatNumber(cache.papers_today || 0)} today`, 'watch')
+          : signalChipHtml(`${formatNumber(node?.totals?.input_tokens || 0)} in`, 'neutral')}
+        ${cache
+          ? signalChipHtml(`${formatNumber(cache.asset_downloads || 0)} new assets`, 'good')
+          : signalChipHtml(`${formatNumber(node?.totals?.output_tokens || 0)} out`, 'neutral')}
+        ${cache
+          ? signalChipHtml(formatPercent(dashboardHitRate(cache)), 'neutral')
+          : signalChipHtml(`${formatNumber(node?.totals?.message_count || 0)} msgs`, tone)}
+      </div>
+    `
+    card.addEventListener('click', async () => {
+      await loadDashboardNode(node.node, false)
+    })
+    elements.dashboardNodesList.appendChild(card)
+  }
+}
+
+function disposeDashboardChart() {
+  dashboardChart?.dispose?.()
+  dashboardChart = null
+  dashboardChartHost = null
+  if (dashboardChartResizeObserver) {
+    dashboardChartResizeObserver.disconnect()
+    dashboardChartResizeObserver = null
+  }
+  if (dashboardChartResizeTimer) {
+    window.clearTimeout(dashboardChartResizeTimer)
+    dashboardChartResizeTimer = 0
+  }
+}
+
+function scheduleDashboardChartResize() {
+  if (!dashboardChart) return
+  window.requestAnimationFrame(() => {
+    dashboardChart?.resize?.()
+  })
+  if (dashboardChartResizeTimer) {
+    window.clearTimeout(dashboardChartResizeTimer)
+  }
+  dashboardChartResizeTimer = window.setTimeout(() => {
+    dashboardChart?.resize?.()
+    dashboardChartResizeTimer = 0
+  }, 150)
+}
+
+function buildDashboardSeriesPoints(paperSeries, eventSeries, tokenSeries) {
+  const eventMap = new Map(eventSeries.map((point) => [String(point.bucket || ''), point]))
+  const paperMap = new Map(paperSeries.map((point) => [String(point.bucket || ''), point]))
+  const tokenMap = new Map(tokenSeries.map((point) => [String(point.bucket || ''), point]))
+  const bucketOrder = [
+    ...new Set([
+      ...tokenSeries.map((point) => String(point.bucket || '')),
+      ...paperSeries.map((point) => String(point.bucket || '')),
+      ...eventSeries.map((point) => String(point.bucket || '')),
+    ]),
+  ]
+  return bucketOrder.map((bucket) => ({
+    bucket,
+    totalTokens: Number(tokenMap.get(bucket)?.total_tokens || 0),
+    papersAdded: Number(paperMap.get(bucket)?.papers_added || 0),
+    cumulativePapers: Number(paperMap.get(bucket)?.cumulative_papers || 0),
+    queryCount: Number(eventMap.get(bucket)?.query_count || 0),
+  }))
+}
+
+function bindDashboardChartResize(host) {
+  if (!host) return
+
+  if (!dashboardWindowResizeBound) {
+    window.addEventListener('resize', scheduleDashboardChartResize)
+    dashboardWindowResizeBound = true
+  }
+
+  if (typeof window.ResizeObserver !== 'function') return
+
+  if (!dashboardChartResizeObserver) {
+    dashboardChartResizeObserver = new window.ResizeObserver(() => {
+      scheduleDashboardChartResize()
+    })
+  } else {
+    dashboardChartResizeObserver.disconnect()
+  }
+
+  const shell = host.closest('.dashboard-chart-shell')
+  dashboardChartResizeObserver.observe(host)
+  if (shell && shell !== host) {
+    dashboardChartResizeObserver.observe(shell)
+  }
+  if (elements.dashboardSeriesStrip && elements.dashboardSeriesStrip !== shell) {
+    dashboardChartResizeObserver.observe(elements.dashboardSeriesStrip)
+  }
+}
+
+function ensureDashboardChartHost() {
+  if (!elements.dashboardSeriesStrip.querySelector('#dashboardSeriesChart')) {
+    elements.dashboardSeriesStrip.innerHTML = `
+      <div class="dashboard-chart-shell">
+        <div class="dashboard-chart-head">
+          <strong>Token Demand And Memory Growth</strong>
+          <span>Monthly token pressure, paper ingress, cumulative registry size, and query activity on one evidence surface</span>
+        </div>
+        <div id="dashboardSeriesChart" class="dashboard-chart"></div>
+      </div>
+    `
+  }
+
+  const nextHost = document.getElementById('dashboardSeriesChart')
+  if (!nextHost) return null
+
+  if (!dashboardChart || dashboardChartHost !== nextHost) {
+    disposeDashboardChart()
+    dashboardChart = window.echarts.init(nextHost)
+    dashboardChartHost = nextHost
+  }
+  bindDashboardChartResize(nextHost)
+
+  return dashboardChart
+}
+
+function dashboardChartOption(seriesPoints) {
+  return {
+    animationDuration: 180,
+    animationDurationUpdate: 180,
+    animationEasing: 'cubicOut',
+    animationEasingUpdate: 'cubicOut',
+    backgroundColor: 'transparent',
+    color: ['#8e451f', '#f89521', '#f4c682', '#dec7b0'],
+    grid: { left: 42, right: 24, top: 64, bottom: 34 },
+    tooltip: {
+      trigger: 'axis',
+      confine: true,
+      backgroundColor: 'rgba(26, 18, 14, 0.96)',
+      borderColor: 'rgba(248, 149, 33, 0.32)',
+      textStyle: { color: '#f7f0e7' },
+    },
+    legend: {
+      top: 6,
+      textStyle: { color: '#ccb8a3', fontFamily: 'Space Grotesk' },
+    },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: seriesPoints.map((point) => point.bucket),
+      axisLabel: { color: '#ccb8a3', fontSize: 11 },
+      axisLine: { lineStyle: { color: 'rgba(248, 149, 33, 0.25)' } },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: 'Tokens / queries',
+        axisLabel: { color: '#ccb8a3', fontSize: 11 },
+        splitLine: { lineStyle: { color: 'rgba(248, 149, 33, 0.12)' } },
+      },
+      {
+        type: 'value',
+        name: 'Papers',
+        axisLabel: { color: '#ccb8a3', fontSize: 11 },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: 'Tokens',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        data: seriesPoints.map((point) => point.totalTokens),
+        lineStyle: { width: 3 },
+        itemStyle: { color: '#8e451f' },
+      },
+      {
+        name: 'New papers',
+        type: 'bar',
+        yAxisIndex: 1,
+        data: seriesPoints.map((point) => point.papersAdded),
+        barMaxWidth: 18,
+        itemStyle: { borderRadius: [6, 6, 0, 0] },
+      },
+      {
+        name: 'Registry size',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        yAxisIndex: 1,
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(244, 198, 130, 0.34)' },
+              { offset: 1, color: 'rgba(244, 198, 130, 0.04)' },
+            ],
+          },
+        },
+        data: seriesPoints.map((point) => point.cumulativePapers),
+      },
+      {
+        name: 'Queries',
+        type: 'line',
+        smooth: true,
+        showSymbol: false,
+        lineStyle: { type: 'dashed' },
+        data: seriesPoints.map((point) => point.queryCount),
+      },
+    ],
+  }
+}
+
+function renderDashboardSeries() {
+  const cache = dashboardCache()
+  const paperSeries = asArray(cache?.paper_series)
+  const eventSeries = asArray(cache?.event_series)
+  const tokenSeries = asArray(state.dashboardSeries.month)
+  if (!paperSeries.length && !eventSeries.length && !tokenSeries.length) {
+    disposeDashboardChart()
+    elements.dashboardSeriesStrip.innerHTML = `
+      <article class="empty-state">
+        <strong>No growth curve yet.</strong>
+        <p>The chart will wake up as soon as Paracelsus logs token traffic or persists new papers.</p>
+      </article>
+    `
+    return
+  }
+
+  if (window.echarts && (paperSeries.length || tokenSeries.length)) {
+    const seriesPoints = buildDashboardSeriesPoints(paperSeries, eventSeries, tokenSeries)
+    const chart = ensureDashboardChartHost()
+    if (chart) {
+      chart.setOption(dashboardChartOption(seriesPoints), {
+        notMerge: false,
+        lazyUpdate: true,
+        replaceMerge: ['xAxis', 'yAxis', 'series'],
+      })
+      scheduleDashboardChartResize()
+    }
+    return
+  }
+
+  const ceiling = Math.max(1, ...paperSeries.map((point) => Number(point.cumulative_papers || 0)))
+  elements.dashboardSeriesStrip.innerHTML = `
+    <div class="dashboard-bars">
+      ${paperSeries
+        .map((point) => {
+          const totalPapers = Number(point.cumulative_papers || 0)
+          const height = Math.max(10, Math.round((totalPapers / ceiling) * 100))
+          return `
+            <article class="dashboard-bar-card">
+              <div class="dashboard-bar-head">
+                <strong>${escapeHtml(point.bucket || '--')}</strong>
+                <span>${escapeHtml(formatNumber(totalPapers))} papers</span>
+              </div>
+              <div class="dashboard-bar-track">
+                <span class="dashboard-bar-fill" style="height:${height}%"></span>
+              </div>
+              <div class="dashboard-bar-meta">
+                <span>${escapeHtml(formatNumber(point.papers_added || 0))} new</span>
+                <span>${escapeHtml(formatNumber(eventSeries.find((item) => item.bucket === point.bucket)?.query_count || 0))} queries</span>
+              </div>
+            </article>
+          `
+        })
+        .join('')}
+    </div>
+  `
+}
+
+function renderDashboardExtras() {
+  const extras = state.dashboardChannelDetail?.extras || state.dashboardNodeOverview?.extras || {}
+  const cards = []
+
+  if (extras.cache) {
+    const cache = extras.cache
+    const hitRate = dashboardHitRate(cache)
+    cards.push(
+      metricCardHtml('Registry', `${formatNumber(cache.total_papers)} papers`, 'watch', [
+        { label: 'Today', value: formatNumber(cache.papers_today || 0) },
+        { label: 'Links', value: formatNumber(cache.unique_links || 0) },
+        { label: 'Latest', value: formatRelativeTime(cache.latest_paper_ts) },
+      ]),
+    )
+    cards.push(
+      metricCardHtml('Lookup Flow', `${formatPercent(hitRate)} hit rate`, 'good', [
+        { label: 'Hits', value: formatNumber(cache.cache_hits || 0) },
+        { label: 'Misses', value: formatNumber(cache.cache_misses || 0) },
+        { label: 'Queries', value: formatNumber(asArray(cache.recent_queries).length) },
+      ]),
+    )
+    cards.push(
+      metricCardHtml('Storage', shortenPath(cache.db_path, 3), 'neutral', [
+        { label: 'Files', value: shortenPath(cache.files_root, 3), title: cache.files_root || '' },
+        { label: 'Events', value: shortenPath(cache.log_path, 3), title: cache.log_path || '' },
+        { label: 'Assets', value: formatNumber(cache.asset_directories || 0) },
+      ]),
+    )
+    if (asArray(cache.source_mix).length) {
+      cards.push(
+        metricCardHtml(
+          'Source Mix',
+          startCase(cache.source_mix[0]?.source || 'n/a'),
+          'good',
+          asArray(cache.source_mix)
+            .slice(0, 3)
+            .map((item) => ({
+              label: startCase(item.source || 'source'),
+              value: formatNumber(item.count || 0),
+            })),
+        ),
+      )
+    }
+    if (asArray(cache.top_journals).length) {
+      cards.push(
+        metricCardHtml(
+          'Top Journals',
+          cache.top_journals[0]?.journal || 'n/a',
+          'watch',
+          asArray(cache.top_journals)
+            .slice(0, 3)
+            .map((item) => ({
+              label: truncateText(item.journal || 'journal', 18),
+              value: formatNumber(item.count || 0),
+              title: item.journal || '',
+            })),
+        ),
+      )
+    }
+  }
+
+  if (extras.operations) {
+    const operations = extras.operations
+    cards.push(
+      metricCardHtml('Colmeio Ops', `${formatNumber(operations.total_operations || 0)} records`, 'good', [
+        { label: 'Top trigger', value: operations.triggers?.[0]?.trigger_name || 'n/a' },
+        { label: 'Top skill', value: operations.skills?.[0]?.skill_name || 'n/a' },
+        { label: 'Top action', value: operations.skills?.[0]?.skill_action || 'n/a' },
+      ]),
+    )
+  }
+
+  elements.dashboardCacheList.innerHTML =
+    cards.length
+      ? `
+          <div class="dashboard-extras-stack">
+            <div class="dashboard-extras-grid">${cards.join('')}</div>
+          </div>
+        `
+      : `
+          <article class="empty-state">
+            <strong>No node-specific extras yet.</strong>
+            <p>Scientific cache telemetry and Colmeio ops metrics will appear here when available.</p>
+          </article>
+        `
+}
+
+function renderDashboardWorkspace() {
+  const overview = state.dashboardNodeOverview
+  if (!overview) {
+    elements.dashboardNodeTitle.textContent = 'Paracelsus Analytics'
+    elements.dashboardNodeSummary.textContent = 'Select a dashboard-enabled node to inspect channel metrics.'
+    elements.dashboardNodeSignalStrip.innerHTML = signalChipHtml('Awaiting dashboard data', 'neutral')
+    elements.dashboardSummaryGrid.innerHTML = `
+      <article class="empty-state">
+        <strong>No dashboard node selected.</strong>
+        <p>Choose a node from the left rail to load its dashboard channels.</p>
+      </article>
+    `
+    elements.dashboardChannelsList.innerHTML = ''
+    elements.dashboardLastEventValue.textContent = 'Waiting'
+    elements.dashboardLastPaperValue.textContent = 'Waiting'
+    elements.dashboardSessionsList.innerHTML = `
+      <article class="empty-state">
+        <strong>No crawl feed yet.</strong>
+        <p>Recent Paracelsus queries will appear here once the registry lane is active.</p>
+      </article>
+    `
+    elements.dashboardProcessingList.innerHTML = `
+      <article class="empty-state">
+        <strong>No processing lane yet.</strong>
+        <p>Recent session load will appear here once the selected channel receives traffic.</p>
+      </article>
+    `
+    elements.dashboardLatestPapersList.innerHTML = `
+      <article class="empty-state">
+        <strong>No papers persisted yet.</strong>
+        <p>The latest registry entries will appear here as soon as the cache starts growing.</p>
+      </article>
+    `
+    renderDashboardSeries()
+    renderDashboardExtras()
+    renderDashboardRefreshState()
+    return
+  }
+
+  const detail = state.dashboardChannelDetail
+  const totals = overview.totals || {}
+  const selectedChannelLabel = detail ? dashboardChannelDisplayName(detail) : 'No channel selected'
+  const cache = dashboardCache()
+  const hitRate = dashboardHitRate(cache)
+  const recentQueries = asArray(cache?.recent_queries)
+  const latestPapers = asArray(cache?.latest_papers)
+  const recentSessions = asArray(detail?.recent_sessions)
+  const daySeries = asArray(state.dashboardSeries.day)
+  const weekSeries = asArray(state.dashboardSeries.week)
+  const monthSeries = asArray(state.dashboardSeries.month)
+  const totalQueries = asArray(cache?.event_series).reduce(
+    (sum, point) => sum + Number(point?.query_count || 0),
+    0,
+  )
+  const todayTokens = sumSeries(daySeries, 'total_tokens')
+  const weekTokens = sumSeries(weekSeries, 'total_tokens')
+  const monthTokens = sumSeries(monthSeries, 'total_tokens')
+  const todayPeak = peakSeriesPoint(daySeries, 'total_tokens')
+  const weekPeak = peakSeriesPoint(weekSeries, 'total_tokens')
+  const monthPeak = peakSeriesPoint(monthSeries, 'total_tokens')
+
+  elements.dashboardNodeTitle.textContent = `${startCase(overview.node || 'node')} Analytics`
+  elements.dashboardNodeSummary.textContent =
+    `${selectedChannelLabel} · ${formatNumber(cache?.total_papers || 0)} registry papers · ${formatNumber(monthTokens)} tokens tracked this month`
+  elements.dashboardNodeSignalStrip.innerHTML = [
+    signalChipHtml(`${formatNumber(cache?.papers_today || 0)} papers today`, 'watch'),
+    signalChipHtml(`${formatNumber(weekTokens)} tokens this week`, 'good'),
+    signalChipHtml(`${formatNumber(monthTokens)} tokens this month`, 'neutral'),
+    signalChipHtml(selectedChannelLabel, detail ? 'watch' : 'neutral'),
+  ].join('')
+  elements.dashboardLastEventValue.textContent = formatDashboardStamp(cache?.latest_event_ts)
+  elements.dashboardLastPaperValue.textContent = formatDashboardStamp(cache?.latest_paper_ts)
+
+  const summaryCards = [
+    dashboardCurveCardHtml('Today Tokens', `${formatNumber(todayTokens)} tokens`, 'watch', daySeries, 'total_tokens', [
+      { label: '24h sessions', value: formatNumber(sumSeries(daySeries, 'session_count')) },
+      { label: 'Peak hour', value: todayPeak ? `${formatDashboardStamp(todayPeak.bucket)} · ${formatNumber(todayPeak.total_tokens)} tokens` : 'Waiting' },
+      { label: 'Output', value: formatNumber(sumSeries(daySeries, 'output_tokens')) },
+    ]),
+    dashboardCurveCardHtml('This Week', `${formatNumber(weekTokens)} tokens`, 'good', weekSeries, 'total_tokens', [
+      { label: '7d sessions', value: formatNumber(sumSeries(weekSeries, 'session_count')) },
+      { label: 'Peak day', value: weekPeak ? `${weekPeak.bucket} · ${formatNumber(weekPeak.total_tokens)} tokens` : 'Waiting' },
+      { label: 'Messages', value: formatNumber(sumSeries(weekSeries, 'message_count')) },
+    ]),
+    dashboardCurveCardHtml('This Month', `${formatNumber(monthTokens)} tokens`, 'neutral', monthSeries, 'total_tokens', [
+      { label: '30d sessions', value: formatNumber(sumSeries(monthSeries, 'session_count')) },
+      { label: 'Peak day', value: monthPeak ? `${monthPeak.bucket} · ${formatNumber(monthPeak.total_tokens)} tokens` : 'Waiting' },
+      { label: 'Input', value: formatNumber(sumSeries(monthSeries, 'input_tokens')) },
+    ]),
+    dashboardCurveCardHtml('Memory Growth', `${formatNumber(cache?.total_papers || 0)} papers`, 'watch', asArray(cache?.paper_series), 'cumulative_papers', [
+      { label: 'New today', value: formatNumber(cache?.papers_today || 0) },
+      { label: '30d queries', value: formatNumber(totalQueries) },
+      { label: 'Cache hit rate', value: formatPercent(hitRate) },
+    ]),
+  ]
+
+  elements.dashboardSummaryGrid.innerHTML = summaryCards.join('')
+
+  const channels = asArray(overview.channels)
+  if (!channels.length) {
+    elements.dashboardChannelsList.innerHTML = `
+      <article class="empty-state">
+        <strong>No ACL-scoped channels found.</strong>
+        <p>Only conditioned channels are rendered in dashboard mode.</p>
+      </article>
+    `
+  } else {
+    elements.dashboardChannelsList.innerHTML = channels
+      .map((channel) => {
+        const isActive = String(channel.channel_id) === String(state.dashboardSelectedChannel)
+        const displayName = dashboardChannelDisplayName(channel)
+        const descriptor =
+          asArray(channel.allowed_commands)[0] ||
+          asArray(channel.allowed_skills)[0] ||
+          channel.channel_id
+        return `
+          <button type="button" class="dashboard-channel-card${isActive ? ' is-active' : ''}" data-dashboard-channel="${escapeHtml(channel.channel_id)}">
+            <strong>${escapeHtml(displayName)}</strong>
+            <span>${escapeHtml(startCase(String(descriptor).replaceAll('-', ' ')))}</span>
+            <div class="timeline-meta-row">
+              ${signalChipHtml(`${formatNumber(channel.total_tokens || 0)} tokens`, 'good')}
+              ${signalChipHtml(`${formatNumber(channel.message_count || 0)} messages`, 'neutral')}
+              ${signalChipHtml(`${formatDashboardStamp(channel.last_activity || '')}`, 'watch')}
+            </div>
+            <p class="dashboard-channel-footnote">${escapeHtml(channel.channel_id)}</p>
+          </button>
+        `
+      })
+      .join('')
+
+    for (const button of elements.dashboardChannelsList.querySelectorAll('[data-dashboard-channel]')) {
+      button.addEventListener('click', async () => {
+        const channelId = button.getAttribute('data-dashboard-channel') || ''
+        await loadDashboardChannel(state.dashboardSelectedNode, channelId)
+      })
+    }
+  }
+
+  elements.dashboardSessionsList.innerHTML =
+    recentQueries.length
+      ? recentQueries.map((query) => dashboardQueryHtml(query)).join('')
+      : `
+          <article class="empty-state">
+            <strong>No query feed yet.</strong>
+            <p>Once Paracelsus records a run summary, this feed will reflect the crawl in real time.</p>
+          </article>
+        `
+  const peakSessionTokens = recentSessions.reduce(
+    (best, session) => Math.max(best, Number(session?.total_tokens || 0)),
+    1,
+  )
+  elements.dashboardProcessingList.innerHTML =
+    recentSessions.length
+      ? recentSessions.map((session) => dashboardProcessingHtml(session, peakSessionTokens)).join('')
+      : `
+          <article class="empty-state">
+            <strong>No recent sessions in this lane.</strong>
+            <p>The processing graph fills as soon as the selected channel records tracked sessions.</p>
+          </article>
+        `
+  elements.dashboardLatestPapersList.innerHTML =
+    latestPapers.length
+      ? latestPapers.map((paper) => dashboardPaperHtml(paper)).join('')
+      : Number(cache?.total_papers || 0) > 0
+        ? `
+            <article class="empty-state">
+              <strong>${formatNumber(cache.total_papers || 0)} papers are already in the registry.</strong>
+              <p>The dashboard could not build the latest-paper preview, but the database is growing and the chart above reflects it.</p>
+            </article>
+          `
+      : `
+          <article class="empty-state">
+            <strong>No papers persisted yet.</strong>
+            <p>Registry entries will appear here as soon as the scientific pipeline writes them.</p>
+          </article>
+        `
+
+  renderDashboardSeries()
+  renderDashboardExtras()
+  renderDashboardRefreshState()
+}
+
+async function loadDashboardChannel(node, channelId) {
+  if (!node || !channelId) {
+    state.dashboardChannelDetail = null
+    state.dashboardSeries = { day: [], week: [], month: [] }
+    renderDashboardWorkspace()
+    return
+  }
+
+  try {
+    const [detailPayload, dayPayload, weekPayload, monthPayload] = await Promise.all([
+      getDashboardChannelDetail(node, channelId),
+      getDashboardChannelSeries(node, channelId, '24h'),
+      getDashboardChannelSeries(node, channelId, '7d'),
+      getDashboardChannelSeries(node, channelId, '30d'),
+    ])
+    state.dashboardSelectedChannel = channelId
+    state.dashboardChannelDetail = detailPayload.channel || null
+    state.dashboardSeries = {
+      day: asArray(dayPayload.series?.points),
+      week: asArray(weekPayload.series?.points),
+      month: asArray(monthPayload.series?.points),
+    }
+    renderDashboardWorkspace()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    toast(`Failed to load dashboard channel: ${message}`, 'error')
+  }
+}
+
+async function loadDashboardNode(node, preserveChannel = true) {
+  if (!node) return
+  try {
+    const payload = await getDashboardNodeChannels(node)
+    state.dashboardSelectedNode = node
+    state.dashboardNodeOverview = payload.overview || null
+    renderDashboardNodes()
+
+    const channels = asArray(payload.channels)
+    const currentChannelStillValid = channels.some(
+      (channel) => String(channel.channel_id) === String(state.dashboardSelectedChannel),
+    )
+    if (!preserveChannel || !currentChannelStillValid) {
+      state.dashboardSelectedChannel = channels[0]?.channel_id || ''
+    }
+    state.dashboardChannelDetail = null
+    state.dashboardSeries = { day: [], week: [], month: [] }
+    renderDashboardWorkspace()
+    await loadDashboardChannel(node, state.dashboardSelectedChannel)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    toast(`Failed to load dashboard node: ${message}`, 'error')
+  }
+}
+
+async function refreshDashboardNodes() {
+  state.dashboardRefreshing = true
+  renderDashboardRefreshState()
+  try {
+    const payload = await listDashboardNodes()
+    state.dashboardNodes = asArray(payload.nodes)
+    renderDashboardNodes()
+
+    if (!state.dashboardSelectedNode && state.dashboardNodes[0]) {
+      state.dashboardSelectedNode = state.dashboardNodes[0].node
+    }
+
+    if (state.dashboardSelectedNode) {
+      await loadDashboardNode(state.dashboardSelectedNode)
+    } else {
+      state.dashboardNodeOverview = null
+      state.dashboardChannelDetail = null
+      state.dashboardSeries = { day: [], week: [], month: [] }
+      renderDashboardWorkspace()
+    }
+    state.dashboardLastRefreshAt = new Date().toISOString()
+    state.dashboardRefreshRemaining = DASHBOARD_REFRESH_SECONDS
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    toast(`Failed to refresh dashboards: ${message}`, 'error')
+  } finally {
+    state.dashboardRefreshing = false
+    renderDashboardRefreshState()
   }
 }
 
@@ -1570,6 +2599,10 @@ function bindInputs() {
     await refreshNodes()
   })
 
+  elements.refreshDashboardBtn.addEventListener('click', async () => {
+    await refreshDashboardNodes()
+  })
+
   elements.reloadLogsBtn.addEventListener('click', async () => {
     await reloadLogs()
   })
@@ -1590,6 +2623,17 @@ function bindInputs() {
       await performAction(action)
     })
   }
+
+  elements.opsModeBtn.addEventListener('click', () => {
+    setView('ops')
+  })
+
+  elements.dashboardsModeBtn.addEventListener('click', async () => {
+    setView('dashboards')
+    if (!state.dashboardNodes.length) {
+      await refreshDashboardNodes()
+    }
+  })
 
   bindTabs()
 }
@@ -1625,6 +2669,8 @@ async function loadCapabilities() {
   renderGuardSummary()
   renderDoctorPanel()
   renderActivityTimeline()
+  renderDashboardNodes()
+  renderDashboardWorkspace()
   updateActionButtons()
 
   if (!experimental) {
@@ -1635,6 +2681,7 @@ async function loadCapabilities() {
 
 async function boot() {
   bindInputs()
+  startDashboardRefreshLoop()
   initWorker()
   renderFleetSummary()
   renderGuardSummary()
@@ -1646,12 +2693,15 @@ async function boot() {
   renderActivityTimeline()
   updateAnalysisFromEvents([])
   updateActionButtons()
+  renderDashboardNodes()
+  renderDashboardWorkspace()
+  setView('dashboards')
 
   try {
     await loadCapabilities()
 
     if (state.capabilities?.experimental_enabled) {
-      await Promise.all([refreshGuardStatus(), refreshNodes()])
+      await Promise.all([refreshGuardStatus(), refreshNodes(), refreshDashboardNodes()])
       connectStream()
     }
   } catch (error) {

@@ -1,7 +1,0 @@
-name: discord-governance
-version: 0.1.0
-description: "Hermes-native Discord ACL governance, slash-command authorization, and channel policy routing."
-author: "Hermes Orchestrator"
-provides_hooks:
-  - pre_gateway_dispatch
-provides_tools: []

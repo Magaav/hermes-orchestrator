@@ -1,0 +1,70 @@
+{
+  "schema": "hermes.space_ui.dashboard_layout.v1",
+  "title": "Hermes Fleet",
+  "generated_at": "2026-04-28T00:00:00Z",
+  "focused_node": null,
+  "sections": [
+    {
+      "id": "fleet",
+      "title": "Fleet",
+      "kind": "node_grid",
+      "items": [
+        {
+          "schema": "hermes.space_ui.node_card.v1",
+          "id": "orchestrator",
+          "title": "orchestrator",
+          "status": "running",
+          "running": true,
+          "runtime": {
+            "type": "baremetal",
+            "state_mode": "orchestrator",
+            "state_code": 1,
+            "container_name": ""
+          },
+          "health": {
+            "required_mounts_ok": null,
+            "required_mounts_missing": [],
+            "attention_log": "/local/logs/attention/nodes/orchestrator/warning-plus.log"
+          },
+          "paths": {
+            "env": "/local/agents/envs/orchestrator.env",
+            "clone_root": "/local/agents/nodes/orchestrator",
+            "logs": {
+              "management": "/local/logs/nodes/orchestrator/management.log",
+              "runtime": "/local/logs/nodes/orchestrator/runtime.log",
+              "attention": "/local/logs/attention/nodes/orchestrator/warning-plus.log"
+            }
+          },
+          "actions": [
+            {
+              "id": "orchestrator:inspect_node",
+              "action": "inspect_node",
+              "label": "Inspect",
+              "method": "POST",
+              "endpoint": "/nodes/orchestrator/action",
+              "destructive": false,
+              "mutates_fleet": false,
+              "enabled": true,
+              "payload_template": {
+                "action": "inspect_node",
+                "payload": {}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "logs",
+      "title": "Logs",
+      "kind": "logs_panel",
+      "source": "GET /nodes/{node_id}/logs"
+    },
+    {
+      "id": "actions",
+      "title": "Actions",
+      "kind": "action_buttons",
+      "source": "node_card.actions"
+    }
+  ]
+}

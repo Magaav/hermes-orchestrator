@@ -12,6 +12,8 @@ def test_render_cloned_env_text_retargets_stage_profile(cm, tmp_path: Path) -> N
             "NODE_STATE=2",
             "NODE_STATE_FROM_BACKUP_PATH=''",
             "NODE_NAME=colmeio",
+            "OPENVIKING_ENABLED=1",
+            "OPENVIKING_ENDPOINT=http://host.docker.internal:1933",
             "OPENVIKING_ACCOUNT=colmeio",
             "OPENVIKING_USER=colmeio",
             "DISCORD_COMMANDS_FILE=/local/plugins/private/discord/commands/colmeio.json",
@@ -29,9 +31,11 @@ def test_render_cloned_env_text_retargets_stage_profile(cm, tmp_path: Path) -> N
     assert f'NODE_STATE_FROM_BACKUP_PATH="{backup_path}"' in rendered
     assert 'NODE_STATE_FROM_BACKUP_NODE="colmeio"' in rendered
     assert 'NODE_NAME="colmeio-stage"' in rendered
-    assert 'OPENVIKING_ACCOUNT="colmeio-stage"' in rendered
-    assert 'OPENVIKING_USER="colmeio-stage"' in rendered
-    assert 'DISCORD_COMMANDS_FILE="/local/plugins/private/discord/commands/colmeio-stage.json"' in rendered
+    assert "OPENVIKING_ENABLED=0" in rendered
+    assert "OPENVIKING_ENDPOINT" not in rendered
+    assert "OPENVIKING_ACCOUNT" not in rendered
+    assert "OPENVIKING_USER" not in rendered
+    assert "DISCORD_COMMANDS_FILE" not in rendered
 
 
 def test_profile_clone_prepares_backup_seeded_stage_assets(cm, tmp_path: Path, monkeypatch) -> None:
@@ -114,7 +118,7 @@ def test_profile_clone_prepares_backup_seeded_stage_assets(cm, tmp_path: Path, m
     assert f'NODE_STATE_FROM_BACKUP_PATH="{backup_path}"' in env_text
     assert 'NODE_STATE_FROM_BACKUP_NODE="colmeio"' in env_text
     assert 'NODE_NAME="colmeio-stage"' in env_text
-    assert 'DISCORD_COMMANDS_FILE="/local/plugins/private/discord/commands/colmeio-stage.json"' in env_text
+    assert "DISCORD_COMMANDS_FILE" not in env_text
 
     assert (datas_root / target_name / "state.json").exists()
     assert (crons_root / target_name / "job.sh").exists()

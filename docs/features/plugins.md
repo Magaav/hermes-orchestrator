@@ -4,21 +4,27 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
 
 ## Canonical Roots
 
-- Public plugins: `/local/plugins/public`
-- Private plugins: `/local/plugins/private`
+- Canonical standalone host plugins:
+  `/local/plugins/discord-slash-commands`,
+  `/local/plugins/exhaust`,
+  `/local/plugins/final-response-changed-files`,
+  `/local/plugins/hermes-space-ui`
+- Optional legacy plugin roots: `/local/plugins/public`, `/local/plugins/private`
+- `hermes-space-ui` local runtime state: `/local/plugins/hermes-space-ui/state`
 
 ## Why It Is Segregated
 
-- Public plugins hold reusable hook/runtime code and remain fully versioned.
-- Private plugins hold mutable runtime payloads, memory/wiki data, and deployment-local command/config state.
+- Standalone plugin roots hold reusable hook/runtime code and remain fully versioned.
+- Mutable runtime state lives in node-local plugin caches or gitignored plugin state directories.
+- Legacy public/private roots are still recognized when present, but new active plugin ownership should prefer standalone package roots.
 
 ## How Hermes-Orchestrator Uses It
 
-- Prestart patch pipeline executes from `/local/plugins/public/hermes-core/scripts/prestart_reapply.sh`.
-- Discord bridge/runtime integrations live in `/local/plugins/public/discord`.
-- Native Hermes project-plugin ports live in `/local/plugins/public/native`.
-- Node command payloads and private Discord state are stored under `/local/plugins/private/discord`.
-- Shared wiki runtime lives under `/local/plugins/private/wiki`.
+- Legacy prestart and native plugin directories under `/local/plugins/public` are mounted only when present.
+- Canonical Discord slash runtime ownership now lives in `/local/plugins/discord-slash-commands`.
+- Mutable Discord slash/governance state for that plugin now lives per node under `/local/workspace/plugins/discord-slash-commands/cache`.
+- `hermes-space-ui` keeps its local Space Agent checkout, customware, logs, and task state under `/local/plugins/hermes-space-ui/state` instead of `/local/plugins/private/hermes-space-ui`.
+- Shared wiki runtime lives under `/local/wiki`.
 
 ## Native Migration Surface
 
@@ -33,39 +39,51 @@ Current native migration flags:
 - `PLUGIN_CANVA`
 - `PLUGIN_BROWSER_PLUS`
 
-The native plugin directories under `/local/plugins/public/native` now cover the Hermes-native path for:
+`PLUGIN_DISCORD_GOVERNANCE` is deprecated and only kept as a migration alias
+for the canonical slash plugin bootstrap.
 
-- `discord-governance` via official Hermes hooks for `/acl`, slash-command ACL, and channel routing
-- `discord-slash-commands` via official Hermes plugin command registration for `/metricas`
+The native plugin directories under `/local/plugins/public/native` still provide
+the shared bootstrap framework, but active Discord slash ownership has moved:
+
+- `discord-slash-commands` now owns `/status`, `/acl`, `/slash`, `/faltas`, `/metricas`, slash reconciliation, and governance routing from `/local/plugins/discord-slash-commands`
+- `discord-governance` remains as deprecated legacy reference code and is no longer part of the active bootstrap chain
 
 Current Discord shape:
 
 - Hermes project plugins own the enable flags and project-plugin sync into `./.hermes/plugins/<name>`.
-- The live Discord governance and slash-command behavior runs from Hermes-native plugin registration and hooks.
+- The live Discord governance and slash-command behavior runs from the canonical `discord-slash-commands` plugin package.
 - Discord-enabled nodes no longer depend on `~/.hermes/hooks/discord_slash_bridge` or `~/.hermes/hooks/channel_acl`.
+- Slash command state is node-local under `workspace/plugins/discord-slash-commands/cache`, with mirrored `app_scope.json` when multiple nodes share the same Discord app+guild.
 
 Future cleanup still remains:
 
-- move private Discord data from the shared `/local/plugins/private/discord/...` tree into plugin-owned namespaces
-- replace the remaining legacy helper imports inside the native plugins with fully self-contained plugin modules
+- remove the remaining legacy governance helper imports still reused inside the canonical slash plugin
+- complete the migration away from compatibility symlinks once native governance helpers are fully in-plugin
 
 ## Discord Role ACL
 
 Discord slash authorization is split by plugin layer contract:
 
-- Public engine and bootstrap script:
-  - `/local/plugins/public/discord/hooks/discord_slash_bridge/role_acl.py`
-  - `/local/plugins/public/discord/scripts/discord_role_acl_sync.py`
-- Private per-node ACL policy:
-  - `/local/plugins/private/discord/acl/<node>_acl.json`
-  - `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
-  - `/local/plugins/private/discord/models/<node>_models.json`
+- Canonical engine and bootstrap package:
+  - `/local/plugins/discord-slash-commands/runtime.py`
+  - `/local/plugins/discord-slash-commands/scripts/register_guild_plugin_commands.py`
+- Node-local ACL policy for the canonical slash plugin:
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/acl.json`
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/channel_acl.yaml`
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/models.json`
 
 The ACL is fail-closed:
 
 - Any slash command missing from `commands.<name>.min_role` is denied.
 - `@everyone` can be used for low-risk commands.
 - Higher hierarchy roles inherit lower-role command permissions.
+
+## Discord Slash Namespaces
+
+- `global` and `custom` are namespaces on slash command definitions, not on plugins and not on Discord API scope.
+- `global` commands are bundled with `discord-slash-commands` and default-enabled.
+- `custom` commands are deployment-specific and enabled per node via `/slash`.
+- Discord writes remain guild-scoped and diff-based: `PATCH`, `POST`, `DELETE`, never `PUT`.
 
 ## Synergy With Other Modules
 

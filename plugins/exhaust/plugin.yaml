@@ -1,0 +1,12 @@
+name: exhaust
+version: 0.1.0
+description: "Structured capability-exhaustion recovery mode for Hermes tasks. Env-gated by PLUGINS_EXHAUST=true."
+author: "Hermes Orchestrator"
+provides_tools:
+  - exhaust_inventory
+provides_hooks:
+  - pre_gateway_dispatch
+  - pre_llm_call
+  - post_tool_call
+  - transform_tool_result
+  - on_session_end

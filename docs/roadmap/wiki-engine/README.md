@@ -4,7 +4,7 @@ Status: `Delivered`
 
 ## Purpose
 
-Build a production-grade autonomous knowledge engine for Hermes Orchestrator that provides a shared, markdown-native wiki at `/local/plugins/private/wiki/`.
+Build a production-grade autonomous knowledge engine for Hermes Orchestrator that provides a shared, markdown-native wiki at `/local/wiki/`.
 
 The wiki is the durable knowledge layer for the orchestrator fleet:
 
@@ -56,16 +56,16 @@ The repository currently has:
 
 Canonical, durable knowledge:
 
-- markdown pages under `/local/plugins/private/wiki/`
-- page history snapshots under `/local/plugins/private/wiki/meta/history/`
-- proposal records under `/local/plugins/private/wiki/meta/proposals/`
+- markdown pages under `/local/wiki/`
+- page history snapshots under `/local/wiki/meta/history/`
+- proposal records under `/local/wiki/meta/proposals/`
 
 Derived, rebuildable artifacts:
 
-- graph manifests under `/local/plugins/private/wiki/meta/graph/`
-- compression manifests under `/local/plugins/private/wiki/meta/compression/`
-- health/lint/observability reports under `/local/plugins/private/wiki/meta/{health_reports,observability,self_heal}/`
-- generated routing indexes under `/local/plugins/private/wiki/indexes/`
+- graph manifests under `/local/wiki/meta/graph/`
+- compression manifests under `/local/wiki/meta/compression/`
+- health/lint/observability reports under `/local/wiki/meta/{health_reports,observability,self_heal}/`
+- generated routing indexes under `/local/wiki/indexes/`
 
 Reusable, versioned guidance:
 
@@ -85,7 +85,7 @@ The live wiki root is intentionally ignored by git because its evolving knowledg
 Canonical wiki root:
 
 ```text
-/local/plugins/private/wiki/
+/local/wiki/
 ├── index.md
 ├── indexes/
 ├── global/
@@ -110,7 +110,7 @@ Canonical wiki root:
 Node integration:
 
 1. Workers mount the host wiki into the container at `/local/wiki` when `NODE_WIKI_ENABLED=true`.
-2. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
+2. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/wiki`.
 
 ### Plugin Boundary
 
@@ -372,7 +372,7 @@ Spec amendments after this point must be explicit and documented rather than sil
 
 Delivery is complete only when all of the following are true:
 
-1. `/local/plugins/private/wiki/` exists and bootstraps itself safely.
+1. `/local/wiki/` exists and bootstraps itself safely.
 2. `/local/plugins/public/hermes-core/` contains the engine code and startup hook integration.
 3. `NODE_WIKI_ENABLED=true` enables the feature and default behavior remains disabled.
 4. Worker nodes receive the shared wiki as a read/write mount and orchestrator gets a clean symlinked view.
@@ -391,7 +391,7 @@ Implementation now ships in `/local/plugins/public/hermes-core/` with:
 - `scripts/wiki_engine.py` for operational CLI access
 - prestart integration in `plugins/public/hermes-core/scripts/prestart_reapply.sh`
 - worker mount + orchestrator symlink integration in `scripts/clone/clone_manager.py`
-- ignored live wiki runtime content under `/local/plugins/private/wiki/`
+- ignored live wiki runtime content under `/local/wiki/`
 - tests under `plugins/public/hermes-core/tests/test_wiki_engine.py`
 
 ## Delivered Behavior
@@ -401,11 +401,11 @@ Implementation now ships in `/local/plugins/public/hermes-core/` with:
 - Nodes opt in with `NODE_WIKI_ENABLED=true` in `/local/agents/envs/<node>.env`.
 - Disabled nodes remain on the previous behavior and the engine no-ops safely.
 - Workers mount `/local/wiki` read/write into the container only when enabled.
-- The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
+- The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/wiki`.
 
 ### Canonical and Derived Layers
 
-- Canonical knowledge remains markdown under `/local/plugins/private/wiki/`.
+- Canonical knowledge remains markdown under `/local/wiki/`.
 - Graph, compression, health, observability, proposals, and maintenance artifacts are rebuilt under `meta/`.
 - Generated routing indexes are rebuilt under `indexes/`.
 
@@ -427,7 +427,7 @@ Implementation now ships in `/local/plugins/public/hermes-core/` with:
 Validated with:
 
 - `/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/public/hermes-core/tests -q`
-- real bootstrap of `/local/plugins/private/wiki`
+- real bootstrap of `/local/wiki`
 - real rebuild of graph/compression/observability artifacts
 
 ## Remaining Limitations

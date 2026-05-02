@@ -10,7 +10,7 @@
 - `envs/node.env.example`: worker node template
 - `nodes/<node>/`: generated runtime state (not versioned)
 - `nodes/<node>/scripts/{public,private}`: host-visible mirrors of `/local/scripts/{public,private}`
-- `nodes/<node>/plugins/{public,private}`: worker mount anchors to `/local/plugins/{public,private}`
+- `nodes/<node>/plugins/`: host-side mount anchor; standalone plugin roots and optional legacy public/private roots mount inside the runtime when enabled
 - `nodes/<node>/cron`: mountpoint from `/local/crons/<node>`
 - `/local/datas/<node>`: centralized private node data root (mounted in runtime as `/local/data`)
 - logs are centralized under `/local/logs/nodes/<node>/` and `/local/logs/attention/nodes/<node>/`
@@ -19,8 +19,12 @@ Canonical shared roots now live outside `agents/`:
 
 - `/local/scripts/public`
 - `/local/scripts/private`
-- `/local/plugins/public`
-- `/local/plugins/private`
+- `/local/plugins/discord-slash-commands`
+- `/local/plugins/exhaust`
+- `/local/plugins/final-response-changed-files`
+- `/local/plugins/hermes-space-ui`
+- `/local/plugins/public` and `/local/plugins/private` when legacy plugin content is present
+- `/local/wiki`
 - `/local/skills`
 - `/local/datas`
 

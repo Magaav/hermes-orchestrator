@@ -6,9 +6,13 @@ agents/registry.json
 skills/**
 !skills/.gitignore
 logs/
+wiki/
+memory/
 plugins/private/**
 !plugins/private/.gitignore
 !plugins/private/**/*.md
+plugins/hermes-space-ui/state/*
+!plugins/hermes-space-ui/state/.gitignore
 scripts/private/**
 !scripts/private/.gitignore
 !scripts/private/**/*.md
@@ -60,3 +64,11 @@ hermes-agent/venv/
 dummy/
 .worktrees/
 .worktrees/
+
+hackaton-hermes-dashboard/
+hackaton-hermes-mythos/
+
+# Keep local hermes-agent workspace on disk, but out of git
+hermes-agent/*
+!hermes-agent/
+!hermes-agent/.gitkeep

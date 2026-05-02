@@ -1,0 +1,24 @@
+schema: spaces/v2
+id: __HERMES_SPACE_ID__
+title: Hermes OS
+description: Space Agent control plane for Hermes Orchestrator.
+icon: dashboard
+icon_color: "#7ddcff"
+agent_instructions: |-
+  Use the Hermes Fleet widgets and the hermes-space-ui bridge for host
+  resources, node status, logs, and safe lifecycle actions. The bridge is
+  available to this server at __HERMES_SPACE_URL__. Use space.fetchExternal(...)
+  so Space Agent can proxy localhost requests from the VM side of the SSH
+  tunnel.
+layout_order:
+  - hermes-os
+  - hermes-topology
+  - drop-to-copy
+sizes:
+  hermes-os: 5x7
+  hermes-topology: 8x7
+  drop-to-copy: 5x6
+positions:
+  hermes-os: "-11,-5"
+  hermes-topology: "-5,-5"
+  drop-to-copy: "3,2"

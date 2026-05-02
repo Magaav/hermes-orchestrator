@@ -1,0 +1,67 @@
+channels:
+  '1487073289137553581':
+    mode: livre
+  '1488175722932736071':
+    mode: livre
+  '1487099467726328038':
+    mode: condicionado
+    label: loja1
+    model_key: nemotron120b
+    model: nvidia/nemotron-3-super-120b-a12b
+    provider: nvidia
+    allowed_skills:
+    - colmeio-lista-de-faltas
+    allowed_commands:
+    - faltas
+    - clean
+    always_allowed_commands:
+    - status
+    default_action: skill:add
+    free_text_policy: strict_item
+    instructions: 🚫 Este canal aceita apenas inclusão de itens de faltas.
+    invalid_text_message: '🚫 Este canal aceita apenas inclusão de itens de faltas.
+
+      Use `/faltas action:adicionar itens:<item>` ou envie somente o nome do item
+      (ex.: `papel higienico`).
+
+      '
+    max_item_words: 8
+  '1487099552636080201':
+    mode: condicionado
+    label: loja2
+    model_key: nemotron120b
+    model: nvidia/nemotron-3-super-120b-a12b
+    provider: nvidia
+    allowed_skills:
+    - colmeio-lista-de-faltas
+    allowed_commands:
+    - faltas
+    - clean
+    always_allowed_commands:
+    - status
+    default_action: skill:add
+    free_text_policy: strict_item
+    instructions: 🚫 Este canal aceita apenas inclusão de itens de faltas.
+    invalid_text_message: '🚫 Este canal aceita apenas inclusão de itens de faltas.
+
+      Use `/faltas action:adicionar itens:<item>` ou envie somente o nome do item
+      (ex.: `papel higienico`).
+
+      '
+    max_item_words: 8
+  '1497340589191204898':
+    mode: condicionado
+    label: scientific-paper-meta-analysis
+    model_key: gpt54
+    model: gpt-5.4
+    provider: openai-codex
+    allowed_commands:
+    - scientific-paper-meta-analysis
+    always_allowed_commands:
+    - status
+    default_action: command:scientific-paper-meta-analysis
+    free_text_policy: strict_item
+    instructions: Canal dedicado a meta-analysis cientifica
+    allowed_skills:
+    - scientific-paper-meta-analysis
+    invalid_text_message: "🚫 Este canal aceita apenas o fluxo de meta-analysis cientifica.\nUse `/scientific-paper-meta-analysis query:\"tema do paper\"`.\nExemplo: `/scientific-paper-meta-analysis query:\"Benefícios da dieta carnívora\"`."

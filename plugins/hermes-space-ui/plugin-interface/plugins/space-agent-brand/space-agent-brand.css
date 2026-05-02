@@ -1,0 +1,5 @@
+.onscreen-agent-avatar-image,
+.agent-page-avatar-image {
+  content: url("/mod/hermes/space-agent-brand/assets/source/hermes-space-ui-agent-nous.png");
+  object-fit: contain;
+}

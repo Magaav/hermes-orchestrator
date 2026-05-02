@@ -5,20 +5,22 @@ Hybrid control-plane UI for Hermes Orchestrator.
 ## Architecture
 
 - Browser UI shell: `/local/apps/wasm-ui`
-- Local gateway API + SSE: `/local/scripts/ui-gateway`
-- Operational source of truth: `scripts/clone/clone_manager.py`
+- Local gateway API + SSE: `/local/scripts/public/ui-gateway`
+- Operational source of truth: `/local/scripts/public/clone/clone_manager.py`
 - Targeted compute acceleration: Rust/WASM worker under `/local/apps/wasm-ui/wasm/log-worker`
 
-V1 intentionally limits scope to observability and safe operations:
+V1 intentionally limits scope to observability, dashboard views, and safe operations:
 
 - Fleet and node status
 - Multi-channel logs
+- Guard and activity summaries
+- Dashboard mode backed by `/api/fleet/dashboard/...`
 - Safe actions: `start`, `stop`, `restart`
 
 ## Start
 
 ```bash
-WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/ui-gateway/run.py
+WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/public/ui-gateway/run.py
 ```
 
 Open: `http://127.0.0.1:8787/`
@@ -27,7 +29,7 @@ Optional auth:
 
 ```bash
 export WASM_UI_API_TOKEN='your-token'
-WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/ui-gateway/run.py
+WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/public/ui-gateway/run.py
 ```
 
 If auth is enabled, the browser prompts once and stores token in `localStorage` key `wasm_ui_api_token`.
@@ -110,4 +112,4 @@ No destructive operations are exposed in V1.
 
 - Prefer Docker builds for CI/release parity and predictable toolchain versions (`node`, `rust`, `wasm-pack`).
 - Prefer local host builds for fastest iterative development when your machine already has the toolchain.
-- Runtime serving still happens on host via `scripts/ui-gateway`; Docker here is for build/test tooling.
+- Runtime serving still happens on host via `scripts/public/ui-gateway`; Docker here is for build/test tooling.

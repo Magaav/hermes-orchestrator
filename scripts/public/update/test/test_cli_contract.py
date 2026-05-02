@@ -24,7 +24,12 @@ def _write_fake_manager(path: Path) -> None:
     path.chmod(0o755)
 
 
-def _run_horc(tmp_path: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+def _run_horc(
+    tmp_path: Path,
+    args: list[str],
+    *,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     fake_manager = tmp_path / "fake_clone_manager.py"
     _write_fake_manager(fake_manager)
     env = os.environ.copy()
@@ -36,6 +41,7 @@ def _run_horc(tmp_path: Path, args: list[str]) -> subprocess.CompletedProcess[st
         capture_output=True,
         text=True,
         env=env,
+        input=input_text,
     )
 
 
@@ -107,6 +113,19 @@ def test_purge_node_confirm_contract(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout.strip())
     assert payload["argv"] == ["purge-node-confirm", "--run-id", "purge-colmeio-123", "--token", "deadbeef"]
+
+
+def test_delete_requires_confirmation_in_cli(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["delete", "colmeio"])
+    assert proc.returncode != 0
+    assert "confirmation required" in proc.stderr.lower()
+
+
+def test_delete_yes_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["delete", "colmeio", "--yes"])
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == ["delete", "colmeio"]
 
 
 def test_retired_update_commands_rejected(tmp_path: Path) -> None:

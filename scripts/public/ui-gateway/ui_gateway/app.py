@@ -20,6 +20,14 @@ from .clone_manager import (
     validate_node_name,
 )
 from .guard import read_activity_entries, read_guard_node_detail, read_guard_status
+from .dashboard import (
+    allowed_channels as read_dashboard_allowed_channels,
+    channel_detail as read_dashboard_channel_detail,
+    channel_series as read_dashboard_channel_series,
+    is_dashboard_node,
+    list_dashboard_nodes,
+    node_overview as read_dashboard_node_overview,
+)
 from .contracts import (
     FleetActionRequest,
     FleetActionResult,
@@ -82,6 +90,7 @@ def build_capabilities(context: GatewayContext) -> FleetCapabilities:
         "nodes": True,
         "status": True,
         "logs": True,
+        "dashboard_metrics": True,
         "guard": True,
         "activity_timeline": True,
         "sse": True,
@@ -96,6 +105,7 @@ def build_capabilities(context: GatewayContext) -> FleetCapabilities:
         "wasm_worker_rust_source": rust_source_exists,
         "wasm_worker_built": wasm_worker_candidate.exists(),
         "wasm_runtime_switch": True,
+        "dashboard_mode": True,
         "js_fallback": True,
         "terminal_passthrough": False,
     }
@@ -220,6 +230,10 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
             self._list_nodes()
             return
 
+        if parsed.path == "/api/fleet/dashboard/nodes":
+            self._list_dashboard_nodes()
+            return
+
         if parsed.path == "/api/fleet/guard/status":
             self._guard_status()
             return
@@ -230,6 +244,10 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
 
         if parsed.path.startswith("/api/fleet/nodes/"):
             self._handle_node_get(parsed)
+            return
+
+        if parsed.path.startswith("/api/fleet/dashboard/nodes/"):
+            self._handle_dashboard_get(parsed)
             return
 
         self._json_error(HTTPStatus.NOT_FOUND, "not_found")
@@ -286,6 +304,89 @@ class FleetGatewayHandler(BaseHTTPRequestHandler):
                 "guard": payload,
             },
         )
+
+    def _list_dashboard_nodes(self) -> None:
+        settings = self.server.context.settings
+        try:
+            nodes = list_dashboard_nodes(settings)
+        except Exception as exc:
+            self._json_error(HTTPStatus.BAD_GATEWAY, str(exc))
+            return
+        self._json_response(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "count": len(nodes),
+                "nodes": nodes,
+            },
+        )
+
+    def _handle_dashboard_get(self, parsed: Any) -> None:
+        settings = self.server.context.settings
+        path_parts = [part for part in parsed.path.split("/") if part]
+        if len(path_parts) < 5:
+            self._json_error(HTTPStatus.NOT_FOUND, "not_found")
+            return
+
+        node_raw = path_parts[4]
+        try:
+            node = validate_node_name(node_raw)
+        except CloneManagerError as exc:
+            self._json_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+
+        if not is_dashboard_node(settings, node):
+            self._json_error(HTTPStatus.NOT_FOUND, "dashboard_node_not_found")
+            return
+
+        if len(path_parts) == 6 and path_parts[5] == "channels":
+            overview = read_dashboard_node_overview(settings, node)
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "node": node,
+                    "channels": overview.get("channels", []),
+                    "overview": overview,
+                },
+            )
+            return
+
+        if len(path_parts) == 7 and path_parts[5] == "channels":
+            channel_id = str(path_parts[6] or "")
+            detail = read_dashboard_channel_detail(settings, node, channel_id)
+            if detail is None:
+                self._json_error(HTTPStatus.NOT_FOUND, "channel_not_found")
+                return
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "node": node,
+                    "allowed_channels": read_dashboard_allowed_channels(settings, node),
+                    "channel": detail,
+                },
+            )
+            return
+
+        if len(path_parts) == 8 and path_parts[5] == "channels" and path_parts[7] == "series":
+            channel_id = str(path_parts[6] or "")
+            window = str((parse_qs(parsed.query).get("window") or ["7d"])[0] or "7d").strip().lower()
+            detail = read_dashboard_channel_series(settings, node, channel_id, window=window)
+            if detail is None:
+                self._json_error(HTTPStatus.NOT_FOUND, "channel_not_found")
+                return
+            self._json_response(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "node": node,
+                    "series": detail,
+                },
+            )
+            return
+
+        self._json_error(HTTPStatus.NOT_FOUND, "not_found")
 
     def _handle_node_get(self, parsed: Any) -> None:
         settings = self.server.context.settings

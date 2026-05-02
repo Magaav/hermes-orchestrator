@@ -24,7 +24,7 @@
   - `/local/scripts/public` (read-only)
   - `/local/scripts/private` (read-write)
 - Node cron mounts come from `/local/crons/<node>` into `/local/agents/nodes/<node>/cron`.
-- Plugin hooks under `/local/plugins/public` call this tree for lifecycle and backup automation.
+- Standalone plugins and optional legacy plugin hooks call this tree for lifecycle and backup automation.
 
 ## Common Commands
 

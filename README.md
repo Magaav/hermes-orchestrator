@@ -120,7 +120,7 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   │   └── ...
 │   └── nodes/                    # each node filesystem
 │       ├── orchestrator/
-│       │   ├── wiki              ->(symlink) /local/plugins/private/wiki
+│       │   ├── wiki              ->(symlink) /local/wiki
 │       │   ├── workspace/        # default for node refining dump
 │       │   ├── hermes-agent/     # copyed from /local/hermes-agent on bootstrap
 │       │   ├── .hermes/          # node hermes-agent state
@@ -128,14 +128,16 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │       │   ├── cron              ->(symlink) /local/crons/orchestrator
 │       │   └── plugins           ->(symlink) /local/plugins
 │       ├── node1/
-│       │   ├── wiki/             # mounted from /local/plugins/private/wiki when NODE_WIKI_ENABLED=true
+│       │   ├── wiki/             # mounted from /local/wiki when wiki is enabled
 │       │   ├── workspace/        # default for node refining dump
+│       │   │   └── plugins/      # node-local plugin runtime/cache root
+│       │   │       └── <plugin>/
+│       │   │           └── cache/ # canonical mutable plugin state, for example discord-slash-commands
 │       │   ├── hermes-agent/     # copyed from /local/hermes-agent on bootstrap
 │       │   ├── .hermes/          # node hermes-agent state
 │       │   ├── scripts/public/   # mounted from /local/scripts/public  (ro)
 │       │   ├── scripts/private/  # mounted from /local/scripts/private (rw)
-│       │   ├── plugins/public/   # mounted from /local/plugins/public  (ro)
-│       │   ├── plugins/private/  # mounted from /local/plugins/private (rw)
+│       │   ├── plugins/          # host mount anchor; standalone plugin mounts overlay in runtime
 │       │   └── cron/             # mounted from /local/crons/<node>
 │       └── ...
 ├── hermes-agent/ # hermes-agent version used for spawning new nodes
@@ -144,9 +146,14 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   └── private/  # canonical local-only script state/entrypoints
 ├── crons/        # canonical node cron roots mounted at /local/agents/nodes/<node>/cron
 ├── plugins/      # plugins are modifications applyed to each node hermes-agent core
-│   ├── public/   # canonical git-tracked plugin code
-│   └── private/  # canonical local-only plugin runtime/config
+│   ├── discord-slash-commands/ # canonical host plugin root for Discord slash UX/runtime ownership
+│   ├── exhaust/                # canonical host plugin root for exhaust-mode behavior
+│   ├── final-response-changed-files/ # canonical host plugin root for final response file summaries
+│   ├── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
+│   ├── public/   # optional legacy git-tracked plugin code root when present
+│   └── private/  # optional legacy local-only plugin runtime/config when present
 ├── skills/       # canonical shared mutable skills pool
+├── wiki/         # canonical shared mutable wiki root (gitignored)
 ├── datas/        # centralized private node data root (/local/datas/<node> mounted as /local/data)
 ├── backups/      # used for rollback/versioning
 └── logs/         # nodes centralized debugging interface
@@ -192,8 +199,15 @@ Operational rule:
 ## Public vs Private State
 **Public** folders are used as global shared features for hermes-orchestrator.
 **Private** folders are used as global shared features applyed for users runtime instance of hermes-orchestrator specificities.
-- `/local/scripts/public` and `/local/plugins/public` shared features of hermes-orchestrator core.
-- `/local/scripts/private` and `/local/plugins/private` local instance state surface/
+- `/local/scripts/public` contains shared git-tracked orchestrator tooling.
+- `/local/scripts/private` contains local-only script state and entrypoints.
+- `/local/plugins/public` and `/local/plugins/private` are optional legacy plugin roots; worker containers mount them only when content is present.
+- `/local/plugins/discord-slash-commands` is a canonical git-tracked host plugin root that now owns Discord slash/governance runtime code outside the legacy `public/native` tree.
+- `/local/plugins/exhaust` and `/local/plugins/final-response-changed-files` are canonical git-tracked standalone plugin roots.
+- `/local/plugins/hermes-space-ui/state` is the canonical gitignored local state root for Space Agent checkout, customware, bridge logs, and task state. Do not use `/local/plugins/private/hermes-space-ui`.
+- Mutable plugin state should prefer node-local cache roots under `/local/agents/nodes/<node>/workspace/plugins/<plugin>/cache` and, from inside the node runtime, `/local/workspace/plugins/<plugin>/cache`.
+- `discord-slash-commands` no longer uses shared mutable state under `/local/plugins/private/discord`; its active runtime state is node-local and mirrored per shared Discord app+guild when needed.
+- `/local/wiki` is the canonical shared mutable wiki root; legacy `/local/plugins/private/wiki` is migrated away when found.
 - `/local/crons` is the canonical cron runtime root consumed by every node via `/local/agents/nodes/<node>/cron`.
 - `/local/skills` is the shared mutable skills pool mounted across nodes.
 - `/local/datas/<node>` is the canonical private node data root (mounted in runtime at `/local/data`) used to hold databases.
@@ -292,15 +306,14 @@ Operational tip:
 - Run `horc backup all` before a fleet-wide update if you want fresh rollback artifacts.
 ## Versioning Hygiene
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `skills/`, `datas/`, `backups/`, (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/`, `wiki/`, `memory/`, `skills/`, `datas/`, `backups/`, (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
-- Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy), so tracked `/local/hermes-agent/*` source files stay clean.
-Commit only templates exemples:
+- Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy); the host `/local/hermes-agent` checkout stays on disk but out of git except `.gitkeep`.
+Commit only templates/examples:
 - `agents/envs/node.env.example`
 - `agents/envs/orchestrator.env.example`
 - `agents/README.md`
-- `state/orchestrator/backup_nodes_to_gdrive.env.example`
-- `state/README.md`
+- docs and README files that describe versioned behavior
 Pre-commit hook (`.githooks/pre-commit`) blocks common leaked paths and token patterns before commit.
 
 ## Roadmap

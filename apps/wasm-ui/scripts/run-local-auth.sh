@@ -6,4 +6,4 @@ if [[ -z "${WASM_UI_API_TOKEN:-}" ]]; then
   exit 1
 fi
 
-WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/ui-gateway/run.py
+WASM_UI_EXPERIMENTAL=1 python3 /local/scripts/public/ui-gateway/run.py

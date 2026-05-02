@@ -1,7 +1,0 @@
-name: discord-slash-commands
-version: 0.1.0
-description: "Hermes-native Discord slash commands, including `/metricas` and `/faltas`, on the official plugin command path."
-author: "Hermes Orchestrator"
-provides_hooks:
-  - pre_gateway_dispatch
-provides_tools: []

@@ -3,8 +3,8 @@ SHELL := /bin/bash
 UI_DIR := /local/apps/wasm-ui
 WASM_CRATE_DIR := $(UI_DIR)/wasm/log-worker
 WASM_OUT_DIR := $(UI_DIR)/wasm/pkg
-GATEWAY_RUN := python3 /local/scripts/ui-gateway/run.py
-PY_TEST := python3 -m unittest discover -s /local/scripts/ui-gateway/tests -v
+GATEWAY_RUN := python3 /local/scripts/public/ui-gateway/run.py
+PY_TEST := python3 -m unittest discover -s /local/scripts/public/ui-gateway/tests -v
 
 # Docker build tooling
 BUILDER_IMAGE ?= hermes-wasm-ui-builder:latest

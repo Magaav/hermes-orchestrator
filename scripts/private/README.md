@@ -18,7 +18,7 @@ This tree is intentionally separated from public framework code so deployment-sp
 ## Synergies With Other Modules
 
 - `horc backup/restore` command flows are implemented in `/local/scripts/public/clone/clone_manager.py`.
-- Discord slash backup handlers under `/local/plugins/public/discord/...` call the same backup core.
+- Plugin-owned commands can call the same backup core through `horc`.
 - Cron jobs that run backup routines are now centralized at `/local/crons`.
 
 ## See Also

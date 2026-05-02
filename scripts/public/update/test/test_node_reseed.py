@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 
 def test_prepare_clone_filesystem_preserves_local_state_when_node_reseed_true(cm, monkeypatch, tmp_path) -> None:
@@ -100,3 +101,56 @@ def test_perform_update_target_keeps_stopped_node_stopped_and_resets_flag(cm, mo
     assert stop_calls == []
     assert start_calls == []
     assert "NODE_RESEED=false" in env_path.read_text(encoding="utf-8")
+
+
+def test_select_seed_venv_source_prefers_clone_safe_runtime(cm, monkeypatch, tmp_path) -> None:
+    hermes_source = tmp_path / "hermes-source" / ".venv" / "bin"
+    orchestrator_venv = tmp_path / "agents" / "nodes" / "orchestrator" / "hermes-agent" / ".venv" / "bin"
+    orchestrator_uv = (
+        tmp_path
+        / "agents"
+        / "nodes"
+        / "orchestrator"
+        / ".runtime"
+        / "uv"
+        / "python"
+        / "cpython-3.11-linux-aarch64-gnu"
+        / "bin"
+    )
+
+    hermes_source.mkdir(parents=True, exist_ok=True)
+    orchestrator_venv.mkdir(parents=True, exist_ok=True)
+    orchestrator_uv.mkdir(parents=True, exist_ok=True)
+    (orchestrator_uv / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+    (orchestrator_uv / "python3.11").chmod(0o755)
+
+    os.symlink("/usr/bin/python3.12", hermes_source / "python")
+    os.symlink("../../../.runtime/uv/python/cpython-3.11-linux-aarch64-gnu/bin/python3.11", orchestrator_venv / "python")
+
+    monkeypatch.setattr(cm, "HERMES_SOURCE_ROOT", tmp_path / "hermes-source")
+    monkeypatch.setattr(cm, "PARENT_HERMES_HOME", tmp_path / "parent-home")
+    monkeypatch.setattr(cm, "CLONES_ROOT", tmp_path / "agents" / "nodes")
+    monkeypatch.setattr(cm, "_python_has_modules", lambda _python, _modules: True)
+
+    selected = cm._select_seed_venv_source(required_modules=("discord", "yaml"))
+
+    assert selected == tmp_path / "agents" / "nodes" / "orchestrator" / "hermes-agent" / ".venv"
+
+
+def test_heal_clone_venv_python_entrypoints_rewrites_host_python_symlink(cm, tmp_path) -> None:
+    clone_root = tmp_path / "agents" / "nodes" / "node1"
+    venv_bin = clone_root / "hermes-agent" / ".venv" / "bin"
+    uv_bin = clone_root / ".runtime" / "uv" / "python" / "cpython-3.11-linux-aarch64-gnu" / "bin"
+
+    venv_bin.mkdir(parents=True, exist_ok=True)
+    uv_bin.mkdir(parents=True, exist_ok=True)
+    (uv_bin / "python3.11").write_text("#!/bin/sh\n", encoding="utf-8")
+    (uv_bin / "python3.11").chmod(0o755)
+    os.symlink("/usr/bin/python3.12", venv_bin / "python")
+
+    changed = cm._heal_clone_venv_python_entrypoints(clone_root)
+
+    assert changed >= 1
+    assert os.readlink(venv_bin / "python").endswith(".runtime/uv/python/cpython-3.11-linux-aarch64-gnu/bin/python3.11")
+    assert os.readlink(venv_bin / "python3") == "python"
+    assert os.readlink(venv_bin / "python3.11") == "python"

@@ -1,0 +1,326 @@
+schema: space-widget/v1
+id: drop-to-copy
+name: Drop to Copy
+cols: 5
+rows: 6
+col: 3
+row: 2
+metadata:
+  icon: auto_awesome_motion
+renderer: |-
+  async (parent, space, context) => {
+    const HERMES_URL = "__HERMES_SPACE_URL__";
+    if (parent.__dropToCopyCleanup) parent.__dropToCopyCleanup();
+    parent.innerHTML = "";
+    parent.style.cssText = "height:100%;overflow:hidden;color:#eff6ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+
+    const state = {
+      droppedText: "",
+      pollTimer: null
+    };
+
+    const style = document.createElement("style");
+    style.textContent = `
+      .dtc-root{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px;}
+      .dtc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
+      .dtc-title{font-size:18px;font-weight:750;line-height:1.15;}
+      .dtc-sub{font-size:11px;color:#9fb0c9;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;}
+      .dtc-live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#a9bbd3;white-space:nowrap;}
+      .dtc-dot{width:8px;height:8px;border-radius:50%;background:#7ce4b0;box-shadow:0 0 0 3px rgba(124,228,176,.12);}
+      .dtc-dot.warn{background:#facc15;box-shadow:0 0 0 3px rgba(250,204,21,.12);}
+      .dtc-form{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);gap:9px;}
+      .dtc-drop{min-height:64px;display:grid;place-items:center;border:1px dashed rgba(125,220,255,.34);border-radius:8px;background:rgba(3,10,20,.38);padding:10px;text-align:center;color:#cfe3ff;font-size:12px;line-height:1.35;}
+      .dtc-root.is-over .dtc-drop{border-color:rgba(124,228,176,.75);background:rgba(124,228,176,.08);}
+      .dtc-field{display:grid;gap:5px;min-width:0;}
+      .dtc-field label{font-size:11px;color:#9fb0c9;}
+      .dtc-input,.dtc-textarea{box-sizing:border-box;width:100%;border:1px solid rgba(148,167,201,.2);border-radius:8px;background:rgba(2,8,18,.72);color:#eff6ff;padding:8px 9px;font:inherit;font-size:12px;outline:none;}
+      .dtc-textarea{height:100%;min-height:94px;resize:none;line-height:1.35;}
+      .dtc-preview{min-height:18px;font-size:11px;color:#8fa4bf;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .dtc-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid rgba(148,167,201,.08);padding-top:9px;}
+      .dtc-status{min-width:0;font-size:12px;color:#9fb0c9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .dtc-btn{border:1px solid rgba(148,188,255,.25);background:rgba(125,220,255,.12);color:#eaf5ff;border-radius:8px;padding:8px 11px;font-size:12px;line-height:1;cursor:pointer;white-space:nowrap;}
+      .dtc-btn:hover{background:rgba(125,220,255,.2);}
+      .dtc-btn:disabled{opacity:.55;cursor:not-allowed;}
+    `;
+    parent.appendChild(style);
+
+    const root = document.createElement("div");
+    root.className = "dtc-root";
+    root.innerHTML = `
+      <div class="dtc-head">
+        <div>
+          <div class="dtc-title">Drop to Copy</div>
+          <div class="dtc-sub">Bridge: ${HERMES_URL}</div>
+        </div>
+        <div class="dtc-live"><span class="dtc-dot" data-role="dot"></span><span data-role="freshness">Ready</span></div>
+      </div>
+      <form class="dtc-form" data-role="form">
+        <div class="dtc-drop" data-role="drop">Drop a GitHub URL or paste one below</div>
+        <div class="dtc-field">
+          <label>GitHub repo</label>
+          <input class="dtc-input" data-role="repo" placeholder="https://github.com/owner/repo">
+          <div class="dtc-preview" data-role="preview"></div>
+        </div>
+        <div class="dtc-field">
+          <label>Wish</label>
+          <textarea class="dtc-textarea" data-role="wish" placeholder="Describe the widget to build"></textarea>
+        </div>
+      </form>
+      <div class="dtc-actions">
+        <div class="dtc-status" data-role="status">Ready</div>
+        <button class="dtc-btn" data-action="submit" type="button">Send</button>
+      </div>
+    `;
+    parent.appendChild(root);
+
+    const form = root.querySelector("[data-role='form']");
+    const drop = root.querySelector("[data-role='drop']");
+    const repo = root.querySelector("[data-role='repo']");
+    const wish = root.querySelector("[data-role='wish']");
+    const status = root.querySelector("[data-role='status']");
+    const freshness = root.querySelector("[data-role='freshness']");
+    const dot = root.querySelector("[data-role='dot']");
+    const preview = root.querySelector("[data-role='preview']");
+    const submit = root.querySelector("[data-action='submit']");
+
+    function setStatus(text, warn = false) {
+      status.textContent = text;
+      freshness.textContent = warn ? "Attention" : "Ready";
+      dot.classList.toggle("warn", warn);
+    }
+
+    function escapeHTML(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]);
+    }
+
+    function normalizeWidgetId(value) {
+      const slug = String(value || "drop-copy-widget").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+      return slug || `drop-copy-widget-${Date.now().toString(36)}`;
+    }
+
+    function clampSize(value, fallback) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(2, Math.min(12, Math.round(n))) : fallback;
+    }
+
+    function spaceId() {
+      return context?.space?.id || space?.spaces?.current?.id || "__HERMES_SPACE_ID__";
+    }
+
+    function guessRepo(text) {
+      const match = String(text || "").match(/https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/);
+      return match ? match[0].replace(/\.git$/, "") : "";
+    }
+
+    function resultRendererSource(title, body, tone = "pending") {
+      const safeTitle = JSON.stringify(String(title || "Drop to Copy"));
+      const safeBody = JSON.stringify(String(body || ""));
+      const safeTone = JSON.stringify(String(tone || "pending"));
+      return `
+        async (parent) => {
+          const title = ${safeTitle};
+          const body = ${safeBody};
+          const tone = ${safeTone};
+          parent.innerHTML = "";
+          parent.style.cssText = "height:100%;overflow:hidden;color:#eff6ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+          const style = document.createElement("style");
+          style.textContent = ".dtr-root{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr);gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px}.dtr-title{font-size:16px;font-weight:760;line-height:1.2;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dtr-body{min-height:0;overflow:auto;border:1px solid rgba(148,167,201,.12);border-radius:8px;background:rgba(3,10,20,.36);padding:10px;font-size:12px;line-height:1.45;white-space:pre-wrap}.dtr-root[data-tone='failed'] .dtr-body{border-color:rgba(248,113,113,.32);color:#fecaca}";
+          const root = document.createElement("div");
+          root.className = "dtr-root";
+          root.dataset.tone = tone;
+          root.innerHTML = "<div class='dtr-title'></div><div class='dtr-body'></div>";
+          root.querySelector(".dtr-title").textContent = title;
+          root.querySelector(".dtr-body").textContent = body;
+          parent.append(style, root);
+        }
+      `.trim();
+    }
+
+    async function hermes(path, options = {}) {
+      const response = await space.fetchExternal(HERMES_URL + path, {
+        method: options.method || "GET",
+        headers: { "Content-Type": "application/json" },
+        body: options.body ? JSON.stringify(options.body) : undefined
+      });
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; }
+      catch { data = { ok: false, error: { message: text.slice(0, 500) } }; }
+      if (!response.ok || data.ok === false) {
+        throw new Error(data?.error?.message || `HTTP ${response.status}`);
+      }
+      return data;
+    }
+
+    async function createBuildIcon(widgetId, message) {
+      await space.spaces.upsertWidget({
+        spaceId: spaceId(),
+        widgetId,
+        name: "Copy Build",
+        cols: 4,
+        rows: 3,
+        metadata: { icon: "construction" },
+        renderer: resultRendererSource("Building Widget", message, "pending"),
+        resetCamera: false
+      });
+      await space.spaces.toggleWidgets({ spaceId: spaceId(), widgetIds: [widgetId] }).catch(() => {});
+    }
+
+    async function updateResultWidget(widgetId, title, body, tone = "completed") {
+      await space.spaces.upsertWidget({
+        spaceId: spaceId(),
+        widgetId,
+        name: title,
+        cols: 5,
+        rows: 5,
+        metadata: { icon: tone === "failed" ? "error" : "article" },
+        renderer: resultRendererSource(title, body, tone),
+        resetCamera: false
+      });
+    }
+
+    function parseGeneratedWidget(text) {
+      const chunks = [];
+      String(text || "").replace(/```(?:json)?\s*([\s\S]*?)```/gi, (_all, body) => {
+        chunks.push(body);
+        return "";
+      });
+      chunks.push(String(text || ""));
+      for (const chunk of chunks) {
+        const start = chunk.indexOf("{");
+        const end = chunk.lastIndexOf("}");
+        if (start < 0 || end <= start) continue;
+        try {
+          const parsed = JSON.parse(chunk.slice(start, end + 1));
+          const widget = parsed.widget || parsed;
+          if (widget && typeof widget.renderer === "string") return widget;
+        } catch {}
+      }
+      return null;
+    }
+
+    async function installGeneratedWidget(output) {
+      const widget = parseGeneratedWidget(output);
+      if (!widget) return false;
+      const widgetId = normalizeWidgetId(widget.widgetId || widget.id || widget.name || "drop-copy-widget");
+      await space.spaces.upsertWidget({
+        spaceId: spaceId(),
+        widgetId,
+        name: String(widget.name || widget.title || "Generated Widget"),
+        cols: clampSize(widget.cols, 5),
+        rows: clampSize(widget.rows, 5),
+        metadata: widget.metadata && typeof widget.metadata === "object" ? widget.metadata : { icon: "extension" },
+        renderer: widget.renderer,
+        resetCamera: false
+      });
+      return true;
+    }
+
+    function schedulePoll(taskId, buildWidgetId) {
+      clearTimeout(state.pollTimer);
+      const tick = async () => {
+        try {
+          const data = await hermes(`/tasks/${encodeURIComponent(taskId)}`);
+          const task = data.task || {};
+          if (task.status === "running") {
+            setStatus(`Running ${taskId.slice(-6)}`);
+            state.pollTimer = setTimeout(tick, 3000);
+            return;
+          }
+          submit.disabled = false;
+          let output = task?.result?.response || task?.error?.message || JSON.stringify(task.result || task.error || task, null, 2);
+          if (task.status === "completed") {
+            const installed = await installGeneratedWidget(output).catch((error) => {
+              output += `\n\nWidget install failed: ${error.message || error}`;
+              return false;
+            });
+            await updateResultWidget(buildWidgetId, installed ? "Drop to Copy Output" : "Drop to Copy Result", output, "completed");
+            setStatus(installed ? "Widget created" : "Result ready");
+          } else {
+            await updateResultWidget(buildWidgetId, "Drop to Copy Failed", output, "failed");
+            setStatus("Task failed", true);
+          }
+        } catch (error) {
+          submit.disabled = false;
+          await updateResultWidget(buildWidgetId, "Drop to Copy Failed", error.message || String(error), "failed").catch(() => {});
+          setStatus(error.message || String(error), true);
+        }
+      };
+      state.pollTimer = setTimeout(tick, 1500);
+    }
+
+    async function submitTask() {
+      const repoUrl = repo.value.trim();
+      const wishText = wish.value.trim();
+      if (!repoUrl && !state.droppedText) {
+        setStatus("Add a repo first", true);
+        return;
+      }
+      if (!wishText) {
+        setStatus("Describe the widget", true);
+        wish.focus();
+        return;
+      }
+      submit.disabled = true;
+      setStatus("Starting orchestrator job");
+      const buildWidgetId = `drop-copy-build-${Date.now().toString(36)}`;
+      await createBuildIcon(buildWidgetId, `Repo: ${repoUrl || "dropped input"}\n\n${wishText}`);
+      try {
+        const data = await hermes("/drop-to-copy/tasks", {
+          method: "POST",
+          body: {
+            repo_url: repoUrl,
+            wish: wishText,
+            dropped_text: state.droppedText.slice(0, 50000),
+            space_id: spaceId(),
+            build_widget_id: buildWidgetId
+          }
+        });
+        const taskId = data?.task?.task_id;
+        if (!taskId) throw new Error("Bridge did not return a task id.");
+        schedulePoll(taskId, buildWidgetId);
+      } catch (error) {
+        submit.disabled = false;
+        await updateResultWidget(buildWidgetId, "Drop to Copy Failed", error.message || String(error), "failed").catch(() => {});
+        setStatus(error.message || String(error), true);
+      }
+    }
+
+    function ingestText(text) {
+      const value = String(text || "").trim();
+      state.droppedText = value;
+      const found = guessRepo(value);
+      if (found) repo.value = found;
+      preview.textContent = value ? value.slice(0, 220) : "";
+      setStatus(found ? "Repo detected" : "Drop captured");
+    }
+
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      root.classList.add("is-over");
+    });
+    drop.addEventListener("dragleave", () => root.classList.remove("is-over"));
+    drop.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      root.classList.remove("is-over");
+      const files = Array.from(event.dataTransfer?.files || []);
+      const text = event.dataTransfer?.getData("text/uri-list") || event.dataTransfer?.getData("text/plain") || "";
+      ingestText(text || files.map((file) => file.name).join("\n"));
+    });
+    repo.addEventListener("paste", (event) => setTimeout(() => ingestText(repo.value || event.clipboardData?.getData("text/plain")), 0));
+    submit.addEventListener("click", () => void submitTask());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void submitTask();
+    });
+
+    parent.__dropToCopyCleanup = () => {
+      clearTimeout(state.pollTimer);
+    };
+  }

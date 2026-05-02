@@ -21,37 +21,16 @@ Design goals:
   - Per-node centralized logs at /local/logs/nodes/<clone_name>/
 
 ================================================================================
-OPENVIKING ORCHESTRATION LAYER
+DEPRECATED OPENVIKING NOTE
 ================================================================================
 
-OpenViking is a centralized memory/knowledge base service that provides:
-  - Semantic search across all nodes
-  - Tiered context (L0 ~100 tokens, L1 ~2k, L2 full)
-  - Automatic memory extraction (6 categories)
-  - Session management and continuity
-  - Prefetch for intelligent context pre-loading
+OpenViking is deprecated in horc. The clone manager now ignores
+`OPENVIKING_*` and `MEMORY_OPENVIKING` at runtime and clears stale
+clone-local `memory.provider=openviking` settings during start/restart.
 
-Architecture:
-  - Server: Container `openviking` running on host, exposed at 0.0.0.0:1933
-  - Host access: http://127.0.0.1:1933
-  - Container access: http://host.docker.internal:1933
-
-Per-node configuration (in /local/agents/envs/<node_name>.env):
-  OPENVIKING_ENABLED=1          # Enable OpenViking (0 to disable)
-  OPENVIKING_ENDPOINT=...       # Server URL (auto-set to host.docker.internal for clones)
-  # OPENVIKING_ACCOUNT / OPENVIKING_USER are optional and default to <node_name>
-
-The clone manager auto-configures OpenViking during `start` by calling
-openviking_env_bootstrap.py which:
-  1. Validates the provider plugin exists in hermes-agent/plugins/memory/openviking/
-  2. Probes the endpoint health
-  3. Updates config.yaml to set memory.provider=openviking
-  4. Sets fail-open mode if endpoint is unreachable
-
-Legacy keys remain supported for compatibility:
-  MEMORY_OPENVIKING -> OPENVIKING_ENABLED
-  BROWSER_CAMOFOX   -> CAMOFOX_ENABLED
-  CLONE_STATE*      -> NODE_STATE*
+Legacy keys that remain tolerated for compatibility:
+  BROWSER_CAMOFOX -> CAMOFOX_ENABLED
+  CLONE_STATE*    -> NODE_STATE*
 """
 
 from __future__ import annotations
@@ -86,6 +65,7 @@ ATTENTION_LOG_ROOT = Path(
     os.getenv("HERMES_AGENTS_ATTENTION_LOG_ROOT", str(LOGS_ROOT / "attention" / "nodes"))
 )
 REGISTRY_PATH = Path(os.getenv("HERMES_AGENTS_REGISTRY_PATH", str(AGENTS_ROOT / "registry.json")))
+LEGACY_HOST_WORKSPACE_ROOT = Path(os.getenv("HERMES_LEGACY_HOST_WORKSPACE_ROOT", "/local/workspace"))
 
 CANONICAL_ORCHESTRATOR_HOME = Path(
     os.getenv("HERMES_ORCHESTRATOR_HOME", str(CLONES_ROOT / "orchestrator" / ".hermes"))
@@ -140,7 +120,7 @@ SHARED_WIKI_ROOT = Path(
     str(
         os.getenv("HERMES_SHARED_WIKI_ROOT", "")
         or os.getenv("HERMES_PRIVATE_WIKI_ROOT", "")
-        or (PRIVATE_PLUGINS_ROOT / "wiki")
+        or "/local/wiki"
     )
 )
 PRIVATE_SKILLS_ROOT = Path(
@@ -153,7 +133,7 @@ SHARED_MEMORY_ROOT = Path(
     str(
         os.getenv("HERMES_PRIVATE_MEMORY_ROOT", "")
         or os.getenv("HERMES_MEMORY_ROOT", "")
-        or (PRIVATE_PLUGINS_ROOT / "memory")
+        or "/local/memory"
     )
 )
 SHARED_NODE_DATA_ROOT = Path(
@@ -163,6 +143,17 @@ SHARED_NODE_DATA_ROOT = Path(
         or os.getenv("HERMES_DATA_ROOT", "")
         or "/local/datas"
     )
+)
+SPACE_UI_LEGACY_ENV_KEYS = (
+    "HERMES_SPACE_UI_STATE_DIR",
+    "SPACE_AGENT_DIR",
+    "SPACE_AGENT_CUSTOMWARE_PATH",
+    "HERMES_SPACE_NODE_ROOT",
+    "HERMES_SPACE_AGENT_PID_FILE",
+    "HERMES_SPACE_UI_PID_FILE",
+    "HERMES_SPACE_UI_BRIDGE_PID_FILE",
+    "HERMES_SPACE_AGENT_LOG_FILE",
+    "HERMES_SPACE_UI_LOG_FILE",
 )
 BACKUPS_ROOT = Path(os.getenv("HERMES_BACKUPS_ROOT", "/local/backups"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
@@ -177,6 +168,8 @@ DEFAULT_DISCORD_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "discord"
 DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
 DEFAULT_NATIVE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "native"
 DEFAULT_DISCORD_PRIVATE_ROOT = PRIVATE_PLUGINS_ROOT / "discord"
+LEGACY_SHARED_WIKI_ROOT = PRIVATE_PLUGINS_ROOT / "wiki"
+LEGACY_SHARED_MEMORY_ROOT = PRIVATE_PLUGINS_ROOT / "memory"
 HOST_BOOTSTRAP_ENV_FILE = Path(os.getenv("HERMES_BOOTSTRAP_ENV_FILE", "/local/.env"))
 UPDATE_LOG_ROOT = Path(
     str(os.getenv("HERMES_UPDATE_LOG_ROOT", str(LOGS_ROOT / "update")) or (LOGS_ROOT / "update"))
@@ -216,9 +209,16 @@ DISCORD_DEFAULT_REBOOT_DELAY_SEC = "0.1"
 NODE_WORKSPACE_ROOT_IN_CONTAINER = "/local/workspace"
 NODE_WORKSPACE_DB_PATH_IN_CONTAINER = "/local/data/colmeio_db.sqlite3"
 NODE_WORKSPACE_DISCORD_SETTINGS_IN_CONTAINER = "/local/workspace/discord/discord_settings.json"
-# Canonical shared Discord ACL/users table now lives in the private plugin root.
-# Keep variable name stable to avoid touching unrelated call sites.
-NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = "/local/plugins/private/discord/discord_users.json"
+NODE_WORKSPACE_DISCORD_SLASH_CACHE_ROOT_IN_CONTAINER = "/local/workspace/plugins/discord-slash-commands/cache"
+NODE_WORKSPACE_DISCORD_GOVERNANCE_ROOT_IN_CONTAINER = (
+    f"{NODE_WORKSPACE_DISCORD_SLASH_CACHE_ROOT_IN_CONTAINER}/governance"
+)
+NODE_WORKSPACE_DISCORD_COMMANDS_FILE_IN_CONTAINER = (
+    f"{NODE_WORKSPACE_DISCORD_SLASH_CACHE_ROOT_IN_CONTAINER}/catalogs/custom_commands.json"
+)
+NODE_WORKSPACE_DISCORD_USERS_DB_IN_CONTAINER = (
+    f"{NODE_WORKSPACE_DISCORD_GOVERNANCE_ROOT_IN_CONTAINER}/discord_users.json"
+)
 NODE_SKILLS_PATH_IN_CONTAINER = "/local/skills"
 ORCHESTRATOR_BACKUP_CRON_SCRIPT = "backup_daily_brt.sh"
 
@@ -292,6 +292,77 @@ def _dir_has_entries(path: Path, *, ignored_names: set[str] | None = None) -> bo
     return False
 
 
+def _tree_has_content(path: Path, *, ignored_names: set[str] | None = None) -> bool:
+    """Return True when *path* contains any real file/symlink payload.
+
+    Empty legacy mount roots should not trigger auto-creation or bind mounts on
+    restart, so this intentionally ignores directory shells that have no
+    nested content.
+    """
+    ignored = ignored_names or set()
+    if not path.exists():
+        return False
+    if path.is_symlink() or path.is_file():
+        return True
+    if not path.is_dir():
+        return False
+    try:
+        for entry in path.iterdir():
+            if entry.name in ignored:
+                continue
+            if entry.is_symlink() or entry.is_file():
+                return True
+            if entry.is_dir() and _tree_has_content(entry, ignored_names=ignored):
+                return True
+    except Exception:
+        return True
+    return False
+
+
+def _legacy_space_ui_state_root() -> Path:
+    return PRIVATE_PLUGINS_ROOT / "hermes-space-ui"
+
+
+def _canonical_space_ui_state_root() -> Path:
+    return PLUGINS_ROOT / "hermes-space-ui" / "state"
+
+
+def _rewrite_legacy_space_ui_path(raw: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        return value
+
+    legacy = os.path.normpath(str(_legacy_space_ui_state_root()))
+    canonical = os.path.normpath(str(_canonical_space_ui_state_root()))
+    normalized = os.path.normpath(value)
+
+    if normalized == legacy:
+        return canonical
+    if normalized.startswith(f"{legacy}{os.sep}"):
+        return f"{canonical}{normalized[len(legacy):]}"
+    return value
+
+
+def _sanitize_space_ui_env_map(env: Dict[str, str]) -> Dict[str, str]:
+    sanitized = dict(env)
+    for key in SPACE_UI_LEGACY_ENV_KEYS:
+        if key not in sanitized:
+            continue
+        sanitized[key] = _rewrite_legacy_space_ui_path(str(sanitized.get(key, "") or ""))
+    return sanitized
+
+
+def _legacy_public_plugins_present() -> bool:
+    return _tree_has_content(SHARED_PLUGINS_ROOT)
+
+
+def _legacy_private_plugins_present() -> bool:
+    return _tree_has_content(
+        PRIVATE_PLUGINS_ROOT,
+        ignored_names={"discord", "hermes-space-ui", "memory", "wiki"},
+    )
+
+
 def _ensure_root_dir(target: Path) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.is_symlink():
@@ -342,6 +413,59 @@ def _migrate_legacy_crons_root() -> None:
     _remove_path(legacy)
 
 
+def _migrate_legacy_host_workspace_root() -> None:
+    """Fold accidental host-level workspace state into the orchestrator node."""
+    legacy = LEGACY_HOST_WORKSPACE_ROOT
+    target = CLONES_ROOT / "orchestrator" / "workspace"
+    if legacy == target or not (legacy.exists() or legacy.is_symlink()):
+        return
+
+    target.mkdir(parents=True, exist_ok=True)
+    if legacy.is_symlink() or not legacy.is_dir():
+        _remove_path(legacy)
+        return
+
+    for item in sorted(legacy.iterdir(), key=lambda p: p.name):
+        dst = target / item.name
+        if dst.exists() or dst.is_symlink():
+            continue
+        shutil.move(str(item), str(dst))
+
+    _remove_path(legacy)
+
+
+def _migrate_legacy_shared_root(legacy: Path, target: Path) -> None:
+    if legacy == target:
+        return
+    if not (legacy.exists() or legacy.is_symlink()):
+        return
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.move(str(legacy), str(target))
+        return
+
+    if legacy.is_symlink():
+        _remove_path(legacy)
+        return
+    if not legacy.is_dir():
+        _remove_path(legacy)
+        return
+
+    for item in sorted(legacy.iterdir(), key=lambda p: p.name):
+        dst = target / item.name
+        if dst.exists() or dst.is_symlink():
+            continue
+        if item.is_symlink():
+            os.symlink(os.readlink(item), dst)
+            continue
+        if item.is_dir():
+            shutil.copytree(item, dst, symlinks=True)
+            continue
+        shutil.copy2(item, dst)
+    _remove_path(legacy)
+
+
 def _ensure_dirs() -> None:
     AGENTS_ROOT.mkdir(parents=True, exist_ok=True)
     ENVS_ROOT.mkdir(parents=True, exist_ok=True)
@@ -360,13 +484,12 @@ def _ensure_dirs() -> None:
     _ensure_root_dir(SHARED_SCRIPTS_ROOT)
     _ensure_root_dir(PRIVATE_SCRIPTS_ROOT)
     _migrate_legacy_crons_root()
+    _migrate_legacy_host_workspace_root()
+    _migrate_legacy_shared_root(LEGACY_SHARED_WIKI_ROOT, SHARED_WIKI_ROOT)
+    _migrate_legacy_shared_root(LEGACY_SHARED_MEMORY_ROOT, SHARED_MEMORY_ROOT)
     _ensure_root_dir(SHARED_CRONS_ROOT)
     _ensure_orchestrator_backup_cron_script()
-    _ensure_root_dir(SHARED_PLUGINS_ROOT)
-    _ensure_root_dir(PRIVATE_PLUGINS_ROOT)
-    _ensure_root_dir(SHARED_WIKI_ROOT)
     _ensure_root_dir(PRIVATE_SKILLS_ROOT)
-    _ensure_root_dir(SHARED_MEMORY_ROOT)
     _ensure_root_dir(SHARED_NODE_DATA_ROOT)
 
 
@@ -660,6 +783,14 @@ def _replace_or_append_env_line(text: str, key: str, value: str) -> str:
     return f"{text}{line}\n"
 
 
+def _remove_env_line(text: str, key: str) -> str:
+    pattern = re.compile(rf"^{re.escape(key)}=.*(?:\n|$)", re.MULTILINE)
+    updated = pattern.sub("", text)
+    if updated and not updated.endswith("\n"):
+        updated += "\n"
+    return updated
+
+
 def _orchestrator_env_template() -> tuple[Path, str]:
     if ORCHESTRATOR_ENV_TEMPLATE_PATH.exists():
         return ORCHESTRATOR_ENV_TEMPLATE_PATH, ORCHESTRATOR_ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -668,7 +799,6 @@ def _orchestrator_env_template() -> tuple[Path, str]:
         text = NODE_ENV_TEMPLATE_PATH.read_text(encoding="utf-8")
         text = _replace_or_append_env_line(text, "NODE_STATE", "1")
         text = _replace_or_append_env_line(text, "NODE_STATE_FROM_BACKUP_PATH", "''")
-        text = _replace_or_append_env_line(text, "OPENVIKING_ENDPOINT", "http://127.0.0.1:1933")
         text = _replace_or_append_env_line(text, "CAMOFOX_URL", "http://127.0.0.1:9377")
         return NODE_ENV_TEMPLATE_PATH, text
 
@@ -751,13 +881,20 @@ def _render_cloned_env_text(
         _env_quote(source_name),
     )
     text = _replace_or_append_env_line(text, "NODE_RESEED", "false")
-    text = _replace_or_append_env_line(
-        text,
+    for key in (
         "DISCORD_COMMANDS_FILE",
-        _env_quote(f"/local/plugins/private/discord/commands/{target_name}.json"),
-    )
+        "HERMES_DISCORD_SLASH_CACHE_ROOT",
+        "HERMES_DISCORD_PRIVATE_DIR",
+        "MEMORY_OPENVIKING",
+        "OPENVIKING_ENDPOINT",
+        "OPENVIKING_ACCOUNT",
+        "OPENVIKING_USER",
+        "OPENVIKING_AGENT",
+    ):
+        text = _remove_env_line(text, key)
+    text = _replace_or_append_env_line(text, "OPENVIKING_ENABLED", "0")
 
-    for key in ("NODE_NAME", "OPENVIKING_ACCOUNT", "OPENVIKING_USER"):
+    for key in ("NODE_NAME",):
         pattern = re.compile(rf"^{re.escape(key)}=(.*)$", re.MULTILINE)
         match = pattern.search(text)
         if not match:
@@ -1553,7 +1690,7 @@ def _normalized_path_str(path: Path | str) -> str:
 
 
 def _required_worker_mount_specs(clone_name: str, clone_root: Path) -> list[Dict[str, Any]]:
-    return [
+    mounts = [
         {
             "destination": "/local",
             "source": str(clone_root),
@@ -1590,16 +1727,6 @@ def _required_worker_mount_specs(clone_name: str, clone_root: Path) -> list[Dict
             "read_only": False,
         },
         {
-            "destination": "/local/plugins/public",
-            "source": str(SHARED_PLUGINS_ROOT),
-            "read_only": True,
-        },
-        {
-            "destination": "/local/plugins/private",
-            "source": str(PRIVATE_PLUGINS_ROOT),
-            "read_only": False,
-        },
-        {
             "destination": "/local/cron",
             "source": str(SHARED_CRONS_ROOT / clone_name),
             "read_only": False,
@@ -1610,6 +1737,23 @@ def _required_worker_mount_specs(clone_name: str, clone_root: Path) -> list[Dict
             "read_only": False,
         },
     ]
+    if _legacy_public_plugins_present():
+        mounts.append(
+            {
+                "destination": "/local/plugins/public",
+                "source": str(SHARED_PLUGINS_ROOT),
+                "read_only": True,
+            }
+        )
+    if _legacy_private_plugins_present():
+        mounts.append(
+            {
+                "destination": "/local/plugins/private",
+                "source": str(PRIVATE_PLUGINS_ROOT),
+                "read_only": False,
+            }
+        )
+    return mounts
 
 
 def _missing_required_worker_mounts(container_name: str, clone_name: str, clone_root: Path) -> list[str]:
@@ -1773,9 +1917,21 @@ def _clone_workspace_runtime_contract_path(clone_root: Path) -> Path:
     return clone_root / NODE_RUNTIME_CONTRACT_WORKSPACE_REL
 
 
-def _resolve_state_mode_info(env: Dict[str, str]) -> tuple[int | None, str]:
+def _normalize_state_code_for_clone(clone_name: str | None, state_code: int) -> int:
+    name = str(clone_name or "").strip()
+    if state_code == 1 and name and name != "orchestrator":
+        return 2
+    return state_code
+
+
+def _effective_state_mode(clone_name: str, env: Dict[str, str]) -> int:
+    return _normalize_state_code_for_clone(clone_name, _extract_state_mode(env))
+
+
+def _resolve_state_mode_info(env: Dict[str, str], *, clone_name: str | None = None) -> tuple[int | None, str]:
     try:
         mode = _extract_state_mode(env)
+        mode = _normalize_state_code_for_clone(clone_name, mode)
         return mode, STATE_LABELS.get(mode, "unknown")
     except Exception:
         raw = _env_first_nonempty(env, "NODE_STATE", "CLONE_STATE")
@@ -1785,6 +1941,7 @@ def _resolve_state_mode_info(env: Dict[str, str]) -> tuple[int | None, str]:
             mode = int(raw)
         except Exception:
             return None, "invalid"
+        mode = _normalize_state_code_for_clone(clone_name, mode)
         return mode, STATE_LABELS.get(mode, "invalid")
 
 
@@ -1817,7 +1974,7 @@ SHARED_CHANGE_EXECUTION_DISCIPLINE: tuple[tuple[str, str], ...] = (
 
 
 def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> str:
-    state_code, state_label = _resolve_state_mode_info(env)
+    state_code, state_label = _resolve_state_mode_info(env, clone_name=clone_name)
     role = "orchestrator-control-plane" if state_code == 1 else "worker-node"
     node_timezone = _env_first_nonempty(env, "NODE_TIME_ZONE", "HERMES_TIMEZONE") or "system-default"
     lines = [
@@ -1868,7 +2025,7 @@ def _build_node_runtime_contract_text(clone_name: str, env: Dict[str, str]) -> s
 
 
 def _build_node_governance_prompt(clone_name: str, env: Dict[str, str]) -> str:
-    state_code, state_label = _resolve_state_mode_info(env)
+    state_code, state_label = _resolve_state_mode_info(env, clone_name=clone_name)
     role = "orchestrator" if state_code == 1 else "worker"
     role_line = (
         "You own shared plugin/framework execution and rollout for the fleet."
@@ -1938,7 +2095,8 @@ def _is_camofox_enabled_env(env: Dict[str, str]) -> bool:
 
 
 def _is_openviking_enabled_env(env: Dict[str, str]) -> bool:
-    return _env_truthy_prefer(env, "OPENVIKING_ENABLED", "MEMORY_OPENVIKING")
+    # Deprecated: horc no longer activates OpenViking regardless of env flags.
+    return False
 
 
 def _node_reseed_requested(env: Dict[str, str]) -> bool:
@@ -1965,6 +2123,111 @@ def _resolve_openviking_identity(env: Dict[str, str], clone_name: str) -> tuple[
         account = user
 
     return account, user
+
+
+def _clear_deprecated_openviking_config(clone_root: Path) -> Dict[str, Any]:
+    config_path = clone_root / ".hermes" / "config.yaml"
+    if not config_path.exists():
+        return {
+            "config_path": str(config_path),
+            "changed": False,
+            "provider_before": "",
+            "provider_after": "",
+        }
+
+    raw = config_path.read_text(encoding="utf-8")
+    provider_before = ""
+    provider_after = ""
+
+    try:
+        import yaml  # type: ignore
+
+        loaded = yaml.safe_load(raw) or {}
+        if not isinstance(loaded, dict):
+            return {
+                "config_path": str(config_path),
+                "changed": False,
+                "provider_before": "",
+                "provider_after": "",
+            }
+
+        memory_cfg = loaded.get("memory")
+        if not isinstance(memory_cfg, dict):
+            return {
+                "config_path": str(config_path),
+                "changed": False,
+                "provider_before": "",
+                "provider_after": "",
+            }
+
+        provider_before = str(memory_cfg.get("provider", "") or "").strip()
+        if provider_before != "openviking":
+            return {
+                "config_path": str(config_path),
+                "changed": False,
+                "provider_before": provider_before,
+                "provider_after": provider_before,
+            }
+
+        memory_cfg["provider"] = ""
+        updated = yaml.safe_dump(loaded, sort_keys=False, allow_unicode=False)
+        if not updated.endswith("\n"):
+            updated += "\n"
+        config_path.write_text(updated, encoding="utf-8")
+        return {
+            "config_path": str(config_path),
+            "changed": True,
+            "provider_before": provider_before,
+            "provider_after": provider_after,
+        }
+    except Exception:
+        lines = raw.splitlines()
+        changed = False
+        in_memory_block = False
+        memory_indent = 0
+
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip(" "))
+            if not stripped or stripped.startswith("#"):
+                continue
+
+            if not in_memory_block and stripped == "memory:":
+                in_memory_block = True
+                memory_indent = indent
+                continue
+
+            if in_memory_block and indent <= memory_indent:
+                in_memory_block = False
+
+            if not in_memory_block:
+                continue
+
+            provider_match = re.match(r"^(\s*provider:\s*)(['\"]?)([^'\"\s#]+)\2(\s*(?:#.*)?)$", line)
+            if provider_match is None:
+                continue
+
+            provider_before = provider_match.group(3).strip()
+            if provider_before != "openviking":
+                provider_after = provider_before
+                break
+
+            lines[idx] = f'{provider_match.group(1)}""{provider_match.group(4)}'
+            changed = True
+            break
+
+        if changed:
+            updated = "\n".join(lines)
+            if raw.endswith("\n"):
+                updated += "\n"
+            config_path.write_text(updated, encoding="utf-8")
+
+        return {
+            "config_path": str(config_path),
+            "changed": changed,
+            "provider_before": provider_before,
+            "provider_after": provider_after,
+        }
 
 
 def _effective_restart_reboot_env(env: Dict[str, str]) -> Dict[str, str]:
@@ -2047,6 +2310,18 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     overrides["DISCORD_SETTINGS_FILE"] = (
         _env_first_nonempty(env, "DISCORD_SETTINGS_FILE") or NODE_WORKSPACE_DISCORD_SETTINGS_IN_CONTAINER
     )
+    overrides["HERMES_DISCORD_SLASH_CACHE_ROOT"] = (
+        _env_first_nonempty(env, "HERMES_DISCORD_SLASH_CACHE_ROOT")
+        or NODE_WORKSPACE_DISCORD_SLASH_CACHE_ROOT_IN_CONTAINER
+    )
+    overrides["HERMES_DISCORD_PRIVATE_DIR"] = (
+        _env_first_nonempty(env, "HERMES_DISCORD_PRIVATE_DIR")
+        or NODE_WORKSPACE_DISCORD_GOVERNANCE_ROOT_IN_CONTAINER
+    )
+    overrides["DISCORD_COMMANDS_FILE"] = (
+        _env_first_nonempty(env, "DISCORD_COMMANDS_FILE")
+        or NODE_WORKSPACE_DISCORD_COMMANDS_FILE_IN_CONTAINER
+    )
 
     discord_home = _effective_discord_home_channel(env)
     if discord_home:
@@ -2059,17 +2334,14 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     overrides["COLMEIO_DISCORD_REBOOT_DELAY_SEC"] = restart_reboot["reboot_delay_sec"]
 
     overrides["CAMOFOX_ENABLED"] = "1" if _is_camofox_enabled_env(env) else "0"
-    overrides["OPENVIKING_ENABLED"] = "1" if _is_openviking_enabled_env(env) else "0"
+    overrides["OPENVIKING_ENABLED"] = "0"
+    overrides["MEMORY_OPENVIKING"] = "0"
+    overrides["OPENVIKING_ENDPOINT"] = ""
+    overrides["OPENVIKING_ACCOUNT"] = ""
+    overrides["OPENVIKING_USER"] = ""
+    overrides["OPENVIKING_AGENT"] = ""
     if _is_camofox_enabled_env(env):
         overrides["CAMOFOX_URL"] = _env_first_nonempty(env, "CAMOFOX_URL") or CAMOFOX_DEFAULT_URL_CLONE
-    if _is_openviking_enabled_env(env):
-        overrides["OPENVIKING_ENDPOINT"] = (
-            _env_first_nonempty(env, "OPENVIKING_ENDPOINT") or OPENVIKING_DEFAULT_ENDPOINT_CLONE
-        )
-
-    openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name)
-    overrides["OPENVIKING_ACCOUNT"] = openviking_account
-    overrides["OPENVIKING_USER"] = openviking_user
 
     yolo_mode = _effective_hermes_yolo_mode(env)
     if yolo_mode:
@@ -2087,6 +2359,33 @@ def _runtime_env_overrides(clone_name: str, env: Dict[str, str]) -> Dict[str, st
     overrides["HERMES_NODE_BOOTSTRAP_META_PATH"] = "/local/.clone-meta/bootstrap.json"
 
     return overrides
+
+
+def _translate_container_runtime_path_for_host(value: str, clone_root: Path, clone_name: str) -> str:
+    text = str(value or "")
+    mappings = (
+        ("/local/workspace", clone_root / "workspace"),
+        ("/local/data", _shared_node_data_dir(clone_name)),
+        ("/local/.hermes", clone_root / ".hermes"),
+    )
+    for prefix, host_root in mappings:
+        if text == prefix:
+            return str(host_root)
+        if text.startswith(prefix + "/"):
+            return str(host_root / text[len(prefix) + 1 :])
+    return text
+
+
+def _translate_runtime_overrides_for_host(
+    overrides: Dict[str, str],
+    *,
+    clone_root: Path,
+    clone_name: str,
+) -> Dict[str, str]:
+    return {
+        key: _translate_container_runtime_path_for_host(str(value), clone_root, clone_name)
+        for key, value in overrides.items()
+    }
 
 
 def _python_has_module(python_bin: Path, module: str) -> bool:
@@ -2111,6 +2410,36 @@ def _python_has_modules(python_bin: Path, modules: tuple[str, ...]) -> bool:
         if not _python_has_module(python_bin, module):
             return False
     return True
+
+
+def _python_seed_is_clone_safe(python_bin: Path) -> bool:
+    if not python_bin.exists():
+        return False
+    if not python_bin.is_symlink():
+        return True
+    try:
+        target = os.readlink(python_bin)
+    except OSError:
+        return False
+    if not os.path.isabs(target):
+        return True
+    return target.startswith("/home/ubuntu/.local/share/uv/") or target.startswith("/local/.runtime/uv/")
+
+
+def _venv_seed_is_clone_safe(
+    venv_dir: Path,
+    *,
+    required_module: str | None = None,
+    required_modules: tuple[str, ...] | None = None,
+) -> bool:
+    py = venv_dir / "bin" / "python"
+    if not _python_seed_is_clone_safe(py):
+        return False
+    if required_modules:
+        return _python_has_modules(py, required_modules)
+    if required_module:
+        return _python_has_module(py, required_module)
+    return py.exists()
 
 
 def _host_python_candidates() -> list[Path]:
@@ -2196,9 +2525,9 @@ def _ensure_orchestrator_runtime(clone_name: str) -> Dict[str, Any]:
 
 def _seed_venv_candidates() -> list[Path]:
     preferred = [
-        HERMES_SOURCE_ROOT / ".venv",
-        PARENT_HERMES_HOME / "hermes-agent" / ".venv",
         CLONES_ROOT / "orchestrator" / "hermes-agent" / ".venv",
+        PARENT_HERMES_HOME / "hermes-agent" / ".venv",
+        HERMES_SOURCE_ROOT / ".venv",
     ]
     deduped: list[Path] = []
     seen: set[str] = set()
@@ -2220,14 +2549,16 @@ def _select_seed_venv_source(
 
     if required_modules:
         for venv_dir in candidates:
-            py = venv_dir / "bin" / "python"
-            if _python_has_modules(py, required_modules):
+            if _venv_seed_is_clone_safe(venv_dir, required_modules=required_modules):
                 return venv_dir
     elif required_module:
         for venv_dir in candidates:
-            py = venv_dir / "bin" / "python"
-            if _python_has_module(py, required_module):
+            if _venv_seed_is_clone_safe(venv_dir, required_module=required_module):
                 return venv_dir
+
+    for venv_dir in candidates:
+        if _venv_seed_is_clone_safe(venv_dir):
+            return venv_dir
 
     for venv_dir in candidates:
         if (venv_dir / "bin" / "python").exists():
@@ -2670,8 +3001,8 @@ def _ensure_worker_shared_mount_links(clone_root: Path, clone_name: str, *, refr
         "wiki": (
             SHARED_WIKI_ROOT,
             "# Node Mount Mirror: wiki\n\n"
-            "Host-visible mirror of shared private wiki data mounted at /local/wiki.\n"
-            "Canonical source: /local/plugins/private/wiki\n",
+            "Host-visible mirror of shared wiki data mounted at /local/wiki.\n"
+            "Canonical source: /local/wiki\n",
         ),
     }
 
@@ -2729,6 +3060,75 @@ def _discord_plugin_roots() -> list[Path]:
         seen.add(key)
         deduped.append(candidate)
     return deduped
+
+
+def _canonical_discord_slash_plugin_root() -> Path:
+    configured = str(os.getenv("HERMES_NATIVE_DISCORD_SLASH_COMMANDS_DIR", "") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return PLUGINS_ROOT / "discord-slash-commands"
+
+
+def _is_discord_slash_plugin_enabled_env(env: Dict[str, str]) -> bool:
+    return _is_truthy(env.get("PLUGIN_DISCORD_SLASH_COMMANDS", "")) or _is_truthy(
+        env.get("PLUGIN_DISCORD_GOVERNANCE", "")
+    )
+
+
+def _bootstrap_discord_slash_commands_for_node(
+    clone_name: str,
+    clone_root: Path,
+    env_path: Path,
+    env: Dict[str, str],
+) -> Dict[str, Any]:
+    if not _is_discord_slash_plugin_enabled_env(env):
+        return {"enabled": False, "changed": False, "reason": "plugin_disabled"}
+
+    plugin_root = _canonical_discord_slash_plugin_root()
+    script = plugin_root / "scripts" / "discord_slash_commands_env_bootstrap.py"
+    if not script.exists():
+        raise CloneManagerError(f"canonical discord slash bootstrap script not found: {script}")
+
+    python_bin = _select_host_python(required_module="yaml") or _select_host_python()
+    if python_bin is None:
+        raise CloneManagerError("python runtime with PyYAML not found for Discord slash bootstrap")
+
+    config_file = clone_root / ".hermes" / "config.yaml"
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    proc = _run(
+        [
+            str(python_bin),
+            str(script),
+            "--env-file",
+            str(env_path),
+            "--config-file",
+            str(config_file),
+            "--plugin-source",
+            str(plugin_root),
+        ],
+        check=False,
+    )
+    out = str(proc.stdout or "").strip()
+    err = str(proc.stderr or "").strip()
+    if proc.returncode != 0:
+        detail = err or out or f"rc={proc.returncode}"
+        raise CloneManagerError(f"Discord slash bootstrap failed for {clone_name}: {detail}")
+
+    payload: Dict[str, Any]
+    try:
+        parsed = json.loads(out) if out else {}
+        payload = parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        payload = {"raw_stdout": out}
+    payload.setdefault("enabled", True)
+    payload.setdefault("changed", False)
+    _log(
+        clone_name,
+        "discord slash bootstrap ok: "
+        f"changed={payload.get('changed')} plugin_synced={payload.get('plugin_synced')} "
+        f"cache={payload.get('cache', {}).get('cache_root') if isinstance(payload.get('cache'), dict) else ''}",
+    )
+    return payload
 
 
 def _discord_plugin_dir(require_exists: bool = False) -> Path:
@@ -2981,6 +3381,8 @@ def _temporary_runtime_roots(
     global DEFAULT_DISCORD_PRIVATE_ROOT
     global SHARED_WIKI_ROOT
     global SHARED_MEMORY_ROOT
+    global LEGACY_SHARED_WIKI_ROOT
+    global LEGACY_SHARED_MEMORY_ROOT
     global LEGACY_SHARED_CRONS_ROOT
 
     previous = {
@@ -2997,6 +3399,8 @@ def _temporary_runtime_roots(
         "DEFAULT_DISCORD_PRIVATE_ROOT": DEFAULT_DISCORD_PRIVATE_ROOT,
         "SHARED_WIKI_ROOT": SHARED_WIKI_ROOT,
         "SHARED_MEMORY_ROOT": SHARED_MEMORY_ROOT,
+        "LEGACY_SHARED_WIKI_ROOT": LEGACY_SHARED_WIKI_ROOT,
+        "LEGACY_SHARED_MEMORY_ROOT": LEGACY_SHARED_MEMORY_ROOT,
         "LEGACY_SHARED_CRONS_ROOT": LEGACY_SHARED_CRONS_ROOT,
     }
 
@@ -3012,8 +3416,10 @@ def _temporary_runtime_roots(
         DEFAULT_HERMES_CORE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "hermes-core"
         DEFAULT_NATIVE_PLUGIN_ROOT = SHARED_PLUGINS_ROOT / "native"
         DEFAULT_DISCORD_PRIVATE_ROOT = PRIVATE_PLUGINS_ROOT / "discord"
-        SHARED_WIKI_ROOT = PRIVATE_PLUGINS_ROOT / "wiki"
-        SHARED_MEMORY_ROOT = PRIVATE_PLUGINS_ROOT / "memory"
+        SHARED_WIKI_ROOT = plugins_root.parent / "wiki"
+        SHARED_MEMORY_ROOT = plugins_root.parent / "memory"
+        LEGACY_SHARED_WIKI_ROOT = PRIVATE_PLUGINS_ROOT / "wiki"
+        LEGACY_SHARED_MEMORY_ROOT = PRIVATE_PLUGINS_ROOT / "memory"
         LEGACY_SHARED_CRONS_ROOT = PRIVATE_SCRIPTS_ROOT / "crons"
         yield
     finally:
@@ -3030,12 +3436,12 @@ def _temporary_runtime_roots(
         DEFAULT_DISCORD_PRIVATE_ROOT = previous["DEFAULT_DISCORD_PRIVATE_ROOT"]
         SHARED_WIKI_ROOT = previous["SHARED_WIKI_ROOT"]
         SHARED_MEMORY_ROOT = previous["SHARED_MEMORY_ROOT"]
+        LEGACY_SHARED_WIKI_ROOT = previous["LEGACY_SHARED_WIKI_ROOT"]
+        LEGACY_SHARED_MEMORY_ROOT = previous["LEGACY_SHARED_MEMORY_ROOT"]
         LEGACY_SHARED_CRONS_ROOT = previous["LEGACY_SHARED_CRONS_ROOT"]
 
 def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
     target = _discord_plugin_roots()[0]
-    target.parent.mkdir(parents=True, exist_ok=True)
-
     prestart_target = target / "scripts" / "prestart_reapply.sh"
     if prestart_target.exists():
         return target
@@ -3045,21 +3451,18 @@ def _ensure_discord_shared_plugin_seeded(clone_name: str) -> Path:
         None,
     )
     if source is not None:
+        target.parent.mkdir(parents=True, exist_ok=True)
         _sync_dir(source, target, delete=True)
         _log(clone_name, f"discord shared plugin seeded: {source} -> {target}")
         return target
 
-    target.mkdir(parents=True, exist_ok=True)
-    _log(clone_name, f"discord shared plugin dir created (empty): {target}")
     return target
 
 
 def _discord_runtime_seed_candidates(filename: str) -> list[Path]:
-    private_root = _discord_private_dir(require_exists=False)
     public_root = _discord_plugin_dir(require_exists=False)
-    primary = private_root / filename
     return [
-        primary,
+        DEFAULT_DISCORD_PRIVATE_ROOT / filename,
         public_root / f"{filename}.example",
     ]
 
@@ -3180,19 +3583,19 @@ def _sync_discord_runtime_layout(
     clone_name: str = "",
     env: Dict[str, str] | None = None,
 ) -> None:
-    """Use private plugin runtime state and remove stale workspace mirrors."""
-    shared_discord_root = _discord_private_dir(require_exists=False)
-    shared_discord_root.mkdir(parents=True, exist_ok=True)
+    """Use node-local Discord runtime state and remove stale shared fallbacks."""
+    governance_root = clone_root / "workspace" / "plugins" / "discord-slash-commands" / "cache" / "governance"
+    governance_root.mkdir(parents=True, exist_ok=True)
 
     _seed_discord_state_file(
         clone_name=clone_name,
-        target_file=shared_discord_root / "discord_users.json",
+        target_file=governance_root / "discord_users.json",
         default_content='{\n  "version": 2,\n  "users": []\n}\n',
         seed_candidates=_discord_runtime_seed_candidates("discord_users.json"),
     )
     _seed_discord_state_file(
         clone_name=clone_name,
-        target_file=shared_discord_root / "discord_webhooks_table.json",
+        target_file=governance_root / "discord_webhooks_table.json",
         default_content="{}\n",
         seed_candidates=_discord_runtime_seed_candidates("discord_webhooks_table.json"),
     )
@@ -3250,9 +3653,7 @@ def _setup_orchestrator_baremetal(clone_name: str, clone_root: Path, env: Dict[s
 
     # Make sure shared host roots exist.
     _orchestrator_cron_host_dir(clone_name).mkdir(parents=True, exist_ok=True)
-    _orchestrator_memory_home(clone_name).mkdir(parents=True, exist_ok=True)
     SHARED_SCRIPTS_ROOT.mkdir(parents=True, exist_ok=True)
-    SHARED_PLUGINS_ROOT.mkdir(parents=True, exist_ok=True)
 
     source_tree = _parent_hermes_agent_source(clone_name=clone_name)
     runtime_agent_root = _prepare_orchestrator_runtime_agent_tree(
@@ -3426,116 +3827,41 @@ def _bootstrap_camofox_for_clone(clone_name: str, env_path: Path) -> Dict[str, A
 
 
 def _clone_supports_openviking(clone_root: Path) -> bool:
-    provider_init = clone_root / "hermes-agent" / "plugins" / "memory" / "openviking" / "__init__.py"
-    return provider_init.exists()
+    # Deprecated: clone-manager intentionally treats OpenViking as unsupported.
+    return False
 
 
 def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root: Path) -> Dict[str, Any]:
     env = _read_env_file(env_path)
-    enabled = _is_openviking_enabled_env(env)
-    enable_var = (
-        "OPENVIKING_ENABLED"
-        if str(env.get("OPENVIKING_ENABLED", "") or "").strip()
-        else "MEMORY_OPENVIKING"
-    )
-    default_account, default_user = _resolve_openviking_identity(env, clone_name)
-    supported = _clone_supports_openviking(clone_root)
-    effective_endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or OPENVIKING_DEFAULT_ENDPOINT_CLONE
-    effective_account, effective_user = _resolve_openviking_identity(env, clone_name)
-
-    if not enabled:
-        return {
-            "enabled": False,
-            "changed": False,
-            "effective": {
-                "endpoint": effective_endpoint,
-                "account": effective_account,
-                "user": effective_user,
-            },
-            "compatibility": {"supported": supported, "message": "disabled"},
-            "degraded": False,
-        }
-
-    openviking_bootstrap_script = _discord_plugin_script("scripts/openviking_env_bootstrap.py")
-    if openviking_bootstrap_script.exists():
-        python_bin = _select_host_python(required_module="yaml")
-        if python_bin is None:
-            _log(clone_name, "openviking bootstrap: python runtime not found; using fallback env update")
-        else:
-            proc = _run(
-                [
-                    str(python_bin),
-                    str(openviking_bootstrap_script),
-                    "--env-file",
-                    str(env_path),
-                    "--enable-var",
-                    enable_var,
-                    "--config-file",
-                    str(clone_root / ".hermes" / "config.yaml"),
-                    "--agent-root",
-                    str(clone_root / "hermes-agent"),
-                    "--default-endpoint",
-                    OPENVIKING_DEFAULT_ENDPOINT_CLONE,
-                    "--default-account",
-                    default_account,
-                    "--default-user",
-                    default_user,
-                    "--skip-health-probe",
-                ],
-                check=False,
-            )
-            out = (proc.stdout or "").strip()
-            err = (proc.stderr or "").strip()
-            payload: Dict[str, Any] = {}
-            if out:
-                try:
-                    loaded = json.loads(out)
-                    if isinstance(loaded, dict):
-                        payload = loaded
-                except Exception:
-                    payload = {}
-            if proc.returncode == 0 and payload:
-                _log(
-                    clone_name,
-                    "openviking bootstrap: "
-                    f"enabled={payload.get('enabled')} changed={payload.get('changed')} "
-                    f"degraded={payload.get('degraded')}",
-                )
-                compatibility = payload.get("compatibility")
-                if isinstance(compatibility, dict) and compatibility.get("supported") is False:
-                    _log(clone_name, f"openviking compatibility warning: {compatibility.get('message')}")
-                return payload
-            _log(
-                clone_name,
-                "openviking bootstrap script failed; using fallback env update"
-                + (f" stderr={err}" if err else ""),
-            )
-
-    # Fallback behavior: env normalization only (fail-open).
-    env = _read_env_file(env_path)
-    effective_endpoint = str(env.get("OPENVIKING_ENDPOINT", "") or "").strip() or OPENVIKING_DEFAULT_ENDPOINT_CLONE
-    effective_account, effective_user = _resolve_openviking_identity(env, clone_name)
-    if not supported:
-        _log(
-            clone_name,
-            "openviking compatibility warning: provider plugin missing in clone code; "
-            "set NODE_RESEED=true and restart the node to refresh its runtime.",
+    requested = any(
+        str(env.get(key, "") or "").strip()
+        for key in (
+            "OPENVIKING_ENABLED",
+            "MEMORY_OPENVIKING",
+            "OPENVIKING_ENDPOINT",
+            "OPENVIKING_ACCOUNT",
+            "OPENVIKING_USER",
+            "OPENVIKING_AGENT",
         )
+    )
+    config_reset = _clear_deprecated_openviking_config(clone_root)
+    if requested or config_reset.get("changed"):
+        _log(clone_name, "openviking deprecated: runtime bootstrap skipped")
     return {
-        "enabled": True,
-        "changed": False,
+        "enabled": False,
+        "changed": bool(config_reset.get("changed")),
         "effective": {
-            "endpoint": effective_endpoint,
-            "account": effective_account,
-            "user": effective_user,
+            "endpoint": "",
+            "account": "",
+            "user": "",
         },
         "compatibility": {
-            "supported": supported,
-            "message": "fallback mode (env only)" if supported else (
-                "provider plugin missing; set NODE_RESEED=true and start the node again."
-            ),
+            "supported": False,
+            "message": "deprecated: openviking bootstrap disabled",
         },
-        "degraded": not supported,
+        "degraded": False,
+        "deprecated": True,
+        "config_reset": config_reset,
     }
 
 
@@ -3740,6 +4066,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
     # Heal legacy absolute links first so host-side validation works.
     _rewrite_uv_store_symlinks(clone_root)
     _rewrite_venv_uv_symlinks(clone_root)
+    _heal_clone_venv_python_entrypoints(clone_root)
 
     python_bin = dst_venv / "bin" / "python"
     if not python_bin.exists():
@@ -3750,6 +4077,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
             )
         src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
+        _heal_clone_venv_python_entrypoints(clone_root)
         python_bin = dst_venv / "bin" / "python"
 
     # Validate required gateway dependency to avoid boot loops.
@@ -3762,6 +4090,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
             )
         src_venv = _select_seed_venv_source(required_modules=GATEWAY_REQUIRED_MODULES)
         _sync_dir(src_venv, dst_venv, delete=True)
+        _heal_clone_venv_python_entrypoints(clone_root)
 
     uv_ready = False
     if dst_uv.exists():
@@ -3782,6 +4111,7 @@ def _seed_clone_runtime(clone_root: Path, *, allow_parent_seed: bool) -> None:
     # Ensure cloned venv does not depend on /home/ubuntu path permissions
     # inside container. We pin uv runtime links to /local/.runtime/uv.
     _rewrite_venv_uv_symlinks(clone_root)
+    _heal_clone_venv_python_entrypoints(clone_root)
 
 
 def _rewrite_venv_uv_symlinks(clone_root: Path) -> int:
@@ -3848,6 +4178,56 @@ def _rewrite_uv_store_symlinks(clone_root: Path) -> int:
             changed += 1
         except Exception:
             continue
+
+    return changed
+
+
+def _heal_clone_venv_python_entrypoints(clone_root: Path) -> int:
+    """Rewrite host-tied python entrypoints to the clone-local uv runtime."""
+    venv_bin = clone_root / "hermes-agent" / ".venv" / "bin"
+    uv_python_root = clone_root / ".runtime" / "uv" / "python"
+    python_link = venv_bin / "python"
+    if not venv_bin.exists() or not uv_python_root.exists():
+        return 0
+
+    needs_rewrite = False
+    if not python_link.exists() and not python_link.is_symlink():
+        needs_rewrite = True
+    elif python_link.is_symlink():
+        try:
+            target = os.readlink(python_link)
+            needs_rewrite = os.path.isabs(target) and target.startswith("/usr/bin/")
+        except OSError:
+            needs_rewrite = True
+    elif not os.access(python_link, os.X_OK):
+        needs_rewrite = True
+
+    if not needs_rewrite:
+        return 0
+
+    candidate_names = ("python3.13", "python3.12", "python3.11", "python3", "python")
+    candidates: list[Path] = []
+    for name in candidate_names:
+        candidates.extend(sorted(uv_python_root.glob(f"*/bin/{name}")))
+    target_path = next((path for path in candidates if path.exists() and not path.is_symlink()), None)
+    if target_path is None:
+        return 0
+
+    changed = 0
+    if python_link.exists() or python_link.is_symlink():
+        python_link.unlink()
+    os.symlink(os.path.relpath(str(target_path), start=str(venv_bin)), python_link)
+    changed += 1
+
+    for alias in ("python3", target_path.name):
+        alias_path = venv_bin / alias
+        current = os.readlink(alias_path) if alias_path.is_symlink() else ""
+        if current == "python":
+            continue
+        if alias_path.exists() or alias_path.is_symlink():
+            alias_path.unlink()
+        os.symlink("python", alias_path)
+        changed += 1
 
     return changed
 
@@ -4018,7 +4398,7 @@ def _prepare_clone_filesystem(clone_name: str, clone_root: Path, env: Dict[str, 
         clone_root.mkdir(parents=True, exist_ok=True)
         clone_root_created = True
 
-    mode = _extract_state_mode(env)
+    mode = _effective_state_mode(clone_name, env)
 
     for sub in (
         "workspace",
@@ -4219,8 +4599,10 @@ def _build_docker_run_cmd(
     openviking_enabled: bool,
     runtime_env_overrides: Dict[str, str],
 ) -> list[str]:
-    env = _read_env_file(env_path)
+    env = _sanitize_space_ui_env_map(_read_env_file(env_path))
     container = _container_name(clone_name)
+    legacy_public_plugins_present = _legacy_public_plugins_present()
+    legacy_private_plugins_present = _legacy_private_plugins_present()
     _ensure_node_log_topology(
         clone_name,
         clone_root=clone_root,
@@ -4341,15 +4723,7 @@ def _build_docker_run_cmd(
         "-e",
         f"NODE_NAME={clone_name}",
         "-e",
-        "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/public/discord",
-        "-e",
-        "HERMES_CORE_PLUGIN_DIR=/local/plugins/public/hermes-core",
-        "-e",
-        "HERMES_DISCORD_PRIVATE_DIR=/local/plugins/private/discord",
-        "-e",
-        "HERMES_PUBLIC_PLUGINS_ROOT=/local/plugins/public",
-        "-e",
-        "HERMES_PRIVATE_PLUGINS_ROOT=/local/plugins/private",
+        "HERMES_NATIVE_DISCORD_SLASH_COMMANDS_DIR=/local/plugins/discord-slash-commands",
         "-e",
         "HERMES_PUBLIC_SCRIPTS_ROOT=/local/scripts/public",
         "-e",
@@ -4373,10 +4747,6 @@ def _build_docker_run_cmd(
         "-v",
         f"{PRIVATE_SCRIPTS_ROOT}:/local/scripts/private",
         "-v",
-        f"{SHARED_PLUGINS_ROOT}:/local/plugins/public:ro",
-        "-v",
-        f"{PRIVATE_PLUGINS_ROOT}:/local/plugins/private",
-        "-v",
         f"{node_crons_host}:/local/cron",
         "-v",
         f"{PRIVATE_SKILLS_ROOT}:{NODE_SKILLS_PATH_IN_CONTAINER}",
@@ -4384,18 +4754,62 @@ def _build_docker_run_cmd(
         "/local/hermes-agent",
     ]
 
+    if legacy_public_plugins_present:
+        cmd.extend(
+            [
+                "-e",
+                "HERMES_DISCORD_PLUGIN_DIR=/local/plugins/public/discord",
+                "-e",
+                "HERMES_CORE_PLUGIN_DIR=/local/plugins/public/hermes-core",
+                "-e",
+                "HERMES_NATIVE_PLUGIN_DIR=/local/plugins/public/native",
+                "-e",
+                "HERMES_PUBLIC_PLUGINS_ROOT=/local/plugins/public",
+                "-v",
+                f"{SHARED_PLUGINS_ROOT}:/local/plugins/public:ro",
+            ]
+        )
+
+    if legacy_private_plugins_present:
+        cmd.extend(
+            [
+                "-e",
+                "HERMES_PRIVATE_PLUGINS_ROOT=/local/plugins/private",
+                "-v",
+                f"{PRIVATE_PLUGINS_ROOT}:/local/plugins/private",
+            ]
+        )
+
+    canonical_discord_slash_root = _canonical_discord_slash_plugin_root()
+    if canonical_discord_slash_root.exists():
+        cmd.extend(
+            [
+                "-v",
+                f"{canonical_discord_slash_root}:/local/plugins/discord-slash-commands:ro",
+            ]
+        )
+
     if _is_wiki_enabled_env(env):
         _ensure_shared_wiki_root()
         cmd.extend(["-e", "HERMES_WIKI_ROOT=/local/wiki"])
         cmd.extend(["-v", f"{SHARED_WIKI_ROOT}:/local/wiki"])
 
+    sanitized_space_env = {
+        key: value
+        for key, value in _sanitize_space_ui_env_map(env).items()
+        if key in SPACE_UI_LEGACY_ENV_KEYS
+    }
+    for key in sorted(sanitized_space_env):
+        cmd.extend(["-e", f"{key}={sanitized_space_env[key]}"])
+
+    runtime_env_overrides = _sanitize_space_ui_env_map(dict(runtime_env_overrides or {}))
     for key in sorted(runtime_env_overrides):
         value = str(runtime_env_overrides.get(key, "") or "")
         cmd.extend(["-e", f"{key}={value}"])
 
     # Needed so clone containers can reach host-level services via
-    # host.docker.internal on Linux (Camofox/OpenViking defaults).
-    if camofox_enabled or openviking_enabled:
+    # host.docker.internal on Linux (Camofox default).
+    if camofox_enabled:
         cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
 
     cmd.extend([image, "bash", "-lc", gateway_cmd])
@@ -4430,6 +4844,11 @@ def _read_pid(path: Path) -> int | None:
     return pid if pid > 0 else None
 
 
+def _write_pid(path: Path, pid: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{int(pid)}\n", encoding="utf-8")
+
+
 def _pid_running(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -4438,6 +4857,78 @@ def _pid_running(pid: int | None) -> bool:
         return True
     except OSError:
         return False
+
+
+def _iter_proc_pids() -> list[int]:
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return []
+    pids: list[int] = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            pids.append(int(entry.name))
+        except ValueError:
+            continue
+    return sorted(pids)
+
+
+def _proc_cmdline_text(pid: int) -> str:
+    try:
+        raw = (Path("/proc") / str(pid) / "cmdline").read_bytes()
+    except Exception:
+        return ""
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+
+
+def _proc_environ_value(pid: int, key: str) -> str:
+    try:
+        raw = (Path("/proc") / str(pid) / "environ").read_bytes()
+    except Exception:
+        return ""
+    prefix = f"{key}=".encode("utf-8")
+    for item in raw.split(b"\x00"):
+        if item.startswith(prefix):
+            return item[len(prefix):].decode("utf-8", errors="ignore").strip()
+    return ""
+
+
+def _proc_cwd_path(pid: int) -> Path | None:
+    try:
+        return (Path("/proc") / str(pid) / "cwd").resolve(strict=True)
+    except Exception:
+        return None
+
+
+def _discover_orchestrator_gateway_pids(clone_root: Path) -> list[int]:
+    expected_home = str((clone_root / ".hermes").resolve())
+    runtime_agent_root = _orchestrator_runtime_agent_root(clone_root)
+    discovered: list[int] = []
+
+    for pid in _iter_proc_pids():
+        if not _pid_running(pid):
+            continue
+        cmdline = _proc_cmdline_text(pid)
+        if not cmdline:
+            continue
+        if "cli.py --gateway" not in cmdline and "start_gateway(replace=True)" not in cmdline and "gateway.run" not in cmdline:
+            continue
+
+        hermes_home = _proc_environ_value(pid, "HERMES_HOME")
+        if hermes_home:
+            try:
+                if str(Path(hermes_home).resolve()) == expected_home:
+                    discovered.append(pid)
+                    continue
+            except Exception:
+                pass
+
+        cwd = _proc_cwd_path(pid)
+        if cwd is not None and cwd == runtime_agent_root:
+            discovered.append(pid)
+
+    return sorted(set(discovered))
 
 
 def _orchestrator_process_state(clone_root: Path) -> Dict[str, Any]:
@@ -4459,6 +4950,16 @@ def _orchestrator_process_state(clone_root: Path) -> Dict[str, Any]:
             break
 
     pid_path = running_path or stale_path or _orchestrator_pid_path(clone_root)
+    if running_pid is None:
+        discovered = _discover_orchestrator_gateway_pids(clone_root)
+        if discovered:
+            running_pid = discovered[0]
+            pid_path = _orchestrator_pid_path(clone_root)
+            try:
+                _write_pid(pid_path, running_pid)
+            except Exception:
+                pass
+
     pid = running_pid if running_pid is not None else stale_pid
     running = running_pid is not None
     return {
@@ -4523,26 +5024,44 @@ def _orchestrator_start_gateway(
     runtime_log.parent.mkdir(parents=True, exist_ok=True)
     log_handle = runtime_log.open("a", encoding="utf-8")
 
-    proc_env = os.environ.copy()
-    proc_env.update(_read_env_file(env_path))
-    proc_env.update(runtime_env_overrides or {})
+    runtime_overrides = _sanitize_space_ui_env_map(
+        _translate_runtime_overrides_for_host(
+            dict(runtime_env_overrides or {}),
+            clone_root=clone_root,
+            clone_name=clone_name,
+        )
+    )
+
+    proc_env = _sanitize_space_ui_env_map(os.environ.copy())
+    proc_env.update(_sanitize_space_ui_env_map(_read_env_file(env_path)))
     proc_env["HERMES_HOME"] = str(clone_root / ".hermes")
     proc_env["HOME"] = str(clone_root)
     proc_env["USER"] = str(proc_env.get("USER") or "ubuntu")
     proc_env["LOGNAME"] = str(proc_env.get("LOGNAME") or proc_env["USER"])
     proc_env["NODE_NAME"] = str(proc_env.get("NODE_NAME") or clone_name)
-    proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
-    proc_env["HERMES_CORE_PLUGIN_DIR"] = str(DEFAULT_HERMES_CORE_PLUGIN_ROOT)
-    proc_env["HERMES_NATIVE_PLUGIN_DIR"] = str(DEFAULT_NATIVE_PLUGIN_ROOT)
-    proc_env["HERMES_DISCORD_PRIVATE_DIR"] = str(DEFAULT_DISCORD_PRIVATE_ROOT)
-    proc_env["HERMES_PUBLIC_PLUGINS_ROOT"] = str(SHARED_PLUGINS_ROOT)
-    proc_env["HERMES_PRIVATE_PLUGINS_ROOT"] = str(PRIVATE_PLUGINS_ROOT)
+    proc_env["HERMES_NATIVE_DISCORD_SLASH_COMMANDS_DIR"] = str(_canonical_discord_slash_plugin_root())
     proc_env["HERMES_PUBLIC_SCRIPTS_ROOT"] = str(SHARED_SCRIPTS_ROOT)
     proc_env["HERMES_PRIVATE_SCRIPTS_ROOT"] = str(PRIVATE_SCRIPTS_ROOT)
     proc_env["HERMES_AGENT_ROOT"] = str(runtime_agent_root)
     proc_env["HERMES_NODE_ROOT"] = str(clone_root)
     proc_env["HERMES_WIKI_ROOT"] = str(clone_root / "wiki")
     proc_env["PYTHONUNBUFFERED"] = "1"
+    if _legacy_public_plugins_present():
+        proc_env["HERMES_DISCORD_PLUGIN_DIR"] = str(DEFAULT_DISCORD_PLUGIN_ROOT)
+        proc_env["HERMES_CORE_PLUGIN_DIR"] = str(DEFAULT_HERMES_CORE_PLUGIN_ROOT)
+        proc_env["HERMES_NATIVE_PLUGIN_DIR"] = str(DEFAULT_NATIVE_PLUGIN_ROOT)
+        proc_env["HERMES_PUBLIC_PLUGINS_ROOT"] = str(SHARED_PLUGINS_ROOT)
+    else:
+        proc_env.pop("HERMES_DISCORD_PLUGIN_DIR", None)
+        proc_env.pop("HERMES_CORE_PLUGIN_DIR", None)
+        proc_env.pop("HERMES_NATIVE_PLUGIN_DIR", None)
+        proc_env.pop("HERMES_PUBLIC_PLUGINS_ROOT", None)
+    if _legacy_private_plugins_present():
+        proc_env["HERMES_PRIVATE_PLUGINS_ROOT"] = str(PRIVATE_PLUGINS_ROOT)
+    else:
+        proc_env.pop("HERMES_PRIVATE_PLUGINS_ROOT", None)
+    proc_env.update(runtime_overrides)
+    proc_env = _sanitize_space_ui_env_map(proc_env)
 
     # Keep host-layer orchestrator behavior aligned with container nodes.
     prestart_script = _prestart_script_path()
@@ -4585,8 +5104,7 @@ def _orchestrator_start_gateway(
     log_handle.close()
 
     pid_path = _orchestrator_pid_path(clone_root)
-    pid_path.parent.mkdir(parents=True, exist_ok=True)
-    pid_path.write_text(f"{proc.pid}\n", encoding="utf-8")
+    _write_pid(pid_path, proc.pid)
     for legacy_pid in _orchestrator_legacy_pid_paths(clone_root):
         if legacy_pid == pid_path or not legacy_pid.exists():
             continue
@@ -4678,7 +5196,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     clone_root = _clone_root_path(clone_name)
     _ensure_node_log_topology(clone_name)
     container = _container_name(clone_name)
-    state_code = _extract_state_mode(env)
+    state_code = _effective_state_mode(clone_name, env)
     is_orchestrator = state_code == 1
 
     if clone_root.exists():
@@ -4688,7 +5206,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
     restart_reboot_sync = _sync_restart_reboot_env(clone_name, env_path)
     env = _read_env_file(env_path)
     runtime_env_overrides = _runtime_env_overrides(clone_name, env)
-    state_code = _extract_state_mode(env)
+    state_code = _effective_state_mode(clone_name, env)
     is_orchestrator = state_code == 1
 
     if not str(env.get("DISCORD_BOT_TOKEN", "") or "").strip():
@@ -4701,6 +5219,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         raise CloneManagerError("docker CLI not found on host.")
 
     shared_discord_plugin_root = _ensure_discord_shared_plugin_seeded(clone_name)
+    discord_slash_bootstrap: Dict[str, Any] = {"enabled": False, "changed": False, "reason": "deferred"}
     camofox_bootstrap = _bootstrap_camofox_for_clone(clone_name, env_path)
     openviking_bootstrap = _bootstrap_openviking_for_clone(clone_name, env_path, clone_root)
     model_bootstrap = (
@@ -4751,7 +5270,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "result": "already_running",
                 "clone_name": clone_name,
                 "container_name": container,
-                "state_mode": STATE_LABELS.get(_extract_state_mode(env), "unknown"),
+                "state_mode": STATE_LABELS.get(_effective_state_mode(clone_name, env), "unknown"),
                 "container_state": state,
                 "env_autocreate": env_autocreate,
                 "log_file": str(_management_log_path(clone_name)),
@@ -4791,6 +5310,12 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
         fs_meta = _prepare_clone_filesystem(clone_name, clone_root, env, env_path)
         # Re-run after filesystem prep so provider compatibility check sees
         # newly seeded clone code and can enforce memory.provider deterministically.
+        discord_slash_bootstrap = _bootstrap_discord_slash_commands_for_node(
+            clone_name,
+            clone_root,
+            env_path,
+            env,
+        )
         openviking_bootstrap = _bootstrap_openviking_for_clone(clone_name, env_path, clone_root)
         model_bootstrap = _bootstrap_models_for_clone(clone_name, env_path, clone_root)
         env = _read_env_file(env_path)
@@ -4844,6 +5369,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
                 "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
                 "camofox": camofox_bootstrap,
                 "openviking": openviking_bootstrap,
+                "discord_slash_bootstrap": discord_slash_bootstrap,
                 "models": model_bootstrap,
                 "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
                 "discord_home_channel_sync": discord_home_sync,
@@ -4904,6 +5430,7 @@ def _action_start(clone_name: str, image: str) -> Dict[str, Any]:
             "hermes_log_dir": str(_clone_hermes_log_dir(clone_name, clone_root=clone_root)),
             "camofox": camofox_bootstrap,
             "openviking": openviking_bootstrap,
+            "discord_slash_bootstrap": discord_slash_bootstrap,
             "models": model_bootstrap,
             "discord_home_channel": str(runtime_env_overrides.get("DISCORD_HOME_CHANNEL", "") or ""),
             "discord_home_channel_sync": discord_home_sync,
@@ -4938,7 +5465,7 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
     state_code: Any = None
     if env:
         try:
-            state_code = _extract_state_mode(env)
+            state_code = _effective_state_mode(clone_name, env)
             state_mode = STATE_LABELS[state_code]
         except Exception:
             state_mode = "invalid"
@@ -4952,7 +5479,6 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         required_mounts_ok = not required_mounts_missing
     runtime_contract_path = _clone_runtime_contract_path(clone_root)
     mgmt_log_file = _management_log_path(clone_name)
-    openviking_account, openviking_user = _resolve_openviking_identity(env, clone_name) if env else ("", "")
     restart_reboot = _effective_restart_reboot_env(env) if env else {
         "restart_cmd": "",
         "reboot_cmd": "",
@@ -4974,11 +5500,11 @@ def _action_status(clone_name: str) -> Dict[str, Any]:
         "state_code": state_code,
         "camofox_enabled": _is_camofox_enabled_env(env) if env else False,
         "camofox_url": str(env.get("CAMOFOX_URL", "") or "") if env else "",
-        "openviking_enabled": _is_openviking_enabled_env(env) if env else False,
-        "openviking_endpoint": str(env.get("OPENVIKING_ENDPOINT", "") or "") if env else "",
-        "openviking_account": openviking_account,
-        "openviking_user": openviking_user,
-        "openviking_supported": _clone_supports_openviking(clone_root) if clone_root.exists() else False,
+        "openviking_enabled": False,
+        "openviking_endpoint": "",
+        "openviking_account": "",
+        "openviking_user": "",
+        "openviking_supported": False,
         "default_model_env": _default_model_name_from_env(env) if env else "",
         "default_model_provider_env": _default_model_provider_from_env(env) if env else "",
         "fallback_model_env": _fallback_model_name_from_env(env) if env else "",
@@ -5009,7 +5535,7 @@ def _action_stop(clone_name: str) -> Dict[str, Any]:
     state_code: Any = None
     if env:
         try:
-            state_code = _extract_state_mode(env)
+            state_code = _effective_state_mode(clone_name, env)
         except Exception:
             state_code = None
     is_orchestrator = state_code == 1
@@ -5063,10 +5589,10 @@ def _action_delete(clone_name: str) -> Dict[str, Any]:
     state_code: Any = None
     if env:
         try:
-            state_code = _extract_state_mode(env)
+            state_code = _effective_state_mode(clone_name, env)
         except Exception:
             state_code = None
-    is_orchestrator = clone_name == "orchestrator" or state_code == 1
+    is_orchestrator = clone_name == "orchestrator" and state_code == 1
     is_transient_clone = (not is_orchestrator) and _is_transient_clone_name(clone_name)
     clone_root = _clone_root_path(clone_name)
 
@@ -5093,6 +5619,14 @@ def _action_delete(clone_name: str) -> Dict[str, Any]:
                 clone_name,
                 include_private_contracts=True,
             )
+        )
+    elif not is_orchestrator:
+        _log(clone_name, "delete cleanup: removing node env and runtime root")
+        cleanup_removed = _remove_target_paths(
+            {
+                "env_path": env_path,
+                "clone_root": clone_root,
+            }
         )
     else:
         _log(clone_name, "delete completed (container removed; data preserved)")
@@ -5806,6 +6340,7 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
                 restored_mode = _extract_state_mode(node_env)
             except CloneManagerError:
                 restored_mode = 2
+            restored_mode = _normalize_state_code_for_clone(node, restored_mode)
             if restored_mode == 1:
                 _set_symlink(node_dst / "scripts", SCRIPTS_ROOT)
                 _set_symlink(node_dst / "plugins", PLUGINS_ROOT)
@@ -5849,17 +6384,17 @@ def _action_restore(restore_path: str) -> Dict[str, Any]:
             _sync_dir(private_plugins_path, PRIVATE_PLUGINS_ROOT, delete=False)
             restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
         if isinstance(legacy_shared_wiki_path, Path) and legacy_shared_wiki_path.exists():
-            target = PRIVATE_PLUGINS_ROOT / "wiki"
+            target = SHARED_WIKI_ROOT
             target.parent.mkdir(parents=True, exist_ok=True)
             target.mkdir(parents=True, exist_ok=True)
             _sync_dir(legacy_shared_wiki_path, target, delete=False)
-            restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
+            restored_private_plugins_root = str(target)
         if isinstance(legacy_shared_memory_path, Path) and legacy_shared_memory_path.exists():
-            target = PRIVATE_PLUGINS_ROOT / "memory"
+            target = SHARED_MEMORY_ROOT
             target.parent.mkdir(parents=True, exist_ok=True)
             target.mkdir(parents=True, exist_ok=True)
             _sync_dir(legacy_shared_memory_path, target, delete=False)
-            restored_private_plugins_root = str(PRIVATE_PLUGINS_ROOT)
+            restored_private_plugins_root = str(target)
 
         restored_private_scripts_root = ""
         if isinstance(private_scripts_path, Path) and private_scripts_path.exists():
@@ -6104,7 +6639,7 @@ def _reconcile_registry_node(clone_name: str) -> Dict[str, Any]:
 
     clone_root = _clone_root_path(clone_name)
     env = _read_env_file(env_path)
-    state_code = _extract_state_mode(env)
+    state_code = _effective_state_mode(clone_name, env)
     state_mode = STATE_LABELS.get(state_code, "unknown")
     reg = _load_registry()
     reg.setdefault("clones", {})

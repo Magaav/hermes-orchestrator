@@ -4,14 +4,14 @@
 
 Discord ACL is fail-closed and node-scoped.
 
-- Public logic/scripts:
-  - `/local/plugins/public/discord/hooks/discord_slash_bridge/role_acl.py`
-  - `/local/plugins/public/discord/scripts/discord_role_acl_sync.py`
-  - `/local/plugins/public/discord/scripts/discord_acl_contract_check.py`
-- Private runtime state:
-  - `/local/plugins/private/discord/acl/<node>_acl.json`
-  - `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
-  - `/local/plugins/private/discord/models/<node>_models.json`
+- Canonical runtime package:
+  - `/local/plugins/discord-slash-commands/runtime.py`
+  - `/local/plugins/discord-slash-commands/channel_acl/handler.py`
+  - `/local/plugins/discord-slash-commands/scripts/register_guild_plugin_commands.py`
+- Node-local runtime state:
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/acl.json`
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/channel_acl.yaml`
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/models.json`
 
 Defaults:
 
@@ -38,8 +38,8 @@ Examples:
 
 `/acl channel` behavior:
 
-- Writes channel policy in `/local/plugins/private/discord/hooks/channel_acl/config.yaml`.
-- `mode:specific` requires valid `model_key` from `/local/plugins/private/discord/models/<node>_models.json`.
+- Writes channel policy in `/local/workspace/plugins/discord-slash-commands/cache/governance/channel_acl.yaml`.
+- `mode:specific` requires valid `model_key` from `/local/workspace/plugins/discord-slash-commands/cache/governance/models.json`.
 - Invalid/missing `model_key` is fail-closed.
 - `label` is the per-channel automation tag used by normalized restricted-channel flows.
 - `/acl` now exposes autocomplete for `command`, `role`, `model_key`, `allowed_commands`, and `allowed_skills`.
@@ -52,12 +52,12 @@ Admin bypass source of truth:
 
 ## Prestart / Update Gates
 
-Prestart now runs:
+Bootstrap/reconciliation now validates:
 
-1. `discord_role_acl_sync`
-2. `discord_acl_contract_check`
+1. canonical slash command payloads
+2. node-local ACL/channel/model governance state
 
-`update-test` and `update-apply` are blocked when these checks fail.
+Registration stays fail-closed when governance state is invalid or incomplete.
 
 ## Troubleshooting
 

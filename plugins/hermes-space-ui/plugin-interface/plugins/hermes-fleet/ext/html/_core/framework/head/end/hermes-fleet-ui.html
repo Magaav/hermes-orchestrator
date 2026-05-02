@@ -1,0 +1,33 @@
+<script>
+  (() => {
+    const aliases = {
+      "hermes-fleet": "hermes-os"
+    };
+
+    function rewriteLegacySpaceHash() {
+      const hash = String(window.location.hash || "");
+      if (!hash.startsWith("#/spaces")) return;
+
+      const route = hash.slice(1);
+      const queryIndex = route.indexOf("?");
+      const path = queryIndex === -1 ? route : route.slice(0, queryIndex);
+      if (path !== "/spaces") return;
+
+      const params = new URLSearchParams(queryIndex === -1 ? "" : route.slice(queryIndex + 1));
+      const nextId = aliases[String(params.get("id") || "").trim()];
+      if (!nextId) return;
+
+      params.set("id", nextId);
+      const nextQuery = params.toString();
+      window.history.replaceState(
+        window.history.state,
+        document.title,
+        `${window.location.pathname}${window.location.search}#${path}${nextQuery ? `?${nextQuery}` : ""}`
+      );
+    }
+
+    rewriteLegacySpaceHash();
+    window.addEventListener("hashchange", rewriteLegacySpaceHash, true);
+  })();
+</script>
+<link rel="stylesheet" href="/mod/hermes/fleet/hermes-fleet-ui.css" />

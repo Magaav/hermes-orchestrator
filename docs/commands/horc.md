@@ -15,8 +15,12 @@ horc start [name]
 horc status [name]
 horc stop [name]
 horc restart [all|name]
-horc delete [name]
+horc delete [name] [--yes]
 ```
+
+`horc delete <name>` asks for confirmation, removes the node container, and deletes
+`/local/agents/envs/<name>.env` plus `/local/agents/nodes/<name>/`. Shared node data,
+cron, and logs are preserved; use `horc purge-node <name>` for full cleanup.
 
 ## Logs Commands
 

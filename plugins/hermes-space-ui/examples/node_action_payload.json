@@ -1,0 +1,24 @@
+{
+  "inspect_node": {
+    "action": "inspect_node",
+    "payload": {}
+  },
+  "tail_logs": {
+    "action": "tail_logs",
+    "payload": {
+      "lines": 120
+    }
+  },
+  "restart_node": {
+    "action": "restart_node",
+    "payload": {
+      "reason": "operator_requested_from_space_agent"
+    }
+  },
+  "run_prompt": {
+    "action": "run_prompt",
+    "payload": {
+      "prompt": "Summarize this node's recent errors and propose a safe remediation."
+    }
+  }
+}

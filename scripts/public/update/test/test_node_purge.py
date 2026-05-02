@@ -62,3 +62,41 @@ def test_purge_node_requires_second_confirmation(cm, tmp_path: Path, monkeypatch
 def test_purge_node_rejects_orchestrator(cm) -> None:
     with pytest.raises(cm.CloneManagerError, match="refuses to target orchestrator"):
         cm._action_purge_node_request("orchestrator")
+
+
+def test_delete_removes_node_env_and_runtime_tree(cm, tmp_path: Path, monkeypatch) -> None:
+    env_root = tmp_path / "envs"
+    nodes_root = tmp_path / "nodes"
+    datas_root = tmp_path / "datas"
+    crons_root = tmp_path / "crons"
+    logs_root = tmp_path / "logs"
+    registry_path = tmp_path / "registry.json"
+
+    clone_name = "eliphas"
+    env_root.mkdir(parents=True, exist_ok=True)
+    (env_root / f"{clone_name}.env").write_text("NODE_STATE=4\n", encoding="utf-8")
+    (nodes_root / clone_name / ".hermes").mkdir(parents=True, exist_ok=True)
+    (datas_root / clone_name).mkdir(parents=True, exist_ok=True)
+    (crons_root / clone_name).mkdir(parents=True, exist_ok=True)
+    registry_path.write_text('{"clones":{"eliphas":{"name":"eliphas"}}}\n', encoding="utf-8")
+
+    monkeypatch.setattr(cm, "ENVS_ROOT", env_root)
+    monkeypatch.setattr(cm, "CLONES_ROOT", nodes_root)
+    monkeypatch.setattr(cm, "SHARED_NODE_DATA_ROOT", datas_root)
+    monkeypatch.setattr(cm, "SHARED_CRONS_ROOT", crons_root)
+    monkeypatch.setattr(cm, "NODE_LOG_ROOT", logs_root / "nodes")
+    monkeypatch.setattr(cm, "ATTENTION_LOG_ROOT", logs_root / "attention" / "nodes")
+    monkeypatch.setattr(cm, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(cm, "_docker_exists", lambda container: False)
+    cm._ensure_dirs()
+
+    result = cm._action_delete(clone_name)
+
+    assert result["ok"] is True
+    assert result["removed_paths"]["env_path"] is True
+    assert result["removed_paths"]["clone_root"] is True
+    assert not (env_root / f"{clone_name}.env").exists()
+    assert not (nodes_root / clone_name).exists()
+    assert (datas_root / clone_name).exists()
+    assert (crons_root / clone_name).exists()
+    assert "eliphas" not in registry_path.read_text(encoding="utf-8")

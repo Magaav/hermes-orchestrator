@@ -1,0 +1,100 @@
+[
+  {
+    "name": "faltas",
+    "namespace": "custom",
+    "handler": "faltas",
+    "description": "Gerenciar lista de faltas das lojas",
+    "help_text": "Uso do `/faltas`:\n- `/faltas action:listar loja:loja1 formato:links`\n- `/faltas action:adicionar itens:\"produto\" loja:loja2`\n- `/faltas action:remover itens:\"produto\" loja:loja1`\n- `/faltas action:limpar confirm:sim`\n- `/faltas help`\n\nAções suportadas: `listar`, `adicionar`, `remover`, `limpar`, `help`.",
+    "default_enabled": false,
+    "type": 1,
+    "options": [
+      {
+        "type": 3,
+        "name": "action",
+        "description": "Acao do comando",
+        "required": true,
+        "choices": [
+          {"name": "listar", "value": "listar"},
+          {"name": "adicionar", "value": "adicionar"},
+          {"name": "remover", "value": "remover"},
+          {"name": "limpar", "value": "limpar"},
+          {"name": "help", "value": "help"}
+        ]
+      },
+      {
+        "type": 3,
+        "name": "loja",
+        "description": "loja1, loja2 ou ambas",
+        "required": false,
+        "choices": [
+          {"name": "loja1", "value": "loja1"},
+          {"name": "loja2", "value": "loja2"},
+          {"name": "ambas", "value": "ambas"}
+        ]
+      },
+      {
+        "type": 3,
+        "name": "itens",
+        "description": "Itens separados por virgula (adicionar/remover)",
+        "required": false
+      },
+      {
+        "type": 3,
+        "name": "formato",
+        "description": "Formato para listar: links, excel ou texto",
+        "required": false,
+        "choices": [
+          {"name": "links", "value": "links"},
+          {"name": "excel", "value": "excel"},
+          {"name": "texto", "value": "texto"}
+        ]
+      }
+    ]
+  },
+  {
+    "name": "metricas",
+    "namespace": "custom",
+    "handler": "metricas",
+    "description": "Dashboard de métricas Colmeio (somente admin)",
+    "help_text": "Uso do `/metricas`:\n- `/metricas`\n- `/metricas dias:7 formato:text`\n- `/metricas dias:30 formato:json`\n- `/metricas skill:colmeio-lista-de-faltas`\n- `/metricas help`\n\nOpções: `dias`, `formato`, `skill`.",
+    "default_enabled": false,
+    "type": 1,
+    "dm_permission": false,
+    "options": [
+      {
+        "type": 3,
+        "name": "action",
+        "description": "Acao opcional do comando",
+        "required": false,
+        "choices": [
+          {"name": "help", "value": "help"}
+        ]
+      },
+      {
+        "type": 3,
+        "name": "formato",
+        "description": "Formato do dashboard",
+        "required": false,
+        "choices": [
+          {"name": "texto", "value": "text"},
+          {"name": "json", "value": "json"},
+          {"name": "csv", "value": "csv"}
+        ]
+      },
+      {
+        "type": 4,
+        "name": "dias",
+        "description": "Janela em dias (ex.: 7, 30, 90)",
+        "required": false,
+        "min_value": 1,
+        "max_value": 365
+      },
+      {
+        "type": 3,
+        "name": "skill",
+        "description": "Filtrar por nome da skill (ex.: colmeio-lista-de-faltas)",
+        "required": false
+      }
+    ]
+  }
+]

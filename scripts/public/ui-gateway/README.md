@@ -26,6 +26,10 @@ Default bind: `127.0.0.1:8787`
 
 - `GET /api/fleet/capabilities`
 - `GET /api/fleet/nodes`
+- `GET /api/fleet/dashboard/nodes`
+- `GET /api/fleet/dashboard/nodes/{node}/channels`
+- `GET /api/fleet/dashboard/nodes/{node}/channels/{channel}`
+- `GET /api/fleet/dashboard/nodes/{node}/channels/{channel}/series?window=7d`
 - `GET /api/fleet/guard/status`
 - `GET /api/fleet/nodes/{node}/status`
 - `GET /api/fleet/nodes/{node}/logs?channel=...&tail=...`
@@ -43,4 +47,5 @@ Default bind: `127.0.0.1:8787`
 - Node discovery pulls from `/local/agents/registry.json`, `/local/agents/envs/*.env`, and `/local/agents/nodes/*`.
 - Guard summaries are read from `/local/logs/guard/`.
 - Agent timelines are read from `/local/logs/nodes/activities/<node>.jsonl`.
+- Dashboard data is read through the hackathon dashboard helper when that workspace is present.
 - When auth is enabled, SSE clients can pass `/api/fleet/stream?token=<WASM_UI_API_TOKEN>` because browser `EventSource` cannot set custom headers.

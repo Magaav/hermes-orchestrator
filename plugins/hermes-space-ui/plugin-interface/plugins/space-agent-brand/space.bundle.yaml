@@ -1,0 +1,25 @@
+id: hermes/space-agent-brand
+name: Hermes Space Agent Brand
+version: 0.1.0
+description: Hermes browser and PWA icon overrides for Space Agent.
+capabilities:
+  - theme
+  - browser-runtime
+extension_points:
+  - _core/framework/head/end
+  - _core/framework/initializer.js/initialize/end
+compatibility:
+  space_agent: ">=0.65"
+assets:
+  source: assets/source/hermes-space-ui-agent-nous.png
+  icons:
+    - assets/icons/favicon.ico
+    - assets/icons/hermes-space-agent-16x16.png
+    - assets/icons/hermes-space-agent-32x32.png
+    - assets/icons/hermes-space-agent-180x180.png
+    - assets/icons/hermes-space-agent-192x192.png
+    - assets/icons/hermes-space-agent-512x512.png
+runtime:
+  stylesheet: space-agent-brand.css
+  initializer: space-agent-brand.js
+  avatar_source: assets/source/hermes-space-ui-agent-nous.png

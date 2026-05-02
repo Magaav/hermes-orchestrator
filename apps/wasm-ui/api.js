@@ -32,6 +32,23 @@ export function listNodes() {
   return request('/api/fleet/nodes')
 }
 
+export function listDashboardNodes() {
+  return request('/api/fleet/dashboard/nodes')
+}
+
+export function getDashboardNodeChannels(node) {
+  return request(`/api/fleet/dashboard/nodes/${encodeURIComponent(node)}/channels`)
+}
+
+export function getDashboardChannelDetail(node, channelId) {
+  return request(`/api/fleet/dashboard/nodes/${encodeURIComponent(node)}/channels/${encodeURIComponent(channelId)}`)
+}
+
+export function getDashboardChannelSeries(node, channelId, window = '7d') {
+  const q = new URLSearchParams({ window })
+  return request(`/api/fleet/dashboard/nodes/${encodeURIComponent(node)}/channels/${encodeURIComponent(channelId)}/series?${q.toString()}`)
+}
+
 export function getGuardStatus() {
   return request('/api/fleet/guard/status')
 }

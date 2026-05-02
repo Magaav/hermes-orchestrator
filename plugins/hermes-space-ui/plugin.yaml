@@ -1,0 +1,34 @@
+name: hermes-space-ui
+version: 0.1.0
+description: "External Space Agent UI/control-plane bridge for Hermes Orchestrator fleets."
+author: "Hermes Orchestrator"
+provides_hooks: []
+provides_tools: []
+provides_skills:
+  - skills/space-ui/SKILL.md
+external_bridge:
+  protocol: http
+  default_host: 127.0.0.1
+  default_port: 8790
+  entrypoint: server/bridge.py
+  auth_env: HERMES_SPACE_UI_TOKEN
+space_agent:
+  upstream_repo: https://github.com/agent0ai/space-agent
+  role: mutable_visual_workspace
+  horc_public_port: 8787
+  hermes_bridge_private_port: 8790
+  plugin_interface: plugin-interface/
+  bundles:
+    - plugin-interface/plugins/hermes-fleet
+    - plugin-interface/plugins/space-agent-brand
+safe_actions:
+  - inspect_node
+  - tail_logs
+  - restart_node
+  - stop_node
+  - start_node
+  - run_prompt
+  - open_dashboard
+integration:
+  orchestrator_cli: scripts/public/clone/horc.sh
+  agent_core_patches: false

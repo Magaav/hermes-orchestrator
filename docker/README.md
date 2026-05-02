@@ -7,7 +7,7 @@ This directory contains a production-oriented OpenViking deployment for Hermes m
 - OpenViking config template: `/local/docker/containers.conf/openviking/ov.conf`
 - Docker image artifacts: `/local/docker/dockerfiles/`
 - Logs (host volume): `/local/logs/openviking/`
-- Persistent memory/index storage (host volume): `/local/plugins/private/memory/`
+- Persistent memory/index storage (host volume): `/local/memory/`
 - Validation scripts: `/local/scripts/public/openviking/openviking_doctor.py`
 
 ## Architecture
@@ -48,7 +48,7 @@ This directory contains a production-oriented OpenViking deployment for Hermes m
       +------------------------------------------------------------------+
                                     |
                                     v
-                    /local/plugins/private/memory (mounted as /data in container)
+                    /local/memory (mounted as /data in container)
 ```
 
 ## Model Mapping (Default)

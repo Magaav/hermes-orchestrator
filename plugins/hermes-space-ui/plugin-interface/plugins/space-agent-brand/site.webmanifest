@@ -1,0 +1,20 @@
+{
+  "name": "Hermes Space Agent",
+  "short_name": "Hermes",
+  "description": "Hermes-branded Space Agent workspace.",
+  "icons": [
+    {
+      "src": "/mod/hermes/space-agent-brand/assets/icons/hermes-space-agent-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/mod/hermes/space-agent-brand/assets/icons/hermes-space-agent-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "theme_color": "#050816",
+  "background_color": "#050816",
+  "display": "standalone"
+}

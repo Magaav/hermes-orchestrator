@@ -1,0 +1,925 @@
+schema: space-widget/v1
+id: hermes-topology
+name: Hermes Topology
+cols: 8
+rows: 7
+col: -5
+row: -5
+renderer: |-
+  async (parent) => {
+    const HERMES_URL = "__HERMES_SPACE_URL__";
+    const LAYOUT_PATH = "~/hermes-topology-layout.json";
+    if (parent.__hermesTopologyCleanup) parent.__hermesTopologyCleanup();
+    parent.innerHTML = "";
+    parent.style.cssText = "height:100%;overflow:hidden;color:#eff6ff;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;";
+
+    const cleanups = [];
+    const state = {
+      nodes: [],
+      selected: "",
+      positions: {},
+      dragging: null,
+      justDragged: false,
+      menuOpen: false,
+      statsNode: "",
+      statsBucket: "daily",
+      statsDays: 1,
+      statsTimer: null,
+      layoutTimer: null
+    };
+
+    const style = document.createElement("style");
+    style.textContent = `
+      .ht-root{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px;}
+      .ht-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+      .ht-title{font-size:18px;font-weight:750;line-height:1.15;}
+      .ht-sub{font-size:11px;color:#9fb0c9;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:330px;}
+      .ht-actions{display:flex;align-items:center;gap:8px;}
+      .ht-btn{border:1px solid rgba(148,188,255,.25);background:rgba(125,220,255,.12);color:#eaf5ff;border-radius:8px;padding:7px 10px;font-size:12px;line-height:1;cursor:pointer;white-space:nowrap;}
+      .ht-btn:hover{background:rgba(125,220,255,.2);}
+      .ht-btn:disabled{opacity:.55;cursor:not-allowed;}
+      .ht-btn.secondary{background:rgba(148,167,201,.08);}
+      .ht-btn.danger{background:rgba(248,113,113,.13);border-color:rgba(248,113,113,.28);}
+      .ht-stage{position:relative;min-height:0;overflow:hidden;border:1px solid rgba(148,167,201,.1);border-radius:8px;background:radial-gradient(circle at 30% 18%,rgba(125,220,255,.09),transparent 28%),rgba(3,10,20,.44);}
+      .ht-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
+      .ht-nodes{position:absolute;inset:0;}
+      .ht-node{position:absolute;width:142px;min-height:66px;box-sizing:border-box;border:1px solid rgba(148,167,201,.22);border-radius:8px;background:rgba(16,33,62,.94);padding:9px 10px;cursor:grab;box-shadow:0 10px 26px rgba(0,0,0,.22);transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease;text-align:left;color:#eff6ff;}
+      .ht-node:active{cursor:grabbing;}
+      .ht-node:hover,.ht-node.selected{border-color:rgba(125,220,255,.72);transform:translateY(-1px);}
+      .ht-node.dragging{z-index:3;border-color:rgba(124,228,176,.82);box-shadow:0 14px 34px rgba(0,0,0,.34);}
+      .ht-node-name{font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-node-meta{font-size:10px;color:#9fb0c9;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-pill{display:inline-flex;align-items:center;gap:5px;margin-top:7px;font-size:10px;color:#cfe3ff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-pill::before{content:"";flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:#f87171;}
+      .ht-pill.running::before{background:#7ce4b0;}
+      .ht-pill.working::before{background:#7ce4b0;box-shadow:0 0 0 3px rgba(124,228,176,.12);}
+      .ht-gear{display:inline-block;transform-origin:50% 50%;animation:ht-spin 1.1s linear infinite;}
+      @keyframes ht-spin{to{transform:rotate(360deg);}}
+      .ht-detail{min-height:50px;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-top:1px solid rgba(148,167,201,.08);padding-top:8px;}
+      .ht-detail-title{font-size:13px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-detail-sub{font-size:11px;color:#9fb0c9;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-count{font-size:12px;color:#dceaff;white-space:nowrap;}
+      .ht-empty{color:#9fb0c9;font-size:13px;text-align:center;padding:24px;}
+      .ht-error{color:#fca5a5;font-size:12px;line-height:1.35;padding:16px;}
+      .ht-menu{position:fixed;z-index:2147483000;min-width:178px;border:1px solid rgba(148,167,201,.18);border-radius:8px;background:rgba(9,18,34,.98);box-shadow:0 18px 44px rgba(0,0,0,.38);padding:6px;}
+      .ht-menu button{display:flex;width:100%;align-items:center;gap:8px;border:0;border-radius:6px;background:transparent;color:#eaf5ff;padding:8px 9px;font-size:12px;text-align:left;cursor:pointer;}
+      .ht-menu button:hover{background:rgba(125,220,255,.13);}
+      .ht-menu button.danger:hover{background:rgba(248,113,113,.14);}
+      .ht-modal-backdrop{position:fixed;inset:0;z-index:2147482990;display:grid;place-items:center;background:rgba(2,6,14,.62);padding:18px;}
+      .ht-modal{width:min(760px,calc(100vw - 36px));max-height:calc(100vh - 36px);display:grid;grid-template-rows:auto minmax(0,1fr);border:1px solid rgba(148,167,201,.2);border-radius:8px;background:rgba(8,17,31,.98);box-shadow:0 24px 70px rgba(0,0,0,.46);overflow:hidden;}
+      .ht-modal.small{width:min(560px,calc(100vw - 36px));}
+      .ht-modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 14px;border-bottom:1px solid rgba(148,167,201,.12);}
+      .ht-modal-title{font-size:15px;font-weight:760;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-close{border:0;background:transparent;color:#dceaff;font-size:22px;line-height:1;cursor:pointer;border-radius:6px;width:30px;height:30px;}
+      .ht-close:hover{background:rgba(255,255,255,.08);}
+      .ht-modal-body{min-height:0;overflow:auto;padding:14px;display:grid;grid-template-rows:auto auto auto minmax(150px,1fr);gap:12px;}
+      .ht-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;min-height:132px;}
+      .ht-stat{border:1px solid rgba(148,167,201,.13);border-radius:8px;background:rgba(255,255,255,.035);padding:10px;min-width:0;min-height:52px;box-sizing:border-box;}
+      .ht-stat-label{font-size:10px;color:#9fb0c9;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+      .ht-stat-value{font-size:15px;font-weight:760;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-segments{display:flex;gap:6px;margin:0;flex-wrap:wrap;}
+      .ht-btn.active{background:rgba(124,228,176,.18);border-color:rgba(124,228,176,.36);}
+      .ht-section{display:grid;gap:8px;min-width:0;}
+      .ht-section-title{font-size:12px;color:#dceaff;font-weight:760;line-height:1.2;}
+      .ht-chart-wrap{grid-template-rows:auto 230px;min-height:258px;}
+      .ht-chart{width:100%;height:230px;border:1px solid rgba(148,167,201,.13);border-radius:8px;background:rgba(3,10,20,.44);box-sizing:border-box;}
+      .ht-list-wrap{grid-template-rows:auto minmax(150px,1fr);min-height:186px;}
+      .ht-list{display:grid;gap:7px;align-content:start;min-height:150px;max-height:220px;overflow:auto;}
+      .ht-event{border:1px solid rgba(148,167,201,.1);border-radius:8px;padding:8px;background:rgba(255,255,255,.03);font-size:11px;color:#cfe3ff;}
+      .ht-event strong{display:block;color:#eff6ff;font-size:12px;margin-bottom:3px;}
+      .ht-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+      .ht-field{display:grid;gap:5px;min-width:0;}
+      .ht-field.full{grid-column:1/-1;}
+      .ht-field label{font-size:11px;color:#9fb0c9;}
+      .ht-input,.ht-select,.ht-textarea{box-sizing:border-box;width:100%;border:1px solid rgba(148,167,201,.2);border-radius:8px;background:rgba(2,8,18,.72);color:#eff6ff;padding:8px 9px;font:inherit;font-size:12px;outline:none;}
+      .ht-textarea{min-height:92px;resize:vertical;line-height:1.35;}
+      .ht-check{display:flex;align-items:center;gap:8px;font-size:12px;color:#cfe3ff;}
+      .ht-topic{grid-column:1/-1;border:1px solid rgba(148,167,201,.14);border-radius:8px;background:rgba(255,255,255,.025);overflow:hidden;}
+      .ht-topic summary{cursor:pointer;list-style:none;padding:9px 10px;font-size:12px;font-weight:720;color:#dceaff;}
+      .ht-topic summary::-webkit-details-marker{display:none;}
+      .ht-topic summary::after{content:"+";float:right;color:#9fb0c9;}
+      .ht-topic[open] summary{border-bottom:1px solid rgba(148,167,201,.12);}
+      .ht-topic[open] summary::after{content:"-";}
+      .ht-topic-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:10px;}
+      .ht-form-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px;margin-top:2px;}
+      .ht-form-msg{grid-column:1/-1;font-size:12px;color:#9fb0c9;min-height:18px;}
+      .ht-session{position:fixed;z-index:2147482980;width:min(390px,calc(100vw - 24px));max-height:min(520px,calc(100vh - 24px));display:grid;grid-template-rows:auto minmax(0,1fr) auto;border:1px solid rgba(125,220,255,.24);border-radius:8px;background:rgba(8,17,31,.98);box-shadow:0 18px 52px rgba(0,0,0,.42);overflow:hidden;}
+      .ht-session-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid rgba(148,167,201,.12);}
+      .ht-session-title{font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-transcript{min-height:0;overflow:auto;display:grid;align-content:start;gap:8px;padding:10px;}
+      .ht-msg{border:1px solid rgba(148,167,201,.1);border-radius:8px;padding:8px;font-size:12px;line-height:1.35;white-space:pre-wrap;background:rgba(255,255,255,.035);}
+      .ht-msg.user{border-color:rgba(125,220,255,.22);}
+      .ht-msg.error{border-color:rgba(248,113,113,.28);color:#fecaca;}
+      .ht-send{display:grid;gap:8px;padding:10px;border-top:1px solid rgba(148,167,201,.12);}
+      @media (max-width:720px){.ht-grid{grid-template-columns:repeat(2,minmax(0,1fr));min-height:268px;}.ht-form,.ht-topic-grid{grid-template-columns:1fr;}.ht-form-actions{justify-content:stretch;}.ht-form-actions .ht-btn{flex:1;}}
+    `;
+    parent.appendChild(style);
+
+    const root = document.createElement("div");
+    root.className = "ht-root";
+    root.innerHTML = `
+      <div class="ht-head">
+        <div>
+          <div class="ht-title">Hermes Topology</div>
+          <div class="ht-sub" data-role="freshness">Bridge: ${HERMES_URL}</div>
+        </div>
+        <div class="ht-actions"><button class="ht-btn" data-action="add-node">Add Node</button></div>
+      </div>
+      <div class="ht-stage" data-role="stage">
+        <svg class="ht-svg" data-role="svg"></svg>
+        <div class="ht-nodes" data-role="nodes"></div>
+      </div>
+      <div class="ht-detail">
+        <div>
+          <div class="ht-detail-title" data-role="detail-title">Loading nodes</div>
+          <div class="ht-detail-sub" data-role="detail-sub">Reading Hermes Orchestrator node status</div>
+        </div>
+        <div class="ht-count" data-role="count"></div>
+      </div>
+    `;
+    parent.appendChild(root);
+
+    const stageEl = root.querySelector("[data-role='stage']");
+    const nodesEl = root.querySelector("[data-role='nodes']");
+    const svgEl = root.querySelector("[data-role='svg']");
+    const freshnessEl = root.querySelector("[data-role='freshness']");
+    const detailTitleEl = root.querySelector("[data-role='detail-title']");
+    const detailSubEl = root.querySelector("[data-role='detail-sub']");
+    const countEl = root.querySelector("[data-role='count']");
+
+    function addCleanup(fn) {
+      cleanups.push(fn);
+      return fn;
+    }
+
+    function listen(target, type, handler, options) {
+      target.addEventListener(type, handler, options);
+      addCleanup(() => target.removeEventListener(type, handler, options));
+    }
+
+    async function hermes(path, options = {}) {
+      const response = await space.fetchExternal(HERMES_URL + path, {
+        method: options.method || "GET",
+        headers: { "Content-Type": "application/json" },
+        body: options.body ? JSON.stringify(options.body) : undefined
+      });
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; }
+      catch { data = { ok: false, error: { message: text.slice(0, 500) } }; }
+      if (!response.ok || data.ok === false) {
+        throw new Error(data?.error?.message || `HTTP ${response.status}`);
+      }
+      return data;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function formatNumber(value) {
+      const n = Number(value || 0);
+      if (!Number.isFinite(n)) return "0";
+      return n.toLocaleString();
+    }
+
+    function formatCost(value) {
+      const n = Number(value || 0);
+      return n ? `$${n.toFixed(4)}` : "$0";
+    }
+
+    function escapeHTML(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      })[char]);
+    }
+
+    function displayStatus(node) {
+      const raw = String(node?.status || "unknown").toLowerCase();
+      if (node?.activity?.llm_active) return "working " + String.fromCharCode(0x2699);
+      if (node?.running) return "idle";
+      if (raw === "exited" || raw === "created") return "stopped";
+      return raw;
+    }
+
+    function statusClass(node) {
+      if (node?.activity?.llm_active) return "working";
+      if (node?.running) return "running";
+      return "";
+    }
+
+    function renderStatusPill(el, node) {
+      el.textContent = "";
+      if (node?.activity?.llm_active) {
+        el.append("working ");
+        const gear = document.createElement("span");
+        gear.className = "ht-gear";
+        gear.textContent = String.fromCharCode(0x2699);
+        el.appendChild(gear);
+        return;
+      }
+      el.textContent = displayStatus(node);
+    }
+
+    function statsDaysForBucket(bucket) {
+      if (bucket === "weekly") return 7;
+      if (bucket === "monthly") return 30;
+      return 1;
+    }
+
+    function shouldPauseRefresh() {
+      return Boolean(state.menuOpen || state.dragging);
+    }
+
+    async function loadLayout() {
+      try {
+        const raw = await space.api.fileRead(LAYOUT_PATH, "utf8");
+        const parsed = JSON.parse(typeof raw === "string" ? raw : "");
+        if (parsed && typeof parsed.positions === "object") {
+          state.positions = parsed.positions || {};
+        }
+      } catch {}
+    }
+
+    function saveLayoutSoon() {
+      clearTimeout(state.layoutTimer);
+      state.layoutTimer = setTimeout(() => {
+        const active = {};
+        for (const node of state.nodes) {
+          if (state.positions[node.id]) active[node.id] = state.positions[node.id];
+        }
+        void space.api.fileWrite(
+          LAYOUT_PATH,
+          JSON.stringify({ schema: "hermes.space_ui.topology_layout.v1", updated_at: new Date().toISOString(), positions: active }, null, 2),
+          "utf8"
+        ).catch(() => {});
+      }, 250);
+    }
+
+    function autoLayout(nodes) {
+      const width = Math.max(340, stageEl.clientWidth || 640);
+      const height = Math.max(260, stageEl.clientHeight || 380);
+      const cardW = 142;
+      const cardH = 72;
+      const center = { x: width / 2 - cardW / 2, y: height / 2 - cardH / 2 };
+      const positions = {};
+      const hub = nodes.find((node) => node.id === "orchestrator") || nodes[0];
+      if (!hub) return positions;
+      positions[hub.id] = center;
+      const others = nodes.filter((node) => node.id !== hub.id);
+      const radiusX = Math.max(120, width * 0.34);
+      const radiusY = Math.max(88, height * 0.31);
+      others.forEach((node, index) => {
+        const angle = (-Math.PI / 2) + (2 * Math.PI * index / Math.max(1, others.length));
+        positions[node.id] = {
+          x: clamp(width / 2 + Math.cos(angle) * radiusX - cardW / 2, 12, width - cardW - 12),
+          y: clamp(height / 2 + Math.sin(angle) * radiusY - cardH / 2, 12, height - cardH - 12)
+        };
+      });
+      return positions;
+    }
+
+    function ensurePositions() {
+      const fallback = autoLayout(state.nodes);
+      const width = Math.max(340, stageEl.clientWidth || 640);
+      const height = Math.max(260, stageEl.clientHeight || 380);
+      for (const node of state.nodes) {
+        const current = state.positions[node.id] || fallback[node.id] || { x: 12, y: 12 };
+        state.positions[node.id] = {
+          x: clamp(Number(current.x || 0), 12, width - 154),
+          y: clamp(Number(current.y || 0), 12, height - 84)
+        };
+      }
+    }
+
+    function closeMenu() {
+      root.querySelectorAll(".ht-menu").forEach((item) => item.remove());
+      state.menuOpen = false;
+    }
+
+    function placeFixed(el, x, y) {
+      requestAnimationFrame(() => {
+        const rect = el.getBoundingClientRect();
+        const margin = 8;
+        el.style.left = `${clamp(x, margin, window.innerWidth - rect.width - margin)}px`;
+        el.style.top = `${clamp(y, margin, window.innerHeight - rect.height - margin)}px`;
+      });
+    }
+
+    function openNodeMenu(node, event) {
+      closeMenu();
+      state.menuOpen = true;
+      state.selected = node.id;
+      renderDetails();
+      const menu = document.createElement("div");
+      menu.className = "ht-menu";
+      menu.innerHTML = `
+        <button data-action="start">Start</button>
+        <button data-action="stop" class="danger">Stop</button>
+        <button data-action="restart">Restart</button>
+        <button data-action="message">Send Message</button>
+        <button data-action="stats">Statistics</button>
+      `;
+      root.appendChild(menu);
+      placeFixed(menu, event.clientX, event.clientY);
+      menu.addEventListener("click", (click) => {
+        const button = click.target.closest("button[data-action]");
+        if (!button) return;
+        const action = button.dataset.action;
+        if (action === "message") openMessageSession(node);
+        else if (action === "stats") openStatsModal(node.id);
+        else void runNodeAction(node.id, `${action}_node`);
+        closeMenu();
+      });
+    }
+
+    async function runNodeAction(nodeId, action) {
+      detailSubEl.textContent = `${action.replace("_node", "")} requested for ${nodeId}`;
+      try {
+        await hermes(`/nodes/${encodeURIComponent(nodeId)}/action`, {
+          method: "POST",
+          body: { action, payload: {} }
+        });
+        await loadNodes({ force: true });
+      } catch (error) {
+        showError(error);
+      }
+    }
+
+    function drawTopology() {
+      closeMenu();
+      nodesEl.innerHTML = "";
+      svgEl.innerHTML = "";
+      if (!state.nodes.length) {
+        nodesEl.innerHTML = '<div class="ht-empty">No Hermes nodes found.</div>';
+        detailTitleEl.textContent = "No nodes";
+        detailSubEl.textContent = "The bridge returned an empty fleet.";
+        countEl.textContent = "";
+        return;
+      }
+
+      ensurePositions();
+      const hub = state.nodes.find((node) => node.id === "orchestrator") || state.nodes[0];
+      if (!state.selected || !state.nodes.some((node) => node.id === state.selected)) {
+        state.selected = hub.id;
+      }
+
+      const hubPos = state.positions[hub.id];
+      for (const node of state.nodes) {
+        const pos = state.positions[node.id];
+        if (!pos) continue;
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "ht-node" + (node.id === state.selected ? " selected" : "");
+        card.style.left = `${pos.x}px`;
+        card.style.top = `${pos.y}px`;
+        card.dataset.nodeId = node.id;
+        card.innerHTML = `
+          <div class="ht-node-name"></div>
+          <div class="ht-node-meta"></div>
+          <div class="ht-pill ${statusClass(node)}"></div>
+        `;
+        card.querySelector(".ht-node-name").textContent = node.title || node.id;
+        card.querySelector(".ht-node-meta").textContent = `${node.runtime?.type || "runtime"} / ${node.runtime?.state_mode || "state"}`;
+        renderStatusPill(card.querySelector(".ht-pill"), node);
+        card.addEventListener("contextmenu", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          openNodeMenu(node, event);
+        });
+        nodesEl.appendChild(card);
+
+        if (hubPos && node.id !== hub.id) {
+          const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+          line.setAttribute("x1", String(hubPos.x + 71));
+          line.setAttribute("y1", String(hubPos.y + 36));
+          line.setAttribute("x2", String(pos.x + 71));
+          line.setAttribute("y2", String(pos.y + 36));
+          line.setAttribute("stroke", node.running ? "rgba(125,220,255,.62)" : "rgba(248,113,113,.5)");
+          line.setAttribute("stroke-width", "2");
+          line.setAttribute("stroke-dasharray", node.running ? "0" : "6 6");
+          svgEl.appendChild(line);
+        }
+      }
+      renderDetails();
+    }
+
+    function renderDetails() {
+      const node = state.nodes.find((item) => item.id === state.selected) || state.nodes[0];
+      const working = state.nodes.filter((item) => item.activity?.llm_active).length;
+      const running = state.nodes.filter((item) => item.running).length;
+      countEl.textContent = `${working}/${state.nodes.length} working / ${running} running`;
+      if (!node) return;
+      detailTitleEl.textContent = node.title || node.id;
+      detailSubEl.textContent = `${displayStatus(node)} / ${node.runtime?.type || "runtime"} / ${node.paths?.clone_root || "no clone path"}`;
+    }
+
+    async function loadNodes(options = {}) {
+      if (!options.force && shouldPauseRefresh()) {
+        freshnessEl.textContent = "Paused";
+        return;
+      }
+      freshnessEl.textContent = "Updating";
+      const data = await hermes("/nodes");
+      state.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      freshnessEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      drawTopology();
+    }
+
+    function showError(error) {
+      svgEl.innerHTML = "";
+      nodesEl.innerHTML = `<div class="ht-error">Error: ${escapeHTML(error.message || error)}</div>`;
+      detailTitleEl.textContent = "Bridge error";
+      detailSubEl.textContent = "Could not read Hermes nodes.";
+      countEl.textContent = "";
+      freshnessEl.textContent = "Stale";
+    }
+
+    function appendMessage(transcript, text, kind = "") {
+      const bubble = document.createElement("div");
+      bubble.className = `ht-msg ${kind}`.trim();
+      bubble.textContent = text;
+      transcript.appendChild(bubble);
+      transcript.scrollTop = transcript.scrollHeight;
+      return bubble;
+    }
+
+    function openMessageSession(node) {
+      root.querySelectorAll(".ht-session").forEach((item) => item.remove());
+      const panel = document.createElement("div");
+      panel.className = "ht-session";
+      panel.innerHTML = `
+        <div class="ht-session-head">
+          <div class="ht-session-title">Message ${node.id}</div>
+          <button class="ht-close" data-action="close" title="Close">x</button>
+        </div>
+        <div class="ht-transcript" data-role="transcript"></div>
+        <form class="ht-send" data-role="send-form">
+          <textarea class="ht-textarea" data-role="prompt" placeholder="Ask this node to do something"></textarea>
+          <button class="ht-btn" type="submit">Send</button>
+        </form>
+      `;
+      root.appendChild(panel);
+      const card = Array.from(nodesEl.querySelectorAll("[data-node-id]")).find((item) => item.dataset.nodeId === node.id);
+      const rect = card?.getBoundingClientRect();
+      placeFixed(panel, (rect?.right || window.innerWidth / 2) + 10, rect?.top || 80);
+      const transcript = panel.querySelector("[data-role='transcript']");
+      const form = panel.querySelector("[data-role='send-form']");
+      const prompt = panel.querySelector("[data-role='prompt']");
+      appendMessage(transcript, `Session opened with ${node.id}.`);
+      panel.querySelector("[data-action='close']").addEventListener("click", () => panel.remove());
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = prompt.value.trim();
+        if (!text) return;
+        prompt.value = "";
+        appendMessage(transcript, text, "user");
+        const pending = appendMessage(transcript, "Running task...");
+        try {
+          const data = await hermes(`/nodes/${encodeURIComponent(node.id)}/prompt`, {
+            method: "POST",
+            body: { prompt: text }
+          });
+          const task = data.task || {};
+          const response = task?.result?.response || task?.error?.message || `Task ${task.status || "submitted"}`;
+          pending.textContent = response;
+          pending.className = task.status === "failed" ? "ht-msg error" : "ht-msg";
+        } catch (error) {
+          pending.textContent = error.message || String(error);
+          pending.className = "ht-msg error";
+        }
+      });
+      prompt.focus();
+    }
+
+    function bindBackdropDismiss(backdrop, close) {
+      let startedOnBackdrop = false;
+      backdrop.addEventListener("pointerdown", (event) => {
+        startedOnBackdrop = event.button === 0 && event.target === backdrop;
+      });
+      backdrop.addEventListener("pointerup", (event) => {
+        const shouldClose = startedOnBackdrop && event.button === 0 && event.target === backdrop;
+        startedOnBackdrop = false;
+        if (shouldClose) close();
+      });
+      backdrop.addEventListener("pointercancel", () => {
+        startedOnBackdrop = false;
+      });
+      backdrop.addEventListener("click", (event) => {
+        if (event.target === backdrop) event.preventDefault();
+      });
+    }
+
+    function openStatsModal(nodeId) {
+      state.statsNode = nodeId;
+      clearInterval(state.statsTimer);
+      root.querySelectorAll(".ht-modal-backdrop").forEach((item) => item.remove());
+      const backdrop = document.createElement("div");
+      backdrop.className = "ht-modal-backdrop";
+      backdrop.innerHTML = `
+        <div class="ht-modal">
+          <div class="ht-modal-head">
+            <div class="ht-modal-title">Statistics: ${nodeId}</div>
+            <button class="ht-close" data-action="close" title="Close">x</button>
+          </div>
+          <div class="ht-modal-body">
+            <div class="ht-segments">
+              <button class="ht-btn secondary" data-bucket="daily">Daily</button>
+              <button class="ht-btn secondary" data-bucket="weekly">Weekly</button>
+              <button class="ht-btn secondary" data-bucket="monthly">Monthly</button>
+            </div>
+            <div class="ht-grid" data-role="stats-grid">
+              <div class="ht-stat"><div class="ht-stat-label">Status</div><div class="ht-stat-value" data-stat="status">Loading</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Tokens</div><div class="ht-stat-value" data-stat="tokens">0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Sessions</div><div class="ht-stat-value" data-stat="sessions">0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Cost</div><div class="ht-stat-value" data-stat="cost">$0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Activity</div><div class="ht-stat-value" data-stat="activity">0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Tools</div><div class="ht-stat-value" data-stat="tools">0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Warnings</div><div class="ht-stat-value" data-stat="warnings">0</div></div>
+              <div class="ht-stat"><div class="ht-stat-label">Errors</div><div class="ht-stat-value" data-stat="errors">0</div></div>
+            </div>
+            <div class="ht-section ht-chart-wrap">
+              <div class="ht-section-title">Token Consumption</div>
+              <svg class="ht-chart" data-role="chart" viewBox="0 0 680 250" preserveAspectRatio="none"></svg>
+            </div>
+            <div class="ht-section ht-list-wrap">
+              <div class="ht-section-title">Activity Log</div>
+              <div class="ht-list" data-role="events"><div class="ht-event"><strong>Loading</strong><div>Reading node activity samples.</div></div></div>
+            </div>
+          </div>
+        </div>
+      `;
+      root.appendChild(backdrop);
+      const close = () => {
+        clearInterval(state.statsTimer);
+        state.statsTimer = null;
+        backdrop.remove();
+      };
+      backdrop.querySelector("[data-action='close']").addEventListener("click", close);
+      bindBackdropDismiss(backdrop, close);
+      backdrop.querySelectorAll("[data-bucket]").forEach((button) => {
+        button.addEventListener("click", () => {
+          state.statsBucket = button.dataset.bucket;
+          state.statsDays = statsDaysForBucket(state.statsBucket);
+          updateStatsSegments(backdrop);
+          void loadStats(backdrop);
+        });
+      });
+      updateStatsSegments(backdrop);
+      void loadStats(backdrop);
+      state.statsTimer = setInterval(() => void loadStats(backdrop), 5000);
+    }
+
+    function updateStatsSegments(backdrop) {
+      backdrop.querySelectorAll("[data-bucket]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.bucket === state.statsBucket);
+      });
+    }
+
+    async function loadStats(backdrop) {
+      const grid = backdrop.querySelector("[data-role='stats-grid']");
+      const events = backdrop.querySelector("[data-role='events']");
+      const chart = backdrop.querySelector("[data-role='chart']");
+      try {
+        const data = await hermes(`/nodes/${encodeURIComponent(state.statsNode)}/stats?bucket=${encodeURIComponent(state.statsBucket)}&days=${state.statsDays}`);
+        renderStats(data.stats || {}, grid, chart, events);
+      } catch (error) {
+        setStat(grid, "status", "Error");
+        setStat(grid, "tokens", "0");
+        setStat(grid, "sessions", "0");
+        setStat(grid, "cost", "$0");
+        setStat(grid, "activity", "0");
+        setStat(grid, "tools", "0");
+        setStat(grid, "warnings", "0");
+        setStat(grid, "errors", "1");
+        drawChart(chart, []);
+        events.innerHTML = `<div class="ht-event"><strong>Bridge error</strong><div>${escapeHTML(error.message || error)}</div></div>`;
+      }
+    }
+
+    function setStat(grid, key, value) {
+      const target = grid.querySelector(`[data-stat="${key}"]`);
+      if (target) target.textContent = value;
+    }
+
+    function renderStats(stats, grid, chart, events) {
+      const usage = stats.usage || {};
+      const activity = stats.activity || {};
+      const logs = stats.logs || {};
+      const totals = usage.totals || {};
+      const activityTotals = activity.totals || {};
+      const status = stats.status || {};
+      setStat(grid, "status", displayStatus(status));
+      setStat(grid, "tokens", formatNumber(totals.total_tokens));
+      setStat(grid, "sessions", formatNumber(totals.sessions));
+      setStat(grid, "cost", formatCost(totals.estimated_cost_usd));
+      setStat(grid, "activity", formatNumber(activityTotals.events));
+      setStat(grid, "tools", formatNumber(activityTotals.tool_count));
+      setStat(grid, "warnings", formatNumber(logs?.totals?.warnings));
+      setStat(grid, "errors", formatNumber((logs?.totals?.errors || 0) + (logs?.totals?.tracebacks || 0)));
+      drawChart(chart, Array.isArray(usage.buckets) ? usage.buckets : []);
+      const recent = Array.isArray(activity.recent_events) ? activity.recent_events : [];
+      const emptyText = activity.source_type === "state_db_sessions"
+        ? "No sessions were recorded in the selected window."
+        : "Token and event history will appear after this node records activity.";
+      events.innerHTML = recent.length
+        ? recent.map((item) => `
+            <div class="ht-event">
+              <strong>${escapeHTML(item.ts || "activity")} / ${escapeHTML(item.outcome || "unknown")}</strong>
+              <div>${escapeHTML(item.message_preview || "No message preview")}</div>
+            </div>
+          `).join("")
+        : `<div class="ht-event"><strong>No activity samples</strong><div>${escapeHTML(emptyText)}</div></div>`;
+    }
+
+    function drawChart(svg, buckets) {
+      svg.innerHTML = "";
+      svg.setAttribute("viewBox", "0 0 680 250");
+      const w = 680;
+      const h = 250;
+      const left = 54;
+      const right = 18;
+      const top = 18;
+      const bottom = 64;
+      const plotW = w - left - right;
+      const plotH = h - top - bottom;
+      const values = buckets.map((item) => Number(item.total_tokens || 0));
+      const max = Math.max(1, ...values);
+      const yTicks = [0, Math.ceil(max / 2), max].filter((value, index, list) => index === 0 || value !== list[index - 1]);
+      yTicks.forEach((value) => {
+        const y = top + plotH - (value / max) * plotH;
+        const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        grid.setAttribute("x1", String(left));
+        grid.setAttribute("x2", String(w - right));
+        grid.setAttribute("y1", String(y));
+        grid.setAttribute("y2", String(y));
+        grid.setAttribute("stroke", "rgba(148,167,201,.13)");
+        svg.appendChild(grid);
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        label.setAttribute("x", String(left - 8));
+        label.setAttribute("y", String(y + 4));
+        label.setAttribute("text-anchor", "end");
+        label.setAttribute("fill", "rgba(207,227,255,.72)");
+        label.setAttribute("font-size", "10");
+        label.textContent = formatNumber(value);
+        svg.appendChild(label);
+      });
+      const axis = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      axis.setAttribute("d", `M${left} ${top + plotH} H${w - right} M${left} ${top + plotH} V${top}`);
+      axis.setAttribute("stroke", "rgba(148,167,201,.42)");
+      axis.setAttribute("fill", "none");
+      svg.appendChild(axis);
+      if (!buckets.length) {
+        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        text.setAttribute("x", String(w / 2));
+        text.setAttribute("y", String(h / 2));
+        text.setAttribute("text-anchor", "middle");
+        text.setAttribute("fill", "rgba(207,227,255,.72)");
+        text.setAttribute("font-size", "13");
+        text.textContent = "No token samples yet";
+        svg.appendChild(text);
+        return;
+      }
+      const step = buckets.length > 1 ? plotW / (buckets.length - 1) : 0;
+      const points = buckets.map((item, index) => {
+        const x = left + index * step;
+        const y = top + plotH - (Number(item.total_tokens || 0) / max) * plotH;
+        return `${x},${y}`;
+      }).join(" ");
+      const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      poly.setAttribute("points", points);
+      poly.setAttribute("fill", "none");
+      poly.setAttribute("stroke", "rgba(124,228,176,.92)");
+      poly.setAttribute("stroke-width", "3");
+      poly.setAttribute("stroke-linecap", "round");
+      svg.appendChild(poly);
+      buckets.forEach((item, index) => {
+        const x = left + index * step;
+        const y = top + plotH - (Number(item.total_tokens || 0) / max) * plotH;
+        const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        dot.setAttribute("cx", String(x));
+        dot.setAttribute("cy", String(y));
+        dot.setAttribute("r", "4");
+        dot.setAttribute("fill", "rgba(125,220,255,.95)");
+        svg.appendChild(dot);
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        const xLabel = item.label || item.start_label || String(index + 1);
+        label.setAttribute("x", String(x));
+        label.setAttribute("y", String(top + plotH + 44));
+        label.setAttribute("text-anchor", "end");
+        label.setAttribute("fill", "rgba(207,227,255,.72)");
+        label.setAttribute("font-size", buckets.length > 24 ? "8" : "9");
+        label.setAttribute("transform", `rotate(-45 ${x} ${top + plotH + 44})`);
+        label.textContent = xLabel;
+        svg.appendChild(label);
+      });
+      const yLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      yLabel.setAttribute("x", String(left));
+      yLabel.setAttribute("y", "12");
+      yLabel.setAttribute("fill", "rgba(207,227,255,.74)");
+      yLabel.setAttribute("font-size", "11");
+      yLabel.textContent = "tokens";
+      svg.appendChild(yLabel);
+      const xLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      xLabel.setAttribute("x", String(w - right));
+      xLabel.setAttribute("y", String(h - 10));
+      xLabel.setAttribute("text-anchor", "end");
+      xLabel.setAttribute("fill", "rgba(207,227,255,.74)");
+      xLabel.setAttribute("font-size", "11");
+      xLabel.textContent = "time";
+      svg.appendChild(xLabel);
+    }
+
+    function openAddNodeModal() {
+      clearInterval(state.statsTimer);
+      state.statsTimer = null;
+      root.querySelectorAll(".ht-modal-backdrop").forEach((item) => item.remove());
+      const backdrop = document.createElement("div");
+      backdrop.className = "ht-modal-backdrop";
+      backdrop.innerHTML = `
+        <div class="ht-modal small">
+          <div class="ht-modal-head">
+            <div class="ht-modal-title">Add Node</div>
+            <button class="ht-close" data-action="close" title="Close">x</button>
+          </div>
+          <div class="ht-modal-body">
+            <form class="ht-form" data-role="node-form" autocomplete="off">
+              <input type="hidden" name="source_node" value="node.env.example">
+              <div class="ht-field"><label>Node id</label><input class="ht-input" name="node_id" required pattern="[a-z0-9][a-z0-9-]{1,62}" placeholder="node-name"></div>
+              <div class="ht-field"><label>Node State</label><select class="ht-select" name="node_state" required><option value="2">seed from parent</option><option value="4">fresh</option><option value="3">from backup</option></select></div>
+              <div class="ht-field"><label>Default provider</label><input class="ht-input" name="default_model_provider" required placeholder="minimax"></div>
+              <div class="ht-field"><label>Default model</label><input class="ht-input" name="default_model" required placeholder="model-id"></div>
+              <div class="ht-field"><label>Fallback provider</label><input class="ht-input" name="fallback_model_provider"></div>
+              <div class="ht-field"><label>Fallback model</label><input class="ht-input" name="fallback_model"></div>
+              <div class="ht-field"><label>Time zone</label><input class="ht-input" name="time_zone" value="UTC"></div>
+              <div class="ht-field"><label>Backup path</label><input class="ht-input" name="ui_backup_path" value="" autocomplete="off" autocapitalize="off" spellcheck="false" data-clear-on-open="true"></div>
+              <details class="ht-topic">
+                <summary>Discord settings</summary>
+                <div class="ht-topic-grid">
+                  <div class="ht-field"><label>Discord bot token</label><input class="ht-input" name="ui_discord_bot_token" type="password" value="" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-clear-on-open="true" data-lpignore="true" data-1p-ignore="true" data-bwignore="true"></div>
+                  <div class="ht-field"><label>Discord app id</label><input class="ht-input" name="discord_app_id" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Discord server id</label><input class="ht-input" name="discord_server_id" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Discord guild id</label><input class="ht-input" name="discord_guild_id" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Discord home channel</label><input class="ht-input" name="discord_home_channel" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Allowed users</label><input class="ht-input" name="discord_allowed_users" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Require mention</label><select class="ht-select" name="discord_require_mention"><option value=""></option><option value="true">true</option><option value="false">false</option></select></div>
+                  <div class="ht-field"><label>Require mention channels</label><input class="ht-input" name="discord_require_mention_channels" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Free response channels</label><input class="ht-input" name="discord_free_response_channels" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Ignored channels</label><input class="ht-input" name="discord_ignored_channels" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>Auto thread</label><select class="ht-select" name="discord_auto_thread"><option value=""></option><option value="true">true</option><option value="false">false</option></select></div>
+                  <div class="ht-field"><label>Auto thread ignore channels</label><input class="ht-input" name="discord_auto_thread_ignore_channels" value="" autocomplete="off"></div>
+                </div>
+              </details>
+              <details class="ht-topic">
+                <summary>Provider keys</summary>
+                <div class="ht-topic-grid">
+                  <div class="ht-field"><label>NVIDIA API key</label><input class="ht-input" name="nvidia_api_key" type="password" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>OpenRouter API key</label><input class="ht-input" name="openrouter_api_key" type="password" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>MiniMax API key</label><input class="ht-input" name="minimax_api_key" type="password" value="" autocomplete="off"></div>
+                  <div class="ht-field"><label>MiniMax group id</label><input class="ht-input" name="minimax_group_id" value="" autocomplete="off"></div>
+                </div>
+              </details>
+              <div class="ht-field full"><label>Personality / role</label><textarea class="ht-textarea" name="personality" placeholder="Optional runtime personality or responsibility for this node"></textarea></div>
+              <label class="ht-check full"><input type="checkbox" name="start_immediately" checked> Start immediately</label>
+              <div class="ht-form-msg" data-role="form-msg"></div>
+              <div class="ht-form-actions">
+                <button class="ht-btn secondary" type="button" data-action="close">Cancel</button>
+                <button class="ht-btn" type="submit">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+      root.appendChild(backdrop);
+      const close = () => backdrop.remove();
+      backdrop.querySelectorAll("[data-action='close']").forEach((button) => button.addEventListener("click", close));
+      bindBackdropDismiss(backdrop, close);
+      const form = backdrop.querySelector("[data-role='node-form']");
+      const msg = backdrop.querySelector("[data-role='form-msg']");
+      const clearRestoredFields = () => {
+        form.querySelectorAll("[data-clear-on-open='true']").forEach((field) => {
+          field.value = "";
+          field.defaultValue = "";
+          field.setAttribute("value", "");
+        });
+      };
+      clearRestoredFields();
+      requestAnimationFrame(clearRestoredFields);
+      setTimeout(clearRestoredFields, 80);
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const payload = Object.fromEntries(data.entries());
+        payload.node_state_from_backup_path = String(data.get("ui_backup_path") || "").trim();
+        payload.discord_bot_token = String(data.get("ui_discord_bot_token") || "").trim();
+        delete payload.ui_backup_path;
+        delete payload.ui_discord_bot_token;
+        payload.start_immediately = data.get("start_immediately") === "on";
+        msg.textContent = "Creating node...";
+        form.querySelectorAll("button,input,select,textarea").forEach((el) => el.disabled = true);
+        try {
+          const result = await hermes("/nodes", { method: "POST", body: payload });
+          const start = result?.node_create?.start || {};
+          msg.textContent = start.ok ? "Node created and running." : (start.skipped ? "Node env profile created." : `Node start needs attention: ${start?.error?.message || "not started"}`);
+          await loadNodes({ force: true });
+          setTimeout(close, 900);
+        } catch (error) {
+          msg.textContent = error.message || String(error);
+          form.querySelectorAll("button,input,select,textarea").forEach((el) => el.disabled = false);
+        }
+      });
+      form.querySelector("input[name='node_id']")?.focus();
+    }
+
+    function onPointerDown(event) {
+      const card = event.target.closest("[data-node-id]");
+      if (!card || event.button !== 0) return;
+      closeMenu();
+      const id = card.dataset.nodeId;
+      state.selected = id;
+      renderDetails();
+      const pos = state.positions[id] || { x: 0, y: 0 };
+      state.dragging = {
+        id,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originX: pos.x,
+        originY: pos.y,
+        moved: false
+      };
+      card.classList.add("dragging");
+      card.setPointerCapture?.(event.pointerId);
+    }
+
+    function onPointerMove(event) {
+      if (!state.dragging) return;
+      const drag = state.dragging;
+      const width = Math.max(340, stageEl.clientWidth || 640);
+      const height = Math.max(260, stageEl.clientHeight || 380);
+      const dx = event.clientX - drag.startX;
+      const dy = event.clientY - drag.startY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      state.positions[drag.id] = {
+        x: clamp(drag.originX + dx, 12, width - 154),
+        y: clamp(drag.originY + dy, 12, height - 84)
+      };
+      drawTopology();
+    }
+
+    function onPointerUp() {
+      if (!state.dragging) return;
+      state.justDragged = state.dragging.moved;
+      state.dragging = null;
+      nodesEl.querySelectorAll(".dragging").forEach((item) => item.classList.remove("dragging"));
+      saveLayoutSoon();
+      setTimeout(() => { state.justDragged = false; }, 0);
+    }
+
+    listen(nodesEl, "pointerdown", onPointerDown);
+    listen(window, "pointermove", onPointerMove);
+    listen(window, "pointerup", onPointerUp);
+    listen(nodesEl, "click", (event) => {
+      const card = event.target.closest("[data-node-id]");
+      if (!card || state.justDragged) return;
+      state.selected = card.dataset.nodeId;
+      drawTopology();
+    });
+    listen(root, "click", (event) => {
+      if (event.target.closest("[data-action='add-node']")) openAddNodeModal();
+      if (!event.target.closest(".ht-menu")) closeMenu();
+    });
+    listen(window, "keydown", (event) => {
+      if (event.key === "Escape") {
+        closeMenu();
+        clearInterval(state.statsTimer);
+        state.statsTimer = null;
+        root.querySelectorAll(".ht-session,.ht-modal-backdrop").forEach((item) => item.remove());
+      }
+    });
+
+    if (typeof ResizeObserver !== "undefined") {
+      const resizeObserver = new ResizeObserver(() => drawTopology());
+      resizeObserver.observe(stageEl);
+      addCleanup(() => resizeObserver.disconnect());
+    }
+
+    await loadLayout();
+    await loadNodes().catch(showError);
+    const timer = setInterval(() => {
+      void loadNodes().catch(showError);
+    }, 5000);
+    addCleanup(() => clearInterval(timer));
+    addCleanup(() => clearInterval(state.statsTimer));
+    addCleanup(() => clearTimeout(state.layoutTimer));
+    parent.__hermesTopologyCleanup = () => {
+      while (cleanups.length) {
+        try { cleanups.pop()(); } catch {}
+      }
+      parent.__hermesTopologyCleanup = null;
+    };
+  }

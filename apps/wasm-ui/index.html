@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Hermes Orchestrator WASM UI</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,8 +18,8 @@
       <header class="app-header">
         <div class="header-copy">
           <p class="eyebrow">Hermes Orchestrator</p>
-          <h1>Fleet Control Surface</h1>
-          <p class="subtitle">
+          <h1 id="headerTitle">Fleet Control Surface</h1>
+          <p id="headerSubtitle" class="subtitle">
             Freshness-first node operations, live diagnostics, and guided debugging layered over
             <code>clone_manager.py</code>.
           </p>
@@ -20,7 +27,11 @@
         <div class="header-meta">
           <span id="featureBadge" class="badge muted">Loading capabilities...</span>
           <span id="connectionBadge" class="badge">Connecting stream...</span>
-          <p class="header-note">Safe actions only. CLI remains canonical.</p>
+          <div class="mode-switch" id="modeSwitch">
+            <button id="opsModeBtn" class="btn ghost is-active" type="button">Ops</button>
+            <button id="dashboardsModeBtn" class="btn ghost" type="button">Dashboards</button>
+          </div>
+          <p id="headerNote" class="header-note">Safe actions only. CLI remains canonical.</p>
         </div>
       </header>
 
@@ -56,7 +67,7 @@
         </article>
       </section>
 
-      <main class="workspace-layout">
+      <main id="opsWorkspace" class="workspace-layout">
         <aside class="panel panel-fleet">
           <div class="panel-head panel-head-wrap">
             <div>
@@ -196,6 +207,155 @@
             </div>
 
             <div id="logOutput" class="log-output"></div>
+          </section>
+        </section>
+      </main>
+
+      <main id="dashboardWorkspace" class="dashboard-shell hidden">
+        <aside class="dashboard-sidebar">
+          <div class="dashboard-brand">
+            <div class="dashboard-mark">H</div>
+            <div>
+              <p class="eyebrow">Hermes</p>
+              <h2>Paracelsus</h2>
+              <p class="panel-subtitle">
+                Tokens in, papers in, and the evidence trail that explains why the memory is growing.
+              </p>
+            </div>
+          </div>
+
+          <section class="dashboard-sidebar-card">
+            <div class="dashboard-sidebar-row">
+              <span>Data refresh</span>
+              <strong id="dashboardRefreshStatus">Idle</strong>
+            </div>
+            <div class="dashboard-sidebar-row">
+              <span>Latest query</span>
+              <strong id="dashboardLastEventValue">Waiting</strong>
+            </div>
+            <div class="dashboard-sidebar-row">
+              <span>Latest paper</span>
+              <strong id="dashboardLastPaperValue">Waiting</strong>
+            </div>
+          </section>
+
+          <section class="dashboard-sidebar-section">
+            <div class="panel-head panel-head-wrap">
+              <div>
+                <h2>Nodes</h2>
+                <p class="panel-subtitle">
+                  Only nodes with <code>PLUGIN_DASHBOARD=true</code> appear here.
+                </p>
+              </div>
+              <button id="refreshDashboardBtn" class="btn ghost">Refresh</button>
+            </div>
+            <div id="dashboardNodesList" class="nodes-list dashboard-node-list"></div>
+          </section>
+
+          <section class="dashboard-sidebar-section">
+            <div class="panel-head">
+              <div>
+                <h2>Channels</h2>
+                <p class="panel-subtitle">
+                  ACL-scoped monitoring lanes sourced from the canonical slash plugin.
+                </p>
+              </div>
+            </div>
+            <div id="dashboardChannelsList" class="dashboard-channel-list dashboard-channel-rail"></div>
+          </section>
+        </aside>
+
+        <section class="dashboard-main">
+          <header class="dashboard-topbar">
+            <div>
+              <p class="dashboard-route">
+                <span class="dashboard-live-pill">Live</span>
+                canonical dashboard / paracelsus monitoring / GET
+              </p>
+              <h2 id="dashboardNodeTitle">Paracelsus Analytics</h2>
+              <p id="dashboardNodeSummary" class="panel-subtitle">
+                Select a dashboard-enabled node to inspect channel metrics.
+              </p>
+            </div>
+            <div class="dashboard-topbar-actions">
+              <span id="dashboardRefreshBadge" class="mini-badge">Refresh pending</span>
+            </div>
+          </header>
+
+          <div id="dashboardNodeSignalStrip" class="signal-strip dashboard-signal-strip">
+            <span class="signal-chip muted">Awaiting dashboard data</span>
+          </div>
+
+          <section id="dashboardSummaryGrid" class="dashboard-kpi-grid"></section>
+
+          <section class="dashboard-hero-grid">
+            <article class="panel dashboard-focus-panel">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="eyebrow">Registry Growth</p>
+                  <h2>Token Demand And Memory Curve</h2>
+                  <p class="panel-subtitle">
+                    Hourly and rolling token demand, daily paper ingress, and cumulative registry growth.
+                  </p>
+                </div>
+                <span class="mini-badge">30 day window</span>
+              </div>
+              <div id="dashboardSeriesStrip" class="dashboard-series-strip"></div>
+            </article>
+
+            <article class="panel dashboard-insight-panel">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="eyebrow">Cache Posture</p>
+                  <h2>What The Node Can Prove</h2>
+                  <p class="panel-subtitle">
+                    Storage surfaces, source mix, and the papers or journals most responsible for growth.
+                  </p>
+                </div>
+              </div>
+              <div id="dashboardCacheList" class="dashboard-insight-stack"></div>
+            </article>
+          </section>
+
+          <section class="dashboard-feed-grid">
+            <article class="panel">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="eyebrow">Recent Queries</p>
+                  <h2>Crawl Feed</h2>
+                  <p class="panel-subtitle">
+                    The newest search requests written into the Paracelsus event log.
+                  </p>
+                </div>
+              </div>
+              <div id="dashboardSessionsList" class="dashboard-feed-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="eyebrow">Agent Processing</p>
+                  <h2>Recent Session Load</h2>
+                  <p class="panel-subtitle">
+                    Live token bars for the latest monitored sessions in the selected channel.
+                  </p>
+                </div>
+              </div>
+              <div id="dashboardProcessingList" class="dashboard-processing-list"></div>
+            </article>
+
+            <article class="panel">
+              <div class="dashboard-panel-head">
+                <div>
+                  <p class="eyebrow">Latest Papers</p>
+                  <h2>Registry Entries</h2>
+                  <p class="panel-subtitle">
+                    The most recent papers persisted into <code>paracelsus_db</code>.
+                  </p>
+                </div>
+              </div>
+              <div id="dashboardLatestPapersList" class="dashboard-paper-list"></div>
+            </article>
           </section>
         </section>
       </main>

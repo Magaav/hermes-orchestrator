@@ -56,7 +56,7 @@ Usage:
   horc status [name]
   horc stop [name]
   horc restart [all|name] [--image IMAGE]
-  horc delete [name]
+  horc delete [name] [--yes]
   horc purge-node <name>
   horc purge-node confirm <request-id> --token TOKEN
   horc logs [name] [--lines N]
@@ -68,6 +68,9 @@ Usage:
   horc update [help]
   horc update all [--force]
   horc update node <name> [--force]
+  horc space start
+  horc space stop
+  horc space status
 
 Examples:
   horc start
@@ -87,9 +90,12 @@ Examples:
   horc update all --force
   horc update node orchestrator
   horc update node colmeio --force
+  horc space start
+  horc space stop
 
 Notes:
   - For start/status/stop/delete/logs, if name is omitted, 'orchestrator' is used.
+  - 'delete' removes the container plus /local/agents/envs/<name>.env and /local/agents/nodes/<name>/ after confirmation.
   - 'purge-node' is destructive and always requires an explicit second confirmation step.
   - For restart, omitted name means "restart all nodes".
   - `horc update all` refreshes /local/hermes-agent and reseeds every node.
@@ -97,6 +103,7 @@ Notes:
   - Add `--force` to discard local `/local/hermes-agent` checkout changes during the refresh.
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
+  - `horc space start` starts Space Agent on localhost:8787 and the Hermes bridge on localhost:8790.
   - Compatibility alias: 'hord' runs the same commands as 'horc'.
 TXT
 }
@@ -159,6 +166,64 @@ resolve_name_and_run() {
   fi
 
   manager "${action}" --name "${name}" "$@"
+}
+
+confirm_delete() {
+  local name="$1"
+  if [[ "${HERMES_HORC_ASSUME_YES:-}" == "1" || "${HERMES_HORC_ASSUME_YES:-}" == "true" ]]; then
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    echo "horc delete: confirmation required. Re-run interactively and type: DELETE ${name}" >&2
+    exit 2
+  fi
+
+  echo "horc delete will stop/remove the container and delete:"
+  echo "  /local/agents/envs/${name}.env"
+  echo "  /local/agents/nodes/${name}/"
+  echo "Shared data, cron, and logs are preserved; use 'horc purge-node ${name}' for full cleanup."
+  printf 'Type "DELETE %s" to continue: ' "${name}" >&2
+  local answer
+  IFS= read -r answer
+  if [[ "${answer}" != "DELETE ${name}" ]]; then
+    echo "horc delete: aborted" >&2
+    exit 130
+  fi
+}
+
+resolve_delete_and_exec() {
+  local name="${DEFAULT_NODE}"
+  local -a passthrough=()
+
+  while [[ $# -gt 0 ]]; do
+    case "${1}" in
+      --name)
+        if [[ $# -lt 2 ]]; then
+          echo "horc: delete --name requires a value" >&2
+          exit 2
+        fi
+        name="${2}"
+        passthrough+=("--name" "${2}")
+        shift 2
+        ;;
+      --yes|-y)
+        HERMES_HORC_ASSUME_YES=1
+        shift
+        ;;
+      --*)
+        passthrough+=("${1}")
+        shift
+        ;;
+      *)
+        name="${1}"
+        passthrough+=("${1}")
+        shift
+        ;;
+    esac
+  done
+
+  confirm_delete "${name}"
+  exec_manager delete "${passthrough[@]}"
 }
 
 discover_restart_nodes() {
@@ -225,14 +290,236 @@ restart_all_nodes() {
   done
 }
 
+space_usage() {
+  cat <<'TXT'
+horc space — Space Agent UI bridge
+
+Usage:
+  horc space start
+  horc space stop
+  horc space status
+
+Behavior:
+  - Starts Space Agent PWA on http://127.0.0.1:8787.
+  - Starts hermes-space-ui bridge privately on http://127.0.0.1:8790.
+  - Disables HERMES_SPACE_UI_TOKEN for SSH-tunnel-only local access.
+  - Frees port 8787 before starting so the browser tunnel can connect.
+TXT
+}
+
+space_pid_file() {
+  local state_dir="${HERMES_SPACE_UI_STATE_DIR:-/local/plugins/hermes-space-ui/state}"
+  printf '%s\n' "${HERMES_SPACE_UI_PID_FILE:-${state_dir}/bridge.pid}"
+}
+
+space_legacy_state_dir() {
+  printf '%s\n' "/local/plugins/private/hermes-space-ui"
+}
+
+space_require_non_legacy_state() {
+  local state_dir="${HERMES_SPACE_UI_STATE_DIR:-/local/plugins/hermes-space-ui/state}"
+  local legacy_dir
+  legacy_dir="$(space_legacy_state_dir)"
+  if [[ "${state_dir}" == "${legacy_dir}" ]]; then
+    echo "horc space: legacy state path is no longer supported: ${legacy_dir}" >&2
+    echo "horc space: use /local/plugins/hermes-space-ui/state instead" >&2
+    exit 1
+  fi
+  if [[ -d "${legacy_dir}" ]] && find "${legacy_dir}" -mindepth 1 -print -quit | grep -q .; then
+    echo "horc space: legacy hermes-space-ui state detected at ${legacy_dir}" >&2
+    echo "horc space: migrate or delete it before using /local/plugins/hermes-space-ui/state" >&2
+    exit 1
+  fi
+}
+
+space_plugin_dir() {
+  local root="${HERMES_ORCHESTRATOR_ROOT:-/local}"
+  printf '%s\n' "${HERMES_SPACE_UI_PLUGIN_DIR:-${root}/plugins/hermes-space-ui}"
+}
+
+space_kill_port() {
+  local port="${1}"
+  local pids=""
+
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+    return
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v ss >/dev/null 2>&1; then
+    pids="$(ss -ltnp "sport = :${port}" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u)"
+  fi
+
+  if [[ -n "${pids}" ]]; then
+    while IFS= read -r pid; do
+      [[ -z "${pid}" ]] && continue
+      kill "${pid}" 2>/dev/null || true
+    done <<< "${pids}"
+    sleep 1
+    while IFS= read -r pid; do
+      [[ -z "${pid}" ]] && continue
+      kill -9 "${pid}" 2>/dev/null || true
+    done <<< "${pids}"
+  fi
+}
+
+space_start() {
+  space_require_non_legacy_state
+  local plugin_dir
+  plugin_dir="$(space_plugin_dir)"
+  local start_script="${plugin_dir}/scripts/start_space_agent.sh"
+  local stop_script="${plugin_dir}/scripts/stop_space_agent.sh"
+  local state_dir="${HERMES_SPACE_UI_STATE_DIR:-/local/plugins/hermes-space-ui/state}"
+  local space_agent_dir="${SPACE_AGENT_DIR:-${state_dir}/space-agent}"
+  local customware_path="${SPACE_AGENT_CUSTOMWARE_PATH:-${state_dir}/space-customware}"
+  local node_root="${HERMES_SPACE_NODE_ROOT:-${state_dir}/node}"
+  local space_pid_file="${HERMES_SPACE_AGENT_PID_FILE:-${state_dir}/space-agent.pid}"
+  local bridge_pid_file
+  bridge_pid_file="$(space_pid_file)"
+  local space_log_file="${HERMES_SPACE_AGENT_LOG_FILE:-${state_dir}/space-agent.log}"
+  local bridge_log_file="${HERMES_SPACE_UI_LOG_FILE:-${state_dir}/bridge.log}"
+  local port="${HERMES_SPACE_AGENT_PORT:-8787}"
+  local host="${HERMES_SPACE_AGENT_HOST:-127.0.0.1}"
+
+  if [[ ! -x "${start_script}" ]]; then
+    echo "horc space: start script not found: ${start_script}" >&2
+    exit 1
+  fi
+
+  if [[ -x "${stop_script}" ]]; then
+    HERMES_SPACE_UI_STATE_DIR="${state_dir}" \
+      SPACE_AGENT_DIR="${space_agent_dir}" \
+      SPACE_AGENT_CUSTOMWARE_PATH="${customware_path}" \
+      HERMES_SPACE_NODE_ROOT="${node_root}" \
+      HERMES_SPACE_AGENT_PID_FILE="${space_pid_file}" \
+      HERMES_SPACE_UI_BRIDGE_PID_FILE="${bridge_pid_file}" \
+      HERMES_SPACE_AGENT_LOG_FILE="${space_log_file}" \
+      HERMES_SPACE_UI_LOG_FILE="${bridge_log_file}" \
+      "${stop_script}" >/dev/null 2>&1 || true
+  fi
+
+  echo "horc space: freeing localhost:${port}"
+  space_kill_port "${port}"
+  rm -f "${space_pid_file}"
+
+  echo "horc space: starting Space Agent on http://${host}:${port} with Hermes bridge"
+  HERMES_SPACE_UI_TOKEN="" \
+    HERMES_SPACE_AGENT_HOST="${host}" \
+    HERMES_SPACE_AGENT_PORT="${port}" \
+    HERMES_SPACE_UI_STATE_DIR="${state_dir}" \
+    SPACE_AGENT_DIR="${space_agent_dir}" \
+    SPACE_AGENT_CUSTOMWARE_PATH="${customware_path}" \
+    HERMES_SPACE_NODE_ROOT="${node_root}" \
+    HERMES_SPACE_AGENT_PID_FILE="${space_pid_file}" \
+    HERMES_SPACE_UI_BRIDGE_PID_FILE="${bridge_pid_file}" \
+    HERMES_SPACE_AGENT_LOG_FILE="${space_log_file}" \
+    HERMES_SPACE_UI_LOG_FILE="${bridge_log_file}" \
+    "${start_script}"
+
+  echo "horc space: SSH tunnel target is localhost:${port}"
+}
+
+space_stop() {
+  space_require_non_legacy_state
+  local plugin_dir
+  plugin_dir="$(space_plugin_dir)"
+  local stop_script="${plugin_dir}/scripts/stop_space_agent.sh"
+  local state_dir="${HERMES_SPACE_UI_STATE_DIR:-/local/plugins/hermes-space-ui/state}"
+  local space_agent_dir="${SPACE_AGENT_DIR:-${state_dir}/space-agent}"
+  local customware_path="${SPACE_AGENT_CUSTOMWARE_PATH:-${state_dir}/space-customware}"
+  local node_root="${HERMES_SPACE_NODE_ROOT:-${state_dir}/node}"
+  local space_pid_file="${HERMES_SPACE_AGENT_PID_FILE:-${state_dir}/space-agent.pid}"
+  local bridge_pid_file
+  bridge_pid_file="$(space_pid_file)"
+  local space_log_file="${HERMES_SPACE_AGENT_LOG_FILE:-${state_dir}/space-agent.log}"
+  local bridge_log_file="${HERMES_SPACE_UI_LOG_FILE:-${state_dir}/bridge.log}"
+
+  if [[ ! -x "${stop_script}" ]]; then
+    echo "horc space: stop script not found: ${stop_script}" >&2
+    exit 1
+  fi
+
+  HERMES_SPACE_UI_STATE_DIR="${state_dir}" \
+    SPACE_AGENT_DIR="${space_agent_dir}" \
+    SPACE_AGENT_CUSTOMWARE_PATH="${customware_path}" \
+    HERMES_SPACE_NODE_ROOT="${node_root}" \
+    HERMES_SPACE_AGENT_PID_FILE="${space_pid_file}" \
+    HERMES_SPACE_UI_BRIDGE_PID_FILE="${bridge_pid_file}" \
+    HERMES_SPACE_AGENT_LOG_FILE="${space_log_file}" \
+    HERMES_SPACE_UI_LOG_FILE="${bridge_log_file}" \
+    "${stop_script}"
+}
+
+space_status() {
+  space_require_non_legacy_state
+  local state_dir="${HERMES_SPACE_UI_STATE_DIR:-/local/plugins/hermes-space-ui/state}"
+  local space_pid_file="${HERMES_SPACE_AGENT_PID_FILE:-${state_dir}/space-agent.pid}"
+  local bridge_pid_file
+  bridge_pid_file="$(space_pid_file)"
+  local port="${HERMES_SPACE_AGENT_PORT:-8787}"
+  local bridge_port="${HERMES_SPACE_UI_BRIDGE_PORT:-8790}"
+  local ok=0
+  if [[ -s "${space_pid_file}" ]]; then
+    local pid
+    pid="$(cat "${space_pid_file}")"
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      echo "Space Agent running pid=${pid} url=http://127.0.0.1:${port}"
+      ok=1
+    fi
+  fi
+  if [[ -s "${bridge_pid_file}" ]]; then
+    local bridge_pid
+    bridge_pid="$(cat "${bridge_pid_file}")"
+    if [[ -n "${bridge_pid}" ]] && kill -0 "${bridge_pid}" 2>/dev/null; then
+      echo "Hermes bridge running pid=${bridge_pid} url=http://127.0.0.1:${bridge_port}"
+      ok=1
+    fi
+  fi
+  if [[ "${ok}" -eq 1 ]]; then
+    exit 0
+  fi
+  echo "horc space is not running"
+  exit 1
+}
+
 ACTION="${1:-help}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
 
 case "${ACTION}" in
-  start|status|stop|delete)
+  space)
+    SUBACTION="${1:-help}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "${SUBACTION}" in
+      start)
+        space_start "$@"
+        ;;
+      stop)
+        space_stop "$@"
+        ;;
+      status)
+        space_status "$@"
+        ;;
+      help|-h|--help)
+        space_usage
+        ;;
+      *)
+        echo "horc space: unknown command '${SUBACTION}'" >&2
+        space_usage >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  start|status|stop)
     resolve_name_and_exec "${ACTION}" "$@"
+    ;;
+  delete)
+    resolve_delete_and_exec "$@"
     ;;
   purge-node)
     SUBACTION="${1:-}"

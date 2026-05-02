@@ -1,8 +1,8 @@
 # Shared Wiki Engine
 
 The Hermes shared wiki engine gives the orchestrator fleet:
-- a durable instance runtime knowledge layer at `/local/plugins/private/wiki/`
-- a reusable public doctrine/reference layer at `/local/plugins/public/wiki/`
+- a durable instance runtime knowledge layer at `/local/wiki/`
+- a reusable public doctrine/reference layer when the legacy wiki package is present
 
 It exists so many Hermes nodes can accumulate durable knowledge without turning the repository, chat logs, or transient memory into a dumping ground. The engine keeps canonical truth in markdown, rebuilds everything else from that markdown, and coordinates knowledge evolution through proposals instead of direct page mutation.
 
@@ -20,7 +20,7 @@ It exists so many Hermes nodes can accumulate durable knowledge without turning 
 Canonical wiki root:
 
 ```text
-/local/plugins/private/wiki/
+/local/wiki/
 ├── index.md
 ├── indexes/
 ├── global/
@@ -63,8 +63,8 @@ Default behavior remains disabled and safe.
 When enabled:
 
 1. Worker nodes mount `/local/wiki` read/write into the container.
-2. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/plugins/private/wiki`.
-3. `plugins/public/hermes-core/scripts/prestart_reapply.sh` runs wiki bootstrap/self-heal at startup.
+2. The orchestrator node gets `/local/agents/nodes/orchestrator/wiki -> /local/wiki`.
+3. `clone_manager.py` owns shared root creation, migration from the legacy plugin-private path, and node mount wiring.
 4. Derived graph/compression/observability layers can rebuild automatically.
 
 When disabled:
@@ -77,7 +77,7 @@ When disabled:
 
 Participating nodes should treat the wiki as shared knowledge infrastructure, not as an ad-hoc scratchpad.
 
-Supported operational entrypoint:
+Legacy operational entrypoint, when the legacy wiki engine package is present:
 
 ```bash
 python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py --help
@@ -353,21 +353,21 @@ Important rule:
 Backup:
 
 ```bash
-tar -czf wiki-backup.tgz -C /local/plugins/private wiki
+tar -czf wiki-backup.tgz -C /local wiki
 ```
 
 Restore:
 
 ```bash
-mkdir -p /local/plugins/private
-tar -xzf wiki-backup.tgz -C /local/plugins/private
+mkdir -p /local
+tar -xzf wiki-backup.tgz -C /local
 NODE_WIKI_ENABLED=1 python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py self-heal --json
 ```
 
 Migration to a new host:
 
-1. Copy `/local/plugins/private/wiki`
-2. Copy `/local/plugins/public/hermes-core/`
+1. Copy `/local/wiki`
+2. Copy `/local/plugins/public/hermes-core/` if the legacy wiki engine package is still in use
 3. Set `NODE_WIKI_ENABLED=true` on participating nodes
 4. Restart nodes or run `bootstrap` and `self-heal`
 
