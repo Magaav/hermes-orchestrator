@@ -65,8 +65,9 @@ dummy/
 .worktrees/
 .worktrees/
 
-hackaton-hermes-dashboard/
-hackaton-hermes-mythos/
+hackathon-hermes-dashboard/
+hackathon-hermes-mythos/
+hackathon-hermes-symbiosis/
 
 # Keep local hermes-agent workspace on disk, but out of git
 hermes-agent/*
