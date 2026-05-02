@@ -302,7 +302,7 @@ JSON_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "schema": {"const": "hermes.space_ui.task_status.v1"},
             "task_id": {"type": "string"},
-            "status": {"enum": ["queued", "running", "succeeded", "completed", "failed", "unsupported"]},
+            "status": {"enum": ["queued", "running", "succeeded", "completed", "failed", "cancelled", "unsupported"]},
             "prompt": {"type": "string"},
             "target_node": {"type": ["string", "null"]},
             "result": {"type": "object"},

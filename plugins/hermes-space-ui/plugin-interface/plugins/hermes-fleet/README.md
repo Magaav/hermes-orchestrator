@@ -38,8 +38,8 @@ headers.
 `space-seed/hermes-fleet/` carries the default `hermes-os` space widgets:
 
 - `Resources Monitor`, which reads live host VM telemetry through `GET /resources`
-- `Hermes Topology`, which reads real Hermes Orchestrator nodes through `GET /nodes`, persists node layout in Space Agent user storage, opens node statistics through `GET /nodes/{node_id}/stats`, and creates then starts documented node profiles through `POST /nodes` using a base env profile plus allowlisted runtime credential overrides or an auto-selected local runtime profile
-- `Drop to Copy`, which submits repository-to-widget jobs through `POST /drop-to-copy/tasks`, polls `GET /tasks/{task_id}`, and installs generated widgets with the Space Agent widget API
+- `Hermes Topology`, which reads real Hermes Orchestrator nodes through `GET /nodes`, persists node layout in Space Agent user storage, opens node statistics through `GET /nodes/{node_id}/stats`, creates then starts documented node profiles through `POST /nodes`, and opens live message sessions that submit async Runs API tasks, show per-run elapsed time, poll `GET /tasks/{task_id}` for reasoning/tool events copied by the bridge, and cancel active runs through `POST /tasks/{task_id}/stop` when the user presses Stop or closes the modal
+- `Drop to Copy`, which submits repository-to-widget jobs through `POST /drop-to-copy/tasks` with an App Name and Instructions, polls `GET /tasks/{task_id}`, and installs generated widgets with the Space Agent widget API
 
 `scripts/start_space_agent.sh` copies these seed files into the Space Agent L2
 user space when the space is missing, when `HERMES_SPACE_SEED_FORCE=1`, or when

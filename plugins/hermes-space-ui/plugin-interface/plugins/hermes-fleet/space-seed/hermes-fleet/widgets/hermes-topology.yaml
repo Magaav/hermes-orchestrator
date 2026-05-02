@@ -25,7 +25,8 @@ renderer: |-
       statsBucket: "daily",
       statsDays: 1,
       statsTimer: null,
-      layoutTimer: null
+      layoutTimer: null,
+      sessionZ: 0
     };
 
     const style = document.createElement("style");
@@ -103,13 +104,31 @@ renderer: |-
       .ht-topic-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;padding:10px;}
       .ht-form-actions{grid-column:1/-1;display:flex;justify-content:flex-end;gap:8px;margin-top:2px;}
       .ht-form-msg{grid-column:1/-1;font-size:12px;color:#9fb0c9;min-height:18px;}
-      .ht-session{position:fixed;z-index:2147482980;width:min(390px,calc(100vw - 24px));max-height:min(520px,calc(100vh - 24px));display:grid;grid-template-rows:auto minmax(0,1fr) auto;border:1px solid rgba(125,220,255,.24);border-radius:8px;background:rgba(8,17,31,.98);box-shadow:0 18px 52px rgba(0,0,0,.42);overflow:hidden;}
-      .ht-session-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid rgba(148,167,201,.12);}
+      .ht-session{position:fixed;z-index:2147482980;width:min(390px,calc(100vw - 24px));max-height:min(520px,calc(100vh - 24px));display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;border:1px solid rgba(125,220,255,.24);border-radius:8px;background:rgba(8,17,31,.98);box-shadow:0 18px 52px rgba(0,0,0,.42);overflow:hidden;}
+      .ht-session-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 11px;border-bottom:1px solid rgba(148,167,201,.12);cursor:move;user-select:none;touch-action:none;}
       .ht-session-title{font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-session-model{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid rgba(148,167,201,.12);}
+      .ht-session-model label{font-size:11px;font-weight:700;color:#9fb0c9;}
       .ht-transcript{min-height:0;overflow:auto;display:grid;align-content:start;gap:8px;padding:10px;}
       .ht-msg{border:1px solid rgba(148,167,201,.1);border-radius:8px;padding:8px;font-size:12px;line-height:1.35;white-space:pre-wrap;background:rgba(255,255,255,.035);}
       .ht-msg.user{border-color:rgba(125,220,255,.22);}
       .ht-msg.error{border-color:rgba(248,113,113,.28);color:#fecaca;}
+      .ht-msg.running{border-color:rgba(124,228,176,.25);}
+      .ht-run-head{display:flex;align-items:center;gap:7px;margin-bottom:7px;color:#dceaff;white-space:normal;}
+      .ht-run-title{font-weight:740;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-run-time{margin-left:auto;color:#9fb0c9;font-variant-numeric:tabular-nums;white-space:nowrap;}
+      .ht-stop{border:1px solid rgba(248,113,113,.3);background:rgba(248,113,113,.12);color:#fecaca;border-radius:6px;padding:4px 7px;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;}
+      .ht-stop:hover{background:rgba(248,113,113,.2);}
+      .ht-stop:disabled{opacity:.55;cursor:not-allowed;}
+      .ht-msg.done .ht-stop,.ht-msg.error .ht-stop{display:none;}
+      .ht-run-spinner{width:12px;height:12px;border:2px solid rgba(124,228,176,.22);border-top-color:rgba(124,228,176,.95);border-radius:50%;animation:ht-spin .9s linear infinite;flex:0 0 auto;}
+      .ht-msg.done .ht-run-spinner,.ht-msg.error .ht-run-spinner{animation:none;border-top-color:rgba(148,167,201,.28);}
+      .ht-run-stream{color:#eff6ff;white-space:pre-wrap;overflow-wrap:anywhere;}
+      .ht-run-events{display:grid;gap:5px;margin-top:8px;max-height:170px;overflow:auto;}
+      .ht-run-event{border-left:2px solid rgba(125,220,255,.34);padding-left:7px;color:#bcd0eb;font-size:11px;line-height:1.3;white-space:pre-wrap;overflow-wrap:anywhere;}
+      .ht-run-event.reasoning{border-left-color:rgba(124,228,176,.72);color:#d9fbe8;}
+      .ht-run-event.execution{border-left-color:rgba(125,220,255,.72);color:#dff5ff;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+      .ht-run-event.error{border-left-color:rgba(248,113,113,.72);color:#fecaca;}
       .ht-send{display:grid;gap:8px;padding:10px;border-top:1px solid rgba(148,167,201,.12);}
       @media (max-width:720px){.ht-grid{grid-template-columns:repeat(2,minmax(0,1fr));min-height:268px;}.ht-form,.ht-topic-grid{grid-template-columns:1fr;}.ht-form-actions{justify-content:stretch;}.ht-form-actions .ht-btn{flex:1;}}
     `;
@@ -448,14 +467,293 @@ renderer: |-
       return bubble;
     }
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    function formatElapsed(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const minutes = Math.floor(total / 60);
+      const seconds = total % 60;
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    }
+
+    function appendRunMessage(transcript) {
+      const bubble = document.createElement("div");
+      bubble.className = "ht-msg running";
+      bubble.innerHTML = `
+        <div class="ht-run-head">
+          <span class="ht-run-spinner" aria-hidden="true"></span>
+          <span class="ht-run-title" data-role="run-title">Starting task</span>
+          <span class="ht-run-time" data-role="run-time">00:00</span>
+          <button class="ht-stop" data-role="run-stop" type="button" title="Stop task">Stop</button>
+        </div>
+        <div class="ht-run-stream" data-role="run-stream">Submitting to Hermes...</div>
+        <div class="ht-run-events" data-role="run-events"></div>
+      `;
+      transcript.appendChild(bubble);
+      transcript.scrollTop = transcript.scrollHeight;
+      return bubble;
+    }
+
+    function startRunTimer(bubble, startedAt) {
+      const target = bubble.querySelector("[data-role='run-time']");
+      const update = () => {
+        if (target) target.textContent = formatElapsed(Date.now() - startedAt);
+      };
+      update();
+      const timer = setInterval(update, 1000);
+      return () => {
+        clearInterval(timer);
+        update();
+      };
+    }
+
+    function commandFromEvent(event) {
+      const args = event?.args && typeof event.args === "object" ? event.args : {};
+      return String(event?.command || args.command || args.cmd || "").trim();
+    }
+
+    function isExecutionEvent(event) {
+      const tool = String(event?.tool || "").toLowerCase();
+      return Boolean(commandFromEvent(event)) || ["terminal", "exec_command", "shell", "bash", "command"].includes(tool);
+    }
+
+    function isTerminalTaskStatus(status) {
+      return ["completed", "failed", "cancelled", "unsupported", "succeeded"].includes(String(status || ""));
+    }
+
+    function describeRunEvent(event) {
+      const type = String(event?.event || "run.event");
+      const tool = event?.tool ? String(event.tool) : "";
+      const command = commandFromEvent(event);
+      const duration = Number(event?.duration || 0);
+      if (type === "tool.started") {
+        if (isExecutionEvent(event)) {
+          return `CLI started${command ? `\n$ ${command}` : event?.preview ? `\n${event.preview}` : ""}`;
+        }
+        return `Tool started: ${tool || "tool"}${event?.preview ? `\n${event.preview}` : ""}`;
+      }
+      if (type === "tool.completed") {
+        const suffix = duration ? ` in ${duration.toFixed(1)}s` : "";
+        const output = event?.output ? `\n${event.output}` : "";
+        if (isExecutionEvent(event)) {
+          return `CLI completed${suffix}${command ? `\n$ ${command}` : ""}${output}${event?.error ? "\nReported an error" : ""}`;
+        }
+        return `Tool completed: ${tool || "tool"}${suffix}${output}${event?.error ? "\nReported an error" : ""}`;
+      }
+      if (["reasoning.available", "reasoning.delta", "thinking.delta"].includes(type)) {
+        return `Thinking\n${event?.text || event?.delta || ""}`.trim();
+      }
+      if (type === "run.events_unavailable") {
+        return `Live event stream unavailable\n${event?.message || event?.error || ""}`.trim();
+      }
+      if (type === "run.completed") return "Run completed";
+      if (type === "run.failed") return `Run failed\n${event?.error || ""}`.trim();
+      if (type === "run.cancelled") return "Run cancelled";
+      return `${type}${event?.message ? `\n${event.message}` : ""}`;
+    }
+
+    function classForRunEvent(event) {
+      const type = String(event?.event || "");
+      return "ht-run-event"
+        + (["reasoning.available", "reasoning.delta", "thinking.delta"].includes(type) ? " reasoning" : "")
+        + (isExecutionEvent(event) ? " execution" : "")
+        + (type.includes("failed") || type.includes("unavailable") || event?.error === true ? " error" : "");
+    }
+
+    function renderTaskProgress(bubble, task) {
+      const status = String(task?.status || "running");
+      const result = task?.result || {};
+      const title = bubble.querySelector("[data-role='run-title']");
+      const stream = bubble.querySelector("[data-role='run-stream']");
+      const eventsEl = bubble.querySelector("[data-role='run-events']");
+      const stopButton = bubble.querySelector("[data-role='run-stop']");
+      if (title) {
+        const runStatus = result.run_status ? ` / ${result.run_status}` : "";
+        title.textContent = `${status}${runStatus}`;
+      }
+      if (stopButton) {
+        stopButton.disabled = Boolean(result.cancel_requested) || isTerminalTaskStatus(status);
+        stopButton.textContent = result.cancel_requested && !isTerminalTaskStatus(status) ? "Stopping" : "Stop";
+      }
+
+      const response = (status === "failed" || status === "cancelled")
+        ? (task?.error?.message || result.response || result.response_stream || "")
+        : (result.response || result.response_stream || task?.error?.message || "");
+      if (stream) {
+        const thinking = result.thinking_stream ? `Thinking\n${result.thinking_stream}` : "";
+        stream.textContent = response || thinking || (result.run_id ? `Run ${result.run_id}` : "Waiting for Hermes events...");
+      }
+
+      if (eventsEl) {
+        eventsEl.textContent = "";
+        const events = Array.isArray(result.events) ? result.events : [];
+        for (const event of events) {
+          const item = document.createElement("div");
+          item.className = classForRunEvent(event);
+          item.textContent = describeRunEvent(event);
+          eventsEl.appendChild(item);
+        }
+        eventsEl.scrollTop = eventsEl.scrollHeight;
+      }
+
+      if (status === "completed") {
+        bubble.classList.remove("running", "error");
+        bubble.classList.add("done");
+      } else if (status === "failed" || status === "cancelled" || status === "unsupported") {
+        bubble.classList.remove("running", "done");
+        bubble.classList.add("error");
+      }
+      const transcript = bubble.parentElement;
+      if (transcript) transcript.scrollTop = transcript.scrollHeight;
+    }
+
+    async function pollTask(taskId, bubble, stopTimer) {
+      let delay = 700;
+      while (true) {
+        if (!bubble.isConnected) {
+          stopTimer?.();
+          return null;
+        }
+        const data = await hermes(`/tasks/${encodeURIComponent(taskId)}`);
+        const task = data.task || {};
+        renderTaskProgress(bubble, task);
+        if (isTerminalTaskStatus(task.status)) {
+          stopTimer?.();
+          return task;
+        }
+        await sleep(delay);
+        delay = Math.min(1600, delay + 150);
+      }
+    }
+
+    async function findRecentNodeTask(nodeId, sinceMs) {
+      const data = await hermes("/tasks");
+      const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+      return tasks.find((task) => {
+        if (String(task?.target_node || "") !== String(nodeId || "")) return false;
+        if (isTerminalTaskStatus(task?.status)) return false;
+        const created = Date.parse(task?.created_at || "");
+        return Number.isFinite(created) && created >= sinceMs - 5000;
+      }) || null;
+    }
+
+    async function submitPromptToNode(node, body, submitStartedAt) {
+      const submit = hermes(`/nodes/${encodeURIComponent(node.id)}/prompt`, {
+        method: "POST",
+        body
+      });
+      const timeout = new Promise((resolve) => {
+        setTimeout(() => resolve({ timeout: true }), 2500);
+      });
+      const first = await Promise.race([submit, timeout]);
+      if (!first?.timeout) return first;
+
+      const task = await findRecentNodeTask(node.id, submitStartedAt).catch(() => null);
+      if (task) return { ok: true, task };
+      return await submit;
+    }
+
+    async function stopTask(taskId, bubble, reason = "Stop requested from message modal.") {
+      if (!taskId) return null;
+      const stopButton = bubble?.querySelector?.("[data-role='run-stop']");
+      const title = bubble?.querySelector?.("[data-role='run-title']");
+      if (stopButton) {
+        stopButton.disabled = true;
+        stopButton.textContent = "Stopping";
+      }
+      if (title) title.textContent = "stopping";
+      const data = await hermes(`/tasks/${encodeURIComponent(taskId)}/stop`, {
+        method: "POST",
+        body: { reason }
+      });
+      const task = data.task || {};
+      if (bubble?.isConnected) renderTaskProgress(bubble, task);
+      return task;
+    }
+
+    function bindDraggableSession(panel) {
+      const handle = panel.querySelector(".ht-session-head");
+      if (!handle) return;
+
+      let drag = null;
+      handle.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0 || event.target.closest("[data-action='close']")) return;
+        bringSessionToFront(panel);
+        const rect = panel.getBoundingClientRect();
+        drag = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          left: rect.left,
+          top: rect.top
+        };
+        handle.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const rect = panel.getBoundingClientRect();
+        const margin = 8;
+        const left = drag.left + event.clientX - drag.startX;
+        const top = drag.top + event.clientY - drag.startY;
+        panel.style.left = `${clamp(left, margin, window.innerWidth - rect.width - margin)}px`;
+        panel.style.top = `${clamp(top, margin, window.innerHeight - rect.height - margin)}px`;
+      });
+      handle.addEventListener("pointerup", (event) => {
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        handle.releasePointerCapture?.(event.pointerId);
+        drag = null;
+      });
+      handle.addEventListener("pointercancel", () => {
+        drag = null;
+      });
+    }
+
+    function bringSessionToFront(panel) {
+      state.sessionZ = (state.sessionZ + 1) % 500;
+      panel.style.zIndex = String(2147482980 + state.sessionZ);
+    }
+
+    function modelOptionsForNode(node) {
+      const raw = node?.raw || {};
+      const seen = new Set();
+      const options = [];
+      const add = (model, provider, label) => {
+        const value = String(model || "").trim();
+        if (!value || seen.has(value)) return;
+        seen.add(value);
+        const source = label || "model";
+        const suffix = provider ? ` / ${provider}` : "";
+        options.push({ value, label: `${source}: ${value}${suffix}` });
+      };
+      add(raw.default_model_env, raw.default_model_provider_env, "default");
+      add(node?.activity?.model, node?.activity?.platform, "last active");
+      add(raw.fallback_model_env, raw.fallback_model_provider_env, "fallback");
+      if (!options.length) options.push({ value: "", label: "current model unavailable" });
+      return options;
+    }
+
     function openMessageSession(node) {
-      root.querySelectorAll(".ht-session").forEach((item) => item.remove());
+      const existing = Array.from(root.querySelectorAll(".ht-session")).find((item) => item.dataset.nodeId === node.id);
+      if (existing) {
+        bringSessionToFront(existing);
+        existing.querySelector("[data-role='prompt']")?.focus();
+        return;
+      }
+
       const panel = document.createElement("div");
       panel.className = "ht-session";
+      panel.dataset.nodeId = node.id;
       panel.innerHTML = `
         <div class="ht-session-head">
           <div class="ht-session-title">Message ${node.id}</div>
           <button class="ht-close" data-action="close" title="Close">x</button>
+        </div>
+        <div class="ht-session-model">
+          <label for="ht-model-${escapeHTML(node.id)}">Model</label>
+          <select class="ht-select" data-role="model" id="ht-model-${escapeHTML(node.id)}"></select>
         </div>
         <div class="ht-transcript" data-role="transcript"></div>
         <form class="ht-send" data-role="send-form">
@@ -470,26 +768,94 @@ renderer: |-
       const transcript = panel.querySelector("[data-role='transcript']");
       const form = panel.querySelector("[data-role='send-form']");
       const prompt = panel.querySelector("[data-role='prompt']");
+      const modelSelect = panel.querySelector("[data-role='model']");
+      const activeTasks = new Map();
+      let sessionClosing = false;
+      for (const option of modelOptionsForNode(node)) {
+        const item = document.createElement("option");
+        item.value = option.value;
+        item.textContent = option.label;
+        modelSelect.appendChild(item);
+      }
+      bindDraggableSession(panel);
+      bringSessionToFront(panel);
+      panel.addEventListener("pointerdown", () => bringSessionToFront(panel));
       appendMessage(transcript, `Session opened with ${node.id}.`);
-      panel.querySelector("[data-action='close']").addEventListener("click", () => panel.remove());
+      async function closeSession() {
+        sessionClosing = true;
+        const tasks = Array.from(activeTasks.entries());
+        activeTasks.clear();
+        await Promise.all(tasks.map(([taskId, bubble]) => (
+          stopTask(taskId, bubble, "Message modal closed.").catch(() => null)
+        )));
+        panel.remove();
+      }
+      panel.querySelector("[data-action='close']").addEventListener("click", () => {
+        void closeSession();
+      });
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const text = prompt.value.trim();
         if (!text) return;
         prompt.value = "";
         appendMessage(transcript, text, "user");
-        const pending = appendMessage(transcript, "Running task...");
+        const pending = appendRunMessage(transcript);
+        const submitStartedAt = Date.now();
+        const stopTimer = startRunTimer(pending, Date.now());
+        const pendingStopButton = pending.querySelector("[data-role='run-stop']");
+        let pendingTaskId = "";
+        let cancelRequested = false;
+        pendingStopButton?.addEventListener("click", () => {
+          cancelRequested = true;
+          const stream = pending.querySelector("[data-role='run-stream']");
+          const title = pending.querySelector("[data-role='run-title']");
+          if (title) title.textContent = pendingTaskId ? "stopping" : "stop pending";
+          if (stream && !pendingTaskId) stream.textContent = "Stop requested. Waiting for Hermes task id...";
+          if (pendingTaskId) {
+            void stopTask(pendingTaskId, pending)
+              .catch((error) => {
+                if (stream) stream.textContent = error.message || String(error);
+              })
+              .finally(() => activeTasks.delete(pendingTaskId));
+          }
+        });
         try {
-          const data = await hermes(`/nodes/${encodeURIComponent(node.id)}/prompt`, {
-            method: "POST",
-            body: { prompt: text }
-          });
+          const data = await submitPromptToNode(node, {
+            prompt: text,
+            model: modelSelect.value || undefined,
+            async: true,
+            background: true,
+            stream_events: true
+          }, submitStartedAt);
           const task = data.task || {};
-          const response = task?.result?.response || task?.error?.message || `Task ${task.status || "submitted"}`;
-          pending.textContent = response;
-          pending.className = task.status === "failed" ? "ht-msg error" : "ht-msg";
+          renderTaskProgress(pending, task);
+          if (task.task_id && task.status === "running") {
+            pendingTaskId = task.task_id;
+            pending.dataset.taskId = task.task_id;
+            if (cancelRequested) {
+              await stopTask(task.task_id, pending).catch(() => null);
+              stopTimer();
+              return;
+            }
+            if (sessionClosing || !panel.isConnected) {
+              await stopTask(task.task_id, pending, "Message modal closed.").catch(() => null);
+              stopTimer();
+              return;
+            }
+            activeTasks.set(task.task_id, pending);
+            await pollTask(task.task_id, pending, stopTimer);
+            activeTasks.delete(task.task_id);
+          } else {
+            stopTimer();
+          }
         } catch (error) {
-          pending.textContent = error.message || String(error);
+          stopTimer();
+          const taskId = pending.dataset.taskId;
+          if (taskId) activeTasks.delete(taskId);
+          const stream = pending.querySelector("[data-role='run-stream']");
+          const title = pending.querySelector("[data-role='run-title']");
+          if (title) title.textContent = "failed";
+          if (stream) stream.textContent = error.message || String(error);
           pending.className = "ht-msg error";
         }
       });
@@ -898,7 +1264,8 @@ renderer: |-
         closeMenu();
         clearInterval(state.statsTimer);
         state.statsTimer = null;
-        root.querySelectorAll(".ht-session,.ht-modal-backdrop").forEach((item) => item.remove());
+        root.querySelectorAll(".ht-session [data-action='close']").forEach((button) => button.click());
+        root.querySelectorAll(".ht-modal-backdrop").forEach((item) => item.remove());
       }
     });
 
@@ -916,6 +1283,7 @@ renderer: |-
     addCleanup(() => clearInterval(timer));
     addCleanup(() => clearInterval(state.statsTimer));
     addCleanup(() => clearTimeout(state.layoutTimer));
+    addCleanup(() => root.querySelectorAll(".ht-session [data-action='close']").forEach((button) => button.click()));
     parent.__hermesTopologyCleanup = () => {
       while (cleanups.length) {
         try { cleanups.pop()(); } catch {}

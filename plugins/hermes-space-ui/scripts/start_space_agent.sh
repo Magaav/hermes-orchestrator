@@ -335,9 +335,11 @@ PY
     local manifest_path="${space_root}/space.yaml"
     local resources_widget_path="${widget_root}/hermes-os.yaml"
     local topology_widget_path="${widget_root}/hermes-topology.yaml"
+    local drop_widget_path="${widget_root}/drop-to-copy.yaml"
     [[ ! -f "${manifest_path}" ]] && return 0
     [[ ! -f "${resources_widget_path}" ]] && return 0
     [[ ! -f "${topology_widget_path}" ]] && return 0
+    [[ ! -f "${drop_widget_path}" ]] && return 0
     [[ "${HERMES_SPACE_SEED_FORCE:-0}" == "1" ]] && return 0
 
     if ! grep -Eq '^[[:space:]]*-[[:space:]]*hermes-os[[:space:]]*$' "${manifest_path}"; then
@@ -348,11 +350,23 @@ PY
       return 0
     fi
 
+    if ! grep -Eq '^[[:space:]]*-[[:space:]]*drop-to-copy[[:space:]]*$' "${manifest_path}"; then
+      return 0
+    fi
+
     if grep -Eq 'name:[[:space:]]*Hermes OS|24h 12m|System dashboard|Total: 16 GB|Total: 256 GB' "${resources_widget_path}"; then
       return 0
     fi
 
     if grep -Eq 'Add Node|Delete Node|hermes-topology-state|node-0|Node 0' "${topology_widget_path}"; then
+      return 0
+    fi
+
+    if ! grep -Eq 'stream_events|ht-run-events|data-role=.run-events.|data-role=.run-stop.|/tasks/.+\}/stop|Message modal closed' "${topology_widget_path}"; then
+      return 0
+    fi
+
+    if grep -Eq 'Bridge:|<label>Wish</label>|data-role=.wish.' "${drop_widget_path}"; then
       return 0
     fi
 
@@ -423,6 +437,7 @@ YAML
       copy_seed_template "${fleet_seed_root}/space.yaml" "${space_root}/space.yaml"
       copy_seed_template "${fleet_seed_root}/widgets/hermes-os.yaml" "${widget_root}/hermes-os.yaml"
       copy_seed_template "${fleet_seed_root}/widgets/hermes-topology.yaml" "${widget_root}/hermes-topology.yaml"
+      copy_seed_template "${fleet_seed_root}/widgets/drop-to-copy.yaml" "${widget_root}/drop-to-copy.yaml"
       rm -f "${widget_root}/hermes-dashboard.yaml"
     fi
   fi

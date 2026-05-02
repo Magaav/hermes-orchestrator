@@ -130,6 +130,22 @@ def test_baoyu_infographic_discord_exhaust_rewrite_contains_recovery_contract(mo
     assert "Final answer format:" in rewritten
 
 
+def test_youtube_exhaust_prompt_mentions_user_browser_cdp_route(monkeypatch, tmp_path):
+    runtime = _load_runtime()
+    monkeypatch.setenv("PLUGINS_EXHAUST", "true")
+    monkeypatch.setenv("HERMES_EXHAUST_LOG", str(tmp_path / "exhaust.log"))
+    monkeypatch.setenv("HERMES_EXHAUST_BROWSER_CDP_URL", "http://127.0.0.1:9222")
+
+    rewritten = runtime._build_exhaust_prompt(
+        "go to youtube and summarize the latest Nous Research video",
+        trigger="/exhaust",
+    )
+
+    assert "/browser connect http://127.0.0.1:9222" in rewritten
+    assert "Oracle Cloud egress path" in rewritten
+    assert "external_access_routes.browser_cdp_reverse_tunnel.reachable_now" in rewritten
+
+
 def test_pre_llm_call_marks_explicit_exhaust_turn_active(monkeypatch, tmp_path):
     runtime = _load_runtime()
     monkeypatch.setenv("PLUGINS_EXHAUST", "true")
@@ -241,6 +257,7 @@ def test_inventory_reports_enabled_budget(monkeypatch, tmp_path):
     runtime = _load_runtime()
     monkeypatch.setenv("PLUGINS_EXHAUST", "true")
     monkeypatch.setenv("PLUGINS_EXHAUST_MAX_ATTEMPTS", "5")
+    monkeypatch.setenv("HERMES_EXHAUST_BROWSER_CDP_URL", "http://127.0.0.1:9222")
     monkeypatch.setenv("HERMES_EXHAUST_LOG", str(tmp_path / "exhaust.log"))
 
     payload = json.loads(runtime.exhaust_inventory({"scope": "summary", "query": "blocked"}))
@@ -249,3 +266,6 @@ def test_inventory_reports_enabled_budget(monkeypatch, tmp_path):
     assert payload["budget"]["max_attempts"] == 5
     assert payload["query"] == "blocked"
     assert "recommended_fallback_classes" in payload
+    cdp_route = payload["external_access_routes"]["browser_cdp_reverse_tunnel"]
+    assert cdp_route["command"] == "/browser connect http://127.0.0.1:9222"
+    assert cdp_route["verify_url"] == "http://127.0.0.1:9222/json/version"

@@ -71,11 +71,18 @@ PLUGINS_EXHAUST_MAX_ATTEMPTS=4
 PLUGINS_EXHAUST_MAX_SECONDS=900
 PLUGINS_EXHAUST_MAX_TOOL_NUDGES=3
 PLUGINS_EXHAUST_PASSIVE=true
+HERMES_EXHAUST_BROWSER_CDP_URL=http://127.0.0.1:9222
 ```
 
 Passive mode uses the official `transform_tool_result` hook to attach bounded
 recovery hints to failed tool results. It does not retry tools by itself and it
 does not bypass Hermes permissions.
+
+For web tasks where normal cloud egress can be blocked, such as YouTube,
+`HERMES_EXHAUST_BROWSER_CDP_URL` makes `/exhaust` treat a user Chrome CDP
+reverse tunnel as a first-class route. The prompt and `exhaust_inventory`
+surface the verification URL and `/browser connect <url>` command before the
+agent declares the browser path blocked.
 
 ## Guardrails
 

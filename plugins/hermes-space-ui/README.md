@@ -196,6 +196,8 @@ Run checks:
   example `HERMES_SPACE_UI_API_SERVER_ORCHESTRATOR_URL`.
 - `HERMES_SPACE_UI_API_SERVER_KEY`: optional bearer token for the Hermes API
   server. Node-specific `..._<NODE>_KEY` overrides are also supported.
+- `HERMES_SPACE_UI_API_SERVER_TIMEOUT_SEC`: max wait for Hermes Runs API tasks,
+  default `900`.
 - `HERMES_SPACE_UI_PID_FILE`: optional pid file override.
 - `HERMES_SPACE_UI_LOG_FILE`: optional bridge log override.
 - `SPACE_AGENT_URL`: optional doctor probe target.
@@ -220,6 +222,14 @@ Run checks:
   `/local/agents/envs/orchestrator.env`.
 - `HERMES_SPACE_SEED_FORCE`: set to `1` to rewrite seeded Space Agent config
   even when files already exist.
+- `HERMES_SPACE_UI_DROP_TO_COPY_NODE`: node that receives Drop to Copy runs,
+  default `orchestrator`.
+- `HERMES_SPACE_UI_DROP_TO_COPY_PROVIDER`: requested frontier provider for
+  Drop to Copy runs, default `openai-codex`.
+- `HERMES_SPACE_UI_DROP_TO_COPY_MODEL`: requested frontier model for Drop to
+  Copy runs, default `gpt-5.5`.
+- `HERMES_SPACE_UI_DROP_TO_COPY_REASONING_EFFORT`: requested reasoning effort,
+  default `xhigh`.
 
 ## Auth
 
@@ -246,12 +256,34 @@ probe the bridge without exposing fleet actions.
 - `GET /nodes/{node_id}/logs?lines=80`
 - `GET /nodes/{node_id}/stats?bucket=daily&days=30`
 - `GET /resources`
+- `GET /tasks`
+- `GET /tasks/{task_id}`
 - `POST /nodes`
 - `POST /nodes/{node_id}/action`
 - `POST /nodes/{node_id}/prompt`
 - `POST /task`
-- `GET /tasks/{task_id}`
+- `POST /tasks`
+- `POST /tasks/{task_id}/stop`
+- `POST /drop-to-copy/tasks`
 - `GET /capabilities`
+
+`POST /nodes/{node_id}/prompt`, `POST /task`, and `POST /tasks` accept
+`"async": true` or `"stream_events": true` to return a running task
+immediately. The bridge follows the Hermes Runs API event stream and copies
+reasoning/tool/message progress into `GET /tasks/{task_id}` for Space widgets.
+`POST /tasks/{task_id}/stop` asks the target node's Runs API to stop the
+underlying run and marks the Space UI task as cancelled.
+
+For node chat parity with Discord, the bridge also recognizes `/exhaust`,
+`/exaust`, and `/bruteforce` at the start of a submitted prompt. When the target
+node has `PLUGINS_EXHAUST=true`, the bridge rewrites the turn through the
+Exhaust plugin activation contract before sending it to the Hermes Runs API.
+
+Widget compatibility:
+
+- `GET|POST /api/*` is accepted as an alias for the same bridge path without
+  `/api`, so generated widgets that accidentally use app-style paths still
+  reach the bridge.
 
 Example:
 

@@ -28,6 +28,7 @@ PASSIVE_ENV = "PLUGINS_EXHAUST_PASSIVE"
 MAX_ATTEMPTS_ENV = "PLUGINS_EXHAUST_MAX_ATTEMPTS"
 MAX_NUDGES_ENV = "PLUGINS_EXHAUST_MAX_TOOL_NUDGES"
 MAX_SECONDS_ENV = "PLUGINS_EXHAUST_MAX_SECONDS"
+BROWSER_CDP_ENV = "HERMES_EXHAUST_BROWSER_CDP_URL"
 
 EXHAUST_MARKER = "HERMES_EXHAUST_MODE=active"
 TRUTHY = {"1", "true", "yes", "on"}
@@ -36,6 +37,13 @@ FALSY = {"0", "false", "no", "off", ""}
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_MAX_TOOL_NUDGES = 3
 DEFAULT_MAX_SECONDS = 900
+DEFAULT_BROWSER_CDP_URL = "http://127.0.0.1:9222"
+WEB_ACCESS_RE = re.compile(
+    r"\b(youtube|youtu\.be|video|browser|chrome|web|website|page|url|"
+    r"transcript|rss|search|google|reddit|twitter|x\.com|linkedin|"
+    r"instagram|tiktok)\b",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger("hermes.plugins.exhaust")
 _LOG_CONFIGURED = False
@@ -80,6 +88,10 @@ def max_tool_nudges() -> int:
 
 def max_seconds() -> int:
     return _env_int(MAX_SECONDS_ENV, DEFAULT_MAX_SECONDS, minimum=60, maximum=7200)
+
+
+def browser_cdp_url() -> str:
+    return str(os.getenv(BROWSER_CDP_ENV, DEFAULT_BROWSER_CDP_URL) or "").strip()
 
 
 def _utc_now() -> str:
@@ -303,11 +315,96 @@ def _fallback_classes() -> list[str]:
     ]
 
 
+def _task_needs_external_web_access(task: str) -> bool:
+    return bool(WEB_ACCESS_RE.search(str(task or "")))
+
+
+def _cdp_version_url(cdp_url: str) -> str:
+    raw = str(cdp_url or "").strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if lowered.startswith(("ws://", "wss://")):
+        if "/devtools/browser/" in lowered:
+            return ""
+        raw = ("http://" if lowered.startswith("ws://") else "https://") + raw.split("://", 1)[1]
+        lowered = raw.lower()
+    if not lowered.startswith(("http://", "https://")):
+        return ""
+    if lowered.rstrip("/").endswith("/json/version"):
+        return raw
+    return raw.rstrip("/") + "/json/version"
+
+
+def _probe_cdp_route(cdp_url: str) -> dict[str, Any]:
+    version_url = _cdp_version_url(cdp_url)
+    result: dict[str, Any] = {
+        "url": cdp_url,
+        "command": f"/browser connect {cdp_url}",
+        "verify_url": version_url,
+        "reachable_now": False,
+        "config_keys": ["BROWSER_CDP_URL", "browser.cdp_url"],
+        "use_when": "Normal browser, HTTP, RSS, or API access is blocked by IP reputation, anti-bot, geo, login, or cookie requirements.",
+    }
+    if not version_url:
+        result["probe_error"] = "CDP URL is not an HTTP discovery endpoint."
+        return result
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(version_url, timeout=1.5) as response:
+            body = response.read(4096).decode("utf-8", errors="replace")
+        payload = json.loads(body or "{}")
+        result["reachable_now"] = True
+        if isinstance(payload, dict):
+            result["browser"] = str(payload.get("Browser") or "")
+            result["user_agent"] = str(payload.get("User-Agent") or "")
+            result["websocket_available"] = bool(payload.get("webSocketDebuggerUrl"))
+    except Exception as exc:
+        result["probe_error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def _external_access_routes() -> dict[str, Any]:
+    cdp_url = browser_cdp_url()
+    routes: dict[str, Any] = {}
+    if cdp_url:
+        routes["browser_cdp_reverse_tunnel"] = _probe_cdp_route(cdp_url)
+    return routes
+
+
+def _task_aware_route_guidance(task: str) -> str:
+    if not _task_needs_external_web_access(task):
+        return ""
+    cdp_url = browser_cdp_url()
+    if not cdp_url:
+        return ""
+    verify_url = _cdp_version_url(cdp_url) or f"{cdp_url.rstrip('/')}/json/version"
+    return f"""\
+
+Task-aware access route:
+- For YouTube or other IP/anti-bot blocked sites, evaluate the user Chrome CDP
+  reverse tunnel before declaring the web path blocked.
+- Verify the route: `curl -fsS {verify_url}` or call `exhaust_inventory` and
+  inspect `external_access_routes.browser_cdp_reverse_tunnel.reachable_now`.
+- Connect route: `/browser connect {cdp_url}`. If slash commands are not
+  available in this API turn, use browser tools after `BROWSER_CDP_URL` or
+  `browser.cdp_url` is set to `{cdp_url}`.
+- Retry the site through browser tools using the user's Chrome session, not the
+  Oracle Cloud egress path.
+- Do not mark the browser/web path exhausted until this route has either been
+  attempted or proven unreachable.
+- If unreachable, ask the user to start or keep open the SSH reverse tunnel
+  window and report this exact missing route.
+"""
+
+
 def _build_exhaust_prompt(task: str, *, trigger: str) -> str:
     task = str(task or "").strip()
     attempts = max_attempts()
     seconds = max_seconds()
     classes = "\n".join(f"- {item}" for item in _fallback_classes())
+    route_guidance = _task_aware_route_guidance(task)
     return f"""\
 {EXHAUST_MARKER}
 Trigger: {trigger}
@@ -341,6 +438,7 @@ Protocol:
    missing input after proving no credential-free route exists.
 7. If full success is impossible, deliver the best safe partial result and a
    reproducible next-step plan.
+{route_guidance}
 
 Fallback classes to consider:
 {classes}
@@ -634,6 +732,7 @@ def exhaust_inventory(args: Dict[str, Any] | None = None, **_: Any) -> str:
         "commands": _inventory_commands(full=full),
         "skills": _inventory_skills(full=full),
         "local_routes": _inventory_local_routes(full=full),
+        "external_access_routes": _external_access_routes(),
         "memory_and_wiki": _inventory_memory_wiki(),
         "recommended_fallback_classes": _fallback_classes(),
         "guardrails": [

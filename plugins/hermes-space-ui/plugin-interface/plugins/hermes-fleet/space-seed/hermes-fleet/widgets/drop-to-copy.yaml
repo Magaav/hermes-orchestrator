@@ -21,22 +21,23 @@ renderer: |-
 
     const style = document.createElement("style");
     style.textContent = `
-      .dtc-root{height:100%;min-height:0;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px;}
+      .dtc-root{height:auto;max-height:100%;min-height:0;display:grid;grid-template-rows:auto auto auto;align-content:start;gap:10px;box-sizing:border-box;padding:12px;background:rgba(7,17,31,.42);border:1px solid rgba(148,167,201,.14);border-radius:8px;overflow:hidden;}
       .dtc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
       .dtc-title{font-size:18px;font-weight:750;line-height:1.15;}
       .dtc-sub{font-size:11px;color:#9fb0c9;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px;}
       .dtc-live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#a9bbd3;white-space:nowrap;}
       .dtc-dot{width:8px;height:8px;border-radius:50%;background:#7ce4b0;box-shadow:0 0 0 3px rgba(124,228,176,.12);}
       .dtc-dot.warn{background:#facc15;box-shadow:0 0 0 3px rgba(250,204,21,.12);}
-      .dtc-form{min-height:0;display:grid;grid-template-rows:auto auto minmax(0,1fr);gap:9px;}
+      .dtc-form{min-height:0;display:grid;grid-template-rows:auto auto auto auto;gap:9px;align-content:start;}
       .dtc-drop{min-height:64px;display:grid;place-items:center;border:1px dashed rgba(125,220,255,.34);border-radius:8px;background:rgba(3,10,20,.38);padding:10px;text-align:center;color:#cfe3ff;font-size:12px;line-height:1.35;}
       .dtc-root.is-over .dtc-drop{border-color:rgba(124,228,176,.75);background:rgba(124,228,176,.08);}
-      .dtc-field{display:grid;gap:5px;min-width:0;}
+      .dtc-field{display:grid;grid-template-rows:auto auto;gap:6px;min-width:0;align-content:start;}
       .dtc-field label{font-size:11px;color:#9fb0c9;}
       .dtc-input,.dtc-textarea{box-sizing:border-box;width:100%;border:1px solid rgba(148,167,201,.2);border-radius:8px;background:rgba(2,8,18,.72);color:#eff6ff;padding:8px 9px;font:inherit;font-size:12px;outline:none;}
-      .dtc-textarea{height:100%;min-height:94px;resize:none;line-height:1.35;}
-      .dtc-preview{min-height:18px;font-size:11px;color:#8fa4bf;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-      .dtc-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid rgba(148,167,201,.08);padding-top:9px;}
+      .dtc-textarea{height:116px;min-height:94px;resize:none;line-height:1.35;}
+      .dtc-preview{display:none;font-size:11px;color:#8fa4bf;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .dtc-preview:not(:empty){display:block;}
+      .dtc-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid rgba(148,167,201,.08);padding-top:6px;}
       .dtc-status{min-width:0;font-size:12px;color:#9fb0c9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .dtc-btn{border:1px solid rgba(148,188,255,.25);background:rgba(125,220,255,.12);color:#eaf5ff;border-radius:8px;padding:8px 11px;font-size:12px;line-height:1;cursor:pointer;white-space:nowrap;}
       .dtc-btn:hover{background:rgba(125,220,255,.2);}
@@ -50,7 +51,7 @@ renderer: |-
       <div class="dtc-head">
         <div>
           <div class="dtc-title">Drop to Copy</div>
-          <div class="dtc-sub">Bridge: ${HERMES_URL}</div>
+          <div class="dtc-sub">GitHub repo to Space app</div>
         </div>
         <div class="dtc-live"><span class="dtc-dot" data-role="dot"></span><span data-role="freshness">Ready</span></div>
       </div>
@@ -62,8 +63,12 @@ renderer: |-
           <div class="dtc-preview" data-role="preview"></div>
         </div>
         <div class="dtc-field">
-          <label>Wish</label>
-          <textarea class="dtc-textarea" data-role="wish" placeholder="Describe the widget to build"></textarea>
+          <label>App Name</label>
+          <input class="dtc-input" data-role="app-name" placeholder="&lt;app_name&gt;">
+        </div>
+        <div class="dtc-field">
+          <label>Instructions</label>
+          <textarea class="dtc-textarea" data-role="instructions" placeholder="Describe the app to create from this repo"></textarea>
         </div>
       </form>
       <div class="dtc-actions">
@@ -76,7 +81,8 @@ renderer: |-
     const form = root.querySelector("[data-role='form']");
     const drop = root.querySelector("[data-role='drop']");
     const repo = root.querySelector("[data-role='repo']");
-    const wish = root.querySelector("[data-role='wish']");
+    const appName = root.querySelector("[data-role='app-name']");
+    const instructions = root.querySelector("[data-role='instructions']");
     const status = root.querySelector("[data-role='status']");
     const freshness = root.querySelector("[data-role='freshness']");
     const dot = root.querySelector("[data-role='dot']");
@@ -205,24 +211,33 @@ renderer: |-
       return null;
     }
 
-    async function installGeneratedWidget(output) {
+    async function installGeneratedWidget(output, requestedName = "") {
       const widget = parseGeneratedWidget(output);
       if (!widget) return false;
-      const widgetId = normalizeWidgetId(widget.widgetId || widget.id || widget.name || "drop-copy-widget");
+      const widgetId = normalizeWidgetId(requestedName || widget.widgetId || widget.id || widget.name || "drop-copy-widget");
+      const renderer = String(widget.renderer || "")
+        .replaceAll("__HERMES_SPACE_URL__", HERMES_URL)
+        .replaceAll("__HERMES_SPACE_ID__", spaceId())
+        .replaceAll("/api/drop-to-copy/tasks", "/drop-to-copy/tasks")
+        .replaceAll("/api/tasks/", "/tasks/")
+        .replaceAll("/api/task", "/task")
+        .replaceAll("/api/nodes/", "/nodes/")
+        .replaceAll("/api/nodes", "/nodes")
+        .replaceAll("/api/resources", "/resources");
       await space.spaces.upsertWidget({
         spaceId: spaceId(),
         widgetId,
-        name: String(widget.name || widget.title || "Generated Widget"),
+        name: String(requestedName || widget.name || widget.title || "Generated Widget"),
         cols: clampSize(widget.cols, 5),
         rows: clampSize(widget.rows, 5),
         metadata: widget.metadata && typeof widget.metadata === "object" ? widget.metadata : { icon: "extension" },
-        renderer: widget.renderer,
+        renderer,
         resetCamera: false
       });
       return true;
     }
 
-    function schedulePoll(taskId, buildWidgetId) {
+    function schedulePoll(taskId, buildWidgetId, requestedName) {
       clearTimeout(state.pollTimer);
       const tick = async () => {
         try {
@@ -236,7 +251,7 @@ renderer: |-
           submit.disabled = false;
           let output = task?.result?.response || task?.error?.message || JSON.stringify(task.result || task.error || task, null, 2);
           if (task.status === "completed") {
-            const installed = await installGeneratedWidget(output).catch((error) => {
+            const installed = await installGeneratedWidget(output, requestedName).catch((error) => {
               output += `\n\nWidget install failed: ${error.message || error}`;
               return false;
             });
@@ -257,26 +272,34 @@ renderer: |-
 
     async function submitTask() {
       const repoUrl = repo.value.trim();
-      const wishText = wish.value.trim();
+      const appNameText = appName.value.trim();
+      const instructionText = instructions.value.trim();
       if (!repoUrl && !state.droppedText) {
         setStatus("Add a repo first", true);
         return;
       }
-      if (!wishText) {
-        setStatus("Describe the widget", true);
-        wish.focus();
+      if (!appNameText) {
+        setStatus("Add an app name", true);
+        appName.focus();
+        return;
+      }
+      if (!instructionText) {
+        setStatus("Add instructions", true);
+        instructions.focus();
         return;
       }
       submit.disabled = true;
       setStatus("Starting orchestrator job");
       const buildWidgetId = `drop-copy-build-${Date.now().toString(36)}`;
-      await createBuildIcon(buildWidgetId, `Repo: ${repoUrl || "dropped input"}\n\n${wishText}`);
+      await createBuildIcon(buildWidgetId, `App: ${appNameText}\nRepo: ${repoUrl || "dropped input"}\n\n${instructionText}`);
       try {
         const data = await hermes("/drop-to-copy/tasks", {
           method: "POST",
           body: {
             repo_url: repoUrl,
-            wish: wishText,
+            app_name: appNameText,
+            instructions: instructionText,
+            wish: instructionText,
             dropped_text: state.droppedText.slice(0, 50000),
             space_id: spaceId(),
             build_widget_id: buildWidgetId
@@ -284,7 +307,7 @@ renderer: |-
         });
         const taskId = data?.task?.task_id;
         if (!taskId) throw new Error("Bridge did not return a task id.");
-        schedulePoll(taskId, buildWidgetId);
+        schedulePoll(taskId, buildWidgetId, appNameText);
       } catch (error) {
         submit.disabled = false;
         await updateResultWidget(buildWidgetId, "Drop to Copy Failed", error.message || String(error), "failed").catch(() => {});

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import re
 import shutil
@@ -40,6 +41,7 @@ from schemas import (
 
 VALID_NODE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 JSON_HEADERS = {"Content-Type": "application/json; charset=utf-8"}
+TERMINAL_TASK_STATUSES = {"cancelled", "completed", "failed", "succeeded", "unsupported"}
 NODE_ENV_SOURCE_ENV = "HERMES_SPACE_UI_NODE_ENV_SOURCE"
 NODE_ENV_RUNTIME_SOURCE_ENV = "HERMES_SPACE_UI_NODE_RUNTIME_SOURCE"
 NODE_ENV_PRIMARY_ORDER = [
@@ -187,7 +189,7 @@ class BridgeSettings:
             api_server_url=str(os.getenv("HERMES_SPACE_UI_API_SERVER_URL", "") or "").strip(),
             api_server_key=str(os.getenv("HERMES_SPACE_UI_API_SERVER_KEY", "") or "").strip(),
             api_server_timeout_sec=float(
-                str(os.getenv("HERMES_SPACE_UI_API_SERVER_TIMEOUT_SEC", "120") or "120")
+                str(os.getenv("HERMES_SPACE_UI_API_SERVER_TIMEOUT_SEC", "900") or "900")
             ),
             api_server_poll_interval_sec=float(
                 str(os.getenv("HERMES_SPACE_UI_API_SERVER_POLL_INTERVAL_SEC", "1") or "1")
@@ -280,7 +282,11 @@ class OrchestratorClient:
     def get_node_status(self, node_id: str) -> dict[str, Any]:
         node = validate_node_id(node_id)
         payload = self._run_horc(["status", node])
-        payload["_space_ui_activity"] = node_activity_snapshot(self.settings, node)
+        activity = node_activity_snapshot(self.settings, node)
+        running_task = self.task_store.latest_running_for_node(node)
+        if running_task:
+            activity.update(activity_from_running_task(running_task))
+        payload["_space_ui_activity"] = activity
         return payload
 
     def tail_node_logs(self, node_id: str, *, lines: int = 80) -> dict[str, Any]:
@@ -320,7 +326,7 @@ class OrchestratorClient:
 
         if safe_action == "run_prompt":
             prompt = str(payload.get("prompt") or "").strip()
-            task = self.submit_task(prompt=prompt, target_node=node)
+            task = self.submit_task(prompt=prompt, target_node=node, run_options=run_options_from_payload(payload))
             return action_result(node, safe_action, accepted=True, result={"task": task})
 
         before = node_card(node, self.get_node_status(node))
@@ -612,31 +618,160 @@ class OrchestratorClient:
             "logs": logs,
         }
 
-    def submit_task(self, *, prompt: str, target_node: str | None) -> dict[str, Any]:
+    def submit_task(
+        self,
+        *,
+        prompt: str,
+        target_node: str | None,
+        run_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         prompt_text = str(prompt or "").strip()
         if not prompt_text:
             raise BridgeError("invalid_prompt", "Prompt must not be empty.")
         node = validate_node_id(target_node) if target_node else None
         if not node:
             raise BridgeError("invalid_node_id", "target_node is required for prompt submission.")
-        task = self.task_store.create_running(prompt_text, node)
+        prepared_prompt = self._prepare_prompt_for_node(prompt_text, node)
+        task = self.task_store.create_running(prepared_prompt, node)
+        return self._finish_prompt_task(task["task_id"], node, prepared_prompt, run_options)
+
+    def start_task(
+        self,
+        *,
+        prompt: str,
+        target_node: str | None,
+        run_options: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prompt_text = str(prompt or "").strip()
+        if not prompt_text:
+            raise BridgeError("invalid_prompt", "Prompt must not be empty.")
+        node = validate_node_id(target_node) if target_node else None
+        if not node:
+            raise BridgeError("invalid_node_id", "target_node is required for prompt submission.")
+        prepared_prompt = self._prepare_prompt_for_node(prompt_text, node)
+        task = self.task_store.create_running(prepared_prompt, node)
+        thread = threading.Thread(
+            target=self._finish_prompt_task,
+            args=(task["task_id"], node, prepared_prompt, run_options),
+            daemon=True,
+            name=f"prompt-task-{task['task_id'][-6:]}",
+        )
+        thread.start()
+        return task
+
+    def _prepare_prompt_for_node(self, prompt: str, node: str) -> str:
+        return rewrite_exhaust_slash_prompt(
+            prompt,
+            node=node,
+            agents_root=self.settings.agents_root,
+        )
+
+    def _finish_prompt_task(
+        self,
+        task_id: str,
+        node: str,
+        prompt_text: str,
+        run_options: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         try:
-            response = self._run_node_api_server(node, prompt_text)
-        except BridgeError as exc:
-            return self.task_store.finish(
-                task["task_id"],
-                status="failed",
-                error={"code": exc.code, "message": exc.message, "details": exc.details},
+            response = self._run_node_api_server(
+                node,
+                prompt_text,
+                run_options=run_options,
+                task_id=task_id,
             )
+        except BridgeError as exc:
+            current = self.task_store.get(task_id) or {}
+            if current.get("status") == "cancelled":
+                return current
+            current_result = current.get("result") if isinstance(current.get("result"), dict) else {}
+            cancel_requested = bool(current_result.get("cancel_requested"))
+            status = "cancelled" if cancel_requested or exc.code == "api_server_run_cancelled" else "failed"
+            error = (
+                {"code": "task_cancelled", "message": "Task cancelled from Space UI.", "details": current_result}
+                if status == "cancelled"
+                else {"code": exc.code, "message": exc.message, "details": exc.details}
+            )
+            return self.task_store.finish(
+                task_id,
+                status=status,
+                result=current_result,
+                error=error,
+            )
+        except Exception as exc:
+            current = self.task_store.get(task_id) or {}
+            if current.get("status") == "cancelled":
+                return current
+            current_result = current.get("result") if isinstance(current.get("result"), dict) else {}
+            return self.task_store.finish(
+                task_id,
+                status="failed",
+                result=current_result,
+                error={"code": "prompt_task_failed", "message": str(exc), "details": {}},
+            )
+        current = self.task_store.get(task_id) or {}
+        if current.get("status") == "cancelled":
+            return current
+        current_result = current.get("result") if isinstance(current.get("result"), dict) else {}
+        result: dict[str, Any] = {**current_result, "response": response, "node_id": node}
+        if run_options:
+            result["run_options"] = run_options
+        return self.task_store.finish(task_id, status="completed", result=result)
+
+    def stop_task(self, task_id: str, *, reason: str = "Stop requested from Space UI.") -> dict[str, Any]:
+        task = self.task_store.get(str(task_id or ""))
+        if not task:
+            raise BridgeError("task_not_found", "Task was not found.", status=HTTPStatus.NOT_FOUND)
+        if str(task.get("status") or "") in TERMINAL_TASK_STATUSES:
+            return task
+
+        requested = self.task_store.request_cancel(str(task["task_id"]), reason=reason)
+        task = requested or task
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        run_id = str(result.get("run_id") or "").strip()
+        node = validate_node_id(task.get("target_node")) if task.get("target_node") else ""
+        if not node or not run_id:
+            return task
+
+        try:
+            stop_status = self._stop_node_run(node, run_id)
+        except BridgeError as exc:
+            updated = self.task_store.update_running(
+                str(task["task_id"]),
+                result={
+                    "cancel_requested": True,
+                    "cancel_reason": reason,
+                    "run_status": "stop_failed",
+                    "stop_status": {"error": exc.code, "message": exc.message, "details": exc.details},
+                },
+            )
+            return updated or self.task_store.get(str(task["task_id"])) or task
+
         return self.task_store.finish(
-            task["task_id"],
-            status="completed",
-            result={"response": response, "node_id": node},
+            str(task["task_id"]),
+            status="cancelled",
+            result={
+                "cancel_requested": True,
+                "cancel_reason": reason,
+                "run_status": "cancelled",
+                "stop_status": stop_status,
+            },
+            error={"code": "task_cancelled", "message": "Task cancelled from Space UI.", "details": {}},
         )
 
     def start_drop_to_copy_task(self, payload: dict[str, Any]) -> dict[str, Any]:
         repo_url = str(payload.get("repo_url") or "").strip()
-        wish = str(payload.get("wish") or "").strip()
+        legacy_wish = str(payload.get("wish") or "").strip()
+        app_name = str(
+            payload.get("app_name")
+            or payload.get("appName")
+            or payload.get("name")
+            or payload.get("title")
+            or ""
+        ).strip()
+        instructions = str(payload.get("instructions") or legacy_wish).strip()
+        if not app_name and legacy_wish and not payload.get("instructions"):
+            app_name = "Generated Widget"
         dropped_text = str(payload.get("dropped_text") or "").strip()
         space_id = str(payload.get("space_id") or "hermes-os").strip() or "hermes-os"
         build_widget_id = str(payload.get("build_widget_id") or "").strip()
@@ -648,12 +783,15 @@ class OrchestratorClient:
         node = validate_node_id(target_node)
         if not repo_url and not dropped_text:
             raise BridgeError("missing_drop_source", "Provide a GitHub repo URL or dropped input.")
-        if not wish:
-            raise BridgeError("missing_drop_wish", "Describe the widget you want to build.")
+        if not app_name:
+            raise BridgeError("missing_drop_app_name", "Provide the app name to create.")
+        if not instructions:
+            raise BridgeError("missing_drop_instructions", "Describe the app you want to build.")
 
         prompt = build_drop_to_copy_prompt(
             repo_url=repo_url,
-            wish=wish,
+            app_name=app_name,
+            instructions=instructions,
             dropped_text=dropped_text[:50000],
             space_id=space_id,
             build_widget_id=build_widget_id,
@@ -674,6 +812,7 @@ class OrchestratorClient:
                 node,
                 prompt,
                 run_options=self._drop_to_copy_run_options(),
+                task_id=task_id,
             )
         except BridgeError as exc:
             self.task_store.finish(
@@ -710,8 +849,13 @@ class OrchestratorClient:
         ).strip()
         provider = str(os.getenv("HERMES_SPACE_UI_DROP_TO_COPY_PROVIDER", "openai-codex") or "openai-codex").strip()
         return {
+            "provider": provider,
             "model": model,
             "reasoning_effort": reasoning_effort,
+            "reasoning": {"effort": reasoning_effort},
+            "timeout_sec": float(
+                str(os.getenv("HERMES_SPACE_UI_DROP_TO_COPY_TIMEOUT_SEC", "900") or "900")
+            ),
             "metadata": {
                 "hermes_space_ui": "drop_to_copy",
                 "requested_provider": provider,
@@ -765,6 +909,20 @@ class OrchestratorClient:
             return self.settings.api_server_key
         env = load_env_file(self.settings.agents_root / "envs" / f"{node}.env")
         return str(env.get("API_SERVER_KEY") or "").strip()
+
+    def _capabilities_advertise_runs_api(self, capabilities: dict[str, Any]) -> bool:
+        """Accept both current and legacy Hermes Runs API capability shapes."""
+        features = capabilities.get("features") if isinstance(capabilities.get("features"), dict) else {}
+        endpoints = capabilities.get("endpoints") if isinstance(capabilities.get("endpoints"), dict) else {}
+
+        if bool(features.get("runs")):
+            return True
+        if bool(features.get("run_submission")) and bool(features.get("run_status")):
+            return True
+
+        run_create = endpoints.get("runs") or endpoints.get("run_create")
+        run_status = endpoints.get("run_status")
+        return bool(run_create and run_status)
 
     def _api_request(
         self,
@@ -824,12 +982,153 @@ class OrchestratorClient:
                 details={"node_id": node_id, "url": base_url, "body": text[:2000]},
             ) from exc
 
+    def _api_event_stream(self, node_id: str, path: str):
+        node = validate_node_id(node_id)
+        base_url = self._api_server_url_for_node(node)
+        headers = {"Accept": "text/event-stream"}
+        key = self._api_server_key_for_node(node)
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        request = Request(f"{base_url}{path}", headers=headers, method="GET")
+        try:
+            with urlopen(request, timeout=45) as response:
+                data_lines: list[str] = []
+                event_type = ""
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if line.startswith("event:"):
+                        event_type = line[6:].strip()
+                        continue
+                    if line.startswith("data:"):
+                        data_lines.append(line[5:].strip())
+                        continue
+                    if line.strip():
+                        continue
+                    if not data_lines:
+                        continue
+                    payload = "\n".join(data_lines).strip()
+                    data_lines = []
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        if event_type:
+                            yield {
+                                "event": event_type,
+                                "timestamp": time.time(),
+                                "delta": payload,
+                                "text": payload,
+                            }
+                        event_type = ""
+                        continue
+                    if isinstance(event, dict):
+                        if event_type and not event.get("event") and not event.get("type"):
+                            event["event"] = event_type
+                        yield event
+                    event_type = ""
+        except HTTPError as exc:
+            details: dict[str, Any] = {"node_id": node, "status": exc.code, "url": f"{base_url}{path}"}
+            try:
+                details["body"] = exc.read().decode("utf-8")[:2000]
+            except Exception:
+                pass
+            raise BridgeError(
+                "api_server_events_http_error",
+                "Hermes API server rejected the run event stream request.",
+                status=HTTPStatus.BAD_GATEWAY,
+                details=details,
+            ) from exc
+        except URLError as exc:
+            raise BridgeError(
+                "api_server_events_unreachable",
+                "Hermes API server run events are not reachable for this node.",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                details={"node_id": node, "url": base_url, "error": str(exc.reason)},
+            ) from exc
+        except TimeoutError as exc:
+            raise BridgeError(
+                "api_server_events_timeout",
+                "Hermes API server run event stream timed out.",
+                status=HTTPStatus.GATEWAY_TIMEOUT,
+                details={"node_id": node, "url": base_url},
+            ) from exc
+
+    def _collect_run_events(self, node: str, run_id: str, task_id: str) -> None:
+        try:
+            events = self._api_event_stream(node, f"/v1/runs/{run_id}/events")
+            for event in events:
+                self.task_store.record_event(task_id, event)
+        except BridgeError as exc:
+            self.task_store.record_event(
+                task_id,
+                {
+                    "event": "run.events_unavailable",
+                    "timestamp": time.time(),
+                    "error": exc.code,
+                    "message": exc.message,
+                },
+            )
+            return
+        except Exception as exc:
+            self.task_store.record_event(
+                task_id,
+                {
+                    "event": "run.events_unavailable",
+                    "timestamp": time.time(),
+                    "error": "run_events_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+
+    def _start_run_event_collector(self, node: str, run_id: str, task_id: str) -> None:
+        thread = threading.Thread(
+            target=self._collect_run_events,
+            args=(node, run_id, task_id),
+            daemon=True,
+            name=f"run-events-{task_id[-6:]}",
+        )
+        thread.start()
+
+    def _stop_node_run(self, node: str, run_id: str) -> dict[str, Any]:
+        return self._api_request(
+            node,
+            "POST",
+            f"/v1/runs/{run_id}/stop",
+            timeout=5,
+        )
+
+    def _raise_if_task_cancelled(self, task_id: str | None, node: str, run_id: str) -> None:
+        if not task_id or not self.task_store.cancel_requested(task_id):
+            return
+        stop_status: dict[str, Any] | None = None
+        try:
+            stop_status = self._stop_node_run(node, run_id)
+        except BridgeError as exc:
+            stop_status = {"error": exc.code, "message": exc.message, "details": exc.details}
+        self.task_store.update_running(
+            task_id,
+            result={
+                "cancel_requested": True,
+                "run_status": "stopping",
+                "stop_status": stop_status,
+            },
+        )
+        raise BridgeError(
+            "api_server_run_cancelled",
+            "Hermes API server run was cancelled from Space UI.",
+            status=HTTPStatus.CONFLICT,
+            details={"node_id": node, "run_id": run_id, "stop_status": stop_status},
+        )
+
     def _run_node_api_server(
         self,
         node_id: str,
         prompt: str,
         *,
         run_options: dict[str, Any] | None = None,
+        task_id: str | None = None,
     ) -> str:
         node = validate_node_id(node_id)
         try:
@@ -838,8 +1137,7 @@ class OrchestratorClient:
             if exc.code not in {"api_server_http_error"}:
                 raise
             capabilities = {}
-        features = capabilities.get("features") if isinstance(capabilities.get("features"), dict) else {}
-        if capabilities and not bool(features.get("runs")):
+        if capabilities and not self._capabilities_advertise_runs_api(capabilities):
             raise BridgeError(
                 "api_server_runs_unsupported",
                 "Hermes API server does not advertise Runs API support.",
@@ -850,7 +1148,13 @@ class OrchestratorClient:
         session_id = f"space-ui-{node}-{uuid.uuid4().hex[:12]}"
         run_payload = {"input": prompt, "session_id": session_id}
         if run_options:
-            run_payload.update(run_options)
+            run_payload.update(
+                {
+                    key: value
+                    for key, value in run_options.items()
+                    if key not in {"timeout", "timeout_sec"}
+                }
+            )
 
         created = self._api_request(
             node,
@@ -866,13 +1170,40 @@ class OrchestratorClient:
                 status=HTTPStatus.BAD_GATEWAY,
                 details={"node_id": node, "response": created},
             )
+        if task_id:
+            self.task_store.update_running(
+                task_id,
+                result={
+                    "node_id": node,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "model_request": run_payload.get("model"),
+                    "run_status": "running",
+                },
+            )
+            self._start_run_event_collector(node, run_id, task_id)
+            self._raise_if_task_cancelled(task_id, node, run_id)
 
-        deadline = time.monotonic() + self.settings.api_server_timeout_sec
+        deadline = time.monotonic() + run_timeout_sec(run_options, self.settings.api_server_timeout_sec)
         last_status: dict[str, Any] = created
         while time.monotonic() < deadline:
+            self._raise_if_task_cancelled(task_id, node, run_id)
             status = self._api_request(node, "GET", f"/v1/runs/{run_id}", timeout=10)
             last_status = status
             state = str(status.get("status") or "").lower()
+            if task_id:
+                self.task_store.update_running(
+                    task_id,
+                    result={
+                        "node_id": node,
+                        "run_id": run_id,
+                        "session_id": session_id,
+                        "model_request": run_payload.get("model"),
+                        "run_status": state or "running",
+                        "last_event": status.get("last_event"),
+                    },
+                )
+                self.task_store.record_status_event(task_id, status)
             if state == "completed":
                 output = status.get("output") or status.get("result") or status.get("final_response")
                 if isinstance(output, dict):
@@ -887,11 +1218,33 @@ class OrchestratorClient:
                 )
             time.sleep(max(0.1, self.settings.api_server_poll_interval_sec))
 
+        stop_status: dict[str, Any] | None = None
+        try:
+            stop_status = self._api_request(node, "POST", f"/v1/runs/{run_id}/stop", timeout=5)
+        except BridgeError as exc:
+            stop_status = {"error": exc.code, "message": exc.message}
+        if task_id:
+            self.task_store.update_running(
+                task_id,
+                result={
+                    "node_id": node,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "model_request": run_payload.get("model"),
+                    "run_status": "timeout",
+                    "last_event": last_status.get("last_event"),
+                },
+            )
         raise BridgeError(
             "api_server_run_timeout",
             "Hermes API server run did not complete before the bridge timeout.",
             status=HTTPStatus.GATEWAY_TIMEOUT,
-            details={"node_id": node, "run_id": run_id, "last_status": last_status},
+            details={
+                "node_id": node,
+                "run_id": run_id,
+                "last_status": last_status,
+                "stop_status": stop_status,
+            },
         )
 
     def run_chat_completion(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -907,6 +1260,119 @@ class OrchestratorClient:
             if "content" in message:
                 message["content"] = sanitize_space_agent_response(str(message.get("content") or ""))
         return completion
+
+
+def compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
+    nested: dict[str, Any] = {}
+    for nested_key in ("payload", "data"):
+        value = event.get(nested_key)
+        if isinstance(value, dict):
+            nested.update(value)
+    merged = {**nested, **event}
+
+    def text_field(key: str, limit: int) -> str:
+        value = str(merged.get(key) or "")
+        return value[:limit]
+
+    name = str(merged.get("event") or merged.get("type") or merged.get("event_type") or "run.event").strip() or "run.event"
+    payload: dict[str, Any] = {
+        "event": name,
+        "timestamp": merged.get("timestamp") or time.time(),
+        "received_at": utc_now(),
+    }
+
+    tool_value = (
+        merged.get("tool")
+        or merged.get("tool_name")
+        or merged.get("name")
+        or merged.get("function_name")
+    )
+    if tool_value:
+        payload["tool"] = str(tool_value).strip()[:200]
+
+    for key in ("run_id", "status", "state", "source"):
+        value = str(merged.get(key) or "").strip()
+        if value:
+            payload["status" if key == "state" else key] = value[:200]
+
+    args = merged.get("args")
+    if args is None:
+        args = merged.get("arguments")
+    if isinstance(args, str):
+        try:
+            parsed_args = json.loads(args)
+            args = parsed_args if isinstance(parsed_args, dict) else {"value": args}
+        except json.JSONDecodeError:
+            args = {"value": args}
+    if isinstance(args, dict):
+        compact_args: dict[str, Any] = {}
+        for key, value in list(args.items())[:24]:
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                compact_args[str(key)[:80]] = str(value)[:2000] if isinstance(value, str) else value
+            elif isinstance(value, (list, dict)):
+                compact_args[str(key)[:80]] = json.dumps(value, ensure_ascii=False, default=str)[:2000]
+            else:
+                compact_args[str(key)[:80]] = str(value)[:2000]
+        if compact_args:
+            payload["args"] = compact_args
+
+    command = (
+        merged.get("command")
+        or (args.get("command") if isinstance(args, dict) else None)
+        or (args.get("cmd") if isinstance(args, dict) else None)
+    )
+    if command:
+        payload["command"] = str(command)[:4000]
+
+    text_aliases = {
+        "preview": ("preview", "label", "summary"),
+        "text": ("text", "thinking", "reasoning", "content"),
+        "delta": ("delta", "content_delta", "text_delta"),
+        "output": ("output", "stdout", "stderr", "result"),
+        "message": ("message", "detail"),
+        "error": ("error", "exception"),
+    }
+    limits = {
+        "preview": 500,
+        "text": 4000,
+        "delta": 4000,
+        "output": 4000,
+        "message": 1000,
+        "error": 1000,
+    }
+    for target, aliases in text_aliases.items():
+        if target in payload and isinstance(payload.get(target), bool):
+            continue
+        for alias in aliases:
+            value = text_field(alias, limits[target])
+            if value:
+                payload[target] = value
+                break
+
+    if not payload.get("preview") and command:
+        payload["preview"] = str(command)[:500]
+
+    for key, limit in (
+        ("preview", 500),
+        ("text", 4000),
+        ("delta", 4000),
+        ("output", 4000),
+        ("message", 1000),
+        ("error", 1000),
+    ):
+        value = str(payload.get(key) or "")[:limit]
+        if value and not isinstance(payload.get(key), bool):
+            payload[key] = value
+    if "duration" in merged or "elapsed" in merged:
+        try:
+            payload["duration"] = round(float(merged.get("duration") or merged.get("elapsed") or 0), 3)
+        except (TypeError, ValueError):
+            pass
+    if "usage" in merged and isinstance(merged.get("usage"), dict):
+        payload["usage"] = merged["usage"]
+    if "error" in merged and isinstance(merged.get("error"), bool):
+        payload["error"] = bool(merged.get("error"))
+    return payload
 
 
 class TaskStore:
@@ -981,20 +1447,145 @@ class TaskStore:
             existing = self._tasks.get(task_id)
             if not existing:
                 raise BridgeError("task_not_found", "Task was not found.", status=HTTPStatus.NOT_FOUND)
+            existing_result = existing.get("result") if isinstance(existing.get("result"), dict) else {}
             task = {
                 **existing,
                 "status": status,
                 "updated_at": utc_now(),
-                "result": result or {},
+                "result": {**existing_result, **(result or {})},
                 "error": error,
             }
             self._tasks[task_id] = task
             self._save()
         return task
 
+    def update_running(self, task_id: str, *, result: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            if not existing or existing.get("status") != "running":
+                return existing
+            merged_result = {
+                **(existing.get("result") if isinstance(existing.get("result"), dict) else {}),
+                **(result or {}),
+            }
+            task = {
+                **existing,
+                "updated_at": utc_now(),
+                "result": merged_result,
+            }
+            self._tasks[task_id] = task
+            self._save()
+            return task
+
+    def request_cancel(self, task_id: str, *, reason: str) -> dict[str, Any] | None:
+        return self.update_running(
+            task_id,
+            result={
+                "cancel_requested": True,
+                "cancel_reason": str(reason or "Stop requested from Space UI.")[:500],
+                "cancel_requested_at": utc_now(),
+                "run_status": "stopping",
+            },
+        )
+
+    def cancel_requested(self, task_id: str) -> bool:
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            result = existing.get("result") if isinstance(existing, dict) and isinstance(existing.get("result"), dict) else {}
+        return bool(result.get("cancel_requested"))
+
+    def record_status_event(self, task_id: str, status: dict[str, Any]) -> dict[str, Any] | None:
+        event_name = str(status.get("last_event") or "").strip()
+        run_id = str(status.get("run_id") or status.get("id") or "").strip()
+        run_status = str(status.get("status") or "").strip()
+        if not event_name:
+            return None
+        marker = f"{run_id}:{event_name}:{run_status}"
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            result = existing.get("result") if isinstance(existing, dict) and isinstance(existing.get("result"), dict) else {}
+            if result.get("status_event_marker") == marker:
+                return existing
+            if existing and existing.get("status") == "running":
+                result = dict(result)
+                result["status_event_marker"] = marker
+                self._tasks[task_id] = {**existing, "result": result}
+        return self.record_event(
+            task_id,
+            {
+                "event": event_name,
+                "run_id": run_id,
+                "status": run_status,
+                "source": "run_status",
+                "timestamp": status.get("updated_at") or time.time(),
+            },
+        )
+
+    def record_event(self, task_id: str, event: dict[str, Any]) -> dict[str, Any] | None:
+        compact = compact_run_event(event if isinstance(event, dict) else {})
+        event_name = str(compact.get("event") or "run.event")
+        with self._lock:
+            existing = self._tasks.get(task_id)
+            if not existing:
+                return None
+            result = dict(existing.get("result") if isinstance(existing.get("result"), dict) else {})
+            try:
+                event_count = int(result.get("event_count") or 0) + 1
+            except (TypeError, ValueError):
+                event_count = 1
+            result["event_count"] = event_count
+            result["last_event"] = event_name
+
+            if event_name in {"message.delta", "response.output_text.delta"}:
+                delta = str(compact.get("delta") or compact.get("text") or "")
+                if delta:
+                    result["response_stream"] = (str(result.get("response_stream") or "") + delta)[-120000:]
+            elif event_name in {"thinking.delta", "reasoning.delta"}:
+                delta = str(compact.get("delta") or compact.get("text") or "")
+                if delta:
+                    result["thinking_stream"] = (str(result.get("thinking_stream") or "") + delta)[-120000:]
+                events = result.get("events") if isinstance(result.get("events"), list) else []
+                events = [item for item in events if isinstance(item, dict)]
+                events.append(compact)
+                result["events"] = events[-240:]
+            else:
+                events = result.get("events") if isinstance(result.get("events"), list) else []
+                events = [item for item in events if isinstance(item, dict)]
+                events.append(compact)
+                result["events"] = events[-240:]
+
+            task = {
+                **existing,
+                "updated_at": utc_now(),
+                "result": result,
+            }
+            self._tasks[task_id] = task
+            if event_name not in {"message.delta", "response.output_text.delta"}:
+                self._save()
+            return task
+
     def get(self, task_id: str) -> dict[str, Any] | None:
         with self._lock:
             return self._tasks.get(task_id)
+
+    def list_recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        with self._lock:
+            tasks = list(self._tasks.values())
+        tasks.sort(key=lambda task: str(task.get("updated_at") or task.get("created_at") or ""), reverse=True)
+        return tasks[:safe_limit]
+
+    def latest_running_for_node(self, node_id: str) -> dict[str, Any] | None:
+        node = validate_node_id(node_id)
+        with self._lock:
+            running = [
+                task
+                for task in self._tasks.values()
+                if task.get("status") == "running" and task.get("target_node") == node
+            ]
+        if not running:
+            return None
+        return max(running, key=lambda task: str(task.get("updated_at") or task.get("created_at") or ""))
 
 
 class BridgeContext:
@@ -1062,7 +1653,7 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
 
     def _handle_get(self) -> None:
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = normalize_bridge_path(parsed.path.rstrip("/") or "/")
         if path == "/health":
             self._health()
             return
@@ -1129,6 +1720,10 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
                 stats = self.server.context.orchestrator.node_stats(node_id, days=days, bucket=bucket)
                 self._json_response(HTTPStatus.OK, success({"stats": stats}))
                 return
+        if path == "/tasks":
+            tasks = self.server.context.task_store.list_recent()
+            self._json_response(HTTPStatus.OK, success({"tasks": tasks}))
+            return
         if path.startswith("/tasks/"):
             parts = path.strip("/").split("/")
             if len(parts) == 2:
@@ -1141,7 +1736,7 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
 
     def _handle_post(self) -> None:
         parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/") or "/"
+        path = normalize_bridge_path(parsed.path.rstrip("/") or "/")
         self._require_auth()
 
         if path == "/drop-to-copy/tasks":
@@ -1150,16 +1745,31 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
             self._json_response(HTTPStatus.ACCEPTED, success({"task": task}))
             return
 
-        if path == "/task":
+        if path in {"/task", "/tasks"}:
             body = self._read_json_body()
             prompt = str(body.get("prompt") or "").strip()
             target_node = body.get("target_node")
-            task = self.server.context.orchestrator.submit_task(
+            runner = (
+                self.server.context.orchestrator.start_task
+                if wants_async_task(body)
+                else self.server.context.orchestrator.submit_task
+            )
+            task = runner(
                 prompt=prompt,
                 target_node=str(target_node) if target_node else None,
+                run_options=run_options_from_payload(body),
             )
-            self._json_response(HTTPStatus.OK, success({"task": task}))
+            self._json_response(HTTPStatus.ACCEPTED if task.get("status") == "running" else HTTPStatus.OK, success({"task": task}))
             return
+
+        if path.startswith("/tasks/") and path.endswith("/stop"):
+            parts = path.strip("/").split("/")
+            if len(parts) == 3:
+                body = self._read_json_body(max_bytes=32 * 1024)
+                reason = str(body.get("reason") or "Stop requested from Space UI.").strip()
+                task = self.server.context.orchestrator.stop_task(parts[1], reason=reason)
+                self._json_response(HTTPStatus.OK, success({"task": task}))
+                return
 
         if path == "/nodes":
             body = self._read_json_body(max_bytes=128 * 1024)
@@ -1173,11 +1783,17 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
                 node_id = validate_node_id(parts[1])
                 body = self._read_json_body(max_bytes=2 * 1024 * 1024)
                 prompt = str(body.get("prompt") or "").strip()
-                task = self.server.context.orchestrator.submit_task(
+                runner = (
+                    self.server.context.orchestrator.start_task
+                    if wants_async_task(body)
+                    else self.server.context.orchestrator.submit_task
+                )
+                task = runner(
                     prompt=prompt,
                     target_node=node_id,
+                    run_options=run_options_from_payload(body),
                 )
-                self._json_response(HTTPStatus.OK, success({"task": task}))
+                self._json_response(HTTPStatus.ACCEPTED if task.get("status") == "running" else HTTPStatus.OK, success({"task": task}))
                 return
 
         if path == "/v1/chat/completions":
@@ -1237,13 +1853,18 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
                 "POST /nodes/{node_id}/prompt",
                 "POST /nodes/{node_id}/action",
                 "POST /task",
+                "POST /tasks",
+                "POST /tasks/{task_id}/stop",
+                "GET /tasks",
                 "GET /tasks/{task_id}",
+                "GET|POST /api/* aliases for widget compatibility",
                 "GET /capabilities",
             ],
             "integration": {
                 "source_of_truth": "horc CLI",
                 "horc_path": settings.horc_path,
                 "task_submission": "official Hermes API server Runs API",
+                "task_events": "Hermes Runs API event stream copied into GET /tasks/{task_id}",
                 "raw_shell_passthrough": False,
                 "agent_core_patches": False,
             },
@@ -1256,6 +1877,8 @@ class SpaceUIHandler(BaseHTTPRequestHandler):
                 "capabilities": "GET /v1/capabilities",
                 "run_create": "POST /v1/runs",
                 "run_status": "GET /v1/runs/{run_id}",
+                "run_events": "GET /v1/runs/{run_id}/events",
+                "run_stop": "POST /v1/runs/{run_id}/stop",
             },
         }
         self._json_response(HTTPStatus.OK, success({"capabilities": payload}))
@@ -1355,10 +1978,146 @@ def validate_node_id(node_id: str | None) -> str:
     return normalized
 
 
+def normalize_bridge_path(path: str) -> str:
+    normalized = str(path or "/").rstrip("/") or "/"
+    if normalized == "/api":
+        return "/"
+    if normalized.startswith("/api/"):
+        return normalized[4:] or "/"
+    return normalized
+
+
+def rewrite_exhaust_slash_prompt(prompt: str, *, node: str, agents_root: Path) -> str:
+    text = str(prompt or "").strip()
+    if not text.startswith("/"):
+        return prompt
+
+    parts = text.split(maxsplit=1)
+    first = parts[0] if parts else ""
+    rest = parts[1] if len(parts) > 1 else ""
+    command = first.lstrip("/").split("@", 1)[0].strip().lower().replace("_", "-")
+    aliases = {
+        "exhaust": "/exhaust",
+        "exaust": "/exaust",
+        "bruteforce": "/bruteforce",
+    }
+    if command not in aliases:
+        return prompt
+
+    task = rest.strip()
+    if not task:
+        raise BridgeError(
+            "missing_exhaust_task",
+            f"Usage: {aliases[command]} <task>",
+        )
+
+    env = load_env_file(agents_root / "envs" / f"{node}.env")
+    if not coerce_bool(env.get("PLUGINS_EXHAUST"), default=False):
+        raise BridgeError(
+            "exhaust_plugin_disabled",
+            "The exhaust plugin is not enabled for this Hermes node.",
+            status=HTTPStatus.CONFLICT,
+            details={
+                "node_id": node,
+                "env_path": str(agents_root / "envs" / f"{node}.env"),
+                "required": "PLUGINS_EXHAUST=true",
+            },
+        )
+
+    runtime_path = Path(os.getenv("HERMES_SPACE_UI_EXHAUST_RUNTIME", "/local/plugins/exhaust/runtime.py"))
+    if runtime_path.exists():
+        previous: dict[str, str | None] = {}
+        for key in (
+            "PLUGINS_EXHAUST",
+            "PLUGINS_EXHAUST_MAX_ATTEMPTS",
+            "PLUGINS_EXHAUST_MAX_SECONDS",
+            "PLUGINS_EXHAUST_MAX_TOOL_NUDGES",
+            "PLUGINS_EXHAUST_PASSIVE",
+            "HERMES_EXHAUST_LOG",
+            "NODE_NAME",
+        ):
+            previous[key] = os.environ.get(key)
+            if key in env:
+                os.environ[key] = env[key]
+        os.environ["NODE_NAME"] = node
+        try:
+            spec = importlib.util.spec_from_file_location("hermes_space_ui_exhaust_runtime", runtime_path)
+            module = importlib.util.module_from_spec(spec) if spec and spec.loader else None
+            if module is not None:
+                spec.loader.exec_module(module)
+                build = getattr(module, "_build_exhaust_prompt", None)
+                if callable(build):
+                    return str(build(task, trigger=aliases[command]))
+        except Exception:
+            pass
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+    return build_exhaust_prompt_fallback(task, trigger=aliases[command])
+
+
+def build_exhaust_prompt_fallback(task: str, *, trigger: str) -> str:
+    cdp_url = str(os.getenv("HERMES_EXHAUST_BROWSER_CDP_URL", "http://127.0.0.1:9222") or "").strip()
+    needs_web_route = bool(
+        re.search(
+            r"\b(youtube|youtu\.be|video|browser|chrome|web|website|page|url|transcript|rss|search)\b",
+            str(task or ""),
+            re.IGNORECASE,
+        )
+    )
+    route_guidance = ""
+    if cdp_url and needs_web_route:
+        verify_url = cdp_url.rstrip("/") + "/json/version"
+        route_guidance = f"""
+Task-aware access route:
+- For YouTube or other IP/anti-bot blocked sites, evaluate the user Chrome CDP
+  reverse tunnel before declaring the web path blocked.
+- Verify the route: `curl -fsS {verify_url}`.
+- Connect route: `/browser connect {cdp_url}`. If slash commands are not
+  available in this API turn, use browser tools after `BROWSER_CDP_URL` or
+  `browser.cdp_url` is set to `{cdp_url}`.
+- Retry the site through browser tools using the user's Chrome session, not the
+  Oracle Cloud egress path.
+- Do not mark the browser/web path exhausted until this route has either been
+  attempted or proven unreachable.
+- If unreachable, ask the user to start or keep open the SSH reverse tunnel
+  window and report this exact missing route.
+"""
+    return f"""\
+HERMES_EXHAUST_MODE=active
+Trigger: {trigger}
+Task: {task}
+
+Run this task in structured capability-exhaustion mode.
+
+Before declaring failure, inspect the available capability surface, call
+exhaust_inventory early when available, build distinct fallback paths, try
+materially different safe routes, and stop only on success, safety/policy
+boundary, missing required input, missing credentials, or budget exhaustion.
+{route_guidance}
+
+Final answer format:
+- Outcome: success, partial, blocked, or exhausted
+- Attempts: concise ledger of distinct fallback paths
+- Result or artifact
+- Remaining blocker and cleanest next architecture/API/hook change if needed
+"""
+
+
+def slugify_for_prompt(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+    return slug or "generated-widget"
+
+
 def build_drop_to_copy_prompt(
     *,
     repo_url: str,
-    wish: str,
+    app_name: str,
+    instructions: str,
     dropped_text: str,
     space_id: str,
     build_widget_id: str,
@@ -1366,10 +2125,12 @@ def build_drop_to_copy_prompt(
     frontier_provider = os.getenv("HERMES_SPACE_UI_DROP_TO_COPY_PROVIDER", "openai-codex")
     frontier_model = os.getenv("HERMES_SPACE_UI_DROP_TO_COPY_MODEL", "gpt-5.5")
     reasoning_effort = os.getenv("HERMES_SPACE_UI_DROP_TO_COPY_REASONING_EFFORT", "xhigh")
+    widget_id = slugify_for_prompt(app_name)
+    app_name_json = json.dumps(app_name)
     enforced = """using `/local/plugins/hermes-space-ui/`
-check `Hermes OS` space with within 2 widgets
-Using plugins best pratices either for `hermes-agent` from `/local/plugins/` as for `space-agent` from `/local/plugins/hermes-space-ui/plugins-interface/`. which uses the plugins interfaces of both as bridge to apply our evolutions in order to be future-proof and prevent the evolution to break on hermes-agent/space-agent version updates
-if you think some blockage/limitations/wall in the built-in plugin interfaces, you should tell us so we can foward maintainers about it and create the solution and PR. only if 100% necessary, so explore the plugin interfaces carefully"""
+check `Hermes OS` space
+Using plugins best practices either for `hermes-agent` from `/local/plugins/` as for `space-agent` from `/local/plugins/hermes-space-ui/plugin-interface/`, using the plugin interfaces of both as a bridge to apply evolutions in a future-proof way and avoid breakage on hermes-agent/space-agent version updates.
+If you find a blockage, limitation, or wall in the built-in plugin interfaces, state it so maintainers can receive the smallest generic solution and PR. Only do this if necessary after exploring the plugin interfaces carefully."""
     return f"""
 {enforced}
 
@@ -1380,7 +2141,8 @@ Drop to Copy job:
 - Target Space Agent space id: {space_id}
 - Build/status widget id already created by the UI: {build_widget_id or "not provided"}
 - GitHub repo or URL: {repo_url or "not provided"}
-- User wish: {wish}
+- App name to create: {app_name}
+- User instructions: {instructions}
 
 Dropped input:
 ```text
@@ -1389,10 +2151,12 @@ Dropped input:
 
 Mission:
 1. Inspect the target repository and `/local/plugins/hermes-space-ui/` before proposing changes.
-2. Use Space Agent customware seams only: `space.bundle.yaml`, `ext/html`, `ext/js`, `ext/skills`, seeded widget YAML, `space.spaces.*`, and `space.current.*`.
-3. Use Hermes Agent through official plugin/bridge interfaces only. Do not import Hermes Agent internals, patch Space Agent core files, or write directly into gateway state.
-4. Build a usable widget for the current Hermes OS space. Keep the implementation self-contained and future-proof against Hermes Agent and Space Agent version updates.
-5. If a required capability is missing from the current plugin interfaces, state the exact missing seam and the smallest generic upstream PR that would unblock it.
+2. Create a new installable Space Agent widget/app named exactly `{app_name}`. Use a widget id derived from that name in short kebab-case.
+3. Use Space Agent customware seams only: `space.bundle.yaml`, `ext/html`, `ext/js`, `ext/skills`, seeded widget YAML, `space.spaces.*`, and `space.current.*`.
+4. Treat the repo as source inspiration and interface context. Do not try to install a Hermes dashboard plugin directly into Space Agent unless the plugin interface explicitly supports it.
+5. Use Hermes Agent through official plugin/bridge interfaces only. Do not import Hermes Agent internals, patch Space Agent core files, or write directly into gateway state.
+6. Build a usable widget for the current Hermes OS space. Keep the implementation self-contained and future-proof against Hermes Agent and Space Agent version updates.
+7. If a required capability is missing from the current plugin interfaces, state the exact missing seam and the smallest generic upstream PR that would unblock it.
 
 Output contract:
 - First provide a concise implementation note and any interface limitations.
@@ -1402,8 +2166,8 @@ Output contract:
 {{
   "schema": "hermes.space_ui.generated_widget.v1",
   "widget": {{
-    "widgetId": "short-kebab-id",
-    "name": "Human Name",
+    "widgetId": "{widget_id}",
+    "name": {app_name_json},
     "cols": 5,
     "rows": 5,
     "metadata": {{ "icon": "extension" }},
@@ -1416,6 +2180,9 @@ Renderer requirements:
 - The renderer must be a complete async JavaScript function source string.
 - It must use stable skeleton sizing and update text/values in place for polling surfaces.
 - It must call the Hermes Space UI bridge through `space.fetchExternal(...)` when host or node data is needed.
+- Use the literal bridge URL shown in this prompt or the `__HERMES_SPACE_URL__` placeholder only; Drop to Copy will replace placeholders before install.
+- Use only documented bridge paths: `GET /resources`, `GET /nodes`, `GET /nodes/{node_id}`, `POST /task` or `POST /tasks`, and `GET /tasks/{task_id}`. Do not invent `/api/...` paths; compatibility aliases exist only as a fallback.
+- If the widget submits future build/edit prompts, wrap the user's text with explicit instructions to update the named widget/app in the `{space_id}` space through plugin-interface-safe files/APIs, and include `target_node: "orchestrator"`, `provider: "{frontier_provider}"`, `model: "{frontier_model}"`, `reasoning_effort: "{reasoning_effort}"`, and `timeout_sec: 900` in the bridge request body.
 - It must not require external build tooling to run inside Space Agent.
 - Keep UI compact, accessible, and consistent with the Hermes OS widgets.
 """.strip()
@@ -2093,6 +2860,32 @@ def node_activity_snapshot(settings: BridgeSettings, node_id: str) -> dict[str, 
     return payload
 
 
+def activity_from_running_task(task: dict[str, Any]) -> dict[str, Any]:
+    updated_ts = parse_iso_timestamp(task.get("updated_at")) or parse_iso_timestamp(task.get("created_at"))
+    age = max(0.0, time.time() - updated_ts) if updated_ts else None
+    prompt = str(task.get("prompt") or "")
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    return {
+        "llm_active": True,
+        "state": "working",
+        "confidence": "exact",
+        "source": "hermes-space-ui task store",
+        "last_signal_at": iso_timestamp(updated_ts) if updated_ts else "",
+        "last_signal_age_sec": round(age, 1) if age is not None else None,
+        "session_id": str(task.get("task_id") or ""),
+        "platform": "space-ui",
+        "model": str(result.get("model_request") or ""),
+        "api_calls": 0,
+        "total_tokens": 0,
+        "reason": "running Space UI task",
+        "task_id": str(task.get("task_id") or ""),
+        "run_id": str(result.get("run_id") or ""),
+        "run_status": str(result.get("run_status") or ""),
+        "last_event": str(result.get("last_event") or ""),
+        "task_preview": prompt[:160],
+    }
+
+
 def read_activity_status_file(
     settings: BridgeSettings,
     node_id: str,
@@ -2561,6 +3354,47 @@ def normalize_chat_content(content: Any) -> str:
     if content is None:
         return ""
     return str(content).strip()
+
+
+def run_options_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    options: dict[str, Any] = {}
+    provider = str(payload.get("provider") or "").strip()
+    if provider:
+        options["provider"] = provider
+    model = str(payload.get("model") or "").strip()
+    if model:
+        options["model"] = model
+    reasoning_effort = str(payload.get("reasoning_effort") or "").strip()
+    if reasoning_effort:
+        options["reasoning_effort"] = reasoning_effort
+        options["reasoning"] = {"effort": reasoning_effort}
+    timeout_raw = payload.get("timeout_sec")
+    if timeout_raw is None:
+        timeout_raw = payload.get("timeout")
+    if timeout_raw is not None:
+        try:
+            options["timeout_sec"] = max(1.0, float(timeout_raw))
+        except (TypeError, ValueError):
+            pass
+    return options or None
+
+
+def wants_async_task(payload: dict[str, Any]) -> bool:
+    return any(
+        coerce_bool(payload.get(key), default=False)
+        for key in ("async", "background", "stream_events")
+    )
+
+
+def run_timeout_sec(run_options: dict[str, Any] | None, fallback: float) -> float:
+    if isinstance(run_options, dict):
+        raw = run_options.get("timeout_sec") or run_options.get("timeout")
+        if raw is not None:
+            try:
+                return max(1.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+    return fallback
 
 
 def load_env_file(path: Path) -> dict[str, str]:
