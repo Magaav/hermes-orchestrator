@@ -12,6 +12,18 @@ Use these rules before evolving this project:
 - If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
 - Treat `/local/plugins/hermes-space-ui` as a Hermes Orchestrator plugin that may ship Space Agent modules, not as permission to patch Space Agent internals directly.
 - Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
+- For long Space OS evolution runs, keep resumability as a first-class deliverable:
+  update the active roadmap before or during each major direction change, commit
+  stable checkpoints, and leave exact next actions in docs before context gets
+  blurry.
+- If context is lost or compacted, resume by reading this README, then
+  `/local/docs/roadmap/README.md`, then
+  `/local/docs/roadmap/space-os/README.md`, then the relevant plugin README.
+  Inspect runtime/codeflow again before changing source, because current code
+  truth wins over remembered intent.
+- During extended implementation, chain work in small verified steps:
+  inspect, document the finding, implement the smallest plugin-owned change,
+  verify, sync docs, commit, then continue from the roadmap's next action.
 - End every final agent response with a concrete proposed next step for the
   agent to run next. Keep it short and actionable so work can resume quickly.
 
