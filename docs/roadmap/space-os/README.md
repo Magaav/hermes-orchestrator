@@ -6,9 +6,12 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
 
 - Hermes Orchestrator is the host-level control plane. `horc` and the clone manager remain the operational source of truth for node lifecycle, logs, backups, updates, and Guard integration.
 - `/local/plugins/hermes-space-ui` is an external Hermes Orchestrator plugin. It starts a local Space Agent PWA on port `8787`, starts a Hermes bridge on port `8790`, and translates Space Agent UI actions into safe Hermes Orchestrator operations.
-- Hermes Space UI currently seeds Space Agent customware/module content from `plugin-interface/plugins/` into the generated customware root under `/local/plugins/hermes-space-ui/state/space-customware`.
+- The standalone app/client surface has been pruned from this repo. Product UI and client work must stay under `/local/plugins`, with `/local/plugins/hermes-space-ui` as the active Space UI path.
+- Hermes Space UI currently seeds Space Agent customware/module content into the generated customware root under `/local/plugins/hermes-space-ui/state/space-customware`. The launcher syncs `space-agent-brand` to `L1/_all/mod/hermes/space-agent-brand`, syncs `hermes-fleet` to `L1/_all/mod/hermes/fleet`, writes the Hermes Space UI skill under `L1/_all/mod/hermes/space_ui`, and seeds the `hermes-os` space, widgets, and LLM config under `L2/user`.
+- `plugin-interface/plugins/component-context-menu` is source-owned and upstreamable, but it is not currently synced by the Hermes Space UI launcher. Decide whether to wire it into startup, install it manually through a Space Agent module seam, or keep it as reference source before treating it as active runtime behavior.
 - Space Agent already has a layered module/customware model (`L0`, `L1`, `L2`) and an Admin > Modules surface. The current local evidence shows module list/remove/info/install APIs exist, while richer Hermes-specific module settings and enable/disable behavior still need generic seams before relying on that UI as a full management surface.
 - Space Agent includes a browser surface module with `<x-browser>`. The current PWA/browser path is not a completed arbitrary browser-inside-browser engine without iframe. Native/Electron paths are more capable, and the PWA path must not be described as full browser parity today.
+- Current Hermes Space UI limitations are documented in `/local/plugins/hermes-space-ui/README.md`: no websocket/SSE log streaming yet, task submission requires a reachable Hermes API server, auth is a single shared token, bridge policy is a fixed allowlist, and rollback-aware planning is future work.
 
 ## Future Intent
 
@@ -37,13 +40,16 @@ The gate stays complete only when:
 
 ## Next Actions
 
-1. Inventory Space Agent module seams and identify the smallest generic additions needed for module settings, enable/disable state, widget runtime registration, and performance telemetry.
-2. Run a focused WASM browser-engine feasibility spike before product implementation:
+1. Freeze the product-surface rule in every new change: no standalone app/client tree and no script-owned UI gateway. Product UI belongs under `/local/plugins`, currently through Hermes Space UI.
+2. Inspect Space Agent module APIs, Admin > Modules code, and Customware Bundle Interface behavior read-only from the generated checkout. Document exact existing seams before changing Hermes Space UI code.
+3. Decide the current status of `component-context-menu`: startup-synced runtime bundle, manual module install candidate, upstream PR fixture, or retired reference.
+4. Draft the smallest Space Agent seam proposal for module settings, enable/disable state, widget runtime registration, and performance telemetry. Prefer an upstreamable PR shape before local patching.
+5. Run a focused WASM browser-engine feasibility spike before product implementation:
    - load and render one arbitrary external site without iframe as the primary runtime
    - render one generated Hermes app in a widget sandbox
    - expose inspectable state and input control to Hermes
-3. If the spike fails the stop/go criteria, revisit architecture before building the cloud product surface.
-4. If the spike passes, design the Space OS cloud/PWA client plan around verified Space Agent seams, not core patches.
+6. If the spike fails the stop/go criteria, revisit architecture before building the cloud product surface.
+7. If the spike passes, design the Space OS cloud/PWA client plan around verified Space Agent seams, not core patches.
 
 ## Stop/Go Criteria
 
@@ -69,7 +75,8 @@ When context is lost, read these in order:
 3. This file.
 4. `/local/plugins/hermes-space-ui/README.md`.
 5. `/local/plugins/hermes-space-ui/plugin-interface/README.md`.
-6. `/local/plugins/hermes-space-ui/state/README.md`.
+6. `/local/plugins/hermes-space-ui/plugin-interface/plugins/README.md`.
+7. `/local/plugins/hermes-space-ui/state/README.md`.
 
 Then inspect current code before changing docs or implementation. Runtime/codeflow truth wins over stale documentation.
 
@@ -77,5 +84,6 @@ Then inspect current code before changing docs or implementation. Runtime/codefl
 
 - Do not let Space OS work become a private fork by default.
 - Do not patch Hermes Agent or Space Agent core for product-specific behavior when a plugin/module/component seam can do the job.
+- Do not reintroduce standalone product UI outside `/local/plugins`; Hermes Space UI is the current product client path.
 - Do not describe future PWA, cloud login, or WASM browser behavior as shipped until it exists in code and has been verified.
 - Keep the roadmap honest enough that a future agent can recover direction without re-litigating old assumptions.
