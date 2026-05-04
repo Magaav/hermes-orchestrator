@@ -16,6 +16,9 @@
 - `install.sh`: bootstrap installer for orchestrator host setup.
 - `backup/backup_nodes_to_gdrive.sh`: compatibility wrapper to private backup script.
 - `backup/restore_hermes_state.sh`: compatibility wrapper to private restore script.
+- `guard/run.py`: host doctor loop with bounded restart remediation.
+- `openviking/openviking_adapter.py`: stdlib OpenViking memory/retrieval adapter.
+- `openviking/openviking_doctor.py`: operational OpenViking validation suite.
 - `ui-gateway/run.py`: local HTTP/SSE gateway for the WASM UI experiment.
 
 ## Runtime Topology Synergy
@@ -24,7 +27,7 @@
   - `/local/scripts/public` (read-only)
   - `/local/scripts/private` (read-write)
 - Node cron mounts come from `/local/crons/<node>` into `/local/agents/nodes/<node>/cron`.
-- Standalone plugins and optional legacy plugin hooks call this tree for lifecycle and backup automation.
+- Standalone plugins call this tree for lifecycle and backup automation.
 
 ## Common Commands
 

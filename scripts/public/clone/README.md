@@ -12,6 +12,18 @@ CLI wrappers.
   restore, update, governance prompt generation, and Space UI helper commands.
 - `tests/`: focused tests for governance prompt and gateway-state behavior.
 
+## Wrapper Behavior
+
+- Omitted node names default to `orchestrator` unless `HERMES_DEFAULT_NODE` is
+  set.
+- `hord.sh` and `clone.sh` are compatibility aliases that exec `horc.sh`.
+- `horc space start|stop|status` is implemented in the wrapper and delegates to
+  `/local/plugins/hermes-space-ui/scripts/*`.
+- `delete` prompts interactively unless `--yes` or `HERMES_HORC_ASSUME_YES=1`
+  is used.
+- `purge-node` is intentionally two-step: request first, then confirm with the
+  generated request id and token.
+
 ## Documentation Sync
 
 When CLI behavior, node lifecycle semantics, env handling, plugin bootstrap, or

@@ -11,16 +11,21 @@
 ## Lifecycle Commands
 
 ```bash
-horc start [name]
+horc start [name] [--image IMAGE]
 horc status [name]
 horc stop [name]
-horc restart [all|name]
+horc restart [all|name] [--image IMAGE]
 horc delete [name] [--yes]
+horc purge-node <name>
+horc purge-node confirm <request-id> --token TOKEN
 ```
 
 `horc delete <name>` asks for confirmation, removes the node container, and deletes
 `/local/agents/envs/<name>.env` plus `/local/agents/nodes/<name>/`. Shared node data,
 cron, and logs are preserved; use `horc purge-node <name>` for full cleanup.
+
+`horc purge-node <name>` is a destructive two-step cleanup. The first command
+creates a purge request; the second confirms it with the request id and token.
 
 ## Logs Commands
 
@@ -46,9 +51,24 @@ horc update all [--force]
 horc update node <name> [--force]
 ```
 
+## Space Agent UI Commands
+
+```bash
+horc space start
+horc space stop
+horc space status
+```
+
+`horc space start` starts the generated Space Agent checkout on
+`http://127.0.0.1:8787` and the Hermes Space UI bridge on
+`http://127.0.0.1:8790`. It refuses to run if legacy
+`/local/plugins/private/hermes-space-ui` state is present; use
+`/local/plugins/hermes-space-ui/state` instead.
+
 ## Notes
 
 - `horc restart` with no node restarts all nodes in orchestrator-first order.
+- `hord` and `clone.sh` are compatibility aliases for `horc`.
 - `horc backup` produces lean archives and includes a shared runtime seed for reseeding nodes during restore.
 - `horc restore` stops included running nodes, restores payloads, and restarts nodes that were running.
 - Every update refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch before reseeding nodes.
@@ -58,6 +78,14 @@ horc update node <name> [--force]
 - Nodes that were already running are restarted through the normal lifecycle; stopped nodes keep their stopped state.
 - `NODE_RESEED=true` in `/local/agents/envs/<node>.env` forces a one-shot reseed from `/local/hermes-agent` on the next start/restart.
 - Update reports are written under `/local/logs/update/<run-id>/`.
+
+## Wrapper Environment
+
+- `HERMES_DEFAULT_NODE`: default node when a command omits a name; default `orchestrator`.
+- `HERMES_CLONE_MANAGER_SCRIPT`: override path for `clone_manager.py`.
+- `HERMES_CLONE_PYTHON_BIN`: override Python runtime for the wrapper.
+- `HERMES_HORC_ASSUME_YES=1`: skip interactive `delete` confirmation.
+- `HERMES_SPACE_UI_STATE_DIR`: override Space UI state root for `horc space`.
 
 ## Governance
 

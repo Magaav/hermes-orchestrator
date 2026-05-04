@@ -24,7 +24,10 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
 
 Do not start major Hermes Space UI, WASM browser runtime, Space OS cloud client, or product-surface implementation until docs match the current software.
 
-The gate is complete only when:
+Gate status on 2026-05-04: frozen for the current repo snapshot. Future code
+CRUD must keep this gate true by updating docs in the same change.
+
+The gate stays complete only when:
 
 - Root, roadmap, plugin, script, and high-value folder docs describe current behavior.
 - Future claims are labeled as roadmap, future work, proposal, risk, or open question.
@@ -34,14 +37,13 @@ The gate is complete only when:
 
 ## Next Actions
 
-1. Finish the documentation sync gate.
-2. Verify `horc` docs, script docs, plugin docs, and Hermes Space UI docs match current codeflow.
-3. Inventory Space Agent module seams and identify the smallest generic additions needed for module settings, enable/disable state, widget runtime registration, and performance telemetry.
-4. Run a focused WASM browser-engine feasibility spike before product implementation:
+1. Inventory Space Agent module seams and identify the smallest generic additions needed for module settings, enable/disable state, widget runtime registration, and performance telemetry.
+2. Run a focused WASM browser-engine feasibility spike before product implementation:
    - load and render one arbitrary external site without iframe as the primary runtime
    - render one generated Hermes app in a widget sandbox
    - expose inspectable state and input control to Hermes
-5. If the spike fails the stop/go criteria, revisit architecture before building the cloud product surface.
+3. If the spike fails the stop/go criteria, revisit architecture before building the cloud product surface.
+4. If the spike passes, design the Space OS cloud/PWA client plan around verified Space Agent seams, not core patches.
 
 ## Stop/Go Criteria
 

@@ -38,14 +38,18 @@ These are the minimum practical values for a usable node profile.
 - `DISCORD_SERVER_ID` (preferred) or `DISCORD_GUILD_ID`
 - Optional: `DISCORD_ROLE_ACL_SAFE_COMMANDS` (CSV, default `status,help,usage,provider`)
 - Optional: `DISCORD_ROLE_ACL_FALLBACK_HIERARCHY` (CSV role-name fallback when live role fetch is unavailable)
-- Required contract file: `/local/plugins/private/discord/acl/<node>_acl.json`
+- Active contract file after bootstrap:
+  `/local/workspace/plugins/discord-slash-commands/cache/governance/acl.json`
 
 ### Discord channel ACL + private model catalog
-- Required contract file: `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
-- Required contract file: `/local/plugins/private/discord/models/<node>_models.json`
+- Active contract files after bootstrap:
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/channel_acl.yaml`
+  - `/local/workspace/plugins/discord-slash-commands/cache/governance/models.json`
+- The canonical `discord-slash-commands` bootstrap can import existing legacy
+  files from `/local/plugins/private/discord/...` when present, then mirrors the
+  active runtime state into the node-local cache.
 - `mode:specific` channel policies must reference a valid `model_key` from the private models file.
 - Channel policies may set `label` (for example `loja1`) for deterministic per-channel automation tagging.
-- Prestart validates this contract via `discord_acl_contract_check`; failure blocks update promotion.
 
 ### LLM credentials (pick at least one provider path)
 | Provider path | Minimum variables |
@@ -56,80 +60,64 @@ These are the minimum practical values for a usable node profile.
 
 If provider credentials are missing, the node may boot but fail at first model call.
 
-## Native Canva Plugin
+## Legacy/External Plugin Flags
 
-Use the Hermes-native Canva plugin contract:
+These flags may still appear in node env files and older bootstrap paths, but
+there is no current source-owned package under `/local/plugins` for Canva,
+Browser Plus, Discord Governance, or Wiki Engine in this repo snapshot. Treat
+them as legacy/external compatibility flags until a source-owned package exists
+or the docs are updated with verified runtime ownership.
+
+### Canva
 
 - `PLUGIN_CANVA=true|false`
 - `CANVA_REFRESH_TOKEN`
 - `CANVA_CLIENT_ID`
 - `CANVA_CLIENT_SECRET`
 
-Behavior:
-- `PLUGIN_CANVA=true` tells orchestrator bootstrap to sync the canonical plugin into the node runtime at `./.hermes/plugins/canva`.
-- Bootstrap also enables `HERMES_ENABLE_PROJECT_PLUGINS=true` and ensures `canva` exists in Hermes `config.yaml` `plugins.enabled`.
 - Exported Canva files are written under `/workspace/canva/`.
-- If `PLUGIN_CANVA=true` and any Canva secret is missing, bootstrap fails clearly.
 
-## Native Browser Plus Plugin
-
-Use the Hermes-native Browser Plus plugin contract:
+### Browser Plus
 
 - `PLUGIN_BROWSER_PLUS=true|false`
 - `BROWSER_USE_API_KEY` optional, only needed for Browser Use cloud/profile tools
 
-Behavior:
-- `PLUGIN_BROWSER_PLUS=true` tells orchestrator bootstrap to sync the canonical plugin into the node runtime at `./.hermes/plugins/browser-plus`.
-- Bootstrap also enables `HERMES_ENABLE_PROJECT_PLUGINS=true` and ensures `browser-plus` exists in Hermes `config.yaml` `plugins.enabled`.
 - Local real-browser CDP mode does not require any additional secret.
 - Browser Use cloud helpers become available automatically when `BROWSER_USE_API_KEY` is present.
 
-## Native Discord Governance Plugin
-
-Use the Hermes-native Discord governance plugin contract:
+### Discord Governance
 
 - `PLUGIN_DISCORD_GOVERNANCE=true|false`
+- Deprecated migration alias for the active `discord-slash-commands` package.
 
-Behavior:
-- `PLUGIN_DISCORD_GOVERNANCE=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/discord-governance`.
-- Existing private contract files remain unchanged:
-  - `/local/plugins/private/discord/acl/<node>_acl.json`
-  - `/local/plugins/private/discord/hooks/channel_acl/config.yaml`
-  - `/local/plugins/private/discord/models/<node>_models.json`
-- Project-plugin bootstrap syncs the plugin into `./.hermes/plugins/discord-governance`.
-- Hermes loads `/acl` through `ctx.register_command(...)`.
-- Slash-command authorization runs through Hermes `command:*` hooks.
-- Channel normalization and routing run through Hermes-native plugin hooks, not `./.hermes/hooks/...`.
+## Discord Slash Commands Plugin
 
-## Native Discord Slash Commands Plugin
-
-Use the Hermes-native Discord slash-commands plugin contract:
+Use the source-owned Discord slash-commands plugin contract:
 
 - `PLUGIN_DISCORD_SLASH_COMMANDS=true|false`
 
 Behavior:
-- `PLUGIN_DISCORD_SLASH_COMMANDS=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/discord-slash-commands`.
-- Project-plugin bootstrap syncs the plugin into `./.hermes/plugins/discord-slash-commands`.
-- Hermes registers `/metricas` through `ctx.register_command(...)`.
+- `PLUGIN_DISCORD_SLASH_COMMANDS=true` enables the canonical host package at
+  `/local/plugins/discord-slash-commands`.
+- `PLUGIN_DISCORD_GOVERNANCE=true` is still accepted as a deprecated alias.
+- Active slash/governance runtime state is node-local under
+  `/local/workspace/plugins/discord-slash-commands/cache`.
 - No Discord slash bridge runtime is synced into `./.hermes/hooks/...`.
 
-## Native Wiki Engine Plugin
-
-Use the Hermes-native wiki-engine plugin contract:
+### Wiki Engine
 
 - `PLUGIN_WIKI_ENGINE=true|false`
+- Shared wiki runtime state is canonical at `/local/wiki`.
 
-Behavior:
-- `PLUGIN_WIKI_ENGINE=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/wiki-engine`.
+## Final Response Changed Files Plugin
 
-## Native Final Response Changed Files Plugin
-
-Use the Hermes-native final-response changed-files plugin contract:
+Use the source-owned final-response changed-files plugin contract:
 
 - `PLUGIN_FINAL_RESPONSE_FILES_CHANGED=true|false`
 
 Behavior:
-- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED=true` is the intended enable flag for the native plugin package at `./.hermes/plugins/final-response-changed-files`.
+- `PLUGIN_FINAL_RESPONSE_FILES_CHANGED=true` enables the source-owned package at
+  `/local/plugins/final-response-changed-files`.
 - The footer contract still includes:
   - created files
   - deleted files

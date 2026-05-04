@@ -15,7 +15,9 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
 
 - Standalone plugin roots hold reusable hook/runtime code and remain fully versioned.
 - Mutable runtime state lives in node-local plugin caches or gitignored plugin state directories.
-- Legacy public/private roots are still recognized when present, but new active plugin ownership should prefer standalone package roots.
+- Compatibility/migration inputs are allowed only when a plugin documents them;
+  new active plugin ownership should use standalone package roots plus
+  package-named node-local caches.
 
 ## How Hermes-Orchestrator Uses It
 
@@ -83,8 +85,10 @@ The ACL is fail-closed:
 ## Synergy With Other Modules
 
 - Scripts in `/local/scripts/public` orchestrate plugin startup, lifecycle, and backup flows.
-- `horc` backup/restore keeps private plugin runtime state restorable across VM rebuilds.
-- Worker nodes consume public/private plugin mounts according to orchestrator topology.
+- `horc` backup/restore keeps node-local plugin caches and documented gitignored
+  plugin state restorable across VM rebuilds.
+- Worker nodes consume standalone plugin packages and node-local caches
+  according to orchestrator topology.
 
 ## Related Docs
 

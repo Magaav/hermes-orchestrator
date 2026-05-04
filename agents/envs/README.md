@@ -89,17 +89,17 @@ All plugin toggles and their direct dependent variables live under this subsecti
 
 | Variable | Type | Expects | Default when missing | Notes |
 |---|---|---|---|---|
-| `PLUGIN_CANVA` | `bool` | `true` or `false` | `false` | Enables the native Canva plugin. |
+| `PLUGIN_CANVA` | `bool` | `true` or `false` | `false` | Legacy/external Canva feature flag; no source-owned `/local/plugins/canva` package exists in this repo snapshot. |
 | `CANVA_REFRESH_TOKEN` | `string` | refresh token | none | Required when `PLUGIN_CANVA=true`. |
 | `CANVA_CLIENT_ID` | `string` | client id | none | Required when `PLUGIN_CANVA=true`. |
 | `CANVA_CLIENT_SECRET` | `string` | client secret | none | Required when `PLUGIN_CANVA=true`. |
-| `PLUGIN_BROWSER_PLUS` | `bool` | `true` or `false` | `false` | Enables the Browser Plus plugin. |
+| `PLUGIN_BROWSER_PLUS` | `bool` | `true` or `false` | `false` | Legacy/external Browser Plus feature flag; no source-owned `/local/plugins/browser-plus` package exists in this repo snapshot. |
 | `BROWSER_USE_API_KEY` | `string` | API key | unset | Optional Browser Use cloud credential for Browser Plus helpers. |
-| `PLUGIN_DISCORD_GOVERNANCE` | `bool` | `true` or `false` | `false` | Enables the native Discord governance plugin. |
-| `PLUGIN_DISCORD_SLASH_COMMANDS` | `bool` | `true` or `false` | `false` | Enables the native Discord slash-commands plugin. |
+| `PLUGIN_DISCORD_GOVERNANCE` | `bool` | `true` or `false` | `false` | Deprecated alias accepted by the canonical `discord-slash-commands` package. |
+| `PLUGIN_DISCORD_SLASH_COMMANDS` | `bool` | `true` or `false` | `false` | Enables the source-owned `/local/plugins/discord-slash-commands` package. |
 | `PLUGIN_WIKI` | `bool` | `true` or `false` | `false` | New canonical wiki flag for project docs. Runtime still contains legacy `NODE_WIKI_ENABLED` references and native `PLUGIN_WIKI_ENGINE` references. |
 | `PLUGIN_WIKI_ENGINE` | `bool` | `true` or `false` | `false` | Current native runtime key still present in bootstrap/plugin docs. Treat as legacy-to-be-converged toward `PLUGIN_WIKI`. |
-| `PLUGIN_FINAL_RESPONSE_FILES_CHANGED` | `bool` | `true` or `false` | `false` | Enables the changed-files footer plugin. |
+| `PLUGIN_FINAL_RESPONSE_FILES_CHANGED` | `bool` | `true` or `false` | `false` | Enables the source-owned `/local/plugins/final-response-changed-files` package. |
 | `PLUGIN_OPENVIKING` | `bool` | `true` or `false` | `false` | Canonical naming target only. Runtime currently still reads legacy `OPENVIKING_ENABLED`, and the feature is not fully implemented yet. |
 | `OPENVIKING_ENDPOINT` | `string` | URL | unset | OpenViking endpoint. |
 | `OPENVIKING_ACCOUNT` | `string` | account name | node name | Optional account override. |

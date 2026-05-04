@@ -12,13 +12,14 @@ Plugins are split between reusable framework capabilities and deployment-local r
 - `exhaust/`: canonical host plugin package for exhaust-mode behavior.
 - `final-response-changed-files/`: canonical host plugin package for final response changed-file summaries.
 - `hermes-space-ui/`: canonical host plugin package for Space Agent UI integration; mutable local state lives under `hermes-space-ui/state/`.
-- `public/`: optional legacy git-tracked plugin code, hooks, scripts, and templates when present.
-- `private/`: optional legacy local runtime payloads when present; this path is not the active home for new mutable plugin state.
 
 ## Hermes-Orchestrator Integration
 
 - Worker nodes mount standalone plugin roots directly when enabled.
-- Legacy public/private plugin roots are mounted only when content is present.
+- Gitignored compatibility/migration state may still be read by specific
+  bootstraps when documented by that plugin, but new plugin code and mutable
+  state should live in the standalone package or node-local cache named by that
+  package.
 - `horc` lifecycle and backup flows preserve node-local plugin caches and gitignored plugin state.
 - Script feature modules under `/local/scripts` and plugin hooks here are designed to work together.
 
