@@ -308,6 +308,7 @@ PY
   local conf_root="${CUSTOMWARE_PATH}/L2/user/conf"
   local skill_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/space_ui/ext/skills/hermes-space-ui"
   local brand_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/space-agent-brand"
+  local component_context_menu_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/space/component-context-menu"
   local fleet_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/fleet"
   local performance_hud_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/performance-hud"
   local fleet_seed_root="${PLUGIN_DIR}/plugin-interface/plugins/hermes-fleet/space-seed/hermes-fleet"
@@ -316,6 +317,10 @@ PY
   sync_customware_bundle \
     "${PLUGIN_DIR}/plugin-interface/plugins/space-agent-brand" \
     "${brand_bundle_root}"
+
+  sync_customware_bundle \
+    "${PLUGIN_DIR}/plugin-interface/plugins/component-context-menu" \
+    "${component_context_menu_bundle_root}"
 
   sync_customware_bundle \
     "${PLUGIN_DIR}/plugin-interface/plugins/hermes-fleet" \

@@ -19,6 +19,7 @@ space_agent:
   hermes_bridge_private_port: 8790
   plugin_interface: plugin-interface/
   bundles:
+    - plugin-interface/plugins/component-context-menu
     - plugin-interface/plugins/hermes-fleet
     - plugin-interface/plugins/hermes-performance-hud
     - plugin-interface/plugins/space-agent-brand

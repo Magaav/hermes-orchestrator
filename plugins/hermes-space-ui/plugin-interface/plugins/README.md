@@ -9,8 +9,7 @@
   Space Agent as a plugin-owned diagnostics bundle.
 - `space-agent-brand/`: Hermes browser/PWA branding override.
 - `component-context-menu/`: upstreamable right-click widget context-menu
-  bundle. It is source-owned here, but it is not currently synced by
-  `start_space_agent.sh`.
+  bundle synced into Space Agent as `space/component-context-menu`.
 
 ## Change Rules
 

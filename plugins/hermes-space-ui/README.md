@@ -140,11 +140,11 @@ http://127.0.0.1:8790
 
 `horc space start` is intended for SSH-tunneled browser access from Windows. It
 frees port `8787`, starts Space Agent in `SINGLE_USER_APP=true`, syncs the
-Hermes brand, fleet, and performance HUD bundles into Space Agent customware,
-seeds a Hermes Fleet space/widget into Space Agent customware, seeds Space
-Agent's admin and onscreen agents to call OpenRouter directly by default,
-starts the Hermes bridge without requiring `HERMES_SPACE_UI_TOKEN`, and prints
-the tunnel target.
+Hermes brand, fleet, performance HUD, and component context-menu bundles into
+Space Agent customware, seeds a Hermes Fleet space/widget into Space Agent
+customware, seeds Space Agent's admin and onscreen agents to call OpenRouter
+directly by default, starts the Hermes bridge without requiring
+`HERMES_SPACE_UI_TOKEN`, and prints the tunnel target.
 
 Legacy state under `/local/plugins/private/hermes-space-ui` is deprecated with
 a hard error. Startup/status/stop commands will refuse to run until that legacy

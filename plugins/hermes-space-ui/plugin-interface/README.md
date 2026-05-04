@@ -13,7 +13,7 @@ The upstream Space Agent PR should stay generic. Hermes-specific behavior belong
 
 `bridge.js` is a tiny helper for bundle code that wants to register Hermes actions or sync external bridge state without touching private Space Agent runtime internals.
 
-`plugins/component-context-menu/` mirrors the upstreamable Component Context Menu bundle. Install it at `L1/<group>/mod/space/component-context-menu/` or `L2/<user>/mod/space/component-context-menu/` to add a right-click Space widget menu with a footer `Copy ID` action.
+`plugins/component-context-menu/` mirrors the upstreamable Component Context Menu bundle. Install it at `L1/<group>/mod/space/component-context-menu/` or `L2/<user>/mod/space/component-context-menu/` to add a right-click Space widget menu with a footer `Copy ID` action. `scripts/start_space_agent.sh` syncs it into `L1/_all/mod/space/component-context-menu` for Hermes Space UI.
 
 `plugins/space-agent-brand/` carries the Hermes-specific browser and PWA icon override. Install it at `L1/<group>/mod/hermes/space-agent-brand/`; `scripts/start_space_agent.sh` syncs it into the local customware root so it is reapplied after Space Agent checkout updates.
 

@@ -48,11 +48,10 @@ Hermes Space UI already uses these seams for:
 - `hermes/space-agent-brand`
 - `hermes/fleet`
 - `hermes/performance-hud`
+- `space/component-context-menu`
 
-Runtime note: `space/component-context-menu` is currently visible in the local
-generated customware root, but the Hermes Space UI launcher does not sync it.
-Treat that as residue from earlier experiments until it is either adopted into
-startup sync or pruned from generated runtime state.
+`space/component-context-menu` was adopted into launcher sync after the audit,
+so the generated runtime copy is now intentional Space UI behavior.
 
 ## Current Admin Modules UI
 
