@@ -27,6 +27,9 @@
   - `/local/scripts/private` (read-write)
 - Node cron mounts come from `/local/crons/<node>` into `/local/agents/nodes/<node>/cron`.
 - Standalone plugins call this tree for lifecycle and backup automation.
+- Product UI surfaces should not live here. Keep UI/client work under
+  `/local/plugins`, with `/local/plugins/hermes-space-ui` as the active Space UI
+  path.
 
 ## Common Commands
 
