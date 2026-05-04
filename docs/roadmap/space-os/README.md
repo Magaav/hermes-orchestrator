@@ -12,6 +12,7 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
 - `plugin-interface/plugins/component-context-menu` is source-owned and upstreamable. Hermes Space UI now syncs it to `L1/_all/mod/space/component-context-menu` so the right-click widget context menu is intentional runtime behavior instead of generated residue.
 - Space Agent already has a layered module/customware model (`L0`, `L1`, `L2`) and an Admin > Modules surface. The current local evidence shows module list/remove/info/install APIs exist, while richer Hermes-specific module settings and enable/disable behavior still need generic seams before relying on that UI as a full management surface.
 - Space Agent includes a browser surface module with `<x-browser>`. The current PWA/browser path is not a completed arbitrary browser-inside-browser engine without iframe. Native/Electron paths are more capable, and the PWA path must not be described as full browser parity today.
+- The browser-engine feasibility spike in `browser-engine-feasibility-spike.md` marks PWA-only local WASM arbitrary browsing as no-go for v1. The viable next path is a Hermes-controlled remote browser service rendered into a Space widget, native desktop browser execution, or generated-app-only WASM widgets.
 - Current Hermes Space UI limitations are documented in `/local/plugins/hermes-space-ui/README.md`: no websocket/SSE log streaming yet, task submission requires a reachable Hermes API server, auth is a single shared token, bridge policy is a fixed allowlist, and rollback-aware planning is future work.
 
 ## Future Intent
@@ -43,12 +44,15 @@ The gate stays complete only when:
 
 1. Keep the product-surface rule frozen in every new change: no standalone app/client tree and no script-owned UI gateway. Product UI belongs under `/local/plugins`, currently through Hermes Space UI.
 2. Use `space-agent-module-settings-seam-pr.md` as the upstreamable Space Agent PR plan for module settings, module-owned Admin actions, enable/disable state, widget runtime registration, and performance telemetry.
-3. Run a focused WASM browser-engine feasibility spike before product implementation:
-   - load and render one arbitrary external site without iframe as the primary runtime
-   - render one generated Hermes app in a widget sandbox
-   - expose inspectable state and input control to Hermes
-4. If the spike fails the stop/go criteria, revisit architecture before building the cloud product surface.
-5. If the spike passes, design the Space OS cloud/PWA client plan around verified Space Agent seams, not core patches.
+3. Build the smallest remote browser proof before cloud/PWA product implementation:
+   - backend starts one isolated Chromium page
+   - Space widget renders the page as pixels, not iframe
+   - widget sends click/type/scroll input to the backend
+   - backend returns screenshot plus DOM/accessibility-like snapshot to Hermes
+   - docs record latency, CPU, memory, and security boundaries
+4. Keep generated-app WASM sandbox work separate from arbitrary external web browsing.
+5. If the remote browser proof fails, stop Space OS browser product work again and revisit architecture before cloud/PWA rollout.
+6. Use `operator-actions.md` as the human-side checklist for domain routing, TLS, auth, space sync, and remote browser infrastructure.
 
 ## Stop/Go Criteria
 
@@ -74,10 +78,12 @@ When context is lost, read these in order:
 3. This file.
 4. `/local/docs/roadmap/space-os/space-agent-seams.md`.
 5. `/local/docs/roadmap/space-os/space-agent-module-settings-seam-pr.md`.
-6. `/local/plugins/hermes-space-ui/README.md`.
-7. `/local/plugins/hermes-space-ui/plugin-interface/README.md`.
-8. `/local/plugins/hermes-space-ui/plugin-interface/plugins/README.md`.
-9. `/local/plugins/hermes-space-ui/state/README.md`.
+6. `/local/docs/roadmap/space-os/browser-engine-feasibility-spike.md`.
+7. `/local/docs/roadmap/space-os/operator-actions.md`.
+8. `/local/plugins/hermes-space-ui/README.md`.
+9. `/local/plugins/hermes-space-ui/plugin-interface/README.md`.
+10. `/local/plugins/hermes-space-ui/plugin-interface/plugins/README.md`.
+11. `/local/plugins/hermes-space-ui/state/README.md`.
 
 Then inspect current code before changing docs or implementation. Runtime/codeflow truth wins over stale documentation.
 
