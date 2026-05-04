@@ -60,5 +60,5 @@ The built-in classifier emits:
 ## Consumers
 
 - Guard doctor loop
-- UI gateway activity endpoint
-- WASM UI agent timeline panel
+- Hermes Space UI activity surfaces
+- Hermes Space UI agent timeline panel

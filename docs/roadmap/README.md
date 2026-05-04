@@ -9,7 +9,6 @@ The goal is to keep the root README focused on current behavior while documentin
 | Track | Focus | Status | Link |
 | --- | --- | --- | --- |
 | `space-os` | Pre-evolution documentation sync, Space Agent module strategy, Colmeio PWA direction, and WASM browser-engine R&D gate | Docs gate frozen; module seam audit next | [docs/roadmap/space-os/README.md](space-os/README.md) |
-| `wasm-ui` | Visual control plane, Guard observability, agent timeline UX, high-performance analysis paths | Implementation in progress | [docs/roadmap/wasm-ui/README.md](wasm-ui/README.md) |
 | `guard` | Host doctor loop, canonical guard logs, Discord alerts, bounded restart remediation, activity timeline dependency | V1 implemented | [docs/roadmap/guard/README.md](guard/README.md) |
 | `wiki-engine` | Shared markdown-native wiki for durable orchestrator knowledge, proposal governance, graph routing, self-healing, and observability | Delivered | [docs/roadmap/wiki-engine/README.md](wiki-engine/README.md) |
 | `hermes-plugin-extension-points` | Upstream Hermes Agent API proposal for true Discord governance, Discord app-command plugins, and final-response transforms | Proposal drafted | [docs/roadmap/hermes-plugin-extension-points/README.md](hermes-plugin-extension-points/README.md) |
@@ -37,7 +36,8 @@ The UI and Guard tracks now have concrete V1 contracts, but both remain intentio
 
 - CLI remains the canonical control plane
 - Guard remains restart-only for automated remediation
-- UI remains an augmentation layer over host-side orchestration and logs
+- UI remains an augmentation layer over host-side orchestration and logs through
+  `/local/plugins/hermes-space-ui`
 - Space OS is not yet implemented as a cloud product; its roadmap is now past
   the initial docs sync gate and points next to Space Agent module seams and
   WASM browser-engine feasibility.

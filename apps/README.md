@@ -1,19 +1,19 @@
 # Apps
 
-`/local/apps` contains source-owned application surfaces that are part of
-Hermes Orchestrator but are not the core `horc` CLI.
+`/local/apps` is retained as a historical top-level application surface, but
+there are no active source-owned apps in this repo snapshot.
 
 ## Current Apps
 
-- `wasm-ui/`: experimental browser UI for fleet observability, Guard summaries,
-  agent activity views, and safe node operations.
+None.
 
 ## Boundaries
 
-Apps here should treat `horc`, `/local/scripts/public/clone/clone_manager.py`,
-and documented APIs as the operational source of truth. They should not become
-alternate lifecycle controllers with private behavior.
+New product UI work should live under `/local/plugins` unless there is a clear
+reason to add a separate application root. The active Space UI direction is
+`/local/plugins/hermes-space-ui`.
 
-The existing `wasm-ui` app is not the future Space OS WASM browser-engine
-runtime. That future work is tracked in `/local/docs/roadmap/space-os/README.md`
-until implemented.
+The retired browser UI demo is deprecated and must not be revived as the Space
+OS path. Future WASM/browser-runtime work is tracked in
+`/local/docs/roadmap/space-os/README.md` and should be implemented through
+Hermes Space UI plugin/module surfaces first.

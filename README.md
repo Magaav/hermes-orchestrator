@@ -345,7 +345,6 @@ Current roadmap themes:
 ## Roadmap Workspace
 - [Roadmap Index](docs/roadmap/README.md)
 - [Space OS Track](docs/roadmap/space-os/README.md)
-- [WASM UI Track](docs/roadmap/wasm-ui/README.md)
 - [Guard Track](docs/roadmap/guard/README.md)
 
 ## Long-Term Vision

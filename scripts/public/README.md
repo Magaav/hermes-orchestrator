@@ -19,7 +19,6 @@
 - `guard/run.py`: host doctor loop with bounded restart remediation.
 - `openviking/openviking_adapter.py`: stdlib OpenViking memory/retrieval adapter.
 - `openviking/openviking_doctor.py`: operational OpenViking validation suite.
-- `ui-gateway/run.py`: local HTTP/SSE gateway for the WASM UI experiment.
 
 ## Runtime Topology Synergy
 
