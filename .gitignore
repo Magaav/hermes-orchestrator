@@ -13,6 +13,7 @@ plugins/private/**
 !plugins/private/**/*.md
 plugins/hermes-space-ui/state/*
 !plugins/hermes-space-ui/state/.gitignore
+!plugins/hermes-space-ui/state/README.md
 scripts/private/**
 !scripts/private/.gitignore
 !scripts/private/**/*.md

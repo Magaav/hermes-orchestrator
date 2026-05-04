@@ -2,6 +2,10 @@
 
 Hybrid control-plane UI for Hermes Orchestrator.
 
+This app is the current experimental fleet/observability UI. It is not the
+future Space OS WASM browser-engine runtime; that separate R&D track is
+documented in `/local/docs/roadmap/space-os/README.md`.
+
 ## Architecture
 
 - Browser UI shell: `/local/apps/wasm-ui`

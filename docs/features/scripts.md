@@ -30,7 +30,7 @@ Node mount behavior:
 
 ## Synergy With Other Modules
 
-- Plugins in `/local/plugins/public` call scripts for startup patching, backup dispatch, and lifecycle orchestration.
+- Standalone plugins under `/local/plugins` call scripts for startup, backup dispatch, and lifecycle orchestration.
 - Node profiles in `/local/agents/envs/*.env` configure script-driven behavior.
 - `NODE_TIME_ZONE` from node env profiles aligns scheduler/runtime time (mapped to `HERMES_TIMEZONE`).
 - Backup and restore workflows include script-private state plus shared cron roots.

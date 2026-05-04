@@ -1,7 +1,25 @@
 # Hermes Orchestrator
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 ![Hermes Orchestrator Hero](docs/assets/hero.png)
-**Quick Links:** [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Feature Docs](#feature-docs) | [Command Reference](docs/commands/horc.md) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
+**Quick Links:** [Prompt Guidelines](#prompt-guidelines) | [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Feature Docs](#feature-docs) | [Command Reference](docs/commands/horc.md) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
+
+## Prompt Guidelines
+
+Use these rules before evolving this project:
+
+- Preserve compatibility with Hermes Agent mainline and Space Agent upstream. Future-proofing and version-update survivability are hard engineering goals.
+- Prefer extension layers before core edits: Hermes Agent changes should use plugins, skills, tools, hooks, or components; Space Agent changes should use modules, customware bundles, extension points, or components.
+- If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
+- Treat `/local/plugins/hermes-space-ui` as a Hermes Orchestrator plugin that may ship Space Agent modules, not as permission to patch Space Agent internals directly.
+- Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
+
+## Documentation Sync
+
+Documentation is part of the runtime contract. It must describe the current software, not intended behavior, unless the section is explicitly labeled as roadmap, proposal, future work, risk, or open question.
+
+When codeflow/runtime behavior and documentation disagree, inspect the current implementation and update the docs to match reality. If code is changed to match intended behavior, update the docs in the same change so they describe the new actual state. Any code CRUD change must include a docs-sync check before it is complete.
+
+Before major Hermes Space UI, WASM browser, Space OS, or cloud-client evolution, treat documentation sync as a gate: prune or relabel stale claims, record partial or broken capabilities honestly, and make sure the roadmap can answer "what should we do now?"
 
 A control plane for managing fleets of Hermes agents across infrastructure.
 
@@ -93,7 +111,7 @@ Every node receives a runtime contract on start/restart:
 This contract defines:
 - node role (`orchestrator` vs `worker`)
 - bootstrap mode (`NODE_STATE`)
-- shared framework ownership (`/local/plugins/public`, `/local/scripts/public`)
+- shared framework ownership (`/local/plugins/<standalone-plugin>`, `/local/scripts/public`)
 - collaboration protocol for plugin/framework changes
 - execution discipline for shared infrastructure changes
 Operational rule:
@@ -149,9 +167,7 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   ├── discord-slash-commands/ # canonical host plugin root for Discord slash UX/runtime ownership
 │   ├── exhaust/                # canonical host plugin root for exhaust-mode behavior
 │   ├── final-response-changed-files/ # canonical host plugin root for final response file summaries
-│   ├── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
-│   ├── public/   # optional legacy git-tracked plugin code root when present
-│   └── private/  # optional legacy local-only plugin runtime/config when present
+│   └── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
 ├── skills/       # canonical shared mutable skills pool
 ├── wiki/         # canonical shared mutable wiki root (gitignored)
 ├── datas/        # centralized private node data root (/local/datas/<node> mounted as /local/data)
@@ -196,13 +212,15 @@ Operational rule:
 - use it as the canonical answer to “which nodes are active?” and “which Hermes build is each node running?”
 - remove stale entries when a node is removed from the fleet
 
-## Public vs Private State
-**Public** folders are used as global shared features for hermes-orchestrator.
-**Private** folders are used as global shared features applyed for users runtime instance of hermes-orchestrator specificities.
+## Versioned vs Local State
+
+Versioned folders contain reviewed orchestrator code, docs, templates, and
+standalone plugin packages. Local state folders contain deployment-specific
+runtime data, generated checkouts, logs, caches, and secrets.
+
 - `/local/scripts/public` contains shared git-tracked orchestrator tooling.
 - `/local/scripts/private` contains local-only script state and entrypoints.
-- `/local/plugins/public` and `/local/plugins/private` are optional legacy plugin roots; worker containers mount them only when content is present.
-- `/local/plugins/discord-slash-commands` is a canonical git-tracked host plugin root that now owns Discord slash/governance runtime code outside the legacy `public/native` tree.
+- `/local/plugins/discord-slash-commands` is a canonical git-tracked host plugin root that now owns Discord slash/governance runtime code.
 - `/local/plugins/exhaust` and `/local/plugins/final-response-changed-files` are canonical git-tracked standalone plugin roots.
 - `/local/plugins/hermes-space-ui/state` is the canonical gitignored local state root for Space Agent checkout, customware, bridge logs, and task state. Do not use `/local/plugins/private/hermes-space-ui`.
 - Mutable plugin state should prefer node-local cache roots under `/local/agents/nodes/<node>/workspace/plugins/<plugin>/cache` and, from inside the node runtime, `/local/workspace/plugins/<plugin>/cache`.
@@ -306,7 +324,7 @@ Operational tip:
 - Run `horc backup all` before a fleet-wide update if you want fresh rollback artifacts.
 ## Versioning Hygiene
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/`, `wiki/`, `memory/`, `skills/`, `datas/`, `backups/`, (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/` (except `.gitignore` and parent `README.md`), `wiki/`, `memory/`, `skills/`, `datas/`, `backups/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy); the host `/local/hermes-agent` checkout stays on disk but out of git except `.gitkeep`.
 Commit only templates/examples:
@@ -322,9 +340,11 @@ Current roadmap themes:
 - Visual control plane with Guard observability and per-agent activity timelines.
 - Runtime guard monitoring, Discord alert routing, and bounded remediation.
 - Shared knowledge and collaboration workflows for larger multi-node operations.
+- Space OS pre-evolution sync, Space Agent module strategy, and WASM browser-engine R&D.
 
 ## Roadmap Workspace
 - [Roadmap Index](docs/roadmap/README.md)
+- [Space OS Track](docs/roadmap/space-os/README.md)
 - [WASM UI Track](docs/roadmap/wasm-ui/README.md)
 - [Guard Track](docs/roadmap/guard/README.md)
 

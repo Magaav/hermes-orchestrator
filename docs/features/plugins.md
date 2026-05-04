@@ -9,7 +9,6 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
   `/local/plugins/exhaust`,
   `/local/plugins/final-response-changed-files`,
   `/local/plugins/hermes-space-ui`
-- Optional legacy plugin roots: `/local/plugins/public`, `/local/plugins/private`
 - `hermes-space-ui` local runtime state: `/local/plugins/hermes-space-ui/state`
 
 ## Why It Is Segregated
@@ -20,17 +19,14 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
 
 ## How Hermes-Orchestrator Uses It
 
-- Legacy prestart and native plugin directories under `/local/plugins/public` are mounted only when present.
 - Canonical Discord slash runtime ownership now lives in `/local/plugins/discord-slash-commands`.
 - Mutable Discord slash/governance state for that plugin now lives per node under `/local/workspace/plugins/discord-slash-commands/cache`.
 - `hermes-space-ui` keeps its local Space Agent checkout, customware, logs, and task state under `/local/plugins/hermes-space-ui/state` instead of `/local/plugins/private/hermes-space-ui`.
 - Shared wiki runtime lives under `/local/wiki`.
 
-## Native Migration Surface
+## Plugin Enable Flags
 
-The staged native migration now packages feature ownership under `/local/plugins/public/native` and enables it per node from `/local/agents/envs/<node>.env`.
-
-Current native migration flags:
+Current plugin enable flags still present in node env files and bootstrap code:
 
 - `PLUGIN_DISCORD_GOVERNANCE`
 - `PLUGIN_DISCORD_SLASH_COMMANDS`
@@ -42,8 +38,7 @@ Current native migration flags:
 `PLUGIN_DISCORD_GOVERNANCE` is deprecated and only kept as a migration alias
 for the canonical slash plugin bootstrap.
 
-The native plugin directories under `/local/plugins/public/native` still provide
-the shared bootstrap framework, but active Discord slash ownership has moved:
+Active Discord slash ownership lives in the standalone plugin package:
 
 - `discord-slash-commands` now owns `/status`, `/acl`, `/slash`, `/faltas`, `/metricas`, slash reconciliation, and governance routing from `/local/plugins/discord-slash-commands`
 - `discord-governance` remains as deprecated legacy reference code and is no longer part of the active bootstrap chain

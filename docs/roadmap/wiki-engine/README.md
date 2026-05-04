@@ -1,6 +1,6 @@
 # `wiki-engine` Track
 
-Status: `Delivered`
+Status: `Delivered; implementation package path pruned`
 
 ## Purpose
 
@@ -23,8 +23,8 @@ The wiki is the durable knowledge layer for the orchestrator fleet:
 The implementation is anchored to the current repository rather than a greenfield design:
 
 1. Node lifecycle and mount topology are owned by `/local/scripts/public/clone/clone_manager.py`.
-2. Shared orchestrator plugin code lives under `/local/plugins/public/`.
-3. Hermes-core startup automation already runs through `/local/plugins/public/hermes-core/scripts/prestart_reapply.sh`.
+2. Shared wiki runtime state lives under `/local/wiki/`.
+3. Hermes runtime startup and mount behavior is coordinated by the orchestrator lifecycle code.
 4. Node opt-in configuration is already expressed through `/local/agents/envs/<node>.env`.
 5. Runtime node roots under `/local/agents/nodes/<node>/` are already treated as generated state.
 6. Roadmap docs live under `/local/docs/roadmap/`, while feature docs belong under `/local/docs/features/`.
@@ -32,23 +32,23 @@ The implementation is anchored to the current repository rather than a greenfiel
 
 ### Existing Patterns To Preserve
 
-- Keep shared operational logic in `/local/scripts/public` and `/local/plugins/public`.
+- Keep shared operational logic in `/local/scripts/public` and standalone plugin roots.
 - Keep runtime state outside tracked framework code.
 - Use deterministic filesystem contracts under `/local/agents/...`.
 - Prefer bootstrap/reapply scripts over brittle edits to upstream Hermes files.
 - Preserve disabled-by-default behavior through env gating.
 
-### Gap Analysis
+### Original Gap Analysis
 
-The repository currently has:
+At proposal time, the repository did not yet have:
 
-- no shared wiki runtime root
-- no wiki bootstrap/self-heal subsystem
-- no proposal registry/queue for durable knowledge changes
-- no markdown graph compiler
-- no query budgeting/compression layer
-- no wiki observability pipeline
-- no tracked feature docs for a knowledge engine
+- a shared wiki runtime root
+- a wiki bootstrap/self-heal subsystem
+- a proposal registry/queue for durable knowledge changes
+- a markdown graph compiler
+- a query budgeting/compression layer
+- a wiki observability pipeline
+- tracked feature docs for a knowledge engine
 
 ## Frozen Architecture
 
@@ -67,16 +67,10 @@ Derived, rebuildable artifacts:
 - health/lint/observability reports under `/local/wiki/meta/{health_reports,observability,self_heal}/`
 - generated routing indexes under `/local/wiki/indexes/`
 
-Reusable, versioned guidance:
+Reusable, versioned guidance belongs in `/local/docs/...` or a standalone
+plugin root if the wiki engine is reintroduced as active source-owned code.
 
-- markdown doctrine/templates under `/local/plugins/public/wiki/`
-
-Tracked implementation assets stay outside the live wiki root:
-
-- engine code under `/local/plugins/public/hermes-core/`
-- seed templates under `/local/plugins/public/hermes-core/wiki_seed/`
-- tests under `/local/plugins/public/hermes-core/tests/`
-- docs under `/local/docs/...`
+Tracked implementation assets must stay outside the live wiki root.
 
 The live wiki root is intentionally ignored by git because its evolving knowledge is deployment-specific.
 
@@ -112,37 +106,16 @@ Node integration:
 1. Workers mount the host wiki into the container at `/local/wiki` when `NODE_WIKI_ENABLED=true`.
 2. The orchestrator node gets a clean symlink at `/local/agents/nodes/orchestrator/wiki -> /local/wiki`.
 
-### Plugin Boundary
+### Implementation Boundary
 
-The wiki engine is implemented as a self-contained Hermes-core plugin extension:
-
-```text
-/local/plugins/public/hermes-core/
-├── README.md
-├── scripts/
-│   ├── prestart_reapply.sh
-│   └── wiki_engine.py
-├── hermes_wiki/
-│   ├── __init__.py
-│   ├── bootstrap.py
-│   ├── compression.py
-│   ├── coordination.py
-│   ├── doctrine.py
-│   ├── graph.py
-│   ├── governance.py
-│   ├── markdown.py
-│   ├── observability.py
-│   ├── query.py
-│   ├── self_heal.py
-│   └── ...
-└── wiki_seed/
-    └── ...
-```
+The previous public-plugin package path has been pruned from the active project
+tree. Future wiki-engine code should live in a standalone plugin root or another
+explicit source-owned package, and this roadmap must be updated in the same
+change.
 
 Integration stays explicit:
 
 - `clone_manager.py` handles env gating, worker mount injection, and node workspace symlinks.
-- `prestart_reapply.sh` invokes wiki bootstrap/self-heal for enabled nodes.
 - wiki engine code does not patch Hermes-agent internals to function.
 
 ## Subsystems
@@ -152,7 +125,7 @@ Integration stays explicit:
 Responsibilities:
 
 - create the shared wiki root and required directories
-- seed starter markdown/index/template files from tracked plugin seed assets
+- seed starter markdown/index/template files from tracked assets when available
 - create meta directories and lock files
 - restore missing generated directories safely
 
@@ -373,7 +346,7 @@ Spec amendments after this point must be explicit and documented rather than sil
 Delivery is complete only when all of the following are true:
 
 1. `/local/wiki/` exists and bootstraps itself safely.
-2. `/local/plugins/public/hermes-core/` contains the engine code and startup hook integration.
+2. Active wiki engine code and startup integration live in a documented source-owned package.
 3. `NODE_WIKI_ENABLED=true` enables the feature and default behavior remains disabled.
 4. Worker nodes receive the shared wiki as a read/write mount and orchestrator gets a clean symlinked view.
 5. wiki content is excluded from git while engine code/docs/tests remain tracked.
@@ -385,14 +358,13 @@ Delivery is complete only when all of the following are true:
 
 ## Delivered
 
-Implementation now ships in `/local/plugins/public/hermes-core/` with:
+The original delivered implementation shipped as a Hermes-core plugin package.
+That package path has since been pruned from the active project tree. Current
+durable runtime state remains under `/local/wiki/`.
 
-- `hermes_wiki/` runtime modules for bootstrap, governance, graph compilation, maintenance, observability, and query routing
-- `scripts/wiki_engine.py` for operational CLI access
-- prestart integration in `plugins/public/hermes-core/scripts/prestart_reapply.sh`
-- worker mount + orchestrator symlink integration in `scripts/clone/clone_manager.py`
-- ignored live wiki runtime content under `/local/wiki/`
-- tests under `plugins/public/hermes-core/tests/test_wiki_engine.py`
+- worker mount + orchestrator symlink integration is owned by orchestrator lifecycle code
+- live wiki runtime content remains ignored under `/local/wiki/`
+- any reintroduced engine package must document its active source path here
 
 ## Delivered Behavior
 
@@ -426,7 +398,6 @@ Implementation now ships in `/local/plugins/public/hermes-core/` with:
 
 Validated with:
 
-- `/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/public/hermes-core/tests -q`
 - real bootstrap of `/local/wiki`
 - real rebuild of graph/compression/observability artifacts
 

@@ -72,6 +72,11 @@ manifests, extension points, action registration, and bridge-state sync.
         AGENTS.md
         README.md
         space.bundle.yaml
+      space-agent-brand/
+        AGENTS.md
+        README.md
+        site.webmanifest
+        space.bundle.yaml
   server/
     __init__.py
     auth.py
@@ -81,13 +86,31 @@ manifests, extension points, action registration, and bridge-state sync.
   skills/
     space-ui/SKILL.md
   scripts/
+    start_space_agent.sh
+    stop_space_agent.sh
     start_space_ui.sh
     stop_space_ui.sh
     doctor.sh
+  state/
+    README.md
+    .gitignore
   examples/
     dashboard_payload.json
     node_action_payload.json
+  tests/
+    test_routes.py
 ```
+
+## Documentation Boundary
+
+Docs for this plugin must separate current behavior from future Space OS intent.
+Current behavior is the local bridge plus Space Agent customware/module seeding
+described here. WASM browser-engine, Colmeio cloud login, and full
+browser-inside-browser goals belong in `/local/docs/roadmap/space-os/README.md`
+until implemented and verified.
+
+When bridge routes, startup scripts, seeded modules, or state paths change,
+update this README and the closest folder README in the same change.
 
 ## Setup
 

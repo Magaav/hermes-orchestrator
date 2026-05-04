@@ -1,11 +1,8 @@
 # Discord Slash Commands Plugin
 
 `/local/plugins/discord-slash-commands` is the canonical host plugin root for
-Discord slash UX in Hermes Orchestrator.
-
-The legacy code under `/local/plugins/public/native/discord-slash-commands/`
-and `/local/plugins/public/native/discord-governance/` is kept as historical
-reference only. Active bootstrap/runtime ownership now lives here.
+Discord slash UX in Hermes Orchestrator. Active bootstrap/runtime ownership
+lives here.
 
 ## Ownership
 
@@ -24,8 +21,6 @@ reference only. Active bootstrap/runtime ownership now lives here.
 ## Canonical Paths
 
 - host plugin root: `/local/plugins/discord-slash-commands`
-- legacy frozen snapshot:
-  `/local/plugins/public/native/discord-slash-commands`
 - node runtime cache:
   `/local/workspace/plugins/discord-slash-commands/cache`
 - host-visible node cache:

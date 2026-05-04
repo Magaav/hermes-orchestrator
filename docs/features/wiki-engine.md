@@ -2,7 +2,6 @@
 
 The Hermes shared wiki engine gives the orchestrator fleet:
 - a durable instance runtime knowledge layer at `/local/wiki/`
-- a reusable public doctrine/reference layer when the legacy wiki package is present
 
 It exists so many Hermes nodes can accumulate durable knowledge without turning the repository, chat logs, or transient memory into a dumping ground. The engine keeps canonical truth in markdown, rebuilds everything else from that markdown, and coordinates knowledge evolution through proposals instead of direct page mutation.
 
@@ -77,13 +76,12 @@ When disabled:
 
 Participating nodes should treat the wiki as shared knowledge infrastructure, not as an ad-hoc scratchpad.
 
-Legacy operational entrypoint, when the legacy wiki engine package is present:
+Current source-owned docs no longer identify an active standalone wiki CLI
+package. Before adding or documenting wiki maintenance commands, inspect the
+current `clone_manager.py`, node env handling, and `/local/wiki` runtime layout.
 
-```bash
-python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py --help
-```
-
-Key commands:
+Historical command concepts that should remain true if a standalone wiki engine
+is reintroduced:
 
 - `bootstrap`: create/repair the runtime layout and workspace link
 - `rebuild`: compile graph, compression, and observability artifacts
@@ -361,15 +359,14 @@ Restore:
 ```bash
 mkdir -p /local
 tar -xzf wiki-backup.tgz -C /local
-NODE_WIKI_ENABLED=1 python3 /local/plugins/public/hermes-core/scripts/wiki_engine.py self-heal --json
 ```
 
 Migration to a new host:
 
 1. Copy `/local/wiki`
-2. Copy `/local/plugins/public/hermes-core/` if the legacy wiki engine package is still in use
-3. Set `NODE_WIKI_ENABLED=true` on participating nodes
-4. Restart nodes or run `bootstrap` and `self-heal`
+2. Set `NODE_WIKI_ENABLED=true` on participating nodes
+3. Restart nodes or run the current documented wiki maintenance command if one
+   is reintroduced under a standalone plugin root
 
 Rebirth philosophy:
 
@@ -378,26 +375,20 @@ Rebirth philosophy:
 
 ## Reapplying After Hermes Updates
 
-The engine is intentionally outside `hermes-agent/`, so Hermes upgrades do not require re-implementing the wiki logic.
+The wiki runtime state is intentionally outside `hermes-agent/`, so Hermes
+upgrades should preserve `/local/wiki`.
 
 Reapply flow:
 
 1. update the Hermes node/runtime as usual
-2. restart the node, or run:
-
-```bash
-bash /local/plugins/public/hermes-core/scripts/prestart_reapply.sh
-```
-
-That prestart pipeline reruns wiki bootstrap/repair along with the other Hermes-core customizations.
+2. restart participating nodes through `horc`
+3. verify `/local/wiki` mounts/symlinks and derived artifacts after restart
 
 ## Testing
 
-Primary suite:
-
-```bash
-/local/hermes-agent/.venv/bin/python -m pytest /local/plugins/public/hermes-core/tests -q
-```
+Primary verification should use the current source-owned test or maintenance
+entrypoint when one exists. No active standalone wiki-engine package path is
+documented in `/local/plugins` today.
 
 What it covers:
 
