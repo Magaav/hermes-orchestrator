@@ -309,6 +309,7 @@ PY
   local skill_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/space_ui/ext/skills/hermes-space-ui"
   local brand_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/space-agent-brand"
   local fleet_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/fleet"
+  local performance_hud_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/performance-hud"
   local fleet_seed_root="${PLUGIN_DIR}/plugin-interface/plugins/hermes-fleet/space-seed/hermes-fleet"
   mkdir -p "${widget_root}" "${conf_root}" "${skill_root}"
 
@@ -319,6 +320,10 @@ PY
   sync_customware_bundle \
     "${PLUGIN_DIR}/plugin-interface/plugins/hermes-fleet" \
     "${fleet_bundle_root}"
+
+  sync_customware_bundle \
+    "${PLUGIN_DIR}/plugin-interface/plugins/hermes-performance-hud" \
+    "${performance_hud_bundle_root}"
 
   should_seed_llm_config() {
     local path="$1"

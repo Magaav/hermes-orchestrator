@@ -20,6 +20,7 @@ space_agent:
   plugin_interface: plugin-interface/
   bundles:
     - plugin-interface/plugins/hermes-fleet
+    - plugin-interface/plugins/hermes-performance-hud
     - plugin-interface/plugins/space-agent-brand
 safe_actions:
   - inspect_node

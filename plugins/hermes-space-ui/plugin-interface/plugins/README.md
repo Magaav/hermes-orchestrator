@@ -5,6 +5,8 @@
 ## Current Bundles
 
 - `hermes-fleet/`: Hermes Fleet module and seeded `hermes-os` space/widgets.
+- `hermes-performance-hud/`: Hermes runtime FPS/memory overlay synced into
+  Space Agent as a plugin-owned diagnostics bundle.
 - `space-agent-brand/`: Hermes browser/PWA branding override.
 - `component-context-menu/`: upstreamable right-click widget context-menu
   bundle. It is source-owned here, but it is not currently synced by

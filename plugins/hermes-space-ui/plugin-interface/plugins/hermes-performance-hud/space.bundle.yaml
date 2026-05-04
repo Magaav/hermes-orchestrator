@@ -1,0 +1,15 @@
+id: hermes/performance-hud
+name: Hermes Performance HUD
+version: 0.1.0
+description: Runtime FPS and browser-memory overlay for Hermes Space UI.
+capabilities:
+  - performance
+  - diagnostics
+extension_points:
+  - _core/framework/head/end
+  - _core/framework/initializer.js/initialize/end
+compatibility:
+  space_agent: ">=0.65"
+runtime:
+  stylesheet: performance-hud.css
+  initializer: performance-hud.js

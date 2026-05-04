@@ -1,0 +1,75 @@
+.hermes-performance-hud {
+  position: fixed;
+  top: 0.65rem;
+  right: 0.7rem;
+  z-index: 2147482000;
+  display: grid;
+  grid-auto-flow: column;
+  gap: 0.45rem;
+  align-items: center;
+  min-width: 7.2rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid rgba(142, 242, 223, 0.2);
+  border-radius: 7px;
+  color: rgba(239, 245, 255, 0.92);
+  font: 600 11px/1.2 "SF Pro Text", "Segoe UI", Arial, sans-serif;
+  background: rgba(5, 10, 18, 0.82);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  pointer-events: none;
+  backdrop-filter: blur(10px);
+}
+
+.hermes-performance-hud[hidden] {
+  display: none !important;
+}
+
+.hermes-performance-hud__item {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.25rem;
+  align-items: baseline;
+  white-space: nowrap;
+}
+
+.hermes-performance-hud__label {
+  color: rgba(169, 184, 209, 0.82);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.hermes-performance-hud__value {
+  color: rgba(142, 242, 223, 0.96);
+  font-variant-numeric: tabular-nums;
+}
+
+.hermes-performance-hud-toggle {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.2rem 0.45rem;
+  border: 1px solid rgba(142, 242, 223, 0.16);
+  border-radius: 7px;
+  color: rgba(239, 245, 255, 0.88);
+  background: rgba(7, 16, 27, 0.44);
+  font: 600 0.78rem/1 "SF Pro Text", "Segoe UI", Arial, sans-serif;
+}
+
+.hermes-performance-hud-toggle input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: #8ef2df;
+}
+
+.hermes-performance-hud-toggle span {
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .hermes-performance-hud {
+    top: 0.55rem;
+    right: 0.55rem;
+    min-width: 0;
+  }
+}
