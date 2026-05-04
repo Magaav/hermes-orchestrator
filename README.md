@@ -12,6 +12,8 @@ Use these rules before evolving this project:
 - If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
 - Treat `/local/plugins/hermes-space-ui` as a Hermes Orchestrator plugin that may ship Space Agent modules, not as permission to patch Space Agent internals directly.
 - Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
+- End every final agent response with a concrete proposed next step for the
+  agent to run next. Keep it short and actionable so work can resume quickly.
 
 ## Documentation Sync
 
