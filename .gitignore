@@ -14,6 +14,13 @@ plugins/private/**
 plugins/hermes-space-ui/state/*
 !plugins/hermes-space-ui/state/.gitignore
 !plugins/hermes-space-ui/state/README.md
+plugins/wasm-agent/state/*
+!plugins/wasm-agent/state/.gitignore
+!plugins/wasm-agent/state/README.md
+plugins/wasm-agent/state/agent-sessions/**
+plugins/wasm-agent/state/chat-sessions/**
+plugins/wasm-agent/state/agent-handoffs/**
+plugins/wasm-agent/state/timeline/**
 scripts/private/**
 !scripts/private/.gitignore
 !scripts/private/**/*.md

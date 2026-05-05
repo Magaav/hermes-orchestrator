@@ -3,10 +3,34 @@
 ![Hermes Orchestrator Hero](docs/assets/hero.png)
 **Quick Links:** [Prompt Guidelines](#prompt-guidelines) | [Install](#install) | [Core Concepts](#core-concepts) | [Node Lifecycle](#node-lifecycle) | [Logging Topology](#logging-topology) | [Feature Docs](#feature-docs) | [Command Reference](docs/commands/horc.md) | [Roadmap Workspace](#roadmap-workspace) | [Contributing](#contributing)
 
+## Engineering Philosophy
+
+Hermes Orchestrator, its plugins, and every agent working on this repo should
+optimize for performance, efficiency, and simplicity.
+
+- Performance: do less work per frame, per request, and per agent turn. Prefer
+  event-driven updates, bounded loops, lazy loading, explicit refreshes, and
+  measured hot-path fixes over decorative or speculative computation.
+- Efficiency: spend tokens, CPU, memory, network, disk, and human attention
+  deliberately. Give agents compact state and tools to fetch context on demand
+  instead of resending large logs, files, screenshots, or transcripts by
+  default.
+- Simplicity: choose the smallest understandable design that can be verified
+  and evolved. Prefer clear contracts, plugin-owned modules, reversible changes,
+  and boring operational paths over clever hidden coupling.
+
+This philosophy applies equally to terminal Codex work, Hermes Agent nodes,
+Space UI integration, and the `wasm-agent` embedded agent. A powerful system
+should feel calm: idle when nothing changed, precise when context is needed,
+and explicit about what it is spending or doing.
+
 ## Prompt Guidelines
 
 Use these rules before evolving this project:
 
+- Let the engineering philosophy lead implementation choices: optimize for
+  performance, efficiency, and simplicity before adding visual effects,
+  background work, broad context, or new abstractions.
 - Preserve compatibility with Hermes Agent mainline and Space Agent upstream. Future-proofing and version-update survivability are hard engineering goals.
 - Prefer extension layers before core edits: Hermes Agent changes should use plugins, skills, tools, hooks, or components; Space Agent changes should use modules, customware bundles, extension points, or components.
 - If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
@@ -181,7 +205,8 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   ├── discord-slash-commands/ # canonical host plugin root for Discord slash UX/runtime ownership
 │   ├── exhaust/                # canonical host plugin root for exhaust-mode behavior
 │   ├── final-response-changed-files/ # canonical host plugin root for final response file summaries
-│   └── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
+│   ├── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
+│   └── wasm-agent/             # shadow WASM-first UI parity plugin; local state lives under ./state/ (gitignored)
 ├── skills/       # canonical shared mutable skills pool
 ├── wiki/         # canonical shared mutable wiki root (gitignored)
 ├── datas/        # centralized private node data root (/local/datas/<node> mounted as /local/data)
@@ -237,6 +262,7 @@ runtime data, generated checkouts, logs, caches, and secrets.
 - `/local/plugins/discord-slash-commands` is a canonical git-tracked host plugin root that now owns Discord slash/governance runtime code.
 - `/local/plugins/exhaust` and `/local/plugins/final-response-changed-files` are canonical git-tracked standalone plugin roots.
 - `/local/plugins/hermes-space-ui/state` is the canonical gitignored local state root for Space Agent checkout, customware, bridge logs, and task state. Do not use `/local/plugins/private/hermes-space-ui`.
+- `/local/plugins/wasm-agent/state` is the canonical gitignored local state root for the shadow WASM Agent PWA pid/log state, Timeline metadata, observation debug snapshots, and embedded assistant attachment assets.
 - Mutable plugin state should prefer node-local cache roots under `/local/agents/nodes/<node>/workspace/plugins/<plugin>/cache` and, from inside the node runtime, `/local/workspace/plugins/<plugin>/cache`.
 - `discord-slash-commands` no longer uses shared mutable state under `/local/plugins/private/discord`; its active runtime state is node-local and mirrored per shared Discord app+guild when needed.
 - `/local/wiki` is the canonical shared mutable wiki root; legacy `/local/plugins/private/wiki` is migrated away when found.
@@ -338,7 +364,7 @@ Operational tip:
 - Run `horc backup all` before a fleet-wide update if you want fresh rollback artifacts.
 ## Versioning Hygiene
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/` (except `.gitignore` and parent `README.md`), `wiki/`, `memory/`, `skills/`, `datas/`, `backups/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/` (except `.gitignore` and parent `README.md`), `plugins/wasm-agent/state/` (except `.gitignore` and parent `README.md`), `wiki/`, `memory/`, `skills/`, `datas/`, `backups/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy); the host `/local/hermes-agent` checkout stays on disk but out of git except `.gitkeep`.
 Commit only templates/examples:
@@ -354,7 +380,7 @@ Current roadmap themes:
 - Visual control plane with Guard observability and per-agent activity timelines.
 - Runtime guard monitoring, Discord alert routing, and bounded remediation.
 - Shared knowledge and collaboration workflows for larger multi-node operations.
-- Space OS pre-evolution sync, Space Agent module strategy, and WASM browser-engine R&D.
+- Space OS pre-evolution sync, Space Agent module strategy, active WASM harness evolution, embedded agent-in-workspace observation/action path, image-card perception, and browser-engine R&D as background evidence.
 
 ## Roadmap Workspace
 - [Roadmap Index](docs/roadmap/README.md)

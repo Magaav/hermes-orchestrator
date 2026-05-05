@@ -8,7 +8,7 @@ The goal is to keep the root README focused on current behavior while documentin
 
 | Track | Focus | Status | Link |
 | --- | --- | --- | --- |
-| `space-os` | Pre-evolution documentation sync, Space Agent module strategy, Colmeio PWA direction, and browser-engine R&D gate | Docs gate frozen; module seam audit done; PWA-only WASM browser path no-go; remote browser proof next | [docs/roadmap/space-os/README.md](space-os/README.md) |
+| `space-os` | Pre-evolution documentation sync, Space Agent module strategy, WASM Agent shadow UI parity, embedded agent-in-workspace path, Colmeio PWA direction, and browser-engine R&D gate | Docs gate frozen; WASM harness is now the active resume branch; embedded assistant, Timeline, Host Browser stream, and browser-built image cards are active; browser-engine saga remains background evidence | [docs/roadmap/space-os/README.md](space-os/README.md) |
 | `guard` | Host doctor loop, canonical guard logs, Discord alerts, bounded restart remediation, activity timeline dependency | V1 implemented | [docs/roadmap/guard/README.md](guard/README.md) |
 | `wiki-engine` | Shared markdown-native wiki for durable orchestrator knowledge, proposal governance, graph routing, self-healing, and observability | Delivered | [docs/roadmap/wiki-engine/README.md](wiki-engine/README.md) |
 | `hermes-plugin-extension-points` | Upstream Hermes Agent API proposal for true Discord governance, Discord app-command plugins, and final-response transforms | Proposal drafted | [docs/roadmap/hermes-plugin-extension-points/README.md](hermes-plugin-extension-points/README.md) |
@@ -37,10 +37,13 @@ The UI and Guard tracks now have concrete V1 contracts, but both remain intentio
 - CLI remains the canonical control plane
 - Guard remains restart-only for automated remediation
 - UI remains an augmentation layer over host-side orchestration and logs through
-  `/local/plugins/hermes-space-ui`
+  `/local/plugins/hermes-space-ui`; the new `/local/plugins/wasm-agent`
+  shadow plugin is the active path for WASM-first UI parity and harness
+  exploration
 - Space OS is not yet implemented as a cloud product; its roadmap is now past
   the initial docs sync gate, has current Space Agent module seam findings,
-  records the PWA-only WASM browser no-go, and points next to upstreamable
-  module-settings/runtime seams plus a remote browser proof.
+  records the PWA-only arbitrary browser no-go, and points next to WASM Agent
+  parity plus a parallel embedded agent observation/action path before
+  cloud/PWA or browser infrastructure work.
 
 Implementation commits should reference their track document and include verification notes.

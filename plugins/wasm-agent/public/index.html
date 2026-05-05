@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#090f1b">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/styles.css">
+    <title>WASM Agent</title>
+    <script>
+      window.__WASM_AGENT_DISABLE_SW__ = true;
+      if ("serviceWorker" in navigator && !sessionStorage.getItem("wasmAgent.swReset.v1")) {
+        sessionStorage.setItem("wasmAgent.swReset.v1", "1");
+        Promise.all([
+          navigator.serviceWorker.getRegistrations().then((items) => Promise.all(items.map((item) => item.unregister()))),
+          "caches" in window ? caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))) : Promise.resolve(),
+        ]).then(() => window.location.reload()).catch(() => {});
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app" class="os-shell" data-status="booting" data-panel="home">
+      <aside class="launcher" aria-label="Workspace launcher">
+        <button class="launcher-mark active" type="button" data-panel="home" title="Home" aria-label="Home">
+          <svg class="home-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-8.5Z"></path>
+            <path d="M9 21h6"></path>
+          </svg>
+        </button>
+        <div id="spaceLauncherList" class="space-launcher-list" aria-label="Spaces"></div>
+        <div class="launcher-spacer"></div>
+        <span id="wasmStatus" class="mini-led pending" title="WASM runtime"></span>
+        <span id="bridgeStatus" class="mini-led pending" title="Hermes bridge"></span>
+      </aside>
+
+      <section class="main-stage">
+        <header class="topbar">
+          <div class="brand">
+            <span class="brand-orbit" aria-hidden="true"></span>
+            <div>
+              <h1>Hermes OS</h1>
+              <p id="bridgeLabel">Bridge pending</p>
+            </div>
+          </div>
+          <form id="commandForm" class="command" autocomplete="off">
+            <input id="commandInput" type="text" placeholder="Ask Hermes or start a run">
+            <button id="sendButton" type="submit">Send</button>
+          </form>
+          <div class="status-strip" aria-label="System status">
+            <span id="nodeCount" class="pill">Nodes 0</span>
+            <span id="taskStatus" class="pill">Idle</span>
+            <button id="refreshButton" class="icon-button" type="button" title="Refresh">
+              <span class="refresh-icon" aria-hidden="true"></span>
+            </button>
+          </div>
+        </header>
+
+        <main class="space-frame">
+          <section class="space-viewport" aria-label="Hermes OS workspace">
+            <canvas id="spaceCanvas"></canvas>
+            <button id="addSpaceButton" class="home-add-space-button" type="button" title="Add space" aria-label="Add space">+</button>
+            <div class="space-title">
+              <span class="space-label">Hermes OS</span>
+              <span id="frameLabel">idle</span>
+            </div>
+            <nav class="layer-dock" aria-label="Widget layers">
+              <button class="layer-button" type="button" data-widget-layer-target="resources" title="Bring Resources Monitor to front">Resources</button>
+              <button class="layer-button" type="button" data-widget-layer-target="topology" title="Bring Hermes Topology to front">Topology</button>
+              <button class="layer-button" type="button" data-widget-layer-target="studio" title="Bring UI Studio to front">Studio</button>
+              <button class="layer-button" type="button" data-widget-layer-target="timeline" data-module-target="timeline" title="Bring Timeline to front">Timeline</button>
+              <button class="layer-button" type="button" data-widget-layer-target="browser-proof" data-module-target="host-browser" title="Bring Host Browser to front">Browser</button>
+              <button class="layer-button" type="button" data-widget-layer-target="drop-to-copy" title="Bring Drop to Copy to front">Drop</button>
+            </nav>
+
+            <article class="widget resources-widget" data-widget-id="resources">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Resources Monitor</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span id="resourceFreshness" class="widget-chip">pending</span>
+                </span>
+              </header>
+              <div id="resourceGrid" class="metric-grid"></div>
+            </article>
+
+            <article class="widget topology-widget" data-widget-id="topology">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Hermes Topology</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span id="selectedNode" class="widget-chip">orchestrator</span>
+                </span>
+              </header>
+              <div id="topologyNodes" class="topology-nodes"></div>
+            </article>
+
+            <article class="widget studio-widget" data-widget-id="studio">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>UI Studio</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span id="runtimeLabel" class="widget-chip">wasm</span>
+                </span>
+              </header>
+              <textarea id="promptInput" rows="6" placeholder="Prompt Hermes from the workspace"></textarea>
+              <div class="task-actions">
+                <button id="clearButton" type="button">Clear</button>
+                <button id="promptSendButton" type="button">Run</button>
+              </div>
+            </article>
+
+            <article class="widget timeline-widget" data-widget-id="timeline" data-module-target="timeline">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Timeline</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span id="timelineStatus" class="widget-chip">git</span>
+                </span>
+              </header>
+              <div id="timelineGraph" class="timeline-graph"></div>
+              <div class="timeline-actions">
+                <button id="timelineRefreshButton" type="button">Refresh</button>
+              </div>
+            </article>
+
+            <article class="widget browser-widget" data-widget-id="browser-proof" data-module-target="host-browser">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Host Browser</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span id="browserStatus" class="widget-chip">pixels</span>
+                </span>
+              </header>
+              <form id="browserForm" class="browser-bar" autocomplete="off">
+                <div class="browser-nav" aria-label="Host browser controls">
+                  <button id="browserBackButton" type="button" title="Back">Back</button>
+                  <button id="browserForwardButton" type="button" title="Forward">Forward</button>
+                  <button id="browserReloadButton" type="button" title="Reload">Reload</button>
+                  <button id="browserLiveButton" type="button" title="Toggle live pixels" aria-pressed="false">Live</button>
+                </div>
+                <input id="browserUrlInput" type="text" value="https://example.com" aria-label="Browser URL">
+                <button id="browserOpenButton" type="submit">Open</button>
+              </form>
+              <div id="browserScreen" class="browser-screen" tabindex="0" role="application" aria-label="Interactive host browser pixels">
+                <canvas id="browserCanvas"></canvas>
+                <img id="browserImage" alt="Remote browser screenshot">
+                <div id="browserEmpty" class="browser-empty">Open a page to render it as pixels inside WASM Agent.</div>
+              </div>
+              <div id="browserMeta" class="browser-meta">Click pixels to focus. Type, Enter, and scroll are forwarded to host Chromium.</div>
+              <div class="widget-resize-handle" data-widget-resize="browser-proof" title="Resize Host Browser" aria-hidden="true"></div>
+            </article>
+
+            <article class="widget drop-widget" data-widget-id="drop-to-copy">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Drop to Copy</span>
+                <span class="widget-head-actions">
+                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <span class="widget-chip">shadow</span>
+                </span>
+              </header>
+              <div class="drop-zone">
+                <span class="drop-icon" aria-hidden="true"></span>
+                <span>Repository or brief</span>
+              </div>
+              <div id="taskOutput" class="task-output" aria-live="polite"></div>
+            </article>
+          </section>
+
+          <aside id="sidePanel" class="side-panel" aria-label="Workspace inspector">
+            <div class="panel-tabs" role="tablist">
+              <button class="panel-tab active" type="button" data-panel="space">Space</button>
+              <button class="panel-tab" type="button" data-panel="fleet">Fleet</button>
+              <button class="panel-tab" type="button" data-panel="tasks">Tasks</button>
+              <button class="panel-tab" type="button" data-panel="logs">Logs</button>
+              <button class="panel-tab" type="button" data-panel="observe" data-module-target="observation">Observe</button>
+              <button class="panel-tab" type="button" data-panel="timeline" data-module-target="timeline">Timeline</button>
+              <button class="panel-tab" type="button" data-panel="modules">Modules</button>
+            </div>
+            <section class="panel-view" data-view="space">
+              <h2>Workspace</h2>
+              <div id="spaceSummary" class="summary-list"></div>
+            </section>
+            <section class="panel-view active" data-view="home" aria-label="Homespace"></section>
+            <section class="panel-view" data-view="fleet">
+              <h2>Fleet</h2>
+              <div id="nodeList" class="node-list"></div>
+            </section>
+            <section class="panel-view" data-view="tasks">
+              <h2>Tasks</h2>
+              <div id="taskList" class="task-list"></div>
+            </section>
+            <section class="panel-view" data-view="logs">
+              <div class="panel-headline">
+                <h2>Logs</h2>
+                <button id="logsButton" type="button">Tail</button>
+              </div>
+              <pre id="logsOutput"></pre>
+            </section>
+            <section class="panel-view" data-view="observe" data-module-target="observation">
+              <div class="panel-headline">
+                <h2>Observation</h2>
+                <span id="observationCount" class="widget-chip">0 events</span>
+              </div>
+              <div id="observationStats" class="observation-stats"></div>
+              <div id="observationTimeline" class="observation-timeline"></div>
+              <pre id="observationSnapshot" class="observation-snapshot"></pre>
+            </section>
+            <section class="panel-view" data-view="timeline" data-module-target="timeline">
+              <div class="panel-headline">
+                <h2>Timeline</h2>
+                <span id="timelineBranch" class="widget-chip">branch</span>
+              </div>
+              <div id="timelineDetails" class="timeline-details"></div>
+            </section>
+            <section class="panel-view" data-view="modules">
+              <div class="panel-headline">
+                <h2>Modules</h2>
+                <span class="widget-chip">local</span>
+              </div>
+              <div id="moduleList" class="module-list"></div>
+            </section>
+          </aside>
+        </main>
+      </section>
+    </div>
+    <section id="agentOverlay" class="agent-overlay" aria-label="Embedded assistant" data-open="false" data-module-target="embedded-assistant">
+      <button id="agentAvatarButton" class="agent-avatar-button" type="button" aria-label="Open assistant" aria-expanded="false">
+        <span class="agent-avatar-core" aria-hidden="true"></span>
+      </button>
+      <aside id="agentPanel" class="agent-panel" aria-label="Assistant chat">
+        <header class="agent-panel-head">
+          <div class="agent-title-block">
+            <strong class="agent-panel-title">Chat</strong>
+            <label class="agent-node-picker">
+              <span>Node</span>
+              <select id="agentNodeSelect" aria-label="Chat target node">
+                <option value="orchestrator">orchestrator</option>
+              </select>
+            </label>
+          </div>
+          <div class="agent-head-tools">
+            <button id="agentSessionsButton" class="icon-button agent-tool-button" type="button" title="Sessions, timeline, history" aria-label="Sessions, timeline, history" aria-expanded="false">
+              <span class="agent-icon agent-icon-sessions" aria-hidden="true"></span>
+            </button>
+            <button id="agentContextButton" class="icon-button agent-tool-button" type="button" title="Context used" aria-label="Context used" aria-expanded="false">
+              <span class="agent-icon agent-icon-context" aria-hidden="true"></span>
+            </button>
+            <button id="agentSettingsButton" class="icon-button agent-tool-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">
+              <span class="agent-icon agent-icon-settings" aria-hidden="true"></span>
+            </button>
+            <button id="agentCloseButton" class="icon-button agent-close-button" type="button" aria-label="Close assistant">
+              <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
+            </button>
+          </div>
+          <span id="agentStatus" hidden></span>
+          <section id="agentSessionsBalloon" class="agent-balloon agent-session-balloon" aria-label="Assistant sessions" hidden>
+            <div class="agent-balloon-head">
+              <strong>Sessions</strong>
+              <button id="agentNewSessionButton" class="icon-button agent-new-session-button" type="button" title="New Chat" aria-label="New Chat">
+                <span class="agent-icon agent-icon-plus" aria-hidden="true"></span>
+              </button>
+            </div>
+            <div id="agentSessionList" class="agent-session-list"></div>
+          </section>
+          <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Context used" hidden>
+            <div class="agent-balloon-head">
+              <strong>Context used</strong>
+            </div>
+            <dl id="agentDiagnostics" class="agent-diagnostics" aria-label="Last agent turn diagnostics">
+              <div><dt>Mode</dt><dd>-</dd></div>
+              <div><dt>Node</dt><dd>orchestrator</dd></div>
+              <div><dt>Source</dt><dd>-</dd></div>
+              <div><dt>Tools</dt><dd>-</dd></div>
+              <div><dt>Context</dt><dd>-</dd></div>
+              <div><dt>Turns</dt><dd>-</dd></div>
+              <div><dt>Time</dt><dd>-</dd></div>
+            </dl>
+            <div id="agentContextPreview" class="agent-context-preview"></div>
+          </section>
+          <section id="agentSettingsBalloon" class="agent-balloon agent-settings-balloon" aria-label="Assistant settings" hidden>
+            <div class="agent-balloon-head">
+              <strong>Settings</strong>
+            </div>
+            <label class="agent-mode">
+              <span>Mode</span>
+              <select id="agentModeSelect" aria-label="Embedded agent mode">
+                <option value="auto">Auto</option>
+                <option value="local">Local</option>
+                <option value="bridge">Bridge</option>
+              </select>
+            </label>
+            <div class="agent-mode-help">
+              <p><strong>Auto</strong> answers cheap resume/inspect turns locally and uses the selected node for other messages.</p>
+              <p><strong>Local</strong> never calls the model; it only uses inspect tools and deterministic replies.</p>
+              <p><strong>Bridge</strong> sends compact tool context to the configured bridge model.</p>
+            </div>
+          </section>
+        </header>
+        <div id="agentMessages" class="agent-messages" aria-live="polite">
+          <div class="agent-message assistant">I can see this workspace snapshot and help evolve the app from here.</div>
+        </div>
+        <form id="agentForm" class="agent-form" autocomplete="off">
+          <div id="agentImagePreview" class="agent-image-preview" hidden></div>
+          <input type="file" id="agentImageInput" accept="image/*" multiple hidden>
+          <textarea id="agentInput" rows="3" placeholder="Talk to Hermes"></textarea>
+          <div class="agent-form-row">
+            <button id="agentAttachButton" class="agent-attach-button" type="button" aria-label="Attach image" title="Attach image">
+              <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="m16.1 9.1-5.95 5.95a4.1 4.1 0 0 1-5.8-5.8l6.55-6.55a2.85 2.85 0 0 1 4.03 4.03l-6.55 6.55a1.6 1.6 0 0 1-2.26-2.26l5.88-5.88"></path>
+              </svg>
+            </button>
+            <span id="agentTokenUsage" class="agent-token-usage" title="Exact model token usage for the last turn">Tokens -</span>
+            <button id="agentSendButton" class="agent-send-button" type="submit" aria-label="Send message" title="Send">
+              <svg class="agent-send-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                <path d="M4 10h10.5m0 0-4.25-4.25M14.5 10l-4.25 4.25"></path>
+              </svg>
+              <span class="agent-send-stop" aria-hidden="true"></span>
+            </button>
+          </div>
+        </form>
+      </aside>
+    </section>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

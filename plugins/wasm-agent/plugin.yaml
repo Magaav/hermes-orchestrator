@@ -1,0 +1,47 @@
+name: wasm-agent
+version: 0.1.0
+description: "Shadow WASM-first PWA parity shell for Hermes Agent UI."
+author: "Hermes Orchestrator"
+provides_hooks: []
+provides_tools: []
+provides_skills: []
+shadow_ui:
+  protocol: http
+  default_host: 127.0.0.1
+  default_port: 8877
+  entrypoint: server/static_server.py
+  public_root: public/
+  state_root: state/
+  backend_bridge_default: http://127.0.0.1:8790
+runtime:
+  wasm_core: embedded
+  browser_proof: host_chromium_cdp_screencast
+  module_registry: public/modules/index.js
+  modules_root: public/modules/
+  pwa_manifest: public/manifest.webmanifest
+  service_worker: public/sw.js
+firmware_modules:
+  - id: dev-hmr
+    path: public/modules/hmr/
+  - id: host-browser
+    path: public/modules/browser/
+    state_root: state/browser/
+  - id: observation
+    path: public/modules/observation/
+    state_root: state/observation/
+  - id: timeline
+    path: public/modules/timeline/
+    state_root: state/timeline/
+  - id: embedded-assistant
+    path: public/modules/assistant/
+integration:
+  compare_with:
+    hermes_space_ui_pwa: http://127.0.0.1:8787
+    hermes_space_ui_bridge: http://127.0.0.1:8790
+  agent_core_patches: false
+  space_agent_patches: false
+  hermes_space_ui_patches: false
+safe_actions:
+  - inspect_nodes
+  - submit_task
+  - view_task_status
