@@ -175,7 +175,9 @@ local backend stores the compacted image under `state/attachments` and returns a
 same-origin `/agent/attachments/<hash>.<ext>` URL plus metadata. The embedded
 assistant action chain shows the image path explicitly: store image assets,
 decode pixels, analyze image with lazy modules, build image cards, then ask the
-selected node.
+selected node. The local attachment store prunes old assets after saves by
+bounded byte, file-count, and age limits; it is a development/runtime cache, not
+a durable media library.
 Image cards include an `analyzer_revision` so stale browser/service-worker
 runtimes are visible in model context. When the revision changes, the app
 migrates image analyzer module defaults for core, barcode, and OCR back to the
@@ -387,6 +389,12 @@ Run checks:
   chat content parts to the bridge, default `0`. Leave disabled for text-only
   providers such as DeepSeek-compatible endpoints; the adapter still forwards
   attachment metadata through `attachment_manifest`.
+- `HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_BYTES`: maximum local attachment
+  cache size before old image assets are pruned, default `67108864`.
+- `HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_FILES`: maximum local attachment
+  cache file count before old image assets are pruned, default `240`.
+- `HERMES_WASM_AGENT_ATTACHMENT_MAX_AGE_SEC`: maximum local attachment asset
+  age before old image assets are pruned, default `1209600`.
 - `HERMES_WASM_AGENT_CHROMIUM`: optional Chromium/Chrome binary override.
 - `HERMES_WASM_AGENT_BROWSER_CDP_URL`: host Chromium DevTools endpoint, default
   `http://127.0.0.1:9233`. Set to an empty value to skip CDP and use the

@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import os
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +51,81 @@ def synthetic_mug_photo_bytes() -> bytes | None:
     buffer = io.BytesIO()
     image.save(buffer, format="JPEG", quality=82)
     return buffer.getvalue()
+
+
+def write_sized_file(path: Path, size: int, mtime: float) -> None:
+    path.write_bytes((path.name[:1] or "x").encode("ascii") * size)
+    os.utime(path, (mtime, mtime))
+
+
+def with_env(values: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in values}
+    os.environ.update(values)
+    return previous
+
+
+def restore_env(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def attachment_retention_test(server) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_server = SimpleNamespace(state_dir=Path(tmpdir))
+        root = server.attachment_dir(fake_server)
+        now = 1_700_000_000.0
+        old_digest = "a" * 64
+        mid_digest = "b" * 64
+        keep_digest = "c" * 64
+        for digest, offset in ((old_digest, 30), (mid_digest, 20), (keep_digest, 10)):
+            write_sized_file(root / f"{digest}.png", 80, now - offset)
+            write_sized_file(root / f"{digest}.json", 20, now - offset)
+        previous = with_env({
+            "HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_BYTES": "220",
+            "HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_FILES": "4",
+            "HERMES_WASM_AGENT_ATTACHMENT_MAX_AGE_SEC": "0",
+        })
+        try:
+            result = server.prune_agent_attachments(fake_server, keep_hashes={keep_digest})
+        finally:
+            restore_env(previous)
+        assert result["schema"] == "hermes.wasm_agent.attachment_retention.v1"
+        assert result["deleted_records"] == 1, result
+        assert result["deleted_files"] == 2, result
+        assert not (root / f"{old_digest}.png").exists(), result
+        assert not (root / f"{old_digest}.json").exists(), result
+        assert (root / f"{mid_digest}.png").exists(), result
+        assert (root / f"{keep_digest}.png").exists(), result
+        assert result["bytes_after"] <= 220, result
+        assert result["files_after"] <= 4, result
+
+
+def attachment_save_test(server) -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fake_server = SimpleNamespace(state_dir=Path(tmpdir))
+        result = server.save_agent_attachment(fake_server, {
+            "image": {
+                "data_url": "data:image/png;base64,aW1hZ2UtYnl0ZXM=",
+                "name": "test.png",
+                "size": 11,
+                "width": 1,
+                "height": 1,
+                "image_card": {
+                    "schema": "hermes.wasm_agent.image_card.v1",
+                    "analyzer_revision": "image-card-text-v2",
+                    "visual_notes": ["small test image"],
+                },
+            }
+        })
+        assert result["schema"] == "hermes.wasm_agent.attachment_asset.v1", result
+        assert result["local_url"].startswith("/agent/attachments/"), result
+        assert result["retention"]["schema"] == "hermes.wasm_agent.attachment_retention.v1", result
+        root = server.attachment_dir(fake_server)
+        assert any(path.suffix == ".png" for path in root.iterdir()), result
+        assert any(path.suffix == ".json" for path in root.iterdir()), result
 
 
 def main() -> int:
@@ -95,6 +173,8 @@ def main() -> int:
     assert hinted_result["reason"] == "browser_image_card_missing_scene_shape_hints", hinted_result
     assert hinted_result["values"]["source"] == "server_hints", hinted_result
     assert server.server_enrich_stale_image_card(hinted_card, payload) is hinted_card
+    attachment_retention_test(server)
+    attachment_save_test(server)
     print("image-card golden ok")
     return 0
 

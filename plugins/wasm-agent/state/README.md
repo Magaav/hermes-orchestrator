@@ -11,8 +11,9 @@ Expected local files include:
 - `observation/latest.json`, the latest frontend observation debug snapshot
   published by the PWA. This is local runtime state, not durable history.
 - `attachments/`, same-origin compact image assets and JSON metadata created
-  for embedded assistant image-card turns. This is local runtime state and is
-  not a durable media library.
+  for embedded assistant image-card turns. The server prunes this cache by
+  byte, file-count, and age limits after saves. This is local runtime state and
+  is not a durable media library.
 - Image-card analyzer modules cache loaded functions in browser memory only;
   their module contracts live under `public/modules/` and do not create durable
   state here by default.

@@ -286,6 +286,7 @@ Deliverables:
   implemented
 - server-side stale image-card enrichment before model inference: implemented
 - local attachment asset store under `state/attachments`: implemented
+- attachment store byte/file/age retention pruning after saves: implemented
 - no UI action execution yet: implemented
 
 ### Phase 3: Inspect-Only Adapter Hardening
@@ -301,7 +302,8 @@ Deliverables:
 - verify image-card quality against real screenshots and user images
 - keep action chains accurate across slow bridge calls, aborts, and HMR reloads
 - improve local deterministic resume/harness answers from the updated roadmap
-- keep attachment storage bounded, same-origin, and gitignored
+- keep attachment storage bounded, same-origin, and gitignored: implemented for
+  the local asset cache; continue watching real-use retention pressure
 
 ### Phase 4: Proposed Actions
 

@@ -48,6 +48,9 @@ DEFAULT_AGENT_BRIDGE_IMAGE_SINGLE_BYTES = 640 * 1024
 DEFAULT_AGENT_BRIDGE_REQUEST_BYTES = 1536 * 1024
 DEFAULT_AGENT_BRIDGE_FORWARD_IMAGE_URLS = False
 DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
+DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
+DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
+DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
 
 
 class WasmAgentServer(ThreadingHTTPServer):
@@ -748,6 +751,119 @@ def attachment_dir(server: WasmAgentServer) -> Path:
     return path
 
 
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def attachment_store_max_bytes() -> int:
+    return env_int(
+        "HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_BYTES",
+        DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES,
+        1024 * 1024,
+        1024 * 1024 * 1024,
+    )
+
+
+def attachment_store_max_files() -> int:
+    return env_int(
+        "HERMES_WASM_AGENT_ATTACHMENT_STORE_MAX_FILES",
+        DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES,
+        2,
+        10000,
+    )
+
+
+def attachment_max_age_sec() -> int:
+    return env_int(
+        "HERMES_WASM_AGENT_ATTACHMENT_MAX_AGE_SEC",
+        DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC,
+        0,
+        365 * 24 * 60 * 60,
+    )
+
+
+def attachment_records(root: Path) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for path in root.iterdir():
+        if not path.is_file() or path.name.startswith("."):
+            continue
+        digest = path.stem if path.suffix == ".json" else path.stem
+        stat = path.stat()
+        record = grouped.setdefault(digest, {"digest": digest, "paths": [], "size": 0, "mtime": 0.0})
+        record["paths"].append(path)
+        record["size"] += stat.st_size
+        record["mtime"] = max(float(record["mtime"]), stat.st_mtime)
+    return list(grouped.values())
+
+
+def prune_agent_attachments(server: WasmAgentServer, keep_hashes: set[str] | None = None) -> dict[str, Any]:
+    root = attachment_dir(server)
+    keep_hashes = keep_hashes or set()
+    max_bytes = attachment_store_max_bytes()
+    max_files = attachment_store_max_files()
+    max_age = attachment_max_age_sec()
+    records = attachment_records(root)
+    total_bytes = sum(int(record["size"]) for record in records)
+    total_files = sum(len(record["paths"]) for record in records)
+    to_delete: set[str] = set()
+    now = time.time()
+    if max_age > 0:
+        for record in records:
+            if record["digest"] not in keep_hashes and float(record["mtime"]) < now - max_age:
+                to_delete.add(str(record["digest"]))
+
+    def survivor_totals() -> tuple[int, int]:
+        return (
+            sum(int(record["size"]) for record in records if record["digest"] not in to_delete),
+            sum(len(record["paths"]) for record in records if record["digest"] not in to_delete),
+        )
+
+    total_bytes, total_files = survivor_totals()
+    for record in sorted(records, key=lambda item: (float(item["mtime"]), str(item["digest"]))):
+        if total_bytes <= max_bytes and total_files <= max_files:
+            break
+        if record["digest"] in keep_hashes or record["digest"] in to_delete:
+            continue
+        to_delete.add(str(record["digest"]))
+        total_bytes -= int(record["size"])
+        total_files -= len(record["paths"])
+
+    deleted_files = 0
+    deleted_bytes = 0
+    for record in records:
+        if record["digest"] not in to_delete:
+            continue
+        for path in record["paths"]:
+            try:
+                deleted_bytes += path.stat().st_size
+                path.unlink()
+                deleted_files += 1
+            except FileNotFoundError:
+                pass
+            except Exception:
+                continue
+    final_records = attachment_records(root)
+    return {
+        "schema": "hermes.wasm_agent.attachment_retention.v1",
+        "max_bytes": max_bytes,
+        "max_files": max_files,
+        "max_age_sec": max_age,
+        "deleted_records": len(to_delete),
+        "deleted_files": deleted_files,
+        "deleted_bytes": deleted_bytes,
+        "bytes_before": sum(int(record["size"]) for record in records),
+        "bytes_after": sum(int(record["size"]) for record in final_records),
+        "files_after": sum(len(record["paths"]) for record in final_records),
+    }
+
+
 def image_extension(mime_type: str) -> str:
     normalized = mime_type.lower().split(";", 1)[0].strip()
     return {
@@ -1311,6 +1427,7 @@ def save_agent_attachment(server: WasmAgentServer, body: dict[str, Any]) -> dict
     tmp = meta_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
     tmp.replace(meta_path)
+    metadata["retention"] = prune_agent_attachments(server, keep_hashes={digest})
     return metadata
 
 
