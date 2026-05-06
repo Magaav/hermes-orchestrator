@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v18";
+const CACHE_NAME = "wasm-agent-v19";
 const ASSETS = [
   "/",
   "/index.html",
@@ -40,6 +40,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (
     url.pathname === "/config.json" ||
+    url.pathname === "/auth/session" ||
     url.pathname === "/health" ||
     url.pathname === "/observation/latest" ||
     url.pathname === "/modules/hmr/events"

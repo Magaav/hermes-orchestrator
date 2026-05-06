@@ -34,14 +34,22 @@ if [[ -s "${PID_FILE}" ]]; then
   python3 - "$HOST" "$PORT" <<'PY'
 import json
 import sys
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 host, port = sys.argv[1], sys.argv[2]
-with urlopen(f"http://{host}:{port}/health", timeout=3) as response:
-    payload = json.loads(response.read().decode("utf-8"))
-if not payload.get("ok"):
-    raise SystemExit("health returned ok=false")
-print(f"health ok http://{host}:{port}/health")
+try:
+    with urlopen(f"http://{host}:{port}/health", timeout=3) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not payload.get("ok"):
+        raise SystemExit("health returned ok=false")
+    print(f"health ok http://{host}:{port}/health")
+except HTTPError as exc:
+    payload = json.loads(exc.read().decode("utf-8"))
+    code = payload.get("error", {}).get("code")
+    if exc.code != 401 or code != "auth_required":
+        raise
+    print(f"auth gate ok http://{host}:{port}/health returned 401 auth_required")
 PY
 else
   echo "wasm-agent is not running; static and wasm checks passed"

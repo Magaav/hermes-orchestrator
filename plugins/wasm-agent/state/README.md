@@ -7,6 +7,9 @@ Expected local files include:
 
 - `wasm-agent.pid`
 - `wasm-agent.log`
+- `db/sqlite/wa_db.sqlite3`, the local account database containing `user_tb`.
+- `db/sqlite/wa_auth_secret`, the local signed-cookie secret. Keep this file
+  private; rotating it signs out existing browser sessions.
 - `browser/`, runtime Host Browser captures and profile data
 - `observation/latest.json`, the latest frontend observation debug snapshot
   published by the PWA. This is local runtime state, not durable history.

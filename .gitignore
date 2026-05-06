@@ -8,6 +8,7 @@ skills/**
 logs/
 wiki/
 memory/
+server/
 plugins/private/**
 !plugins/private/.gitignore
 !plugins/private/**/*.md
@@ -52,6 +53,8 @@ plugins/**/.env
 plugins/**/*.env
 plugins/**/*.env.*
 !plugins/**/*.env.example
+plugins/wasm-agent/conf/wa.env
+!plugins/wasm-agent/conf/wa.env.example
 
 # Python / Node build artifacts
 **/__pycache__/

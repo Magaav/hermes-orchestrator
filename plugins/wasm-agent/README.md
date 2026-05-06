@@ -288,13 +288,52 @@ create duplicate refs, while new source changes get a new recovery point
 without relying on the user to click a manual checkpoint button.
 
 The Home route is the app entrance: `/` and `/home` open the intentionally
-empty black homespace with no topbar or command form. Home exposes a compact
-`+` control for creating local spaces; each new space is persisted in browser
-storage and appears in the left global rail. The old fixed OS/Fleet/Run/Logs/
-Observation/Modules shortcuts are no longer global space buttons; those views
-remain internal panels/modules. The launcher stays a left rail across desktop
-and narrow/mobile breakpoints so Home and user-created spaces keep the same
-spatial position.
+empty black homespace with no topbar or command form. Home exposes a wider
+`New Space` action plus `Config` and `Modules` modal actions. New spaces are
+persisted in browser storage and appear in the left global rail. Right-clicking
+a space opens a local menu for copying the space id or deleting the space; the
+delete modal requires the exact `DELETE <space name>` phrase before `OK` is
+enabled. The old fixed OS/Fleet/Run/Logs/Observation/Modules shortcuts are no
+longer global space buttons; those views remain internal panels/modules. The
+launcher stays a left rail across desktop and narrow/mobile breakpoints so Home
+and user-created spaces keep the same spatial position.
+
+The launcher's lower corner is now reserved for account state instead of raw
+bridge/WASM status leds. The compact account button opens a Google Identity
+login popover when `GOOGLE_LOGIN_CLIENT_ID` is available in
+`conf/wa.env`. wasm-agent is admin-gated: unauthenticated requests can load only the login shell/static
+assets and auth endpoints, while bridge, browser, timeline, agent, attachment,
+handoff, health, and observation services require an authenticated admin
+session. The allowed Google admin must be configured locally with
+`ADMIN_EMAIL` in `conf/wa.env`; there is no hardcoded fallback admin account.
+If no admin email is configured, every Google account is rejected. Other
+verified Google accounts are rejected before a row is created. The local backend
+verifies Google ID tokens through Google's token verification endpoint and
+stores the allowed account in
+`/local/plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3` under `user_tb`.
+`user_tb.id` is a Snowflake-style integer id so timestamp and uniqueness stay
+inside one compact primary-key column.
+
+## Public web security
+
+`wa.colmeio.com` makes wasm-agent a world-reachable web service, so the server
+must fail closed:
+
+- Keep `plugins/wasm-agent/conf/wa.env` machine-local and untracked.
+- Set exactly the intended admin with `ADMIN_EMAIL=<google-account>`.
+- Keep `GOOGLE_LOGIN_CLIENT_ID` configured in `conf/wa.env` for the same Google OAuth client
+  whose authorized JavaScript origins include the production origin.
+- Do not expose the app port directly; public traffic should terminate at the
+  HTTPS reverse proxy and reach wasm-agent on `127.0.0.1`.
+- Protected routes must continue returning `401 auth_required` until a signed
+  admin session cookie is present.
+
+Public deployment on this host terminates TLS at Caddy for
+`https://wa.colmeio.com`, then reverse-proxies to the Python server on
+`127.0.0.1:8877`. The cloud ingress and host firewall should expose only the
+public HTTPS edge, not the raw app port. The app port remains loopback-only so
+the admin gate is the only web entry point into local bridge, browser, timeline,
+agent, attachment, handoff, health, and observation services.
 
 Frontend changes in this plugin must also read `DESIGN.md`. That design
 contract records the current shell layout, centered icon-button rules, chat
@@ -365,23 +404,6 @@ HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agen
 If `http://127.0.0.1:8877` refuses from your desktop browser while the server is
 healthy inside `/local`, your browser's loopback is not the same loopback as the
 workspace. Forward port `8877` or use the workspace-provided forwarded URL.
-The PWA uses a same-origin `/bridge` proxy for Hermes bridge calls, so direct
-or forwarded access only needs the `wasm-agent` app port; the bridge can remain
-bound to VM-local `127.0.0.1:8790`.
-
-For direct VM access, keep the bind explicit and open only the app port to the
-operator's current public IP:
-
-```bash
-HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
-sudo ufw allow from <operator-public-ip> to any port 8877 proto tcp
-```
-
-Then open `http://<vm-public-ip>:8877`. If that URL still times out while
-`curl http://127.0.0.1:8877/health` works on the VM, the remaining blocker is a
-cloud security-list/firewall rule outside the VM. Do not expose `8877` to the
-whole internet unless an auth layer is added first; the app can reach local
-orchestrator and bridge capabilities.
 
 Open:
 
@@ -411,6 +433,16 @@ Run checks:
   `http://127.0.0.1:8790`.
 - `HERMES_WASM_AGENT_PID_FILE`: optional pid file override.
 - `HERMES_WASM_AGENT_LOG_FILE`: optional server log override.
+- `GOOGLE_LOGIN_CLIENT_ID`: required Google Identity Services client id in
+  `conf/wa.env`.
+- `ADMIN_EMAIL`: required Google admin email in `conf/wa.env`. Without this, the
+  server rejects every Google account.
+- `HERMES_WASM_AGENT_ENV_PATH`: optional path override for the private
+  wasm-agent env file, default `plugins/wasm-agent/conf/wa.env`.
+- `HERMES_WASM_AGENT_DB_PATH`: optional account SQLite path override, default
+  `plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3`.
+- `HERMES_WASM_AGENT_AUTH_SECRET_PATH`: optional signed-cookie secret path
+  override, default `plugins/wasm-agent/state/db/sqlite/wa_auth_secret`.
 - `HERMES_WASM_AGENT_CHAT_TIMEOUT_SEC`: embedded assistant bridge/model turn
   timeout, default `300`, clamped between 30 seconds and 6 hours.
 - `HERMES_WASM_AGENT_FORWARD_IMAGE_URLS`: opt in to forwarding raw `image_url`
