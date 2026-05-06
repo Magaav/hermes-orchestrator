@@ -287,6 +287,7 @@ Deliverables:
 - server-side stale image-card enrichment before model inference: implemented
 - local attachment asset store under `state/attachments`: implemented
 - attachment store byte/file/age retention pruning after saves: implemented
+- same-origin wasm-agent `/bridge` proxy for PWA bridge calls: implemented
 - no UI action execution yet: implemented
 
 ### Phase 3: Inspect-Only Adapter Hardening

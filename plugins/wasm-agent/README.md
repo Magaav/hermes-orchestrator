@@ -365,6 +365,23 @@ HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agen
 If `http://127.0.0.1:8877` refuses from your desktop browser while the server is
 healthy inside `/local`, your browser's loopback is not the same loopback as the
 workspace. Forward port `8877` or use the workspace-provided forwarded URL.
+The PWA uses a same-origin `/bridge` proxy for Hermes bridge calls, so direct
+or forwarded access only needs the `wasm-agent` app port; the bridge can remain
+bound to VM-local `127.0.0.1:8790`.
+
+For direct VM access, keep the bind explicit and open only the app port to the
+operator's current public IP:
+
+```bash
+HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
+sudo ufw allow from <operator-public-ip> to any port 8877 proto tcp
+```
+
+Then open `http://<vm-public-ip>:8877`. If that URL still times out while
+`curl http://127.0.0.1:8877/health` works on the VM, the remaining blocker is a
+cloud security-list/firewall rule outside the VM. Do not expose `8877` to the
+whole internet unless an auth layer is added first; the app can reach local
+orchestrator and bridge capabilities.
 
 Open:
 

@@ -24,6 +24,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 try:
@@ -89,6 +90,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path.startswith("/bridge/") or path == "/bridge":
+            try:
+                proxy_bridge_request(self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/browser/stream":
             serve_browser_stream(self)
             return
@@ -123,11 +130,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 {
                     "name": PLUGIN_NAME,
                     "version": PLUGIN_VERSION,
-                    "bridgeUrl": self.server.bridge_url,
+                    "bridgeUrl": "/bridge",
+                    "bridgeProxy": True,
                     "agentTurnTimeoutSec": agent_bridge_timeout_sec(),
                     "compareWith": {
                         "hermesSpaceUiPwa": "http://127.0.0.1:8787",
-                        "hermesSpaceUiBridge": "http://127.0.0.1:8790",
+                        "hermesSpaceUiBridge": "/bridge",
                     },
                 },
             )
@@ -162,6 +170,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path.startswith("/bridge/") or path == "/bridge":
+            try:
+                proxy_bridge_request(self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/browser/open":
             try:
                 body = self._read_json()
@@ -321,6 +335,65 @@ class BrowserError(RuntimeError):
         self.code = code
         self.message = message
         self.status = status
+
+
+def proxy_bridge_request(handler: WasmAgentHandler) -> None:
+    method = handler.command.upper()
+    if method not in {"GET", "POST"}:
+        raise BrowserError(
+            "bridge_proxy_method_not_allowed",
+            "Bridge proxy only supports GET and POST.",
+            status=HTTPStatus.METHOD_NOT_ALLOWED,
+        )
+    parsed = urlparse(handler.path)
+    bridge_path = parsed.path.removeprefix("/bridge") or "/"
+    if not bridge_path.startswith("/"):
+        bridge_path = f"/{bridge_path}"
+    target = f"{handler.server.bridge_url}{bridge_path}"
+    if parsed.query:
+        target = f"{target}?{parsed.query}"
+    body = None
+    if method == "POST":
+        try:
+            length = int(handler.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise BrowserError("invalid_content_length", "Invalid Content-Length header.") from exc
+        if length > DEFAULT_AGENT_BRIDGE_REQUEST_BYTES:
+            raise BrowserError(
+                "bridge_proxy_payload_too_large",
+                "Bridge proxy request body is too large.",
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        body = handler.rfile.read(length) if length > 0 else b""
+    headers = {"Accept": handler.headers.get("Accept", "application/json")}
+    content_type = handler.headers.get("Content-Type")
+    if content_type:
+        headers["Content-Type"] = content_type
+    authorization = handler.headers.get("Authorization")
+    if authorization:
+        headers["Authorization"] = authorization
+    request = Request(target, data=body, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=agent_bridge_timeout_sec()) as response:
+            payload = response.read()
+            status = HTTPStatus(response.status)
+            content_type = response.headers.get("Content-Type", "application/json; charset=utf-8")
+    except HTTPError as exc:
+        payload = exc.read()
+        status = HTTPStatus(exc.code)
+        content_type = exc.headers.get("Content-Type", "application/json; charset=utf-8")
+    except URLError as exc:
+        raise BrowserError(
+            "bridge_proxy_unavailable",
+            f"Bridge proxy could not reach {handler.server.bridge_url}: {exc.reason}",
+            status=HTTPStatus.BAD_GATEWAY,
+        ) from exc
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
 
 
 def chromium_command() -> str:
