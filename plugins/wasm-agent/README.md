@@ -355,6 +355,17 @@ Start the shadow WASM UI:
 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
 ```
 
+In remote IDE or container-backed workspaces, bind outward and use the IDE's
+forwarded port URL:
+
+```bash
+HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
+```
+
+If `http://127.0.0.1:8877` refuses from your desktop browser while the server is
+healthy inside `/local`, your browser's loopback is not the same loopback as the
+workspace. Forward port `8877` or use the workspace-provided forwarded URL.
+
 Open:
 
 ```text

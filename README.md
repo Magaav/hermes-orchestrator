@@ -48,6 +48,10 @@ Use these rules before evolving this project:
 - During extended implementation, chain work in small verified steps:
   inspect, document the finding, implement the smallest plugin-owned change,
   verify, sync docs, commit, then continue from the roadmap's next action.
+- After a verified stable checkpoint is committed, check whether the current
+  branch is ahead of its upstream. Unless the user explicitly asked for
+  local-only work or a separate PR branch, push the committed checkpoint to
+  GitHub so repository browsing reflects the latest durable achievements.
 - End every final agent response with a concrete proposed next step for the
   agent to run next. Keep it short and actionable so work can resume quickly.
 
