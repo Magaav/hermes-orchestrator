@@ -14,6 +14,16 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   absolute positioning that lets the board slide behind the launcher.
 - Home and user-created spaces are black canvases with no topbar, command form,
   side panel, dock, or widgets.
+- Home-level actions sit on the black homespace itself. The primary action may
+  be a wider text button when the action is the main object creation path.
+- The launcher lower corner is reserved for account state. Do not put raw
+  bridge/WASM status leds back in that slot; system status belongs in the
+  topbar or diagnostics surfaces.
+- When auth is locked, the main app surface stays hidden behind the admin gate.
+  Only the login shell and account control should be usable before the admin
+  session is established.
+- Space launcher hover/focus affordances must render inside the launcher rail
+  without sliding behind the aside surface or the workspace canvas.
 
 ## Button Icons
 

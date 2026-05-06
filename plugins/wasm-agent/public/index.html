@@ -19,7 +19,7 @@
     </script>
   </head>
   <body>
-    <div id="app" class="os-shell" data-status="booting" data-panel="home">
+    <div id="app" class="os-shell" data-status="booting" data-panel="home" data-auth="checking">
       <aside class="launcher" aria-label="Workspace launcher">
         <button class="launcher-mark active" type="button" data-panel="home" title="Home" aria-label="Home">
           <svg class="home-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -29,9 +29,89 @@
         </button>
         <div id="spaceLauncherList" class="space-launcher-list" aria-label="Spaces"></div>
         <div class="launcher-spacer"></div>
-        <span id="wasmStatus" class="mini-led pending" title="WASM runtime"></span>
-        <span id="bridgeStatus" class="mini-led pending" title="Hermes bridge"></span>
+        <section id="launcherLogin" class="launcher-login" aria-label="Account">
+          <button id="loginButton" class="login-avatar-button" type="button" aria-label="Open account" aria-expanded="false">
+            <span id="loginAvatar" class="login-avatar" aria-hidden="true">
+              <img class="google-logo" src="/icons/google-logo.svg" alt="">
+            </span>
+            <span id="loginStateDot" class="login-state-dot" aria-hidden="true"></span>
+          </button>
+          <aside id="loginPopover" class="login-popover" aria-label="Account login" hidden>
+            <div class="login-head">
+              <strong id="loginTitle">Sign in</strong>
+              <span id="loginMeta">Google</span>
+            </div>
+            <div id="loginUser" class="login-user" hidden></div>
+            <div id="googleSignInButton" class="google-signin-slot"></div>
+            <p id="loginMessage" class="login-message"></p>
+            <button id="logoutButton" class="login-secondary-button" type="button" hidden>Sign out</button>
+          </aside>
+        </section>
       </aside>
+
+      <div id="spaceContextMenu" class="space-context-menu" role="menu" aria-label="Space menu" hidden>
+        <button id="copySpaceIdButton" type="button" role="menuitem">Copy space id</button>
+        <button id="deleteSpaceButton" class="danger" type="button" role="menuitem">Delete space</button>
+      </div>
+
+      <section id="deleteSpaceModal" class="modal-backdrop" aria-label="Delete space confirmation" hidden>
+        <article class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteSpaceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="deleteSpaceTitle">Delete space</h2>
+              <p id="deleteSpaceName">Space</p>
+            </div>
+            <button id="closeDeleteSpaceButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <label class="confirm-field">
+            <span id="deleteSpacePrompt">DELETE Space</span>
+            <input id="deleteSpaceConfirmInput" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="modal-actions">
+            <button id="cancelDeleteSpaceButton" type="button">Cancel</button>
+            <button id="confirmDeleteSpaceButton" class="danger" type="button" disabled>OK</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="configModal" class="modal-backdrop" aria-label="Configuration" hidden>
+        <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="configModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="configModalTitle">Config</h2>
+              <p>Runtime</p>
+            </div>
+            <button id="closeConfigModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div id="configDetails" class="config-details"></div>
+        </article>
+      </section>
+
+      <section id="homeModulesModal" class="modal-backdrop" aria-label="Modules" hidden>
+        <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="homeModulesModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="homeModulesModalTitle">Modules</h2>
+              <p>Local</p>
+            </div>
+            <button id="closeHomeModulesModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div id="homeModuleList" class="module-list modal-module-list"></div>
+        </article>
+      </section>
+
+      <section id="authGate" class="auth-gate" aria-label="Admin sign-in">
+        <article class="auth-card">
+          <span class="auth-mark" aria-hidden="true">
+            <img class="google-logo" src="/icons/google-logo.svg" alt="">
+          </span>
+          <h1>Colmeio Admin</h1>
+          <p id="authGateCopy">Sign in with the admin Google account to open wasm-agent.</p>
+          <button id="authGateLoginButton" class="home-action-button primary" type="button">Sign in with Google</button>
+          <div id="authGateGoogleSignInButton" class="google-signin-slot auth-google-slot"></div>
+          <p id="authGateMessage" class="auth-message"></p>
+        </article>
+      </section>
 
       <section class="main-stage">
         <header class="topbar">
@@ -58,7 +138,11 @@
         <main class="space-frame">
           <section class="space-viewport" aria-label="Hermes OS workspace">
             <canvas id="spaceCanvas"></canvas>
-            <button id="addSpaceButton" class="home-add-space-button" type="button" title="Add space" aria-label="Add space">+</button>
+            <div class="home-actions" aria-label="Homespace actions">
+              <button id="addSpaceButton" class="home-action-button primary" type="button">New Space</button>
+              <button id="homeConfigButton" class="home-action-button" type="button">Config</button>
+              <button id="homeModulesButton" class="home-action-button" type="button">Modules</button>
+            </div>
             <div class="space-title">
               <span class="space-label">Hermes OS</span>
               <span id="frameLabel">idle</span>

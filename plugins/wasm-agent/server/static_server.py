@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import io
 import json
 import math
@@ -13,6 +14,7 @@ import queue
 import secrets
 import shutil
 import socket
+import sqlite3
 import subprocess
 import struct
 import threading
@@ -52,6 +54,14 @@ DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
+WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
+DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
+DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_db.sqlite3"
+DEFAULT_AUTH_SECRET_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_auth_secret"
+AUTH_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 30
+_SNOWFLAKE_LOCK = threading.Lock()
+_SNOWFLAKE_LAST_MS = -1
+_SNOWFLAKE_SEQUENCE = 0
 
 
 class WasmAgentServer(ThreadingHTTPServer):
@@ -90,11 +100,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path.startswith("/bridge/") or path == "/bridge":
-            try:
-                proxy_bridge_request(self)
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+        if not is_public_request("GET", path) and not authenticated_request_user(self):
+            self._json(
+                HTTPStatus.UNAUTHORIZED,
+                {"ok": False, "error": {"code": "auth_required", "message": "Admin sign-in is required."}},
+            )
             return
         if path == "/browser/stream":
             serve_browser_stream(self)
@@ -124,18 +134,33 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 },
             )
             return
+        if path == "/auth/session":
+            try:
+                self._json(HTTPStatus.OK, auth_session(self.server, self.headers.get("Cookie", "")))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/auth/google/callback":
+            self._redirect("/home")
+            return
         if path == "/config.json":
             self._json(
                 HTTPStatus.OK,
                 {
                     "name": PLUGIN_NAME,
                     "version": PLUGIN_VERSION,
-                    "bridgeUrl": "/bridge",
-                    "bridgeProxy": True,
+                    "bridgeUrl": self.server.bridge_url,
                     "agentTurnTimeoutSec": agent_bridge_timeout_sec(),
+                    "auth": {
+                        "googleClientId": google_client_id(),
+                        "googleClientIdConfigured": bool(google_client_id()),
+                        "required": True,
+                        "adminEmail": admin_email_label(),
+                        "userTable": "user_tb",
+                    },
                     "compareWith": {
                         "hermesSpaceUiPwa": "http://127.0.0.1:8787",
-                        "hermesSpaceUiBridge": "/bridge",
+                        "hermesSpaceUiBridge": "http://127.0.0.1:8790",
                     },
                 },
             )
@@ -170,11 +195,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if path.startswith("/bridge/") or path == "/bridge":
-            try:
-                proxy_bridge_request(self)
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+        if not is_public_request("POST", path) and not authenticated_request_user(self):
+            self._json(
+                HTTPStatus.UNAUTHORIZED,
+                {"ok": False, "error": {"code": "auth_required", "message": "Admin sign-in is required."}},
+            )
             return
         if path == "/browser/open":
             try:
@@ -206,6 +231,36 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {"ok": True, "browser": close_browser_session(self.server, body)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/auth/google":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                payload = google_auth_login(self.server, body)
+                self._json(HTTPStatus.OK, payload, headers={"Set-Cookie": auth_cookie(payload["user"]["id"])})
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "auth_error", "message": str(exc)}},
+                )
+            return
+        if path == "/auth/google/callback":
+            try:
+                body = self._read_form(max_bytes=32 * 1024)
+                payload = google_auth_login(self.server, body)
+                self._redirect("/home", headers={"Set-Cookie": auth_cookie(payload["user"]["id"])})
+            except BrowserError as exc:
+                self._redirect(f"/home?auth_error={quote(exc.code, safe='')}&message={quote(exc.message, safe='')}")
+            except Exception as exc:
+                self._redirect(f"/home?auth_error=auth_error&message={quote(str(exc), safe='')}")
+            return
+        if path == "/auth/logout":
+            self._json(
+                HTTPStatus.OK,
+                {"ok": True, "authenticated": False, "user": None},
+                headers={"Set-Cookie": auth_cookie("", max_age=0)},
+            )
             return
         if path == "/observation/latest":
             try:
@@ -283,7 +338,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
         super().end_headers()
 
     def translate_path(self, path: str) -> str:
@@ -297,14 +352,25 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return str(translated)
         return str(public_root / "index.html")
 
-    def _json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+    def _json(self, status: HTTPStatus, payload: dict[str, Any], *, headers: dict[str, str] | None = None) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _redirect(self, location: str, *, headers: dict[str, str] | None = None) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _read_json(self, *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
         try:
@@ -328,6 +394,22 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             raise BrowserError("invalid_json", "Request body must be a JSON object.")
         return payload
 
+    def _read_form(self, *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise BrowserError("invalid_content_length", "Invalid Content-Length header.") from exc
+        if length > max_bytes:
+            raise BrowserError(
+                "payload_too_large",
+                "Request body is too large.",
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8")
+        return {key: values[-1] if values else "" for key, values in parse_qs(raw, keep_blank_values=True).items()}
+
 
 class BrowserError(RuntimeError):
     def __init__(self, code: str, message: str, *, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
@@ -337,63 +419,320 @@ class BrowserError(RuntimeError):
         self.status = status
 
 
-def proxy_bridge_request(handler: WasmAgentHandler) -> None:
-    method = handler.command.upper()
-    if method not in {"GET", "POST"}:
-        raise BrowserError(
-            "bridge_proxy_method_not_allowed",
-            "Bridge proxy only supports GET and POST.",
-            status=HTTPStatus.METHOD_NOT_ALLOWED,
-        )
-    parsed = urlparse(handler.path)
-    bridge_path = parsed.path.removeprefix("/bridge") or "/"
-    if not bridge_path.startswith("/"):
-        bridge_path = f"/{bridge_path}"
-    target = f"{handler.server.bridge_url}{bridge_path}"
-    if parsed.query:
-        target = f"{target}?{parsed.query}"
-    body = None
-    if method == "POST":
-        try:
-            length = int(handler.headers.get("Content-Length", "0"))
-        except ValueError as exc:
-            raise BrowserError("invalid_content_length", "Invalid Content-Length header.") from exc
-        if length > DEFAULT_AGENT_BRIDGE_REQUEST_BYTES:
-            raise BrowserError(
-                "bridge_proxy_payload_too_large",
-                "Bridge proxy request body is too large.",
-                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-            )
-        body = handler.rfile.read(length) if length > 0 else b""
-    headers = {"Accept": handler.headers.get("Accept", "application/json")}
-    content_type = handler.headers.get("Content-Type")
-    if content_type:
-        headers["Content-Type"] = content_type
-    authorization = handler.headers.get("Authorization")
-    if authorization:
-        headers["Authorization"] = authorization
-    request = Request(target, data=body, headers=headers, method=method)
+def wa_env_path() -> Path:
+    return Path(os.getenv("HERMES_WASM_AGENT_ENV_PATH", str(DEFAULT_WA_ENV_PATH))).resolve()
+
+
+def env_file_value(name: str, *, path: Path | None = None) -> str:
+    source = path or wa_env_path()
     try:
-        with urlopen(request, timeout=agent_bridge_timeout_sec()) as response:
-            payload = response.read()
-            status = HTTPStatus(response.status)
-            content_type = response.headers.get("Content-Type", "application/json; charset=utf-8")
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return ""
+    except Exception:
+        return ""
+    prefix = f"{name}="
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or not stripped.startswith(prefix):
+            continue
+        value = stripped[len(prefix):].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value.strip()
+    return ""
+
+
+def google_client_id() -> str:
+    return (
+        os.getenv("HERMES_WASM_AGENT_GOOGLE_CLIENT_ID", "").strip()
+        or env_file_value("GOOGLE_LOGIN_CLIENT_ID")
+    )
+
+
+def allowed_admin_emails() -> set[str]:
+    raw = env_file_value("ADMIN_EMAIL")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
+def admin_email_label() -> str:
+    emails = sorted(allowed_admin_emails())
+    return emails[0] if len(emails) == 1 else ",".join(emails)
+
+
+def is_admin_email(email: str) -> bool:
+    return email.strip().lower() in allowed_admin_emails()
+
+
+def auth_db_path() -> Path:
+    return Path(os.getenv("HERMES_WASM_AGENT_DB_PATH", str(DEFAULT_AUTH_DB_PATH))).resolve()
+
+
+def auth_secret_path() -> Path:
+    return Path(os.getenv("HERMES_WASM_AGENT_AUTH_SECRET_PATH", str(DEFAULT_AUTH_SECRET_PATH))).resolve()
+
+
+def auth_secret() -> bytes:
+    raw = os.getenv("HERMES_WASM_AGENT_AUTH_SECRET", "").strip()
+    if raw:
+        return raw.encode("utf-8")
+    path = auth_secret_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        value = secrets.token_urlsafe(48)
+        path.write_text(value + "\n", encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except Exception:
+            pass
+    return value.encode("utf-8")
+
+
+def snowflake_machine_id() -> int:
+    raw = os.getenv("HERMES_WASM_AGENT_SNOWFLAKE_MACHINE_ID", "").strip()
+    if raw:
+        try:
+            return int(raw) & 0x3FF
+        except ValueError:
+            pass
+    host = socket.gethostname().encode("utf-8", "ignore")
+    digest = hashlib.blake2s(host, digest_size=2).digest()
+    return int.from_bytes(digest, "big") & 0x3FF
+
+
+def next_snowflake_id() -> int:
+    global _SNOWFLAKE_LAST_MS, _SNOWFLAKE_SEQUENCE
+    machine = snowflake_machine_id()
+    with _SNOWFLAKE_LOCK:
+        now_ms = int(time.time() * 1000) - WASM_AGENT_SNOWFLAKE_EPOCH_MS
+        if now_ms < _SNOWFLAKE_LAST_MS:
+            now_ms = _SNOWFLAKE_LAST_MS
+        if now_ms == _SNOWFLAKE_LAST_MS:
+            _SNOWFLAKE_SEQUENCE = (_SNOWFLAKE_SEQUENCE + 1) & 0xFFF
+            if _SNOWFLAKE_SEQUENCE == 0:
+                while now_ms <= _SNOWFLAKE_LAST_MS:
+                    time.sleep(0.001)
+                    now_ms = int(time.time() * 1000) - WASM_AGENT_SNOWFLAKE_EPOCH_MS
+        else:
+            _SNOWFLAKE_SEQUENCE = 0
+        _SNOWFLAKE_LAST_MS = now_ms
+        return (now_ms << 22) | (machine << 12) | _SNOWFLAKE_SEQUENCE
+
+
+def auth_connect() -> sqlite3.Connection:
+    path = auth_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_tb (
+          id INTEGER PRIMARY KEY,
+          provider TEXT NOT NULL,
+          provider_sub TEXT NOT NULL,
+          email TEXT NOT NULL DEFAULT '',
+          email_verified INTEGER NOT NULL DEFAULT 0,
+          name TEXT NOT NULL DEFAULT '',
+          picture_url TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          last_login_at INTEGER NOT NULL,
+          UNIQUE(provider, provider_sub)
+        )
+        """
+    )
+    return conn
+
+
+def public_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {
+        "id": str(row["id"]),
+        "provider": row["provider"],
+        "email": row["email"],
+        "email_verified": bool(row["email_verified"]),
+        "name": row["name"],
+        "picture_url": row["picture_url"],
+        "created_at": int(row["created_at"]),
+        "last_login_at": int(row["last_login_at"]),
+    }
+
+
+def parse_cookies(raw: str) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for part in str(raw or "").split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def signed_auth_value(user_id: str, issued_at: int | None = None) -> str:
+    issued = int(issued_at or time.time())
+    message = f"{user_id}.{issued}"
+    signature = hmac.new(auth_secret(), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{message}.{signature}"
+
+
+def verified_auth_user_id(value: str) -> str:
+    parts = str(value or "").split(".")
+    if len(parts) != 3:
+        return ""
+    user_id, issued_raw, signature = parts
+    if not user_id.isdigit() or not issued_raw.isdigit() or not signature:
+        return ""
+    issued = int(issued_raw)
+    if issued > int(time.time()) + 60 or int(time.time()) - issued > AUTH_COOKIE_MAX_AGE_SEC:
+        return ""
+    expected = hmac.new(auth_secret(), f"{user_id}.{issued}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return user_id if hmac.compare_digest(signature, expected) else ""
+
+
+def auth_cookie(user_id: str, *, max_age: int = AUTH_COOKIE_MAX_AGE_SEC) -> str:
+    value = signed_auth_value(str(user_id)) if user_id else ""
+    return f"wa_uid={value}; Path=/; Max-Age={max_age}; SameSite=Lax; HttpOnly"
+
+
+def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
+    user_id = verified_auth_user_id(parse_cookies(cookie_header).get("wa_uid", ""))
+    if not user_id:
+        return {"ok": True, "authenticated": False, "user": None}
+    path = auth_db_path()
+    if not path.exists():
+        return {"ok": True, "authenticated": False, "user": None}
+    with auth_connect() as conn:
+        row = conn.execute("SELECT * FROM user_tb WHERE id = ?", (int(user_id),)).fetchone()
+    user = public_user(row)
+    if user and not is_admin_email(str(user.get("email") or "")):
+        user = None
+    return {"ok": True, "authenticated": bool(user), "user": user}
+
+
+def authenticated_request_user(handler: WasmAgentHandler) -> dict[str, Any] | None:
+    try:
+        payload = auth_session(handler.server, handler.headers.get("Cookie", ""))
+    except Exception:
+        return None
+    user = payload.get("user")
+    return user if isinstance(user, dict) else None
+
+
+def is_public_request(method: str, path: str) -> bool:
+    method = method.upper()
+    if method == "OPTIONS":
+        return True
+    if method == "GET":
+        if path in {
+            "/",
+            "/home",
+            "/index.html",
+            "/styles.css",
+            "/app.js",
+            "/manifest.webmanifest",
+            "/sw.js",
+            "/config.json",
+            "/auth/session",
+            "/auth/google/callback",
+        }:
+            return True
+        if path.startswith("/icons/"):
+            return True
+        if path.startswith("/modules/") and path.endswith(".js"):
+            return True
+        return False
+    if method == "POST":
+        return path in {"/auth/google", "/auth/google/callback", "/auth/logout"}
+    return False
+
+
+def verify_google_id_token(credential: str, client_id: str) -> dict[str, Any]:
+    if not client_id:
+        raise BrowserError("google_login_not_configured", "Google login needs HERMES_WASM_AGENT_GOOGLE_CLIENT_ID.")
+    if not credential:
+        raise BrowserError("missing_google_credential", "Google credential is required.")
+    request = Request(
+        f"https://oauth2.googleapis.com/tokeninfo?id_token={quote(credential, safe='')}",
+        headers={"Accept": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=8) as response:
+            claims = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        payload = exc.read()
-        status = HTTPStatus(exc.code)
-        content_type = exc.headers.get("Content-Type", "application/json; charset=utf-8")
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = str(payload.get("error_description") or payload.get("error") or exc.reason)
+        except Exception:
+            detail = str(exc.reason)
+        raise BrowserError("google_token_rejected", f"Google rejected the credential: {detail}") from exc
     except URLError as exc:
         raise BrowserError(
-            "bridge_proxy_unavailable",
-            f"Bridge proxy could not reach {handler.server.bridge_url}: {exc.reason}",
+            "google_token_verify_unavailable",
+            f"Could not reach Google token verification: {exc.reason}",
             status=HTTPStatus.BAD_GATEWAY,
         ) from exc
-    handler.send_response(status)
-    handler.send_header("Content-Type", content_type)
-    handler.send_header("Cache-Control", "no-store")
-    handler.send_header("Content-Length", str(len(payload)))
-    handler.end_headers()
-    handler.wfile.write(payload)
+    if str(claims.get("aud") or "") != client_id:
+        raise BrowserError("google_audience_mismatch", "Google credential audience does not match this app.")
+    if str(claims.get("iss") or "") not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise BrowserError("google_issuer_mismatch", "Google credential issuer is not supported.")
+    if not str(claims.get("sub") or "").strip():
+        raise BrowserError("google_subject_missing", "Google credential did not include an account id.")
+    return claims
+
+
+def google_auth_login(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+    claims = verify_google_id_token(str(body.get("credential") or "").strip(), google_client_id())
+    now = int(time.time())
+    provider_sub = str(claims.get("sub") or "").strip()
+    email = str(claims.get("email") or "").strip().lower()
+    email_verified = str(claims.get("email_verified") or "").lower() in {"1", "true", "yes"}
+    if not email_verified:
+        raise BrowserError(
+            "google_email_unverified",
+            "Google did not mark this email as verified.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+    if not is_admin_email(email):
+        raise BrowserError(
+            "google_account_not_allowed",
+            "This Google account is not allowed to access wasm-agent.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+    name = str(claims.get("name") or email or "Google User").strip()
+    picture_url = str(claims.get("picture") or "").strip()
+    with auth_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM user_tb WHERE provider = ? AND provider_sub = ?",
+            ("google", provider_sub),
+        ).fetchone()
+        if row:
+            conn.execute(
+                """
+                UPDATE user_tb
+                   SET email = ?, email_verified = ?, name = ?, picture_url = ?,
+                       updated_at = ?, last_login_at = ?
+                 WHERE id = ?
+                """,
+                (email, int(email_verified), name, picture_url, now, now, int(row["id"])),
+            )
+            user_id = int(row["id"])
+        else:
+            user_id = next_snowflake_id()
+            conn.execute(
+                """
+                INSERT INTO user_tb (
+                  id, provider, provider_sub, email, email_verified, name,
+                  picture_url, created_at, updated_at, last_login_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, "google", provider_sub, email, int(email_verified), name, picture_url, now, now, now),
+            )
+        stored = conn.execute("SELECT * FROM user_tb WHERE id = ?", (user_id,)).fetchone()
+    return {"ok": True, "authenticated": True, "user": public_user(stored)}
 
 
 def chromium_command() -> str:
@@ -3914,6 +4253,9 @@ def main() -> int:
     mimetypes.add_type("application/wasm", ".wasm")
 
     args = build_parser().parse_args()
+    with auth_connect():
+        pass
+    auth_secret()
 
     def handler(*handler_args: Any, **handler_kwargs: Any) -> WasmAgentHandler:
         return WasmAgentHandler(*handler_args, directory=str(public_root), **handler_kwargs)
@@ -3929,6 +4271,7 @@ def main() -> int:
     )
     print(f"wasm-agent listening on http://{args.host}:{args.port}", flush=True)
     print(f"wasm-agent bridge target {args.bridge_url.rstrip('/')}", flush=True)
+    print(f"wasm-agent account db {auth_db_path()}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

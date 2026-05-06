@@ -30,6 +30,11 @@ const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and hel
 
 const els = {
   app: document.querySelector("#app"),
+  authGate: document.querySelector("#authGate"),
+  authGateCopy: document.querySelector("#authGateCopy"),
+  authGateLoginButton: document.querySelector("#authGateLoginButton"),
+  authGateGoogleSignInButton: document.querySelector("#authGateGoogleSignInButton"),
+  authGateMessage: document.querySelector("#authGateMessage"),
   bridgeLabel: document.querySelector("#bridgeLabel"),
   wasmStatus: document.querySelector("#wasmStatus"),
   bridgeStatus: document.querySelector("#bridgeStatus"),
@@ -58,6 +63,24 @@ const els = {
   spaceViewport: document.querySelector(".space-viewport"),
   spaceLauncherList: document.querySelector("#spaceLauncherList"),
   addSpaceButton: document.querySelector("#addSpaceButton"),
+  homeConfigButton: document.querySelector("#homeConfigButton"),
+  homeModulesButton: document.querySelector("#homeModulesButton"),
+  spaceContextMenu: document.querySelector("#spaceContextMenu"),
+  copySpaceIdButton: document.querySelector("#copySpaceIdButton"),
+  deleteSpaceButton: document.querySelector("#deleteSpaceButton"),
+  deleteSpaceModal: document.querySelector("#deleteSpaceModal"),
+  deleteSpaceName: document.querySelector("#deleteSpaceName"),
+  deleteSpacePrompt: document.querySelector("#deleteSpacePrompt"),
+  deleteSpaceConfirmInput: document.querySelector("#deleteSpaceConfirmInput"),
+  confirmDeleteSpaceButton: document.querySelector("#confirmDeleteSpaceButton"),
+  cancelDeleteSpaceButton: document.querySelector("#cancelDeleteSpaceButton"),
+  closeDeleteSpaceButton: document.querySelector("#closeDeleteSpaceButton"),
+  configModal: document.querySelector("#configModal"),
+  configDetails: document.querySelector("#configDetails"),
+  closeConfigModalButton: document.querySelector("#closeConfigModalButton"),
+  homeModulesModal: document.querySelector("#homeModulesModal"),
+  homeModuleList: document.querySelector("#homeModuleList"),
+  closeHomeModulesModalButton: document.querySelector("#closeHomeModulesModalButton"),
   spaceCanvas: document.querySelector("#spaceCanvas"),
   frameLabel: document.querySelector("#frameLabel"),
   selectedNode: document.querySelector("#selectedNode"),
@@ -106,6 +129,16 @@ const els = {
   agentImageInput: document.querySelector("#agentImageInput"),
   agentAttachButton: document.querySelector("#agentAttachButton"),
   agentImagePreview: document.querySelector("#agentImagePreview"),
+  launcherLogin: document.querySelector("#launcherLogin"),
+  loginButton: document.querySelector("#loginButton"),
+  loginAvatar: document.querySelector("#loginAvatar"),
+  loginPopover: document.querySelector("#loginPopover"),
+  loginTitle: document.querySelector("#loginTitle"),
+  loginMeta: document.querySelector("#loginMeta"),
+  loginUser: document.querySelector("#loginUser"),
+  googleSignInButton: document.querySelector("#googleSignInButton"),
+  loginMessage: document.querySelector("#loginMessage"),
+  logoutButton: document.querySelector("#logoutButton"),
   panelButtons: document.querySelectorAll("[data-panel]"),
   panelTabs: document.querySelectorAll(".panel-tab"),
   panelViews: document.querySelectorAll(".panel-view"),
@@ -113,6 +146,16 @@ const els = {
 
 const state = {
   bridgeUrl: "http://127.0.0.1:8790",
+  config: null,
+  googleClientId: "",
+  adminEmail: "",
+  googleButtonRenderedFor: "",
+  authUser: null,
+  authChecked: false,
+  loginOpen: false,
+  loginMessage: "",
+  authenticatedBootstrapped: false,
+  refreshInterval: 0,
   wasm: null,
   wasmReady: false,
   bridgeReady: false,
@@ -152,6 +195,8 @@ const state = {
   observationPublishBusy: false,
   moduleSettings: readModuleSettings(),
   userSpaces: readUserSpaces(),
+  activeSpaceMenuId: "",
+  deleteSpaceTargetId: "",
   agentOpen: false,
   agentDragSuppressClick: false,
   agentBusy: false,
@@ -180,11 +225,13 @@ function bytesFromBase64(value) {
 }
 
 function setLed(el, mode) {
+  if (!el) return;
   el.classList.remove("ok", "err", "pending");
   el.classList.add(mode);
 }
 
 function setPill(el, text, mode = "") {
+  if (!el) return;
   el.textContent = text;
   el.classList.remove("ok", "err");
   if (mode) el.classList.add(mode);
@@ -306,7 +353,7 @@ function latestEvents(count = 36) {
 
 function latestNonAgentClick() {
   return [...state.userEvents].reverse().find((event) => {
-    if (event.type !== "workspace.click") return false;
+    if (!["workspace.click", "workspace.context_menu_requested"].includes(event.type)) return false;
     const target = String(event.target || "");
     const path = event.data?.target?.path || [];
     const id = event.data?.target?.id || "";
@@ -480,41 +527,46 @@ function renderObservation() {
   els.observationSnapshot.textContent = JSON.stringify(snapshot, null, 2);
 }
 
+function moduleCard(module) {
+  const enabled = isModuleEnabled(module.id);
+  const card = document.createElement("article");
+  card.className = `module-card${enabled ? " enabled" : ""}`;
+
+  const copy = document.createElement("div");
+  copy.className = "module-copy";
+  const title = document.createElement("strong");
+  title.textContent = module.title;
+  const detail = document.createElement("p");
+  detail.textContent = module.detail;
+  const meta = document.createElement("span");
+  meta.textContent = module.status;
+  copy.append(title, detail, meta);
+
+  const label = document.createElement("label");
+  label.className = "module-toggle";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = enabled;
+  input.setAttribute("aria-label", `${enabled ? "Disable" : "Enable"} ${module.title}`);
+  const control = document.createElement("span");
+  control.textContent = enabled ? "On" : "Off";
+  input.addEventListener("change", () => {
+    setModuleEnabled(module.id, input.checked);
+  });
+  label.append(input, control);
+
+  card.append(copy, label);
+  return card;
+}
+
+function renderModuleList(container) {
+  if (!container) return;
+  container.replaceChildren(...MODULE_DEFINITIONS.map(moduleCard));
+}
+
 function renderModules() {
-  if (!els.moduleList) return;
-  els.moduleList.replaceChildren(
-    ...MODULE_DEFINITIONS.map((module) => {
-      const enabled = isModuleEnabled(module.id);
-      const card = document.createElement("article");
-      card.className = `module-card${enabled ? " enabled" : ""}`;
-
-      const copy = document.createElement("div");
-      copy.className = "module-copy";
-      const title = document.createElement("strong");
-      title.textContent = module.title;
-      const detail = document.createElement("p");
-      detail.textContent = module.detail;
-      const meta = document.createElement("span");
-      meta.textContent = module.status;
-      copy.append(title, detail, meta);
-
-      const label = document.createElement("label");
-      label.className = "module-toggle";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = enabled;
-      input.setAttribute("aria-label", `${enabled ? "Disable" : "Enable"} ${module.title}`);
-      const control = document.createElement("span");
-      control.textContent = enabled ? "On" : "Off";
-      input.addEventListener("change", () => {
-        setModuleEnabled(module.id, input.checked);
-      });
-      label.append(input, control);
-
-      card.append(copy, label);
-      return card;
-    })
-  );
+  renderModuleList(els.moduleList);
+  renderModuleList(els.homeModuleList);
 }
 
 function renderTimeline() {
@@ -1259,7 +1311,10 @@ async function loadConfig() {
     const response = await fetch("/config.json", { cache: "no-store" });
     if (response.ok) {
       const config = await response.json();
+      state.config = config;
       if (config.bridgeUrl) state.bridgeUrl = String(config.bridgeUrl).replace(/\/$/, "");
+      state.googleClientId = String(config.auth?.googleClientId || "").trim();
+      state.adminEmail = cleanText(config.auth?.adminEmail, state.adminEmail);
       const timeoutSec = Number(config.agentTurnTimeoutSec);
       if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
         state.agentTurnTimeoutMs = timeoutSec * 1000;
@@ -1269,6 +1324,281 @@ async function loadConfig() {
     // Keep the local default when the config route is unavailable.
   }
   els.bridgeLabel.textContent = `Bridge ${state.bridgeUrl}`;
+  renderLogin();
+}
+
+function publicUserLabel(user) {
+  return cleanText(user?.name || user?.email, "Guest");
+}
+
+function publicUserInitial(user) {
+  const label = publicUserLabel(user);
+  return label.slice(0, 1).toUpperCase();
+}
+
+function setLoginOpen(open) {
+  state.loginOpen = Boolean(open);
+  if (!els.loginPopover || !els.loginButton) return;
+  els.loginPopover.hidden = !state.loginOpen;
+  els.loginButton.setAttribute("aria-expanded", state.loginOpen ? "true" : "false");
+  if (state.loginOpen) {
+    renderLogin();
+    void renderGoogleSignInButton();
+  }
+}
+
+function renderAuthGate() {
+  if (!els.app) return;
+  const authenticated = Boolean(state.authUser);
+  els.app.dataset.auth = authenticated ? "ready" : state.authChecked && state.googleClientId ? "locked" : "checking";
+  if (els.authGateCopy) {
+    els.authGateCopy.textContent = state.googleClientId
+      ? "Sign in as admin to open wasm-agent."
+      : "Google login is not configured on this server yet.";
+  }
+  if (els.authGateMessage) {
+    els.authGateMessage.textContent = authenticated
+      ? ""
+      : state.authChecked ? state.loginMessage || (state.googleClientId ? "" : "Missing GOOGLE_LOGIN_CLIENT_ID") : "";
+  }
+}
+
+function renderLogin() {
+  if (!els.launcherLogin) return;
+  const user = state.authUser;
+  els.launcherLogin.classList.toggle("signed-in", Boolean(user));
+  els.launcherLogin.classList.toggle("needs-config", !state.googleClientId && !user);
+  els.launcherLogin.classList.toggle("error", Boolean(state.loginMessage) && !user && Boolean(state.googleClientId));
+  if (els.loginAvatar) {
+    if (user?.picture_url) els.loginAvatar.replaceChildren();
+    else if (user) els.loginAvatar.textContent = publicUserInitial(user);
+    else if (!els.loginAvatar.querySelector(".google-logo")) {
+      const logo = document.createElement("img");
+      logo.className = "google-logo";
+      logo.src = "/icons/google-logo.svg";
+      logo.alt = "";
+      els.loginAvatar.replaceChildren(logo);
+    }
+    els.loginAvatar.style.backgroundImage = user?.picture_url ? `url("${user.picture_url}")` : "";
+  }
+  if (els.loginButton) {
+    els.loginButton.title = user ? publicUserLabel(user) : "Sign in with Google";
+    els.loginButton.setAttribute("aria-label", user ? `Account ${publicUserLabel(user)}` : "Sign in with Google");
+  }
+  if (els.loginTitle) els.loginTitle.textContent = user ? publicUserLabel(user) : "Sign in";
+  if (els.loginMeta) els.loginMeta.textContent = user ? cleanText(user.email, "Google account") : "Google";
+  if (els.loginUser) {
+    els.loginUser.hidden = !user;
+    els.loginUser.replaceChildren();
+    if (user) {
+      const name = document.createElement("strong");
+      name.textContent = publicUserLabel(user);
+      const email = document.createElement("span");
+      email.textContent = cleanText(user.email, "Google account");
+      els.loginUser.append(name, email);
+    }
+  }
+  if (els.googleSignInButton) {
+    els.googleSignInButton.hidden = Boolean(user);
+    if (user) els.googleSignInButton.replaceChildren();
+  }
+  if (els.authGateGoogleSignInButton) {
+    els.authGateGoogleSignInButton.hidden = Boolean(user) || !state.googleClientId;
+    if (user) els.authGateGoogleSignInButton.replaceChildren();
+  }
+  if (els.authGateLoginButton) {
+    els.authGateLoginButton.hidden = Boolean(user) || !state.authChecked || (
+      Boolean(state.googleClientId) && Boolean(els.authGateGoogleSignInButton?.childElementCount)
+    );
+  }
+  if (els.logoutButton) els.logoutButton.hidden = !user;
+  if (els.loginMessage) {
+    els.loginMessage.textContent = user
+      ? `Account ${user.id}`
+      : state.loginMessage || (state.googleClientId ? "Only the configured admin account is allowed." : "Google client ID missing");
+  }
+  renderAuthGate();
+}
+
+function loadGoogleIdentityScript() {
+  if (!state.googleClientId) return Promise.reject(new Error("Google client ID missing"));
+  if (window.google?.accounts?.id) {
+    installGoogleStyleOverrides();
+    return Promise.resolve();
+  }
+  if (window.__wasmAgentGoogleIdentityPromise) return window.__wasmAgentGoogleIdentityPromise;
+  window.__wasmAgentGoogleIdentityPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => {
+      installGoogleStyleOverrides();
+      resolve();
+    };
+    script.onerror = () => reject(new Error("Google Identity failed to load"));
+    document.head.append(script);
+  });
+  return window.__wasmAgentGoogleIdentityPromise;
+}
+
+function installGoogleStyleOverrides() {
+  const id = "wasmAgentGoogleStyleOverrides";
+  document.querySelector(`#${id}`)?.remove();
+  const style = document.createElement("style");
+  style.id = id;
+  style.textContent = `
+    .google-signin-slot .nsm7Bb-HzV7m-LgbsSe-Bz112c-haAclf,
+    .google-signin-slot [id="container-div"] {
+      background: transparent !important;
+      background-color: transparent !important;
+      box-shadow: none !important;
+    }
+    .google-signin-slot .nsm7Bb-HzV7m-LgbsSe-Bz112c-haAclf {
+      min-width: 28px !important;
+      width: 28px !important;
+      height: 28px !important;
+      margin-left: -4px !important;
+      margin-right: 10px !important;
+    }
+    .google-signin-slot .nsm7Bb-HzV7m-LgbsSe {
+      background: rgba(10, 18, 30, 0.96) !important;
+      border-color: rgba(147, 170, 203, 0.18) !important;
+      color: #e8eef7 !important;
+    }
+  `;
+  document.head.append(style);
+}
+
+function renderGoogleLoginFace(slot) {
+  const shell = document.createElement("div");
+  shell.className = "google-login-shell";
+
+  const face = document.createElement("div");
+  face.className = "google-login-face";
+  face.setAttribute("aria-hidden", "true");
+
+  const logo = document.createElement("img");
+  logo.className = "google-login-face-logo";
+  logo.src = "/icons/google-logo.svg";
+  logo.alt = "";
+
+  const label = document.createElement("span");
+  label.textContent = "Google Login";
+
+  const clickLayer = document.createElement("div");
+  clickLayer.className = "google-login-click-layer";
+
+  face.append(logo, label);
+  shell.append(face, clickLayer);
+  slot.replaceChildren(shell);
+  return clickLayer;
+}
+
+async function renderGoogleSignInButton() {
+  const shouldRender = state.loginOpen || (!state.authUser && els.app?.dataset.auth === "locked");
+  const slots = [els.googleSignInButton, els.authGateGoogleSignInButton].filter(Boolean);
+  if (!state.authChecked || !shouldRender || state.authUser || !slots.length) return;
+  if (!state.googleClientId) {
+    slots.forEach((slot) => slot.replaceChildren());
+    state.loginMessage = "Set GOOGLE_LOGIN_CLIENT_ID";
+    renderLogin();
+    return;
+  }
+  if (state.googleButtonRenderedFor === state.googleClientId && slots.every((slot) => slot.childElementCount)) return;
+  state.loginMessage = "";
+  renderLogin();
+  try {
+    await loadGoogleIdentityScript();
+    window.google.accounts.id.initialize({
+      client_id: state.googleClientId,
+      callback: handleGoogleCredential,
+      ux_mode: "popup",
+    });
+    slots.forEach((slot) => {
+      const clickLayer = renderGoogleLoginFace(slot);
+      window.google.accounts.id.renderButton(clickLayer, {
+        type: "standard",
+        theme: "filled_black",
+        size: "large",
+        text: "signin_with",
+        shape: "rectangular",
+        logo_alignment: "left",
+        width: 500,
+      });
+    });
+    installGoogleStyleOverrides();
+    state.googleButtonRenderedFor = state.googleClientId;
+    if (els.authGateLoginButton && els.authGateGoogleSignInButton?.childElementCount) {
+      els.authGateLoginButton.hidden = true;
+    }
+  } catch (error) {
+    state.loginMessage = error.message;
+    renderLogin();
+  }
+}
+
+async function loadAuthSession() {
+  try {
+    const payload = await fetchJson("/auth/session", { timeoutMs: 8000 });
+    state.authUser = payload.user || null;
+    state.loginMessage = "";
+  } catch (error) {
+    state.authUser = null;
+    state.loginMessage = error.message;
+  }
+  state.authChecked = true;
+  renderLogin();
+}
+
+async function handleGoogleCredential(response) {
+  const credential = String(response?.credential || "");
+  if (!credential) return;
+  state.loginMessage = "Signing in...";
+  renderLogin();
+  try {
+    const payload = await fetchJson("/auth/google", {
+      method: "POST",
+      body: { credential },
+      timeoutMs: 15000,
+    });
+    state.authUser = payload.user || null;
+    state.loginMessage = "";
+    setLoginOpen(false);
+    await bootstrapAuthenticatedApp();
+    recordUserEvent("auth.google_login_finished", {
+      target: "account",
+      summary: `Signed in ${publicUserLabel(state.authUser)}`,
+      data: { user_id: state.authUser?.id || "", email: state.authUser?.email || "" },
+      redacted: true,
+    });
+  } catch (error) {
+    state.loginMessage = error.message;
+  }
+  renderLogin();
+}
+
+async function logout() {
+  try {
+    await fetchJson("/auth/logout", { method: "POST", timeoutMs: 8000 });
+  } catch {
+    // Clearing local session state keeps the UI honest even if the server is restarting.
+  }
+  state.authUser = null;
+  state.loginMessage = "";
+  state.googleButtonRenderedFor = "";
+  renderLogin();
+  if (state.loginOpen) void renderGoogleSignInButton();
+  if (state.refreshInterval) {
+    window.clearInterval(state.refreshInterval);
+    state.refreshInterval = 0;
+  }
+  if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
+  state.authenticatedBootstrapped = false;
+  recordUserEvent("auth.logout_finished", {
+    target: "account",
+    summary: "Signed out",
+  });
 }
 
 async function loadWasm() {
@@ -4678,11 +5008,130 @@ function renderAll() {
   renderObservation();
   renderModules();
   renderAgentNodeSelect();
+  renderLogin();
+  if (els.configModal && !els.configModal.hidden) renderConfigModal();
 }
 
 function userSpaceInitial(title) {
   const text = cleanText(title, "S");
   return text.slice(0, 1).toUpperCase();
+}
+
+function userSpaceById(spaceId) {
+  return state.userSpaces.find((space) => space.id === spaceId) || null;
+}
+
+function hideSpaceContextMenu() {
+  state.activeSpaceMenuId = "";
+  if (els.spaceContextMenu) els.spaceContextMenu.hidden = true;
+}
+
+function positionSpaceContextMenu(event) {
+  if (!els.spaceContextMenu) return;
+  els.spaceContextMenu.hidden = false;
+  const rect = els.spaceContextMenu.getBoundingClientRect();
+  const gap = 8;
+  const maxLeft = window.innerWidth - rect.width - gap;
+  const maxTop = window.innerHeight - rect.height - gap;
+  const left = Math.max(gap, Math.min(maxLeft, event.clientX));
+  const top = Math.max(gap, Math.min(maxTop, event.clientY));
+  els.spaceContextMenu.style.left = `${left}px`;
+  els.spaceContextMenu.style.top = `${top}px`;
+}
+
+function showSpaceContextMenu(space, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  state.activeSpaceMenuId = space.id;
+  positionSpaceContextMenu(event);
+  recordUserEvent("workspace.context_menu_requested", {
+    target: `space:${space.id}`,
+    summary: `Opened menu for ${space.title}`,
+    data: {
+      button: event.button,
+      panel: state.activePanel,
+      space_id: space.id,
+      space_title: space.title,
+      target: describeEventTarget(event.target),
+    },
+  });
+}
+
+async function copyActiveSpaceId() {
+  const space = userSpaceById(state.activeSpaceMenuId);
+  if (!space) return;
+  try {
+    await navigator.clipboard.writeText(space.id);
+    recordUserEvent("workspace.space_id_copied", {
+      target: `space:${space.id}`,
+      summary: `Copied ${space.title} id`,
+      data: { space_id: space.id, title: space.title },
+    });
+  } catch (error) {
+    recordUserEvent("workspace.space_id_copy_error", {
+      target: `space:${space.id}`,
+      summary: error.message,
+      data: { error: error.message },
+    });
+  } finally {
+    hideSpaceContextMenu();
+  }
+}
+
+function deleteSpacePhrase(space) {
+  return `DELETE ${space.title}`;
+}
+
+function renderDeleteSpaceModal() {
+  const space = userSpaceById(state.deleteSpaceTargetId);
+  if (!space || !els.deleteSpaceModal) return;
+  const phrase = deleteSpacePhrase(space);
+  if (els.deleteSpaceName) els.deleteSpaceName.textContent = space.title;
+  if (els.deleteSpacePrompt) els.deleteSpacePrompt.textContent = phrase;
+  if (els.confirmDeleteSpaceButton) {
+    els.confirmDeleteSpaceButton.disabled = cleanText(els.deleteSpaceConfirmInput?.value, "") !== phrase;
+  }
+}
+
+function openDeleteSpaceModal() {
+  const space = userSpaceById(state.activeSpaceMenuId);
+  if (!space || !els.deleteSpaceModal) return;
+  hideSpaceContextMenu();
+  state.deleteSpaceTargetId = space.id;
+  if (els.deleteSpaceConfirmInput) els.deleteSpaceConfirmInput.value = "";
+  renderDeleteSpaceModal();
+  els.deleteSpaceModal.hidden = false;
+  window.setTimeout(() => els.deleteSpaceConfirmInput?.focus(), 0);
+  recordUserEvent("workspace.space_delete_prompt_opened", {
+    target: `space:${space.id}`,
+    summary: `Delete confirmation opened for ${space.title}`,
+    data: { space_id: space.id, title: space.title },
+  });
+}
+
+function closeDeleteSpaceModal() {
+  if (els.deleteSpaceModal) els.deleteSpaceModal.hidden = true;
+  state.deleteSpaceTargetId = "";
+  if (els.deleteSpaceConfirmInput) els.deleteSpaceConfirmInput.value = "";
+}
+
+function confirmDeleteSpace() {
+  const space = userSpaceById(state.deleteSpaceTargetId);
+  if (!space) return;
+  if (cleanText(els.deleteSpaceConfirmInput?.value, "") !== deleteSpacePhrase(space)) {
+    renderDeleteSpaceModal();
+    return;
+  }
+  state.userSpaces = state.userSpaces.filter((item) => item.id !== space.id);
+  saveUserSpaces();
+  closeDeleteSpaceModal();
+  if (state.activePanel === space.id) setPanel("home");
+  renderSpaceLauncher();
+  recordUserEvent("workspace.space_deleted", {
+    target: `space:${space.id}`,
+    summary: `Deleted ${space.title}`,
+    data: { space_id: space.id, title: space.title },
+  });
 }
 
 function renderSpaceLauncher() {
@@ -4707,6 +5156,7 @@ function renderSpaceLauncher() {
 
     button.append(glyph, label);
     button.addEventListener("click", () => setPanel(space.id));
+    button.addEventListener("contextmenu", (event) => showSpaceContextMenu(space, event));
     els.spaceLauncherList.append(button);
   });
 }
@@ -4728,6 +5178,47 @@ function createUserSpace() {
     summary: `Created ${space.title}`,
     data: { space_id: space.id, title: space.title, created_at: createdAt },
   });
+}
+
+function openConfigModal() {
+  renderConfigModal();
+  if (els.configModal) els.configModal.hidden = false;
+  recordUserEvent("home.config_opened", {
+    target: "home:config",
+    summary: "Opened home config",
+  });
+}
+
+function closeConfigModal() {
+  if (els.configModal) els.configModal.hidden = true;
+}
+
+function renderConfigModal() {
+  if (!els.configDetails) return;
+  const enabledModules = MODULE_DEFINITIONS.filter((module) => isModuleEnabled(module.id)).length;
+  els.configDetails.replaceChildren(
+    metric("Bridge", state.bridgeUrl || "-"),
+    metric("WASM", state.wasmReady ? "Ready" : "Pending"),
+    metric("Google", state.googleClientId ? "Configured" : "Missing client id"),
+    metric("Account", state.authUser ? publicUserLabel(state.authUser) : "Guest"),
+    metric("Spaces", String(state.userSpaces.length)),
+    metric("Modules", `${enabledModules}/${MODULE_DEFINITIONS.length} on`),
+    metric("Panel", state.activePanel),
+    metric("Node", state.selectedNode || "-")
+  );
+}
+
+function openHomeModulesModal() {
+  renderModules();
+  if (els.homeModulesModal) els.homeModulesModal.hidden = false;
+  recordUserEvent("home.modules_opened", {
+    target: "home:modules",
+    summary: "Opened home modules",
+  });
+}
+
+function closeHomeModulesModal() {
+  if (els.homeModulesModal) els.homeModulesModal.hidden = true;
 }
 
 function selectNode(nodeId) {
@@ -5284,6 +5775,11 @@ function wireEvents() {
       },
     });
   });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu();
+    if (!event.target.closest?.("#launcherLogin")) setLoginOpen(false);
+  });
+  window.addEventListener("resize", hideSpaceContextMenu);
   els.refreshButton.addEventListener("click", () => {
     recordUserEvent("workspace.refresh_requested", {
       target: "#refreshButton",
@@ -5387,6 +5883,35 @@ function wireEvents() {
   els.timelineRefreshButton.addEventListener("click", () => void loadTimeline("manual"));
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
+  els.homeConfigButton?.addEventListener("click", openConfigModal);
+  els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
+  els.copySpaceIdButton?.addEventListener("click", () => void copyActiveSpaceId());
+  els.deleteSpaceButton?.addEventListener("click", openDeleteSpaceModal);
+  els.deleteSpaceConfirmInput?.addEventListener("input", renderDeleteSpaceModal);
+  els.confirmDeleteSpaceButton?.addEventListener("click", confirmDeleteSpace);
+  els.cancelDeleteSpaceButton?.addEventListener("click", closeDeleteSpaceModal);
+  els.closeDeleteSpaceButton?.addEventListener("click", closeDeleteSpaceModal);
+  els.deleteSpaceModal?.addEventListener("click", (event) => {
+    if (event.target === els.deleteSpaceModal) closeDeleteSpaceModal();
+  });
+  els.closeConfigModalButton?.addEventListener("click", closeConfigModal);
+  els.configModal?.addEventListener("click", (event) => {
+    if (event.target === els.configModal) closeConfigModal();
+  });
+  els.closeHomeModulesModalButton?.addEventListener("click", closeHomeModulesModal);
+  els.homeModulesModal?.addEventListener("click", (event) => {
+    if (event.target === els.homeModulesModal) closeHomeModulesModal();
+  });
+  els.loginButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setLoginOpen(!state.loginOpen);
+  });
+  els.authGateLoginButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setLoginOpen(true);
+  });
+  els.loginPopover?.addEventListener("click", (event) => event.stopPropagation());
+  els.logoutButton?.addEventListener("click", () => void logout());
   els.agentAvatarButton.addEventListener("click", () => {
     if (state.agentDragSuppressClick) return;
     setAgentOpen(!state.agentOpen);
@@ -5479,8 +6004,17 @@ function wireEvents() {
   installAgentDragging();
 }
 
-async function main() {
-  wireEvents();
+async function bootstrapAuthenticatedApp() {
+  if (!state.authUser) {
+    renderLogin();
+    return;
+  }
+  if (state.authenticatedBootstrapped) {
+    renderAuthGate();
+    return;
+  }
+  state.authenticatedBootstrapped = true;
+  renderAuthGate();
   applyModuleVisibility();
   renderModules();
   installDevHmrBridge();
@@ -5489,6 +6023,7 @@ async function main() {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
   await loadConfig();
+  await loadAuthSession();
   await loadWasm();
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   updateAgentSendButton();
@@ -5500,7 +6035,16 @@ async function main() {
   drawCanvas();
   await loadTimeline("startup");
   await refresh("startup");
-  window.setInterval(refresh, 15000);
+  if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
+}
+
+async function main() {
+  wireEvents();
+  renderAuthGate();
+  await loadConfig();
+  await loadAuthSession();
+  if (!state.authUser) void renderGoogleSignInButton();
+  await bootstrapAuthenticatedApp();
 }
 
 main().catch((error) => {
