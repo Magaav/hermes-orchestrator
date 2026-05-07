@@ -3,25 +3,30 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#090f1b">
+    <meta name="theme-color" content="#000000">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
     <title>WASM Agent</title>
     <script>
       window.__WASM_AGENT_DISABLE_SW__ = true;
-      if ("serviceWorker" in navigator && !sessionStorage.getItem("wasmAgent.swReset.v1")) {
-        sessionStorage.setItem("wasmAgent.swReset.v1", "1");
+      if ("serviceWorker" in navigator) {
+        const resetKey = "wasmAgent.swReset.v2";
         Promise.all([
           navigator.serviceWorker.getRegistrations().then((items) => Promise.all(items.map((item) => item.unregister()))),
           "caches" in window ? caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))) : Promise.resolve(),
-        ]).then(() => window.location.reload()).catch(() => {});
+        ]).then(() => {
+          if (!sessionStorage.getItem(resetKey) && navigator.serviceWorker.controller) {
+            sessionStorage.setItem(resetKey, "1");
+            window.location.reload();
+          }
+        }).catch(() => {});
       }
     </script>
   </head>
   <body>
     <div id="app" class="os-shell" data-status="booting" data-panel="home" data-auth="checking">
       <aside class="launcher" aria-label="Workspace launcher">
-        <button class="launcher-mark active" type="button" data-panel="home" title="Home" aria-label="Home">
+        <button class="launcher-mark active" type="button" data-panel="home" title="space-home" aria-label="space-home">
           <svg class="home-glyph" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 11.5 12 5l8 6.5V20a1 1 0 0 1-1 1h-5v-6h-4v6H5a1 1 0 0 1-1-1v-8.5Z"></path>
             <path d="M9 21h6"></path>
@@ -41,7 +46,6 @@
               <strong id="loginTitle">Sign in</strong>
               <span id="loginMeta">Google</span>
             </div>
-            <div id="loginUser" class="login-user" hidden></div>
             <div id="googleSignInButton" class="google-signin-slot"></div>
             <p id="loginMessage" class="login-message"></p>
             <button id="logoutButton" class="login-secondary-button" type="button" hidden>Sign out</button>
@@ -52,6 +56,11 @@
       <div id="spaceContextMenu" class="space-context-menu" role="menu" aria-label="Space menu" hidden>
         <button id="copySpaceIdButton" type="button" role="menuitem">Copy space id</button>
         <button id="deleteSpaceButton" class="danger" type="button" role="menuitem">Delete space</button>
+      </div>
+      <div id="nodeContextMenu" class="node-context-menu" role="menu" aria-label="Node actions" hidden></div>
+      <div id="appContextMenu" class="app-context-menu" role="menu" aria-label="App actions" hidden>
+        <button id="editAppButton" type="button" role="menuitem">Edit</button>
+        <button id="copyAppIdButton" type="button" role="menuitem">Copy app id</button>
       </div>
 
       <section id="deleteSpaceModal" class="modal-backdrop" aria-label="Delete space confirmation" hidden>
@@ -79,11 +88,106 @@
           <header class="modal-head">
             <div>
               <h2 id="configModalTitle">Config</h2>
-              <p>Runtime</p>
+              <p id="configModalSpaceName">space-home</p>
             </div>
             <button id="closeConfigModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
           </header>
           <div id="configDetails" class="config-details"></div>
+        </article>
+      </section>
+
+      <section id="artifactsModal" class="modal-backdrop" aria-label="Artifacts" hidden>
+        <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="artifactsModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="artifactsModalTitle">Artifacts</h2>
+              <p>Local client inventory</p>
+            </div>
+            <button id="closeArtifactsModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div id="artifactList" class="artifact-list"></div>
+        </article>
+      </section>
+
+      <section id="appEditModal" class="modal-backdrop" aria-label="Edit app" hidden>
+        <article class="modal-card wide edit-modal-card" role="dialog" aria-modal="true" aria-labelledby="appEditModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="appEditModalTitle">Edit app</h2>
+              <p id="appEditModalMeta">app</p>
+            </div>
+            <button id="closeAppEditModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <form id="appEditForm" class="edit-form">
+            <label class="edit-field">
+              <span>Rename</span>
+              <input id="appEditNameInput" type="text" maxlength="64" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="edit-field">
+              <span>Icon text</span>
+              <input id="appEditIconInput" type="text" maxlength="8" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="edit-field">
+              <span>Image</span>
+              <input id="appEditImageInput" type="file" accept="image/*">
+            </label>
+            <section class="edit-section" aria-label="Dimensions">
+              <header>Dimensions</header>
+              <div class="dimension-grid">
+                <label class="edit-field">
+                  <span>Min width</span>
+                  <input id="appEditMinWidthInput" type="number" min="180" max="2400" step="10">
+                </label>
+                <label class="edit-field">
+                  <span>Max width</span>
+                  <input id="appEditMaxWidthInput" type="number" min="180" max="4000" step="10">
+                </label>
+                <label class="edit-field">
+                  <span>Min height</span>
+                  <input id="appEditMinHeightInput" type="number" min="120" max="1800" step="10">
+                </label>
+                <label class="edit-field">
+                  <span>Max height</span>
+                  <input id="appEditMaxHeightInput" type="number" min="120" max="3000" step="10">
+                </label>
+              </div>
+            </section>
+            <div class="modal-actions">
+              <button id="resetAppEditButton" type="button">Reset</button>
+              <button id="saveAppEditButton" class="primary" type="submit">Save</button>
+            </div>
+          </form>
+        </article>
+      </section>
+
+      <section id="nodeEditModal" class="modal-backdrop" aria-label="Edit node" hidden>
+        <article class="modal-card edit-modal-card" role="dialog" aria-modal="true" aria-labelledby="nodeEditModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="nodeEditModalTitle">Edit node</h2>
+              <p id="nodeEditModalMeta">node</p>
+            </div>
+            <button id="closeNodeEditModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <form id="nodeEditForm" class="edit-form">
+            <section class="edit-section" aria-label="Model">
+              <header>Model</header>
+              <div class="dimension-grid">
+                <label class="edit-field">
+                  <span>Name</span>
+                  <input id="nodeEditModelNameInput" type="text" maxlength="96" autocomplete="off" spellcheck="false">
+                </label>
+                <label class="edit-field">
+                  <span>Provider</span>
+                  <input id="nodeEditModelProviderInput" type="text" maxlength="64" autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+            </section>
+            <div class="modal-actions">
+              <button id="resetNodeEditButton" type="button">Reset</button>
+              <button id="saveNodeEditButton" class="primary" type="submit">Save</button>
+            </div>
+          </form>
         </article>
       </section>
 
@@ -100,7 +204,7 @@
         </article>
       </section>
 
-      <section id="authGate" class="auth-gate" aria-label="Admin sign-in">
+      <section id="authGate" class="auth-gate" aria-label="Account sign-in">
         <article class="auth-card">
           <span class="auth-mark" aria-hidden="true">
             <img class="google-logo" src="/icons/google-logo.svg" alt="">
@@ -114,75 +218,69 @@
       </section>
 
       <section class="main-stage">
-        <header class="topbar">
-          <div class="brand">
-            <span class="brand-orbit" aria-hidden="true"></span>
-            <div>
-              <h1>Hermes OS</h1>
-              <p id="bridgeLabel">Bridge pending</p>
-            </div>
-          </div>
-          <form id="commandForm" class="command" autocomplete="off">
-            <input id="commandInput" type="text" placeholder="Ask Hermes or start a run">
-            <button id="sendButton" type="submit">Send</button>
-          </form>
-          <div class="status-strip" aria-label="System status">
-            <span id="nodeCount" class="pill">Nodes 0</span>
-            <span id="taskStatus" class="pill">Idle</span>
-            <button id="refreshButton" class="icon-button" type="button" title="Refresh">
-              <span class="refresh-icon" aria-hidden="true"></span>
-            </button>
-          </div>
-        </header>
-
         <main class="space-frame">
-          <section class="space-viewport" aria-label="Hermes OS workspace">
-            <canvas id="spaceCanvas"></canvas>
-            <div class="home-actions" aria-label="Homespace actions">
-              <button id="addSpaceButton" class="home-action-button primary" type="button">New Space</button>
-              <button id="homeConfigButton" class="home-action-button" type="button">Config</button>
-              <button id="homeModulesButton" class="home-action-button" type="button">Modules</button>
-            </div>
-            <div class="space-title">
-              <span class="space-label">Hermes OS</span>
-              <span id="frameLabel">idle</span>
-            </div>
-            <nav class="layer-dock" aria-label="Widget layers">
-              <button class="layer-button" type="button" data-widget-layer-target="resources" title="Bring Resources Monitor to front">Resources</button>
-              <button class="layer-button" type="button" data-widget-layer-target="topology" title="Bring Hermes Topology to front">Topology</button>
-              <button class="layer-button" type="button" data-widget-layer-target="studio" title="Bring UI Studio to front">Studio</button>
-              <button class="layer-button" type="button" data-widget-layer-target="timeline" data-module-target="timeline" title="Bring Timeline to front">Timeline</button>
-              <button class="layer-button" type="button" data-widget-layer-target="browser-proof" data-module-target="host-browser" title="Bring Host Browser to front">Browser</button>
-              <button class="layer-button" type="button" data-widget-layer-target="drop-to-copy" title="Bring Drop to Copy to front">Drop</button>
-            </nav>
+          <section class="space-viewport" aria-label="Space workspace">
+            <div id="spaceBoard" class="space-board">
+              <canvas id="spaceCanvas"></canvas>
+              <div class="home-actions" aria-label="Homespace actions">
+                <button id="addSpaceButton" class="home-action-button primary" type="button">New Space</button>
+                <button id="homeArtifactsButton" class="home-action-button" type="button">Artifacts</button>
+                <button id="homeConfigButton" class="home-action-button" type="button">Config</button>
+                <button id="homeModulesButton" class="home-action-button" type="button">Modules</button>
+                <span id="homeStorageBadge" class="home-storage-badge">Storage pending</span>
+              </div>
+              <div class="space-title">
+                <span id="spaceLabel" class="space-label">space-home</span>
+              </div>
+              <div id="appLayer" class="app-layer" aria-label="Space apps"></div>
 
             <article class="widget resources-widget" data-widget-id="resources">
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>Resources Monitor</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Resources Monitor"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Resources Monitor"></button>
                   <span id="resourceFreshness" class="widget-chip">pending</span>
                 </span>
               </header>
               <div id="resourceGrid" class="metric-grid"></div>
+              <div class="widget-resize-handle" data-widget-resize="resources" title="Resize Resources Monitor" aria-hidden="true"></div>
+            </article>
+
+            <article class="widget devices-widget" data-widget-id="devices">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Connected Devices</span>
+                <span class="widget-head-actions">
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Connected Devices"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Connected Devices"></button>
+                  <button id="devicesSyncButton" class="widget-control-button device-sync-button" type="button" title="Sync current device" aria-label="Sync current device"></button>
+                  <span id="devicesStatus" class="widget-chip">account</span>
+                </span>
+              </header>
+              <div id="devicesList" class="devices-list"></div>
+              <div class="widget-resize-handle" data-widget-resize="devices" title="Resize Connected Devices" aria-hidden="true"></div>
             </article>
 
             <article class="widget topology-widget" data-widget-id="topology">
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>Hermes Topology</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button id="addNodeButton" class="widget-add-button" type="button" title="Add node">Add Node</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Hermes Topology"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Hermes Topology"></button>
                   <span id="selectedNode" class="widget-chip">orchestrator</span>
                 </span>
               </header>
               <div id="topologyNodes" class="topology-nodes"></div>
+              <div class="widget-resize-handle" data-widget-resize="topology" title="Resize Hermes Topology" aria-hidden="true"></div>
             </article>
 
             <article class="widget studio-widget" data-widget-id="studio">
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>UI Studio</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize UI Studio"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize UI Studio"></button>
                   <span id="runtimeLabel" class="widget-chip">wasm</span>
                 </span>
               </header>
@@ -191,13 +289,15 @@
                 <button id="clearButton" type="button">Clear</button>
                 <button id="promptSendButton" type="button">Run</button>
               </div>
+              <div class="widget-resize-handle" data-widget-resize="studio" title="Resize UI Studio" aria-hidden="true"></div>
             </article>
 
             <article class="widget timeline-widget" data-widget-id="timeline" data-module-target="timeline">
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>Timeline</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Timeline"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Timeline"></button>
                   <span id="timelineStatus" class="widget-chip">git</span>
                 </span>
               </header>
@@ -205,13 +305,15 @@
               <div class="timeline-actions">
                 <button id="timelineRefreshButton" type="button">Refresh</button>
               </div>
+              <div class="widget-resize-handle" data-widget-resize="timeline" title="Resize Timeline" aria-hidden="true"></div>
             </article>
 
             <article class="widget browser-widget" data-widget-id="browser-proof" data-module-target="host-browser">
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>Host Browser</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Host Browser"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Host Browser"></button>
                   <span id="browserStatus" class="widget-chip">pixels</span>
                 </span>
               </header>
@@ -238,7 +340,8 @@
               <header class="widget-head" title="Drag to move. Double-click to reset.">
                 <span>Drop to Copy</span>
                 <span class="widget-head-actions">
-                  <button class="widget-layer-button" type="button" data-widget-layer="front" title="Bring to front">Top</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Drop to Copy"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Drop to Copy"></button>
                   <span class="widget-chip">shadow</span>
                 </span>
               </header>
@@ -247,12 +350,15 @@
                 <span>Repository or brief</span>
               </div>
               <div id="taskOutput" class="task-output" aria-live="polite"></div>
-            </article>
+              <div class="widget-resize-handle" data-widget-resize="drop-to-copy" title="Resize Drop to Copy" aria-hidden="true"></div>
+              </article>
+            </div>
           </section>
+          <button id="spaceConfigButton" class="space-config-button icon-button" type="button" title="Space config" aria-label="Space config"></button>
+          <div id="spaceMiniMap" class="space-minimap" aria-hidden="true" hidden></div>
 
           <aside id="sidePanel" class="side-panel" aria-label="Workspace inspector">
             <div class="panel-tabs" role="tablist">
-              <button class="panel-tab active" type="button" data-panel="space">Space</button>
               <button class="panel-tab" type="button" data-panel="fleet">Fleet</button>
               <button class="panel-tab" type="button" data-panel="tasks">Tasks</button>
               <button class="panel-tab" type="button" data-panel="logs">Logs</button>
@@ -260,10 +366,6 @@
               <button class="panel-tab" type="button" data-panel="timeline" data-module-target="timeline">Timeline</button>
               <button class="panel-tab" type="button" data-panel="modules">Modules</button>
             </div>
-            <section class="panel-view" data-view="space">
-              <h2>Workspace</h2>
-              <div id="spaceSummary" class="summary-list"></div>
-            </section>
             <section class="panel-view active" data-view="home" aria-label="Homespace"></section>
             <section class="panel-view" data-view="fleet">
               <h2>Fleet</h2>
@@ -332,7 +434,7 @@
             <button id="agentSettingsButton" class="icon-button agent-tool-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">
               <span class="agent-icon agent-icon-settings" aria-hidden="true"></span>
             </button>
-            <button id="agentCloseButton" class="icon-button agent-close-button" type="button" aria-label="Close assistant">
+            <button id="agentCloseButton" class="icon-button agent-close-button" type="button" title="Minimize wasm-agent-chat" aria-label="Minimize wasm-agent-chat">
               <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
             </button>
           </div>

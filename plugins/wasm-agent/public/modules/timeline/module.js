@@ -7,7 +7,7 @@ export const moduleDefinition = {
   firmware: "/modules/timeline/module.js",
   endpoints: ["/timeline/status", "/timeline/checkpoint"],
   state: {
-    runtimeRoot: "state/timeline",
-    gitRefs: "refs/wasm-agent-timeline/*",
+    runtimeRoot: "state/users/<acc_id>/timelines/<space_id>",
+    gitRefs: "refs/wasm-agent-timeline/<acc_id>/<space_id>/*",
   },
 };

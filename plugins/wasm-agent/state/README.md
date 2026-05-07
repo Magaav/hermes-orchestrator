@@ -11,18 +11,32 @@ Expected local files include:
 - `db/sqlite/wa_auth_secret`, the local signed-cookie secret. Keep this file
   private; rotating it signs out existing browser sessions.
 - `browser/`, runtime Host Browser captures and profile data
-- `observation/latest.json`, the latest frontend observation debug snapshot
-  published by the PWA. This is local runtime state, not durable history.
-- `attachments/`, same-origin compact image assets and JSON metadata created
-  for embedded assistant image-card turns. The server prunes this cache by
-  byte, file-count, and age limits after saves. This is local runtime state and
-  is not a durable media library.
+- `users/<acc_id>/spaces/<space_id>/`, account-owned space metadata.
+- `users/<acc_id>/device-settings.json`, the account's current main-device
+  pointer for the Connected Devices flow.
+- `users/<acc_id>/device-layouts/<device_id>/<space_id>/`, device-local app
+  positions, widget geometry, topology card positions, and space density.
+- `users/<acc_id>/timelines/<space_id>/`, account/space-local Timeline
+  metadata and automatic checkpoint fingerprint cache. The versioned Timeline
+  module contract lives under `public/modules/timeline/`; these directories are
+  only user/runtime data.
+- `users/<acc_id>/devices/`, recently seen browser/device records used by the
+  Home Connected Devices app. These are local account runtime records, not a
+  security session list.
+- `users/<acc_id>/device-sync/`, downloaded device-sync installer manifests and
+  bootstrap status records.
+- `users/<acc_id>/observation/latest.json`, the latest frontend observation
+  debug snapshot published by the PWA for that account. This is local runtime
+  state, not durable history.
+- `users/<acc_id>/attachments/`, same-origin compact image assets and JSON
+  metadata created for embedded assistant image-card turns. The server prunes
+  this cache by byte, file-count, and age limits after saves. This is local
+  runtime state and is not a durable media library.
 - Image-card analyzer modules cache loaded functions in browser memory only;
   their module contracts live under `public/modules/` and do not create durable
   state here by default.
-- `timeline/`, local Timeline checkpoint metadata and the automatic checkpoint
-  fingerprint cache. The versioned Timeline module contract lives under
-  `public/modules/timeline/`; this directory is only per-user/runtime data.
+- Standard users are limited to 1 GB under `users/<acc_id>/`; admin accounts are
+  unlimited.
 
 Do not store source code, generated app bundles, secrets, or durable product
 docs here. Versioned module firmware belongs under

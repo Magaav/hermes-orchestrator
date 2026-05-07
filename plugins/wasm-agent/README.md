@@ -20,19 +20,93 @@ cleaner app shell.
 - Does not modify `/local/plugins/hermes-space-ui`.
 
 The current app is an early browser-view parity surface, not a full replacement
-for `hermes-space-ui`. It now presents a Hermes OS workspace shell with a
-launcher rail with a Home target, draggable floating widget cards, an idle black space canvas,
-resource monitoring, topology, recent task state, logs, node action controls,
-prompt submission, and an Observation inspector through the same documented
-bridge endpoints used by Hermes Space UI. Node cards reuse the bridge's allowlisted action descriptors
-for inspect, logs, start, stop, and restart; destructive lifecycle actions ask
-for browser confirmation before they call the bridge. The launcher mark opens
-an intentionally empty black homespace, which is the future starting surface for
-new home/workspace experiments. Widget positions are
-stored locally in the browser and can be reset by double-clicking the widget
-header. Clicking or focusing anywhere inside a widget brings that widget to the
-front. A workspace layer dock can also bring any widget above the stack when it
-is buried by overlapping cards.
+for `hermes-space-ui`. It now presents a workspace shell with a left launcher
+rail by default, a visible `space-home` Home space, a hardcoded `space-admin` Admin space
+with a crown icon, and account-owned user spaces. The old header/status chrome,
+canvas label, summary panel, and dock have been removed from the shell. Each
+working space now has two visual layers: an app layer with draggable app
+buttons, and a widget layer where opened widgets sit above those apps as
+draggable, resizable windows with minimize and maximize controls. Apps are
+account/user entities mapped into spaces: Home maps only Home-owned apps such
+as Connected Devices, while Admin and user spaces map their working apps.
+Widgets remain hidden unless their app is mapped into the active space or is
+later ported into that space. App buttons snap to a non-overlapping `5px`
+app-layer grid on drop and keep pixel placement stable across viewport resize,
+while widgets store pixel geometry so changing space density does not resize
+them. Clicking an already-open app icon minimizes its widget again, and app
+icons and widgets remain draggable on mobile. Empty canvas panning uses the
+same one-finger/click-drag gesture on mobile and desktop, but only moves when
+space density or content makes the board larger than the visible viewport. The
+native workspace scrollbars are hidden; subtle edge glows show when more board
+content exists to the left, right, top, or bottom. A temporary minimap appears
+while panning so the user can see the viewport position against the total board
+with app and widget miniatures; it takes the
+top-right config anchor, stays below open widgets, fades the config button away
+until panning ends, keeps the viewport border visible at every board edge, clips
+miniatures to the board bounds, and draws open widget footprints with
+minimap-namespaced classes so global widget CSS cannot impose real panel
+minimum sizes. Opened apps are represented by their widget footprint instead of
+also drawing a duplicate app-icon marker; minimized app markers are positioned
+from the painted app-icon rectangle after minimized state is confirmed from
+layout. Its viewport marker and entity markers both use the scroll container's
+logical coordinate space, so space density changes, the launcher, and the
+painted board rectangle cannot skew the minimap projection. A fully visible icon
+stays inside the viewport marker at every board edge.
+On mobile and tablet widths, Home/Admin/User space frames collapse to one actual
+canvas row when the side panel is hidden, so minimap viewport height is the
+visible canvas height rather than an old inspector-row layout.
+The app marker is a small symbolic dot, but its size is capped from the icon's
+projected footprint and clamped inside the projected viewport whenever the
+painted icon is fully visible.
+It stays hidden when the board is not larger than the
+visible viewport and layers above Home action buttons while active. Per-space
+layout is sanitized against the active app mapping, so the Home-only Connected
+Devices app cannot leak into user-created spaces. If a minimized widget opens
+outside the visible canvas viewport, it is
+moved to the canvas initial point: the top-left beginning of the board. Opened
+widgets are also shrunk to the visible canvas on mobile so density-expanded
+boards do not make windows wider than the device screen. Right-clicking an app
+icon or widget header, or long-pressing it on mobile, opens an app menu with
+Edit and Copy app id. Edit persists title, icon text/image, and min/max
+dimensions in the current device layout. Widget layout is stored per account,
+current device, and space through the local backend instead of only in browser
+storage.
+The shareability and marketplace direction is tracked in
+[`ARTIFACTS.md`](./ARTIFACTS.md): spaces, apps/widgets, and widget-inner
+entities become portable `wasm-artifacts`, while device layout remains local.
+
+Admin is the standard operational space for `wasm-agent`, not a custom user
+space. `/admin` opens the app-icon workspace for the resource monitor,
+topology, Host Browser, Drop to Copy, workspace studio, Observation inspector,
+and module-management surfaces using the same documented bridge endpoints used
+by Hermes Space UI. Timeline is not an app icon; it is opened from the fixed
+space config button for the current space. Legacy `/space` links land on the
+same Admin workspace. Topology reads live nodes through the same-origin
+`/bridge/nodes` proxy and exposes only start/stop/restart/update actions per
+node; right-clicking a node in the topology widget opens Edit, Restart, Start,
+Stop, and Update actions for that node. The Edit form can persist a local model
+override as provider/name. Topology node cards can also be dragged inside the
+topology widget and persist their positions with the device-local space layout.
+The Add Node button creates a bridge node profile through `POST /nodes`. The
+Resources Monitor polls live bridge resource data while it is open, defaults to
+content-fitting height, and renders one metric per row in this order: Nodes,
+Disk, RAM, CPU, Processes, Uptime. RAM and Disk use compact `usedGB/totalGB`
+values.
+
+Home also has a Connected Devices app. It is hard-gated to `space-home` in app
+mapping, widget availability, and CSS transition guards, so it cannot appear in
+Admin or user-created spaces. Opening it lists devices recently seen for the
+signed-in account through `/account/devices`; the current browser is recorded
+from the authenticated request and marked in the widget, and each row shows a
+compact operating-system icon, a main-device switch action, and a Sync action.
+The backend records one main device for the account; if that main device is
+offline, artifact-evolution actions such as creating spaces and importing
+storage point the user back to Connected Devices so they can switch main devices
+quickly. Sync currently downloads a device-specific installer manifest with
+planned tunnel and state-sync capabilities; it does not claim a tunnel is live
+yet. On mobile, Home config can switch the launcher from the default left rail
+to a top bar so the Home button and account control stay pinned while the space
+list scrolls between them.
 
 The Host Browser widget is deliberately pixel-based, not iframe-based. It asks
 the local `wasm-agent` backend to use host Chromium through CDP, capture a URL,
@@ -48,32 +122,33 @@ navigation, and resize input over the same connection. Captures use the Browser
 Proof pixel surface dimensions so the returned image fits the widget exactly and
 input coordinates map cleanly. The status chip stays stable as `stream` or
 `live`; refresh details move to the meta line to avoid screenshot/live flicker.
-The widget includes Back, Forward, and Reload controls. The Host Browser widget
-has a resize grip. Every floating widget has a `Top` control so it can be placed
-above overlapping widgets deliberately; the workspace layer dock provides the
-same action from outside the widget stack. Submitting another URL while the
-stream is open navigates the current host browser target instead of tearing down
-the stream, and incoming frame URL updates do not overwrite the address field
-while the user is editing it. Stream navigation pauses screencast frames during
-the page change and restarts them afterward. The backend also throttles the CDP
-screencast before forwarding frames to the PWA so animated pages do not decode
-every available browser frame. A snapshot frame is forced after open, navigate,
-and resize so pages that do not immediately emit a fresh screencast frame still
-update the canvas. The URL bar keeps an edit draft separate from stream URL
-updates, so clicking Open or pressing Enter after typing a second domain uses
-the typed value even if the previous page is still emitting frames.
+The widget includes Back, Forward, Reload, minimize, maximize, drag, and resize
+controls; resize remains available on mobile through the corner grip. Clicking,
+focusing, or opening a widget brings it above overlapping widgets deliberately.
+Submitting another URL while the stream is open navigates
+the current host browser target instead of tearing down the stream, and incoming
+frame URL updates do not overwrite the address field while the user is editing
+it. Stream navigation pauses screencast frames during the page change and
+restarts them afterward. The backend also throttles the CDP screencast before
+forwarding frames to the PWA so animated pages do not decode every available
+browser frame. A snapshot frame is forced after open, navigate, and resize so
+pages that do not immediately emit a fresh screencast frame still update the
+canvas. The URL bar keeps an edit draft separate from stream URL updates, so
+clicking Open or pressing Enter after typing a second domain uses the typed
+value even if the previous page is still emitting frames.
 
 The Observation inspector is the first embedded-agent framework layer. It keeps
 a session-only, in-memory ring buffer of app-local semantic events and renders
 the current `hermes.space_os.observation.v1` snapshot that an embedded agent
 session would receive. It also debounces the latest snapshot to the local
 `wasm-agent` backend at `/observation/latest`, which stores only the latest
-debug snapshot under `state/observation/latest.json` so the orchestrator side
-can inspect the most recent clicked element or UI event. It captures workspace
-clicks, widget focus/layer/drag and resize actions, browser navigation and
-forwarded input actions, task submits, node action requests, logs loads, bridge
-refreshes, stream frame health, timings, and errors. It does not persist a
-durable observation history, upload it, capture OS-wide input, or install a
+debug snapshot under `state/users/<acc_id>/observation/latest.json` so the
+orchestrator side can inspect the most recent clicked element or UI event for
+that account. It captures workspace clicks, widget focus/drag/resize/minimize
+and maximize actions, app-button opens, browser navigation and forwarded input
+actions, task submits, node action requests, logs loads, bridge refreshes,
+stream frame health, timings, and errors. It does not persist a durable
+observation history, upload it, capture OS-wide input, or install a
 document-level raw key recorder. Typed text forwarded into the Host Browser is
 summarized/redacted; submitted Hermes prompts are summarized with length
 metadata because the user already submitted them to the bridge.
@@ -129,10 +204,14 @@ context.
 The avatar is draggable and remembers its position in browser local storage.
 The chat header is icon-first: a sessions/history button opens a local session
 balloon with the New Chat icon action, and a context button opens the latest
-tool-context preview in a separate balloon. Transcripts, diagnostics, and
-context previews are persisted in browser storage for quick development
-continuity. This is local convenience state, not a durable multi-user account
-store.
+tool-context preview in a separate balloon. The avatar opens `wasm-agent-chat`
+with `?chat=wasm-agent-chat` on the current route, and the header control is a
+minus/minimize action rather than a close/destroy action. Browser Back, Android
+Back, desktop Escape, and manual minimize/close controls all route through the
+same topmost-layer navigation path for chat, modals, menus, and popovers before
+normal route history is consumed. Transcripts, diagnostics, and context previews
+are persisted in browser storage for quick development continuity. This is
+local convenience state, not a durable multi-user account store.
 
 The composer uses a compact 34px send button with a restrained arrow icon.
 While an embedded assistant turn is running, the button switches to a
@@ -171,13 +250,14 @@ say "likely printed or label-like markings" even when exact OCR is unavailable.
 Loaded analyzer promises/functions remain cached in memory for later turns and
 each result is recorded as evidence with a status such as `detected`,
 `not_detected`, `unsupported`, `not_loaded`, `timeout`, or `error`. On send, the
-local backend stores the compacted image under `state/attachments` and returns a
-same-origin `/agent/attachments/<hash>.<ext>` URL plus metadata. The embedded
-assistant action chain shows the image path explicitly: store image assets,
-decode pixels, analyze image with lazy modules, build image cards, then ask the
-selected node. The local attachment store prunes old assets after saves by
-bounded byte, file-count, and age limits; it is a development/runtime cache, not
-a durable media library.
+local backend stores the compacted image under
+`state/users/<acc_id>/attachments` and returns a same-origin
+`/agent/attachments/<hash>.<ext>` URL plus metadata. The embedded assistant
+action chain shows the image path explicitly: store image assets, decode pixels,
+analyze image with lazy modules, build image cards, then ask the selected node.
+The local attachment store prunes old assets after saves by bounded byte,
+file-count, and age limits; it is a development/runtime cache, not a durable
+media library.
 Image cards include an `analyzer_revision` so stale browser/service-worker
 runtimes are visible in model context. When the revision changes, the app
 migrates image analyzer module defaults for core, barcode, and OCR back to the
@@ -247,10 +327,15 @@ questions, separate from the raw JSON action preview.
 
 The assistant panel stays anchored beside the draggable avatar. Panel placement
 is side-first, uses a side latch so it does not chatter left/right while the
-avatar is dragged, and clamps inside the visible viewport. Avatar drag bounds
-also use `window.visualViewport` when available, so mobile scroll areas and
-browser chrome do not let the icon escape the visible rectangle; viewport
-resize resets the avatar to the visible bottom-right corner.
+avatar is dragged, and clamps inside the visible viewport. Dragging the chat
+header moves the same avatar anchor instead of giving the panel an independent
+manual position, so the avatar core and chat stay bound together. Avatar-core
+dragging keeps the avatar as the primary object and may swap the panel side;
+chat-header dragging keeps the chat rectangle as the primary object and swaps
+the avatar side when needed near edges. Avatar drag bounds also use
+`window.visualViewport` when available, so mobile scroll areas and browser
+chrome do not let the icon escape the visible rectangle; viewport resize resets
+the avatar to the visible bottom-right corner.
 
 Assistant replies can include a Codex-style changed-files footer sourced from a
 before/after worktree tree diff for that single request. Ambient dirty worktree
@@ -273,46 +358,74 @@ firmware folders.
 
 The Timeline module is the first time-travel surface for cheap app evolution.
 It reads git branch, head, dirty status, recent commits, local branches, and
-`refs/wasm-agent-timeline/*` checkpoints through the local backend. Timeline
+`refs/wasm-agent-timeline/<acc_id>/<space_id>/*` checkpoints through the local
+backend. Each space has its own fixed Timeline view through the top-right
+config button; Home uses the `home` timeline as the account-level/global lane,
+Admin uses `admin`, and user-created spaces use their own space id. Timeline
 points are created automatically after chat turns that actually change the
-worktree, using a temporary git index so tracked and untracked non-ignored
-files can be captured without changing the real index or moving the current
-worktree. Branch, merge, and restore actions are shown as planned
-confirmation-gated actions until the UI can preview exact file effects and
-stop/rollback behavior. Timeline metadata is local runtime state under
-`state/timeline` and is gitignored.
+worktree, using a temporary git index so tracked and untracked non-ignored files
+can be captured without changing the real index or moving the current worktree.
+Branch, merge, and restore actions are shown as planned confirmation-gated
+actions until the UI can preview exact file effects and stop/rollback behavior.
+Timeline metadata is local runtime state under
+`state/users/<acc_id>/timelines/<space_id>/` and is gitignored.
 
 The backend fingerprints the temporary-index tree in
-`state/timeline/auto-latest.json`, so repeated runs with identical files do not
-create duplicate refs, while new source changes get a new recovery point
-without relying on the user to click a manual checkpoint button.
+`state/users/<acc_id>/timelines/<space_id>/auto-latest.json`, so repeated runs
+with identical files do not create duplicate refs, while new source changes get
+a new recovery point without relying on the user to click a manual checkpoint
+button.
 
-The Home route is the app entrance: `/` and `/home` open the intentionally
-empty black homespace with no topbar or command form. Home exposes a wider
-`New Space` action plus `Config` and `Modules` modal actions. New spaces are
-persisted in browser storage and appear in the left global rail. Right-clicking
-a space opens a local menu for copying the space id or deleting the space; the
-delete modal requires the exact `DELETE <space name>` phrase before `OK` is
-enabled. The old fixed OS/Fleet/Run/Logs/Observation/Modules shortcuts are no
-longer global space buttons; those views remain internal panels/modules. The
-launcher stays a left rail across desktop and narrow/mobile breakpoints so Home
-and user-created spaces keep the same spatial position.
+The Home route is the app entrance: `/` and `/home` open the account home
+space and show the `space-home` title. Home exposes a wider `New Space` action,
+`Artifacts`, `Config`, and `Modules` modal actions, and the current account
+storage badge.
+Standard users are limited to 1 GB under their `state/users/<acc_id>/` root;
+admins are shown as unlimited. Home's config button opens the account-global
+`home` Timeline lane. The launcher also has a fixed `space-admin` space with a
+crown icon. New spaces are persisted under
+`state/users/<acc_id>/spaces/<space_id>/` and appear in the left global rail
+below Admin. Space widgets start minimized as app icons; clicking an app opens
+the widget above the app layer, except Timeline, which stays fixed behind the
+space config flow. Connected Devices is mapped only into Home, so it does not
+appear in Admin or user spaces unless a later porting flow maps it there. The
+config modal header identifies the current space while the options list omits a
+duplicate Space card. Each space config includes
+one draggable space-density line that expands or shrinks that space's scrollable board
+between `1x` and `10x` without changing current widget width/height; its knob
+stays within the line boundaries. App positions, widget geometry, topology card
+positions, and density are saved under
+`state/users/<acc_id>/device-layouts/<device_id>/<space_id>/`, so a newly seen
+device starts from the default projection instead of inheriting another screen's
+coordinates. Config storage shows account usage plus local disk availability
+and exposes Export/Import buttons for portable local backups.
+The shell stays fixed while the
+inner board can be scrolled or one-finger/click-drag panned. Home config also
+includes a mobile launcher preference that can put the launcher on the top edge on narrow
+screens. Right-clicking a user-created space opens a local menu for copying the
+space id or deleting the space; the delete modal requires the exact
+`DELETE <space name>` phrase before `OK` is enabled. Modal backdrops close only
+when the click starts and ends on the backdrop, so selecting modal text and
+releasing outside does not close the modal. The old fixed
+OS/Fleet/Run/Logs/Observation/Modules shortcuts are no longer separate global
+space buttons; those views remain internal Admin panels/modules. The launcher
+defaults to a left rail; when the mobile top preference is enabled, Home stays
+pinned at one end and the account button at the other while spaces scroll
+between them.
 
-The launcher's lower corner is now reserved for account state instead of raw
-bridge/WASM status leds. The compact account button opens a Google Identity
-login popover when `GOOGLE_LOGIN_CLIENT_ID` is available in
-`conf/wa.env`. wasm-agent is admin-gated: unauthenticated requests can load only the login shell/static
-assets and auth endpoints, while bridge, browser, timeline, agent, attachment,
-handoff, health, and observation services require an authenticated admin
-session. The allowed Google admin must be configured locally with
-`ADMIN_EMAIL` in `conf/wa.env`; there is no hardcoded fallback admin account.
-If no admin email is configured, every Google account is rejected. Other
-verified Google accounts are rejected before a row is created. The local backend
-verifies Google ID tokens through Google's token verification endpoint and
-stores the allowed account in
-`/local/plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3` under `user_tb`.
-`user_tb.id` is a Snowflake-style integer id so timestamp and uniqueness stay
-inside one compact primary-key column.
+The launcher's lower corner is reserved for account state. The compact account
+button opens a Google Identity login popover when `GOOGLE_LOGIN_CLIENT_ID` is
+available in `conf/wa.env`. wasm-agent is account-gated: unauthenticated
+requests can load only the login shell/static assets and auth endpoints, while
+bridge, browser, timeline, agent, attachment, health, observation, and user
+space services require an authenticated session. Admin accounts must be listed
+with `ADMIN_EMAIL`; standard accounts must be listed with `USER_EMAILS`. If both
+lists are empty, every Google account is rejected. Other verified Google
+accounts are rejected before a row is created. The local backend verifies Google
+ID tokens through Google's token verification endpoint and stores allowed
+accounts in `/local/plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3` under
+`user_tb`. `user_tb.id` is a Snowflake-style integer id so timestamp and
+uniqueness stay inside one compact primary-key column.
 
 ## Public web security
 
@@ -321,19 +434,30 @@ must fail closed:
 
 - Keep `plugins/wasm-agent/conf/wa.env` machine-local and untracked.
 - Set exactly the intended admin with `ADMIN_EMAIL=<google-account>`.
+- List standard accounts explicitly with `USER_EMAILS=<account>,<account>`; do
+  not use a broad Google-login policy until tenant isolation is reviewed.
 - Keep `GOOGLE_LOGIN_CLIENT_ID` configured in `conf/wa.env` for the same Google OAuth client
   whose authorized JavaScript origins include the production origin.
 - Do not expose the app port directly; public traffic should terminate at the
   HTTPS reverse proxy and reach wasm-agent on `127.0.0.1`.
 - Protected routes must continue returning `401 auth_required` until a signed
-  admin session cookie is present.
+  allowed-account session cookie is present.
 
 Public deployment on this host terminates TLS at Caddy for
 `https://wa.colmeio.com`, then reverse-proxies to the Python server on
 `127.0.0.1:8877`. The cloud ingress and host firewall should expose only the
 public HTTPS edge, not the raw app port. The app port remains loopback-only so
-the admin gate is the only web entry point into local bridge, browser, timeline,
-agent, attachment, handoff, health, and observation services.
+the account gate is the only web entry point into local bridge, browser,
+timeline, agent, attachment, health, observation, and user-space services.
+
+Known security risks to target are tracked in
+`/local/docs/roadmap/space-os/README.md`. The current high-risk areas are the
+same-origin `/bridge/*` proxy to local orchestrator operations, host Chromium
+CDP control, per-user filesystem isolation and quota enforcement, attachment
+serving, git-backed Timeline refs and object growth, future node creation and
+main-agent mounts, OAuth/cookie deployment configuration, service-worker cache
+staleness, and model-context leakage from observations, transcripts, image
+cards, logs, or file reads.
 
 Frontend changes in this plugin must also read `DESIGN.md`. That design
 contract records the current shell layout, centered icon-button rules, chat
@@ -367,6 +491,7 @@ request or resend oversized conversation payloads.
 ```text
 wasm-agent PWA :8877
   -> WebAssembly runtime handshake
+  -> same-origin /bridge/* proxy
   -> Hermes bridge contract :8790
   -> Hermes Orchestrator CLI/API boundary
   -> Hermes Agent nodes
@@ -435,8 +560,12 @@ Run checks:
 - `HERMES_WASM_AGENT_LOG_FILE`: optional server log override.
 - `GOOGLE_LOGIN_CLIENT_ID`: required Google Identity Services client id in
   `conf/wa.env`.
-- `ADMIN_EMAIL`: required Google admin email in `conf/wa.env`. Without this, the
-  server rejects every Google account.
+- `ADMIN_EMAIL`: comma-separated Google admin email allowlist in `conf/wa.env`.
+  Admin accounts receive the hardcoded Admin space and unlimited account
+  storage.
+- `USER_EMAILS`: optional comma-separated Google standard-user allowlist in
+  `conf/wa.env`. Standard users receive isolated state under
+  `state/users/<acc_id>/` and a 1 GB account storage quota.
 - `HERMES_WASM_AGENT_ENV_PATH`: optional path override for the private
   wasm-agent env file, default `plugins/wasm-agent/conf/wa.env`.
 - `HERMES_WASM_AGENT_DB_PATH`: optional account SQLite path override, default
@@ -495,7 +624,16 @@ Run checks:
   state/
     README.md
     .gitignore
-    attachments/              # local image asset store; gitignored runtime state
+    db/sqlite/                # local account database and auth secret
+    users/<acc_id>/
+      spaces/<space_id>/      # account-owned space metadata
+      device-settings.json    # account main-device pointer
+      device-layouts/<device_id>/<space_id>/ # device-local widget layout
+      timelines/<space_id>/   # account/space timeline metadata
+      devices/                # recently seen account devices
+      device-sync/            # downloaded sync-installer manifests
+      observation/latest.json  # latest account-local observation snapshot
+      attachments/            # account-local image asset cache
   tests/
     wasm_agent_smoke.test.js
 ```

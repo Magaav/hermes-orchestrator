@@ -48,23 +48,31 @@ Already available in this repo:
 - `wasm-agent` shadow PWA on `http://127.0.0.1:8877`.
 - Host Browser widget pixels and input forwarding through `wasm-agent`.
 - Bridge payload contracts for nodes, logs, tasks, resources, and actions.
-- Global embedded assistant overlay with local transcript continuity, mode and
-  target-node selectors, streaming action chains, compact context previews, and
-  automatic Timeline checkpoints when a turn changes files.
+- Global embedded assistant overlay with a chat panel anchored to the same
+  draggable avatar core, local transcript continuity, mode and target-node
+  selectors, streaming action chains, compact context previews, and automatic
+  Timeline checkpoints when a turn changes files.
 - Browser-built `hermes.wasm_agent.image_card.v1` metadata plus a local
-  `state/attachments` asset store, so image turns can give text-only providers
-  compact visual facts instead of raw data URLs. Image-card perception now has
-  module contracts for the resident Canvas pass, lazy native barcode detection,
-  lazy native OCR probing, and disabled CV/semantic placeholders with explicit
-  evidence statuses.
+- per-user `state/users/<acc_id>/attachments` asset store, so image turns can
+  give text-only providers compact visual facts instead of raw data URLs.
+  Image-card perception now has module contracts for the resident Canvas pass,
+  lazy native barcode detection, lazy native OCR probing, and disabled
+  CV/semantic placeholders with explicit evidence statuses.
+- Account-owned spaces, device-local layout projections, observations, and
+  Timeline metadata under `state/users/<acc_id>/spaces`,
+  `state/users/<acc_id>/device-layouts`, `state/users/<acc_id>/observation`,
+  and `state/users/<acc_id>/timelines`.
 
 Missing for this path:
 
 - Durable multi-user conversation storage outside browser local storage.
 - A full agent session lifecycle owned by the orchestrator or bridge.
+- A user-to-agent ownership model where each account can create one or more
+  orchestrator agents while exactly one main agent mounts
+  `state/users/<acc_id>/` into its container.
 - A backend-delivered durable observation stream from the UI to the agent; the
   current path sends the current compact snapshot per turn and stores only the
-  latest debug snapshot.
+  latest account-local debug snapshot.
 - A structured action ABI from the agent back to the UI/runtime.
 - Policy rules for what the embedded agent may see, click, type, submit, or run.
 - Persistent recording/replay of user-visible actions for debugging and trust.
@@ -123,6 +131,10 @@ Default turn shape:
   calls are explicit and measurable
 - keep the avatar draggable and persist local session transcripts so short
   development loops survive refreshes without requiring backend account state
+- keep the chat header and avatar core bound to the same saved anchor; dragging
+  the header moves the group instead of creating an independent panel position,
+  with the chat rectangle treated as primary and the avatar side swapped near
+  edges when needed
 - keep the embedded assistant behind the `wasm-agent` Modules panel until
   action execution and backend ownership have clearer contracts
 - pair app-evolution chat turns with the Timeline module so risky UI changes
@@ -130,6 +142,8 @@ Default turn shape:
 - convert image attachments into compact image cards before the model turn:
   browser decode, Canvas pixel stats, palette, perceptual hash, visual notes,
   lazy analyzer evidence, local asset URL, then `attachment_manifest`
+- scope observations, attachments, spaces, and Timeline reads to the current
+  authenticated account and active space id
 
 Initial tool set should be small and inspect-only:
 
@@ -285,7 +299,8 @@ Deliverables:
 - image-card analyzer revision marker for stale browser/runtime diagnosis:
   implemented
 - server-side stale image-card enrichment before model inference: implemented
-- local attachment asset store under `state/attachments`: implemented
+- local attachment asset store under `state/users/<acc_id>/attachments`:
+  implemented
 - attachment store byte/file/age retention pruning after saves: implemented
 - no UI action execution yet: implemented
 

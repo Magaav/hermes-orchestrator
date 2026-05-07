@@ -50,7 +50,7 @@
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <path id="agentic-star" d="M 628 597.5 L 644.2 650 L 698 653.8 L 653 685 L 664.2 738.8 L 628 698.8 L 591.8 738.8 L 603 685 L 558 653.8 L 611.8 650 Z"/>
+    <path id="agentic-star" d="M 628 590 L 641 632 L 684 635 L 648 660 L 657 703 L 628 671 L 599 703 L 608 660 L 572 635 L 615 632 Z"/>
   </defs>
 
   <g filter="url(#softGlow)">
@@ -60,10 +60,10 @@
     <use href="#wa-shape" fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="miter" opacity="0.55"/>
   </g>
 
-  <g id="agentic-star-mark" filter="url(#agenticStarGlow)">
+  <g id="agentic-start" filter="url(#agenticStarGlow)">
     <use href="#agentic-star" fill="url(#agenticStarCore)" opacity="0.98"/>
     <use href="#agentic-star" fill="none" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" opacity="0.88"/>
-    <circle cx="628" cy="670" r="10" fill="#ffffff" opacity="0.96"/>
+    <circle cx="628" cy="648" r="8" fill="#ffffff" opacity="0.96"/>
   </g>
 
 </svg>

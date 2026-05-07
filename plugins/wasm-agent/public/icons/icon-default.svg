@@ -32,25 +32,6 @@
     </filter>
     <path id="wa-shape" d="       M 999 942 L 628 327 L 255 943 L 365 941 L 628 504 L 891 943 Z       M 216 363 L 318 363 L 440 570 L 388 658 Z       M 1038 363 L 937 363 L 815 571 L 866 658 Z"/>
     <clipPath id="waClip"><use href="#wa-shape"/></clipPath>
-
-    <radialGradient id="agenticStarCore" cx="50%" cy="50%" r="55%">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="0.38" stop-color="#e9ffff"/>
-      <stop offset="0.72" stop-color="#17f6ff"/>
-      <stop offset="1" stop-color="#a040ff"/>
-    </radialGradient>
-    <filter id="agenticStarGlow" x="-140%" y="-140%" width="380%" height="380%">
-      <feGaussianBlur stdDeviation="5" result="glowA"/>
-      <feColorMatrix in="glowA" type="matrix" values="0 0 0 0 0.05  0 0 0 0 0.92  0 0 0 0 1.00  0 0 0 0.85 0" result="cyanGlow"/>
-      <feGaussianBlur in="SourceAlpha" stdDeviation="10" result="glowB"/>
-      <feColorMatrix in="glowB" type="matrix" values="0 0 0 0 0.60  0 0 0 0 0.15  0 0 0 0 1.00  0 0 0 0.62 0" result="violetGlow"/>
-      <feMerge>
-        <feMergeNode in="violetGlow"/>
-        <feMergeNode in="cyanGlow"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <path id="agentic-star" d="M 628 597.5 L 644.2 650 L 698 653.8 L 653 685 L 664.2 738.8 L 628 698.8 L 591.8 738.8 L 603 685 L 558 653.8 L 611.8 650 Z"/>
   </defs>
 
   <g filter="url(#softGlow)">
@@ -59,11 +40,4 @@
     <use href="#wa-shape" fill="none" stroke="url(#edge)" stroke-width="7" stroke-linejoin="miter" opacity="0.62"/>
     <use href="#wa-shape" fill="none" stroke="#ffffff" stroke-width="2" stroke-linejoin="miter" opacity="0.55"/>
   </g>
-
-  <g id="agentic-star-mark" filter="url(#agenticStarGlow)">
-    <use href="#agentic-star" fill="url(#agenticStarCore)" opacity="0.98"/>
-    <use href="#agentic-star" fill="none" stroke="#ffffff" stroke-width="3" stroke-linejoin="round" opacity="0.88"/>
-    <circle cx="628" cy="670" r="10" fill="#ffffff" opacity="0.96"/>
-  </g>
-
 </svg>

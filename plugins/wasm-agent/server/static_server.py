@@ -54,6 +54,8 @@ DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
+DEFAULT_USER_QUOTA_BYTES = 1024 * 1024 * 1024
+DEVICE_ONLINE_WINDOW_SEC = 3 * 60
 WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
 DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
 DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_db.sqlite3"
@@ -100,21 +102,28 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if not is_public_request("GET", path) and not authenticated_request_user(self):
+        user = authenticated_request_user(self)
+        if not is_public_request("GET", path) and not user:
             self._json(
                 HTTPStatus.UNAUTHORIZED,
-                {"ok": False, "error": {"code": "auth_required", "message": "Admin sign-in is required."}},
+                {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
             )
             return
         if path == "/browser/stream":
             serve_browser_stream(self)
+            return
+        if path.startswith("/bridge/"):
+            try:
+                self._json(HTTPStatus.OK, bridge_proxy(self.server, "GET", self.path.removeprefix("/bridge"), None))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
         if path == "/modules/hmr/events":
             serve_dev_hmr_events(self)
             return
         if path.startswith("/agent/attachments/"):
             try:
-                serve_agent_attachment(self, path)
+                serve_agent_attachment(self, path, user)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -167,19 +176,33 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/observation/latest":
             try:
-                self._json(HTTPStatus.OK, latest_observation(self.server))
+                self._json(HTTPStatus.OK, latest_observation(self.server, user))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
         if path == "/timeline/status":
             try:
-                self._json(HTTPStatus.OK, {"ok": True, "timeline": timeline_status(self.server)})
+                query = parse_qs(urlparse(self.path).query)
+                space_id = str((query.get("space") or ["home"])[0] or "home")
+                self._json(HTTPStatus.OK, {"ok": True, "timeline": timeline_status(self.server, user, space_id=space_id)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
-        if path == "/agent/handoff/latest":
+        if path == "/spaces":
             try:
-                self._json(HTTPStatus.OK, latest_agent_handoff(self.server))
+                self._json(HTTPStatus.OK, list_user_spaces(self.server, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/storage/export":
+            try:
+                self._json(HTTPStatus.OK, export_user_storage(self.server, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/devices":
+            try:
+                self._json(HTTPStatus.OK, list_account_devices(self.server, user, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -195,10 +218,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
-        if not is_public_request("POST", path) and not authenticated_request_user(self):
+        user = authenticated_request_user(self)
+        if not is_public_request("POST", path) and not user:
             self._json(
                 HTTPStatus.UNAUTHORIZED,
-                {"ok": False, "error": {"code": "auth_required", "message": "Admin sign-in is required."}},
+                {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
             )
             return
         if path == "/browser/open":
@@ -211,6 +235,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "browser_error", "message": str(exc)}},
+                )
+            return
+        if path.startswith("/bridge/"):
+            try:
+                body = self._read_json(max_bytes=1024 * 1024)
+                self._json(HTTPStatus.OK, bridge_proxy(self.server, "POST", self.path.removeprefix("/bridge"), body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "bridge_proxy_error", "message": str(exc)}},
                 )
             return
         if path == "/browser/input":
@@ -229,6 +265,27 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json()
                 self._json(HTTPStatus.OK, {"ok": True, "browser": close_browser_session(self.server, body)})
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/devices/sync":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, create_device_sync_package(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/devices/main":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, set_main_account_device(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/storage/import":
+            try:
+                body = self._read_json(max_bytes=4 * 1024 * 1024)
+                self._json(HTTPStatus.OK, import_user_storage(self.server, user, body, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -265,7 +322,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/observation/latest":
             try:
                 body = self._read_json(max_bytes=256 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "observation": save_observation(self.server, body)})
+                self._json(HTTPStatus.OK, {"ok": True, "observation": save_observation(self.server, body, user)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -277,7 +334,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/agent/attachments":
             try:
                 body = self._read_json(max_bytes=4 * 1024 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "asset": save_agent_attachment(self.server, body)})
+                self._json(HTTPStatus.OK, {"ok": True, "asset": save_agent_attachment(self.server, body, user)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -289,7 +346,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/agent/session/message":
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "agent": embedded_agent_message(self.server, body)})
+                self._json(HTTPStatus.OK, {"ok": True, "agent": embedded_agent_message(self.server, body, user=user)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -301,7 +358,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/agent/session/message/stream":
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
-                stream_embedded_agent_message(self, body)
+                stream_embedded_agent_message(self, body, user=user)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -313,7 +370,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/timeline/checkpoint":
             try:
                 body = self._read_json(max_bytes=16 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "checkpoint": timeline_checkpoint(self.server, body)})
+                self._json(HTTPStatus.OK, {"ok": True, "checkpoint": timeline_checkpoint(self.server, body, user)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -322,16 +379,16 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "timeline_error", "message": str(exc)}},
                 )
             return
-        if path == "/agent/handoff":
+        if path == "/spaces":
             try:
-                body = self._read_json(max_bytes=128 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "handoff": save_agent_handoff(self.server, body)})
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_user_spaces(self.server, user, body, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "error": {"code": "handoff_error", "message": str(exc)}},
+                    {"ok": False, "error": {"code": "spaces_error", "message": str(exc)}},
                 )
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Endpoint was not found")
@@ -455,6 +512,11 @@ def allowed_admin_emails() -> set[str]:
     return {item.strip().lower() for item in raw.split(",") if item.strip()}
 
 
+def allowed_user_emails() -> set[str]:
+    raw = env_file_value("USER_EMAILS")
+    return {item.strip().lower() for item in raw.split(",") if item.strip()}
+
+
 def admin_email_label() -> str:
     emails = sorted(allowed_admin_emails())
     return emails[0] if len(emails) == 1 else ",".join(emails)
@@ -462,6 +524,11 @@ def admin_email_label() -> str:
 
 def is_admin_email(email: str) -> bool:
     return email.strip().lower() in allowed_admin_emails()
+
+
+def is_allowed_account_email(email: str) -> bool:
+    value = email.strip().lower()
+    return value in allowed_admin_emails() or value in allowed_user_emails()
 
 
 def auth_db_path() -> Path:
@@ -555,11 +622,172 @@ def public_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | No
         "provider": row["provider"],
         "email": row["email"],
         "email_verified": bool(row["email_verified"]),
+        "role": "admin" if is_admin_email(str(row["email"])) else "user",
         "name": row["name"],
         "picture_url": row["picture_url"],
         "created_at": int(row["created_at"]),
         "last_login_at": int(row["last_login_at"]),
     }
+
+
+def user_id(user: dict[str, Any] | None) -> str:
+    value = str((user or {}).get("id") or "").strip()
+    return value if value.isdigit() else "anonymous"
+
+
+def user_is_admin(user: dict[str, Any] | None) -> bool:
+    return str((user or {}).get("role") or "") == "admin" or is_admin_email(str((user or {}).get("email") or ""))
+
+
+def safe_state_id(raw: str, fallback: str = "space") -> str:
+    base = "".join(ch.lower() if ch.isalnum() or ch in {"-", "_"} else "-" for ch in str(raw or "").strip())[:72].strip("-_")
+    return base or fallback
+
+
+def user_root(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = server.state_dir / "users" / user_id(user)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def directory_size(path: Path) -> int:
+    total = 0
+    if not path.exists():
+        return 0
+    for item in path.rglob("*"):
+        try:
+            if item.is_file():
+                total += item.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def ensure_user_quota(server: WasmAgentServer, user: dict[str, Any] | None, incoming_bytes: int = 0) -> None:
+    if user_is_admin(user):
+        return
+    used = directory_size(user_root(server, user))
+    projected = used + max(0, int(incoming_bytes or 0))
+    if projected > DEFAULT_USER_QUOTA_BYTES:
+        raise BrowserError(
+            "user_storage_quota_exceeded",
+            "This account reached the 1 GB wasm-agent storage limit.",
+            status=HTTPStatus.INSUFFICIENT_STORAGE,
+        )
+
+
+def user_storage(server: WasmAgentServer, user: dict[str, Any] | None) -> dict[str, Any]:
+    root = user_root(server, user)
+    used = directory_size(root)
+    limit = None if user_is_admin(user) else DEFAULT_USER_QUOTA_BYTES
+    disk = shutil.disk_usage(root)
+    return {
+        "schema": "hermes.wasm_agent.user_storage.v1",
+        "used_bytes": used,
+        "limit_bytes": limit,
+        "available_bytes": disk.free,
+        "local_total_bytes": disk.total,
+        "unlimited": limit is None,
+        "percent": 0 if limit in {None, 0} else min(100, round((used / limit) * 100, 2)),
+    }
+
+
+def user_spaces_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "spaces"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_space_dir(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str) -> Path:
+    sid = safe_state_id(space_id, "home")
+    path = user_spaces_dir(server, user) / sid
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_timeline_dir(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str = "home") -> Path:
+    path = user_root(server, user) / "timelines" / safe_state_id(space_id, "home")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_attachment_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "attachments"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_observation_path(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "observation" / "latest.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_devices_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "devices"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_device_sync_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "device-sync"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_device_layout_root(server: WasmAgentServer, user: dict[str, Any] | None, *, create: bool = True) -> Path:
+    path = user_root(server, user) / "device-layouts"
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_device_layout_dir(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    device_id: str,
+    *,
+    create: bool = True,
+) -> Path:
+    path = user_device_layout_root(server, user, create=create) / safe_state_id(device_id, "unknown-device")
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_space_layout_path(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    device_id: str,
+    space_id: str,
+    *,
+    create: bool = True,
+) -> Path:
+    sid = safe_state_id(space_id, "home")
+    path = user_device_layout_dir(server, user, device_id, create=create) / sid / "widget-layout.json"
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_device_settings_path(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "device-settings.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def read_json_file(path: Path, fallback: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback
+
+
+def write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
+    tmp.replace(path)
 
 
 def parse_cookies(raw: str) -> dict[str, str]:
@@ -608,7 +836,7 @@ def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
     with auth_connect() as conn:
         row = conn.execute("SELECT * FROM user_tb WHERE id = ?", (int(user_id),)).fetchone()
     user = public_user(row)
-    if user and not is_admin_email(str(user.get("email") or "")):
+    if user and not is_allowed_account_email(str(user.get("email") or "")):
         user = None
     return {"ok": True, "authenticated": bool(user), "user": user}
 
@@ -622,6 +850,422 @@ def authenticated_request_user(handler: WasmAgentHandler) -> dict[str, Any] | No
     return user if isinstance(user, dict) else None
 
 
+def request_ip(handler: WasmAgentHandler) -> str:
+    forwarded = str(handler.headers.get("X-Forwarded-For") or "").split(",", 1)[0].strip()
+    if forwarded:
+        return forwarded
+    try:
+        return str(handler.client_address[0])
+    except Exception:
+        return ""
+
+
+def request_client_device_id(handler: WasmAgentHandler) -> str:
+    return safe_state_id(str(handler.headers.get("X-Wasm-Agent-Device-Id") or ""), "")
+
+
+def browser_label(user_agent: str) -> str:
+    ua = user_agent.lower()
+    browser = "Browser"
+    if "edg/" in ua:
+        browser = "Edge"
+    elif "chrome/" in ua or "crios/" in ua:
+        browser = "Chrome"
+    elif "firefox/" in ua or "fxios/" in ua:
+        browser = "Firefox"
+    elif "safari/" in ua:
+        browser = "Safari"
+    platform = "Device"
+    if "android" in ua:
+        platform = "Android"
+    elif "iphone" in ua or "ipad" in ua:
+        platform = "iOS"
+    elif "mac os x" in ua or "macintosh" in ua:
+        platform = "macOS"
+    elif "windows" in ua:
+        platform = "Windows"
+    elif "linux" in ua:
+        platform = "Linux"
+    return f"{browser} on {platform}"
+
+
+def display_time(epoch: int) -> str:
+    if not epoch:
+        return ""
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(epoch))
+
+
+def account_device_id(user: dict[str, Any] | None, user_agent: str, ip: str, client_device_id: str = "") -> str:
+    client_id = safe_state_id(client_device_id, "")
+    fingerprint = f"client:{client_id}" if client_id else f"ua-ip:{user_agent}\n{ip}"
+    raw = f"{user_id(user)}\n{fingerprint}".encode("utf-8", "replace")
+    return hashlib.sha256(raw).hexdigest()[:18]
+
+
+def request_account_device_id(user: dict[str, Any] | None, handler: WasmAgentHandler) -> str:
+    return account_device_id(
+        user,
+        clipped(str(handler.headers.get("User-Agent") or "Browser"), 360),
+        clipped(request_ip(handler), 80),
+        request_client_device_id(handler),
+    )
+
+
+def read_device_settings(server: WasmAgentServer, user: dict[str, Any] | None) -> dict[str, Any]:
+    payload = read_json_file(user_device_settings_path(server, user), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_device_settings(server: WasmAgentServer, user: dict[str, Any] | None, payload: dict[str, Any]) -> None:
+    write_json_file(user_device_settings_path(server, user), {
+        "schema": "hermes.wasm_agent.device_settings.v1",
+        **payload,
+    })
+
+
+def device_is_online(device: dict[str, Any], now: int) -> bool:
+    if bool(device.get("current")):
+        return True
+    last_seen = int(device.get("last_seen") or 0)
+    return last_seen > 0 and now - last_seen <= DEVICE_ONLINE_WINDOW_SEC
+
+
+def list_account_devices(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    now = int(time.time())
+    user_agent = clipped(str(handler.headers.get("User-Agent") or "Browser"), 360)
+    ip = clipped(request_ip(handler), 80)
+    client_device_id = request_client_device_id(handler)
+    current_id = account_device_id(user, user_agent, ip, client_device_id)
+    current = {
+        "schema": "hermes.wasm_agent.account_device.v1",
+        "id": current_id,
+        "client_device_id": client_device_id,
+        "label": browser_label(user_agent),
+        "user_agent": user_agent,
+        "ip": ip,
+        "first_seen": now,
+        "last_seen": now,
+    }
+    root = user_devices_dir(server, user)
+    existing = read_json_file(root / f"{current_id}.json", {})
+    if isinstance(existing, dict):
+        current["first_seen"] = int(existing.get("first_seen") or now)
+    write_json_file(root / f"{current_id}.json", current)
+    sync_root = user_device_sync_dir(server, user)
+    sync_by_device: dict[str, dict[str, Any]] = {}
+    for sync_path in sorted(sync_root.glob("*.json")):
+        sync_payload = read_json_file(sync_path, {})
+        if not isinstance(sync_payload, dict):
+            continue
+        target_id = str(sync_payload.get("target_device_id") or "")
+        if target_id:
+            sync_by_device[target_id] = sync_payload
+    settings = read_device_settings(server, user)
+    main_device_id = safe_state_id(str(settings.get("main_device_id") or ""), "")
+    if not main_device_id or not (root / f"{main_device_id}.json").exists():
+        main_device_id = current_id
+        write_device_settings(server, user, {
+            "main_device_id": main_device_id,
+            "updated_at": now,
+            "updated_by_device_id": current_id,
+        })
+    devices = []
+    for path in sorted(root.glob("*.json")):
+        payload = read_json_file(path, {})
+        if not isinstance(payload, dict):
+            continue
+        device_id = str(payload.get("id") or path.stem)
+        last_seen = int(payload.get("last_seen") or 0)
+        item = {
+            "id": device_id,
+            "client_device_id": clipped(str(payload.get("client_device_id") or ""), 96),
+            "label": clipped(str(payload.get("label") or "Device"), 80),
+            "user_agent": clipped(str(payload.get("user_agent") or ""), 360),
+            "ip": clipped(str(payload.get("ip") or ""), 80),
+            "first_seen": int(payload.get("first_seen") or last_seen or 0),
+            "last_seen": last_seen,
+            "last_seen_display": display_time(last_seen),
+            "sync_status": clipped(str(sync_by_device.get(device_id, {}).get("status") or "not_synced"), 40),
+            "main": device_id == main_device_id,
+            "current": device_id == current_id,
+        }
+        item["online"] = device_is_online(item, now)
+        item["reachability"] = "online" if item["online"] else "offline"
+        devices.append(item)
+    devices.sort(key=lambda item: (not item["current"], -int(item.get("last_seen") or 0)))
+    main_device = next((item for item in devices if item["id"] == main_device_id), None)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.account_devices.v1",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "current_device_id": current_id,
+        "main_device_id": main_device_id,
+        "main_device_online": bool(main_device and main_device.get("online")),
+        "devices": devices[:20],
+    }
+
+
+def set_main_account_device(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    device_id = safe_state_id(str(body.get("device_id") or ""), "")
+    if not device_id:
+        raise BrowserError("invalid_device", "device_id is required.")
+    if not (user_devices_dir(server, user) / f"{device_id}.json").exists():
+        raise BrowserError("device_not_found", "That account device was not found.", status=HTTPStatus.NOT_FOUND)
+    now = int(time.time())
+    current_device_id = request_account_device_id(user, handler)
+    write_device_settings(server, user, {
+        "main_device_id": device_id,
+        "updated_at": now,
+        "updated_by_device_id": current_device_id,
+    })
+    return list_account_devices(server, user, handler)
+
+
+def create_device_sync_package(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    device_id = safe_state_id(str(body.get("device_id") or ""), "")
+    if not device_id:
+        raise BrowserError("invalid_device", "device_id is required.")
+    device = read_json_file(user_devices_dir(server, user) / f"{device_id}.json", {})
+    if not isinstance(device, dict) or str(device.get("id") or device_id) != device_id:
+        raise BrowserError("device_not_found", "That account device was not found.", status=HTTPStatus.NOT_FOUND)
+    now = int(time.time())
+    current_device_id = request_account_device_id(user, handler)
+    token_id = uuid.uuid4().hex
+    package = {
+        "schema": "hermes.wasm_agent.device_sync_package.v1",
+        "artifact_kind": "device-sync-installer",
+        "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "token_id": token_id,
+        "account_id": str(user.get("id") or ""),
+        "target_device_id": device_id,
+        "target_label": clipped(str(device.get("label") or "Device"), 80),
+        "main_device_id": current_device_id,
+        "mode": "local-first-tunnel-bootstrap",
+        "capabilities": [
+            "register-device",
+            "report-online",
+            "prepare-tunnel",
+            "sync-device-state",
+        ],
+        "layout_policy": "device-local",
+        "artifact_policy": "shareable-wasm-artifacts",
+        "tunnel": {
+            "status": "planned",
+            "transport": "pending",
+        },
+    }
+    write_json_file(user_device_sync_dir(server, user) / f"{token_id}.json", {
+        "schema": "hermes.wasm_agent.device_sync_request.v1",
+        "token_id": token_id,
+        "target_device_id": device_id,
+        "main_device_id": current_device_id,
+        "status": "installer_downloaded",
+        "created_at": now,
+    })
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.device_sync_response.v1",
+        "package": package,
+    }
+
+
+def all_device_layouts(server: WasmAgentServer, user: dict[str, Any] | None) -> dict[str, Any]:
+    layouts: dict[str, Any] = {}
+    root = user_device_layout_root(server, user)
+    for device_path in sorted(root.iterdir()):
+        if not device_path.is_dir():
+            continue
+        device_layouts: dict[str, Any] = {}
+        for space_path in sorted(device_path.iterdir()):
+            if not space_path.is_dir():
+                continue
+            layout = read_json_file(space_path / "widget-layout.json", {})
+            if isinstance(layout, dict):
+                device_layouts[space_path.name] = layout
+        if device_layouts:
+            layouts[device_path.name] = device_layouts
+    return layouts
+
+
+def export_user_storage(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    spaces = list_user_spaces(server, user, handler)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.storage_export.v1",
+        "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "account_id": str(user.get("id") or ""),
+        "current_device_id": spaces.get("current_device_id", ""),
+        "layout_policy": "device-local",
+        "storage": user_storage(server, user),
+        "spaces": spaces.get("spaces", []),
+        "widget_layouts": spaces.get("widget_layouts", {}),
+        "device_layouts": all_device_layouts(server, user),
+    }
+
+
+def import_user_storage(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    if str(body.get("schema") or "") != "hermes.wasm_agent.storage_export.v1":
+        raise BrowserError("invalid_storage_import", "Storage import expects a wasm-agent storage export.")
+    spaces = body.get("spaces")
+    layouts = body.get("widget_layouts")
+    device_layouts = body.get("device_layouts")
+    if not isinstance(spaces, list) or not isinstance(layouts, dict):
+        raise BrowserError("invalid_storage_import", "Storage export is missing spaces or widget_layouts.")
+    ensure_user_quota(server, user, len(json.dumps(body, ensure_ascii=True).encode("utf-8")))
+    save_user_spaces(server, user, {"action": "replace", "spaces": spaces}, handler)
+    for space_id, layout in layouts.items():
+        if isinstance(layout, dict):
+            save_user_spaces(server, user, {
+                "action": "layout",
+                "space_id": safe_state_id(str(space_id), "home"),
+                "widget_layout": layout,
+            }, handler)
+    if isinstance(device_layouts, dict):
+        for raw_device_id, raw_layouts in device_layouts.items():
+            device_id = safe_state_id(str(raw_device_id), "")
+            if not device_id or not isinstance(raw_layouts, dict):
+                continue
+            for raw_space_id, layout in raw_layouts.items():
+                if isinstance(layout, dict):
+                    write_json_file(
+                        user_space_layout_path(server, user, device_id, safe_state_id(str(raw_space_id), "home")),
+                        layout,
+                    )
+    return list_user_spaces(server, user, handler)
+
+
+def list_user_spaces(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    spaces = []
+    layouts: dict[str, Any] = {}
+    current_device_id = request_account_device_id(user, handler) if handler else ""
+    user_space_paths = [path for path in sorted(user_spaces_dir(server, user).iterdir()) if path.is_dir()]
+    known_space_ids = ["home", "admin", *[path.name for path in user_space_paths if path.name not in {"home", "admin"}]]
+    for path in user_space_paths:
+        meta = read_json_file(path / "space.json", {})
+        if isinstance(meta, dict) and path.name not in {"home", "admin"}:
+            spaces.append({
+                "id": path.name,
+                "title": clipped(str(meta.get("title") or path.name), 120),
+                "created_at": str(meta.get("created_at") or ""),
+                "updated_at": str(meta.get("updated_at") or ""),
+            })
+    for space_id in known_space_ids:
+        legacy_path = user_spaces_dir(server, user) / space_id / "widget-layout.json"
+        layout = {}
+        if current_device_id:
+            layout = read_json_file(user_space_layout_path(server, user, current_device_id, space_id, create=False), {})
+        if not isinstance(layout, dict) or not layout:
+            layout = read_json_file(legacy_path, {})
+        if isinstance(layout, dict):
+            layouts[space_id] = layout
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.user_spaces.v1",
+        "current_device_id": current_device_id,
+        "layout_policy": "device-local",
+        "storage": user_storage(server, user),
+        "spaces": spaces,
+        "widget_layouts": layouts,
+    }
+
+
+def save_user_spaces(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    action = str(body.get("action") or "replace").strip().lower()
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    ensure_user_quota(server, user, len(json.dumps(body, ensure_ascii=True).encode("utf-8")))
+    if action == "layout":
+        if not handler:
+            raise BrowserError("device_required", "Device-local layout writes require a request device.")
+        device_id = request_account_device_id(user, handler)
+        space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
+        layout = body.get("widget_layout")
+        if not isinstance(layout, dict):
+            raise BrowserError("invalid_space_layout", "widget_layout must be an object.")
+        write_json_file(user_space_layout_path(server, user, device_id, space_id), layout)
+        return list_user_spaces(server, user, handler)
+    if action == "delete":
+        space_id = safe_state_id(str(body.get("space_id") or ""), "")
+        if not space_id or space_id in {"home", "admin"}:
+            raise BrowserError("invalid_space_delete", "Only user-created spaces can be deleted.")
+        shutil.rmtree(user_space_dir(server, user, space_id), ignore_errors=True)
+        for device_path in sorted(user_device_layout_root(server, user).iterdir()):
+            if device_path.is_dir():
+                shutil.rmtree(device_path / space_id, ignore_errors=True)
+        return list_user_spaces(server, user, handler)
+    if action == "replace":
+        spaces = body.get("spaces")
+        if not isinstance(spaces, list):
+            raise BrowserError("invalid_spaces", "spaces must be an array.")
+        seen: set[str] = set()
+        for item in spaces[:40]:
+            if not isinstance(item, dict):
+                continue
+            space_id = safe_state_id(str(item.get("id") or ""), "")
+            if not space_id or space_id in {"home", "admin"} or space_id in seen:
+                continue
+            seen.add(space_id)
+            root = user_space_dir(server, user, space_id)
+            existing = read_json_file(root / "space.json", {})
+            created_at = str(item.get("created_at") or (existing.get("created_at") if isinstance(existing, dict) else "") or now)
+            write_json_file(root / "space.json", {
+                "schema": "hermes.wasm_agent.space.v1",
+                "id": space_id,
+                "title": clipped(str(item.get("title") or space_id), 120),
+                "created_at": created_at,
+                "updated_at": now,
+            })
+        for path in user_spaces_dir(server, user).iterdir():
+            if path.is_dir() and path.name not in {"home", "admin"} and path.name not in seen:
+                shutil.rmtree(path, ignore_errors=True)
+                for device_path in sorted(user_device_layout_root(server, user).iterdir()):
+                    if device_path.is_dir():
+                        shutil.rmtree(device_path / path.name, ignore_errors=True)
+        return list_user_spaces(server, user, handler)
+    raise BrowserError("invalid_space_action", "Unsupported space action.")
+
+
 def is_public_request(method: str, path: str) -> bool:
     method = method.upper()
     if method == "OPTIONS":
@@ -630,6 +1274,14 @@ def is_public_request(method: str, path: str) -> bool:
         if path in {
             "/",
             "/home",
+            "/admin",
+            "/space",
+            "/fleet",
+            "/tasks",
+            "/logs",
+            "/observe",
+            "/timeline",
+            "/modules",
             "/index.html",
             "/styles.css",
             "/app.js",
@@ -648,6 +1300,33 @@ def is_public_request(method: str, path: str) -> bool:
     if method == "POST":
         return path in {"/auth/google", "/auth/google/callback", "/auth/logout"}
     return False
+
+
+def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
+    if not path.startswith("/"):
+        path = f"/{path}"
+    if path.startswith("/bridge/") or "://" in path:
+        raise BrowserError("invalid_bridge_path", "Bridge proxy path is invalid.")
+    url = f"{server.bridge_url}{path}"
+    data = None
+    headers = {"Accept": "application/json"}
+    if method.upper() == "POST":
+        data = json.dumps(body or {}).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(url, data=data, headers=headers, method=method.upper())
+    try:
+        with urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:1000]
+        raise BrowserError("bridge_http_error", detail or str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        raise BrowserError("bridge_unavailable", str(exc.reason), status=HTTPStatus.BAD_GATEWAY) from exc
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError:
+        payload = {"raw": raw}
+    return payload if isinstance(payload, dict) else {"result": payload}
 
 
 def verify_google_id_token(credential: str, client_id: str) -> dict[str, Any]:
@@ -696,7 +1375,7 @@ def google_auth_login(server: WasmAgentServer, body: dict[str, Any]) -> dict[str
             "Google did not mark this email as verified.",
             status=HTTPStatus.FORBIDDEN,
         )
-    if not is_admin_email(email):
+    if not is_allowed_account_email(email):
         raise BrowserError(
             "google_account_not_allowed",
             "This Google account is not allowed to access wasm-agent.",
@@ -796,21 +1475,19 @@ def reject_private_target(hostname: str) -> None:
             )
 
 
-def observation_path(server: WasmAgentServer) -> Path:
-    return server.state_dir / "observation" / "latest.json"
+def observation_path(server: WasmAgentServer, user: dict[str, Any] | None = None) -> Path:
+    return user_observation_path(server, user)
 
 
-def save_observation(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+def save_observation(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
     schema = str(body.get("schema") or "")
     if schema != "hermes.space_os.observation.v1":
         raise BrowserError("invalid_observation", "Observation payload schema is not supported.")
     payload = dict(body)
     payload["received_at"] = int(time.time())
-    path = observation_path(server)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+    ensure_user_quota(server, user, len(json.dumps(payload, ensure_ascii=True).encode("utf-8")))
+    path = observation_path(server, user)
+    write_json_file(path, payload)
     last_event = (payload.get("user_events") or [{}])[0]
     return {
         "schema": schema,
@@ -821,8 +1498,8 @@ def save_observation(server: WasmAgentServer, body: dict[str, Any]) -> dict[str,
     }
 
 
-def latest_observation(server: WasmAgentServer) -> dict[str, Any]:
-    path = observation_path(server)
+def latest_observation(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    path = observation_path(server, user)
     if not path.exists():
         return {"ok": True, "observation": None}
     try:
@@ -864,16 +1541,18 @@ def timeline_ref_name(raw: str) -> str:
     return base or f"checkpoint-{int(time.time())}"
 
 
-def timeline_status(server: WasmAgentServer) -> dict[str, Any]:
+def timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None, *, space_id: str = "home") -> dict[str, Any]:
     branch = git_output(server, ["branch", "--show-current"]) or "detached"
     head = git_output(server, ["rev-parse", "--short", "HEAD"])
     head_full = git_output(server, ["rev-parse", "HEAD"])
     status = git_output(server, ["status", "--short"], timeout=5)
     recent_raw = git_output(server, ["log", "--oneline", "--decorate", "-8"], timeout=5)
     branches_raw = git_output(server, ["branch", "--format=%(refname:short)|%(objectname:short)|%(committerdate:relative)"], timeout=5)
+    timeline_id = safe_state_id(space_id, "home")
+    timeline_root = user_timeline_dir(server, user, timeline_id)
     checkpoints_raw = git_output(
         server,
-        ["for-each-ref", "refs/wasm-agent-timeline", "--format=%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)"],
+        ["for-each-ref", f"refs/wasm-agent-timeline/{user_id(user)}/{timeline_id}", "--format=%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)"],
         timeout=5,
     )
     return {
@@ -881,6 +1560,9 @@ def timeline_status(server: WasmAgentServer) -> dict[str, Any]:
         "branch": branch,
         "head": head,
         "head_full": head_full,
+        "user_id": user_id(user),
+        "timeline_id": timeline_id,
+        "storage_root": str(timeline_root),
         "dirty": bool(status),
         "dirty_count": len(status.splitlines()) if status else 0,
         "status_preview": status.splitlines()[:16],
@@ -892,7 +1574,7 @@ def timeline_status(server: WasmAgentServer) -> dict[str, Any]:
         ][:12],
         "checkpoints": [
             {
-                "name": item.split("|")[0].replace("wasm-agent-timeline/", "", 1),
+                "name": item.split("|")[0].replace(f"wasm-agent-timeline/{user_id(user)}/{timeline_id}/", "", 1),
                 "head": item.split("|")[1],
                 "created_at": item.split("|")[2],
                 "subject": "|".join(item.split("|")[3:]),
@@ -929,10 +1611,11 @@ def timeline_status(server: WasmAgentServer) -> dict[str, Any]:
     }
 
 
-def timeline_checkpoint(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+def timeline_checkpoint(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
     label = timeline_ref_name(str(body.get("label") or "manual-checkpoint"))
     message = clipped(str(body.get("message") or f"wasm-agent timeline checkpoint: {label}"), 180)
-    return create_timeline_checkpoint(server, label=label, message=message, automatic=False)
+    space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
+    return create_timeline_checkpoint(server, label=label, message=message, automatic=False, user=user, space_id=space_id)
 
 
 def checkpoint_tree(server: WasmAgentServer, metadata_dir: Path) -> tuple[str, Path]:
@@ -957,17 +1640,21 @@ def create_timeline_checkpoint(
     label: str,
     message: str,
     automatic: bool,
+    user: dict[str, Any] | None = None,
+    space_id: str = "home",
 ) -> dict[str, Any]:
     dirty = git_output(server, ["status", "--short"], timeout=5)
     untracked = [line for line in dirty.splitlines() if line.startswith("?? ")]
-    metadata_dir = server.state_dir / "timeline"
+    timeline_id = safe_state_id(space_id, "home")
+    metadata_dir = user_timeline_dir(server, user, timeline_id)
+    ensure_user_quota(server, user)
     metadata_dir.mkdir(parents=True, exist_ok=True)
     tree_sha, temp_index = checkpoint_tree(server, metadata_dir)
     commit_proc = git_run(server, ["commit-tree", tree_sha, "-p", "HEAD", "-m", message], timeout=8)
     sha = (commit_proc.stdout or "").strip()
     if commit_proc.returncode != 0 or not sha:
         raise BrowserError("timeline_checkpoint_failed", clipped(commit_proc.stderr or "Could not create checkpoint commit."))
-    ref = f"refs/wasm-agent-timeline/{label}-{int(time.time())}"
+    ref = f"refs/wasm-agent-timeline/{user_id(user)}/{timeline_id}/{label}-{int(time.time())}"
     update_proc = git_run(server, ["update-ref", ref, sha], timeout=8)
     if update_proc.returncode != 0:
         raise BrowserError("timeline_checkpoint_failed", clipped(update_proc.stderr or "Could not write timeline ref."))
@@ -981,6 +1668,9 @@ def create_timeline_checkpoint(
         "sha": sha,
         "tree": tree_sha,
         "label": label,
+        "user_id": user_id(user),
+        "timeline_id": timeline_id,
+        "storage_root": str(metadata_dir),
         "message": message,
         "created_at": int(time.time()),
         "automatic": automatic,
@@ -995,8 +1685,8 @@ def create_timeline_checkpoint(
     return metadata
 
 
-def auto_checkpoint_state_path(server: WasmAgentServer) -> Path:
-    return server.state_dir / "timeline" / "auto-latest.json"
+def auto_checkpoint_state_path(server: WasmAgentServer, user: dict[str, Any] | None = None, space_id: str = "home") -> Path:
+    return user_timeline_dir(server, user, space_id) / "auto-latest.json"
 
 
 def timeline_auto_checkpoint(
@@ -1005,15 +1695,17 @@ def timeline_auto_checkpoint(
     *,
     message: str | None = None,
     tree_sha: str | None = None,
+    user: dict[str, Any] | None = None,
+    space_id: str = "home",
 ) -> dict[str, Any] | None:
     dirty = git_output(server, ["status", "--short"], timeout=5)
     if not dirty:
         return None
-    metadata_dir = server.state_dir / "timeline"
+    metadata_dir = user_timeline_dir(server, user, space_id)
     metadata_dir.mkdir(parents=True, exist_ok=True)
     if tree_sha is None:
         tree_sha = worktree_tree_sha(server)
-    state_path = auto_checkpoint_state_path(server)
+    state_path = auto_checkpoint_state_path(server, user, space_id)
     previous: dict[str, Any] = {}
     if state_path.exists():
         try:
@@ -1028,6 +1720,8 @@ def timeline_auto_checkpoint(
         label=label,
         message=message or f"wasm-agent auto checkpoint: {reason}",
         automatic=True,
+        user=user,
+        space_id=space_id,
     )
     state_path.write_text(
         json.dumps(
@@ -1112,55 +1806,8 @@ def run_checkpoint_summary(message: str) -> str:
     return text
 
 
-def handoff_dir(server: WasmAgentServer) -> Path:
-    return server.state_dir / "agent-handoffs"
-
-
-def save_agent_handoff(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
-    proposal = body.get("proposal")
-    if not isinstance(proposal, dict):
-        raise BrowserError("invalid_handoff", "Handoff proposal must be an object.")
-    files = proposal.get("files") if isinstance(proposal.get("files"), list) else []
-    payload = {
-        "schema": "hermes.wasm_agent.agent_handoff.v1",
-        "id": f"handoff-{int(time.time())}-{uuid.uuid4().hex[:8]}",
-        "created_at": int(time.time()),
-        "message_id": str(body.get("message_id") or ""),
-        "files": [str(item) for item in files[:12]],
-        "summary": clipped(str(proposal.get("summary") or ""), 4000),
-        "checkpoint": body.get("checkpoint") if isinstance(body.get("checkpoint"), dict) else None,
-        "requires_outer_orchestrator": True,
-    }
-    root = handoff_dir(server)
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{payload['id']}.json"
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    latest = root / "latest.json"
-    tmp = latest.with_suffix(f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(latest)
-    payload["auto_checkpoint"] = timeline_auto_checkpoint(server, "handoff")
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp = latest.with_suffix(f".{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(latest)
-    return payload
-
-
-def latest_agent_handoff(server: WasmAgentServer) -> dict[str, Any]:
-    path = handoff_dir(server) / "latest.json"
-    if not path.exists():
-        return {"ok": True, "handoff": None}
-    try:
-        return {"ok": True, "handoff": json.loads(path.read_text(encoding="utf-8"))}
-    except Exception as exc:
-        raise BrowserError("handoff_read_failed", f"Could not read latest handoff: {exc}") from exc
-
-
-def attachment_dir(server: WasmAgentServer) -> Path:
-    path = server.state_dir / "attachments"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+def attachment_dir(server: WasmAgentServer, user: dict[str, Any] | None = None) -> Path:
+    return user_attachment_dir(server, user)
 
 
 def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -1215,8 +1862,12 @@ def attachment_records(root: Path) -> list[dict[str, Any]]:
     return list(grouped.values())
 
 
-def prune_agent_attachments(server: WasmAgentServer, keep_hashes: set[str] | None = None) -> dict[str, Any]:
-    root = attachment_dir(server)
+def prune_agent_attachments(
+    server: WasmAgentServer,
+    keep_hashes: set[str] | None = None,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    root = attachment_dir(server, user)
     keep_hashes = keep_hashes or set()
     max_bytes = attachment_store_max_bytes()
     max_files = attachment_store_max_files()
@@ -1792,14 +2443,15 @@ def compact_image_card(card: Any, fallback: dict[str, Any] | None = None) -> dic
     }
 
 
-def save_agent_attachment(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+def save_agent_attachment(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
     image = body.get("image") if isinstance(body.get("image"), dict) else body
     data_url = str(image.get("data_url") or "")
     mime_type, payload = parse_image_data_url(data_url)
+    ensure_user_quota(server, user, len(payload))
     digest = hashlib.sha256(payload).hexdigest()
     ext = image_extension(mime_type)
     basename = f"{digest}{ext}"
-    path = attachment_dir(server) / basename
+    path = attachment_dir(server, user) / basename
     if not path.exists():
         path.write_bytes(payload)
     size = image.get("size") if isinstance(image.get("size"), int) else len(payload)
@@ -1835,22 +2487,23 @@ def save_agent_attachment(server: WasmAgentServer, body: dict[str, Any]) -> dict
         "stored_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "image_card": card,
     }
-    meta_path = attachment_dir(server) / f"{digest}.json"
+    meta_path = attachment_dir(server, user) / f"{digest}.json"
     tmp = meta_path.with_suffix(f".{uuid.uuid4().hex}.tmp")
     tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True, ensure_ascii=True), encoding="utf-8")
     tmp.replace(meta_path)
-    metadata["retention"] = prune_agent_attachments(server, keep_hashes={digest})
+    metadata["retention"] = prune_agent_attachments(server, keep_hashes={digest}, user=user)
     return metadata
 
 
-def serve_agent_attachment(handler: WasmAgentHandler, path: str) -> None:
+def serve_agent_attachment(handler: WasmAgentHandler, path: str, user: dict[str, Any] | None = None) -> None:
     filename = path.rsplit("/", 1)[-1]
     allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
     if not filename or any(char not in allowed for char in filename):
         raise BrowserError("attachment_not_found", "Attachment was not found.", status=HTTPStatus.NOT_FOUND)
-    resolved = (attachment_dir(handler.server) / filename).resolve()
+    root = attachment_dir(handler.server, user).resolve()
+    resolved = (root / filename).resolve()
     try:
-        resolved.relative_to(attachment_dir(handler.server).resolve())
+        resolved.relative_to(root)
     except ValueError as exc:
         raise BrowserError("attachment_not_found", "Attachment was not found.", status=HTTPStatus.NOT_FOUND) from exc
     if not resolved.is_file() or resolved.suffix == ".json":
@@ -2201,8 +2854,8 @@ def agent_git_diff_stat(server: WasmAgentServer) -> dict[str, Any]:
     return {"tool": "git_diff_stat", "returncode": proc.returncode, "output": clipped(proc.stdout or proc.stderr, 4000)}
 
 
-def agent_timeline_status(server: WasmAgentServer) -> dict[str, Any]:
-    timeline = timeline_status(server)
+def agent_timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    timeline = timeline_status(server, user)
     return {
         "tool": "timeline_status",
         "content": json.dumps(
@@ -2275,8 +2928,8 @@ def agent_app_map(server: WasmAgentServer) -> dict[str, Any]:
     }
 
 
-def agent_latest_observation(server: WasmAgentServer) -> dict[str, Any]:
-    payload = latest_observation(server).get("observation") or {}
+def agent_latest_observation(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = latest_observation(server, user).get("observation") or {}
     if not isinstance(payload, dict):
         payload = {}
     return {
@@ -2297,6 +2950,7 @@ def infer_agent_tools(
     server: WasmAgentServer,
     message: str,
     *,
+    user: dict[str, Any] | None = None,
     action_callback: Any | None = None,
     action_offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -2315,7 +2969,7 @@ def infer_agent_tools(
         if action_callback:
             action_callback(tool_action_event(tool, action_offset + len(tools)))
 
-    add_tool(agent_latest_observation(server))
+    add_tool(agent_latest_observation(server, user))
     wants_evolution_context = any(
         phrase in lowered
         for phrase in (
@@ -2337,7 +2991,7 @@ def infer_agent_tools(
         add_tool(agent_app_map(server))
         add_tool(agent_git_status(server))
         add_tool(agent_git_diff_stat(server))
-        add_tool(agent_timeline_status(server))
+        add_tool(agent_timeline_status(server, user))
     if "read /local/readme.md" in lowered or "read readme" in lowered or "resume our work" in lowered:
         add_tool(agent_read_file(server, "/local/README.md"))
         roadmap = repo_root(server) / "docs" / "roadmap" / "space-os" / "embedded-agent-path.md"
@@ -2899,6 +3553,7 @@ def embedded_agent_message(
     server: WasmAgentServer,
     body: dict[str, Any],
     *,
+    user: dict[str, Any] | None = None,
     action_callback: Any | None = None,
 ) -> dict[str, Any]:
     message = str(body.get("message") or "").strip()
@@ -2929,6 +3584,7 @@ def embedded_agent_message(
         tools.extend(infer_agent_tools(
             server,
             message,
+            user=user,
             action_callback=action_callback,
             action_offset=len(tools),
         ))
@@ -3021,6 +3677,8 @@ def embedded_agent_message(
             f"chat-{target_node}-{checkpoint_summary}",
             message=f"wasm-agent chat on {target_node}: {checkpoint_summary}",
             tree_sha=after_tree,
+            user=user,
+            space_id=safe_state_id(str(body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home"),
         )
         if files
         else None
@@ -3078,7 +3736,12 @@ def write_ndjson(handler: WasmAgentHandler, payload: dict[str, Any]) -> None:
     handler.wfile.flush()
 
 
-def stream_embedded_agent_message(handler: WasmAgentHandler, body: dict[str, Any]) -> None:
+def stream_embedded_agent_message(
+    handler: WasmAgentHandler,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+) -> None:
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
@@ -3088,7 +3751,7 @@ def stream_embedded_agent_message(handler: WasmAgentHandler, body: dict[str, Any
         write_ndjson(handler, {"type": "action", "action": action})
 
     try:
-        result = embedded_agent_message(handler.server, body, action_callback=emit_action)
+        result = embedded_agent_message(handler.server, body, user=user, action_callback=emit_action)
         write_ndjson(handler, {"type": "final", "agent": result})
     except BrowserError as exc:
         write_ndjson(handler, {"type": "error", "error": {"code": exc.code, "message": exc.message}})

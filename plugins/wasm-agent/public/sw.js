@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v19";
+const CACHE_NAME = "wasm-agent-v33";
 const ASSETS = [
   "/",
   "/index.html",

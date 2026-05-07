@@ -2,13 +2,21 @@ import { MODULE_DEFINITIONS } from "./modules/index.js";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
-const WIDGET_LAYOUT_STORAGE_KEY = "wasmAgent.widgetLayout.v1";
+const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
 const AGENT_SESSIONS_STORAGE_KEY = "wasmAgent.agentSessions.v1";
 const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
-const USER_SPACES_STORAGE_KEY = "wasmAgent.userSpaces.v1";
+const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
+const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
+const CHAT_QUERY_KEY = "chat";
+const CHAT_QUERY_VALUE = "wasm-agent-chat";
 const WIDGET_Z_BASE = 20;
 const WIDGET_Z_LIMIT = 9000;
+const APP_ICON_GRID_PX = 5;
+const SPACE_MINIMAP_HIDE_MS = 180;
+const SPACE_MINIMAP_PADDING_PX = 4;
+const CANVAS_DENSITY_MAX = 10;
+const RESOURCE_POLL_MS = 2500;
 const USER_EVENT_LIMIT = 160;
 const DEFAULT_AGENT_TURN_TIMEOUT_MS = 5 * 60 * 1000;
 const AGENT_MAX_IMAGES = 8;
@@ -27,6 +35,23 @@ const OCR_TESSERACT_LANGUAGE = "eng";
 const IMAGE_ANALYZER_CACHE = new Map();
 const SCRIPT_RUNTIME_CACHE = new Map();
 const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and help evolve the app from here.";
+const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules"]);
+const SPACE_APP_DEFINITIONS = [
+  { id: "resources", label: "Resources", short: "Res" },
+  { id: "topology", label: "Topology", short: "Topo" },
+  { id: "devices", label: "Devices", short: "Dev", home: true },
+  { id: "studio", label: "Studio", short: "Studio" },
+  { id: "browser-proof", label: "Browser", short: "Web", module: "host-browser" },
+  { id: "drop-to-copy", label: "Drop", short: "Drop" },
+];
+const SPACE_APP_MAPPINGS = {
+  home: ["devices"],
+  admin: ["resources", "topology", "studio", "browser-proof", "drop-to-copy"],
+  user: ["resources", "topology", "studio", "browser-proof", "drop-to-copy"],
+};
+const FIXED_WIDGET_LAYOUT = {
+  timeline: { minimized: true },
+};
 
 const els = {
   app: document.querySelector("#app"),
@@ -35,15 +60,6 @@ const els = {
   authGateLoginButton: document.querySelector("#authGateLoginButton"),
   authGateGoogleSignInButton: document.querySelector("#authGateGoogleSignInButton"),
   authGateMessage: document.querySelector("#authGateMessage"),
-  bridgeLabel: document.querySelector("#bridgeLabel"),
-  wasmStatus: document.querySelector("#wasmStatus"),
-  bridgeStatus: document.querySelector("#bridgeStatus"),
-  nodeCount: document.querySelector("#nodeCount"),
-  taskStatus: document.querySelector("#taskStatus"),
-  refreshButton: document.querySelector("#refreshButton"),
-  commandForm: document.querySelector("#commandForm"),
-  commandInput: document.querySelector("#commandInput"),
-  sendButton: document.querySelector("#sendButton"),
   promptInput: document.querySelector("#promptInput"),
   promptSendButton: document.querySelector("#promptSendButton"),
   clearButton: document.querySelector("#clearButton"),
@@ -61,11 +77,22 @@ const els = {
   browserEmpty: document.querySelector("#browserEmpty"),
   browserMeta: document.querySelector("#browserMeta"),
   spaceViewport: document.querySelector(".space-viewport"),
+  spaceBoard: document.querySelector("#spaceBoard"),
+  appLayer: document.querySelector("#appLayer"),
+  spaceMiniMap: document.querySelector("#spaceMiniMap"),
+  spaceLabel: document.querySelector("#spaceLabel"),
+  spaceConfigButton: document.querySelector("#spaceConfigButton"),
   spaceLauncherList: document.querySelector("#spaceLauncherList"),
+  addNodeButton: document.querySelector("#addNodeButton"),
   addSpaceButton: document.querySelector("#addSpaceButton"),
+  homeStorageBadge: document.querySelector("#homeStorageBadge"),
   homeConfigButton: document.querySelector("#homeConfigButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
   spaceContextMenu: document.querySelector("#spaceContextMenu"),
+  nodeContextMenu: document.querySelector("#nodeContextMenu"),
+  appContextMenu: document.querySelector("#appContextMenu"),
+  editAppButton: document.querySelector("#editAppButton"),
+  copyAppIdButton: document.querySelector("#copyAppIdButton"),
   copySpaceIdButton: document.querySelector("#copySpaceIdButton"),
   deleteSpaceButton: document.querySelector("#deleteSpaceButton"),
   deleteSpaceModal: document.querySelector("#deleteSpaceModal"),
@@ -77,19 +104,48 @@ const els = {
   closeDeleteSpaceButton: document.querySelector("#closeDeleteSpaceButton"),
   configModal: document.querySelector("#configModal"),
   configDetails: document.querySelector("#configDetails"),
+  configModalSpaceName: document.querySelector("#configModalSpaceName"),
   closeConfigModalButton: document.querySelector("#closeConfigModalButton"),
+  appEditModal: document.querySelector("#appEditModal"),
+  appEditModalTitle: document.querySelector("#appEditModalTitle"),
+  appEditModalMeta: document.querySelector("#appEditModalMeta"),
+  appEditForm: document.querySelector("#appEditForm"),
+  appEditNameInput: document.querySelector("#appEditNameInput"),
+  appEditIconInput: document.querySelector("#appEditIconInput"),
+  appEditImageInput: document.querySelector("#appEditImageInput"),
+  appEditMinWidthInput: document.querySelector("#appEditMinWidthInput"),
+  appEditMaxWidthInput: document.querySelector("#appEditMaxWidthInput"),
+  appEditMinHeightInput: document.querySelector("#appEditMinHeightInput"),
+  appEditMaxHeightInput: document.querySelector("#appEditMaxHeightInput"),
+  resetAppEditButton: document.querySelector("#resetAppEditButton"),
+  saveAppEditButton: document.querySelector("#saveAppEditButton"),
+  closeAppEditModalButton: document.querySelector("#closeAppEditModalButton"),
+  nodeEditModal: document.querySelector("#nodeEditModal"),
+  nodeEditModalTitle: document.querySelector("#nodeEditModalTitle"),
+  nodeEditModalMeta: document.querySelector("#nodeEditModalMeta"),
+  nodeEditForm: document.querySelector("#nodeEditForm"),
+  nodeEditModelNameInput: document.querySelector("#nodeEditModelNameInput"),
+  nodeEditModelProviderInput: document.querySelector("#nodeEditModelProviderInput"),
+  resetNodeEditButton: document.querySelector("#resetNodeEditButton"),
+  saveNodeEditButton: document.querySelector("#saveNodeEditButton"),
+  closeNodeEditModalButton: document.querySelector("#closeNodeEditModalButton"),
   homeModulesModal: document.querySelector("#homeModulesModal"),
   homeModuleList: document.querySelector("#homeModuleList"),
   closeHomeModulesModalButton: document.querySelector("#closeHomeModulesModalButton"),
   spaceCanvas: document.querySelector("#spaceCanvas"),
-  frameLabel: document.querySelector("#frameLabel"),
   selectedNode: document.querySelector("#selectedNode"),
   runtimeLabel: document.querySelector("#runtimeLabel"),
   resourceFreshness: document.querySelector("#resourceFreshness"),
   resourceGrid: document.querySelector("#resourceGrid"),
   topologyNodes: document.querySelector("#topologyNodes"),
+  devicesList: document.querySelector("#devicesList"),
+  devicesStatus: document.querySelector("#devicesStatus"),
+  devicesSyncButton: document.querySelector("#devicesSyncButton"),
+  homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
+  artifactsModal: document.querySelector("#artifactsModal"),
+  artifactList: document.querySelector("#artifactList"),
+  closeArtifactsModalButton: document.querySelector("#closeArtifactsModalButton"),
   taskOutput: document.querySelector("#taskOutput"),
-  spaceSummary: document.querySelector("#spaceSummary"),
   nodeList: document.querySelector("#nodeList"),
   taskList: document.querySelector("#taskList"),
   logsButton: document.querySelector("#logsButton"),
@@ -135,7 +191,6 @@ const els = {
   loginPopover: document.querySelector("#loginPopover"),
   loginTitle: document.querySelector("#loginTitle"),
   loginMeta: document.querySelector("#loginMeta"),
-  loginUser: document.querySelector("#loginUser"),
   googleSignInButton: document.querySelector("#googleSignInButton"),
   loginMessage: document.querySelector("#loginMessage"),
   logoutButton: document.querySelector("#logoutButton"),
@@ -160,15 +215,22 @@ const state = {
   wasmReady: false,
   bridgeReady: false,
   resources: null,
+  resourceInterval: 0,
+  devices: [],
+  deviceAuthority: null,
+  devicesBusy: false,
+  deviceSyncBusy: "",
+  deviceMainBusy: "",
+  devicesLoadedAt: "",
   nodes: [],
   tasks: [],
   selectedNode: "orchestrator",
-  activePanel: "space",
+  activePanel: "admin",
   taskId: "",
   taskTimer: 0,
   actionBusy: "",
   lastError: "",
-  widgetLayout: readWidgetLayout(),
+  widgetLayout: {},
   widgetZ: WIDGET_Z_BASE,
   activeWidgetId: "",
   browserCapture: null,
@@ -194,9 +256,18 @@ const state = {
   observationPublishTimer: 0,
   observationPublishBusy: false,
   moduleSettings: readModuleSettings(),
-  userSpaces: readUserSpaces(),
+  userSpaces: [],
+  userStorage: null,
+  spaceWidgetLayouts: {},
   activeSpaceMenuId: "",
+  activeNodeMenuId: "",
+  activeAppMenuId: "",
+  activeAppMenuKind: "",
+  activeNodeEditId: "",
+  mobileLauncherTop: readLauncherPreference(),
   deleteSpaceTargetId: "",
+  uiNavigationStack: [],
+  uiNavigationSeq: 0,
   agentOpen: false,
   agentDragSuppressClick: false,
   agentBusy: false,
@@ -215,6 +286,9 @@ const state = {
   agentTargetNode: "orchestrator",
   agentLayout: readAgentLayout(),
   agentPanelSide: "",
+  appButtonCache: new Map(),
+  spaceMiniMapVisible: false,
+  spaceMiniMapHideTimer: 0,
 };
 
 function bytesFromBase64(value) {
@@ -222,19 +296,6 @@ function bytesFromBase64(value) {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
   return out;
-}
-
-function setLed(el, mode) {
-  if (!el) return;
-  el.classList.remove("ok", "err", "pending");
-  el.classList.add(mode);
-}
-
-function setPill(el, text, mode = "") {
-  if (!el) return;
-  el.textContent = text;
-  el.classList.remove("ok", "err");
-  if (mode) el.classList.add(mode);
 }
 
 function cleanText(value, fallback = "-") {
@@ -279,10 +340,10 @@ function redactValue(value) {
 
 function summarizeEventTarget(target) {
   if (!target) return "unknown";
-  const element = target.closest?.("button,input,textarea,select,a,[data-panel],[data-widget-id],[data-widget-layer-target]");
+  const element = target.closest?.("button,input,textarea,select,a,[data-panel],[data-widget-id],[data-widget-app]");
   if (!element) return target.tagName ? target.tagName.toLowerCase() : "unknown";
   if (element.dataset?.widgetId) return `widget:${element.dataset.widgetId}`;
-  if (element.dataset?.widgetLayerTarget) return `layer:${element.dataset.widgetLayerTarget}`;
+  if (element.dataset?.widgetApp) return `app:${element.dataset.widgetApp}`;
   if (element.dataset?.panel) return `panel:${element.dataset.panel}`;
   if (element.id) return `#${element.id}`;
   const label = element.getAttribute("aria-label") || element.getAttribute("title") || element.textContent || element.tagName;
@@ -373,7 +434,7 @@ function buildObservationSnapshot() {
     workspace: {
       active_panel: state.activePanel,
       active_widget: state.activeWidgetId || "",
-      layout_version: WIDGET_LAYOUT_STORAGE_KEY,
+      layout_version: SPACE_LAYOUT_SCHEMA,
       modules: MODULE_DEFINITIONS.map((module) => ({
         id: module.id,
         title: module.title,
@@ -425,7 +486,7 @@ function buildObservationSnapshot() {
     },
     tasks: {
       active_task_id: state.taskId,
-      status: els.taskStatus?.textContent || "",
+      status: state.taskId ? "running" : state.bridgeReady ? "idle" : "offline",
       recent: state.tasks.slice(0, 8).map((task) => ({
         id: task.task_id || task.id || "",
         status: task.status || "",
@@ -626,7 +687,7 @@ async function loadTimeline(origin = "auto") {
   if (els.timelineRefreshButton) els.timelineRefreshButton.disabled = true;
   const startedAt = performance.now();
   try {
-    const payload = await fetchJson("/timeline/status", { timeoutMs: 10000 });
+    const payload = await fetchJson(`/timeline/status?space=${encodeURIComponent(activeSpaceStorageId())}`, { timeoutMs: 10000 });
     state.timeline = payload.timeline || null;
     renderTimeline();
     if (origin !== "auto") {
@@ -667,7 +728,6 @@ function applyModuleVisibility() {
     if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
     els.browserScreen.classList.remove("is-busy");
   }
-  if (isModuleEnabled("timeline") && !state.timeline) void loadTimeline();
   if (!isPanelAvailable(state.activePanel)) setPanel("modules");
 }
 
@@ -706,21 +766,69 @@ function bytes(value) {
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`;
 }
 
-function readWidgetLayout() {
-  try {
-    const raw = JSON.parse(localStorage.getItem(WIDGET_LAYOUT_STORAGE_KEY) || "{}");
-    return raw && typeof raw === "object" ? raw : {};
-  } catch {
-    return {};
-  }
+function compactGb(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "-";
+  const gb = number / (1024 ** 3);
+  return `${gb.toFixed(1).replace(".", ",")}GB`;
+}
+
+function activeSpaceStorageId(panel = state.activePanel) {
+  if (isUserSpacePanel(panel)) return panel;
+  if (isAdminPanel(panel)) return "admin";
+  return "home";
+}
+
+function defaultWidgetLayoutForPanel(panel = state.activePanel) {
+  return {
+    ...Object.fromEntries(spaceApps(panel).map((app) => [app.id, { minimized: true }])),
+    ...FIXED_WIDGET_LAYOUT,
+  };
+}
+
+function layoutKeysForPanel(panel = state.activePanel) {
+  return new Set([
+    "__canvas",
+    ...spaceApps(panel).map((app) => app.id),
+    ...Object.keys(FIXED_WIDGET_LAYOUT),
+  ]);
+}
+
+function sanitizeWidgetLayoutForPanel(layout, panel = state.activePanel) {
+  if (!layout || typeof layout !== "object") return {};
+  const allowedKeys = layoutKeysForPanel(panel);
+  return Object.fromEntries(
+    Object.entries(layout).filter(([key]) => allowedKeys.has(key))
+  );
 }
 
 function saveWidgetLayout() {
-  try {
-    localStorage.setItem(WIDGET_LAYOUT_STORAGE_KEY, JSON.stringify(state.widgetLayout));
-  } catch {
-    // Layout persistence is a convenience; dragging should still work without it.
+  const spaceId = activeSpaceStorageId();
+  state.widgetLayout = sanitizeWidgetLayoutForPanel(state.widgetLayout);
+  state.spaceWidgetLayouts[spaceId] = state.widgetLayout;
+  if (state.authUser) {
+    void fetchJson("/spaces", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        action: "layout",
+        space_id: spaceId,
+        widget_layout: state.widgetLayout,
+      },
+    }).catch(() => {});
   }
+}
+
+function applySpaceWidgetLayout(panel = state.activePanel) {
+  const spaceId = activeSpaceStorageId(panel);
+  const layout = state.spaceWidgetLayouts[spaceId];
+  state.widgetLayout = {
+    ...defaultWidgetLayoutForPanel(panel),
+    ...sanitizeWidgetLayoutForPanel(layout, panel),
+  };
+  applyCanvasDensity({ renderMiniMap: false });
+  applyWidgetLayout();
+  renderSpaceMiniMap();
 }
 
 function defaultModuleSettings() {
@@ -765,33 +873,76 @@ function saveModuleSettings() {
   }
 }
 
-function readUserSpaces() {
+function readLauncherPreference() {
   try {
-    const raw = JSON.parse(localStorage.getItem(USER_SPACES_STORAGE_KEY) || "[]");
-    if (!Array.isArray(raw)) return [];
-    return raw
-      .map((item) => ({
-        id: cleanText(item?.id, ""),
-        title: cleanText(item?.title, ""),
-        created_at: cleanText(item?.created_at, ""),
-      }))
-      .filter((item) => /^space_[a-z0-9_]+$/i.test(item.id) && item.title)
-      .slice(0, 40);
+    const raw = JSON.parse(localStorage.getItem(LAUNCHER_PREF_STORAGE_KEY) || "{}");
+    return Boolean(raw?.mobileTop);
   } catch {
-    return [];
+    return false;
   }
 }
 
-function saveUserSpaces() {
+function saveLauncherPreference() {
   try {
-    localStorage.setItem(USER_SPACES_STORAGE_KEY, JSON.stringify(state.userSpaces.slice(0, 40)));
+    localStorage.setItem(LAUNCHER_PREF_STORAGE_KEY, JSON.stringify({ mobileTop: Boolean(state.mobileLauncherTop) }));
   } catch {
-    // Space shortcuts are local shell state; the Home canvas remains usable without them.
+    // Launcher placement is local UI preference; defaults keep navigation available.
+  }
+}
+
+function applyLauncherPreference() {
+  if (!els.app) return;
+  els.app.dataset.mobileLauncher = state.mobileLauncherTop ? "top" : "left";
+}
+
+function saveUserSpaces() {
+  if (state.authUser) {
+    void fetchJson("/spaces", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { action: "replace", spaces: state.userSpaces },
+    }).catch((error) => {
+      recordUserEvent("workspace.spaces_save_error", {
+        target: "spaces",
+        summary: error.message,
+        data: { error: error.message },
+      });
+    });
+  }
+}
+
+async function loadUserSpaces() {
+  if (!state.authUser) return;
+  try {
+    const payload = await fetchJson("/spaces", { timeoutMs: 8000 });
+    state.userSpaces = Array.isArray(payload.spaces) ? payload.spaces : [];
+    state.userStorage = payload.storage || null;
+    state.spaceWidgetLayouts = payload.widget_layouts && typeof payload.widget_layouts === "object"
+      ? payload.widget_layouts
+      : {};
+    applySpaceWidgetLayout(state.activePanel);
+    renderSpaceLauncher();
+    renderHomeStorage();
+  } catch (error) {
+    recordUserEvent("workspace.spaces_load_error", {
+      target: "spaces",
+      summary: error.message,
+      data: { error: error.message },
+    });
   }
 }
 
 function isUserSpacePanel(panel) {
   return state.userSpaces.some((space) => space.id === panel);
+}
+
+function normalizePanel(panel) {
+  const value = cleanText(panel, "home");
+  return value === "space" ? "admin" : value;
+}
+
+function isAdminPanel(panel) {
+  return ADMIN_PANEL_IDS.has(normalizePanel(panel));
 }
 
 function moduleDefinitionById(moduleId) {
@@ -806,6 +957,7 @@ function isModuleEnabled(moduleId) {
 }
 
 function isPanelAvailable(panel) {
+  panel = normalizePanel(panel);
   if (panel === "home" || isUserSpacePanel(panel)) return true;
   if (panel === "observe") return isModuleEnabled("observation");
   return true;
@@ -997,10 +1149,380 @@ function isCompactViewport() {
   return window.matchMedia("(max-width: 820px)").matches;
 }
 
+function isPrimaryPointer(event) {
+  return event?.isPrimary !== false && (event?.pointerType !== "mouse" || event.button === 0);
+}
+
+function spaceSurface() {
+  return els.spaceBoard || els.spaceViewport;
+}
+
+function canvasLayout() {
+  state.widgetLayout.__canvas = state.widgetLayout.__canvas && typeof state.widgetLayout.__canvas === "object"
+    ? state.widgetLayout.__canvas
+    : {};
+  return state.widgetLayout.__canvas;
+}
+
+function canvasDensity() {
+  const density = Number(canvasLayout().density || 1);
+  return clamp(Number.isFinite(density) ? density : 1, 1, CANVAS_DENSITY_MAX);
+}
+
+function canvasContentExtent() {
+  return Object.entries(state.widgetLayout || {}).reduce((extent, [key, layout]) => {
+    if (key === "__canvas" || !layout || typeof layout !== "object") return extent;
+    const appLeft = Number(layout.appLeftPx);
+    const appTop = Number(layout.appTopPx);
+    if (Number.isFinite(appLeft)) extent.width = Math.max(extent.width, appLeft + 96);
+    if (Number.isFinite(appTop)) extent.height = Math.max(extent.height, appTop + 104);
+    return extent;
+  }, { width: 0, height: 0 });
+}
+
+function applyCanvasDensity(options = {}) {
+  const board = spaceSurface();
+  const viewport = els.spaceViewport;
+  if (!board || !viewport) return;
+  const rect = viewport.getBoundingClientRect();
+  const density = canvasDensity();
+  const extent = canvasContentExtent();
+  board.style.width = `${Math.max(rect.width, Math.round(rect.width * density), extent.width)}px`;
+  board.style.height = `${Math.max(rect.height, Math.round(rect.height * density), extent.height)}px`;
+  drawCanvas();
+  updateSpaceNavigationHints();
+  if (options.renderMiniMap !== false) renderSpaceMiniMap();
+}
+
+function spaceMapMetrics() {
+  const board = spaceSurface();
+  const viewport = els.spaceViewport;
+  if (!board || !viewport) return null;
+  const boardRect = board.getBoundingClientRect();
+  const viewportRect = viewport.getBoundingClientRect();
+  return {
+    board,
+    viewport,
+    boardRect,
+    viewportRect,
+    width: Math.max(viewport.scrollWidth, viewport.clientWidth, board.scrollWidth, board.offsetWidth, boardRect.width),
+    height: Math.max(viewport.scrollHeight, viewport.clientHeight, board.scrollHeight, board.offsetHeight, boardRect.height),
+  };
+}
+
+function visibleBoardRect(metrics) {
+  const left = clamp(metrics.viewport.scrollLeft, 0, metrics.width);
+  const top = clamp(metrics.viewport.scrollTop, 0, metrics.height);
+  const right = clamp(left + metrics.viewport.clientWidth, left, metrics.width);
+  const bottom = clamp(top + metrics.viewport.clientHeight, top, metrics.height);
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  };
+}
+
+function miniMapPlotMetrics(metrics, mapWidth, mapHeight) {
+  const padding = SPACE_MINIMAP_PADDING_PX;
+  const availableWidth = Math.max(1, mapWidth - padding * 2);
+  const availableHeight = Math.max(1, mapHeight - padding * 2);
+  const scale = Math.min(availableWidth / Math.max(1, metrics.width), availableHeight / Math.max(1, metrics.height));
+  const boardWidth = Math.max(1, Math.round(metrics.width * scale));
+  const boardHeight = Math.max(1, Math.round(metrics.height * scale));
+  const width = Math.max(1, boardWidth - 2);
+  const height = Math.max(1, boardHeight - 2);
+  return {
+    boardWidth,
+    boardHeight,
+    mapWidth: boardWidth + padding * 2,
+    mapHeight: boardHeight + padding * 2,
+    width,
+    height,
+    left: padding,
+    top: padding,
+    scaleX: width / Math.max(1, metrics.width),
+    scaleY: height / Math.max(1, metrics.height),
+  };
+}
+
+function cssPixelValue(element, name, fallback) {
+  const value = parseFloat(getComputedStyle(element).getPropertyValue(name));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function miniMapProjectRect(rect, plot, minWidth = 1, minHeight = 1) {
+  const width = clamp(rect.width * plot.scaleX, minWidth, plot.width);
+  const height = clamp(rect.height * plot.scaleY, minHeight, plot.height);
+  return {
+    left: clamp(rect.left * plot.scaleX, 0, Math.max(0, plot.width - width)),
+    top: clamp(rect.top * plot.scaleY, 0, Math.max(0, plot.height - height)),
+    width,
+    height,
+  };
+}
+
+function boardRectContains(outer, inner, tolerance = 0.75) {
+  return inner.left >= outer.left - tolerance
+    && inner.top >= outer.top - tolerance
+    && inner.left + inner.width <= outer.left + outer.width + tolerance
+    && inner.top + inner.height <= outer.top + outer.height + tolerance;
+}
+
+function miniMapProjectAppMarker(entity, plot, visibleRect) {
+  const footprintSize = Math.max(entity.width * plot.scaleX, entity.height * plot.scaleY);
+  const size = clamp(footprintSize, 2, 6);
+  const visibleBounds = boardRectContains(visibleRect, entity)
+    ? miniMapProjectRect(visibleRect, plot)
+    : { left: 0, top: 0, width: plot.width, height: plot.height };
+  const width = Math.min(size, visibleBounds.width);
+  const height = Math.min(size, visibleBounds.height);
+  const centerX = (entity.left + entity.width / 2) * plot.scaleX;
+  const centerY = (entity.top + entity.height / 2) * plot.scaleY;
+  return {
+    left: clamp(centerX - width / 2, visibleBounds.left, visibleBounds.left + Math.max(0, visibleBounds.width - width)),
+    top: clamp(centerY - height / 2, visibleBounds.top, visibleBounds.top + Math.max(0, visibleBounds.height - height)),
+    width,
+    height,
+  };
+}
+
+function miniMapEntityFromElement(element, metrics, kind, boardBounds) {
+  const rect = element?.getBoundingClientRect?.();
+  if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+  const rawLeft = rect.left - metrics.viewportRect.left + metrics.viewport.scrollLeft;
+  const rawTop = rect.top - metrics.viewportRect.top + metrics.viewport.scrollTop;
+  const left = clamp(rawLeft, 0, Math.max(0, boardBounds.width));
+  const top = clamp(rawTop, 0, Math.max(0, boardBounds.height));
+  const right = clamp(rawLeft + rect.width, 0, Math.max(0, boardBounds.width));
+  const bottom = clamp(rawTop + rect.height, 0, Math.max(0, boardBounds.height));
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) return null;
+  return {
+    kind,
+    left,
+    top,
+    width,
+    height,
+  };
+}
+
+function miniMapEntityFromRect(rect, kind, boardBounds) {
+  const left = clamp(rect.left, 0, Math.max(0, boardBounds.width));
+  const top = clamp(rect.top, 0, Math.max(0, boardBounds.height));
+  const right = clamp(rect.left + rect.width, 0, Math.max(0, boardBounds.width));
+  const bottom = clamp(rect.top + rect.height, 0, Math.max(0, boardBounds.height));
+  if (right <= left || bottom <= top) return null;
+  return {
+    kind,
+    left,
+    top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function miniMapAppEntityFromButton(button, metrics, boardBounds) {
+  const appId = button?.dataset?.widgetApp || "";
+  const layout = appId ? state.widgetLayout[appId] || {} : {};
+  if (!appId || layout.minimized === false) return null;
+  const icon = button.querySelector?.(".space-app-icon");
+  const iconEntity = miniMapEntityFromElement(icon || button, metrics, "app", boardBounds);
+  if (iconEntity) return iconEntity;
+  const width = icon?.offsetWidth || button.offsetWidth || 40;
+  const height = icon?.offsetHeight || button.offsetHeight || 40;
+  const styleLeft = parseFloat(button.style.left || "");
+  const styleTop = parseFloat(button.style.top || "");
+  const rawButtonLeft = Number.isFinite(Number(layout.appLeftPx))
+    ? Number(layout.appLeftPx)
+    : (Number.isFinite(styleLeft) ? styleLeft : 0);
+  const rawButtonTop = Number.isFinite(Number(layout.appTopPx))
+    ? Number(layout.appTopPx)
+    : (Number.isFinite(styleTop) ? styleTop : 0);
+  const rawLeft = rawButtonLeft + Math.max(0, ((button.offsetWidth || 62) - width) / 2);
+  const rawTop = rawButtonTop + 6;
+  return miniMapEntityFromRect({ left: rawLeft, top: rawTop, width, height }, "app", boardBounds);
+}
+
+function spaceMiniMapEntities(metrics) {
+  const boardBounds = { width: metrics.width, height: metrics.height };
+  const apps = Array.from(els.appLayer?.querySelectorAll?.(".space-app-button") || [])
+    .map((button) => miniMapAppEntityFromButton(button, metrics, boardBounds))
+    .filter(Boolean);
+  const widgets = Array.from(document.querySelectorAll(".widget[data-widget-id]"))
+    .filter((widget) => !widget.hidden && !widget.classList.contains("is-minimized") && !widget.classList.contains("is-maximized"))
+    .map((widget) => miniMapEntityFromElement(widget, metrics, "widget", boardBounds))
+    .filter(Boolean);
+  return [...apps, ...widgets];
+}
+
+function miniMapEntityClassName(entity) {
+  const classes = ["space-minimap-entity"];
+  if (entity.kind.includes("app")) classes.push("is-app");
+  if (entity.kind.includes("open")) classes.push("is-open");
+  if (entity.kind === "widget") classes.push("is-widget");
+  return classes.join(" ");
+}
+
+function renderSpaceMiniMap() {
+  const map = els.spaceMiniMap;
+  const metrics = spaceMapMetrics();
+  if (!map || !metrics) return;
+  if (!spaceMiniMapCanRender(metrics)) {
+    map.replaceChildren();
+    return;
+  }
+  const mapWidth = cssPixelValue(map, "--space-minimap-max-width", 184);
+  const mapHeight = cssPixelValue(map, "--space-minimap-max-height", 112);
+  const plot = miniMapPlotMetrics(metrics, mapWidth, mapHeight);
+  map.style.width = `${Math.round(plot.mapWidth)}px`;
+  map.style.height = `${Math.round(plot.mapHeight)}px`;
+  const boardLayer = document.createElement("div");
+  boardLayer.className = "space-minimap-board";
+  boardLayer.style.left = `${plot.left}px`;
+  boardLayer.style.top = `${plot.top}px`;
+  boardLayer.style.width = `${plot.boardWidth}px`;
+  boardLayer.style.height = `${plot.boardHeight}px`;
+  const visibleRect = visibleBoardRect(metrics);
+
+  spaceMiniMapEntities(metrics).forEach((entity) => {
+    const item = document.createElement("span");
+    item.className = miniMapEntityClassName(entity);
+    const projected = entity.kind.includes("app")
+      ? miniMapProjectAppMarker(entity, plot, visibleRect)
+      : miniMapProjectRect(entity, plot, 5, 4);
+    item.style.left = `${Math.round(projected.left)}px`;
+    item.style.top = `${Math.round(projected.top)}px`;
+    item.style.width = `${Math.round(projected.width)}px`;
+    item.style.height = `${Math.round(projected.height)}px`;
+    boardLayer.append(item);
+  });
+
+  const viewportBox = document.createElement("span");
+  viewportBox.className = "space-minimap-viewport";
+  const viewportRect = miniMapProjectRect(visibleRect, plot);
+  viewportBox.style.left = `${Math.round(viewportRect.left)}px`;
+  viewportBox.style.top = `${Math.round(viewportRect.top)}px`;
+  viewportBox.style.width = `${Math.round(viewportRect.width)}px`;
+  viewportBox.style.height = `${Math.round(viewportRect.height)}px`;
+  boardLayer.append(viewportBox);
+  map.replaceChildren(boardLayer);
+}
+
+function updateSpaceNavigationHints() {
+  const viewport = els.spaceViewport;
+  if (!viewport) return;
+  const canLeft = viewport.scrollLeft > 1;
+  const canRight = viewport.scrollLeft + viewport.clientWidth < viewport.scrollWidth - 1;
+  const canUp = viewport.scrollTop > 1;
+  const canDown = viewport.scrollTop + viewport.clientHeight < viewport.scrollHeight - 1;
+  viewport.classList.toggle("can-scroll-left", canLeft);
+  viewport.classList.toggle("can-scroll-right", canRight);
+  viewport.classList.toggle("can-scroll-up", canUp);
+  viewport.classList.toggle("can-scroll-down", canDown);
+}
+
+function spaceMiniMapCanRender(metrics = spaceMapMetrics()) {
+  if (!metrics) return false;
+  return metrics.width > metrics.viewport.clientWidth + 1
+    || metrics.height > metrics.viewport.clientHeight + 1;
+}
+
+function setSpaceMiniMapVisible(visible) {
+  const map = els.spaceMiniMap;
+  if (!map) return;
+  window.clearTimeout(state.spaceMiniMapHideTimer);
+  state.spaceMiniMapHideTimer = 0;
+  const nextVisible = Boolean(visible && spaceMiniMapCanRender());
+  els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", nextVisible);
+  if (nextVisible) {
+    state.spaceMiniMapVisible = true;
+    map.hidden = false;
+    renderSpaceMiniMap();
+    window.requestAnimationFrame(() => {
+      if (state.spaceMiniMapVisible) map.classList.add("is-visible");
+    });
+    return;
+  }
+  state.spaceMiniMapVisible = false;
+  map.classList.remove("is-visible");
+  state.spaceMiniMapHideTimer = window.setTimeout(() => {
+    if (!state.spaceMiniMapVisible) map.hidden = true;
+  }, SPACE_MINIMAP_HIDE_MS);
+}
+
+function freezeWidgetPixelLayout() {
+  const surface = spaceSurface();
+  if (!surface) return;
+  const surfaceRect = surface.getBoundingClientRect();
+  document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
+    const id = widget.dataset.widgetId;
+    if (!id || widget.hidden || widget.classList.contains("is-minimized") || widget.classList.contains("is-maximized")) return;
+    const rect = widget.getBoundingClientRect();
+    const layout = widgetLayout(id);
+    const left = rect.left - surfaceRect.left;
+    const top = rect.top - surfaceRect.top;
+    layout.leftPx = Math.round(left);
+    layout.topPx = Math.round(top);
+    layout.widthPx = Math.round(rect.width);
+    layout.heightPx = Math.round(rect.height);
+    layout.leftPct = left / Math.max(1, surfaceRect.width);
+    layout.topPct = top / Math.max(1, surfaceRect.height);
+    layout.widthPct = rect.width / Math.max(1, surfaceRect.width);
+    layout.heightPct = rect.height / Math.max(1, surfaceRect.height);
+  });
+}
+
+function normalizedCanvasDensity(value) {
+  const number = Number(value);
+  return clamp(Math.round((Number.isFinite(number) ? number : 1) * 4) / 4, 1, CANVAS_DENSITY_MAX);
+}
+
+function commitCanvasDensityChange(origin = "control") {
+  saveWidgetLayout();
+  recordUserEvent("workspace.space_density_changed", {
+    target: `space:${activeSpaceStorageId()}`,
+    summary: `Space density ${canvasDensity()}x`,
+    data: { space_id: activeSpaceStorageId(), density: canvasDensity(), origin },
+  });
+}
+
+function setCanvasDensityValue(value, options = {}) {
+  const layout = canvasLayout();
+  const next = normalizedCanvasDensity(value);
+  const previous = canvasDensity();
+  if (next === previous && !options.force) return next;
+  layout.density = next;
+  applyCanvasDensity();
+  applyWidgetLayout();
+  updateDensityDial(options.control);
+  if (options.persist !== false) {
+    commitCanvasDensityChange(options.origin || "control");
+  }
+  if (options.render !== false) renderConfigModal();
+  return next;
+}
+
+function setCanvasDensity(delta) {
+  freezeWidgetPixelLayout();
+  return setCanvasDensityValue(canvasDensity() + delta, { origin: "step" });
+}
+
 function resetWidgetPosition(widget) {
   const id = widget.dataset.widgetId;
   if (id) {
-    delete state.widgetLayout[id];
+    const previous = state.widgetLayout[id] || {};
+    state.widgetLayout[id] = {
+      minimized: Boolean(previous.minimized),
+      maximized: Boolean(previous.maximized),
+      appLeftPx: previous.appLeftPx,
+      appTopPx: previous.appTopPx,
+      appLeftPct: previous.appLeftPct,
+      appTopPct: previous.appTopPct,
+      meta: previous.meta,
+      nodePositions: previous.nodePositions,
+    };
     saveWidgetLayout();
   }
   widget.style.left = "";
@@ -1013,43 +1535,557 @@ function resetWidgetPosition(widget) {
   widget.style.aspectRatio = "";
 }
 
+function widgetById(widgetId) {
+  return document.querySelector(`.widget[data-widget-id="${CSS.escape(widgetId)}"]`);
+}
+
+function widgetLayout(widgetId) {
+  state.widgetLayout[widgetId] = state.widgetLayout[widgetId] || {};
+  return state.widgetLayout[widgetId];
+}
+
+function appDefinitionById(widgetId) {
+  return SPACE_APP_DEFINITIONS.find((app) => app.id === widgetId) || null;
+}
+
+function spaceAppScope(panel = state.activePanel) {
+  const spaceId = activeSpaceStorageId(panel);
+  if (spaceId === "home") return "home";
+  if (spaceId === "admin") return "admin";
+  return "user";
+}
+
+function mappedAppIdsForPanel(panel = state.activePanel) {
+  return new Set(SPACE_APP_MAPPINGS[spaceAppScope(panel)] || []);
+}
+
+function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
+  if (widgetId === "devices") return activeSpaceStorageId(panel) === "home";
+  if (Object.prototype.hasOwnProperty.call(FIXED_WIDGET_LAYOUT, widgetId)) return true;
+  return mappedAppIdsForPanel(panel).has(widgetId);
+}
+
+function widgetMeta(widgetId) {
+  const layout = widgetLayout(widgetId);
+  layout.meta = layout.meta && typeof layout.meta === "object" ? layout.meta : {};
+  return layout.meta;
+}
+
+function widgetDefaultLabel(widgetId) {
+  const definition = appDefinitionById(widgetId);
+  if (definition?.label) return definition.label;
+  const widget = widgetById(widgetId);
+  const title = widget?.querySelector(".widget-head > span:first-child")?.textContent?.trim();
+  return title || widgetId;
+}
+
+function widgetDefaultShort(widgetId) {
+  const definition = appDefinitionById(widgetId);
+  if (definition?.short) return definition.short;
+  return widgetDefaultLabel(widgetId).slice(0, 4);
+}
+
+function widgetTitle(widgetId) {
+  return cleanText(widgetMeta(widgetId).title, widgetDefaultLabel(widgetId));
+}
+
+function widgetShort(widgetId) {
+  return cleanText(widgetMeta(widgetId).iconText, widgetDefaultShort(widgetId)).slice(0, 8);
+}
+
+function widgetImage(widgetId) {
+  const image = String(widgetMeta(widgetId).image || "").trim();
+  return image.startsWith("data:image/") ? image : "";
+}
+
+function normalizeDimension(value, fallback, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.round(clamp(number, min, max));
+}
+
+function widgetDimensionBounds(widgetId, surfaceRect = null) {
+  const meta = widgetMeta(widgetId);
+  const maxSurfaceWidth = Math.max(240, Math.round((surfaceRect?.width || 1800) - 16));
+  const maxSurfaceHeight = Math.max(180, Math.round((surfaceRect?.height || 1200) - 16));
+  const minWidth = normalizeDimension(meta.minWidth, 320, 180, maxSurfaceWidth);
+  const minHeight = normalizeDimension(meta.minHeight, 220, 120, maxSurfaceHeight);
+  const maxWidth = Math.max(minWidth, normalizeDimension(meta.maxWidth, maxSurfaceWidth, minWidth, Math.max(minWidth, 4000)));
+  const maxHeight = Math.max(minHeight, normalizeDimension(meta.maxHeight, maxSurfaceHeight, minHeight, Math.max(minHeight, 3000)));
+  return {
+    minWidth,
+    minHeight,
+    maxWidth: Math.min(maxWidth, maxSurfaceWidth),
+    maxHeight: Math.min(maxHeight, maxSurfaceHeight),
+  };
+}
+
+function applyWidgetChrome(widget) {
+  const id = widget?.dataset?.widgetId || "";
+  if (!id) return;
+  const title = widget.querySelector(".widget-head > span:first-child");
+  if (title) title.textContent = widgetTitle(id);
+  widget.querySelectorAll("[data-widget-control='minimize']").forEach((button) => {
+    button.setAttribute("aria-label", `Minimize ${widgetTitle(id)}`);
+  });
+  widget.querySelectorAll("[data-widget-control='maximize']").forEach((button) => {
+    button.setAttribute("aria-label", `${widget.classList.contains("is-maximized") ? "Restore" : "Maximize"} ${widgetTitle(id)}`);
+  });
+}
+
+function applyWidgetChromeAll() {
+  document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => applyWidgetChrome(widget));
+}
+
+function setWidgetMinimized(widgetId, minimized) {
+  if (!widgetAvailableInPanel(widgetId)) return;
+  const widget = widgetById(widgetId);
+  if (!widget) return;
+  const layout = widgetLayout(widgetId);
+  layout.minimized = Boolean(minimized);
+  if (minimized) layout.maximized = false;
+  saveWidgetLayout();
+  applyWidgetState(widget);
+  if (!minimized) {
+    applyWidgetLayout();
+    ensureOpenedWidgetContained(widget, widgetId);
+  }
+  renderAppLayer();
+  syncResourcePolling();
+  if (!minimized && widgetId === "devices") void loadDevices("open").catch(() => {});
+  recordUserEvent(minimized ? "workspace.widget_minimized" : "workspace.widget_opened", {
+    target: `widget:${widgetId}`,
+    summary: `${minimized ? "Minimized" : "Opened"} ${widgetId}`,
+    data: { widget_id: widgetId },
+  });
+  if (!minimized) bringWidgetForward(widget);
+}
+
+function toggleWidgetMaximized(widgetId) {
+  const widget = widgetById(widgetId);
+  if (!widget) return;
+  const layout = widgetLayout(widgetId);
+  layout.maximized = !layout.maximized;
+  if (layout.maximized) layout.minimized = false;
+  saveWidgetLayout();
+  applyWidgetState(widget);
+  renderAppLayer();
+  bringWidgetForward(widget);
+  if (widgetId === "browser-proof") scheduleBrowserResizeSync();
+  recordUserEvent("workspace.widget_maximize_toggled", {
+    target: `widget:${widgetId}`,
+    summary: `${layout.maximized ? "Maximized" : "Restored"} ${widgetId}`,
+    data: { widget_id: widgetId, maximized: layout.maximized },
+  });
+}
+
+function applyWidgetState(widget) {
+  const id = widget.dataset.widgetId;
+  const layout = id ? state.widgetLayout[id] || {} : {};
+  widget.classList.toggle("is-minimized", Boolean(layout.minimized));
+  widget.classList.toggle("is-maximized", Boolean(layout.maximized));
+  widget.hidden = Boolean(layout.minimized);
+  widget.querySelectorAll("[data-widget-control='maximize']").forEach((button) => {
+    button.classList.toggle("active", Boolean(layout.maximized));
+    button.title = layout.maximized ? "Restore" : "Maximize";
+    button.setAttribute("aria-label", layout.maximized ? `Restore ${id}` : `Maximize ${id}`);
+  });
+}
+
+function spaceApps(panel = state.activePanel) {
+  const mappedIds = mappedAppIdsForPanel(panel);
+  const spaceId = activeSpaceStorageId(panel);
+  return SPACE_APP_DEFINITIONS.filter((app) => {
+    if (!mappedIds.has(app.id)) return false;
+    if (app.home && spaceId !== "home") return false;
+    return !app.module || isModuleEnabled(app.module);
+  });
+}
+
+function snapToAppGrid(value) {
+  return Math.round(Number(value || 0) / APP_ICON_GRID_PX) * APP_ICON_GRID_PX;
+}
+
+function appRect(left, top, width, height) {
+  return { left, top, right: left + width, bottom: top + height };
+}
+
+function appRectsOverlap(a, b) {
+  const gap = APP_ICON_GRID_PX;
+  return a.left < b.right + gap && a.right + gap > b.left && a.top < b.bottom + gap && a.bottom + gap > b.top;
+}
+
+function appPositionFits(left, top, width, height, occupied) {
+  const rect = appRect(left, top, width, height);
+  return !occupied.some((item) => appRectsOverlap(rect, item));
+}
+
+function nearestOpenAppPosition(desiredLeft, desiredTop, width, height, maxLeft, maxTop, occupied) {
+  const startLeft = clamp(snapToAppGrid(desiredLeft), 8, maxLeft);
+  const startTop = clamp(snapToAppGrid(desiredTop), 8, maxTop);
+  if (appPositionFits(startLeft, startTop, width, height, occupied)) return { left: startLeft, top: startTop };
+  const maxRadius = Math.max(maxLeft, maxTop) + width + height;
+  for (let radius = APP_ICON_GRID_PX; radius <= maxRadius; radius += APP_ICON_GRID_PX) {
+    for (let dx = -radius; dx <= radius; dx += APP_ICON_GRID_PX) {
+      for (const dy of [-radius, radius]) {
+        const left = clamp(snapToAppGrid(startLeft + dx), 8, maxLeft);
+        const top = clamp(snapToAppGrid(startTop + dy), 8, maxTop);
+        if (appPositionFits(left, top, width, height, occupied)) return { left, top };
+      }
+    }
+    for (let dy = -radius + APP_ICON_GRID_PX; dy <= radius - APP_ICON_GRID_PX; dy += APP_ICON_GRID_PX) {
+      for (const dx of [-radius, radius]) {
+        const left = clamp(snapToAppGrid(startLeft + dx), 8, maxLeft);
+        const top = clamp(snapToAppGrid(startTop + dy), 8, maxTop);
+        if (appPositionFits(left, top, width, height, occupied)) return { left, top };
+      }
+    }
+  }
+  return { left: startLeft, top: startTop };
+}
+
+function createSpaceAppButton(app) {
+  const button = document.createElement("button");
+  button.className = "space-app-button";
+  button.type = "button";
+  button.dataset.widgetApp = app.id;
+  button.title = widgetTitle(app.id);
+  button.setAttribute("aria-label", widgetTitle(app.id));
+
+  const icon = document.createElement("span");
+  icon.className = "space-app-icon";
+  icon.textContent = widgetShort(app.id).slice(0, 2);
+  const label = document.createElement("span");
+  label.textContent = widgetShort(app.id);
+  button.append(icon, label);
+  button.addEventListener("click", (event) => {
+    if (button.dataset.dragMoved === "true") {
+      button.dataset.dragMoved = "";
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const layout = widgetLayout(app.id);
+    setWidgetMinimized(app.id, !layout.minimized);
+  });
+  button.addEventListener("contextmenu", (event) => showAppContextMenu(app.id, "app", event));
+  installLongPressMenu(button, (event) => showAppContextMenu(app.id, "app", event));
+  installAppButtonDragging(button, app.id);
+  return button;
+}
+
+function positionSpaceAppButton(button, app, index, occupied = []) {
+  const layout = widgetLayout(app.id);
+  button.title = widgetTitle(app.id);
+  button.setAttribute("aria-label", widgetTitle(app.id));
+  button.classList.toggle("open", !layout.minimized);
+  const icon = button.querySelector(".space-app-icon");
+  const image = widgetImage(app.id);
+  if (icon) {
+    icon.textContent = image ? "" : widgetShort(app.id).slice(0, 2);
+    icon.style.backgroundImage = image ? `url("${image}")` : "";
+    icon.classList.toggle("has-image", Boolean(image));
+  }
+  const label = button.querySelector(".space-app-icon + span");
+  if (label) label.textContent = widgetShort(app.id);
+  const viewportRect = spaceSurface()?.getBoundingClientRect?.() || { width: 1, height: 1 };
+  const defaultLeftPct = 0.04 + (index % 3) * 0.088;
+  const defaultTopPct = 0.12 + Math.floor(index / 3) * 0.14;
+  const buttonWidth = button.offsetWidth || 62;
+  const buttonHeight = button.offsetHeight || 70;
+  const maxLeftStable = Math.max(8, viewportRect.width - buttonWidth - 8);
+  const maxTopStable = Math.max(8, viewportRect.height - buttonHeight - 8);
+  const desiredLeft = Number.isFinite(layout.appLeftPx)
+    ? layout.appLeftPx
+    : (Number.isFinite(layout.appLeftPct) ? layout.appLeftPct : defaultLeftPct) * viewportRect.width;
+  const desiredTop = Number.isFinite(layout.appTopPx)
+    ? layout.appTopPx
+    : (Number.isFinite(layout.appTopPct) ? layout.appTopPct : defaultTopPct) * viewportRect.height;
+  const { left, top } = nearestOpenAppPosition(desiredLeft, desiredTop, buttonWidth, buttonHeight, maxLeftStable, maxTopStable, occupied);
+  layout.appLeftPx = left;
+  layout.appTopPx = top;
+  layout.appLeftPct = left / Math.max(1, viewportRect.width);
+  layout.appTopPct = top / Math.max(1, viewportRect.height);
+  button.style.left = `${left}px`;
+  button.style.top = `${top}px`;
+  occupied.push(appRect(left, top, buttonWidth, buttonHeight));
+}
+
+function renderAppLayer() {
+  if (!els.appLayer) return;
+  const apps = spaceApps();
+  const occupied = [];
+  const nodes = apps.map((app, index) => {
+    let button = state.appButtonCache.get(app.id);
+    if (!button) {
+      button = createSpaceAppButton(app);
+      state.appButtonCache.set(app.id, button);
+    }
+    positionSpaceAppButton(button, app, index, occupied);
+    return button;
+  });
+  els.appLayer.replaceChildren(...nodes);
+}
+
+function installAppButtonDragging(button, appId) {
+  const viewport = spaceSurface();
+  if (!viewport) return;
+  button.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    const startRect = button.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const startLeft = startRect.left - viewportRect.left;
+    const startTop = startRect.top - viewportRect.top;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    button.classList.add("is-dragging");
+    document.body.classList.add("is-app-dragging");
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can be unavailable during rapid touch/context transitions.
+    }
+    const move = (moveEvent) => {
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
+      const maxLeft = Math.max(0, viewportRect.width - button.offsetWidth - 8);
+      const maxTop = Math.max(0, viewportRect.height - button.offsetHeight - 8);
+      const left = clamp(startLeft + moveEvent.clientX - startX, 8, maxLeft);
+      const top = clamp(startTop + moveEvent.clientY - startY, 8, maxTop);
+      button.style.left = `${left}px`;
+      button.style.top = `${top}px`;
+    };
+    const end = (endEvent) => {
+      button.classList.remove("is-dragging");
+      document.body.classList.remove("is-app-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      try {
+        button.releasePointerCapture(event.pointerId);
+      } catch {
+        // Capture may already be released by the browser.
+      }
+      const layout = widgetLayout(appId);
+      const maxLeft = Math.max(8, viewportRect.width - button.offsetWidth - 8);
+      const maxTop = Math.max(8, viewportRect.height - button.offsetHeight - 8);
+      const occupied = Array.from(els.appLayer.querySelectorAll(".space-app-button"))
+        .filter((item) => item !== button)
+        .map((item) => {
+          const rect = item.getBoundingClientRect();
+          return appRect(rect.left - viewportRect.left, rect.top - viewportRect.top, rect.width, rect.height);
+        });
+      const { left, top } = nearestOpenAppPosition(
+        parseFloat(button.style.left || "0"),
+        parseFloat(button.style.top || "0"),
+        button.offsetWidth,
+        button.offsetHeight,
+        maxLeft,
+        maxTop,
+        occupied
+      );
+      button.style.left = `${left}px`;
+      button.style.top = `${top}px`;
+      layout.appLeftPx = left;
+      layout.appTopPx = top;
+      layout.appLeftPct = left / Math.max(1, viewportRect.width);
+      layout.appTopPct = top / Math.max(1, viewportRect.height);
+      saveWidgetLayout();
+      if (moved) {
+        button.dataset.dragMoved = "true";
+        window.setTimeout(() => {
+          button.dataset.dragMoved = "";
+        }, 0);
+        endEvent.preventDefault();
+        endEvent.stopPropagation();
+        recordUserEvent("workspace.app_moved", {
+          target: `app:${appId}`,
+          summary: `Moved app ${appId}`,
+          data: { app_id: appId, left_pct: layout.appLeftPct, top_pct: layout.appTopPct },
+        });
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
+function installLongPressMenu(target, openMenu) {
+  if (!target) return;
+  let timer = 0;
+  let startX = 0;
+  let startY = 0;
+  const clear = () => {
+    window.clearTimeout(timer);
+    timer = 0;
+  };
+  target.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" || event.button !== 0) return;
+    startX = event.clientX;
+    startY = event.clientY;
+    clear();
+    timer = window.setTimeout(() => {
+      timer = 0;
+      openMenu(event);
+    }, 560);
+  });
+  target.addEventListener("pointermove", (event) => {
+    if (!timer) return;
+    if (Math.hypot(event.clientX - startX, event.clientY - startY) > 8) clear();
+  });
+  target.addEventListener("pointerup", clear);
+  target.addEventListener("pointercancel", clear);
+  target.addEventListener("lostpointercapture", clear);
+}
+
 function applyWidgetLayout() {
-  const viewport = els.spaceViewport;
-  if (!viewport || isCompactViewport()) return;
+  const viewport = spaceSurface();
+  if (!viewport) return;
+  applyWidgetChromeAll();
   const viewportRect = viewport.getBoundingClientRect();
   let maxZ = state.widgetZ;
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
-    const layout = state.widgetLayout[widget.dataset.widgetId];
-    if (layout?.widthPct && layout?.heightPct) {
-      const width = clamp(Number(layout.widthPct) * viewportRect.width, 320, viewportRect.width - 16);
-      const height = clamp(Number(layout.heightPct) * viewportRect.height, 220, viewportRect.height - 16);
+    const id = widget.dataset.widgetId;
+    if (!widgetAvailableInPanel(id)) {
+      widget.hidden = true;
+      widget.classList.add("is-minimized");
+      widget.classList.remove("is-maximized");
+      return;
+    }
+    const layout = widgetLayout(id);
+    applyWidgetState(widget);
+    applyWidgetChrome(widget);
+    if (layout?.maximized || layout?.minimized) {
+      maxZ = Math.max(maxZ, Number(layout?.z || widget.style.zIndex || 4));
+      return;
+    }
+    const bounds = widgetDimensionBounds(id, viewportRect);
+    const widthPx = Number(layout?.widthPx);
+    const heightPx = Number(layout?.heightPx);
+    const widthPct = Number(layout?.widthPct);
+    const heightPct = Number(layout?.heightPct);
+    if (Number.isFinite(widthPx) || Number.isFinite(widthPct)) {
+      const width = clamp(
+        Number.isFinite(widthPx) ? widthPx : widthPct * viewportRect.width,
+        bounds.minWidth,
+        bounds.maxWidth
+      );
       widget.style.width = `${width}px`;
-      widget.style.height = `${height}px`;
+      layout.widthPx = Math.round(width);
       widget.style.aspectRatio = "auto";
     }
-    if (layout?.leftPct !== undefined && layout?.topPct !== undefined) {
+    if (Number.isFinite(heightPx) || Number.isFinite(heightPct)) {
+      const height = clamp(
+        Number.isFinite(heightPx) ? heightPx : heightPct * viewportRect.height,
+        bounds.minHeight,
+        bounds.maxHeight
+      );
+      widget.style.height = `${height}px`;
+      layout.heightPx = Math.round(height);
+      widget.style.aspectRatio = "auto";
+    }
+    fitWidgetToVisibleViewport(widget, id, { updateLayout: false });
+    const leftPx = Number(layout?.leftPx);
+    const topPx = Number(layout?.topPx);
+    const leftPct = Number(layout?.leftPct);
+    const topPct = Number(layout?.topPct);
+    if ((Number.isFinite(leftPx) || Number.isFinite(leftPct)) && (Number.isFinite(topPx) || Number.isFinite(topPct))) {
       const maxLeft = Math.max(0, viewportRect.width - widget.offsetWidth - 8);
       const maxTop = Math.max(0, viewportRect.height - widget.offsetHeight - 8);
-      const left = clamp(Number(layout.leftPct || 0) * viewportRect.width, 8, maxLeft);
-      const top = clamp(Number(layout.topPct || 0) * viewportRect.height, 8, maxTop);
+      const left = clamp(Number.isFinite(leftPx) ? leftPx : leftPct * viewportRect.width, 8, maxLeft);
+      const top = clamp(Number.isFinite(topPx) ? topPx : topPct * viewportRect.height, 8, maxTop);
       widget.style.left = `${left}px`;
       widget.style.top = `${top}px`;
       widget.style.right = "auto";
       widget.style.bottom = "auto";
+      layout.leftPx = Math.round(left);
+      layout.topPx = Math.round(top);
+      layout.leftPct = left / Math.max(1, viewportRect.width);
+      layout.topPct = top / Math.max(1, viewportRect.height);
     }
     const restoredZ = clamp(Number(layout?.z || widget.style.zIndex || 4), 4, WIDGET_Z_LIMIT);
     if (layout?.z || widget.style.zIndex) widget.style.zIndex = String(restoredZ);
     maxZ = Math.max(maxZ, restoredZ);
   });
   state.widgetZ = maxZ;
-  updateLayerDock(state.activeWidgetId);
+  renderAppLayer();
+  syncResourcePolling();
+  if (devicesWidgetIsOpen() && !state.devices.length && !state.devicesBusy) void loadDevices("open").catch(() => {});
 }
 
-function updateLayerDock(activeId = "") {
-  document.querySelectorAll("[data-widget-layer-target]").forEach((button) => {
-    const isActive = button.dataset.widgetLayerTarget === activeId;
-    button.classList.toggle("active", isActive);
-    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+function fitWidgetToVisibleViewport(widget, widgetId, options = {}) {
+  const visibleRect = els.spaceViewport?.getBoundingClientRect?.();
+  if (!widget || !visibleRect?.width || !visibleRect?.height) return { changed: false };
+  const bounds = widgetDimensionBounds(widgetId, visibleRect);
+  const rect = widget.getBoundingClientRect();
+  const width = Math.round(rect.width);
+  const height = Math.round(rect.height);
+  const nextWidth = Math.round(clamp(width, 1, bounds.maxWidth));
+  const nextHeight = Math.round(clamp(height, 1, bounds.maxHeight));
+  const updateLayout = options.updateLayout !== false;
+  const layout = updateLayout ? widgetLayout(widgetId) : null;
+  let changed = false;
+  if (width > nextWidth) {
+    widget.style.width = `${nextWidth}px`;
+    widget.style.right = "auto";
+    widget.style.aspectRatio = "auto";
+    if (layout) {
+      layout.widthPx = nextWidth;
+      layout.widthPct = nextWidth / Math.max(1, visibleRect.width);
+    }
+    changed = true;
+  }
+  if (height > nextHeight) {
+    widget.style.height = `${nextHeight}px`;
+    widget.style.bottom = "auto";
+    widget.style.aspectRatio = "auto";
+    if (layout) {
+      layout.heightPx = nextHeight;
+      layout.heightPct = nextHeight / Math.max(1, visibleRect.height);
+    }
+    changed = true;
+  }
+  return { changed, height: nextHeight, width: nextWidth };
+}
+
+function ensureOpenedWidgetContained(widget, widgetId) {
+  if (!widget || widget.hidden || widget.classList.contains("is-minimized") || widget.classList.contains("is-maximized")) return;
+  const visibleRect = els.spaceViewport?.getBoundingClientRect?.();
+  if (!visibleRect) return;
+  const fit = fitWidgetToVisibleViewport(widget, widgetId);
+  const rect = widget.getBoundingClientRect();
+  const fullyVisible = rect.left >= visibleRect.left
+    && rect.top >= visibleRect.top
+    && rect.right <= visibleRect.right
+    && rect.bottom <= visibleRect.bottom;
+  if (fullyVisible) {
+    if (fit.changed) {
+      saveWidgetLayout();
+      recordUserEvent("workspace.widget_visible_bounds_applied", {
+        target: `widget:${widgetId}`,
+        summary: `Fit ${widgetId} to the visible canvas`,
+        data: { widget_id: widgetId, width_px: fit.width, height_px: fit.height },
+      });
+    }
+    return;
+  }
+  const layout = widgetLayout(widgetId);
+  layout.leftPx = 8;
+  layout.topPx = 8;
+  layout.leftPct = 0;
+  layout.topPct = 0;
+  widget.style.left = "8px";
+  widget.style.top = "8px";
+  widget.style.right = "auto";
+  widget.style.bottom = "auto";
+  els.spaceViewport.scrollLeft = 0;
+  els.spaceViewport.scrollTop = 0;
+  saveWidgetLayout();
+  recordUserEvent("workspace.widget_initial_point_applied", {
+    target: `widget:${widgetId}`,
+    summary: `Moved ${widgetId} to the canvas initial point`,
+    data: { widget_id: widgetId, left_px: 8, top_px: 8, width_px: fit.changed ? fit.width : Math.round(rect.width), height_px: fit.changed ? fit.height : Math.round(rect.height) },
   });
 }
 
@@ -1077,7 +2113,6 @@ function bringWidgetForward(widget) {
     state.widgetLayout[id].z = state.widgetZ;
     saveWidgetLayout();
     state.activeWidgetId = id;
-    updateLayerDock(id);
     if (previous !== id) {
       recordUserEvent("workspace.widget_focused", {
         target: `widget:${id}`,
@@ -1089,7 +2124,7 @@ function bringWidgetForward(widget) {
 }
 
 function installWidgetDragging() {
-  const viewport = els.spaceViewport;
+  const viewport = spaceSurface();
   if (!viewport) return;
 
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
@@ -1108,10 +2143,13 @@ function installWidgetDragging() {
         data: { widget_id: widget.dataset.widgetId },
       });
     });
+    handle.addEventListener("contextmenu", (event) => showAppContextMenu(widget.dataset.widgetId, "widget", event));
+    installLongPressMenu(handle, (event) => showAppContextMenu(widget.dataset.widgetId, "widget", event));
 
     handle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || isCompactViewport()) return;
+      if (!isPrimaryPointer(event)) return;
       if (event.target.closest("button,input,textarea,select,a")) return;
+      if (widget.classList.contains("is-maximized")) return;
       event.preventDefault();
 
       const viewportRect = viewport.getBoundingClientRect();
@@ -1129,7 +2167,11 @@ function installWidgetDragging() {
       widget.classList.add("is-dragging");
       document.body.classList.add("is-widget-dragging");
       bringWidgetForward(widget);
-      handle.setPointerCapture(event.pointerId);
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture can be unavailable during rapid touch/context transitions.
+      }
       const startedAt = performance.now();
       recordUserEvent("workspace.widget_drag_started", {
         target: `widget:${widget.dataset.widgetId}`,
@@ -1149,13 +2191,20 @@ function installWidgetDragging() {
       const end = () => {
         widget.classList.remove("is-dragging");
         document.body.classList.remove("is-widget-dragging");
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", end);
-        handle.removeEventListener("pointercancel", end);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", end);
+        window.removeEventListener("pointercancel", end);
+        try {
+          handle.releasePointerCapture(event.pointerId);
+        } catch {
+          // Capture may already be released by the browser.
+        }
         const finalLeft = parseFloat(widget.style.left || "0");
         const finalTop = parseFloat(widget.style.top || "0");
         state.widgetLayout[widget.dataset.widgetId] = {
           ...(state.widgetLayout[widget.dataset.widgetId] || {}),
+          leftPx: Math.round(finalLeft),
+          topPx: Math.round(finalTop),
           leftPct: finalLeft / Math.max(1, viewportRect.width),
           topPct: finalTop / Math.max(1, viewportRect.height),
           z: Number(widget.style.zIndex || 4),
@@ -1173,9 +2222,9 @@ function installWidgetDragging() {
         });
       };
 
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", end, { once: true });
-      handle.addEventListener("pointercancel", end, { once: true });
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", end, { once: true });
+      window.addEventListener("pointercancel", end, { once: true });
     });
   });
 
@@ -1183,53 +2232,34 @@ function installWidgetDragging() {
   applyWidgetLayout();
 }
 
-function installWidgetLayerControls() {
-  document.querySelectorAll("[data-widget-layer='front']").forEach((button) => {
+function installWidgetWindowControls() {
+  document.querySelectorAll("[data-widget-control='minimize']").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       const widget = button.closest(".widget[data-widget-id]");
-      if (widget) {
-        bringWidgetForward(widget);
-        recordUserEvent("workspace.widget_layered", {
-          target: `widget:${widget.dataset.widgetId}`,
-          summary: `Brought ${widget.dataset.widgetId} to front`,
-          data: { widget_id: widget.dataset.widgetId, source: "widget_button" },
-        });
-      }
+      if (widget?.dataset.widgetId) setWidgetMinimized(widget.dataset.widgetId, true);
     });
   });
-
-  document.querySelectorAll("[data-widget-layer-target]").forEach((button) => {
+  document.querySelectorAll("[data-widget-control='maximize']").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.preventDefault();
-      const target = button.dataset.widgetLayerTarget;
-      const widget = Array.from(document.querySelectorAll(".widget[data-widget-id]"))
-        .find((candidate) => candidate.dataset.widgetId === target);
-      if (!widget) return;
-      bringWidgetForward(widget);
-      recordUserEvent("workspace.widget_layered", {
-        target: `widget:${target}`,
-        summary: `Brought ${target} to front from layer dock`,
-        data: { widget_id: target, source: "layer_dock" },
-      });
-      widget.classList.remove("is-layer-pulse");
-      requestAnimationFrame(() => {
-        widget.classList.add("is-layer-pulse");
-        window.setTimeout(() => widget.classList.remove("is-layer-pulse"), 420);
-      });
+      event.stopPropagation();
+      const widget = button.closest(".widget[data-widget-id]");
+      if (widget?.dataset.widgetId) toggleWidgetMaximized(widget.dataset.widgetId);
     });
   });
 }
 
 function installWidgetResizing() {
-  const viewport = els.spaceViewport;
+  const viewport = spaceSurface();
   if (!viewport) return;
   document.querySelectorAll(".widget-resize-handle").forEach((handle) => {
     const widget = handle.closest(".widget[data-widget-id]");
     if (!widget) return;
     handle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || isCompactViewport()) return;
+      if (!isPrimaryPointer(event)) return;
+      if (widget.classList.contains("is-maximized")) return;
       event.preventDefault();
       event.stopPropagation();
 
@@ -1241,8 +2271,10 @@ function installWidgetResizing() {
       const startHeight = widgetRect.height;
       const startX = event.clientX;
       const startY = event.clientY;
-      const minWidth = 420;
-      const minHeight = 300;
+      const bounds = widgetDimensionBounds(widget.dataset.widgetId, viewportRect);
+      const minWidth = bounds.minWidth;
+      const minHeight = bounds.minHeight;
+      let finished = false;
 
       widget.style.left = `${startLeft}px`;
       widget.style.top = `${startTop}px`;
@@ -1254,7 +2286,11 @@ function installWidgetResizing() {
       widget.classList.add("is-resizing");
       document.body.classList.add("is-widget-resizing");
       bringWidgetForward(widget);
-      handle.setPointerCapture(event.pointerId);
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture can be unavailable during rapid touch/context transitions.
+      }
       const startedAt = performance.now();
       recordUserEvent("workspace.widget_resize_started", {
         target: `widget:${widget.dataset.widgetId}`,
@@ -1263,8 +2299,9 @@ function installWidgetResizing() {
       });
 
       const move = (moveEvent) => {
-        const maxWidth = Math.max(minWidth, viewportRect.width - startLeft - 8);
-        const maxHeight = Math.max(minHeight, viewportRect.height - startTop - 8);
+        moveEvent.preventDefault();
+        const maxWidth = Math.min(bounds.maxWidth, Math.max(minWidth, viewportRect.width - startLeft - 8));
+        const maxHeight = Math.min(bounds.maxHeight, Math.max(minHeight, viewportRect.height - startTop - 8));
         const width = clamp(startWidth + moveEvent.clientX - startX, minWidth, maxWidth);
         const height = clamp(startHeight + moveEvent.clientY - startY, minHeight, maxHeight);
         widget.style.width = `${width}px`;
@@ -1272,13 +2309,27 @@ function installWidgetResizing() {
       };
 
       const end = () => {
+        if (finished) return;
+        finished = true;
         widget.classList.remove("is-resizing");
         document.body.classList.remove("is-widget-resizing");
         handle.removeEventListener("pointermove", move);
         handle.removeEventListener("pointerup", end);
         handle.removeEventListener("pointercancel", end);
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", end);
+        window.removeEventListener("pointercancel", end);
+        try {
+          handle.releasePointerCapture(event.pointerId);
+        } catch {
+          // Capture may already be released by the browser.
+        }
         state.widgetLayout[widget.dataset.widgetId] = {
           ...(state.widgetLayout[widget.dataset.widgetId] || {}),
+          leftPx: Math.round(parseFloat(widget.style.left || "0")),
+          topPx: Math.round(parseFloat(widget.style.top || "0")),
+          widthPx: Math.round(widget.offsetWidth),
+          heightPx: Math.round(widget.offsetHeight),
           leftPct: parseFloat(widget.style.left || "0") / Math.max(1, viewportRect.width),
           topPct: parseFloat(widget.style.top || "0") / Math.max(1, viewportRect.height),
           widthPct: widget.offsetWidth / Math.max(1, viewportRect.width),
@@ -1299,9 +2350,12 @@ function installWidgetResizing() {
         });
       };
 
-      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointermove", move, { passive: false });
       handle.addEventListener("pointerup", end, { once: true });
       handle.addEventListener("pointercancel", end, { once: true });
+      window.addEventListener("pointermove", move, { passive: false });
+      window.addEventListener("pointerup", end, { once: true });
+      window.addEventListener("pointercancel", end, { once: true });
     });
   });
 }
@@ -1323,7 +2377,6 @@ async function loadConfig() {
   } catch {
     // Keep the local default when the config route is unavailable.
   }
-  els.bridgeLabel.textContent = `Bridge ${state.bridgeUrl}`;
   renderLogin();
 }
 
@@ -1337,13 +2390,20 @@ function publicUserInitial(user) {
 }
 
 function setLoginOpen(open) {
-  state.loginOpen = Boolean(open);
+  const nextOpen = Boolean(open);
+  if (!nextOpen && closeUiNavigationLayer("login-popover")) return;
+  state.loginOpen = nextOpen;
   if (!els.loginPopover || !els.loginButton) return;
   els.loginPopover.hidden = !state.loginOpen;
   els.loginButton.setAttribute("aria-expanded", state.loginOpen ? "true" : "false");
   if (state.loginOpen) {
     renderLogin();
     void renderGoogleSignInButton();
+    pushUiNavigationLayer("login-popover", () => {
+      state.loginOpen = false;
+      if (els.loginPopover) els.loginPopover.hidden = true;
+      els.loginButton?.setAttribute("aria-expanded", "false");
+    });
   }
 }
 
@@ -1387,17 +2447,6 @@ function renderLogin() {
   }
   if (els.loginTitle) els.loginTitle.textContent = user ? publicUserLabel(user) : "Sign in";
   if (els.loginMeta) els.loginMeta.textContent = user ? cleanText(user.email, "Google account") : "Google";
-  if (els.loginUser) {
-    els.loginUser.hidden = !user;
-    els.loginUser.replaceChildren();
-    if (user) {
-      const name = document.createElement("strong");
-      name.textContent = publicUserLabel(user);
-      const email = document.createElement("span");
-      email.textContent = cleanText(user.email, "Google account");
-      els.loginUser.append(name, email);
-    }
-  }
   if (els.googleSignInButton) {
     els.googleSignInButton.hidden = Boolean(user);
     if (user) els.googleSignInButton.replaceChildren();
@@ -1593,8 +2642,13 @@ async function logout() {
     window.clearInterval(state.refreshInterval);
     state.refreshInterval = 0;
   }
+  if (state.resourceInterval) {
+    window.clearInterval(state.resourceInterval);
+    state.resourceInterval = 0;
+  }
   if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
+  renderAuthGate();
   recordUserEvent("auth.logout_finished", {
     target: "account",
     summary: "Signed out",
@@ -1607,12 +2661,26 @@ async function loadWasm() {
     const result = await WebAssembly.instantiate(bytes);
     state.wasm = result.instance.exports;
     state.wasmReady = typeof state.wasm.add === "function";
-    setLed(els.wasmStatus, state.wasmReady ? "ok" : "err");
   } catch (error) {
     state.wasmReady = false;
     state.lastError = `WASM load error: ${error.message}`;
-    setLed(els.wasmStatus, "err");
   }
+}
+
+function clientDeviceId() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CLIENT_DEVICE_STORAGE_KEY) || "{}");
+    if (raw?.id && /^[a-z0-9_-]{8,96}$/i.test(raw.id)) return raw.id;
+  } catch {
+    // Device identity is local convenience state; a fresh id is safe.
+  }
+  const id = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+  try {
+    localStorage.setItem(CLIENT_DEVICE_STORAGE_KEY, JSON.stringify({ id, created_at: new Date().toISOString() }));
+  } catch {
+    // The backend can fall back to user-agent/IP if local storage is blocked.
+  }
+  return id;
 }
 
 async function fetchJson(path, options = {}) {
@@ -1624,7 +2692,10 @@ async function fetchJson(path, options = {}) {
   try {
     const response = await fetch(path, {
       method: options.method || "GET",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wasm-Agent-Device-Id": clientDeviceId(),
+      },
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     });
@@ -1646,7 +2717,7 @@ async function fetchJson(path, options = {}) {
 }
 
 async function bridgeJson(path, options = {}) {
-  return fetchJson(`${state.bridgeUrl}${path}`, options);
+  return fetchJson(`/bridge${path}`, options);
 }
 
 async function postAgentMessage(body, pendingMessage, options = {}) {
@@ -1716,11 +2787,13 @@ function handleAgentStreamLine(line, pendingMessage) {
   return payload;
 }
 
-function setAgentOpen(open) {
-  state.agentOpen = open;
-  els.agentOverlay.dataset.open = open ? "true" : "false";
-  els.agentAvatarButton.setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) {
+function setAgentOpen(open, options = {}) {
+  const nextOpen = Boolean(open);
+  const changed = state.agentOpen !== nextOpen;
+  state.agentOpen = nextOpen;
+  els.agentOverlay.dataset.open = nextOpen ? "true" : "false";
+  els.agentAvatarButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+  if (nextOpen) {
     placeAgentPanel();
     window.setTimeout(() => {
       placeAgentPanel();
@@ -1729,11 +2802,131 @@ function setAgentOpen(open) {
   } else {
     setAgentBalloon("");
   }
-  recordUserEvent(open ? "agent.opened" : "agent.closed", {
+  if (!changed && !options.forceEvent) return;
+  recordUserEvent(nextOpen ? "agent.opened" : "agent.closed", {
     target: "agent-overlay",
-    summary: open ? "Opened embedded assistant" : "Closed embedded assistant",
+    summary: nextOpen ? "Opened embedded assistant" : "Minimized embedded assistant",
     data: { panel: state.activePanel },
   });
+}
+
+function chatQueryIsOpen() {
+  return new URLSearchParams(window.location.search).get(CHAT_QUERY_KEY) === CHAT_QUERY_VALUE;
+}
+
+function uiNavigationId() {
+  const raw = window.history.state;
+  return raw && typeof raw === "object" ? String(raw.uiLayerId || "") : "";
+}
+
+function uiNavigationState(entry = state.uiNavigationStack.at(-1) || null) {
+  const raw = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
+  return {
+    ...raw,
+    panel: state.activePanel,
+    uiLayer: entry?.layer || "",
+    uiLayerId: entry?.id || "",
+  };
+}
+
+function uiNavigationUrl() {
+  const url = new URL(window.location.href);
+  if (state.agentOpen) {
+    url.searchParams.set(CHAT_QUERY_KEY, CHAT_QUERY_VALUE);
+  } else if (url.searchParams.get(CHAT_QUERY_KEY) === CHAT_QUERY_VALUE) {
+    url.searchParams.delete(CHAT_QUERY_KEY);
+  }
+  return url;
+}
+
+function replaceCurrentUiNavigationState() {
+  window.history.replaceState(uiNavigationState(), "", uiNavigationUrl());
+}
+
+function closeUiNavigationEntry(entry, options = {}) {
+  if (!entry) return false;
+  state.uiNavigationStack = state.uiNavigationStack.filter((item) => item.id !== entry.id);
+  if (options.invoke !== false) entry.close?.({ skipHistory: true, skipStack: true });
+  return true;
+}
+
+function pushUiNavigationLayer(layer, close, options = {}) {
+  if (!layer) return null;
+  state.uiNavigationStack
+    .filter((entry) => entry.layer === layer)
+    .forEach((entry) => closeUiNavigationEntry(entry, { invoke: false }));
+  const entry = {
+    id: `${layer}:${++state.uiNavigationSeq}`,
+    layer,
+    close,
+  };
+  state.uiNavigationStack.push(entry);
+  const url = uiNavigationUrl();
+  if (options.chat) url.searchParams.set(CHAT_QUERY_KEY, CHAT_QUERY_VALUE);
+  window.history.pushState(uiNavigationState(entry), "", url);
+  return entry;
+}
+
+function closeUiNavigationLayer(layer, options = {}) {
+  const entry = [...state.uiNavigationStack].reverse().find((item) => item.layer === layer);
+  if (!entry) return false;
+  if (!options.skipHistory && uiNavigationId() === entry.id) {
+    window.history.back();
+    return true;
+  }
+  closeUiNavigationEntry(entry);
+  if (options.replaceHistory || uiNavigationId() === entry.id) replaceCurrentUiNavigationState();
+  return true;
+}
+
+function closeTopUiNavigationLayer() {
+  const entry = state.uiNavigationStack.at(-1);
+  if (!entry) return false;
+  return closeUiNavigationLayer(entry.layer);
+}
+
+function syncUiNavigationWithHistory() {
+  const targetId = uiNavigationId();
+  while (state.uiNavigationStack.length && state.uiNavigationStack.at(-1).id !== targetId) {
+    closeUiNavigationEntry(state.uiNavigationStack.at(-1));
+  }
+  if (targetId && !state.uiNavigationStack.some((entry) => entry.id === targetId)) {
+    const raw = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
+    if (raw.uiLayer === "agent-chat") {
+      const entry = {
+        id: targetId,
+        layer: "agent-chat",
+        close: () => setAgentOpen(false),
+      };
+      state.uiNavigationStack.push(entry);
+      setAgentOpen(true);
+    }
+  }
+  if (!targetId && !chatQueryIsOpen() && state.agentOpen) {
+    setAgentOpen(false);
+  }
+}
+
+function initializeUiNavigationFromUrl() {
+  state.uiNavigationStack = [];
+  if (chatQueryIsOpen()) {
+    const baseUrl = new URL(window.location.href);
+    baseUrl.searchParams.delete(CHAT_QUERY_KEY);
+    window.history.replaceState(uiNavigationState(null), "", baseUrl);
+    setAgentOpen(true);
+    pushUiNavigationLayer("agent-chat", () => setAgentOpen(false), { chat: true });
+    return;
+  }
+  window.history.replaceState(uiNavigationState(null), "", window.location.href);
+}
+
+function openAgentChat() {
+  setAgentOpen(true);
+  pushUiNavigationLayer("agent-chat", () => setAgentOpen(false), { chat: true });
+}
+
+function closeAgentChat() {
+  if (!closeUiNavigationLayer("agent-chat")) setAgentOpen(false);
 }
 
 function appendAgentMessage(role, content, extra = {}) {
@@ -4010,6 +5203,28 @@ function placeAgentPanel() {
   panel.dataset.x = side;
 }
 
+function moveAgentGroupFromPanelRect(panelLeft, panelTop, panelWidth, panelHeight) {
+  const appRect = appViewportRect();
+  const avatar = agentAvatarSize();
+  const gap = 14;
+  const minPanelLeft = appRect.left + 8;
+  const maxPanelLeft = Math.max(minPanelLeft, appRect.right - panelWidth - 8);
+  const minPanelTop = appRect.top + 8;
+  const maxPanelTop = Math.max(minPanelTop, appRect.bottom - panelHeight - 8);
+  const left = clamp(panelLeft, minPanelLeft, maxPanelLeft);
+  const top = clamp(panelTop, minPanelTop, maxPanelTop);
+  const avatarOnRight = left + panelWidth / 2 < appRect.left + appRect.width / 2;
+  state.agentPanelSide = avatarOnRight ? "left" : "right";
+  const overlayLeft = avatarOnRight ? left + panelWidth + gap : left - avatar.width - gap;
+  const overlayTop = top + panelHeight / 2 - avatar.height / 2;
+  state.agentLayout = clampAgentLayout({ left: overlayLeft, top: overlayTop });
+  els.agentOverlay.style.left = `${state.agentLayout.left}px`;
+  els.agentOverlay.style.top = `${state.agentLayout.top}px`;
+  els.agentOverlay.style.right = "auto";
+  els.agentOverlay.style.bottom = "auto";
+  placeAgentPanel();
+}
+
 function installAgentDragging() {
   els.agentAvatarButton.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
@@ -4057,6 +5272,55 @@ function installAgentDragging() {
         recordUserEvent("agent.dragged", {
           target: "agent-overlay",
           summary: "Moved embedded assistant avatar",
+          data: state.agentLayout,
+        });
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
+function installAgentPanelDragging() {
+  const handle = els.agentPanel?.querySelector(".agent-panel-head");
+  if (!handle) return;
+  handle.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    if (event.target.closest("button,input,textarea,select,a")) return;
+    event.preventDefault();
+    const panelRect = els.agentPanel.getBoundingClientRect();
+    const offsetX = event.clientX - panelRect.left;
+    const offsetY = event.clientY - panelRect.top;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    document.body.classList.add("is-agent-dragging");
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners below keep the drag alive if capture is interrupted.
+    }
+    const move = (moveEvent) => {
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
+      moveAgentGroupFromPanelRect(
+        moveEvent.clientX - offsetX,
+        moveEvent.clientY - offsetY,
+        els.agentPanel.offsetWidth || 430,
+        els.agentPanel.offsetHeight || 620
+      );
+    };
+    const end = () => {
+      document.body.classList.remove("is-agent-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      placeAgentPanel();
+      saveAgentLayout();
+      if (moved) {
+        recordUserEvent("agent.dragged", {
+          target: "agent-overlay",
+          summary: "Moved embedded assistant avatar and chat together",
           data: state.agentLayout,
         });
       }
@@ -4264,6 +5528,7 @@ async function sendAgentMessage(text) {
       attachments: payloadAttachments.length ? payloadAttachments : undefined,
       mode,
       target_node: targetNode,
+      space_id: activeSpaceStorageId(),
       observation: compactObservation,
       transcript,
     }, pendingMessage, {
@@ -4343,15 +5608,27 @@ function normalizeNode(raw) {
   const activity = raw.activity || {};
   const running = Boolean(raw.running || raw.status === "running" || raw.status === "working");
   const status = cleanText(activity.state || raw.status || (running ? "running" : "stopped"), "unknown");
+  const statusKey = status.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  const statusClass = /error|fail|missing|unhealthy/.test(statusKey)
+    ? "error"
+    : /stop|exit|down|offline/.test(statusKey)
+      ? "stopped"
+      : running || /work|run|active|ready|idle|online|healthy/.test(statusKey)
+        ? statusKey || "running"
+        : "unknown";
   const runtime = cleanText(raw.runtime?.type || raw.raw?.runtime_type, "runtime");
+  const modelOverride = nodeModelOverride(id);
+  const overriddenModel = formatNodeModel(modelOverride.name, modelOverride.provider);
   return {
     raw,
     id,
     title: cleanText(raw.title || id, id),
     running,
     status,
+    statusClass,
     runtime,
-    model: cleanText(activity.model, ""),
+    model: cleanText(overriddenModel || activity.model, ""),
+    modelOverride,
     taskPreview: cleanText(activity.task_preview, ""),
     actions: Array.isArray(raw.actions) ? raw.actions : [],
   };
@@ -4363,22 +5640,21 @@ function taskPreview(task) {
 }
 
 async function refresh(origin = "auto") {
-  els.refreshButton.disabled = true;
   const startedAt = performance.now();
   try {
     await bridgeJson("/health");
     state.bridgeReady = true;
     state.lastError = "";
-    setLed(els.bridgeStatus, "ok");
 
-    const [resources, nodes, tasks] = await Promise.all([
-      bridgeJson("/resources").catch(() => ({ resources: null })),
+    const [nodes, tasks] = await Promise.all([
       bridgeJson("/nodes").catch(() => ({ nodes: [] })),
       bridgeJson("/tasks").catch(() => ({ tasks: [] })),
     ]);
-    state.resources = resources.resources || null;
     state.nodes = (nodes.nodes || []).map(normalizeNode);
     state.tasks = tasks.tasks || [];
+    if (!state.resourceInterval && (resourcesWidgetIsOpen() || !["auto", "startup"].includes(origin))) {
+      await loadResources(origin).catch(() => {});
+    }
     if (state.nodes.length && !state.nodes.some((node) => node.id === state.selectedNode)) {
       state.selectedNode = state.nodes[0].id;
     }
@@ -4394,7 +5670,6 @@ async function refresh(origin = "auto") {
   } catch (error) {
     state.bridgeReady = false;
     state.lastError = error.message;
-    setLed(els.bridgeStatus, "err");
     renderAll();
     recordUserEvent("workspace.refresh_error", {
       target: "bridge",
@@ -4403,8 +5678,267 @@ async function refresh(origin = "auto") {
       duration_ms: performance.now() - startedAt,
     });
   } finally {
-    els.refreshButton.disabled = false;
+    renderAppLayer();
+    syncResourcePolling();
   }
+}
+
+async function loadResources(origin = "auto") {
+  try {
+    const payload = await bridgeJson("/resources");
+    state.resources = payload.resources || null;
+    renderResources();
+    if (origin !== "poll") {
+      recordUserEvent("resources.loaded", {
+        target: "resources",
+        summary: state.resources?.timestamp ? `Loaded resources ${state.resources.timestamp}` : "Loaded resources",
+        data: { origin, timestamp: state.resources?.timestamp || "" },
+      });
+    }
+  } catch (error) {
+    state.lastError = error.message;
+    if (!state.resources) renderResources();
+    if (origin !== "poll") {
+      recordUserEvent("resources.load_error", {
+        target: "resources",
+        summary: error.message,
+        data: { origin, error: error.message },
+      });
+    }
+    throw error;
+  }
+}
+
+function resourcesWidgetIsOpen() {
+  const widget = widgetById("resources");
+  return Boolean(state.authUser && widget && !widget.hidden && !widget.classList.contains("is-minimized"));
+}
+
+function syncResourcePolling() {
+  if (resourcesWidgetIsOpen()) {
+    if (!state.resourceInterval) {
+      state.resourceInterval = window.setInterval(() => void loadResources("poll").catch(() => {}), RESOURCE_POLL_MS);
+      void loadResources("open").catch(() => {});
+    }
+    return;
+  }
+  if (state.resourceInterval) {
+    window.clearInterval(state.resourceInterval);
+    state.resourceInterval = 0;
+  }
+}
+
+function devicesWidgetIsOpen() {
+  const widget = widgetById("devices");
+  return Boolean(activeSpaceStorageId() === "home" && state.authUser && widget && !widget.hidden && !widget.classList.contains("is-minimized"));
+}
+
+async function loadDevices(origin = "auto") {
+  if (state.devicesBusy) return;
+  state.devicesBusy = true;
+  renderDevices();
+  try {
+    const payload = await fetchJson("/account/devices", { timeoutMs: 8000 });
+    state.devices = Array.isArray(payload.devices) ? payload.devices : [];
+    state.deviceAuthority = {
+      current_device_id: payload.current_device_id || "",
+      main_device_id: payload.main_device_id || "",
+      main_device_online: Boolean(payload.main_device_online),
+      layout_policy: "device-local",
+    };
+    state.devicesLoadedAt = payload.timestamp || new Date().toISOString();
+    renderDevices();
+    if (origin !== "poll") {
+      recordUserEvent("account.devices_loaded", {
+        target: "devices",
+        summary: `Loaded ${state.devices.length} connected devices`,
+        data: { origin, count: state.devices.length },
+      });
+    }
+  } catch (error) {
+    if (els.devicesStatus) {
+      els.devicesStatus.textContent = "offline";
+      els.devicesStatus.className = "widget-chip err";
+    }
+    recordUserEvent("account.devices_load_error", {
+      target: "devices",
+      summary: error.message,
+      data: { origin, error: error.message },
+    });
+  } finally {
+    state.devicesBusy = false;
+    renderDevices();
+  }
+}
+
+function renderDevices() {
+  if (!els.devicesList || !els.devicesStatus) return;
+  if (els.devicesSyncButton) {
+    els.devicesSyncButton.disabled = !state.authUser || Boolean(state.deviceSyncBusy);
+    els.devicesSyncButton.classList.toggle("is-busy", Boolean(state.deviceSyncBusy));
+  }
+  if (state.devicesBusy && !state.devices.length) {
+    els.devicesStatus.textContent = "loading";
+    els.devicesStatus.className = "widget-chip";
+    els.devicesList.replaceChildren(metric("Devices", "Loading"));
+    return;
+  }
+  els.devicesStatus.textContent = state.devices.length ? `${state.devices.length}` : "account";
+  els.devicesStatus.className = `widget-chip ${state.devices.length ? "ok" : ""}`;
+  if (!state.devices.length) {
+    els.devicesList.replaceChildren(metric("Devices", state.authUser ? "No devices yet" : "Sign in required"));
+    return;
+  }
+  els.devicesList.replaceChildren(
+    ...state.devices.map((device) => {
+      const card = document.createElement("article");
+      card.className = `device-card${device.current ? " current" : ""}`;
+      const icon = document.createElement("span");
+      icon.className = `device-os-icon ${deviceOsClass(device)}`;
+      icon.textContent = deviceOsGlyph(device);
+      icon.title = deviceOsLabel(device);
+      icon.setAttribute("aria-hidden", "true");
+      const copy = document.createElement("div");
+      copy.className = "device-card-copy";
+      const title = document.createElement("strong");
+      title.textContent = cleanText(device.label, "Device");
+      const meta = document.createElement("span");
+      const flags = [
+        device.current ? "Current" : "",
+        device.main ? "Main" : "",
+        cleanText(device.reachability, ""),
+      ].filter(Boolean);
+      meta.textContent = flags.length ? flags.join(" / ") : cleanText(device.last_seen_display, device.last_seen || "");
+      const detail = document.createElement("p");
+      detail.textContent = cleanText(device.user_agent, device.id);
+      const main = document.createElement("button");
+      main.className = "device-main-button icon-button";
+      main.type = "button";
+      main.title = device.main ? "Main device" : `Make ${cleanText(device.label, "device")} the main device`;
+      main.setAttribute("aria-label", main.title);
+      main.disabled = !state.authUser || Boolean(device.main) || state.deviceMainBusy === device.id;
+      main.classList.toggle("active", Boolean(device.main));
+      main.classList.toggle("is-busy", state.deviceMainBusy === device.id);
+      main.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void setMainDevice(device);
+      });
+      const sync = document.createElement("button");
+      sync.className = "device-sync-button icon-button";
+      sync.type = "button";
+      sync.title = `Download sync installer for ${cleanText(device.label, "device")}`;
+      sync.setAttribute("aria-label", `Download sync installer for ${cleanText(device.label, "device")}`);
+      sync.disabled = !state.authUser || state.deviceSyncBusy === device.id;
+      sync.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void syncDevice(device);
+      });
+      copy.append(title, meta, detail);
+      card.append(icon, copy, main, sync);
+      return card;
+    })
+  );
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function syncDevice(device = null) {
+  const target = device || state.devices.find((item) => item.current) || state.devices[0] || null;
+  if (!target || state.deviceSyncBusy) return;
+  state.deviceSyncBusy = target.id;
+  renderDevices();
+  try {
+    const payload = await fetchJson("/account/devices/sync", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { device_id: target.id },
+    });
+    downloadJson(`wasm-agent-sync-${target.id}.json`, payload.package || payload);
+    recordUserEvent("account.device_sync_package_downloaded", {
+      target: `device:${target.id}`,
+      summary: `Downloaded sync installer for ${cleanText(target.label, "device")}`,
+      data: { device_id: target.id, current: Boolean(target.current), package_schema: payload.package?.schema || "" },
+    });
+    void loadDevices("sync").catch(() => {});
+  } catch (error) {
+    recordUserEvent("account.device_sync_error", {
+      target: `device:${target.id}`,
+      summary: error.message,
+      data: { device_id: target.id, error: error.message },
+    });
+  } finally {
+    state.deviceSyncBusy = "";
+    renderDevices();
+  }
+}
+
+async function setMainDevice(device = null) {
+  if (!device || !device.id || state.deviceMainBusy) return;
+  state.deviceMainBusy = device.id;
+  renderDevices();
+  try {
+    const payload = await fetchJson("/account/devices/main", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { device_id: device.id },
+    });
+    state.devices = Array.isArray(payload.devices) ? payload.devices : state.devices;
+    state.deviceAuthority = {
+      current_device_id: payload.current_device_id || "",
+      main_device_id: payload.main_device_id || device.id,
+      main_device_online: Boolean(payload.main_device_online),
+      layout_policy: "device-local",
+    };
+    recordUserEvent("account.main_device_changed", {
+      target: `device:${device.id}`,
+      summary: `Main device switched to ${cleanText(device.label, "device")}`,
+      data: { device_id: device.id, current: Boolean(device.current) },
+    });
+  } catch (error) {
+    recordUserEvent("account.main_device_error", {
+      target: `device:${device.id}`,
+      summary: error.message,
+      data: { device_id: device.id, error: error.message },
+    });
+  } finally {
+    state.deviceMainBusy = "";
+    renderDevices();
+  }
+}
+
+function deviceOsLabel(device) {
+  const text = `${device?.label || ""} ${device?.user_agent || ""}`.toLowerCase();
+  if (text.includes("android")) return "Android";
+  if (text.includes("iphone") || text.includes("ipad") || text.includes(" ios")) return "iOS";
+  if (text.includes("mac os") || text.includes("macintosh") || text.includes("macos")) return "macOS";
+  if (text.includes("windows")) return "Windows";
+  if (text.includes("linux")) return "Linux";
+  return "Device";
+}
+
+function deviceOsClass(device) {
+  return `os-${deviceOsLabel(device).toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+}
+
+function deviceOsGlyph(device) {
+  return {
+    Android: "An",
+    iOS: "iO",
+    macOS: "Ma",
+    Windows: "Wi",
+    Linux: "Li",
+    Device: "De",
+  }[deviceOsLabel(device)] || "De";
 }
 
 function metric(label, value, barValue = null) {
@@ -4433,6 +5967,7 @@ function renderResources() {
   els.resourceGrid.replaceChildren();
   if (!res) {
     els.resourceFreshness.textContent = state.bridgeReady ? "partial" : "offline";
+    els.resourceFreshness.title = "";
     els.resourceFreshness.className = `widget-chip ${state.bridgeReady ? "" : "err"}`;
     els.resourceGrid.append(
       metric("Bridge", state.bridgeReady ? "Online" : "Offline"),
@@ -4443,19 +5978,36 @@ function renderResources() {
     return;
   }
 
-  els.resourceFreshness.textContent = cleanText(res.timestamp, "live").replace("T", " ").replace("Z", "");
+  els.resourceFreshness.textContent = "live";
+  els.resourceFreshness.title = cleanText(res.timestamp, "live").replace("T", " ").replace("Z", "");
   els.resourceFreshness.className = "widget-chip ok";
+  const totalNodes = state.nodes.length;
+  const runningNodes = state.nodes.filter((node) => node.running).length;
+  const memoryTotal = Number(res.memory?.total_bytes || 0);
+  const memoryUsed = Number(res.memory?.used_bytes || 0);
+  const diskTotal = Number(res.disk?.total_bytes || 0);
+  const diskUsed = Number(res.disk?.used_bytes || 0);
   els.resourceGrid.append(
+    metric("Nodes", `${runningNodes}/${totalNodes}`, totalNodes ? (runningNodes / totalNodes) * 100 : 0),
+    metric("Disk", `${compactGb(diskUsed)}/${compactGb(diskTotal)}`, res.disk?.percent),
+    metric("RAM", `${compactGb(memoryUsed)}/${compactGb(memoryTotal)}`, res.memory?.percent),
     metric("CPU", `${cleanText(res.cpu?.percent, "0")}%`, res.cpu?.percent),
-    metric("Memory", `${cleanText(res.memory?.percent, "0")}%`, res.memory?.percent),
-    metric("Disk", `${cleanText(res.disk?.percent, "0")}%`, res.disk?.percent),
-    metric("Uptime", cleanText(res.uptime?.display, "-")),
-    metric("Available", bytes(res.memory?.available_bytes)),
-    metric("Processes", cleanText(res.processes?.count, "0"))
+    metric("Processes", cleanText(res.processes?.count, "0")),
+    metric("Uptime", cleanText(res.uptime?.display, "-"))
   );
 }
 
-function nodePosition(index, total) {
+function topologyNodePositions() {
+  const layout = widgetLayout("topology");
+  layout.nodePositions = layout.nodePositions && typeof layout.nodePositions === "object" ? layout.nodePositions : {};
+  return layout.nodePositions;
+}
+
+function nodePosition(node, index, total) {
+  const saved = topologyNodePositions()[node.id];
+  if (saved && Number.isFinite(saved.leftPct) && Number.isFinite(saved.topPct)) {
+    return { left: `${saved.leftPct * 100}%`, top: `${saved.topPct * 100}%`, transform: "translate(-50%, -50%)" };
+  }
   if (index === 0) return { left: "50%", top: "48%", transform: "translate(-50%, -50%)" };
   const radiusX = 33;
   const radiusY = 29;
@@ -4467,24 +6019,83 @@ function nodePosition(index, total) {
   };
 }
 
+function installTopologyNodeDragging(button, node) {
+  const surface = els.topologyNodes;
+  if (!surface) return;
+  button.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const surfaceRect = surface.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    button.setPointerCapture(event.pointerId);
+    const move = (moveEvent) => {
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
+      const left = clamp(moveEvent.clientX - surfaceRect.left, button.offsetWidth / 2, surfaceRect.width - button.offsetWidth / 2);
+      const top = clamp(moveEvent.clientY - surfaceRect.top, button.offsetHeight / 2, surfaceRect.height - button.offsetHeight / 2);
+      button.style.left = `${left}px`;
+      button.style.top = `${top}px`;
+      button.style.transform = "translate(-50%, -50%)";
+    };
+    const end = (endEvent) => {
+      button.removeEventListener("pointermove", move);
+      button.removeEventListener("pointerup", end);
+      button.removeEventListener("pointercancel", end);
+      if (moved) {
+        const left = parseFloat(button.style.left || "0");
+        const top = parseFloat(button.style.top || "0");
+        topologyNodePositions()[node.id] = {
+          leftPct: left / Math.max(1, surfaceRect.width),
+          topPct: top / Math.max(1, surfaceRect.height),
+        };
+        saveWidgetLayout();
+        button.dataset.dragMoved = "true";
+        window.setTimeout(() => {
+          button.dataset.dragMoved = "";
+        }, 0);
+        endEvent.preventDefault();
+        endEvent.stopPropagation();
+        recordUserEvent("fleet.topology_node_moved", {
+          target: `node:${node.id}`,
+          summary: `Moved topology node ${node.id}`,
+          data: { node_id: node.id, ...topologyNodePositions()[node.id] },
+        });
+      }
+    };
+    button.addEventListener("pointermove", move);
+    button.addEventListener("pointerup", end, { once: true });
+    button.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
 function renderTopology() {
   const nodes = state.nodes.length ? state.nodes : [normalizeNode({ id: "orchestrator", status: "unknown" })];
   els.selectedNode.textContent = state.selectedNode;
-  els.nodeCount.textContent = `Nodes ${state.nodes.length}`;
   els.topologyNodes.replaceChildren(
     ...nodes.map((node, index) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = `topology-node${node.id === state.selectedNode ? " active" : ""}`;
-      Object.assign(button.style, nodePosition(index, nodes.length));
-      button.addEventListener("click", () => selectNode(node.id));
+      Object.assign(button.style, nodePosition(node, index, nodes.length));
+      button.addEventListener("click", (event) => {
+        if (button.dataset.dragMoved === "true") {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        selectNode(node.id);
+      });
+      button.addEventListener("contextmenu", (event) => showNodeContextMenu(node, event));
+      installLongPressMenu(button, (event) => showNodeContextMenu(node, event));
+      installTopologyNodeDragging(button, node);
 
       const title = document.createElement("div");
       title.className = "node-title";
       const strong = document.createElement("strong");
       strong.textContent = node.title;
       const dot = document.createElement("span");
-      dot.className = `state-dot ${node.status}`;
+      dot.className = `state-dot ${node.statusClass}`;
       title.append(strong, dot);
 
       const runtime = document.createElement("div");
@@ -4499,6 +6110,181 @@ function renderTopology() {
       return button;
     })
   );
+}
+
+function nodeById(nodeId) {
+  return state.nodes.find((node) => node.id === nodeId) || null;
+}
+
+function nodeModelOverrides() {
+  const layout = widgetLayout("topology");
+  layout.nodeModels = layout.nodeModels && typeof layout.nodeModels === "object" ? layout.nodeModels : {};
+  return layout.nodeModels;
+}
+
+function nodeModelOverride(nodeId) {
+  const override = nodeModelOverrides()[nodeId];
+  return override && typeof override === "object" ? override : {};
+}
+
+function formatNodeModel(name, provider) {
+  const modelName = cleanText(name, "");
+  const modelProvider = cleanText(provider, "");
+  if (modelName && modelProvider) return `${modelProvider}/${modelName}`;
+  return modelName || modelProvider || "";
+}
+
+function hideNodeContextMenu(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("node-menu")) return;
+  state.activeNodeMenuId = "";
+  if (els.nodeContextMenu) els.nodeContextMenu.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("node-menu", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function positionNodeContextMenu(event) {
+  if (!els.nodeContextMenu) return;
+  els.nodeContextMenu.hidden = false;
+  const rect = els.nodeContextMenu.getBoundingClientRect();
+  const gap = 8;
+  const maxLeft = window.innerWidth - rect.width - gap;
+  const maxTop = window.innerHeight - rect.height - gap;
+  const left = Math.max(gap, Math.min(maxLeft, event.clientX));
+  const top = Math.max(gap, Math.min(maxTop, event.clientY));
+  els.nodeContextMenu.style.left = `${left}px`;
+  els.nodeContextMenu.style.top = `${top}px`;
+}
+
+function nodeContextActions(node) {
+  const preferred = ["restart_node", "start_node", "stop_node", "update_node"];
+  const aliases = {
+    restart_node: ["restart_node", "restart"],
+    start_node: ["start_node", "start"],
+    stop_node: ["stop_node", "stop"],
+    update_node: ["update_node", "update"],
+  };
+  return preferred.map((name) => {
+    const action = node.actions.find((item) => (aliases[name] || [name]).includes(item.action));
+    return action || {
+      id: `${node.id}:${name}`,
+      action: name,
+      label: name.replace("_node", ""),
+      endpoint: `/nodes/${encodeURIComponent(node.id)}/action`,
+      method: "POST",
+      payload_template: { action: name, payload: {} },
+      enabled: true,
+      destructive: name !== "start_node",
+    };
+  });
+}
+
+function showNodeContextMenu(node, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!els.nodeContextMenu) return;
+  state.activeNodeMenuId = node.id;
+  selectNode(node.id);
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.setAttribute("role", "menuitem");
+  editButton.textContent = "Edit";
+  editButton.addEventListener("click", (clickEvent) => {
+    clickEvent.stopPropagation();
+    hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+    openNodeEditModal(node.id);
+  });
+  els.nodeContextMenu.replaceChildren(
+    editButton,
+    ...nodeContextActions(node).map((action) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.setAttribute("role", "menuitem");
+      button.className = action.destructive ? "danger" : "";
+      button.textContent = actionLabel(action);
+      button.disabled = action.enabled === false || state.actionBusy === action.id;
+      button.title = action.disabled_reason || `${actionLabel(action)} ${node.id}`;
+      button.addEventListener("click", (clickEvent) => {
+        clickEvent.stopPropagation();
+        hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+        void runNodeAction(nodeById(node.id) || node, action);
+      });
+      return button;
+    })
+  );
+  positionNodeContextMenu(event);
+  pushUiNavigationLayer("node-menu", () => hideNodeContextMenu({ skipHistory: true, skipStack: true }));
+  recordUserEvent("fleet.node_context_menu_requested", {
+    target: `node:${node.id}`,
+    summary: `Opened actions for ${node.id}`,
+    data: { node_id: node.id },
+  });
+}
+
+function openNodeEditModal(nodeId = state.activeNodeMenuId) {
+  const node = nodeById(nodeId) || normalizeNode({ id: nodeId, status: "unknown" });
+  if (!node?.id || !els.nodeEditModal) return;
+  hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+  state.activeNodeEditId = node.id;
+  const override = nodeModelOverride(node.id);
+  if (els.nodeEditModalTitle) els.nodeEditModalTitle.textContent = `Edit ${node.title}`;
+  if (els.nodeEditModalMeta) els.nodeEditModalMeta.textContent = node.id;
+  const [provider = "", name = ""] = node.model && node.model.includes("/")
+    ? node.model.split("/", 2)
+    : ["", node.model || ""];
+  if (els.nodeEditModelNameInput) els.nodeEditModelNameInput.value = cleanText(override.name, name);
+  if (els.nodeEditModelProviderInput) els.nodeEditModelProviderInput.value = cleanText(override.provider, provider);
+  els.nodeEditModal.hidden = false;
+  pushUiNavigationLayer("node-edit-modal", () => closeNodeEditModal({ skipHistory: true, skipStack: true }));
+  recordUserEvent("fleet.node_edit_opened", {
+    target: `node:${node.id}`,
+    summary: `Opened editor for ${node.id}`,
+    data: { node_id: node.id },
+  });
+}
+
+function closeNodeEditModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("node-edit-modal")) return;
+  if (els.nodeEditModal) els.nodeEditModal.hidden = true;
+  state.activeNodeEditId = "";
+  if (!options.skipStack) {
+    closeUiNavigationLayer("node-edit-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function saveNodeEdit(event) {
+  event?.preventDefault();
+  const nodeId = state.activeNodeEditId;
+  if (!nodeId) return;
+  const name = cleanText(els.nodeEditModelNameInput?.value, "").slice(0, 96);
+  const provider = cleanText(els.nodeEditModelProviderInput?.value, "").slice(0, 64);
+  nodeModelOverrides()[nodeId] = { name, provider };
+  saveWidgetLayout();
+  state.nodes = state.nodes.map((node) => (node.id === nodeId ? normalizeNode(node.raw || node) : node));
+  renderTopology();
+  renderNodeList();
+  closeNodeEditModal({ skipHistory: true, replaceHistory: true });
+  recordUserEvent("fleet.node_edit_saved", {
+    target: `node:${nodeId}`,
+    summary: `Saved model for ${nodeId}`,
+    data: { node_id: nodeId, model_name: name, provider },
+  });
+}
+
+function resetNodeEdit() {
+  const nodeId = state.activeNodeEditId;
+  if (!nodeId) return;
+  delete nodeModelOverrides()[nodeId];
+  saveWidgetLayout();
+  state.nodes = state.nodes.map((node) => (node.id === nodeId ? normalizeNode(node.raw || node) : node));
+  renderTopology();
+  renderNodeList();
+  openNodeEditModal(nodeId);
+  recordUserEvent("fleet.node_edit_reset", {
+    target: `node:${nodeId}`,
+    summary: `Reset model for ${nodeId}`,
+    data: { node_id: nodeId },
+  });
 }
 
 function renderNodeList() {
@@ -4534,10 +6320,47 @@ function actionLabel(action) {
 }
 
 function visibleNodeActions(node) {
-  const preferred = ["inspect_node", "tail_logs", "start_node", "stop_node", "restart_node"];
+  const aliases = {
+    start_node: ["start_node", "start"],
+    stop_node: ["stop_node", "stop"],
+    restart_node: ["restart_node", "restart"],
+    update_node: ["update_node", "update"],
+  };
+  const preferred = ["start_node", "stop_node", "restart_node", "update_node"];
   return preferred
-    .map((name) => node.actions.find((action) => action.action === name))
+    .map((name) => {
+      const names = aliases[name] || [name];
+      return node.actions.find((action) => names.includes(action.action)) || {
+        id: `${node.id}:${name}`,
+        action: name,
+        label: name.replace("_node", "").replace("_", " "),
+        endpoint: `/nodes/${encodeURIComponent(node.id)}/action`,
+        method: "POST",
+        payload_template: { action: name, payload: {} },
+        enabled: true,
+        destructive: name !== "start_node",
+      };
+    })
     .filter(Boolean);
+}
+
+function addNodeFromTopology() {
+  const name = window.prompt("Node name");
+  if (!name) return;
+  const nodeId = name.trim();
+  if (!nodeId) return;
+  recordUserEvent("fleet.node_add_requested", {
+    target: "topology:add-node",
+    summary: `Requested node ${nodeId}`,
+    data: { node_id: nodeId },
+  });
+  void bridgeJson("/nodes", {
+    method: "POST",
+    body: { id: nodeId, name: nodeId, start: true },
+  }).then(() => refresh("manual")).catch((error) => {
+    state.lastError = error.message;
+    renderTaskOutput({ action: "add_node", node_id: nodeId, error: error.message });
+  });
 }
 
 function renderNodeActions(node) {
@@ -4591,32 +6414,6 @@ function renderTasks() {
       preview.textContent = taskPreview(task);
       card.append(title, meta, preview);
       return card;
-    })
-  );
-}
-
-function renderSummary() {
-  const res = state.resources || {};
-  const selected = state.nodes.find((node) => node.id === state.selectedNode);
-  const items = [
-    ["Runtime", state.wasmReady ? `WASM add=${state.wasm.add(19, 23)}` : "WASM pending"],
-    ["Bridge", state.bridgeReady ? state.bridgeUrl : cleanText(state.lastError, "offline")],
-    ["Host", cleanText(res.host?.hostname, "-")],
-    ["Selected Node", selected ? `${selected.id} / ${selected.status}` : state.selectedNode],
-    ["Timeline", state.timeline ? `${state.timeline.branch} / ${state.timeline.dirty ? "dirty" : "clean"}` : "pending"],
-    ["Tasks", `${state.tasks.length} recent`],
-  ];
-  els.spaceSummary.replaceChildren(
-    ...items.map(([label, value]) => {
-      const item = document.createElement("div");
-      item.className = "summary-item";
-      const strong = document.createElement("strong");
-      strong.textContent = label;
-      const meta = document.createElement("div");
-      meta.className = "node-meta";
-      meta.textContent = value;
-      item.append(strong, meta);
-      return item;
     })
   );
 }
@@ -4995,14 +6792,16 @@ function scheduleBrowserResizeSync() {
 }
 
 function renderAll() {
-  setPill(els.taskStatus, state.taskId ? "Running" : state.bridgeReady ? "Idle" : "Offline", state.bridgeReady ? "" : "err");
   els.runtimeLabel.textContent = state.wasmReady ? `wasm add=${state.wasm.add(19, 23)}` : "wasm pending";
+  renderSpaceTitle();
   renderSpaceLauncher();
+  renderAppLayer();
+  renderHomeStorage();
   renderResources();
+  renderDevices();
   renderTopology();
   renderNodeList();
   renderTasks();
-  renderSummary();
   renderTaskOutput();
   renderTimeline();
   renderObservation();
@@ -5010,6 +6809,108 @@ function renderAll() {
   renderAgentNodeSelect();
   renderLogin();
   if (els.configModal && !els.configModal.hidden) renderConfigModal();
+  if (els.artifactsModal && !els.artifactsModal.hidden) renderArtifacts();
+}
+
+function renderHomeStorage() {
+  if (!els.homeStorageBadge) return;
+  const storage = state.userStorage;
+  if (!storage) {
+    els.homeStorageBadge.textContent = "Storage pending";
+    return;
+  }
+  const used = bytes(storage.used_bytes);
+  els.homeStorageBadge.textContent = storage.unlimited
+    ? `Storage ${used} / unlimited`
+    : `Storage ${used} / ${bytes(storage.limit_bytes)} (${cleanText(storage.percent, "0")}%)`;
+}
+
+function artifactCard(title, meta, items = []) {
+  const card = document.createElement("article");
+  card.className = "artifact-card";
+  const head = document.createElement("div");
+  head.className = "artifact-card-head";
+  const name = document.createElement("strong");
+  name.textContent = title;
+  const info = document.createElement("span");
+  info.textContent = meta;
+  head.append(name, info);
+  const list = document.createElement("div");
+  list.className = "artifact-card-items";
+  list.replaceChildren(...items.map((item) => {
+    const row = document.createElement("span");
+    row.textContent = item;
+    return row;
+  }));
+  card.append(head, list);
+  return card;
+}
+
+function renderArtifacts() {
+  if (!els.artifactList) return;
+  const spaceItems = [
+    "space-home",
+    "space-admin",
+    ...state.userSpaces.map((space) => `${space.title} (${space.id})`),
+  ];
+  const appItems = SPACE_APP_DEFINITIONS.map((app) => {
+    const scopes = Object.entries(SPACE_APP_MAPPINGS)
+      .filter(([, ids]) => ids.includes(app.id))
+      .map(([scope]) => scope)
+      .join("/");
+    return `${app.label} -> ${scopes || "unmapped"}`;
+  });
+  const layoutItems = [
+    "positions: device-local",
+    "widget geometry: device-local",
+    `space density: device-local, 1x-${CANVAS_DENSITY_MAX}x`,
+  ];
+  els.artifactList.replaceChildren(
+    artifactCard("spaces/", `${spaceItems.length} local`, spaceItems),
+    artifactCard("apps-widgets/", `${appItems.length} mapped`, appItems),
+    artifactCard("device-layouts/", "not shared between devices", layoutItems)
+  );
+}
+
+function mainDeviceCanEvolve() {
+  return !state.deviceAuthority || state.deviceAuthority.main_device_online !== false;
+}
+
+function ensureMainDeviceForEvolution(action = "evolve artifacts") {
+  if (mainDeviceCanEvolve()) return true;
+  setPanel("home");
+  setWidgetMinimized("devices", false);
+  renderDevices();
+  recordUserEvent("account.main_device_required", {
+    target: "devices",
+    summary: "Main device is offline",
+    data: {
+      action,
+      main_device_id: state.deviceAuthority?.main_device_id || "",
+      current_device_id: state.deviceAuthority?.current_device_id || "",
+    },
+  });
+  window.alert("Main device is offline. Switch the main device from Connected Devices to evolve artifacts here.");
+  return false;
+}
+
+function openArtifactsModal() {
+  renderArtifacts();
+  if (els.artifactsModal) els.artifactsModal.hidden = false;
+  pushUiNavigationLayer("artifacts-modal", () => closeArtifactsModal({ skipHistory: true, skipStack: true }));
+  recordUserEvent("workspace.artifacts_opened", {
+    target: "artifacts",
+    summary: "Opened local artifact inventory",
+    data: { spaces: state.userSpaces.length, apps: SPACE_APP_DEFINITIONS.length },
+  });
+}
+
+function closeArtifactsModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("artifacts-modal")) return;
+  if (els.artifactsModal) els.artifactsModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("artifacts-modal", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function userSpaceInitial(title) {
@@ -5021,9 +6922,26 @@ function userSpaceById(spaceId) {
   return state.userSpaces.find((space) => space.id === spaceId) || null;
 }
 
-function hideSpaceContextMenu() {
+function activeSpaceTitle(panel = state.activePanel) {
+  panel = normalizePanel(panel);
+  if (panel === "home") return "space-home";
+  if (isAdminPanel(panel)) return "space-admin";
+  const space = userSpaceById(panel);
+  return cleanText(space?.title || panel, panel);
+}
+
+function renderSpaceTitle() {
+  if (els.spaceLabel) els.spaceLabel.textContent = activeSpaceTitle();
+  if (els.configModalSpaceName) els.configModalSpaceName.textContent = activeSpaceTitle();
+}
+
+function hideSpaceContextMenu(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("space-menu")) return;
   state.activeSpaceMenuId = "";
   if (els.spaceContextMenu) els.spaceContextMenu.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("space-menu", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function positionSpaceContextMenu(event) {
@@ -5044,6 +6962,7 @@ function showSpaceContextMenu(space, event) {
   event.stopPropagation();
   state.activeSpaceMenuId = space.id;
   positionSpaceContextMenu(event);
+  pushUiNavigationLayer("space-menu", () => hideSpaceContextMenu({ skipHistory: true, skipStack: true }));
   recordUserEvent("workspace.context_menu_requested", {
     target: `space:${space.id}`,
     summary: `Opened menu for ${space.title}`,
@@ -5055,6 +6974,45 @@ function showSpaceContextMenu(space, event) {
       target: describeEventTarget(event.target),
     },
   });
+}
+
+function createAdminCrownIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.classList.add("space-launch-crown");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+
+  const crown = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  crown.setAttribute("d", "M3 6l5 5 4-7 4 7 5-5-3 12H6L3 6Z");
+
+  const base = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  base.setAttribute("d", "M6 21h12");
+
+  svg.append(crown, base);
+  return svg;
+}
+
+function createAdminLauncherButton() {
+  const button = document.createElement("button");
+  button.className = "space-launch-button admin-launch-button";
+  button.type = "button";
+  button.dataset.panel = "admin";
+  button.title = "space-admin";
+  button.setAttribute("aria-label", "space-admin");
+  button.classList.toggle("active", isAdminPanel(state.activePanel));
+
+  const glyph = document.createElement("span");
+  glyph.className = "space-launch-glyph admin-launch-glyph";
+  glyph.setAttribute("aria-hidden", "true");
+  glyph.append(createAdminCrownIcon());
+
+  const label = document.createElement("span");
+  label.textContent = "Admin";
+
+  button.append(glyph, label);
+  button.addEventListener("click", () => setPanel("admin"));
+  return button;
 }
 
 async function copyActiveSpaceId() {
@@ -5074,8 +7032,191 @@ async function copyActiveSpaceId() {
       data: { error: error.message },
     });
   } finally {
-    hideSpaceContextMenu();
+    hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
   }
+}
+
+function hideAppContextMenu(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("app-menu")) return;
+  state.activeAppMenuId = "";
+  state.activeAppMenuKind = "";
+  if (els.appContextMenu) els.appContextMenu.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("app-menu", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function positionFixedMenu(menu, event) {
+  if (!menu) return;
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  const gap = 8;
+  const maxLeft = window.innerWidth - rect.width - gap;
+  const maxTop = window.innerHeight - rect.height - gap;
+  const left = Math.max(gap, Math.min(maxLeft, event.clientX || gap));
+  const top = Math.max(gap, Math.min(maxTop, event.clientY || gap));
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function showAppContextMenu(widgetId, kind, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!widgetId || !els.appContextMenu) return;
+  state.activeAppMenuId = widgetId;
+  state.activeAppMenuKind = kind || "app";
+  if (els.editAppButton) els.editAppButton.textContent = "Edit";
+  if (els.copyAppIdButton) els.copyAppIdButton.textContent = "Copy app id";
+  positionFixedMenu(els.appContextMenu, event);
+  pushUiNavigationLayer("app-menu", () => hideAppContextMenu({ skipHistory: true, skipStack: true }));
+  recordUserEvent("workspace.app_context_menu_requested", {
+    target: `${state.activeAppMenuKind}:${widgetId}`,
+    summary: `Opened app menu for ${widgetId}`,
+    data: { app_id: widgetId, kind: state.activeAppMenuKind },
+  });
+}
+
+async function copyActiveAppId() {
+  const widgetId = state.activeAppMenuId;
+  if (!widgetId) return;
+  try {
+    await navigator.clipboard.writeText(widgetId);
+    recordUserEvent("workspace.app_id_copied", {
+      target: `app:${widgetId}`,
+      summary: `Copied ${widgetId} id`,
+      data: { app_id: widgetId },
+    });
+  } catch (error) {
+    recordUserEvent("workspace.app_id_copy_error", {
+      target: `app:${widgetId}`,
+      summary: error.message,
+      data: { app_id: widgetId, error: error.message },
+    });
+  } finally {
+    hideAppContextMenu({ skipHistory: true, replaceHistory: true });
+  }
+}
+
+function populateAppEditForm(widgetId) {
+  const meta = widgetMeta(widgetId);
+  const bounds = widgetDimensionBounds(widgetId, spaceSurface()?.getBoundingClientRect?.());
+  if (els.appEditModalTitle) els.appEditModalTitle.textContent = `Edit ${widgetTitle(widgetId)}`;
+  if (els.appEditModalMeta) els.appEditModalMeta.textContent = widgetId;
+  if (els.appEditNameInput) els.appEditNameInput.value = cleanText(meta.title, widgetDefaultLabel(widgetId));
+  if (els.appEditIconInput) els.appEditIconInput.value = cleanText(meta.iconText, widgetDefaultShort(widgetId));
+  if (els.appEditImageInput) els.appEditImageInput.value = "";
+  if (els.appEditMinWidthInput) els.appEditMinWidthInput.value = String(bounds.minWidth);
+  if (els.appEditMaxWidthInput) els.appEditMaxWidthInput.value = String(bounds.maxWidth);
+  if (els.appEditMinHeightInput) els.appEditMinHeightInput.value = String(bounds.minHeight);
+  if (els.appEditMaxHeightInput) els.appEditMaxHeightInput.value = String(bounds.maxHeight);
+}
+
+function openAppEditModal(widgetId = state.activeAppMenuId) {
+  if (!widgetId || !els.appEditModal) return;
+  state.activeAppMenuId = widgetId;
+  populateAppEditForm(widgetId);
+  els.appEditModal.hidden = false;
+  hideAppContextMenu({ skipHistory: true, replaceHistory: true });
+  pushUiNavigationLayer("app-edit-modal", () => closeAppEditModal({ skipHistory: true, skipStack: true }));
+  recordUserEvent("workspace.app_edit_opened", {
+    target: `app:${widgetId}`,
+    summary: `Opened editor for ${widgetId}`,
+    data: { app_id: widgetId },
+  });
+}
+
+function closeAppEditModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("app-edit-modal")) return;
+  if (els.appEditModal) els.appEditModal.hidden = true;
+  if (els.appEditImageInput) els.appEditImageInput.value = "";
+  if (!options.skipStack) {
+    closeUiNavigationLayer("app-edit-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function inputNumber(input, fallback) {
+  const value = Number(input?.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function selectedImageDataUrl(input) {
+  const file = input?.files?.[0];
+  if (!file || !file.type.startsWith("image/")) return Promise.resolve("");
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      const raw = String(reader.result || "");
+      const image = new Image();
+      image.addEventListener("load", () => {
+        const edge = 96;
+        const scale = Math.min(1, edge / Math.max(image.width || edge, image.height || edge));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round((image.width || edge) * scale));
+        canvas.height = Math.max(1, Math.round((image.height || edge) * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      }, { once: true });
+      image.addEventListener("error", () => resolve(raw.length < 180000 ? raw : ""), { once: true });
+      image.src = raw;
+    });
+    reader.addEventListener("error", () => resolve(""));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function saveAppEdit(event) {
+  event?.preventDefault();
+  const widgetId = state.activeAppMenuId;
+  if (!widgetId) return;
+  const current = widgetMeta(widgetId);
+  const image = await selectedImageDataUrl(els.appEditImageInput);
+  const minWidth = normalizeDimension(inputNumber(els.appEditMinWidthInput, current.minWidth || 320), 320, 180, 2400);
+  const minHeight = normalizeDimension(inputNumber(els.appEditMinHeightInput, current.minHeight || 220), 220, 120, 1800);
+  const maxWidth = Math.max(minWidth, normalizeDimension(inputNumber(els.appEditMaxWidthInput, current.maxWidth || 1800), 1800, minWidth, 4000));
+  const maxHeight = Math.max(minHeight, normalizeDimension(inputNumber(els.appEditMaxHeightInput, current.maxHeight || 1200), 1200, minHeight, 3000));
+  const layout = widgetLayout(widgetId);
+  layout.meta = {
+    ...current,
+    title: cleanText(els.appEditNameInput?.value, widgetDefaultLabel(widgetId)).slice(0, 64),
+    iconText: cleanText(els.appEditIconInput?.value, widgetDefaultShort(widgetId)).slice(0, 8),
+    minWidth,
+    maxWidth,
+    minHeight,
+    maxHeight,
+    image: image || current.image || "",
+  };
+  const widget = widgetById(widgetId);
+  if (widget && !widget.classList.contains("is-minimized") && !widget.classList.contains("is-maximized")) {
+    layout.widthPx = clamp(Number(layout.widthPx || widget.offsetWidth), minWidth, maxWidth);
+    layout.heightPx = clamp(Number(layout.heightPx || widget.offsetHeight), minHeight, maxHeight);
+  }
+  saveWidgetLayout();
+  applyWidgetLayout();
+  renderAppLayer();
+  closeAppEditModal({ skipHistory: true, replaceHistory: true });
+  recordUserEvent("workspace.app_edit_saved", {
+    target: `app:${widgetId}`,
+    summary: `Saved editor for ${widgetId}`,
+    data: { app_id: widgetId, min_width: minWidth, max_width: maxWidth, min_height: minHeight, max_height: maxHeight },
+  });
+}
+
+function resetAppEdit() {
+  const widgetId = state.activeAppMenuId;
+  if (!widgetId) return;
+  const layout = widgetLayout(widgetId);
+  delete layout.meta;
+  saveWidgetLayout();
+  applyWidgetLayout();
+  renderAppLayer();
+  populateAppEditForm(widgetId);
+  recordUserEvent("workspace.app_edit_reset", {
+    target: `app:${widgetId}`,
+    summary: `Reset editor for ${widgetId}`,
+    data: { app_id: widgetId },
+  });
 }
 
 function deleteSpacePhrase(space) {
@@ -5096,11 +7237,12 @@ function renderDeleteSpaceModal() {
 function openDeleteSpaceModal() {
   const space = userSpaceById(state.activeSpaceMenuId);
   if (!space || !els.deleteSpaceModal) return;
-  hideSpaceContextMenu();
+  hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
   state.deleteSpaceTargetId = space.id;
   if (els.deleteSpaceConfirmInput) els.deleteSpaceConfirmInput.value = "";
   renderDeleteSpaceModal();
   els.deleteSpaceModal.hidden = false;
+  pushUiNavigationLayer("delete-space-modal", () => closeDeleteSpaceModal({ skipHistory: true, skipStack: true }));
   window.setTimeout(() => els.deleteSpaceConfirmInput?.focus(), 0);
   recordUserEvent("workspace.space_delete_prompt_opened", {
     target: `space:${space.id}`,
@@ -5109,13 +7251,18 @@ function openDeleteSpaceModal() {
   });
 }
 
-function closeDeleteSpaceModal() {
+function closeDeleteSpaceModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("delete-space-modal")) return;
   if (els.deleteSpaceModal) els.deleteSpaceModal.hidden = true;
   state.deleteSpaceTargetId = "";
   if (els.deleteSpaceConfirmInput) els.deleteSpaceConfirmInput.value = "";
+  if (!options.skipStack) {
+    closeUiNavigationLayer("delete-space-modal", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function confirmDeleteSpace() {
+  if (!ensureMainDeviceForEvolution("delete space")) return;
   const space = userSpaceById(state.deleteSpaceTargetId);
   if (!space) return;
   if (cleanText(els.deleteSpaceConfirmInput?.value, "") !== deleteSpacePhrase(space)) {
@@ -5123,8 +7270,16 @@ function confirmDeleteSpace() {
     return;
   }
   state.userSpaces = state.userSpaces.filter((item) => item.id !== space.id);
+  delete state.spaceWidgetLayouts[space.id];
   saveUserSpaces();
-  closeDeleteSpaceModal();
+  if (state.authUser) {
+    void fetchJson("/spaces", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { action: "delete", space_id: space.id },
+    }).catch(() => {});
+  }
+  closeDeleteSpaceModal({ skipHistory: true, replaceHistory: true });
   if (state.activePanel === space.id) setPanel("home");
   renderSpaceLauncher();
   recordUserEvent("workspace.space_deleted", {
@@ -5136,7 +7291,7 @@ function confirmDeleteSpace() {
 
 function renderSpaceLauncher() {
   if (!els.spaceLauncherList) return;
-  els.spaceLauncherList.replaceChildren();
+  els.spaceLauncherList.replaceChildren(createAdminLauncherButton());
   state.userSpaces.forEach((space, index) => {
     const button = document.createElement("button");
     button.className = "space-launch-button";
@@ -5162,6 +7317,7 @@ function renderSpaceLauncher() {
 }
 
 function createUserSpace() {
+  if (!ensureMainDeviceForEvolution("create space")) return;
   const createdAt = new Date().toISOString();
   const nextNumber = state.userSpaces.length + 1;
   const space = {
@@ -5183,42 +7339,314 @@ function createUserSpace() {
 function openConfigModal() {
   renderConfigModal();
   if (els.configModal) els.configModal.hidden = false;
+  pushUiNavigationLayer("config-modal", () => closeConfigModal({ skipHistory: true, skipStack: true }));
+  void loadTimeline("config").catch(() => {});
   recordUserEvent("home.config_opened", {
     target: "home:config",
-    summary: "Opened home config",
+    summary: "Opened space config",
   });
 }
 
-function closeConfigModal() {
+function closeConfigModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("config-modal")) return;
   if (els.configModal) els.configModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("config-modal", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function renderConfigModal() {
   if (!els.configDetails) return;
+  renderSpaceTitle();
   const enabledModules = MODULE_DEFINITIONS.filter((module) => isModuleEnabled(module.id)).length;
-  els.configDetails.replaceChildren(
-    metric("Bridge", state.bridgeUrl || "-"),
-    metric("WASM", state.wasmReady ? "Ready" : "Pending"),
-    metric("Google", state.googleClientId ? "Configured" : "Missing client id"),
+  const timelineButton = document.createElement("button");
+  timelineButton.className = "config-action-button";
+  timelineButton.type = "button";
+  timelineButton.textContent = "Timeline";
+  timelineButton.addEventListener("click", openTimelineFromConfig);
+  const rows = [
     metric("Account", state.authUser ? publicUserLabel(state.authUser) : "Guest"),
+    renderStorageControl(),
     metric("Spaces", String(state.userSpaces.length)),
     metric("Modules", `${enabledModules}/${MODULE_DEFINITIONS.length} on`),
-    metric("Panel", state.activePanel),
-    metric("Node", state.selectedNode || "-")
-  );
+    renderCanvasDensityControl(),
+  ];
+  if (activeSpaceStorageId() === "home") rows.push(renderLauncherPreferenceControl());
+  rows.push(timelineButton);
+  els.configDetails.replaceChildren(...rows);
+}
+
+function renderStorageControl() {
+  const wrap = document.createElement("div");
+  wrap.className = "config-storage-card";
+  const storage = state.userStorage;
+  const title = document.createElement("strong");
+  title.textContent = "Storage";
+  const detail = document.createElement("span");
+  if (!storage) {
+    detail.textContent = "pending";
+  } else {
+    const quota = storage.unlimited ? "unlimited" : bytes(storage.limit_bytes);
+    const available = Number.isFinite(Number(storage.available_bytes)) ? ` / ${bytes(storage.available_bytes)} local free` : "";
+    detail.textContent = `${bytes(storage.used_bytes)} / ${quota}${available}`;
+  }
+  const actions = document.createElement("div");
+  actions.className = "config-storage-actions";
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.textContent = "Export";
+  exportButton.addEventListener("click", () => void exportStorageBackup());
+  const importButton = document.createElement("button");
+  importButton.type = "button";
+  importButton.textContent = "Import";
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.addEventListener("change", () => {
+    const file = input.files?.[0];
+    input.value = "";
+    if (file) void importStorageBackup(file);
+  });
+  importButton.addEventListener("click", () => input.click());
+  actions.append(exportButton, importButton, input);
+  wrap.append(title, detail, actions);
+  return wrap;
+}
+
+function readJsonFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => {
+      try {
+        resolve(JSON.parse(String(reader.result || "{}")));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    reader.addEventListener("error", () => reject(reader.error || new Error("Could not read file.")));
+    reader.readAsText(file);
+  });
+}
+
+async function exportStorageBackup() {
+  try {
+    const payload = await fetchJson("/storage/export", { timeoutMs: 10000 });
+    downloadJson(`wasm-agent-storage-${new Date().toISOString().slice(0, 10)}.json`, payload);
+    recordUserEvent("storage.exported", {
+      target: "storage",
+      summary: "Exported local storage backup",
+      data: { schema: payload.schema || "" },
+    });
+  } catch (error) {
+    recordUserEvent("storage.export_error", {
+      target: "storage",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  }
+}
+
+async function importStorageBackup(file) {
+  if (!ensureMainDeviceForEvolution("import storage")) return;
+  try {
+    const payload = await readJsonFile(file);
+    const result = await fetchJson("/storage/import", {
+      method: "POST",
+      timeoutMs: 12000,
+      body: payload,
+    });
+    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    state.userStorage = result.storage || state.userStorage;
+    state.spaceWidgetLayouts = result.widget_layouts && typeof result.widget_layouts === "object"
+      ? result.widget_layouts
+      : state.spaceWidgetLayouts;
+    applySpaceWidgetLayout(state.activePanel);
+    renderSpaceLauncher();
+    renderHomeStorage();
+    renderConfigModal();
+    recordUserEvent("storage.imported", {
+      target: "storage",
+      summary: "Imported local storage backup",
+      data: { spaces: state.userSpaces.length },
+    });
+  } catch (error) {
+    recordUserEvent("storage.import_error", {
+      target: "storage",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  }
+}
+
+function renderCanvasDensityControl() {
+  const wrap = document.createElement("div");
+  wrap.className = "config-density-control";
+  const label = document.createElement("strong");
+  label.textContent = "Space density";
+  const value = document.createElement("span");
+  value.className = "config-density-value";
+  value.textContent = `${canvasDensity().toFixed(2).replace(/\.00$/, "")}x`;
+  const dial = document.createElement("div");
+  dial.className = "config-density-line";
+  dial.tabIndex = 0;
+  dial.setAttribute("role", "slider");
+  dial.setAttribute("aria-label", "Space density");
+  dial.setAttribute("aria-valuemin", "1");
+  dial.setAttribute("aria-valuemax", String(CANVAS_DENSITY_MAX));
+  dial.setAttribute("aria-valuestep", "0.25");
+  const knob = document.createElement("span");
+  knob.className = "config-density-line-knob";
+  knob.setAttribute("aria-hidden", "true");
+  dial.append(knob);
+  wrap.append(label, value, dial);
+  updateDensityDial(wrap);
+  installDensityDial(wrap, dial);
+  return wrap;
+}
+
+function updateDensityDial(control = null) {
+  const wrap = control || els.configDetails?.querySelector?.(".config-density-control");
+  if (!wrap) return;
+  const density = canvasDensity();
+  const progress = (density - 1) / (CANVAS_DENSITY_MAX - 1);
+  wrap.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
+  const value = wrap.querySelector(".config-density-value");
+  if (value) value.textContent = `${density.toFixed(2).replace(/\.00$/, "")}x`;
+  const dial = wrap.querySelector(".config-density-line");
+  if (dial) {
+    dial.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
+    dial.setAttribute("aria-valuenow", String(density));
+    dial.setAttribute("aria-valuetext", `${density}x`);
+  }
+}
+
+function densityFromDialPointer(dial, event) {
+  const rect = dial.getBoundingClientRect();
+  const progress = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  return normalizedCanvasDensity(1 + progress * (CANVAS_DENSITY_MAX - 1));
+}
+
+function installDensityDial(wrap, dial) {
+  if (!wrap || !dial) return;
+  let dragging = false;
+  let changed = false;
+  const move = (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    const previous = canvasDensity();
+    const next = densityFromDialPointer(dial, event);
+    changed = next !== previous || changed;
+    setCanvasDensityValue(next, {
+      control: wrap,
+      persist: false,
+      render: false,
+    });
+  };
+  const end = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    dial.classList.remove("is-dragging");
+    dial.removeEventListener("pointermove", move);
+    dial.removeEventListener("pointerup", end);
+    dial.removeEventListener("pointercancel", end);
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", end);
+    window.removeEventListener("pointercancel", end);
+    try {
+      dial.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may already be released by the browser.
+    }
+    if (changed) {
+      commitCanvasDensityChange("dial");
+      renderConfigModal();
+    }
+  };
+  dial.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    event.preventDefault();
+    freezeWidgetPixelLayout();
+    dragging = true;
+    changed = false;
+    dial.classList.add("is-dragging");
+    try {
+      dial.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners below keep the dial responsive when capture is unavailable.
+    }
+    move(event);
+    dial.addEventListener("pointermove", move, { passive: false });
+    dial.addEventListener("pointerup", end, { once: true });
+    dial.addEventListener("pointercancel", end, { once: true });
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+  dial.addEventListener("keydown", (event) => {
+    const delta = {
+      ArrowLeft: -0.25,
+      ArrowDown: -0.25,
+      ArrowRight: 0.25,
+      ArrowUp: 0.25,
+      Home: 1 - canvasDensity(),
+      End: CANVAS_DENSITY_MAX - canvasDensity(),
+    }[event.key];
+    if (delta === undefined) return;
+    event.preventDefault();
+    freezeWidgetPixelLayout();
+    setCanvasDensityValue(canvasDensity() + delta, { control: wrap, origin: "dial-key" });
+  });
+}
+
+function renderLauncherPreferenceControl() {
+  const label = document.createElement("label");
+  label.className = "config-toggle-row";
+  const text = document.createElement("span");
+  text.innerHTML = "<strong>Mobile launcher position</strong><small>Use top bar on narrow screens</small>";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = Boolean(state.mobileLauncherTop);
+  input.addEventListener("change", () => {
+    state.mobileLauncherTop = input.checked;
+    saveLauncherPreference();
+    applyLauncherPreference();
+    recordUserEvent("workspace.launcher_preference_changed", {
+      target: "launcher",
+      summary: input.checked ? "Mobile launcher moved to top" : "Mobile launcher kept on left",
+      data: { mobile_top: input.checked },
+    });
+  });
+  label.append(text, input);
+  return label;
+}
+
+function openTimelineFromConfig() {
+  setWidgetMinimized("timeline", false);
+  void loadTimeline("config").catch(() => {});
+  closeConfigModal({ skipHistory: true, replaceHistory: true });
+  recordUserEvent("workspace.timeline_accessed", {
+    target: `timeline:${activeSpaceStorageId()}`,
+    summary: `Opened ${activeSpaceStorageId()} timeline`,
+    data: { space_id: activeSpaceStorageId() },
+  });
 }
 
 function openHomeModulesModal() {
   renderModules();
   if (els.homeModulesModal) els.homeModulesModal.hidden = false;
+  pushUiNavigationLayer("home-modules-modal", () => closeHomeModulesModal({ skipHistory: true, skipStack: true }));
   recordUserEvent("home.modules_opened", {
     target: "home:modules",
     summary: "Opened home modules",
   });
 }
 
-function closeHomeModulesModal() {
+function closeHomeModulesModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("home-modules-modal")) return;
   if (els.homeModulesModal) els.homeModulesModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("home-modules-modal", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function selectNode(nodeId) {
@@ -5237,28 +7665,38 @@ function selectNode(nodeId) {
 }
 
 function panelFromPath() {
-  const panel = window.location.pathname.replace(/^\/+/, "") || "home";
+  const panel = normalizePanel(window.location.pathname.replace(/^\/+/, "") || "home");
   const spaceMatch = panel.match(/^spaces\/([^/]+)$/);
   if (spaceMatch && isUserSpacePanel(spaceMatch[1])) return spaceMatch[1];
-  if (["home", "space", "fleet", "tasks", "logs", "observe", "timeline", "modules"].includes(panel)) return panel;
+  if (panel === "home" || ADMIN_PANEL_IDS.has(panel)) return panel;
   return "home";
 }
 
 function panelPath(panel) {
+  panel = normalizePanel(panel);
   if (isUserSpacePanel(panel)) return `/spaces/${panel}`;
-  if (["space", "fleet", "tasks", "logs", "observe", "timeline", "modules"].includes(panel)) return `/${panel}`;
+  if (ADMIN_PANEL_IDS.has(panel)) return `/${panel}`;
   return "/home";
 }
 
 function syncPanelUrl(panel) {
   const nextPath = panelPath(panel);
-  if (window.location.pathname === nextPath) return;
-  window.history.pushState({ panel }, "", nextPath);
+  const nextUrl = new URL(window.location.href);
+  nextUrl.pathname = nextPath;
+  if (state.agentOpen) {
+    nextUrl.searchParams.set(CHAT_QUERY_KEY, CHAT_QUERY_VALUE);
+  } else {
+    nextUrl.searchParams.delete(CHAT_QUERY_KEY);
+  }
+  if (`${window.location.pathname}${window.location.search}` === `${nextUrl.pathname}${nextUrl.search}`) return;
+  window.history.pushState(uiNavigationState(), "", nextUrl);
 }
 
 function setPanel(panel, options = {}) {
+  panel = normalizePanel(panel);
   if (!isPanelAvailable(panel)) panel = "home";
   const previous = state.activePanel;
+  state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = state.widgetLayout;
   const userSpacePanel = isUserSpacePanel(panel);
   state.activePanel = panel;
   els.app.dataset.panel = userSpacePanel ? "user-space" : panel;
@@ -5269,7 +7707,11 @@ function setPanel(panel, options = {}) {
     if (button.classList.contains("launcher-mark")) button.classList.toggle("active", button.dataset.panel === panel);
   });
   els.panelViews.forEach((view) => view.classList.toggle("active", view.dataset.view === panel));
+  applySpaceWidgetLayout(panel);
+  renderSpaceTitle();
   renderSpaceLauncher();
+  syncResourcePolling();
+  if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
   if (options.updateUrl !== false) syncPanelUrl(panel);
   if (previous !== panel) {
     recordUserEvent("workspace.panel_selected", {
@@ -5278,6 +7720,11 @@ function setPanel(panel, options = {}) {
       data: { panel, previous_panel: previous },
     });
   }
+}
+
+function handleAppPopState() {
+  setPanel(panelFromPath(), { updateUrl: false });
+  syncUiNavigationWithHistory();
 }
 
 async function submitTask(prompt) {
@@ -5293,9 +7740,7 @@ async function submitTask(prompt) {
       prompt_length: text.length,
     },
   });
-  els.sendButton.disabled = true;
   els.promptSendButton.disabled = true;
-  setPill(els.taskStatus, "Submitting");
   els.taskOutput.textContent = "Submitting task...";
   try {
     const data = await bridgeJson("/task", {
@@ -5309,7 +7754,6 @@ async function submitTask(prompt) {
     const task = data.task || {};
     state.taskId = task.task_id || "";
     renderTaskOutput(task);
-    setPill(els.taskStatus, cleanText(task.status, "Submitted"), "ok");
     if (state.taskId) pollTask();
     recordUserEvent("task.submit_accepted", {
       target: `task:${state.taskId || "unknown"}`,
@@ -5319,9 +7763,7 @@ async function submitTask(prompt) {
     });
   } catch (error) {
     state.lastError = error.message;
-    setPill(els.taskStatus, "Failed", "err");
     els.taskOutput.textContent = error.message;
-    els.sendButton.disabled = false;
     els.promptSendButton.disabled = false;
     recordUserEvent("task.submit_error", {
       target: `node:${state.selectedNode || "orchestrator"}`,
@@ -5335,7 +7777,6 @@ async function submitTask(prompt) {
 async function pollTask() {
   clearTimeout(state.taskTimer);
   if (!state.taskId) {
-    els.sendButton.disabled = false;
     els.promptSendButton.disabled = false;
     return;
   }
@@ -5343,19 +7784,15 @@ async function pollTask() {
     const data = await bridgeJson(`/tasks/${encodeURIComponent(state.taskId)}`);
     const task = data.task || {};
     renderTaskOutput(task);
-    setPill(els.taskStatus, cleanText(task.status, "Running"), task.status === "failed" ? "err" : "ok");
     if (["running", "queued", "submitted"].includes(task.status)) {
       state.taskTimer = window.setTimeout(pollTask, 1800);
     } else {
       state.taskId = "";
-      els.sendButton.disabled = false;
       els.promptSendButton.disabled = false;
       await refresh();
     }
   } catch (error) {
-    setPill(els.taskStatus, "Poll error", "err");
     els.taskOutput.textContent = error.message;
-    els.sendButton.disabled = false;
     els.promptSendButton.disabled = false;
   }
 }
@@ -5363,11 +7800,8 @@ async function pollTask() {
 function clearTaskInputs() {
   clearTimeout(state.taskTimer);
   state.taskId = "";
-  els.commandInput.value = "";
   els.promptInput.value = "";
   els.taskOutput.textContent = "Ready";
-  setPill(els.taskStatus, state.bridgeReady ? "Idle" : "Offline", state.bridgeReady ? "" : "err");
-  els.sendButton.disabled = false;
   els.promptSendButton.disabled = false;
 }
 
@@ -5444,25 +7878,15 @@ async function runNodeAction(node, action) {
   });
   state.actionBusy = action.id || `${node.id}:${action.action}`;
   renderNodeList();
-  setPill(els.taskStatus, label);
+  renderTaskOutput({ action: action.action, status: "running", node_id: node.id });
   try {
     const data = await bridgeJson(action.endpoint || `/nodes/${encodeURIComponent(node.id)}/action`, {
       method: action.method || "POST",
       body: action.payload_template || { action: action.action, payload: {} },
     });
     const actionResult = bridgeActionResult(data);
-    if (action.action === "tail_logs") {
-      els.logsOutput.textContent = logsText(actionResult.result?.logs || actionResult);
-      setPanel("logs");
-    } else if (action.action === "inspect_node") {
-      const inspected = actionResult.result?.node;
-      if (inspected) renderTaskOutput(inspected);
-      setPanel("fleet");
-    } else {
-      renderTaskOutput(actionResult);
-    }
+    renderTaskOutput(actionResult);
     await refresh();
-    setPill(els.taskStatus, `${label} ok`, "ok");
     recordUserEvent("node.action_finished", {
       target: `node:${node.id}`,
       summary: `${label} finished for ${node.id}`,
@@ -5472,7 +7896,6 @@ async function runNodeAction(node, action) {
   } catch (error) {
     state.lastError = error.message;
     renderTaskOutput({ action: action.action, error: error.message });
-    setPill(els.taskStatus, `${label} failed`, "err");
     recordUserEvent("node.action_error", {
       target: `node:${node.id}`,
       summary: error.message,
@@ -5759,7 +8182,90 @@ function drawCanvas() {
   const ctx = canvas.getContext("2d");
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, width, height);
-  els.frameLabel.textContent = "idle";
+}
+
+function installSpacePanning() {
+  const viewport = els.spaceViewport;
+  if (!viewport) return;
+  viewport.addEventListener("scroll", () => {
+    updateSpaceNavigationHints();
+    renderSpaceMiniMap();
+  }, { passive: true });
+  updateSpaceNavigationHints();
+  viewport.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    if (event.target.closest?.(".widget,.space-app-button,.home-actions,.space-config-button,.modal-backdrop,.agent-overlay")) return;
+    const canPanX = viewport.scrollWidth > viewport.clientWidth + 1;
+    const canPanY = viewport.scrollHeight > viewport.clientHeight + 1;
+    if (!canPanX && !canPanY) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = viewport.scrollLeft;
+    const startTop = viewport.scrollTop;
+    let moved = false;
+    let finished = false;
+    viewport.classList.add("is-panning");
+    setSpaceMiniMapVisible(true);
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners below keep panning responsive when capture is unavailable.
+    }
+    const move = (moveEvent) => {
+      moveEvent.preventDefault();
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
+      if (canPanX) viewport.scrollLeft = startLeft - (moveEvent.clientX - startX);
+      if (canPanY) viewport.scrollTop = startTop - (moveEvent.clientY - startY);
+      updateSpaceNavigationHints();
+      renderSpaceMiniMap();
+    };
+    const end = (endEvent) => {
+      if (finished) return;
+      finished = true;
+      viewport.classList.remove("is-panning");
+      renderSpaceMiniMap();
+      setSpaceMiniMapVisible(false);
+      viewport.removeEventListener("pointermove", move);
+      viewport.removeEventListener("pointerup", end);
+      viewport.removeEventListener("pointercancel", end);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      try {
+        viewport.releasePointerCapture(event.pointerId);
+      } catch {
+        // The browser may release capture before the cleanup handler runs.
+      }
+      if (moved) {
+        endEvent.preventDefault();
+        endEvent.stopPropagation();
+        recordUserEvent("workspace.canvas_panned", {
+          target: `space:${activeSpaceStorageId()}`,
+          summary: `Panned ${activeSpaceStorageId()} canvas`,
+          data: { scroll_left: viewport.scrollLeft, scroll_top: viewport.scrollTop },
+        });
+      }
+    };
+    viewport.addEventListener("pointermove", move, { passive: false });
+    viewport.addEventListener("pointerup", end, { once: true });
+    viewport.addEventListener("pointercancel", end, { once: true });
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
+function installModalBackdropDismiss(modal, close) {
+  if (!modal) return;
+  let startedOnBackdrop = false;
+  modal.addEventListener("pointerdown", (event) => {
+    startedOnBackdrop = event.target === modal;
+  });
+  modal.addEventListener("click", (event) => {
+    if (startedOnBackdrop && event.target === modal) close();
+    startedOnBackdrop = false;
+  });
 }
 
 function wireEvents() {
@@ -5777,24 +8283,23 @@ function wireEvents() {
   });
   document.addEventListener("click", (event) => {
     if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu();
+    if (!event.target.closest?.("#nodeContextMenu")) hideNodeContextMenu();
+    if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
     if (!event.target.closest?.("#launcherLogin")) setLoginOpen(false);
   });
-  window.addEventListener("resize", hideSpaceContextMenu);
-  els.refreshButton.addEventListener("click", () => {
-    recordUserEvent("workspace.refresh_requested", {
-      target: "#refreshButton",
-      summary: "Refresh requested",
-      data: { bridge_ready: state.bridgeReady },
-    });
-    void refresh("manual");
-  });
-  els.commandForm.addEventListener("submit", (event) => {
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (!closeTopUiNavigationLayer()) return;
     event.preventDefault();
-    const prompt = els.commandInput.value.trim();
-    if (prompt) void submitTask(prompt);
+    event.stopPropagation();
   });
+  window.addEventListener("resize", () => hideSpaceContextMenu({ skipHistory: true, replaceHistory: true }));
+  window.addEventListener("resize", () => hideNodeContextMenu({ skipHistory: true, replaceHistory: true }));
+  window.addEventListener("resize", () => hideAppContextMenu({ skipHistory: true, replaceHistory: true }));
+  els.spaceConfigButton?.addEventListener("click", openConfigModal);
+  els.addNodeButton?.addEventListener("click", addNodeFromTopology);
   els.promptSendButton.addEventListener("click", () => {
-    const prompt = els.promptInput.value.trim() || els.commandInput.value.trim();
+    const prompt = els.promptInput.value.trim();
     if (prompt) void submitTask(prompt);
   });
   els.clearButton.addEventListener("click", clearTaskInputs);
@@ -5885,23 +8390,31 @@ function wireEvents() {
   els.addSpaceButton?.addEventListener("click", createUserSpace);
   els.homeConfigButton?.addEventListener("click", openConfigModal);
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
+  els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
+  els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
   els.copySpaceIdButton?.addEventListener("click", () => void copyActiveSpaceId());
   els.deleteSpaceButton?.addEventListener("click", openDeleteSpaceModal);
+  els.editAppButton?.addEventListener("click", () => openAppEditModal());
+  els.copyAppIdButton?.addEventListener("click", () => void copyActiveAppId());
   els.deleteSpaceConfirmInput?.addEventListener("input", renderDeleteSpaceModal);
   els.confirmDeleteSpaceButton?.addEventListener("click", confirmDeleteSpace);
   els.cancelDeleteSpaceButton?.addEventListener("click", closeDeleteSpaceModal);
   els.closeDeleteSpaceButton?.addEventListener("click", closeDeleteSpaceModal);
-  els.deleteSpaceModal?.addEventListener("click", (event) => {
-    if (event.target === els.deleteSpaceModal) closeDeleteSpaceModal();
-  });
+  installModalBackdropDismiss(els.deleteSpaceModal, closeDeleteSpaceModal);
   els.closeConfigModalButton?.addEventListener("click", closeConfigModal);
-  els.configModal?.addEventListener("click", (event) => {
-    if (event.target === els.configModal) closeConfigModal();
-  });
+  installModalBackdropDismiss(els.configModal, closeConfigModal);
+  els.closeArtifactsModalButton?.addEventListener("click", closeArtifactsModal);
+  installModalBackdropDismiss(els.artifactsModal, closeArtifactsModal);
+  els.appEditForm?.addEventListener("submit", (event) => void saveAppEdit(event));
+  els.resetAppEditButton?.addEventListener("click", resetAppEdit);
+  els.closeAppEditModalButton?.addEventListener("click", closeAppEditModal);
+  installModalBackdropDismiss(els.appEditModal, closeAppEditModal);
+  els.nodeEditForm?.addEventListener("submit", saveNodeEdit);
+  els.resetNodeEditButton?.addEventListener("click", resetNodeEdit);
+  els.closeNodeEditModalButton?.addEventListener("click", closeNodeEditModal);
+  installModalBackdropDismiss(els.nodeEditModal, closeNodeEditModal);
   els.closeHomeModulesModalButton?.addEventListener("click", closeHomeModulesModal);
-  els.homeModulesModal?.addEventListener("click", (event) => {
-    if (event.target === els.homeModulesModal) closeHomeModulesModal();
-  });
+  installModalBackdropDismiss(els.homeModulesModal, closeHomeModulesModal);
   els.loginButton?.addEventListener("click", (event) => {
     event.stopPropagation();
     setLoginOpen(!state.loginOpen);
@@ -5914,9 +8427,13 @@ function wireEvents() {
   els.logoutButton?.addEventListener("click", () => void logout());
   els.agentAvatarButton.addEventListener("click", () => {
     if (state.agentDragSuppressClick) return;
-    setAgentOpen(!state.agentOpen);
+    if (state.agentOpen) {
+      closeAgentChat();
+    } else {
+      openAgentChat();
+    }
   });
-  els.agentCloseButton.addEventListener("click", () => setAgentOpen(false));
+  els.agentCloseButton.addEventListener("click", closeAgentChat);
   els.agentSessionsButton.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleAgentBalloon("sessions");
@@ -5979,12 +8496,18 @@ function wireEvents() {
       handleAgentFiles(event.dataTransfer.files);
     }
   });
-  window.addEventListener("popstate", () => setPanel(panelFromPath(), { updateUrl: false }));
+  window.addEventListener("popstate", handleAppPopState);
   if ("ResizeObserver" in window) {
-    const spaceResizeObserver = new ResizeObserver(drawCanvas);
+    const spaceResizeObserver = new ResizeObserver(() => {
+      applyCanvasDensity();
+      applyWidgetLayout();
+    });
     spaceResizeObserver.observe(els.spaceViewport);
   } else {
-    window.addEventListener("resize", drawCanvas);
+    window.addEventListener("resize", () => {
+      applyCanvasDensity();
+      applyWidgetLayout();
+    });
   }
   const resetAgentAfterViewportChange = () => {
     resetAgentToViewportCorner();
@@ -5998,10 +8521,12 @@ function wireEvents() {
     els.agentOverlay.style.top = `${state.agentLayout.top}px`;
     placeAgentPanel();
   });
-  installWidgetLayerControls();
+  installWidgetWindowControls();
   installWidgetDragging();
   installWidgetResizing();
+  installSpacePanning();
   installAgentDragging();
+  installAgentPanelDragging();
 }
 
 async function bootstrapAuthenticatedApp() {
@@ -6014,7 +8539,6 @@ async function bootstrapAuthenticatedApp() {
     return;
   }
   state.authenticatedBootstrapped = true;
-  renderAuthGate();
   applyModuleVisibility();
   renderModules();
   installDevHmrBridge();
@@ -6024,6 +8548,13 @@ async function bootstrapAuthenticatedApp() {
   }
   await loadConfig();
   await loadAuthSession();
+  if (!state.authUser) {
+    state.authenticatedBootstrapped = false;
+    renderAuthGate();
+    return;
+  }
+  await loadDevices("bootstrap");
+  await loadUserSpaces();
   await loadWasm();
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   updateAgentSendButton();
@@ -6031,14 +8562,15 @@ async function bootstrapAuthenticatedApp() {
   renderAgentMessages();
   applyAgentLayout();
   setPanel(panelFromPath(), { updateUrl: false });
-  renderAll();
+  initializeUiNavigationFromUrl();
   drawCanvas();
-  await loadTimeline("startup");
+  renderAuthGate();
   await refresh("startup");
   if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
 }
 
 async function main() {
+  applyLauncherPreference();
   wireEvents();
   renderAuthGate();
   await loadConfig();
@@ -6049,7 +8581,6 @@ async function main() {
 
 main().catch((error) => {
   state.lastError = error.message;
-  setLed(els.bridgeStatus, "err");
   renderAll();
 });
 

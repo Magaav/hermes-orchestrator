@@ -10,10 +10,10 @@ per-user state stays outside this directory:
 - `browser/`: Host Browser firmware contract; runtime browser captures and
   profiles live under `state/browser/`.
 - `observation/`: Observation firmware contract; the latest debug snapshot
-  lives under `state/observation/latest.json`.
+  lives under `state/users/<acc_id>/observation/latest.json`.
 - `timeline/`: Timeline/time-travel firmware contract; checkpoint metadata
-  lives under `state/timeline/` and checkpoint commits live under
-  `refs/wasm-agent-timeline/*`.
+  lives under `state/users/<acc_id>/timelines/<space_id>/` and checkpoint
+  commits live under `refs/wasm-agent-timeline/<acc_id>/<space_id>/*`.
 - `assistant/`: embedded assistant firmware contract; local transcripts and
   settings currently live in browser local storage.
 - `image-card-core/`: built-in browser image-card analyzer contract; the runtime

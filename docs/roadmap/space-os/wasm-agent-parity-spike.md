@@ -32,12 +32,24 @@ a WASM-rendered runtime canvas, bridge health probing, node listing, task
 submission, task polling, PWA manifest, and service worker.
 
 The second browser-view pass moved the shell closer to Hermes Space UI from a
-user viewpoint: launcher rail, Hermes OS workspace, floating draggable widget
-cards with click-to-front behavior, resource monitor, topology, UI Studio
-prompt surface, Drop to Copy output, side inspector panels, recent task list,
-log tailing, and bridge-described node action controls for inspect, logs, start,
-stop, and restart. Destructive lifecycle actions require browser confirmation
-before the shadow UI calls the allowlisted bridge action.
+user viewpoint: launcher rail, visible `space-home` and `space-admin` titles,
+a hardcoded Admin space, account-owned spaces, scrollable/pannable space boards
+with config-controlled space density, app-layer buttons that toggle widgets,
+support edit/copy-id context menus, and snap to a non-overlapping `5px` grid
+while preserving pixel placement across resize, draggable/resizable widget
+windows, resource monitor, topology,
+UI Studio prompt surface, Drop to Copy output, inspector surfaces, recent task
+list, log tailing, and bridge-described node lifecycle controls. Timeline is a
+fixed space-config action instead of an app-layer icon. The old header/status
+chrome, canvas label, summary panel, and dock are now removed. Topology exposes
+right-click Edit/Restart/Start/Stop/Update actions per node and draggable
+node-card placement, plus an Add Node action that calls the documented bridge
+`POST /nodes` route.
+Connected Devices is Home-only and now records the current browser as an
+account device, lets the user switch the account's main device, downloads
+device-sync installer manifests, and stores app/widget coordinates plus space
+density in device-local layout roots instead of synchronizing another screen's
+placement by default.
 
 The browser proof pass adds a Host Browser widget that asks the local
 `wasm-agent` backend to use host Chromium through CDP, capture a URL, and render
@@ -63,9 +75,8 @@ open, navigate, and resize keeps the canvas updated even when a page does not
 emit a fresh screencast frame immediately. The address bar now keeps typed
 input as a draft separate from incoming stream URL updates, so a second Open or
 Enter uses the user's typed domain instead of a late frame URL from the previous
-site. Host Browser can be resized in the workspace. Every widget has an
-explicit layer control for placing it above overlapping widgets, and the
-workspace layer dock can lift buried widgets without first finding their header.
+site. Host Browser can be minimized, maximized, dragged, and resized in the
+workspace like the other widget windows.
 
 The embedded assistant image pass adds the first cheap-eyes harness. Browser
 native decode and Canvas pixel sampling build a compact
@@ -82,11 +93,11 @@ can be described as likely printed or label-like without inventing exact OCR.
 Analyzer evidence is stored on the image card with explicit statuses so model
 turns know what was checked, skipped, unsupported, or not loaded. On send, the
 local backend stores compacted images under
-`/local/plugins/wasm-agent/state/attachments` and returns same-origin
-`/agent/attachments/<hash>.<ext>` URLs. The model-facing action chain now shows:
-store image assets, decode pixels, analyze image, build image cards, then ask
-the selected node. Text-only bridge providers receive the image cards through
-`attachment_manifest`; raw `image_url` parts remain opt-in.
+`/local/plugins/wasm-agent/state/users/<acc_id>/attachments` and returns
+same-origin `/agent/attachments/<hash>.<ext>` URLs. The model-facing action
+chain now shows: store image assets, decode pixels, analyze image, build image
+cards, then ask the selected node. Text-only bridge providers receive the image
+cards through `attachment_manifest`; raw `image_url` parts remain opt-in.
 
 ## Why This Comes Before Browser Work
 
@@ -114,10 +125,15 @@ This spike is narrower and more reachable:
 The first parity target is the smallest useful Hermes control surface:
 
 - browser-view workspace chrome
-- draggable floating widget cards with local layout persistence and
-  click-to-front focus behavior
+- draggable/resizable widget windows with account/space-local layout persistence
+  and click-to-front focus behavior
 - bridge health
 - host resource monitor
+- live resource polling with top-down Nodes, Disk, RAM, CPU, Processes, and
+  Uptime rows
+- scrollable/pannable space board with per-space space density controls that
+  preserve current widget dimensions
+- account connected-devices widget on Home
 - fleet/node list
 - selected node state
 - prompt submission to a node
@@ -126,15 +142,16 @@ The first parity target is the smallest useful Hermes control surface:
 - backend-rendered browser pixels in a draggable widget
 - click/type/key/scroll forwarding to the host browser target
 - websocket CDP screencast frames rendered into a canvas
-- explicit widget layer control, workspace layer dock, and Host Browser resizing
+- non-overlapping app-layer buttons with 5px-grid snapping and toggle-open
+  behavior, widget minimize/maximize controls, and Host Browser resizing
 - browser-built image cards and local attachment asset storage for embedded
   assistant turns
-- bridge-described inspect/logs/start/stop/restart node action controls
+- bridge-described start/stop/restart/update node action controls and Add Node
 - stable installable PWA shell
 - visible WASM runtime indicator
 
 After this works, expand parity toward logs, node actions, activity timelines,
-Guard state, and the Hermes OS workspace output currently handled by
+Guard state, and the Hermes workspace output currently handled by
 `hermes-space-ui`.
 
 ## Runtime Contract Direction

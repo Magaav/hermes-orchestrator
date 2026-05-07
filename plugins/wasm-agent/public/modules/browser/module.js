@@ -8,6 +8,6 @@ export const moduleDefinition = {
   endpoints: ["/browser/stream", "/browser/open", "/browser/input", "/browser/close"],
   state: {
     runtimeRoot: "state/browser",
-    browserStorage: "wasmAgent.widgetLayout.v1",
+    layoutRoot: "state/users/<acc_id>/spaces/<space_id>/widget-layout.json",
   },
 };
