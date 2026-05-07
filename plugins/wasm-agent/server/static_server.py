@@ -735,41 +735,6 @@ def user_device_sync_dir(server: WasmAgentServer, user: dict[str, Any] | None) -
     return path
 
 
-def user_device_layout_root(server: WasmAgentServer, user: dict[str, Any] | None, *, create: bool = True) -> Path:
-    path = user_root(server, user) / "device-layouts"
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def user_device_layout_dir(
-    server: WasmAgentServer,
-    user: dict[str, Any] | None,
-    device_id: str,
-    *,
-    create: bool = True,
-) -> Path:
-    path = user_device_layout_root(server, user, create=create) / safe_state_id(device_id, "unknown-device")
-    if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def user_space_layout_path(
-    server: WasmAgentServer,
-    user: dict[str, Any] | None,
-    device_id: str,
-    space_id: str,
-    *,
-    create: bool = True,
-) -> Path:
-    sid = safe_state_id(space_id, "home")
-    path = user_device_layout_dir(server, user, device_id, create=create) / sid / "widget-layout.json"
-    if create:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
 def user_device_settings_path(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
     path = user_root(server, user) / "device-settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1067,7 +1032,7 @@ def create_device_sync_package(
             "prepare-tunnel",
             "sync-device-state",
         ],
-        "layout_policy": "device-local",
+        "layout_policy": "client-local",
         "artifact_policy": "shareable-wasm-artifacts",
         "tunnel": {
             "status": "planned",
@@ -1089,24 +1054,6 @@ def create_device_sync_package(
     }
 
 
-def all_device_layouts(server: WasmAgentServer, user: dict[str, Any] | None) -> dict[str, Any]:
-    layouts: dict[str, Any] = {}
-    root = user_device_layout_root(server, user)
-    for device_path in sorted(root.iterdir()):
-        if not device_path.is_dir():
-            continue
-        device_layouts: dict[str, Any] = {}
-        for space_path in sorted(device_path.iterdir()):
-            if not space_path.is_dir():
-                continue
-            layout = read_json_file(space_path / "widget-layout.json", {})
-            if isinstance(layout, dict):
-                device_layouts[space_path.name] = layout
-        if device_layouts:
-            layouts[device_path.name] = device_layouts
-    return layouts
-
-
 def export_user_storage(
     server: WasmAgentServer,
     user: dict[str, Any] | None,
@@ -1121,11 +1068,11 @@ def export_user_storage(
         "exported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "account_id": str(user.get("id") or ""),
         "current_device_id": spaces.get("current_device_id", ""),
-        "layout_policy": "device-local",
+        "layout_policy": "client-local",
         "storage": user_storage(server, user),
         "spaces": spaces.get("spaces", []),
-        "widget_layouts": spaces.get("widget_layouts", {}),
-        "device_layouts": all_device_layouts(server, user),
+        "widget_layouts": {},
+        "device_layouts": {},
     }
 
 
@@ -1140,30 +1087,10 @@ def import_user_storage(
     if str(body.get("schema") or "") != "hermes.wasm_agent.storage_export.v1":
         raise BrowserError("invalid_storage_import", "Storage import expects a wasm-agent storage export.")
     spaces = body.get("spaces")
-    layouts = body.get("widget_layouts")
-    device_layouts = body.get("device_layouts")
-    if not isinstance(spaces, list) or not isinstance(layouts, dict):
-        raise BrowserError("invalid_storage_import", "Storage export is missing spaces or widget_layouts.")
+    if not isinstance(spaces, list):
+        raise BrowserError("invalid_storage_import", "Storage export is missing spaces.")
     ensure_user_quota(server, user, len(json.dumps(body, ensure_ascii=True).encode("utf-8")))
     save_user_spaces(server, user, {"action": "replace", "spaces": spaces}, handler)
-    for space_id, layout in layouts.items():
-        if isinstance(layout, dict):
-            save_user_spaces(server, user, {
-                "action": "layout",
-                "space_id": safe_state_id(str(space_id), "home"),
-                "widget_layout": layout,
-            }, handler)
-    if isinstance(device_layouts, dict):
-        for raw_device_id, raw_layouts in device_layouts.items():
-            device_id = safe_state_id(str(raw_device_id), "")
-            if not device_id or not isinstance(raw_layouts, dict):
-                continue
-            for raw_space_id, layout in raw_layouts.items():
-                if isinstance(layout, dict):
-                    write_json_file(
-                        user_space_layout_path(server, user, device_id, safe_state_id(str(raw_space_id), "home")),
-                        layout,
-                    )
     return list_user_spaces(server, user, handler)
 
 
@@ -1173,10 +1100,8 @@ def list_user_spaces(
     handler: WasmAgentHandler | None = None,
 ) -> dict[str, Any]:
     spaces = []
-    layouts: dict[str, Any] = {}
     current_device_id = request_account_device_id(user, handler) if handler else ""
     user_space_paths = [path for path in sorted(user_spaces_dir(server, user).iterdir()) if path.is_dir()]
-    known_space_ids = ["home", "admin", *[path.name for path in user_space_paths if path.name not in {"home", "admin"}]]
     for path in user_space_paths:
         meta = read_json_file(path / "space.json", {})
         if isinstance(meta, dict) and path.name not in {"home", "admin"}:
@@ -1186,23 +1111,14 @@ def list_user_spaces(
                 "created_at": str(meta.get("created_at") or ""),
                 "updated_at": str(meta.get("updated_at") or ""),
             })
-    for space_id in known_space_ids:
-        legacy_path = user_spaces_dir(server, user) / space_id / "widget-layout.json"
-        layout = {}
-        if current_device_id:
-            layout = read_json_file(user_space_layout_path(server, user, current_device_id, space_id, create=False), {})
-        if not isinstance(layout, dict) or not layout:
-            layout = read_json_file(legacy_path, {})
-        if isinstance(layout, dict):
-            layouts[space_id] = layout
     return {
         "ok": True,
         "schema": "hermes.wasm_agent.user_spaces.v1",
         "current_device_id": current_device_id,
-        "layout_policy": "device-local",
+        "layout_policy": "client-local",
         "storage": user_storage(server, user),
         "spaces": spaces,
-        "widget_layouts": layouts,
+        "widget_layouts": {},
     }
 
 
@@ -1216,23 +1132,12 @@ def save_user_spaces(
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     ensure_user_quota(server, user, len(json.dumps(body, ensure_ascii=True).encode("utf-8")))
     if action == "layout":
-        if not handler:
-            raise BrowserError("device_required", "Device-local layout writes require a request device.")
-        device_id = request_account_device_id(user, handler)
-        space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
-        layout = body.get("widget_layout")
-        if not isinstance(layout, dict):
-            raise BrowserError("invalid_space_layout", "widget_layout must be an object.")
-        write_json_file(user_space_layout_path(server, user, device_id, space_id), layout)
-        return list_user_spaces(server, user, handler)
+        raise BrowserError("layout_is_client_local", "Layout is client-local by default; server layout sync requires premium storage.")
     if action == "delete":
         space_id = safe_state_id(str(body.get("space_id") or ""), "")
         if not space_id or space_id in {"home", "admin"}:
             raise BrowserError("invalid_space_delete", "Only user-created spaces can be deleted.")
         shutil.rmtree(user_space_dir(server, user, space_id), ignore_errors=True)
-        for device_path in sorted(user_device_layout_root(server, user).iterdir()):
-            if device_path.is_dir():
-                shutil.rmtree(device_path / space_id, ignore_errors=True)
         return list_user_spaces(server, user, handler)
     if action == "replace":
         spaces = body.get("spaces")
@@ -1259,9 +1164,6 @@ def save_user_spaces(
         for path in user_spaces_dir(server, user).iterdir():
             if path.is_dir() and path.name not in {"home", "admin"} and path.name not in seen:
                 shutil.rmtree(path, ignore_errors=True)
-                for device_path in sorted(user_device_layout_root(server, user).iterdir()):
-                    if device_path.is_dir():
-                        shutil.rmtree(device_path / path.name, ignore_errors=True)
         return list_user_spaces(server, user, handler)
     raise BrowserError("invalid_space_action", "Unsupported space action.")
 

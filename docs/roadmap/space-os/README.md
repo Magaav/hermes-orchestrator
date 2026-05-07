@@ -23,8 +23,8 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
   edit/lifecycle actions plus draggable node placement. Home also exposes an
   account Connected Devices app backed by wasm-agent account state, including a
   main-device pointer, a quick main-device switch action, device-sync installer
-  manifests, and device-local layouts under
-  `state/users/<acc_id>/device-layouts/<device_id>/`.
+  manifests, and browser-local device layouts that are not retained server-side
+  unless a future premium sync/backup mode is enabled.
 - The standalone app/client surface has been pruned from this repo. Product UI and client work must stay under `/local/plugins`, with `/local/plugins/hermes-space-ui` as the current Space Agent UI path and `/local/plugins/wasm-agent` as the shadow WASM parity path.
 - Hermes Space UI currently seeds Space Agent customware/module content into the generated customware root under `/local/plugins/hermes-space-ui/state/space-customware`. The launcher syncs `space-agent-brand` to `L1/_all/mod/hermes/space-agent-brand`, syncs `hermes-fleet` to `L1/_all/mod/hermes/fleet`, writes the Hermes Space UI skill under `L1/_all/mod/hermes/space_ui`, and seeds the `hermes-os` space, widgets, and LLM config under `L2/user`.
 - Hermes Space UI now also syncs `hermes-performance-hud` to `L1/_all/mod/hermes/performance-hud`. This plugin-owned bundle adds the current FPS/memory overlay without editing Space Agent core. It exposes browser toggle helpers now; the final Admin > Modules toggle requires a generic Space Agent module-settings seam because Admin Mode clamps module resolution to `maxLayer=0`.

@@ -44,14 +44,15 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   home-level controls, account storage, modal launch actions, and the
   account-global Timeline access through the fixed config button. Home also
   exposes Artifacts, a local inventory of spaces, mapped apps/widgets, and
-  device-local layouts that previews the `wasm-artifact` direction.
+  browser-local layouts that previews the `wasm-artifact` direction.
 - Admin is a fixed launcher space for operational surfaces. It uses the same
   app-layer and widget-layer pattern as other working spaces, has the crown
   launcher icon, shows the `space-admin` title, and must not be stored or
   deleted as a user-created space.
 - User-created spaces are account-owned working canvases. They may contain
-  draggable app buttons and opened widgets, with widget layout persisted under
-  the current account, current device id, and space id.
+  draggable app buttons and opened widgets, with widget layout persisted in
+  browser local storage by default. Do not POST app/widget geometry or density
+  to the server unless a premium sync/backup mode is explicitly implemented.
 - The shell must not reintroduce the removed header/status chrome, command
   form, canvas label, summary panel, or dock.
 - Home-level actions sit on the black homespace itself. The primary action may
@@ -94,19 +95,19 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Right-clicking an app icon or widget header opens the app menu; mobile uses a
   still long-press. The menu exposes Edit and Copy app id. Editing persists the
   app/widget title, icon text/image, and min/max dimensions in the current
-  account/space layout.
+  browser-local space layout.
 - Home includes a Connected Devices app that lists devices seen for the signed
   in account through the local account devices endpoint, with an operating
   system icon per device. The widget can switch the account's main device. If
   the recorded main device is offline, artifact-evolution actions should steer
   the user back to Connected Devices so they can pick a reachable main device.
   The Sync action downloads a device-specific installer manifest that records
-  target device, main device, planned tunnel capability, device-local layout
+  target device, main device, planned tunnel capability, client-local layout
   policy, and shareable artifact policy.
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
   shareable/backupable/marketplace-ready, but app positions, widget positions,
-  sizes, and space density stay device-local.
+  sizes, and space density stay client-local unless premium sync is explicit.
 - The Resources Monitor polls live host resource data while it is open and
   renders one metric row per line in this order: Nodes, Disk, RAM, CPU,
   Processes, Uptime. RAM and Disk use compact `usedGB/totalGB` values.

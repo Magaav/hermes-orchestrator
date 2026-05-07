@@ -68,9 +68,9 @@ widgets are also shrunk to the visible canvas on mobile so density-expanded
 boards do not make windows wider than the device screen. Right-clicking an app
 icon or widget header, or long-pressing it on mobile, opens an app menu with
 Edit and Copy app id. Edit persists title, icon text/image, and min/max
-dimensions in the current device layout. Widget layout is stored per account,
-current device, and space through the local backend instead of only in browser
-storage.
+dimensions in the current browser's local device layout. Widget layout is
+stored in browser local storage by default; the server does not retain it unless
+a future premium sync/backup path is explicitly enabled.
 The shareability and marketplace direction is tracked in
 [`ARTIFACTS.md`](./ARTIFACTS.md): spaces, apps/widgets, and widget-inner
 entities become portable `wasm-artifacts`, while device layout remains local.
@@ -86,7 +86,8 @@ same Admin workspace. Topology reads live nodes through the same-origin
 node; right-clicking a node in the topology widget opens Edit, Restart, Start,
 Stop, and Update actions for that node. The Edit form can persist a local model
 override as provider/name. Topology node cards can also be dragged inside the
-topology widget and persist their positions with the device-local space layout.
+topology widget and persist their positions with the browser-local space
+layout.
 The Add Node button creates a bridge node profile through `POST /nodes`. The
 Resources Monitor polls live bridge resource data while it is open, defaults to
 content-fitting height, and renders one metric per row in this order: Nodes,
@@ -394,11 +395,12 @@ duplicate Space card. Each space config includes
 one draggable space-density line that expands or shrinks that space's scrollable board
 between `1x` and `10x` without changing current widget width/height; its knob
 stays within the line boundaries. App positions, widget geometry, topology card
-positions, and density are saved under
-`state/users/<acc_id>/device-layouts/<device_id>/<space_id>/`, so a newly seen
-device starts from the default projection instead of inheriting another screen's
-coordinates. Config storage shows account usage plus local disk availability
-and exposes Export/Import buttons for portable local backups.
+positions, and density are saved only in browser local storage by default, so a
+newly seen device starts from the default projection instead of inheriting
+another screen's coordinates. Config storage shows account usage plus local
+disk availability and exposes Export/Import buttons for portable local backups;
+exports include the browser-local layout payload, while imports restore that
+payload back into the current browser.
 The shell stays fixed while the
 inner board can be scrolled or one-finger/click-drag panned. Home config also
 includes a mobile launcher preference that can put the launcher on the top edge on narrow
@@ -628,7 +630,6 @@ Run checks:
     users/<acc_id>/
       spaces/<space_id>/      # account-owned space metadata
       device-settings.json    # account main-device pointer
-      device-layouts/<device_id>/<space_id>/ # device-local widget layout
       timelines/<space_id>/   # account/space timeline metadata
       devices/                # recently seen account devices
       device-sync/            # downloaded sync-installer manifests

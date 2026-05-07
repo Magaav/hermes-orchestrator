@@ -48,8 +48,8 @@ node-card placement, plus an Add Node action that calls the documented bridge
 Connected Devices is Home-only and now records the current browser as an
 account device, lets the user switch the account's main device, downloads
 device-sync installer manifests, and stores app/widget coordinates plus space
-density in device-local layout roots instead of synchronizing another screen's
-placement by default.
+density in browser local storage instead of retaining another screen's
+placement server-side by default.
 
 The browser proof pass adds a Host Browser widget that asks the local
 `wasm-agent` backend to use host Chromium through CDP, capture a URL, and render

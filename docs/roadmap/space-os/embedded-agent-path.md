@@ -58,10 +58,11 @@ Already available in this repo:
   Image-card perception now has module contracts for the resident Canvas pass,
   lazy native barcode detection, lazy native OCR probing, and disabled
   CV/semantic placeholders with explicit evidence statuses.
-- Account-owned spaces, device-local layout projections, observations, and
-  Timeline metadata under `state/users/<acc_id>/spaces`,
-  `state/users/<acc_id>/device-layouts`, `state/users/<acc_id>/observation`,
-  and `state/users/<acc_id>/timelines`.
+- Account-owned spaces, observations, and Timeline metadata under
+  `state/users/<acc_id>/spaces`, `state/users/<acc_id>/observation`, and
+  `state/users/<acc_id>/timelines`. Device-local layout projections stay in the
+  browser by default, with server-retained sync/backup reserved for a future
+  premium path.
 
 Missing for this path:
 

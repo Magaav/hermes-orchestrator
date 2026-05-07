@@ -3,7 +3,7 @@
 This is the working design note for componentizing `wasm-agent` without turning
 the shipped core into a forked customization layer. The current implementation
 only includes the first hooks: Home Artifacts inventory, storage export/import,
-device sync installer manifests, Home-only Connected Devices, and device-local
+device sync installer manifests, Home-only Connected Devices, and client-local
 layout policy.
 
 ## Product Direction
@@ -54,15 +54,14 @@ the artifact.
 ## Device-Local Layout
 
 App positions, widget positions, widget sizes, and space density are
-device-local preferences. They should not synchronize across the account by
+client-local preferences. They should not synchronize across the account by
 default because screen size and personal layout taste are device-specific.
 
 The artifact contains semantic structure: which space exists, which apps are in
 it, what a widget is, and what inner entities it owns. A device creates its own
 layout projection the first time it renders that artifact. Current runtime
-layout files live under
-`state/users/<acc_id>/device-layouts/<device_id>/<space_id>/widget-layout.json`;
-account-owned space metadata stays under
+layout is browser-local by default under the PWA's local storage key
+`wasmAgent.spaceWidgetLayouts.v2`; account-owned space metadata stays under
 `state/users/<acc_id>/spaces/<space_id>/space.json`.
 
 ## Device Sync
@@ -75,7 +74,7 @@ device-specific installer manifest:
 - current/main device id;
 - planned capabilities for registering, reporting online, preparing a tunnel,
   and syncing device state;
-- layout policy: `device-local`;
+- layout policy: `client-local`;
 - artifact policy: `shareable-wasm-artifacts`.
 
 This is a bootstrap contract, not a fake tunnel. Later iterations should turn
@@ -90,10 +89,11 @@ creating spaces and importing storage route the user back to Connected Devices.
 ## Storage And Premium Boundary
 
 Config exposes local account storage usage and local disk availability. Export
-creates a portable JSON backup with spaces, current-device widget layouts, and
-all saved device-layout roots. Import restores that backup into the current
-account without making device-local coordinates automatically synchronize across
-other devices.
+creates a portable JSON backup with account spaces plus the current browser's
+local widget layouts. Import restores account space metadata on the server and
+restores the layout payload into the current browser only. Server-retained
+layout sync, backup, or automation state is a premium feature boundary because
+it spends storage/compute and changes the privacy contract.
 
 Future cloud storage should store artifacts and backups only when the user opts
 into paid storage. The free path remains local export/import plus direct device

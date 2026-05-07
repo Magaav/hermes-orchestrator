@@ -3,6 +3,7 @@ import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
+const SPACE_WIDGET_LAYOUTS_STORAGE_KEY = "wasmAgent.spaceWidgetLayouts.v2";
 const AGENT_SESSIONS_STORAGE_KEY = "wasmAgent.agentSessions.v1";
 const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
@@ -806,17 +807,7 @@ function saveWidgetLayout() {
   const spaceId = activeSpaceStorageId();
   state.widgetLayout = sanitizeWidgetLayoutForPanel(state.widgetLayout);
   state.spaceWidgetLayouts[spaceId] = state.widgetLayout;
-  if (state.authUser) {
-    void fetchJson("/spaces", {
-      method: "POST",
-      timeoutMs: 8000,
-      body: {
-        action: "layout",
-        space_id: spaceId,
-        widget_layout: state.widgetLayout,
-      },
-    }).catch(() => {});
-  }
+  saveLocalSpaceWidgetLayouts();
 }
 
 function applySpaceWidgetLayout(panel = state.activePanel) {
@@ -890,6 +881,26 @@ function saveLauncherPreference() {
   }
 }
 
+function readLocalSpaceWidgetLayouts() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SPACE_WIDGET_LAYOUTS_STORAGE_KEY) || "{}");
+    if (!raw || typeof raw !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(raw).filter(([, layout]) => layout && typeof layout === "object")
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveLocalSpaceWidgetLayouts() {
+  try {
+    localStorage.setItem(SPACE_WIDGET_LAYOUTS_STORAGE_KEY, JSON.stringify(state.spaceWidgetLayouts || {}));
+  } catch {
+    // Device layout is ephemeral and client-local by default.
+  }
+}
+
 function applyLauncherPreference() {
   if (!els.app) return;
   els.app.dataset.mobileLauncher = state.mobileLauncherTop ? "top" : "left";
@@ -917,9 +928,7 @@ async function loadUserSpaces() {
     const payload = await fetchJson("/spaces", { timeoutMs: 8000 });
     state.userSpaces = Array.isArray(payload.spaces) ? payload.spaces : [];
     state.userStorage = payload.storage || null;
-    state.spaceWidgetLayouts = payload.widget_layouts && typeof payload.widget_layouts === "object"
-      ? payload.widget_layouts
-      : {};
+    state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
     applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
     renderHomeStorage();
@@ -5744,7 +5753,7 @@ async function loadDevices(origin = "auto") {
       current_device_id: payload.current_device_id || "",
       main_device_id: payload.main_device_id || "",
       main_device_online: Boolean(payload.main_device_online),
-      layout_policy: "device-local",
+      layout_policy: "client-local",
     };
     state.devicesLoadedAt = payload.timestamp || new Date().toISOString();
     renderDevices();
@@ -5897,7 +5906,7 @@ async function setMainDevice(device = null) {
       current_device_id: payload.current_device_id || "",
       main_device_id: payload.main_device_id || device.id,
       main_device_online: Boolean(payload.main_device_online),
-      layout_policy: "device-local",
+      layout_policy: "client-local",
     };
     recordUserEvent("account.main_device_changed", {
       target: `device:${device.id}`,
@@ -6861,14 +6870,14 @@ function renderArtifacts() {
     return `${app.label} -> ${scopes || "unmapped"}`;
   });
   const layoutItems = [
-    "positions: device-local",
-    "widget geometry: device-local",
-    `space density: device-local, 1x-${CANVAS_DENSITY_MAX}x`,
+    "positions: browser-local",
+    "widget geometry: browser-local",
+    `space density: browser-local, 1x-${CANVAS_DENSITY_MAX}x`,
   ];
   els.artifactList.replaceChildren(
     artifactCard("spaces/", `${spaceItems.length} local`, spaceItems),
     artifactCard("apps-widgets/", `${appItems.length} mapped`, appItems),
-    artifactCard("device-layouts/", "not shared between devices", layoutItems)
+    artifactCard("browser-layouts/", "not retained server-side", layoutItems)
   );
 }
 
@@ -7271,6 +7280,7 @@ function confirmDeleteSpace() {
   }
   state.userSpaces = state.userSpaces.filter((item) => item.id !== space.id);
   delete state.spaceWidgetLayouts[space.id];
+  saveLocalSpaceWidgetLayouts();
   saveUserSpaces();
   if (state.authUser) {
     void fetchJson("/spaces", {
@@ -7326,6 +7336,8 @@ function createUserSpace() {
     created_at: createdAt,
   };
   state.userSpaces.push(space);
+  state.spaceWidgetLayouts[space.id] = defaultWidgetLayoutForPanel(space.id);
+  saveLocalSpaceWidgetLayouts();
   saveUserSpaces();
   renderSpaceLauncher();
   setPanel(space.id);
@@ -7431,11 +7443,17 @@ function readJsonFile(file) {
 async function exportStorageBackup() {
   try {
     const payload = await fetchJson("/storage/export", { timeoutMs: 10000 });
-    downloadJson(`wasm-agent-storage-${new Date().toISOString().slice(0, 10)}.json`, payload);
+    const backup = {
+      ...payload,
+      layout_policy: "client-local-by-default",
+      widget_layouts: state.spaceWidgetLayouts || {},
+      client_device_id: clientDeviceId(),
+    };
+    downloadJson(`wasm-agent-storage-${new Date().toISOString().slice(0, 10)}.json`, backup);
     recordUserEvent("storage.exported", {
       target: "storage",
       summary: "Exported local storage backup",
-      data: { schema: payload.schema || "" },
+      data: { schema: backup.schema || "", includes_client_layouts: true },
     });
   } catch (error) {
     recordUserEvent("storage.export_error", {
@@ -7453,13 +7471,18 @@ async function importStorageBackup(file) {
     const result = await fetchJson("/storage/import", {
       method: "POST",
       timeoutMs: 12000,
-      body: payload,
+      body: {
+        ...payload,
+        widget_layouts: {},
+        device_layouts: {},
+      },
     });
     state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
     state.userStorage = result.storage || state.userStorage;
-    state.spaceWidgetLayouts = result.widget_layouts && typeof result.widget_layouts === "object"
-      ? result.widget_layouts
+    state.spaceWidgetLayouts = payload.widget_layouts && typeof payload.widget_layouts === "object"
+      ? payload.widget_layouts
       : state.spaceWidgetLayouts;
+    saveLocalSpaceWidgetLayouts();
     applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
     renderHomeStorage();
@@ -7697,6 +7720,7 @@ function setPanel(panel, options = {}) {
   if (!isPanelAvailable(panel)) panel = "home";
   const previous = state.activePanel;
   state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = state.widgetLayout;
+  saveLocalSpaceWidgetLayouts();
   const userSpacePanel = isUserSpacePanel(panel);
   state.activePanel = panel;
   els.app.dataset.panel = userSpacePanel ? "user-space" : panel;
