@@ -34,6 +34,9 @@ Expected local files include:
   metadata created for embedded assistant image-card turns. The server prunes
   this cache by byte, file-count, and age limits after saves. This is local
   runtime state and is not a durable media library.
+- `security-loop/`, append-only finding events plus a compact current summary
+  for the Admin-only `hermes-attack` / `hermes-defense` dashboard. It stores
+  redacted evidence previews and decisions, not raw attack logs.
 - Image-card analyzer modules cache loaded functions in browser memory only;
   their module contracts live under `public/modules/` and do not create durable
   state here by default.

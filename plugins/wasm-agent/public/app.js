@@ -14,13 +14,27 @@ const CHAT_QUERY_VALUE = "wasm-agent-chat";
 const WIDGET_Z_BASE = 20;
 const WIDGET_Z_LIMIT = 9000;
 const APP_ICON_GRID_PX = 5;
+const APP_ICON_COLLISION_TOLERANCE_PX = Math.ceil(APP_ICON_GRID_PX / 2);
+const APP_ORGANIZER_TOP_INSET_PX = 30;
+const SPACE_CANVAS_EDGE_INSET_PX = 0;
 const SPACE_MINIMAP_HIDE_MS = 180;
-const SPACE_MINIMAP_PADDING_PX = 4;
+const SPACE_MINIMAP_PADDING_PX = 0;
+const SPACE_PAN_MOMENTUM_FRICTION = 0.92;
+const SPACE_PAN_MOMENTUM_MIN_VELOCITY = 0.04;
+const SPACE_PAN_MOMENTUM_MAX_VELOCITY = 2.4;
+const SPACE_PAN_MOMENTUM_SAMPLE_MS = 120;
+const SPACE_PAN_MOMENTUM_LAUNCH_MULTIPLIER = 1.08;
+const SPACE_PAN_MOMENTUM_FRAME_MS = 1000 / 60;
+const SPACE_PAN_MOMENTUM_MAX_MS = 1200;
 const CANVAS_DENSITY_MAX = 10;
 const RESOURCE_POLL_MS = 2500;
+const SECURITY_POLL_MS = 5000;
 const USER_EVENT_LIMIT = 160;
 const DEFAULT_AGENT_TURN_TIMEOUT_MS = 5 * 60 * 1000;
 const AGENT_MAX_IMAGES = 8;
+const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
+const AGENT_PANEL_VIEWPORT_GAP_PX = 0;
+const AGENT_PANEL_AVATAR_GAP_PX = AGENT_AVATAR_VIEWPORT_GAP_PX;
 const AGENT_IMAGE_MAX_EDGE = 1280;
 const AGENT_IMAGE_MAX_BYTES = 384 * 1024;
 const AGENT_IMAGE_TOTAL_MAX_BYTES = 1400 * 1024;
@@ -36,18 +50,19 @@ const OCR_TESSERACT_LANGUAGE = "eng";
 const IMAGE_ANALYZER_CACHE = new Map();
 const SCRIPT_RUNTIME_CACHE = new Map();
 const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and help evolve the app from here.";
-const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules"]);
+const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules", "security"]);
+const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
 const SPACE_APP_DEFINITIONS = [
   { id: "resources", label: "Resources", short: "Res" },
   { id: "topology", label: "Topology", short: "Topo" },
-  { id: "devices", label: "Devices", short: "Dev", home: true },
   { id: "studio", label: "Studio", short: "Studio" },
   { id: "browser-proof", label: "Browser", short: "Web", module: "host-browser" },
   { id: "drop-to-copy", label: "Drop", short: "Drop" },
+  { id: "security-loop", label: "Security", short: "Sec" },
 ];
 const SPACE_APP_MAPPINGS = {
-  home: ["devices"],
-  admin: ["resources", "topology", "studio", "browser-proof", "drop-to-copy"],
+  home: [],
+  admin: ["resources", "topology", "studio", "browser-proof", "drop-to-copy", "security-loop"],
   user: ["resources", "topology", "studio", "browser-proof", "drop-to-copy"],
 };
 const FIXED_WIDGET_LAYOUT = {
@@ -82,12 +97,12 @@ const els = {
   appLayer: document.querySelector("#appLayer"),
   spaceMiniMap: document.querySelector("#spaceMiniMap"),
   spaceLabel: document.querySelector("#spaceLabel"),
+  spaceOrganizeButton: document.querySelector("#spaceOrganizeButton"),
   spaceConfigButton: document.querySelector("#spaceConfigButton"),
   spaceLauncherList: document.querySelector("#spaceLauncherList"),
   addNodeButton: document.querySelector("#addNodeButton"),
   addSpaceButton: document.querySelector("#addSpaceButton"),
-  homeStorageBadge: document.querySelector("#homeStorageBadge"),
-  homeConfigButton: document.querySelector("#homeConfigButton"),
+  homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
   spaceContextMenu: document.querySelector("#spaceContextMenu"),
   nodeContextMenu: document.querySelector("#nodeContextMenu"),
@@ -130,9 +145,15 @@ const els = {
   resetNodeEditButton: document.querySelector("#resetNodeEditButton"),
   saveNodeEditButton: document.querySelector("#saveNodeEditButton"),
   closeNodeEditModalButton: document.querySelector("#closeNodeEditModalButton"),
+  securityEvidenceModal: document.querySelector("#securityEvidenceModal"),
+  securityEvidenceTitle: document.querySelector("#securityEvidenceTitle"),
+  securityEvidenceMeta: document.querySelector("#securityEvidenceMeta"),
+  securityEvidenceBody: document.querySelector("#securityEvidenceBody"),
+  closeSecurityEvidenceButton: document.querySelector("#closeSecurityEvidenceButton"),
   homeModulesModal: document.querySelector("#homeModulesModal"),
   homeModuleList: document.querySelector("#homeModuleList"),
   closeHomeModulesModalButton: document.querySelector("#closeHomeModulesModalButton"),
+  mainStage: document.querySelector(".main-stage"),
   spaceCanvas: document.querySelector("#spaceCanvas"),
   selectedNode: document.querySelector("#selectedNode"),
   runtimeLabel: document.querySelector("#runtimeLabel"),
@@ -146,6 +167,8 @@ const els = {
   artifactsModal: document.querySelector("#artifactsModal"),
   artifactList: document.querySelector("#artifactList"),
   closeArtifactsModalButton: document.querySelector("#closeArtifactsModalButton"),
+  devicesModal: document.querySelector("#devicesModal"),
+  closeDevicesModalButton: document.querySelector("#closeDevicesModalButton"),
   taskOutput: document.querySelector("#taskOutput"),
   nodeList: document.querySelector("#nodeList"),
   taskList: document.querySelector("#taskList"),
@@ -161,6 +184,13 @@ const els = {
   observationTimeline: document.querySelector("#observationTimeline"),
   observationSnapshot: document.querySelector("#observationSnapshot"),
   moduleList: document.querySelector("#moduleList"),
+  securityRefreshButton: document.querySelector("#securityRefreshButton"),
+  securityLoopStatus: document.querySelector("#securityLoopStatus"),
+  securityLoopSummary: document.querySelector("#securityLoopSummary"),
+  securityFindingQueue: document.querySelector("#securityFindingQueue"),
+  securityPanelStatus: document.querySelector("#securityPanelStatus"),
+  securityPanelSummary: document.querySelector("#securityPanelSummary"),
+  securityPanelFindingQueue: document.querySelector("#securityPanelFindingQueue"),
   agentOverlay: document.querySelector("#agentOverlay"),
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
   agentPanel: document.querySelector("#agentPanel"),
@@ -200,6 +230,8 @@ const els = {
   panelViews: document.querySelectorAll(".panel-view"),
 };
 
+const INITIAL_SPACE_WIDGET_LAYOUTS = readLocalSpaceWidgetLayouts();
+
 const state = {
   bridgeUrl: "http://127.0.0.1:8790",
   config: null,
@@ -225,13 +257,18 @@ const state = {
   devicesLoadedAt: "",
   nodes: [],
   tasks: [],
+  securityLoop: null,
+  securityFindings: [],
+  securityBusy: false,
+  securityInterval: 0,
+  securityEvidenceId: "",
   selectedNode: "orchestrator",
-  activePanel: "admin",
+  activePanel: "home",
   taskId: "",
   taskTimer: 0,
   actionBusy: "",
   lastError: "",
-  widgetLayout: {},
+  widgetLayout: INITIAL_SPACE_WIDGET_LAYOUTS.home || {},
   widgetZ: WIDGET_Z_BASE,
   activeWidgetId: "",
   browserCapture: null,
@@ -259,7 +296,8 @@ const state = {
   moduleSettings: readModuleSettings(),
   userSpaces: [],
   userStorage: null,
-  spaceWidgetLayouts: {},
+  localStorageEstimate: null,
+  spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
   activeSpaceMenuId: "",
   activeNodeMenuId: "",
   activeAppMenuId: "",
@@ -290,6 +328,8 @@ const state = {
   appButtonCache: new Map(),
   spaceMiniMapVisible: false,
   spaceMiniMapHideTimer: 0,
+  spacePanMomentumFrame: 0,
+  spacePanMomentumActive: false,
 };
 
 function bytesFromBase64(value) {
@@ -425,6 +465,8 @@ function latestNonAgentClick() {
 
 function buildObservationSnapshot() {
   const viewportRect = els.spaceViewport?.getBoundingClientRect?.() || { width: 0, height: 0 };
+  const usableViewportRect = spaceViewportUsableRect() || viewportRect;
+  const visualViewport = window.visualViewport;
   const browserRect = els.browserScreen?.getBoundingClientRect?.() || { width: 0, height: 0 };
   const recentErrors = state.userEvents
     .filter((event) => event.type.endsWith(".error") || event.data?.error)
@@ -451,6 +493,28 @@ function buildObservationSnapshot() {
       } : null,
       widget_count: document.querySelectorAll(".widget[data-widget-id]").length,
       viewport: { width: Math.round(viewportRect.width || 0), height: Math.round(viewportRect.height || 0) },
+      viewport_diagnostics: {
+        visual: visualViewport ? {
+          width: Math.round(visualViewport.width || 0),
+          height: Math.round(visualViewport.height || 0),
+          offset_top: Math.round(visualViewport.offsetTop || 0),
+          offset_left: Math.round(visualViewport.offsetLeft || 0),
+        } : null,
+        layout: {
+          width: Math.round(window.innerWidth || 0),
+          height: Math.round(window.innerHeight || 0),
+        },
+        space_viewport: {
+          width: Math.round(viewportRect.width || 0),
+          height: Math.round(viewportRect.height || 0),
+        },
+        usable_canvas: {
+          width: Math.round(usableViewportRect.width || 0),
+          height: Math.round(usableViewportRect.height || 0),
+        },
+        bottom_inset_px: viewportBottomInsetPx(),
+        applied_canvas_padding_bottom_px: Math.round(appliedCanvasBottomPaddingPx()),
+      },
     },
     browser: {
       url: state.browserCapture?.url || els.browserUrlInput?.value || "",
@@ -591,8 +655,9 @@ function renderObservation() {
 
 function moduleCard(module) {
   const enabled = isModuleEnabled(module.id);
+  const core = Boolean(module.core);
   const card = document.createElement("article");
-  card.className = `module-card${enabled ? " enabled" : ""}`;
+  card.className = `module-card${enabled ? " enabled" : ""}${core ? " core" : ""}`;
 
   const copy = document.createElement("div");
   copy.className = "module-copy";
@@ -609,9 +674,10 @@ function moduleCard(module) {
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = enabled;
+  input.disabled = core;
   input.setAttribute("aria-label", `${enabled ? "Disable" : "Enable"} ${module.title}`);
   const control = document.createElement("span");
-  control.textContent = enabled ? "On" : "Off";
+  control.textContent = core ? "Core" : (enabled ? "On" : "Off");
   input.addEventListener("change", () => {
     setModuleEnabled(module.id, input.checked);
   });
@@ -733,6 +799,11 @@ function applyModuleVisibility() {
 }
 
 function setModuleEnabled(moduleId, enabled) {
+  if (moduleDefinitionById(moduleId)?.core) {
+    state.moduleSettings[moduleId] = true;
+    renderModules();
+    return;
+  }
   const previous = isModuleEnabled(moduleId);
   state.moduleSettings[moduleId] = Boolean(enabled);
   saveModuleSettings();
@@ -840,6 +911,9 @@ function readModuleSettings() {
         .filter(([key]) => knownModuleIds.has(key))
         .map(([key, value]) => [key, Boolean(value)])
     );
+    for (const module of MODULE_DEFINITIONS) {
+      if (module.core) stored[module.id] = true;
+    }
     const settings = { ...defaults, ...stored };
     if (raw.__imageAnalyzerRevision !== IMAGE_CARD_ANALYZER_REVISION) {
       for (const moduleId of ["image-card-core", "barcode-reader", "ocr"]) {
@@ -931,7 +1005,6 @@ async function loadUserSpaces() {
     state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
     applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
-    renderHomeStorage();
   } catch (error) {
     recordUserEvent("workspace.spaces_load_error", {
       target: "spaces",
@@ -939,6 +1012,19 @@ async function loadUserSpaces() {
       data: { error: error.message },
     });
   }
+}
+
+async function loadLocalStorageEstimate() {
+  if (!navigator.storage?.estimate) {
+    state.localStorageEstimate = { usage: 0, quota: 0 };
+    return;
+  }
+  try {
+    state.localStorageEstimate = await navigator.storage.estimate();
+  } catch {
+    state.localStorageEstimate = { usage: 0, quota: 0 };
+  }
+  if (els.configModal && !els.configModal.hidden) renderConfigModal();
 }
 
 function isUserSpacePanel(panel) {
@@ -959,6 +1045,7 @@ function moduleDefinitionById(moduleId) {
 }
 
 function isModuleEnabled(moduleId) {
+  if (moduleDefinitionById(moduleId)?.core) return true;
   if (Object.prototype.hasOwnProperty.call(state.moduleSettings, moduleId)) {
     return state.moduleSettings[moduleId] !== false;
   }
@@ -968,6 +1055,7 @@ function isModuleEnabled(moduleId) {
 function isPanelAvailable(panel) {
   panel = normalizePanel(panel);
   if (panel === "home" || isUserSpacePanel(panel)) return true;
+  if (isAdminPanel(panel) && !isAdminUser()) return false;
   if (panel === "observe") return isModuleEnabled("observation");
   return true;
 }
@@ -1162,8 +1250,73 @@ function isPrimaryPointer(event) {
   return event?.isPrimary !== false && (event?.pointerType !== "mouse" || event.button === 0);
 }
 
+function visualViewportHeight() {
+  const height = Number(window.visualViewport?.height || window.innerHeight || 0);
+  if (!Number.isFinite(height) || height <= 0) return 0;
+  return Math.floor(height);
+}
+
+function viewportBottomInsetPx() {
+  const viewport = window.visualViewport;
+  const layoutHeight = Math.max(
+    Number(document.documentElement?.clientHeight || 0),
+    Number(window.innerHeight || 0)
+  );
+  if (!viewport || !layoutHeight) return 0;
+  const visualBottom = Number(viewport.offsetTop || 0) + Number(viewport.height || 0);
+  const visualInset = Math.max(0, layoutHeight - visualBottom);
+  const appRect = els.app?.getBoundingClientRect?.();
+  const appInset = appRect ? Math.max(0, appRect.bottom - visualBottom) : 0;
+  const inset = Math.max(visualInset, appInset);
+  const keyboardSized = inset > Math.max(96, layoutHeight * 0.18);
+  return keyboardSized ? 0 : Math.round(inset);
+}
+
+function syncVisualViewportSize() {
+  const height = visualViewportHeight();
+  if (!height) return;
+  document.documentElement.style.setProperty("--wasm-visual-height", `${height}px`);
+  document.documentElement.style.setProperty("--wasm-viewport-bottom-inset", `${viewportBottomInsetPx()}px`);
+}
+
 function spaceSurface() {
   return els.spaceBoard || els.spaceViewport;
+}
+
+function appliedCanvasBottomPaddingPx() {
+  const value = parseFloat(getComputedStyle(els.mainStage || document.documentElement).paddingBottom);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function spaceViewportUsableRect() {
+  const rect = els.spaceViewport?.getBoundingClientRect?.();
+  if (!rect) return null;
+  const unappliedInset = isCompactViewport()
+    ? Math.max(0, viewportBottomInsetPx() - appliedCanvasBottomPaddingPx())
+    : 0;
+  const bottom = Math.max(rect.top, rect.bottom - unappliedInset);
+  return {
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom,
+    width: rect.width,
+    height: Math.max(1, bottom - rect.top),
+  };
+}
+
+function widgetCanvasMovementBounds(widget) {
+  const board = spaceSurface();
+  const boardRect = board?.getBoundingClientRect?.();
+  if (!widget || !boardRect?.width || !boardRect?.height) return null;
+  return {
+    minLeft: SPACE_CANVAS_EDGE_INSET_PX,
+    minTop: SPACE_CANVAS_EDGE_INSET_PX,
+    maxLeft: Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.width - widget.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX),
+    maxTop: Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.height - widget.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX),
+    width: boardRect.width,
+    height: boardRect.height,
+  };
 }
 
 function canvasLayout() {
@@ -1179,13 +1332,13 @@ function canvasDensity() {
 }
 
 function canvasContentExtent() {
-  return Object.entries(state.widgetLayout || {}).reduce((extent, [key, layout]) => {
-    if (key === "__canvas" || !layout || typeof layout !== "object") return extent;
+  return Object.entries(state.widgetLayout || {}).reduce((current, [key, layout]) => {
+    if (key === "__canvas" || !layout || typeof layout !== "object") return current;
     const appLeft = Number(layout.appLeftPx);
     const appTop = Number(layout.appTopPx);
-    if (Number.isFinite(appLeft)) extent.width = Math.max(extent.width, appLeft + 96);
-    if (Number.isFinite(appTop)) extent.height = Math.max(extent.height, appTop + 104);
-    return extent;
+    if (Number.isFinite(appLeft)) current.width = Math.max(current.width, appLeft + 96);
+    if (Number.isFinite(appTop)) current.height = Math.max(current.height, appTop + 104);
+    return current;
   }, { width: 0, height: 0 });
 }
 
@@ -1193,7 +1346,7 @@ function applyCanvasDensity(options = {}) {
   const board = spaceSurface();
   const viewport = els.spaceViewport;
   if (!board || !viewport) return;
-  const rect = viewport.getBoundingClientRect();
+  const rect = spaceViewportUsableRect() || viewport.getBoundingClientRect();
   const density = canvasDensity();
   const extent = canvasContentExtent();
   board.style.width = `${Math.max(rect.width, Math.round(rect.width * density), extent.width)}px`;
@@ -1214,8 +1367,8 @@ function spaceMapMetrics() {
     viewport,
     boardRect,
     viewportRect,
-    width: Math.max(viewport.scrollWidth, viewport.clientWidth, board.scrollWidth, board.offsetWidth, boardRect.width),
-    height: Math.max(viewport.scrollHeight, viewport.clientHeight, board.scrollHeight, board.offsetHeight, boardRect.height),
+    width: Math.max(viewport.clientWidth, board.offsetWidth, boardRect.width),
+    height: Math.max(viewport.clientHeight, board.offsetHeight, boardRect.height),
   };
 }
 
@@ -1223,7 +1376,8 @@ function visibleBoardRect(metrics) {
   const left = clamp(metrics.viewport.scrollLeft, 0, metrics.width);
   const top = clamp(metrics.viewport.scrollTop, 0, metrics.height);
   const right = clamp(left + metrics.viewport.clientWidth, left, metrics.width);
-  const bottom = clamp(top + metrics.viewport.clientHeight, top, metrics.height);
+  const visibleHeight = (spaceViewportUsableRect()?.height || metrics.viewport.clientHeight);
+  const bottom = clamp(top + visibleHeight, top, metrics.height);
   return {
     left,
     top,
@@ -1239,8 +1393,8 @@ function miniMapPlotMetrics(metrics, mapWidth, mapHeight) {
   const scale = Math.min(availableWidth / Math.max(1, metrics.width), availableHeight / Math.max(1, metrics.height));
   const boardWidth = Math.max(1, Math.round(metrics.width * scale));
   const boardHeight = Math.max(1, Math.round(metrics.height * scale));
-  const width = Math.max(1, boardWidth - 2);
-  const height = Math.max(1, boardHeight - 2);
+  const width = Math.max(1, boardWidth);
+  const height = Math.max(1, boardHeight);
   return {
     boardWidth,
     boardHeight,
@@ -1269,6 +1423,29 @@ function miniMapProjectRect(rect, plot, minWidth = 1, minHeight = 1) {
     width,
     height,
   };
+}
+
+function miniMapPixelRect(rect, plot) {
+  const maxWidth = Math.max(1, Math.round(plot.width));
+  const maxHeight = Math.max(1, Math.round(plot.height));
+  const left = clamp(Math.floor(rect.left), 0, Math.max(0, maxWidth - 1));
+  const top = clamp(Math.floor(rect.top), 0, Math.max(0, maxHeight - 1));
+  const right = clamp(Math.ceil(rect.left + rect.width), left + 1, maxWidth);
+  const bottom = clamp(Math.ceil(rect.top + rect.height), top + 1, maxHeight);
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  };
+}
+
+function applyMiniMapPixelRect(element, rect, plot) {
+  const pixels = miniMapPixelRect(rect, plot);
+  element.style.left = `${pixels.left}px`;
+  element.style.top = `${pixels.top}px`;
+  element.style.width = `${pixels.width}px`;
+  element.style.height = `${pixels.height}px`;
 }
 
 function boardRectContains(outer, inner, tolerance = 0.75) {
@@ -1401,20 +1578,14 @@ function renderSpaceMiniMap() {
     const projected = entity.kind.includes("app")
       ? miniMapProjectAppMarker(entity, plot, visibleRect)
       : miniMapProjectRect(entity, plot, 5, 4);
-    item.style.left = `${Math.round(projected.left)}px`;
-    item.style.top = `${Math.round(projected.top)}px`;
-    item.style.width = `${Math.round(projected.width)}px`;
-    item.style.height = `${Math.round(projected.height)}px`;
+    applyMiniMapPixelRect(item, projected, plot);
     boardLayer.append(item);
   });
 
   const viewportBox = document.createElement("span");
   viewportBox.className = "space-minimap-viewport";
   const viewportRect = miniMapProjectRect(visibleRect, plot);
-  viewportBox.style.left = `${Math.round(viewportRect.left)}px`;
-  viewportBox.style.top = `${Math.round(viewportRect.top)}px`;
-  viewportBox.style.width = `${Math.round(viewportRect.width)}px`;
-  viewportBox.style.height = `${Math.round(viewportRect.height)}px`;
+  applyMiniMapPixelRect(viewportBox, viewportRect, plot);
   boardLayer.append(viewportBox);
   map.replaceChildren(boardLayer);
 }
@@ -1430,6 +1601,73 @@ function updateSpaceNavigationHints() {
   viewport.classList.toggle("can-scroll-right", canRight);
   viewport.classList.toggle("can-scroll-up", canUp);
   viewport.classList.toggle("can-scroll-down", canDown);
+}
+
+function stopSpacePanMomentum() {
+  if (state.spacePanMomentumFrame) cancelAnimationFrame(state.spacePanMomentumFrame);
+  state.spacePanMomentumFrame = 0;
+  state.spacePanMomentumActive = false;
+  els.spaceViewport?.classList.remove("is-momentum");
+}
+
+function weightedSpacePanVelocity(samples) {
+  const recent = samples.filter((sample) => sample.dt > 0);
+  const totalMs = recent.reduce((total, sample) => total + sample.dt, 0);
+  if (!totalMs) return { x: 0, y: 0 };
+  const weighted = recent.reduce((velocity, sample) => {
+    const weight = sample.dt / totalMs;
+    velocity.x += sample.vx * weight;
+    velocity.y += sample.vy * weight;
+    return velocity;
+  }, { x: 0, y: 0 });
+  return {
+    x: clamp(weighted.x * SPACE_PAN_MOMENTUM_LAUNCH_MULTIPLIER, -SPACE_PAN_MOMENTUM_MAX_VELOCITY, SPACE_PAN_MOMENTUM_MAX_VELOCITY),
+    y: clamp(weighted.y * SPACE_PAN_MOMENTUM_LAUNCH_MULTIPLIER, -SPACE_PAN_MOMENTUM_MAX_VELOCITY, SPACE_PAN_MOMENTUM_MAX_VELOCITY),
+  };
+}
+
+function startSpacePanMomentum(viewport, velocityX, velocityY, canPanX, canPanY) {
+  stopSpacePanMomentum();
+  let vx = Number.isFinite(velocityX) ? velocityX : 0;
+  let vy = Number.isFinite(velocityY) ? velocityY : 0;
+  if (!canPanX) vx = 0;
+  if (!canPanY) vy = 0;
+  let previous = performance.now();
+  const started = previous;
+  const tick = (now) => {
+    const dt = Math.min(32, Math.max(1, now - previous));
+    previous = now;
+    const previousLeft = viewport.scrollLeft;
+    const previousTop = viewport.scrollTop;
+    if (canPanX) viewport.scrollLeft -= vx * dt;
+    if (canPanY) viewport.scrollTop -= vy * dt;
+    updateSpaceNavigationHints();
+    renderSpaceMiniMap();
+    const atHorizontalEdge = !canPanX || viewport.scrollLeft <= 0 || viewport.scrollLeft + viewport.clientWidth >= viewport.scrollWidth - 1;
+    const atVerticalEdge = !canPanY || viewport.scrollTop <= 0 || viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 1;
+    const movedX = !canPanX || Math.abs(viewport.scrollLeft - previousLeft) > 0.2;
+    const movedY = !canPanY || Math.abs(viewport.scrollTop - previousTop) > 0.2;
+    const decay = Math.pow(SPACE_PAN_MOMENTUM_FRICTION, dt / SPACE_PAN_MOMENTUM_FRAME_MS);
+    vx *= decay;
+    vy *= decay;
+    const speed = Math.hypot(canPanX && !atHorizontalEdge ? vx : 0, canPanY && !atVerticalEdge ? vy : 0);
+    if (speed < SPACE_PAN_MOMENTUM_MIN_VELOCITY || now - started > SPACE_PAN_MOMENTUM_MAX_MS || (!movedX && !movedY)) {
+      state.spacePanMomentumFrame = 0;
+      state.spacePanMomentumActive = false;
+      viewport.classList.remove("is-momentum");
+      setSpaceMiniMapVisible(false);
+      return;
+    }
+    state.spacePanMomentumFrame = requestAnimationFrame(tick);
+  };
+  if (Math.hypot(vx, vy) < SPACE_PAN_MOMENTUM_MIN_VELOCITY) {
+    setSpaceMiniMapVisible(false);
+    return;
+  }
+  state.spacePanMomentumActive = true;
+  viewport.classList.add("is-momentum");
+  setSpaceMiniMapVisible(true);
+  state.spacePanMomentumFrame = requestAnimationFrame(tick);
 }
 
 function spaceMiniMapCanRender(metrics = spaceMapMetrics()) {
@@ -1569,7 +1807,6 @@ function mappedAppIdsForPanel(panel = state.activePanel) {
 }
 
 function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
-  if (widgetId === "devices") return activeSpaceStorageId(panel) === "home";
   if (Object.prototype.hasOwnProperty.call(FIXED_WIDGET_LAYOUT, widgetId)) return true;
   return mappedAppIdsForPanel(panel).has(widgetId);
 }
@@ -1661,7 +1898,6 @@ function setWidgetMinimized(widgetId, minimized) {
   }
   renderAppLayer();
   syncResourcePolling();
-  if (!minimized && widgetId === "devices") void loadDevices("open").catch(() => {});
   recordUserEvent(minimized ? "workspace.widget_minimized" : "workspace.widget_opened", {
     target: `widget:${widgetId}`,
     summary: `${minimized ? "Minimized" : "Opened"} ${widgetId}`,
@@ -1677,7 +1913,7 @@ function toggleWidgetMaximized(widgetId) {
   layout.maximized = !layout.maximized;
   if (layout.maximized) layout.minimized = false;
   saveWidgetLayout();
-  applyWidgetState(widget);
+  applyWidgetLayout();
   renderAppLayer();
   bringWidgetForward(widget);
   if (widgetId === "browser-proof") scheduleBrowserResizeSync();
@@ -1686,6 +1922,41 @@ function toggleWidgetMaximized(widgetId) {
     summary: `${layout.maximized ? "Maximized" : "Restored"} ${widgetId}`,
     data: { widget_id: widgetId, maximized: layout.maximized },
   });
+}
+
+function clearWidgetGeometryStyle(widget) {
+  widget.style.left = "";
+  widget.style.top = "";
+  widget.style.right = "";
+  widget.style.bottom = "";
+  widget.style.width = "";
+  widget.style.height = "";
+  widget.style.aspectRatio = "";
+}
+
+function applyMaximizedWidgetLayout(widget) {
+  if (!widget) return false;
+  widget.style.left = "";
+  widget.style.top = "";
+  widget.style.right = "auto";
+  widget.style.bottom = "auto";
+  widget.style.width = "";
+  widget.style.height = "";
+  widget.style.aspectRatio = "auto";
+  widget.style.zIndex = "";
+  return true;
+}
+
+function applyMaximizedWidgetLayouts() {
+  document.querySelectorAll(".widget.is-maximized[data-widget-id]").forEach((widget) => {
+    applyMaximizedWidgetLayout(widget);
+  });
+  syncMaximizedShellState();
+}
+
+function syncMaximizedShellState() {
+  const hasMaximizedWidget = Boolean(document.querySelector(".widget.is-maximized[data-widget-id]:not([hidden])"));
+  els.app?.classList.toggle("has-maximized-widget", hasMaximizedWidget);
 }
 
 function applyWidgetState(widget) {
@@ -1702,6 +1973,8 @@ function applyWidgetState(widget) {
 }
 
 function spaceApps(panel = state.activePanel) {
+  if (!isAdminUser() && isAdminPanel(panel)) return [];
+  if (!isAdminUser() && isUserSpacePanel(panel)) return [];
   const mappedIds = mappedAppIdsForPanel(panel);
   const spaceId = activeSpaceStorageId(panel);
   return SPACE_APP_DEFINITIONS.filter((app) => {
@@ -1720,8 +1993,12 @@ function appRect(left, top, width, height) {
 }
 
 function appRectsOverlap(a, b) {
-  const gap = APP_ICON_GRID_PX;
-  return a.left < b.right + gap && a.right + gap > b.left && a.top < b.bottom + gap && a.bottom + gap > b.top;
+  const gap = 0;
+  const tolerance = APP_ICON_COLLISION_TOLERANCE_PX;
+  return a.left < b.right + gap - tolerance
+    && a.right + gap > b.left + tolerance
+    && a.top < b.bottom + gap - tolerance
+    && a.bottom + gap > b.top + tolerance;
 }
 
 function appPositionFits(left, top, width, height, occupied) {
@@ -1730,22 +2007,22 @@ function appPositionFits(left, top, width, height, occupied) {
 }
 
 function nearestOpenAppPosition(desiredLeft, desiredTop, width, height, maxLeft, maxTop, occupied) {
-  const startLeft = clamp(snapToAppGrid(desiredLeft), 8, maxLeft);
-  const startTop = clamp(snapToAppGrid(desiredTop), 8, maxTop);
+  const startLeft = clamp(Math.round(Number(desiredLeft || 0)), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+  const startTop = clamp(Math.round(Number(desiredTop || 0)), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
   if (appPositionFits(startLeft, startTop, width, height, occupied)) return { left: startLeft, top: startTop };
   const maxRadius = Math.max(maxLeft, maxTop) + width + height;
   for (let radius = APP_ICON_GRID_PX; radius <= maxRadius; radius += APP_ICON_GRID_PX) {
     for (let dx = -radius; dx <= radius; dx += APP_ICON_GRID_PX) {
       for (const dy of [-radius, radius]) {
-        const left = clamp(snapToAppGrid(startLeft + dx), 8, maxLeft);
-        const top = clamp(snapToAppGrid(startTop + dy), 8, maxTop);
+        const left = clamp(snapToAppGrid(startLeft + dx), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+        const top = clamp(snapToAppGrid(startTop + dy), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
         if (appPositionFits(left, top, width, height, occupied)) return { left, top };
       }
     }
     for (let dy = -radius + APP_ICON_GRID_PX; dy <= radius - APP_ICON_GRID_PX; dy += APP_ICON_GRID_PX) {
       for (const dx of [-radius, radius]) {
-        const left = clamp(snapToAppGrid(startLeft + dx), 8, maxLeft);
-        const top = clamp(snapToAppGrid(startTop + dy), 8, maxTop);
+        const left = clamp(snapToAppGrid(startLeft + dx), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+        const top = clamp(snapToAppGrid(startTop + dy), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
         if (appPositionFits(left, top, width, height, occupied)) return { left, top };
       }
     }
@@ -1802,14 +2079,27 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
   const defaultTopPct = 0.12 + Math.floor(index / 3) * 0.14;
   const buttonWidth = button.offsetWidth || 62;
   const buttonHeight = button.offsetHeight || 70;
-  const maxLeftStable = Math.max(8, viewportRect.width - buttonWidth - 8);
-  const maxTopStable = Math.max(8, viewportRect.height - buttonHeight - 8);
+  const maxLeftStable = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - buttonWidth - SPACE_CANVAS_EDGE_INSET_PX);
+  const maxTopStable = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - buttonHeight - SPACE_CANVAS_EDGE_INSET_PX);
+  const hasSavedPixelPosition = Number.isFinite(layout.appLeftPx) && Number.isFinite(layout.appTopPx);
   const desiredLeft = Number.isFinite(layout.appLeftPx)
     ? layout.appLeftPx
     : (Number.isFinite(layout.appLeftPct) ? layout.appLeftPct : defaultLeftPct) * viewportRect.width;
   const desiredTop = Number.isFinite(layout.appTopPx)
     ? layout.appTopPx
     : (Number.isFinite(layout.appTopPct) ? layout.appTopPct : defaultTopPct) * viewportRect.height;
+  if (layout.appOrganized === true || hasSavedPixelPosition) {
+    const left = clamp(Math.round(Number(desiredLeft || 0)), 0, Math.max(0, viewportRect.width - buttonWidth));
+    const top = clamp(Math.round(Number(desiredTop || 0)), 0, Math.max(0, viewportRect.height - buttonHeight));
+    layout.appLeftPx = left;
+    layout.appTopPx = top;
+    layout.appLeftPct = left / Math.max(1, viewportRect.width);
+    layout.appTopPct = top / Math.max(1, viewportRect.height);
+    button.style.left = `${left}px`;
+    button.style.top = `${top}px`;
+    occupied.push(appRect(left, top, buttonWidth, buttonHeight));
+    return;
+  }
   const { left, top } = nearestOpenAppPosition(desiredLeft, desiredTop, buttonWidth, buttonHeight, maxLeftStable, maxTopStable, occupied);
   layout.appLeftPx = left;
   layout.appTopPx = top;
@@ -1836,6 +2126,74 @@ function renderAppLayer() {
   els.appLayer.replaceChildren(...nodes);
 }
 
+function organizerTopInsetPx(board) {
+  const boardRect = board?.getBoundingClientRect?.();
+  const title = els.spaceOrganizeButton?.closest?.(".space-title") || els.spaceLabel?.closest?.(".space-title");
+  const titleRect = title?.getBoundingClientRect?.();
+  if (!boardRect || !titleRect) return APP_ORGANIZER_TOP_INSET_PX;
+  const titleBottom = Math.ceil(titleRect.bottom - boardRect.top + 4);
+  const homeCoreModuleList = activeSpaceStorageId() === "home" ? board.querySelector(".home-actions") : null;
+  const homeCoreModuleRect = homeCoreModuleList?.getBoundingClientRect?.();
+  const homeCoreModuleBottom = homeCoreModuleRect && homeCoreModuleRect.width && homeCoreModuleRect.height
+    ? Math.ceil(homeCoreModuleRect.bottom - boardRect.top + 4)
+    : 0;
+  return Math.max(APP_ORGANIZER_TOP_INSET_PX, titleBottom, homeCoreModuleBottom);
+}
+
+function organizeSpaceAppsInViewport() {
+  const viewport = els.spaceViewport;
+  const board = spaceSurface();
+  if (!viewport || !board || !els.appLayer) return;
+  const apps = spaceApps();
+  if (!apps.length) return;
+  const buttonWidth = 62;
+  const buttonHeight = 70;
+  const gapX = 0;
+  const gapY = 0;
+  const leftInset = 0;
+  const topInset = organizerTopInsetPx(board);
+  const boardWidth = Math.max(buttonWidth, board.offsetWidth || viewport.clientWidth);
+  const boardHeight = Math.max(buttonHeight, board.offsetHeight || viewport.clientHeight);
+  const visibleColumns = Math.max(1, Math.floor((Math.max(buttonWidth, viewport.clientWidth - leftInset) + gapX) / (buttonWidth + gapX)));
+  const boardColumns = Math.max(1, Math.floor((boardWidth + gapX) / (buttonWidth + gapX)));
+  const columns = Math.min(apps.length, visibleColumns, boardColumns);
+  const rows = Math.ceil(apps.length / columns);
+  const blockWidth = columns * buttonWidth + Math.max(0, columns - 1) * gapX;
+  const blockHeight = rows * buttonHeight + Math.max(0, rows - 1) * gapY;
+  const rawStartLeft = snapToAppGrid(viewport.scrollLeft + leftInset);
+  const startLeft = clamp(rawStartLeft, 0, Math.max(0, boardWidth - blockWidth));
+  const rawStartTop = snapToAppGrid(viewport.scrollTop + topInset);
+  const startTop = clamp(rawStartTop, 0, Math.max(0, boardHeight - blockHeight));
+  apps.forEach((app, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const layout = widgetLayout(app.id);
+    const left = Math.round(startLeft + column * (buttonWidth + gapX));
+    const top = Math.round(startTop + row * (buttonHeight + gapY));
+    layout.appLeftPx = left;
+    layout.appTopPx = top;
+    layout.appOrganized = true;
+    layout.appLeftPct = left / Math.max(1, board.offsetWidth || viewport.scrollWidth || viewport.clientWidth);
+    layout.appTopPct = top / Math.max(1, board.offsetHeight || viewport.scrollHeight || viewport.clientHeight);
+  });
+  const overflowRows = Math.max(0, rows - Math.max(1, Math.floor((viewport.clientHeight - topInset + gapY) / (buttonHeight + gapY))));
+  renderAppLayer();
+  renderSpaceMiniMap();
+  saveWidgetLayout();
+  recordUserEvent("workspace.apps_organized", {
+    target: `space:${activeSpaceStorageId()}`,
+    summary: `Organized ${activeSpaceStorageId()} apps`,
+    data: {
+      space_id: activeSpaceStorageId(),
+      app_count: apps.length,
+      columns,
+      overflow_rows: overflowRows,
+      scroll_left: viewport.scrollLeft,
+      scroll_top: viewport.scrollTop,
+    },
+  });
+}
+
 function installAppButtonDragging(button, appId) {
   const viewport = spaceSurface();
   if (!viewport) return;
@@ -1857,10 +2215,10 @@ function installAppButtonDragging(button, appId) {
     }
     const move = (moveEvent) => {
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
-      const maxLeft = Math.max(0, viewportRect.width - button.offsetWidth - 8);
-      const maxTop = Math.max(0, viewportRect.height - button.offsetHeight - 8);
-      const left = clamp(startLeft + moveEvent.clientX - startX, 8, maxLeft);
-      const top = clamp(startTop + moveEvent.clientY - startY, 8, maxTop);
+      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
+      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
+      const left = clamp(startLeft + moveEvent.clientX - startX, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+      const top = clamp(startTop + moveEvent.clientY - startY, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
       button.style.left = `${left}px`;
       button.style.top = `${top}px`;
     };
@@ -1875,9 +2233,14 @@ function installAppButtonDragging(button, appId) {
       } catch {
         // Capture may already be released by the browser.
       }
+      if (!moved) {
+        button.style.left = `${startLeft}px`;
+        button.style.top = `${startTop}px`;
+        return;
+      }
       const layout = widgetLayout(appId);
-      const maxLeft = Math.max(8, viewportRect.width - button.offsetWidth - 8);
-      const maxTop = Math.max(8, viewportRect.height - button.offsetHeight - 8);
+      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
+      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
       const occupied = Array.from(els.appLayer.querySelectorAll(".space-app-button"))
         .filter((item) => item !== button)
         .map((item) => {
@@ -1897,22 +2260,21 @@ function installAppButtonDragging(button, appId) {
       button.style.top = `${top}px`;
       layout.appLeftPx = left;
       layout.appTopPx = top;
+      layout.appOrganized = false;
       layout.appLeftPct = left / Math.max(1, viewportRect.width);
       layout.appTopPct = top / Math.max(1, viewportRect.height);
       saveWidgetLayout();
-      if (moved) {
-        button.dataset.dragMoved = "true";
-        window.setTimeout(() => {
-          button.dataset.dragMoved = "";
-        }, 0);
-        endEvent.preventDefault();
-        endEvent.stopPropagation();
-        recordUserEvent("workspace.app_moved", {
-          target: `app:${appId}`,
-          summary: `Moved app ${appId}`,
-          data: { app_id: appId, left_pct: layout.appLeftPct, top_pct: layout.appTopPct },
-        });
-      }
+      button.dataset.dragMoved = "true";
+      window.setTimeout(() => {
+        button.dataset.dragMoved = "";
+      }, 0);
+      endEvent.preventDefault();
+      endEvent.stopPropagation();
+      recordUserEvent("workspace.app_moved", {
+        target: `app:${appId}`,
+        summary: `Moved app ${appId}`,
+        data: { app_id: appId, left_pct: layout.appLeftPct, top_pct: layout.appTopPct },
+      });
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", end, { once: true });
@@ -1954,6 +2316,7 @@ function applyWidgetLayout() {
   applyWidgetChromeAll();
   const viewportRect = viewport.getBoundingClientRect();
   let maxZ = state.widgetZ;
+  let containedAny = false;
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
     const id = widget.dataset.widgetId;
     if (!widgetAvailableInPanel(id)) {
@@ -1965,10 +2328,16 @@ function applyWidgetLayout() {
     const layout = widgetLayout(id);
     applyWidgetState(widget);
     applyWidgetChrome(widget);
-    if (layout?.maximized || layout?.minimized) {
+    if (layout?.maximized) {
+      applyMaximizedWidgetLayout(widget);
       maxZ = Math.max(maxZ, Number(layout?.z || widget.style.zIndex || 4));
       return;
     }
+    if (layout?.minimized) {
+      maxZ = Math.max(maxZ, Number(layout?.z || widget.style.zIndex || 4));
+      return;
+    }
+    clearWidgetGeometryStyle(widget);
     const bounds = widgetDimensionBounds(id, viewportRect);
     const widthPx = Number(layout?.widthPx);
     const heightPx = Number(layout?.heightPx);
@@ -2000,10 +2369,10 @@ function applyWidgetLayout() {
     const leftPct = Number(layout?.leftPct);
     const topPct = Number(layout?.topPct);
     if ((Number.isFinite(leftPx) || Number.isFinite(leftPct)) && (Number.isFinite(topPx) || Number.isFinite(topPct))) {
-      const maxLeft = Math.max(0, viewportRect.width - widget.offsetWidth - 8);
-      const maxTop = Math.max(0, viewportRect.height - widget.offsetHeight - 8);
-      const left = clamp(Number.isFinite(leftPx) ? leftPx : leftPct * viewportRect.width, 8, maxLeft);
-      const top = clamp(Number.isFinite(topPx) ? topPx : topPct * viewportRect.height, 8, maxTop);
+      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - widget.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
+      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - widget.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
+      const left = clamp(Number.isFinite(leftPx) ? leftPx : leftPct * viewportRect.width, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+      const top = clamp(Number.isFinite(topPx) ? topPx : topPct * viewportRect.height, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
       widget.style.left = `${left}px`;
       widget.style.top = `${top}px`;
       widget.style.right = "auto";
@@ -2013,18 +2382,21 @@ function applyWidgetLayout() {
       layout.leftPct = left / Math.max(1, viewportRect.width);
       layout.topPct = top / Math.max(1, viewportRect.height);
     }
+    const contained = containWidgetInCanvasBounds(widget, id);
+    containedAny = containedAny || contained.changed;
     const restoredZ = clamp(Number(layout?.z || widget.style.zIndex || 4), 4, WIDGET_Z_LIMIT);
     if (layout?.z || widget.style.zIndex) widget.style.zIndex = String(restoredZ);
     maxZ = Math.max(maxZ, restoredZ);
   });
   state.widgetZ = maxZ;
+  if (containedAny) saveWidgetLayout();
+  syncMaximizedShellState();
   renderAppLayer();
   syncResourcePolling();
-  if (devicesWidgetIsOpen() && !state.devices.length && !state.devicesBusy) void loadDevices("open").catch(() => {});
 }
 
 function fitWidgetToVisibleViewport(widget, widgetId, options = {}) {
-  const visibleRect = els.spaceViewport?.getBoundingClientRect?.();
+  const visibleRect = spaceViewportUsableRect();
   if (!widget || !visibleRect?.width || !visibleRect?.height) return { changed: false };
   const bounds = widgetDimensionBounds(widgetId, visibleRect);
   const rect = widget.getBoundingClientRect();
@@ -2058,9 +2430,38 @@ function fitWidgetToVisibleViewport(widget, widgetId, options = {}) {
   return { changed, height: nextHeight, width: nextWidth };
 }
 
+function containWidgetInCanvasBounds(widget, widgetId, options = {}) {
+  const board = spaceSurface();
+  const boardRect = board?.getBoundingClientRect?.();
+  if (!widget || !boardRect?.width || !boardRect?.height) return { changed: false };
+  const rect = widget.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return { changed: false };
+  const updateLayout = options.updateLayout !== false;
+  const layout = updateLayout ? widgetLayout(widgetId) : null;
+  const left = rect.left - boardRect.left;
+  const top = rect.top - boardRect.top;
+  const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.width - rect.width - SPACE_CANVAS_EDGE_INSET_PX);
+  const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.height - rect.height - SPACE_CANVAS_EDGE_INSET_PX);
+  const nextLeft = clamp(left, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+  const nextTop = clamp(top, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
+  const changed = Math.abs(nextLeft - left) > 0.5 || Math.abs(nextTop - top) > 0.5;
+  if (!changed) return { changed: false, left: Math.round(left), top: Math.round(top) };
+  widget.style.left = `${Math.round(nextLeft)}px`;
+  widget.style.top = `${Math.round(nextTop)}px`;
+  widget.style.right = "auto";
+  widget.style.bottom = "auto";
+  if (layout) {
+    layout.leftPx = Math.round(nextLeft);
+    layout.topPx = Math.round(nextTop);
+    layout.leftPct = nextLeft / Math.max(1, boardRect.width);
+    layout.topPct = nextTop / Math.max(1, boardRect.height);
+  }
+  return { changed: true, left: Math.round(nextLeft), top: Math.round(nextTop) };
+}
+
 function ensureOpenedWidgetContained(widget, widgetId) {
   if (!widget || widget.hidden || widget.classList.contains("is-minimized") || widget.classList.contains("is-maximized")) return;
-  const visibleRect = els.spaceViewport?.getBoundingClientRect?.();
+  const visibleRect = spaceViewportUsableRect();
   if (!visibleRect) return;
   const fit = fitWidgetToVisibleViewport(widget, widgetId);
   const rect = widget.getBoundingClientRect();
@@ -2080,12 +2481,12 @@ function ensureOpenedWidgetContained(widget, widgetId) {
     return;
   }
   const layout = widgetLayout(widgetId);
-  layout.leftPx = 8;
-  layout.topPx = 8;
+  layout.leftPx = SPACE_CANVAS_EDGE_INSET_PX;
+  layout.topPx = SPACE_CANVAS_EDGE_INSET_PX;
   layout.leftPct = 0;
   layout.topPct = 0;
-  widget.style.left = "8px";
-  widget.style.top = "8px";
+  widget.style.left = `${SPACE_CANVAS_EDGE_INSET_PX}px`;
+  widget.style.top = `${SPACE_CANVAS_EDGE_INSET_PX}px`;
   widget.style.right = "auto";
   widget.style.bottom = "auto";
   els.spaceViewport.scrollLeft = 0;
@@ -2094,7 +2495,7 @@ function ensureOpenedWidgetContained(widget, widgetId) {
   recordUserEvent("workspace.widget_initial_point_applied", {
     target: `widget:${widgetId}`,
     summary: `Moved ${widgetId} to the canvas initial point`,
-    data: { widget_id: widgetId, left_px: 8, top_px: 8, width_px: fit.changed ? fit.width : Math.round(rect.width), height_px: fit.changed ? fit.height : Math.round(rect.height) },
+    data: { widget_id: widgetId, left_px: SPACE_CANVAS_EDGE_INSET_PX, top_px: SPACE_CANVAS_EDGE_INSET_PX, width_px: fit.changed ? fit.width : Math.round(rect.width), height_px: fit.changed ? fit.height : Math.round(rect.height) },
   });
 }
 
@@ -2189,10 +2590,10 @@ function installWidgetDragging() {
       });
 
       const move = (moveEvent) => {
-        const maxLeft = Math.max(0, viewportRect.width - widget.offsetWidth - 8);
-        const maxTop = Math.max(0, viewportRect.height - widget.offsetHeight - 8);
-        const left = clamp(startLeft + moveEvent.clientX - startX, 8, maxLeft);
-        const top = clamp(startTop + moveEvent.clientY - startY, 8, maxTop);
+        const bounds = widgetCanvasMovementBounds(widget);
+        if (!bounds) return;
+        const left = clamp(startLeft + moveEvent.clientX - startX, bounds.minLeft, bounds.maxLeft);
+        const top = clamp(startTop + moveEvent.clientY - startY, bounds.minTop, bounds.maxTop);
         widget.style.left = `${left}px`;
         widget.style.top = `${top}px`;
       };
@@ -2210,12 +2611,13 @@ function installWidgetDragging() {
         }
         const finalLeft = parseFloat(widget.style.left || "0");
         const finalTop = parseFloat(widget.style.top || "0");
+        const bounds = widgetCanvasMovementBounds(widget) || { width: viewportRect.width, height: viewportRect.height };
         state.widgetLayout[widget.dataset.widgetId] = {
           ...(state.widgetLayout[widget.dataset.widgetId] || {}),
           leftPx: Math.round(finalLeft),
           topPx: Math.round(finalTop),
-          leftPct: finalLeft / Math.max(1, viewportRect.width),
-          topPct: finalTop / Math.max(1, viewportRect.height),
+          leftPct: finalLeft / Math.max(1, bounds.width),
+          topPct: finalTop / Math.max(1, bounds.height),
           z: Number(widget.style.zIndex || 4),
         };
         saveWidgetLayout();
@@ -2273,9 +2675,10 @@ function installWidgetResizing() {
       event.stopPropagation();
 
       const viewportRect = viewport.getBoundingClientRect();
+      const boardRect = viewportRect;
       const widgetRect = widget.getBoundingClientRect();
-      const startLeft = widgetRect.left - viewportRect.left;
-      const startTop = widgetRect.top - viewportRect.top;
+      const startLeft = widgetRect.left - boardRect.left;
+      const startTop = widgetRect.top - boardRect.top;
       const startWidth = widgetRect.width;
       const startHeight = widgetRect.height;
       const startX = event.clientX;
@@ -2309,8 +2712,9 @@ function installWidgetResizing() {
 
       const move = (moveEvent) => {
         moveEvent.preventDefault();
-        const maxWidth = Math.min(bounds.maxWidth, Math.max(minWidth, viewportRect.width - startLeft - 8));
-        const maxHeight = Math.min(bounds.maxHeight, Math.max(minHeight, viewportRect.height - startTop - 8));
+        const movementBounds = widgetCanvasMovementBounds(widget);
+        const maxWidth = Math.min(bounds.maxWidth, Math.max(minWidth, (movementBounds?.maxLeft || viewportRect.width) - startLeft + widget.offsetWidth));
+        const maxHeight = Math.min(bounds.maxHeight, Math.max(minHeight, (movementBounds?.maxTop || viewportRect.height) - startTop + widget.offsetHeight));
         const width = clamp(startWidth + moveEvent.clientX - startX, minWidth, maxWidth);
         const height = clamp(startHeight + moveEvent.clientY - startY, minHeight, maxHeight);
         widget.style.width = `${width}px`;
@@ -2398,6 +2802,10 @@ function publicUserInitial(user) {
   return label.slice(0, 1).toUpperCase();
 }
 
+function isAdminUser(user = state.authUser) {
+  return String(user?.role || "").toLowerCase() === "admin";
+}
+
 function setLoginOpen(open) {
   const nextOpen = Boolean(open);
   if (!nextOpen && closeUiNavigationLayer("login-popover")) return;
@@ -2422,7 +2830,7 @@ function renderAuthGate() {
   els.app.dataset.auth = authenticated ? "ready" : state.authChecked && state.googleClientId ? "locked" : "checking";
   if (els.authGateCopy) {
     els.authGateCopy.textContent = state.googleClientId
-      ? "Sign in as admin to open wasm-agent."
+      ? "Sign in with an allowlisted Google account to open wasm-agent."
       : "Google login is not configured on this server yet.";
   }
   if (els.authGateMessage) {
@@ -2472,8 +2880,8 @@ function renderLogin() {
   if (els.logoutButton) els.logoutButton.hidden = !user;
   if (els.loginMessage) {
     els.loginMessage.textContent = user
-      ? `Account ${user.id}`
-      : state.loginMessage || (state.googleClientId ? "Only the configured admin account is allowed." : "Google client ID missing");
+      ? `${cleanText(user.role, "user")} account ${user.id}`
+      : state.loginMessage || (state.googleClientId ? "Only allowlisted accounts can enter." : "Google client ID missing");
   }
   renderAuthGate();
 }
@@ -2655,6 +3063,10 @@ async function logout() {
     window.clearInterval(state.resourceInterval);
     state.resourceInterval = 0;
   }
+  if (state.securityInterval) {
+    window.clearInterval(state.securityInterval);
+    state.securityInterval = 0;
+  }
   if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
   renderAuthGate();
@@ -2828,6 +3240,11 @@ function uiNavigationId() {
   return raw && typeof raw === "object" ? String(raw.uiLayerId || "") : "";
 }
 
+function uiNavigationLocationKey(url = window.location.href) {
+  const nextUrl = url instanceof URL ? url : new URL(url, window.location.href);
+  return `${nextUrl.pathname}${nextUrl.search}`;
+}
+
 function uiNavigationState(entry = state.uiNavigationStack.at(-1) || null) {
   const raw = window.history.state && typeof window.history.state === "object" ? window.history.state : {};
   return {
@@ -2835,6 +3252,7 @@ function uiNavigationState(entry = state.uiNavigationStack.at(-1) || null) {
     panel: state.activePanel,
     uiLayer: entry?.layer || "",
     uiLayerId: entry?.id || "",
+    uiLayerLocationKey: entry?.locationKey || "",
   };
 }
 
@@ -2864,14 +3282,15 @@ function pushUiNavigationLayer(layer, close, options = {}) {
   state.uiNavigationStack
     .filter((entry) => entry.layer === layer)
     .forEach((entry) => closeUiNavigationEntry(entry, { invoke: false }));
+  const url = uiNavigationUrl();
+  if (options.chat) url.searchParams.set(CHAT_QUERY_KEY, CHAT_QUERY_VALUE);
   const entry = {
     id: `${layer}:${++state.uiNavigationSeq}`,
     layer,
     close,
+    locationKey: uiNavigationLocationKey(url),
   };
   state.uiNavigationStack.push(entry);
-  const url = uiNavigationUrl();
-  if (options.chat) url.searchParams.set(CHAT_QUERY_KEY, CHAT_QUERY_VALUE);
   window.history.pushState(uiNavigationState(entry), "", url);
   return entry;
 }
@@ -2879,12 +3298,14 @@ function pushUiNavigationLayer(layer, close, options = {}) {
 function closeUiNavigationLayer(layer, options = {}) {
   const entry = [...state.uiNavigationStack].reverse().find((item) => item.layer === layer);
   if (!entry) return false;
-  if (!options.skipHistory && uiNavigationId() === entry.id) {
+  const currentEntryIsLayer = uiNavigationId() === entry.id;
+  const currentEntryIsOriginalLayerUrl = currentEntryIsLayer && entry.locationKey === uiNavigationLocationKey();
+  if (!options.skipHistory && currentEntryIsOriginalLayerUrl) {
     window.history.back();
     return true;
   }
   closeUiNavigationEntry(entry);
-  if (options.replaceHistory || uiNavigationId() === entry.id) replaceCurrentUiNavigationState();
+  if (options.replaceHistory || currentEntryIsLayer) replaceCurrentUiNavigationState();
   return true;
 }
 
@@ -2906,6 +3327,7 @@ function syncUiNavigationWithHistory() {
         id: targetId,
         layer: "agent-chat",
         close: () => setAgentOpen(false),
+        locationKey: String(raw.uiLayerLocationKey || uiNavigationLocationKey()),
       };
       state.uiNavigationStack.push(entry);
       setAgentOpen(true);
@@ -5126,8 +5548,8 @@ function defaultAgentLayout() {
   const appRect = appViewportRect();
   const { width, height } = agentAvatarSize();
   return {
-    left: appRect.right - width - 22,
-    top: appRect.bottom - height - 22,
+    left: appRect.right - width - AGENT_AVATAR_VIEWPORT_GAP_PX,
+    top: appRect.bottom - height - AGENT_AVATAR_VIEWPORT_GAP_PX,
   };
 }
 
@@ -5142,7 +5564,7 @@ function agentAvatarSize() {
 function clampAgentLayout(layout) {
   const appRect = appViewportRect();
   const { width, height } = agentAvatarSize();
-  const gap = 8;
+  const gap = AGENT_AVATAR_VIEWPORT_GAP_PX;
   const fallback = defaultAgentLayout();
   const fallbackLeft = fallback.left;
   const fallbackTop = fallback.top;
@@ -5180,8 +5602,8 @@ function placeAgentPanel() {
   if (!overlay || !panel) return;
   syncAgentAppBounds();
   if (!state.agentOpen) return;
-  const gap = 8;
-  const avatarGap = 14;
+  const gap = AGENT_PANEL_VIEWPORT_GAP_PX;
+  const avatarGap = AGENT_PANEL_AVATAR_GAP_PX;
   const appRect = appViewportRect();
   const overlayRect = overlay.getBoundingClientRect();
   const panelRect = panel.getBoundingClientRect();
@@ -5215,11 +5637,11 @@ function placeAgentPanel() {
 function moveAgentGroupFromPanelRect(panelLeft, panelTop, panelWidth, panelHeight) {
   const appRect = appViewportRect();
   const avatar = agentAvatarSize();
-  const gap = 14;
-  const minPanelLeft = appRect.left + 8;
-  const maxPanelLeft = Math.max(minPanelLeft, appRect.right - panelWidth - 8);
-  const minPanelTop = appRect.top + 8;
-  const maxPanelTop = Math.max(minPanelTop, appRect.bottom - panelHeight - 8);
+  const gap = AGENT_PANEL_AVATAR_GAP_PX;
+  const minPanelLeft = appRect.left + AGENT_PANEL_VIEWPORT_GAP_PX;
+  const maxPanelLeft = Math.max(minPanelLeft, appRect.right - panelWidth - AGENT_PANEL_VIEWPORT_GAP_PX);
+  const minPanelTop = appRect.top + AGENT_PANEL_VIEWPORT_GAP_PX;
+  const maxPanelTop = Math.max(minPanelTop, appRect.bottom - panelHeight - AGENT_PANEL_VIEWPORT_GAP_PX);
   const left = clamp(panelLeft, minPanelLeft, maxPanelLeft);
   const top = clamp(panelTop, minPanelTop, maxPanelTop);
   const avatarOnRight = left + panelWidth / 2 < appRect.left + appRect.width / 2;
@@ -5649,6 +6071,15 @@ function taskPreview(task) {
 }
 
 async function refresh(origin = "auto") {
+  if (!isAdminUser()) {
+    state.bridgeReady = false;
+    state.nodes = [];
+    state.tasks = [];
+    state.securityLoop = null;
+    state.securityFindings = [];
+    renderAll();
+    return;
+  }
   const startedAt = performance.now();
   try {
     await bridgeJson("/health");
@@ -5667,6 +6098,7 @@ async function refresh(origin = "auto") {
     if (state.nodes.length && !state.nodes.some((node) => node.id === state.selectedNode)) {
       state.selectedNode = state.nodes[0].id;
     }
+    await loadSecurityLoop(origin).catch(() => {});
     renderAll();
     if (origin !== "auto") {
       recordUserEvent("workspace.refresh_finished", {
@@ -5679,6 +6111,7 @@ async function refresh(origin = "auto") {
   } catch (error) {
     state.bridgeReady = false;
     state.lastError = error.message;
+    await loadSecurityLoop(origin).catch(() => {});
     renderAll();
     recordUserEvent("workspace.refresh_error", {
       target: "bridge",
@@ -5689,6 +6122,7 @@ async function refresh(origin = "auto") {
   } finally {
     renderAppLayer();
     syncResourcePolling();
+    syncSecurityPolling();
   }
 }
 
@@ -5723,6 +6157,28 @@ function resourcesWidgetIsOpen() {
   return Boolean(state.authUser && widget && !widget.hidden && !widget.classList.contains("is-minimized"));
 }
 
+function securityLoopIsOpen() {
+  const widget = widgetById("security-loop");
+  return Boolean(isAdminUser() && (
+    state.activePanel === "security"
+    || (widget && !widget.hidden && !widget.classList.contains("is-minimized"))
+  ));
+}
+
+function syncSecurityPolling() {
+  if (securityLoopIsOpen()) {
+    if (!state.securityInterval) {
+      state.securityInterval = window.setInterval(() => void loadSecurityLoop("poll").catch(() => {}), SECURITY_POLL_MS);
+      void loadSecurityLoop("open").catch(() => {});
+    }
+    return;
+  }
+  if (state.securityInterval) {
+    window.clearInterval(state.securityInterval);
+    state.securityInterval = 0;
+  }
+}
+
 function syncResourcePolling() {
   if (resourcesWidgetIsOpen()) {
     if (!state.resourceInterval) {
@@ -5737,9 +6193,8 @@ function syncResourcePolling() {
   }
 }
 
-function devicesWidgetIsOpen() {
-  const widget = widgetById("devices");
-  return Boolean(activeSpaceStorageId() === "home" && state.authUser && widget && !widget.hidden && !widget.classList.contains("is-minimized"));
+function devicesPageIsOpen() {
+  return Boolean(els.devicesModal && !els.devicesModal.hidden);
 }
 
 async function loadDevices(origin = "auto") {
@@ -6427,6 +6882,335 @@ function renderTasks() {
   );
 }
 
+function sortedSecurityFindings() {
+  return [...state.securityFindings].sort((a, b) => {
+    const scoreDelta = Number(b.score || 0) - Number(a.score || 0);
+    if (scoreDelta) return scoreDelta;
+    return String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || ""));
+  });
+}
+
+function securityStatusClass(status) {
+  const value = String(status || "new").toLowerCase();
+  if (["accepted", "mitigating", "new", "triaged"].includes(value)) return "warn";
+  if (value === "resolved") return "ok";
+  if (value === "rejected") return "muted";
+  return "";
+}
+
+function securitySeverityClass(severity) {
+  const value = String(severity || "low").toLowerCase();
+  if (value === "critical") return "critical";
+  if (value === "high") return "high";
+  if (value === "medium") return "medium";
+  return "low";
+}
+
+function renderSecuritySummary(container, loop = state.securityLoop) {
+  if (!container) return;
+  if (!isAdminUser()) {
+    container.replaceChildren(metric("Security", "Admin only"));
+    return;
+  }
+  if (!loop) {
+    container.replaceChildren(
+      metric("Attack", "hermes-attack"),
+      metric("Defense", "hermes-defense"),
+      metric("Findings", "pending"),
+      metric("Freshness", "unknown")
+    );
+    return;
+  }
+  container.replaceChildren(
+    metric("Attack", loop.actors?.attack || "hermes-attack"),
+    metric("Defense", loop.actors?.defense || "hermes-defense"),
+    metric("Open", String(loop.open_count || 0)),
+    metric("Critical", String(loop.critical_count || 0)),
+    metric("Accepted", String(loop.accepted_count || 0)),
+    metric("Rejected", String(loop.rejected_count || 0)),
+    metric("Top score", String(loop.top_score || 0)),
+    metric("Latest", loop.latest_run_at ? loop.latest_run_at.replace("T", " ").replace("Z", "") : "none"),
+    metric("Freshness", loop.stale ? "stale" : "live")
+  );
+}
+
+function securityFindingById(findingId) {
+  return state.securityFindings.find((finding) => finding.id === findingId) || null;
+}
+
+function securityFindingCard(finding, options = {}) {
+  const card = document.createElement("article");
+  card.className = `security-finding-card ${securitySeverityClass(finding.severity)}`;
+  const head = document.createElement("div");
+  head.className = "security-finding-head";
+  const title = document.createElement("strong");
+  title.textContent = finding.summary || "Security finding";
+  const score = document.createElement("span");
+  score.className = "security-score";
+  score.textContent = String(finding.score || 0).padStart(2, "0");
+  head.append(title, score);
+
+  const meta = document.createElement("div");
+  meta.className = "security-finding-meta";
+  [
+    finding.updated_at || finding.created_at || "time",
+    finding.source_node || "hermes-attack",
+    finding.target_surface || "surface",
+    finding.category || "probe",
+    finding.severity || "low",
+    `conf ${Math.round(Number(finding.confidence || 0) * 100)}%`,
+  ].forEach((value) => {
+    const chip = document.createElement("span");
+    chip.textContent = value;
+    meta.append(chip);
+  });
+
+  const status = document.createElement("span");
+  status.className = `security-status ${securityStatusClass(finding.status)}`;
+  status.textContent = finding.status || "new";
+  meta.append(status);
+
+  const preview = document.createElement("p");
+  preview.className = "security-evidence-preview";
+  preview.textContent = truncateText(finding.evidence_preview || "No evidence preview supplied.", 220);
+
+  const proposed = document.createElement("p");
+  proposed.className = "security-proposed-action";
+  proposed.textContent = truncateText(finding.proposed_action || "No proposed defense action yet.", 220);
+
+  const actions = document.createElement("div");
+  actions.className = "security-actions";
+  const actionButtons = [
+    ["accepted", "Accept"],
+    ["rejected", "Reject"],
+    ["resolved", "Mark Resolved"],
+    ["watching", "Watch"],
+  ];
+  actionButtons.forEach(([nextStatus, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.disabled = state.securityBusy || finding.status === nextStatus;
+    if (nextStatus === "rejected") button.className = "danger";
+    button.addEventListener("click", () => void decideSecurityFinding(finding.id, nextStatus));
+    actions.append(button);
+  });
+
+  const evidenceButton = document.createElement("button");
+  evidenceButton.type = "button";
+  evidenceButton.textContent = "Open Evidence";
+  evidenceButton.addEventListener("click", () => openSecurityEvidenceModal(finding.id));
+  actions.append(evidenceButton);
+
+  if (finding.task_id) {
+    const taskButton = document.createElement("button");
+    taskButton.type = "button";
+    taskButton.textContent = "Open Task";
+    taskButton.addEventListener("click", () => openSecurityTask(finding.task_id));
+    actions.append(taskButton);
+  }
+
+  const defenseButton = document.createElement("button");
+  defenseButton.type = "button";
+  defenseButton.textContent = options.compact ? "Ask Defense" : "Ask hermes-defense";
+  defenseButton.addEventListener("click", () => askDefenseForFinding(finding, "mitigation"));
+  actions.append(defenseButton);
+
+  const planButton = document.createElement("button");
+  planButton.type = "button";
+  planButton.textContent = "Create PR Plan";
+  planButton.addEventListener("click", () => askDefenseForFinding(finding, "pr-plan"));
+  actions.append(planButton);
+
+  card.append(head, meta, preview, proposed, actions);
+  return card;
+}
+
+function renderSecurityQueue(container, options = {}) {
+  if (!container) return;
+  if (!isAdminUser()) {
+    container.replaceChildren();
+    return;
+  }
+  const findings = sortedSecurityFindings().slice(0, options.limit || 20);
+  if (!findings.length) {
+    const empty = document.createElement("article");
+    empty.className = "security-finding-card empty";
+    empty.innerHTML = "<strong>No findings yet</strong><p class=\"security-evidence-preview\">hermes-attack has not reported bounded probe findings.</p>";
+    container.replaceChildren(empty);
+    return;
+  }
+  container.replaceChildren(...findings.map((finding) => securityFindingCard(finding, options)));
+}
+
+function renderSecurityLoop() {
+  const loop = state.securityLoop;
+  const statusText = !isAdminUser()
+    ? "admin"
+    : loop?.stale
+      ? "stale"
+      : loop
+        ? "live"
+        : "pending";
+  [els.securityLoopStatus, els.securityPanelStatus].forEach((chip) => {
+    if (!chip) return;
+    chip.textContent = statusText;
+    chip.className = `widget-chip ${statusText === "live" ? "ok" : statusText === "stale" ? "err" : ""}`;
+  });
+  renderSecuritySummary(els.securityLoopSummary, loop);
+  renderSecuritySummary(els.securityPanelSummary, loop);
+  renderSecurityQueue(els.securityFindingQueue, { limit: 12, compact: false });
+  renderSecurityQueue(els.securityPanelFindingQueue, { limit: 20, compact: true });
+}
+
+function renderRoleVisibility() {
+  const admin = isAdminUser();
+  document.querySelectorAll(".panel-tab").forEach((button) => {
+    const panel = button.dataset.panel;
+    if (!panel) return;
+    button.hidden = isAdminPanel(panel) && !admin;
+  });
+  document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
+    const widgetId = widget.dataset.widgetId || "";
+    const adminOnlyWidget = ["resources", "topology", "studio", "browser-proof", "drop-to-copy", "security-loop", "timeline"].includes(widgetId);
+    if (adminOnlyWidget && !admin) widget.hidden = true;
+  });
+  if (!admin && isAdminPanel(state.activePanel)) setPanel("home");
+}
+
+async function loadSecurityLoop(origin = "auto") {
+  if (!isAdminUser() || state.securityBusy) return;
+  state.securityBusy = true;
+  if (els.securityRefreshButton) els.securityRefreshButton.disabled = true;
+  try {
+    const payload = await fetchJson("/security-loop/findings?limit=80", { timeoutMs: 10000 });
+    state.securityLoop = payload.security_loop || null;
+    state.securityFindings = Array.isArray(payload.findings) ? payload.findings : [];
+    renderSecurityLoop();
+    if (origin === "manual") {
+      recordUserEvent("security.loop_loaded", {
+        target: "security-loop",
+        summary: `Loaded ${state.securityFindings.length} security findings`,
+        data: { finding_count: state.securityFindings.length, open_count: state.securityLoop?.open_count || 0 },
+      });
+    }
+  } catch (error) {
+    state.lastError = error.message;
+    renderSecurityLoop();
+    if (origin !== "auto") {
+      recordUserEvent("security.loop_error", {
+        target: "security-loop",
+        summary: error.message,
+        data: { error: error.message },
+      });
+    }
+  } finally {
+    state.securityBusy = false;
+    if (els.securityRefreshButton) els.securityRefreshButton.disabled = false;
+  }
+}
+
+async function decideSecurityFinding(findingId, status) {
+  if (!SECURITY_FINDING_STATUSES.includes(status)) return;
+  state.securityBusy = true;
+  renderSecurityLoop();
+  try {
+    const payload = await fetchJson(`/security-loop/findings/${encodeURIComponent(findingId)}/decision`, {
+      method: "POST",
+      timeoutMs: 10000,
+      body: { status },
+    });
+    const nextFinding = payload.finding;
+    state.securityLoop = payload.security_loop || state.securityLoop;
+    state.securityFindings = state.securityFindings.map((finding) => finding.id === findingId ? nextFinding : finding);
+    renderSecurityLoop();
+    if (state.securityEvidenceId === findingId) renderSecurityEvidenceModal();
+    recordUserEvent("security.finding_decided", {
+      target: `security:${findingId}`,
+      summary: `${status} ${findingId}`,
+      data: { finding_id: findingId, status },
+    });
+  } catch (error) {
+    state.lastError = error.message;
+  } finally {
+    state.securityBusy = false;
+    renderSecurityLoop();
+  }
+}
+
+function openSecurityEvidenceModal(findingId) {
+  state.securityEvidenceId = findingId;
+  renderSecurityEvidenceModal();
+  if (els.securityEvidenceModal) els.securityEvidenceModal.hidden = false;
+  pushUiNavigationLayer("security-evidence-modal", () => closeSecurityEvidenceModal({ skipHistory: true, skipStack: true }));
+}
+
+function closeSecurityEvidenceModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("security-evidence-modal")) return;
+  if (els.securityEvidenceModal) els.securityEvidenceModal.hidden = true;
+  state.securityEvidenceId = "";
+  if (!options.skipStack) {
+    closeUiNavigationLayer("security-evidence-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function renderSecurityEvidenceModal() {
+  const finding = securityFindingById(state.securityEvidenceId);
+  if (!finding || !els.securityEvidenceBody) return;
+  if (els.securityEvidenceTitle) els.securityEvidenceTitle.textContent = finding.summary || finding.id;
+  if (els.securityEvidenceMeta) {
+    els.securityEvidenceMeta.textContent = `${finding.source_node || "hermes-attack"} / ${finding.target_surface || "surface"} / score ${finding.score || 0}`;
+  }
+  const rows = [
+    ["Status", finding.status],
+    ["Severity", finding.severity],
+    ["Confidence", `${Math.round(Number(finding.confidence || 0) * 100)}%`],
+    ["Exploitability", `${Math.round(Number(finding.exploitability || 0) * 100)}%`],
+    ["Category", finding.category],
+    ["Task", finding.task_id || "none"],
+    ["Proposed Action", finding.proposed_action || "none"],
+    ["Decision", finding.decision_reason || "none"],
+  ];
+  const grid = document.createElement("div");
+  grid.className = "security-evidence-grid";
+  rows.forEach(([label, value]) => {
+    grid.append(metric(label, cleanText(value, "-")));
+  });
+  const evidence = document.createElement("pre");
+  evidence.textContent = finding.evidence_preview || "No evidence preview supplied.";
+  els.securityEvidenceBody.replaceChildren(grid, evidence);
+}
+
+function openSecurityTask(taskId) {
+  if (!taskId) return;
+  setPanel("tasks");
+  const task = state.tasks.find((item) => String(item.task_id || item.id || "") === String(taskId));
+  renderTaskOutput(task || { task_id: taskId, status: "linked", message: "Refresh Tasks to load this bridge task." });
+}
+
+function defensePromptForFinding(finding, mode) {
+  const ask = mode === "pr-plan"
+    ? "Create a PR-ready remediation plan with tests, rollback, and exact files to inspect. Do not apply changes."
+    : "Propose a bounded mitigation, verification steps, and any tests needed. Do not apply changes.";
+  return [
+    ask,
+    "",
+    `Finding: ${finding.summary || finding.id}`,
+    `Severity: ${finding.severity}; confidence: ${finding.confidence}; score: ${finding.score}`,
+    `Surface: ${finding.target_surface}; category: ${finding.category}`,
+    `Evidence: ${finding.evidence_preview || "none"}`,
+    `Proposed action: ${finding.proposed_action || "none"}`,
+  ].join("\n");
+}
+
+function askDefenseForFinding(finding, mode = "mitigation") {
+  if (!finding) return;
+  setPanel("tasks");
+  state.selectedNode = "hermes-defense";
+  renderTaskOutput({ action: mode, status: "submitting", node_id: "hermes-defense", finding_id: finding.id });
+  void submitTask(defensePromptForFinding(finding, mode));
+}
+
 function renderTaskOutput(task = null) {
   if (task) {
     els.taskOutput.textContent = JSON.stringify(task, null, 2);
@@ -6801,11 +7585,11 @@ function scheduleBrowserResizeSync() {
 }
 
 function renderAll() {
+  renderRoleVisibility();
   els.runtimeLabel.textContent = state.wasmReady ? `wasm add=${state.wasm.add(19, 23)}` : "wasm pending";
   renderSpaceTitle();
   renderSpaceLauncher();
   renderAppLayer();
-  renderHomeStorage();
   renderResources();
   renderDevices();
   renderTopology();
@@ -6815,23 +7599,14 @@ function renderAll() {
   renderTimeline();
   renderObservation();
   renderModules();
+  renderSecurityLoop();
   renderAgentNodeSelect();
   renderLogin();
+  renderRoleVisibility();
+  syncSecurityPolling();
   if (els.configModal && !els.configModal.hidden) renderConfigModal();
   if (els.artifactsModal && !els.artifactsModal.hidden) renderArtifacts();
-}
-
-function renderHomeStorage() {
-  if (!els.homeStorageBadge) return;
-  const storage = state.userStorage;
-  if (!storage) {
-    els.homeStorageBadge.textContent = "Storage pending";
-    return;
-  }
-  const used = bytes(storage.used_bytes);
-  els.homeStorageBadge.textContent = storage.unlimited
-    ? `Storage ${used} / unlimited`
-    : `Storage ${used} / ${bytes(storage.limit_bytes)} (${cleanText(storage.percent, "0")}%)`;
+  if (devicesPageIsOpen()) renderDevices();
 }
 
 function artifactCard(title, meta, items = []) {
@@ -6887,9 +7662,7 @@ function mainDeviceCanEvolve() {
 
 function ensureMainDeviceForEvolution(action = "evolve artifacts") {
   if (mainDeviceCanEvolve()) return true;
-  setPanel("home");
-  setWidgetMinimized("devices", false);
-  renderDevices();
+  openDevicesModal({ origin: "main-device-required", skipHistory: true });
   recordUserEvent("account.main_device_required", {
     target: "devices",
     summary: "Main device is offline",
@@ -6901,6 +7674,28 @@ function ensureMainDeviceForEvolution(action = "evolve artifacts") {
   });
   window.alert("Main device is offline. Switch the main device from Connected Devices to evolve artifacts here.");
   return false;
+}
+
+function openDevicesModal(options = {}) {
+  setPanel("home", { updateUrl: false });
+  renderDevices();
+  if (els.devicesModal) els.devicesModal.hidden = false;
+  if (!options.skipHistory) {
+    pushUiNavigationLayer("devices-modal", () => closeDevicesModal({ skipHistory: true, skipStack: true }));
+  }
+  if (!state.devicesBusy) void loadDevices(options.origin || "devices-page").catch(() => {});
+  recordUserEvent("home.devices_opened", {
+    target: "home:devices",
+    summary: "Opened connected devices",
+  });
+}
+
+function closeDevicesModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("devices-modal")) return;
+  if (els.devicesModal) els.devicesModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("devices-modal", { skipHistory: true, replaceHistory: true });
+  }
 }
 
 function openArtifactsModal() {
@@ -7301,7 +8096,8 @@ function confirmDeleteSpace() {
 
 function renderSpaceLauncher() {
   if (!els.spaceLauncherList) return;
-  els.spaceLauncherList.replaceChildren(createAdminLauncherButton());
+  els.spaceLauncherList.replaceChildren();
+  if (isAdminUser()) els.spaceLauncherList.append(createAdminLauncherButton());
   state.userSpaces.forEach((space, index) => {
     const button = document.createElement("button");
     button.className = "space-launch-button";
@@ -7348,6 +8144,10 @@ function createUserSpace() {
   });
 }
 
+function openHomeDevices() {
+  openDevicesModal({ origin: "home-action" });
+}
+
 function openConfigModal() {
   renderConfigModal();
   if (els.configModal) els.configModal.hidden = false;
@@ -7370,17 +8170,13 @@ function closeConfigModal(options = {}) {
 function renderConfigModal() {
   if (!els.configDetails) return;
   renderSpaceTitle();
-  const enabledModules = MODULE_DEFINITIONS.filter((module) => isModuleEnabled(module.id)).length;
   const timelineButton = document.createElement("button");
   timelineButton.className = "config-action-button";
   timelineButton.type = "button";
   timelineButton.textContent = "Timeline";
   timelineButton.addEventListener("click", openTimelineFromConfig);
   const rows = [
-    metric("Account", state.authUser ? publicUserLabel(state.authUser) : "Guest"),
     renderStorageControl(),
-    metric("Spaces", String(state.userSpaces.length)),
-    metric("Modules", `${enabledModules}/${MODULE_DEFINITIONS.length} on`),
     renderCanvasDensityControl(),
   ];
   if (activeSpaceStorageId() === "home") rows.push(renderLauncherPreferenceControl());
@@ -7388,20 +8184,70 @@ function renderConfigModal() {
   els.configDetails.replaceChildren(...rows);
 }
 
+function storagePercent(used, total) {
+  const usedNumber = Number(used);
+  const totalNumber = Number(total);
+  if (!Number.isFinite(usedNumber) || !Number.isFinite(totalNumber) || totalNumber <= 0) return 0;
+  return clamp(Math.round((usedNumber / totalNumber) * 100), 0, 100);
+}
+
+function cloudStorageMetric() {
+  const storage = state.userStorage || {};
+  const cloud = storage.cloud && typeof storage.cloud === "object" ? storage.cloud : {};
+  const total = Number(cloud.quota_bytes || cloud.total_bytes || 0);
+  const used = Number(cloud.used_bytes || 0);
+  const percent = storagePercent(used, total);
+  return {
+    used,
+    total,
+    percent,
+    usedLabel: bytes(used),
+    totalLabel: bytes(total),
+    muted: total <= 0,
+  };
+}
+
+function localStorageMetric() {
+  const estimate = state.localStorageEstimate || {};
+  const used = Number(estimate.usage || 0);
+  const total = Number(estimate.quota || 0);
+  const percent = storagePercent(used, total);
+  return {
+    used,
+    total,
+    percent,
+    usedLabel: Number.isFinite(used) ? bytes(used) : "-",
+    totalLabel: total > 0 ? bytes(total) : "browser managed",
+    muted: total <= 0,
+  };
+}
+
+function storageMetricRow(label, metric) {
+  const row = document.createElement("div");
+  row.className = `config-storage-meter${metric.muted ? " is-muted" : ""}`;
+  const line = document.createElement("div");
+  line.className = "config-storage-meter-line";
+  const title = document.createElement("strong");
+  title.textContent = `${label}:`;
+  const value = document.createElement("span");
+  value.textContent = `${metric.usedLabel}/${metric.totalLabel}`;
+  const percent = document.createElement("span");
+  percent.textContent = `${metric.percent}%`;
+  line.append(title, value, percent);
+  const bar = document.createElement("div");
+  bar.className = "config-storage-meter-bar";
+  bar.style.setProperty("--storage-progress", `${metric.percent}%`);
+  row.append(line, bar);
+  return row;
+}
+
 function renderStorageControl() {
   const wrap = document.createElement("div");
   wrap.className = "config-storage-card";
-  const storage = state.userStorage;
   const title = document.createElement("strong");
   title.textContent = "Storage";
-  const detail = document.createElement("span");
-  if (!storage) {
-    detail.textContent = "pending";
-  } else {
-    const quota = storage.unlimited ? "unlimited" : bytes(storage.limit_bytes);
-    const available = Number.isFinite(Number(storage.available_bytes)) ? ` / ${bytes(storage.available_bytes)} local free` : "";
-    detail.textContent = `${bytes(storage.used_bytes)} / ${quota}${available}`;
-  }
+  const cloud = storageMetricRow("Cloud", cloudStorageMetric());
+  const local = storageMetricRow("Local", localStorageMetric());
   const actions = document.createElement("div");
   actions.className = "config-storage-actions";
   const exportButton = document.createElement("button");
@@ -7421,7 +8267,7 @@ function renderStorageControl() {
   });
   importButton.addEventListener("click", () => input.click());
   actions.append(exportButton, importButton, input);
-  wrap.append(title, detail, actions);
+  wrap.append(title, cloud, local, actions);
   return wrap;
 }
 
@@ -7485,7 +8331,6 @@ async function importStorageBackup(file) {
     saveLocalSpaceWidgetLayouts();
     applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
-    renderHomeStorage();
     renderConfigModal();
     recordUserEvent("storage.imported", {
       target: "storage",
@@ -7504,11 +8349,21 @@ async function importStorageBackup(file) {
 function renderCanvasDensityControl() {
   const wrap = document.createElement("div");
   wrap.className = "config-density-control";
+  const head = document.createElement("div");
+  head.className = "config-density-head";
   const label = document.createElement("strong");
   label.textContent = "Space density";
   const value = document.createElement("span");
   value.className = "config-density-value";
   value.textContent = `${canvasDensity().toFixed(2).replace(/\.00$/, "")}x`;
+  const input = document.createElement("input");
+  input.className = "config-density-input";
+  input.type = "number";
+  input.min = "1";
+  input.max = String(CANVAS_DENSITY_MAX);
+  input.step = "0.25";
+  input.inputMode = "decimal";
+  input.setAttribute("aria-label", "Space density value");
   const dial = document.createElement("div");
   dial.className = "config-density-line";
   dial.tabIndex = 0;
@@ -7521,9 +8376,11 @@ function renderCanvasDensityControl() {
   knob.className = "config-density-line-knob";
   knob.setAttribute("aria-hidden", "true");
   dial.append(knob);
-  wrap.append(label, value, dial);
+  head.append(label, value, input);
+  wrap.append(head, dial);
   updateDensityDial(wrap);
   installDensityDial(wrap, dial);
+  installDensityInput(wrap, input);
   return wrap;
 }
 
@@ -7535,6 +8392,8 @@ function updateDensityDial(control = null) {
   wrap.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
   const value = wrap.querySelector(".config-density-value");
   if (value) value.textContent = `${density.toFixed(2).replace(/\.00$/, "")}x`;
+  const input = wrap.querySelector(".config-density-input");
+  if (input && document.activeElement !== input) input.value = String(density);
   const dial = wrap.querySelector(".config-density-line");
   if (dial) {
     dial.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
@@ -7547,6 +8406,22 @@ function densityFromDialPointer(dial, event) {
   const rect = dial.getBoundingClientRect();
   const progress = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
   return normalizedCanvasDensity(1 + progress * (CANVAS_DENSITY_MAX - 1));
+}
+
+function installDensityInput(wrap, input) {
+  if (!wrap || !input) return;
+  const commit = (origin = "input") => {
+    const next = normalizedCanvasDensity(input.value);
+    freezeWidgetPixelLayout();
+    setCanvasDensityValue(next, { control: wrap, origin, force: true });
+  };
+  input.addEventListener("change", () => commit("input"));
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    input.blur();
+    commit("input-enter");
+  });
 }
 
 function installDensityDial(wrap, dial) {
@@ -7625,7 +8500,7 @@ function renderLauncherPreferenceControl() {
   const label = document.createElement("label");
   label.className = "config-toggle-row";
   const text = document.createElement("span");
-  text.innerHTML = "<strong>Mobile launcher position</strong><small>Use top bar on narrow screens</small>";
+  text.innerHTML = "<strong>Navbar position</strong><small>Use top bar on narrow screens</small>";
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = Boolean(state.mobileLauncherTop);
@@ -7735,6 +8610,7 @@ function setPanel(panel, options = {}) {
   renderSpaceTitle();
   renderSpaceLauncher();
   syncResourcePolling();
+  syncSecurityPolling();
   if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
   if (options.updateUrl !== false) syncPanelUrl(panel);
   if (previous !== panel) {
@@ -8213,20 +9089,26 @@ function installSpacePanning() {
   if (!viewport) return;
   viewport.addEventListener("scroll", () => {
     updateSpaceNavigationHints();
+    applyMaximizedWidgetLayouts();
     renderSpaceMiniMap();
   }, { passive: true });
   updateSpaceNavigationHints();
   viewport.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
-    if (event.target.closest?.(".widget,.space-app-button,.home-actions,.space-config-button,.modal-backdrop,.agent-overlay")) return;
+    if (event.target.closest?.(".widget,.space-app-button,.home-actions,.space-title,.space-config-button,.modal-backdrop,.agent-overlay")) return;
     const canPanX = viewport.scrollWidth > viewport.clientWidth + 1;
     const canPanY = viewport.scrollHeight > viewport.clientHeight + 1;
     if (!canPanX && !canPanY) return;
     event.preventDefault();
+    stopSpacePanMomentum();
     const startX = event.clientX;
     const startY = event.clientY;
     const startLeft = viewport.scrollLeft;
     const startTop = viewport.scrollTop;
+    let lastX = startX;
+    let lastY = startY;
+    let lastTime = performance.now();
+    let velocitySamples = [];
     let moved = false;
     let finished = false;
     viewport.classList.add("is-panning");
@@ -8239,6 +9121,19 @@ function installSpacePanning() {
     const move = (moveEvent) => {
       moveEvent.preventDefault();
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
+      const now = performance.now();
+      const dt = Math.max(1, now - lastTime);
+      const velocityX = (moveEvent.clientX - lastX) / dt;
+      const velocityY = (moveEvent.clientY - lastY) / dt;
+      velocitySamples.push({ vx: velocityX, vy: velocityY, dt });
+      let sampleWindowMs = 0;
+      velocitySamples = velocitySamples.reverse().filter((sample) => {
+        sampleWindowMs += sample.dt;
+        return sampleWindowMs <= SPACE_PAN_MOMENTUM_SAMPLE_MS;
+      }).reverse();
+      lastX = moveEvent.clientX;
+      lastY = moveEvent.clientY;
+      lastTime = now;
       if (canPanX) viewport.scrollLeft = startLeft - (moveEvent.clientX - startX);
       if (canPanY) viewport.scrollTop = startTop - (moveEvent.clientY - startY);
       updateSpaceNavigationHints();
@@ -8249,7 +9144,6 @@ function installSpacePanning() {
       finished = true;
       viewport.classList.remove("is-panning");
       renderSpaceMiniMap();
-      setSpaceMiniMapVisible(false);
       viewport.removeEventListener("pointermove", move);
       viewport.removeEventListener("pointerup", end);
       viewport.removeEventListener("pointercancel", end);
@@ -8264,11 +9158,25 @@ function installSpacePanning() {
       if (moved) {
         endEvent.preventDefault();
         endEvent.stopPropagation();
+        const releaseIdleMs = performance.now() - lastTime;
+        const releaseVelocity = releaseIdleMs > SPACE_PAN_MOMENTUM_SAMPLE_MS
+          ? { x: 0, y: 0 }
+          : weightedSpacePanVelocity(velocitySamples);
+        startSpacePanMomentum(viewport, releaseVelocity.x, releaseVelocity.y, canPanX, canPanY);
         recordUserEvent("workspace.canvas_panned", {
           target: `space:${activeSpaceStorageId()}`,
           summary: `Panned ${activeSpaceStorageId()} canvas`,
-          data: { scroll_left: viewport.scrollLeft, scroll_top: viewport.scrollTop },
+          data: {
+            scroll_left: viewport.scrollLeft,
+            scroll_top: viewport.scrollTop,
+            release_velocity_x: releaseVelocity.x,
+            release_velocity_y: releaseVelocity.y,
+            release_idle_ms: releaseIdleMs,
+            momentum: state.spacePanMomentumActive,
+          },
         });
+      } else {
+        setSpaceMiniMapVisible(false);
       }
     };
     viewport.addEventListener("pointermove", move, { passive: false });
@@ -8293,6 +9201,7 @@ function installModalBackdropDismiss(modal, close) {
 }
 
 function wireEvents() {
+  syncVisualViewportSize();
   els.app.addEventListener("click", (event) => {
     recordUserEvent("workspace.click", {
       target: summarizeEventTarget(event.target),
@@ -8320,6 +9229,15 @@ function wireEvents() {
   window.addEventListener("resize", () => hideSpaceContextMenu({ skipHistory: true, replaceHistory: true }));
   window.addEventListener("resize", () => hideNodeContextMenu({ skipHistory: true, replaceHistory: true }));
   window.addEventListener("resize", () => hideAppContextMenu({ skipHistory: true, replaceHistory: true }));
+  const refreshViewportLayout = () => {
+    syncVisualViewportSize();
+    applyCanvasDensity();
+    applyWidgetLayout();
+  };
+  window.addEventListener("resize", refreshViewportLayout);
+  window.visualViewport?.addEventListener("resize", refreshViewportLayout);
+  window.visualViewport?.addEventListener("scroll", refreshViewportLayout);
+  els.spaceOrganizeButton?.addEventListener("click", organizeSpaceAppsInViewport);
   els.spaceConfigButton?.addEventListener("click", openConfigModal);
   els.addNodeButton?.addEventListener("click", addNodeFromTopology);
   els.promptSendButton.addEventListener("click", () => {
@@ -8412,7 +9330,7 @@ function wireEvents() {
   els.timelineRefreshButton.addEventListener("click", () => void loadTimeline("manual"));
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
-  els.homeConfigButton?.addEventListener("click", openConfigModal);
+  els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
   els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
@@ -8429,6 +9347,8 @@ function wireEvents() {
   installModalBackdropDismiss(els.configModal, closeConfigModal);
   els.closeArtifactsModalButton?.addEventListener("click", closeArtifactsModal);
   installModalBackdropDismiss(els.artifactsModal, closeArtifactsModal);
+  els.closeDevicesModalButton?.addEventListener("click", closeDevicesModal);
+  installModalBackdropDismiss(els.devicesModal, closeDevicesModal);
   els.appEditForm?.addEventListener("submit", (event) => void saveAppEdit(event));
   els.resetAppEditButton?.addEventListener("click", resetAppEdit);
   els.closeAppEditModalButton?.addEventListener("click", closeAppEditModal);
@@ -8437,6 +9357,9 @@ function wireEvents() {
   els.resetNodeEditButton?.addEventListener("click", resetNodeEdit);
   els.closeNodeEditModalButton?.addEventListener("click", closeNodeEditModal);
   installModalBackdropDismiss(els.nodeEditModal, closeNodeEditModal);
+  els.securityRefreshButton?.addEventListener("click", () => void loadSecurityLoop("manual"));
+  els.closeSecurityEvidenceButton?.addEventListener("click", closeSecurityEvidenceModal);
+  installModalBackdropDismiss(els.securityEvidenceModal, closeSecurityEvidenceModal);
   els.closeHomeModulesModalButton?.addEventListener("click", closeHomeModulesModal);
   installModalBackdropDismiss(els.homeModulesModal, closeHomeModulesModal);
   els.loginButton?.addEventListener("click", (event) => {
@@ -8527,11 +9450,6 @@ function wireEvents() {
       applyWidgetLayout();
     });
     spaceResizeObserver.observe(els.spaceViewport);
-  } else {
-    window.addEventListener("resize", () => {
-      applyCanvasDensity();
-      applyWidgetLayout();
-    });
   }
   const resetAgentAfterViewportChange = () => {
     resetAgentToViewportCorner();
@@ -8579,6 +9497,7 @@ async function bootstrapAuthenticatedApp() {
   }
   await loadDevices("bootstrap");
   await loadUserSpaces();
+  await loadLocalStorageEstimate();
   await loadWasm();
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   updateAgentSendButton();

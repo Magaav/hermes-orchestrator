@@ -11,6 +11,7 @@ import math
 import mimetypes
 import os
 import queue
+import re
 import secrets
 import shutil
 import socket
@@ -56,6 +57,7 @@ DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
 DEFAULT_USER_QUOTA_BYTES = 1024 * 1024 * 1024
 DEVICE_ONLINE_WINDOW_SEC = 3 * 60
+SECURITY_LOOP_STALE_AFTER_SEC = 24 * 60 * 60
 WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
 DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
 DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_db.sqlite3"
@@ -107,6 +109,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             self._json(
                 HTTPStatus.UNAUTHORIZED,
                 {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
+            )
+            return
+        if user and requires_admin_request("GET", path) and not user_is_admin(user):
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"ok": False, "error": {"code": "admin_required", "message": "Admin access is required."}},
             )
             return
         if path == "/browser/stream":
@@ -164,7 +172,6 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                         "googleClientId": google_client_id(),
                         "googleClientIdConfigured": bool(google_client_id()),
                         "required": True,
-                        "adminEmail": admin_email_label(),
                         "userTable": "user_tb",
                     },
                     "compareWith": {
@@ -206,6 +213,22 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/security-loop/status":
+            try:
+                self._json(HTTPStatus.OK, security_loop_status(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/security-loop/findings":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                limit = int(str((query.get("limit") or ["80"])[0] or "80"))
+                self._json(HTTPStatus.OK, list_security_loop_findings(self.server, limit=limit))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except ValueError:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": {"code": "invalid_limit", "message": "limit must be a number."}})
+            return
         super().do_GET()
 
     def do_OPTIONS(self) -> None:  # noqa: N802
@@ -223,6 +246,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             self._json(
                 HTTPStatus.UNAUTHORIZED,
                 {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
+            )
+            return
+        if requires_admin_request("POST", path) and not user_is_admin(user):
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"ok": False, "error": {"code": "admin_required", "message": "Admin access is required."}},
+            )
+            return
+        if not is_public_request("POST", path) and not same_origin_post(self):
+            self._json(
+                HTTPStatus.FORBIDDEN,
+                {"ok": False, "error": {"code": "origin_rejected", "message": "POST origin does not match this wasm-agent host."}},
             )
             return
         if path == "/browser/open":
@@ -391,6 +426,31 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "spaces_error", "message": str(exc)}},
                 )
             return
+        if path == "/security-loop/findings":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_security_loop_finding(self.server, body, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "security_loop_error", "message": str(exc)}},
+                )
+            return
+        decision_match = re.fullmatch(r"/security-loop/findings/([^/]+)/decision", path)
+        if decision_match:
+            try:
+                body = self._read_json(max_bytes=128 * 1024)
+                self._json(HTTPStatus.OK, decide_security_loop_finding(self.server, decision_match.group(1), body, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "security_loop_error", "message": str(exc)}},
+                )
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Endpoint was not found")
 
     def end_headers(self) -> None:
@@ -505,6 +565,10 @@ def google_client_id() -> str:
         os.getenv("HERMES_WASM_AGENT_GOOGLE_CLIENT_ID", "").strip()
         or env_file_value("GOOGLE_LOGIN_CLIENT_ID")
     )
+
+
+def public_origin() -> str:
+    return os.getenv("HERMES_WASM_AGENT_PUBLIC_ORIGIN", "").strip().rstrip("/")
 
 
 def allowed_admin_emails() -> set[str]:
@@ -788,7 +852,8 @@ def verified_auth_user_id(value: str) -> str:
 
 def auth_cookie(user_id: str, *, max_age: int = AUTH_COOKIE_MAX_AGE_SEC) -> str:
     value = signed_auth_value(str(user_id)) if user_id else ""
-    return f"wa_uid={value}; Path=/; Max-Age={max_age}; SameSite=Lax; HttpOnly"
+    secure = " Secure;" if public_origin().lower().startswith("https://") or os.getenv("HERMES_WASM_AGENT_SECURE_COOKIES", "").lower() in {"1", "true", "yes", "on"} else ""
+    return f"wa_uid={value}; Path=/; Max-Age={max_age}; SameSite=Lax;{secure} HttpOnly"
 
 
 def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
@@ -1168,6 +1233,207 @@ def save_user_spaces(
     raise BrowserError("invalid_space_action", "Unsupported space action.")
 
 
+def security_loop_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "security-loop"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def security_loop_findings_path(server: WasmAgentServer) -> Path:
+    return security_loop_dir(server) / "findings.jsonl"
+
+
+def security_loop_current_path(server: WasmAgentServer) -> Path:
+    return security_loop_dir(server) / "findings_current.json"
+
+
+def security_loop_summary_path(server: WasmAgentServer) -> Path:
+    return security_loop_dir(server) / "summary.json"
+
+
+def security_loop_append(server: WasmAgentServer, payload: dict[str, Any]) -> None:
+    path = security_loop_findings_path(server)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
+
+
+SECURITY_LOOP_STATUSES = {"new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"}
+SECURITY_SEVERITY_WEIGHT = {"info": 5, "low": 20, "medium": 45, "high": 75, "critical": 90}
+SECURITY_SURFACE_WEIGHT = {
+    "auth": 8,
+    "bridge": 8,
+    "browser": 7,
+    "storage": 6,
+    "config": 5,
+    "service-worker": 4,
+    "ui": 2,
+}
+
+
+def security_score(severity: str, confidence: float, exploitability: float, surface: str) -> int:
+    base = SECURITY_SEVERITY_WEIGHT.get(severity, 20)
+    surface_bonus = SECURITY_SURFACE_WEIGHT.get(surface, 3)
+    confidence_bonus = max(0, min(1, confidence)) * 7
+    exploit_bonus = max(0, min(1, exploitability)) * 8
+    return max(0, min(100, round(base + surface_bonus + confidence_bonus + exploit_bonus)))
+
+
+def bounded_float(value: Any, fallback: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = fallback
+    return max(0.0, min(1.0, number))
+
+
+def security_finding_current(server: WasmAgentServer) -> dict[str, dict[str, Any]]:
+    payload = read_json_file(security_loop_current_path(server), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def write_security_finding_current(server: WasmAgentServer, current: dict[str, dict[str, Any]]) -> None:
+    write_json_file(security_loop_current_path(server), current)
+    write_json_file(security_loop_summary_path(server), security_loop_status(server, current=current)["security_loop"])
+
+
+def normalize_security_finding(raw: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    severity = str(raw.get("severity") or "low").strip().lower()
+    if severity not in SECURITY_SEVERITY_WEIGHT:
+        severity = "low"
+    status = str(raw.get("status") or "new").strip().lower()
+    if status not in SECURITY_LOOP_STATUSES:
+        status = "new"
+    confidence = bounded_float(raw.get("confidence"), 0.5)
+    exploitability = bounded_float(raw.get("exploitability"), 0.25)
+    target_surface = safe_state_id(str(raw.get("target_surface") or raw.get("surface") or "unknown"), "unknown")
+    finding_id = safe_state_id(str(raw.get("id") or raw.get("finding_id") or ""), "")
+    if not finding_id:
+        finding_id = f"finding-{uuid.uuid4().hex[:16]}"
+    reporter = {
+        "id": str((user or {}).get("id") or ""),
+        "email": str((user or {}).get("email") or ""),
+        "role": str((user or {}).get("role") or ""),
+    } if user else None
+    finding = {
+        "schema": "hermes.security_loop.finding.v1",
+        "id": finding_id,
+        "created_at": clipped(str(raw.get("created_at") or now), 40),
+        "updated_at": now,
+        "source_node": safe_state_id(str(raw.get("source_node") or "hermes-attack"), "hermes-attack"),
+        "target_surface": target_surface,
+        "category": clipped(str(raw.get("category") or "probe"), 80),
+        "severity": severity,
+        "confidence": confidence,
+        "exploitability": exploitability,
+        "score": security_score(severity, confidence, exploitability, target_surface),
+        "status": status,
+        "summary": clipped(str(raw.get("summary") or "Security finding"), 360),
+        "evidence_preview": clipped(str(raw.get("evidence_preview") or raw.get("evidence") or ""), 900),
+        "task_id": clipped(str(raw.get("task_id") or ""), 96),
+        "proposed_action": clipped(str(raw.get("proposed_action") or ""), 900),
+        "decision_reason": clipped(str(raw.get("decision_reason") or ""), 500),
+        "decided_by": str(raw.get("decided_by") or ""),
+        "decided_at": str(raw.get("decided_at") or ""),
+        "reported_by": reporter,
+    }
+    return finding
+
+
+def save_security_loop_finding(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    raw = body.get("finding") if isinstance(body.get("finding"), dict) else body
+    finding = normalize_security_finding(raw, user)
+    current = security_finding_current(server)
+    current[finding["id"]] = finding
+    security_loop_append(server, {"event": "finding_saved", "finding": finding, "recorded_at": finding["updated_at"]})
+    write_security_finding_current(server, current)
+    return {"ok": True, "finding": finding, "security_loop": security_loop_status(server, current=current)["security_loop"]}
+
+
+def decide_security_loop_finding(
+    server: WasmAgentServer,
+    finding_id: str,
+    body: dict[str, Any],
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    clean_id = safe_state_id(finding_id, "")
+    current = security_finding_current(server)
+    finding = current.get(clean_id)
+    if not finding:
+        raise BrowserError("security_finding_not_found", "Security finding was not found.", status=HTTPStatus.NOT_FOUND)
+    status = str(body.get("status") or body.get("decision") or "").strip().lower()
+    if status not in SECURITY_LOOP_STATUSES:
+        raise BrowserError("invalid_security_status", "Unsupported security finding status.")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    finding = {
+        **finding,
+        "status": status,
+        "updated_at": now,
+        "decision_reason": clipped(str(body.get("reason") or body.get("decision_reason") or ""), 500),
+        "decided_by": str((user or {}).get("email") or (user or {}).get("id") or ""),
+        "decided_at": now,
+    }
+    current[clean_id] = finding
+    security_loop_append(server, {"event": "finding_decided", "finding": finding, "recorded_at": now})
+    write_security_finding_current(server, current)
+    return {"ok": True, "finding": finding, "security_loop": security_loop_status(server, current=current)["security_loop"]}
+
+
+def list_security_loop_findings(server: WasmAgentServer, *, limit: int = 80) -> dict[str, Any]:
+    current = security_finding_current(server)
+    findings = sorted(
+        current.values(),
+        key=lambda item: (int(item.get("score") or 0), str(item.get("updated_at") or item.get("created_at") or "")),
+        reverse=True,
+    )[:max(1, min(200, limit))]
+    return {
+        "ok": True,
+        "schema": "hermes.security_loop.findings.v1",
+        "security_loop": security_loop_status(server, current=current)["security_loop"],
+        "findings": findings,
+    }
+
+
+def security_loop_status(
+    server: WasmAgentServer,
+    *,
+    current: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    findings = list((current if current is not None else security_finding_current(server)).values())
+    open_statuses = {"new", "triaged", "accepted", "mitigating", "watching"}
+    open_findings = [item for item in findings if str(item.get("status") or "") in open_statuses]
+    latest = max((str(item.get("updated_at") or item.get("created_at") or "") for item in findings), default="")
+    latest_epoch = 0.0
+    if latest:
+        try:
+            latest_epoch = time.mktime(time.strptime(latest.replace("Z", ""), "%Y-%m-%dT%H:%M:%S"))
+        except Exception:
+            latest_epoch = 0.0
+    stale = not latest_epoch or time.time() - latest_epoch > SECURITY_LOOP_STALE_AFTER_SEC
+    return {
+        "ok": True,
+        "schema": "hermes.security_loop.status.v1",
+        "security_loop": {
+            "actors": {"attack": "hermes-attack", "defense": "hermes-defense"},
+            "latest_run_at": latest,
+            "stale": stale,
+            "stale_after_sec": SECURITY_LOOP_STALE_AFTER_SEC,
+            "open_count": len(open_findings),
+            "critical_count": sum(1 for item in open_findings if item.get("severity") == "critical"),
+            "accepted_count": sum(1 for item in findings if item.get("status") == "accepted"),
+            "rejected_count": sum(1 for item in findings if item.get("status") == "rejected"),
+            "resolved_count": sum(1 for item in findings if item.get("status") == "resolved"),
+            "top_score": max((int(item.get("score") or 0) for item in open_findings), default=0),
+            "finding_count": len(findings),
+        },
+    }
+
+
 def is_public_request(method: str, path: str) -> bool:
     method = method.upper()
     if method == "OPTIONS":
@@ -1204,11 +1470,70 @@ def is_public_request(method: str, path: str) -> bool:
     return False
 
 
+def requires_admin_request(method: str, path: str) -> bool:
+    method = method.upper()
+    if path.startswith(("/bridge/", "/browser/", "/security-loop/", "/agent/", "/observation/")):
+        return True
+    if path.startswith("/timeline/"):
+        return True
+    return False
+
+
+def request_origin(handler: WasmAgentHandler) -> str:
+    return str(handler.headers.get("Origin") or "").strip().rstrip("/")
+
+
+def request_host_origin(handler: WasmAgentHandler) -> str:
+    proto = str(handler.headers.get("X-Forwarded-Proto") or "").split(",", 1)[0].strip()
+    if not proto:
+        proto = "https" if public_origin().lower().startswith("https://") else "http"
+    host = str(handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or "").split(",", 1)[0].strip()
+    return f"{proto}://{host}".rstrip("/") if host else ""
+
+
+def same_origin_post(handler: WasmAgentHandler) -> bool:
+    origin = request_origin(handler)
+    if not origin:
+        return True
+    allowed = {item for item in {public_origin(), request_host_origin(handler)} if item}
+    return origin in allowed
+
+
+def bridge_route_allowed(method: str, path: str) -> bool:
+    method = method.upper()
+    if not path.startswith("/") or path.startswith("/bridge/") or "://" in path:
+        return False
+    if method == "GET":
+        if path in {"/health", "/nodes", "/resources", "/tasks", "/capabilities"}:
+            return True
+        if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+", path):
+            return True
+        if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+/logs", path):
+            return True
+        if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+/stats", path):
+            return True
+        if re.fullmatch(r"/tasks/[A-Za-z0-9_.:-]+", path):
+            return True
+        return False
+    if method == "POST":
+        if path in {"/nodes", "/task", "/tasks", "/drop-to-copy/tasks"}:
+            return True
+        if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+/action", path):
+            return True
+        if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+/prompt", path):
+            return True
+        if re.fullmatch(r"/tasks/[A-Za-z0-9_.:-]+/stop", path):
+            return True
+    return False
+
+
 def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
     if not path.startswith("/"):
         path = f"/{path}"
-    if path.startswith("/bridge/") or "://" in path:
-        raise BrowserError("invalid_bridge_path", "Bridge proxy path is invalid.")
+    parsed = urlparse(path)
+    path_only = parsed.path or "/"
+    if not bridge_route_allowed(method, path_only):
+        raise BrowserError("bridge_route_not_allowed", "Bridge route is not allowed from wasm-agent.", status=HTTPStatus.FORBIDDEN)
     url = f"{server.bridge_url}{path}"
     data = None
     headers = {"Accept": "application/json"}

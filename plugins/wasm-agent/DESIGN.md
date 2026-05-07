@@ -4,6 +4,35 @@ This file is required context for frontend changes in `plugins/wasm-agent`.
 Read it before changing `public/index.html`, `public/styles.css`, or
 `public/app.js`.
 
+## Module Architecture Vision
+
+- `wasm-agent` should evolve as a small core runtime plus hierarchical modules,
+  not as one undifferentiated application file. The app shell is the assembled
+  mainframe: it owns boot, auth, routing, layout hydration, module registry
+  loading, and stable browser/bridge contracts. Feature behavior should be
+  expressed through modules whenever possible.
+- Core modules are the non-removable platform layer. `spaces`, `devices`,
+  `artifacts`, `config`, and `module-manager` are core because they define how
+  users enter, inspect, configure, and extend the workspace. Core modules may be
+  listed for visibility, but user controls must not disable them.
+- Modules may be hierarchical. The `spaces` module owns Home/Admin/user space
+  identity and space routing. A space can expose child modules as pages,
+  actions, apps, widgets, or widget-internal capabilities. Admin and user spaces
+  can map app/widget modules onto the canvas; Home exposes account-level core
+  modules as page actions instead of canvas apps.
+- Module boundaries should prevent accidental breakage across the tree. A
+  child module must not assume it can mutate another module's state directly.
+  Cross-module behavior should use explicit registry metadata, mapped ids,
+  events, bridge endpoints, or documented helper functions.
+- Per-instance customization should happen through plugin/module descriptors,
+  mappings, local state, and runtime data. The shared core mainframe should stay
+  small, performance-conscious, and reusable across all wasm-agent instances,
+  while each instance remains free to arrange spaces, plugins, modules, and
+  state for its own workflow.
+- Runtime and per-user state must stay outside module firmware folders. Module
+  code describes capability and UI contracts; browser local storage, `state/`,
+  and future sync/export systems own mutable state.
+
 ## Shell Layout
 
 - The global launcher is a left rail by default. On narrow/mobile widths, Home
@@ -18,11 +47,14 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - The shell itself must not scroll. The launcher is fixed to the viewport and
   must keep account/login controls in view; the inner space viewport owns
   scrolling and one-finger/click-drag panning when the board is larger than the
-  visible viewport. Native workspace scrollbars stay hidden; subtle edge glows
-  show when more board content exists in a direction. While the user pans, a
-  temporary top-right minimap renders the total board, actual visible board
-  rectangle, app icons, and open widget miniatures. The minimap uses the fixed config-button anchor while visible and
-  fades the config button away until panning ends. It must stay hidden when the
+  visible viewport. Release velocity from recent drag samples continues the
+  pan briefly as inertial motion, bounded by friction, velocity clamps, and
+  board edges. Native workspace scrollbars stay hidden; subtle edge glows show
+  when more board content exists in a direction. While the user pans or
+  inertial motion is still moving the viewport, a temporary top-right minimap
+  renders the total board, actual visible board rectangle, app icons, and open
+  widget miniatures. The minimap uses the fixed config-button anchor while visible and
+  fades the config button away until viewport motion stops. It must stay hidden when the
   board is not actually pannable, keep the viewport border visible at all board
   edges, clip widget/app miniatures to board bounds, and use minimap-namespaced
   classes for open widget footprints so global widget CSS cannot impose real
@@ -35,7 +67,16 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   A fully visible icon remains inside the viewport marker at every board edge.
   On mobile/tablet breakpoints, Home/Admin/User space frames must collapse to
   one actual canvas row whenever the side panel is hidden; hidden inspector rows
-  must not inflate the scroll viewport height used by minimap math.
+  must not inflate the scroll viewport height used by minimap math. The minimap
+  must use density-sized board/canvas dimensions, not widget-inflated scroll
+  dimensions; overflowing widgets are rerendered back into the canvas bounds
+  instead of expanding the canvas. Mobile shell height must follow
+  `window.visualViewport.height` when available, and the outer canvas wrapper
+  must reserve the measured visual-viewport bottom inset without
+  platform-specific guard offsets. Mobile widget dragging and resizing must
+  still use the real density-sized canvas bounds, just like desktop, while
+  minimap board dimensions also come from the canvas rather than the padded
+  wrapper.
   App markers are symbolic dots, but their
   size is capped from the projected icon footprint and clamped into the
   projected viewport whenever the painted icon is fully visible. The minimap and fixed config button layer above
@@ -45,6 +86,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   account-global Timeline access through the fixed config button. Home also
   exposes Artifacts, a local inventory of spaces, mapped apps/widgets, and
   browser-local layouts that previews the `wasm-artifact` direction.
+- The space title sits on the same top edge as the fixed config button and its
+  left edge aligns with the inner icon edge used by app buttons. The title-row
+  organize control and fixed config control use the same `34px` square
+  icon-button size.
 - Admin is a fixed launcher space for operational surfaces. It uses the same
   app-layer and widget-layer pattern as other working spaces, has the crown
   launcher icon, shows the `space-admin` title, and must not be stored or
@@ -73,20 +118,26 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   increasing density expands the scrollable board width and height for that
   space without resizing existing widgets, and the slider knob must remain
   within the line boundaries at minimum and maximum density.
-- Apps are account/user entities that are mapped into spaces. Home maps only
-  Home-owned apps such as Connected Devices; Admin and user spaces map their
-  own working apps. A widget must stay hidden in a space unless that app is
-  mapped into the active space or promoted there by a later porting flow.
-  Per-space widget layout must be sanitized against that mapping so Home-only
-  app state cannot be saved into user-created spaces. Connected Devices is also
-  hard-gated to Home in widget availability and CSS transition guards.
+- Apps are account/user entities that are mapped into spaces. Home lists core
+  modules in its command strip; Admin and user spaces map their own working
+  apps. A widget must stay hidden in a space unless that app is mapped into the
+  active space or is promoted there by a later porting flow. Per-space widget
+  layout must be sanitized against that mapping so Home-only state cannot be
+  saved into user-created spaces. Connected Devices is a core module page, not
+  a canvas app or widget.
 - App buttons can be dragged anywhere inside the app layer. Opening an app shows
   its widget above the app layer; minimizing hides only the widget and leaves
   the app button available. App buttons snap to the nearest non-overlapping
   `5px` app-layer grid point on drop and store pixel positions so viewport
   resizing does not drift placement; clicking an open app icon minimizes its
-  widget again. App icons and widgets remain draggable on mobile; widgets remain
-  free-positioned.
+  widget again. The title-row organize control resets mapped app positions into
+  a predictable grid starting flush with the current visible canvas edge, with
+  no added gaps between icon boxes, and overflowing downward in rows only when
+  the mapped app count cannot fit. It must measure the packed block, place that
+  block inside the current density-sized canvas, and avoid forcing
+  canvas-density recomputation. Organized positions are authoritative until a
+  user manually drags an app again. App icons and widgets remain draggable on
+  mobile; widgets remain free-positioned.
 - When a minimized widget opens outside the visible canvas viewport, it is
   moved to the canvas initial point: the top-left beginning of the board.
 - Opened widgets must fit the visible canvas viewport on mobile. Space density
@@ -96,9 +147,9 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   still long-press. The menu exposes Edit and Copy app id. Editing persists the
   app/widget title, icon text/image, and min/max dimensions in the current
   browser-local space layout.
-- Home includes a Connected Devices app that lists devices seen for the signed
-  in account through the local account devices endpoint, with an operating
-  system icon per device. The widget can switch the account's main device. If
+- Home includes a Connected Devices core module that lists devices seen for the
+  signed in account through the local account devices endpoint, with an
+  operating system icon per device. The page can switch the account's main device. If
   the recorded main device is offline, artifact-evolution actions should steer
   the user back to Connected Devices so they can pick a reachable main device.
   The Sync action downloads a device-specific installer manifest that records
@@ -116,10 +167,18 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   Restart, Start, Stop, Update. Node Edit persists a local model
   `provider/name` override. Individual topology node cards are draggable within
   the topology widget and persist their positions with the widget layout.
+- Admin includes the Security Loop widget and Security side-panel view for the
+  platform-level `hermes-attack` / `hermes-defense` loop. It must show concise
+  chronological findings sorted by score, compact evidence previews, status and
+  severity chips, and human-gated decisions. Raw logs stay behind evidence,
+  task, or log drill-ins rather than in the main queue.
 - Widget header controls prioritize minimize/maximize at the far right. Status
   chips may be present, but they must sit before the window controls.
 - Widgets must remain draggable and resizable on desktop and mobile unless
-  maximized. Maximize fills the viewport/workspace rect and must be reversible.
+  maximized. Maximize becomes a fixed fullscreen layer at the viewport origin,
+  fills `100vw` by the visible viewport height without canvas padding, sits
+  above launcher/app chrome and below the embedded assistant overlay, and must
+  be reversible.
 - Backdrop modals close only from a click that starts and ends on the backdrop.
   Pressing inside a modal to select text and releasing outside must not close it.
 - In-app navigation owns closeable UI layers. Browser Back, Android Back,
@@ -146,11 +205,16 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   the panel must not keep an independent manual position. Avatar-core dragging
   may keep the avatar as the primary anchor and swap the panel side. Chat-header
   dragging treats the chat rectangle as primary and swaps the avatar side when
-  needed near edges.
+  needed near edges. The avatar keeps its viewport inset, while the chat panel
+  may clamp directly to the app viewport edge on narrow screens; the
+  panel-to-avatar spacing follows the avatar inset. When edge-to-edge chat
+  overlaps the avatar, the chat panel layers above the avatar.
 - Opening the avatar opens `wasm-agent-chat` and pushes `?chat=wasm-agent-chat`
   on the current route. The chat header control is a minimize action with a
   single minus glyph, not an `x`; minimizing removes the chat URL state through
-  the shared navigation stack.
+  the shared navigation stack. If the user changes spaces while chat is open,
+  manual minimize must close chat in place instead of navigating back to the
+  space where chat was opened.
 - Assistant action chains render above the final answer. They stay expanded
   while the turn is running, collapse after completion, and keep the final
   answer text below the chain.
@@ -209,5 +273,7 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 Every frontend change should update or verify:
 
 - `plugins/wasm-agent/tests/wasm_agent_smoke.test.js`
+- `plugins/wasm-agent/tests/ui_navigation_history.test.js` for chat/history
+  navigation behavior
 - This design contract when the visual rule changes
 - `plugins/wasm-agent/README.md` when runtime behavior changes

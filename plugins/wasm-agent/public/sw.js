@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v33";
+const CACHE_NAME = "wasm-agent-v35";
 const ASSETS = [
   "/",
   "/index.html",
@@ -7,8 +7,13 @@ const ASSETS = [
   "/modules/index.js",
   "/modules/hmr/dev-hmr.js",
   "/modules/hmr/module.js",
+  "/modules/spaces/module.js",
   "/modules/browser/module.js",
   "/modules/observation/module.js",
+  "/modules/devices/module.js",
+  "/modules/artifacts/module.js",
+  "/modules/config/module.js",
+  "/modules/module-manager/module.js",
   "/modules/timeline/module.js",
   "/modules/assistant/module.js",
   "/modules/image-card-core/module.js",
@@ -43,6 +48,7 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/auth/session" ||
     url.pathname === "/health" ||
     url.pathname === "/observation/latest" ||
+    url.pathname.startsWith("/security-loop/") ||
     url.pathname === "/modules/hmr/events"
   ) return;
   event.respondWith(

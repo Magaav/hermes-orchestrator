@@ -109,6 +109,23 @@
         </article>
       </section>
 
+      <section id="devicesModal" class="modal-backdrop" aria-label="Devices" hidden>
+        <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="devicesModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="devicesModalTitle">Devices</h2>
+              <p>Connected account clients</p>
+            </div>
+            <div class="modal-head-actions">
+              <button id="devicesSyncButton" class="icon-button device-sync-button" type="button" title="Sync current device" aria-label="Sync current device"></button>
+              <span id="devicesStatus" class="widget-chip">account</span>
+              <button id="closeDevicesModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+            </div>
+          </header>
+          <div id="devicesList" class="devices-list modal-devices-list"></div>
+        </article>
+      </section>
+
       <section id="appEditModal" class="modal-backdrop" aria-label="Edit app" hidden>
         <article class="modal-card wide edit-modal-card" role="dialog" aria-modal="true" aria-labelledby="appEditModalTitle">
           <header class="modal-head">
@@ -191,6 +208,19 @@
         </article>
       </section>
 
+      <section id="securityEvidenceModal" class="modal-backdrop" aria-label="Security finding evidence" hidden>
+        <article class="modal-card wide security-evidence-modal-card" role="dialog" aria-modal="true" aria-labelledby="securityEvidenceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="securityEvidenceTitle">Security finding</h2>
+              <p id="securityEvidenceMeta">hermes-attack / hermes-defense</p>
+            </div>
+            <button id="closeSecurityEvidenceButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div id="securityEvidenceBody" class="security-evidence-body"></div>
+        </article>
+      </section>
+
       <section id="homeModulesModal" class="modal-backdrop" aria-label="Modules" hidden>
         <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="homeModulesModalTitle">
           <header class="modal-head">
@@ -223,13 +253,13 @@
             <div id="spaceBoard" class="space-board">
               <canvas id="spaceCanvas"></canvas>
               <div class="home-actions" aria-label="Homespace actions">
-                <button id="addSpaceButton" class="home-action-button primary" type="button">New Space</button>
-                <button id="homeArtifactsButton" class="home-action-button" type="button">Artifacts</button>
-                <button id="homeConfigButton" class="home-action-button" type="button">Config</button>
-                <button id="homeModulesButton" class="home-action-button" type="button">Modules</button>
-                <span id="homeStorageBadge" class="home-storage-badge">Storage pending</span>
+                <button id="addSpaceButton" class="home-action-button primary" type="button" title="New Space" aria-label="New Space"><span>New Space</span></button>
+                <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
+                <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
+                <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
               </div>
               <div class="space-title">
+                <button id="spaceOrganizeButton" class="space-organize-button icon-button" type="button" title="Organize canvas apps" aria-label="Organize canvas apps"></button>
                 <span id="spaceLabel" class="space-label">space-home</span>
               </div>
               <div id="appLayer" class="app-layer" aria-label="Space apps"></div>
@@ -245,20 +275,6 @@
               </header>
               <div id="resourceGrid" class="metric-grid"></div>
               <div class="widget-resize-handle" data-widget-resize="resources" title="Resize Resources Monitor" aria-hidden="true"></div>
-            </article>
-
-            <article class="widget devices-widget" data-widget-id="devices">
-              <header class="widget-head" title="Drag to move. Double-click to reset.">
-                <span>Connected Devices</span>
-                <span class="widget-head-actions">
-                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Connected Devices"></button>
-                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Connected Devices"></button>
-                  <button id="devicesSyncButton" class="widget-control-button device-sync-button" type="button" title="Sync current device" aria-label="Sync current device"></button>
-                  <span id="devicesStatus" class="widget-chip">account</span>
-                </span>
-              </header>
-              <div id="devicesList" class="devices-list"></div>
-              <div class="widget-resize-handle" data-widget-resize="devices" title="Resize Connected Devices" aria-hidden="true"></div>
             </article>
 
             <article class="widget topology-widget" data-widget-id="topology">
@@ -352,6 +368,21 @@
               <div id="taskOutput" class="task-output" aria-live="polite"></div>
               <div class="widget-resize-handle" data-widget-resize="drop-to-copy" title="Resize Drop to Copy" aria-hidden="true"></div>
               </article>
+
+            <article class="widget security-widget" data-widget-id="security-loop">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Security Loop</span>
+                <span class="widget-head-actions">
+                  <button id="securityRefreshButton" class="widget-add-button" type="button" title="Refresh security loop">Refresh</button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Security Loop"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Security Loop"></button>
+                  <span id="securityLoopStatus" class="widget-chip">security</span>
+                </span>
+              </header>
+              <div id="securityLoopSummary" class="security-summary"></div>
+              <div id="securityFindingQueue" class="security-finding-queue"></div>
+              <div class="widget-resize-handle" data-widget-resize="security-loop" title="Resize Security Loop" aria-hidden="true"></div>
+            </article>
             </div>
           </section>
           <button id="spaceConfigButton" class="space-config-button icon-button" type="button" title="Space config" aria-label="Space config"></button>
@@ -365,6 +396,7 @@
               <button class="panel-tab" type="button" data-panel="observe" data-module-target="observation">Observe</button>
               <button class="panel-tab" type="button" data-panel="timeline" data-module-target="timeline">Timeline</button>
               <button class="panel-tab" type="button" data-panel="modules">Modules</button>
+              <button class="panel-tab" type="button" data-panel="security">Security</button>
             </div>
             <section class="panel-view active" data-view="home" aria-label="Homespace"></section>
             <section class="panel-view" data-view="fleet">
@@ -404,6 +436,14 @@
                 <span class="widget-chip">local</span>
               </div>
               <div id="moduleList" class="module-list"></div>
+            </section>
+            <section class="panel-view" data-view="security">
+              <div class="panel-headline">
+                <h2>Security</h2>
+                <span id="securityPanelStatus" class="widget-chip">loop</span>
+              </div>
+              <div id="securityPanelSummary" class="security-summary"></div>
+              <div id="securityPanelFindingQueue" class="security-finding-queue panel-security-queue"></div>
             </section>
           </aside>
         </main>

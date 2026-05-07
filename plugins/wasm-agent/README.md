@@ -19,6 +19,28 @@ cleaner app shell.
 - Does not start, stop, copy, or patch Space Agent.
 - Does not modify `/local/plugins/hermes-space-ui`.
 
+## Architecture Vision
+
+`wasm-agent` should grow as a modular runtime rather than a single tangled app.
+The browser shell is the shared mainframe: it owns boot, auth, routing, layout
+hydration, the module registry, and stable bridge contracts. Features should be
+described as modules wherever possible so all wasm-agent instances can share
+core evolution without forcing every instance into the same workspace shape.
+
+Core modules are the non-removable platform layer. Today that includes
+`spaces`, `devices`, `artifacts`, `config`, and `module-manager`. They define
+how users enter, inspect, configure, and extend the workspace. Core modules may
+be visible in the module inventory, but they should not be user-disabled.
+
+Modules are hierarchical. The `spaces` module owns Home, Admin, and user space
+identity. A space can expose child modules as pages, actions, apps, widgets,
+analyzers, or widget-internal capabilities. Home presents account-level core
+modules as page actions; Admin and user spaces map working app/widget modules
+onto the canvas. Plugins should extend this tree through module descriptors,
+space mappings, local state, and runtime data instead of patching unrelated
+core code. That keeps the shared mainframe small and performance-conscious
+while leaving each wasm-agent instance free to evolve its own module tree.
+
 The current app is an early browser-view parity surface, not a full replacement
 for `hermes-space-ui`. It now presents a workspace shell with a left launcher
 rail by default, a visible `space-home` Home space, a hardcoded `space-admin` Admin space
@@ -27,22 +49,40 @@ canvas label, summary panel, and dock have been removed from the shell. Each
 working space now has two visual layers: an app layer with draggable app
 buttons, and a widget layer where opened widgets sit above those apps as
 draggable, resizable windows with minimize and maximize controls. Apps are
-account/user entities mapped into spaces: Home maps only Home-owned apps such
-as Connected Devices, while Admin and user spaces map their working apps.
-Widgets remain hidden unless their app is mapped into the active space or is
-later ported into that space. App buttons snap to a non-overlapping `5px`
+account/user entities mapped into spaces: Home exposes core modules in its
+command strip, while Admin and user spaces map their working apps. Widgets
+remain hidden unless their app is mapped into the active space or is later
+ported into that space.
+App buttons snap to a non-overlapping `5px`
 app-layer grid on drop and keep pixel placement stable across viewport resize,
 while widgets store pixel geometry so changing space density does not resize
 them. Clicking an already-open app icon minimizes its widget again, and app
-icons and widgets remain draggable on mobile. Empty canvas panning uses the
+icons and widgets remain draggable on mobile. A small organize button beside
+each canvas title rewrites the active space's app icon positions into a tidy
+grid starting flush with the current viewport's left canvas edge and below the
+title controls. The title itself shares the config button's top edge and lines
+up with the app icon's inner-left edge, while the organize and config controls
+share the same `34px` square icon-button size. It adds no gaps between icon
+boxes; if the apps do not all fit, the grid continues past the viewport in
+organized rows. The organizer wraps inside the current density-sized canvas by
+measuring the packed block before it writes positions, and does not trigger a
+canvas-density recalculation. Organized icon positions stay compact until the
+user manually drags an app again, and the manual app/widget bounds use the same
+flush canvas edge with no hidden inset. Manual app collision checks
+also allow icons to sit directly side by side, matching the organizer, and a
+plain tap-to-open does not rewrite icon placement. Organized slots keep the
+actual app-button pixel width instead of being rounded away from a valid slot by
+the visual grid. Empty canvas panning uses the
 same one-finger/click-drag gesture on mobile and desktop, but only moves when
-space density or content makes the board larger than the visible viewport. The
-native workspace scrollbars are hidden; subtle edge glows show when more board
-content exists to the left, right, top, or bottom. A temporary minimap appears
-while panning so the user can see the viewport position against the total board
-with app and widget miniatures; it takes the
-top-right config anchor, stays below open widgets, fades the config button away
-until panning ends, keeps the viewport border visible at every board edge, clips
+space density or content makes the board larger than the visible viewport. On
+release, recent drag speed launches a short inertial glide so a fast spin keeps
+the viewport moving smoothly across the board. The native workspace scrollbars
+are hidden; subtle edge glows show when more board content exists to the left,
+right, top, or bottom. A temporary minimap appears while direct panning or
+inertial motion is active so the user can see the viewport position against the
+total board with app and widget miniatures; it takes the top-right config
+anchor, stays below open widgets, fades the config button away until viewport
+motion stops, keeps the viewport border visible at every board edge, clips
 miniatures to the board bounds, and draws open widget footprints with
 minimap-namespaced classes so global widget CSS cannot impose real panel
 minimum sizes. Opened apps are represented by their widget footprint instead of
@@ -54,14 +94,23 @@ painted board rectangle cannot skew the minimap projection. A fully visible icon
 stays inside the viewport marker at every board edge.
 On mobile and tablet widths, Home/Admin/User space frames collapse to one actual
 canvas row when the side panel is hidden, so minimap viewport height is the
-visible canvas height rather than an old inspector-row layout.
+visible canvas height rather than an old inspector-row layout. The minimap uses
+the density-sized canvas dimensions, not widget-inflated scroll dimensions, and
+open widgets are rerendered back inside that canvas if a saved/default position
+would overflow it, using the canvas origin as the initial recovery point rather
+than padding away from the edge. On mobile browsers, the shell height is synced
+from `window.visualViewport.height` and the outer canvas wrapper reserves the
+measured visual-viewport bottom inset, so Android navigation bars or similar
+device chrome do not sit on top of draggable widgets. Widget drag and resize
+bounds still use the density-sized canvas on mobile and desktop, while the
+minimap also reads the board dimensions rather than the padded wrapper.
 The app marker is a small symbolic dot, but its size is capped from the icon's
 projected footprint and clamped inside the projected viewport whenever the
 painted icon is fully visible.
 It stays hidden when the board is not larger than the
 visible viewport and layers above Home action buttons while active. Per-space
-layout is sanitized against the active app mapping, so the Home-only Connected
-Devices app cannot leak into user-created spaces. If a minimized widget opens
+layout is sanitized against the active app mapping so Home-only state cannot
+leak into user-created spaces. If a minimized widget opens
 outside the visible canvas viewport, it is
 moved to the canvas initial point: the top-left beginning of the board. Opened
 widgets are also shrunk to the visible canvas on mobile so density-expanded
@@ -94,9 +143,8 @@ content-fitting height, and renders one metric per row in this order: Nodes,
 Disk, RAM, CPU, Processes, Uptime. RAM and Disk use compact `usedGB/totalGB`
 values.
 
-Home also has a Connected Devices app. It is hard-gated to `space-home` in app
-mapping, widget availability, and CSS transition guards, so it cannot appear in
-Admin or user-created spaces. Opening it lists devices recently seen for the
+Home also has a Connected Devices core module. It is opened from the Home
+core-module strip as a page rather than from the app layer. Opening it lists devices recently seen for the
 signed-in account through `/account/devices`; the current browser is recorded
 from the authenticated request and marked in the widget, and each row shows a
 compact operating-system icon, a main-device switch action, and a Sync action.
@@ -124,7 +172,9 @@ Proof pixel surface dimensions so the returned image fits the widget exactly and
 input coordinates map cleanly. The status chip stays stable as `stream` or
 `live`; refresh details move to the meta line to avoid screenshot/live flicker.
 The widget includes Back, Forward, Reload, minimize, maximize, drag, and resize
-controls; resize remains available on mobile through the corner grip. Clicking,
+controls; maximize becomes a fixed fullscreen layer at `100vw` by the visible
+viewport height with no canvas padding, above launcher/app chrome and below the
+embedded assistant overlay, and resize remains available on mobile through the corner grip. Clicking,
 focusing, or opening a widget brings it above overlapping widgets deliberately.
 Submitting another URL while the stream is open navigates
 the current host browser target instead of tearing down the stream, and incoming
@@ -210,8 +260,10 @@ with `?chat=wasm-agent-chat` on the current route, and the header control is a
 minus/minimize action rather than a close/destroy action. Browser Back, Android
 Back, desktop Escape, and manual minimize/close controls all route through the
 same topmost-layer navigation path for chat, modals, menus, and popovers before
-normal route history is consumed. Transcripts, diagnostics, and context previews
-are persisted in browser storage for quick development continuity. This is
+normal route history is consumed. Each UI layer remembers the route where it was
+opened, so manual chat minimize closes in place after space changes instead of
+using browser Back and returning to an older space. Transcripts, diagnostics,
+and context previews are persisted in browser storage for quick development continuity. This is
 local convenience state, not a durable multi-user account store.
 
 The composer uses a compact 34px send button with a restrained arrow icon.
@@ -333,10 +385,13 @@ header moves the same avatar anchor instead of giving the panel an independent
 manual position, so the avatar core and chat stay bound together. Avatar-core
 dragging keeps the avatar as the primary object and may swap the panel side;
 chat-header dragging keeps the chat rectangle as the primary object and swaps
-the avatar side when needed near edges. Avatar drag bounds also use
-`window.visualViewport` when available, so mobile scroll areas and browser
-chrome do not let the icon escape the visible rectangle; viewport resize resets
-the avatar to the visible bottom-right corner.
+the avatar side when needed near edges. The avatar keeps its edge inset, but
+the chat panel can clamp directly to the app edge, including its narrow-screen
+width and height clamps. The chat-to-avatar gap follows the avatar inset, and
+the avatar is layered behind the panel if the full-width chat reaches over it.
+Avatar drag bounds also use `window.visualViewport` when available, so
+mobile scroll areas and browser chrome do not let the icon escape the visible
+rectangle; viewport resize resets the avatar to the visible bottom-right corner.
 
 Assistant replies can include a Codex-style changed-files footer sourced from a
 before/after worktree tree diff for that single request. Ambient dirty worktree
@@ -347,10 +402,11 @@ The expanded list stays scroll limited after roughly four rows, so changed-file
 reporting does not steal the main chat area.
 
 The Modules panel is a local module management surface for the shadow PWA. It
-stores enable/disable state in browser local storage for development and
+shows locked core modules plus optional development, runtime, and
 image-perception modules: Dev HMR, Observation, Host Browser, Embedded
 Assistant, Timeline, Image Card Core, Barcode Reader, OCR, CV Shapes, and
-Semantic Vision. Toggling a module only changes local UI or analyzer
+Semantic Vision. Optional toggles store enable/disable state in browser local
+storage. Toggling a module only changes local UI or analyzer
 availability in `wasm-agent`; it does not install, remove, patch, or restart
 backend components. The versioned module firmware lives under `public/modules/`
 with `public/modules/index.js` as the app-facing registry. Per-user and runtime
@@ -388,8 +444,8 @@ crown icon. New spaces are persisted under
 `state/users/<acc_id>/spaces/<space_id>/` and appear in the left global rail
 below Admin. Space widgets start minimized as app icons; clicking an app opens
 the widget above the app layer, except Timeline, which stays fixed behind the
-space config flow. Connected Devices is mapped only into Home, so it does not
-appear in Admin or user spaces unless a later porting flow maps it there. The
+space config flow. Connected Devices is a Home core module page, so it does
+not appear in Admin or user spaces unless a later porting flow maps it there. The
 config modal header identifies the current space while the options list omits a
 duplicate Space card. Each space config includes
 one draggable space-density line that expands or shrinks that space's scrollable board
@@ -451,6 +507,10 @@ Public deployment on this host terminates TLS at Caddy for
 public HTTPS edge, not the raw app port. The app port remains loopback-only so
 the account gate is the only web entry point into local bridge, browser,
 timeline, agent, attachment, health, observation, and user-space services.
+
+The private-beta launch runbook lives in `LAUNCH.md`. It covers Caddy/HTTPS,
+Google allowlist setup, backup/rollback, the Admin-only security-loop
+dashboard, and the platform-level `hermes-attack` / `hermes-defense` loop.
 
 Known security risks to target are tracked in
 `/local/docs/roadmap/space-os/README.md`. The current high-risk areas are the
@@ -550,6 +610,10 @@ Run checks:
 /local/plugins/wasm-agent/scripts/doctor.sh
 ```
 
+The doctor runs the source smoke test, image-card golden coverage, and the UI
+navigation history regression that keeps chat minimize from navigating back to
+an older space after the user changes spaces with chat open.
+
 ## Environment
 
 - `HERMES_WASM_AGENT_HOST`: bind host, default `127.0.0.1`.
@@ -637,6 +701,8 @@ Run checks:
       attachments/            # account-local image asset cache
   tests/
     wasm_agent_smoke.test.js
+    ui_navigation_history.test.js
+    image_card_golden.test.py
 ```
 
 ## Parity Ladder

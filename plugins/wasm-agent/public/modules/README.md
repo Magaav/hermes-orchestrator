@@ -6,7 +6,40 @@ PWA runtime.
 Each module owns a folder with a small `module.js` descriptor. Runtime and
 per-user state stays outside this directory:
 
+## Architecture
+
+`wasm-agent` uses modules as a hierarchy, not just a flat feature list. The
+browser shell is the shared mainframe that loads the registry, keeps boot/auth
+and layout contracts stable, and lets all wasm-agent instances share core
+evolution. Core modules describe the non-removable platform layer. Other
+modules can be mapped into spaces as pages, actions, apps, widgets, analyzers,
+or widget-internal capabilities.
+
+The `spaces` core module is the parent for Home, Admin, and user spaces. Home
+shows account-level core modules as page actions. Admin and user spaces map
+working app/widget modules onto the canvas. This keeps module boundaries clear:
+child modules should communicate through registry metadata, mapped ids, events,
+documented helpers, or bridge endpoints rather than mutating each other
+directly.
+
+Plugins should extend the system by adding module descriptors, mappings, and
+runtime state instead of forking the shared shell. That keeps the core fast and
+portable while allowing each wasm-agent instance to customize its own module
+tree and workflow.
+
 - `hmr/`: development hot-reload firmware; no durable runtime state.
+- `spaces/`: core workspace contract for `space-home`, `space-admin`, user
+  spaces, and space creation/deletion. Core modules are listed in the Modules
+  panel but cannot be disabled.
+- `devices/`: core account-device contract for the home Connected Devices page;
+  device records live under `state/users/<acc_id>/devices/` and main-device
+  settings live in `state/users/<acc_id>/device-settings.json`.
+- `artifacts/`: core artifact/storage inventory contract for the home Artifacts
+  action and storage import/export boundaries.
+- `config/`: core space configuration contract for the top-right space gear. It
+  is intentionally not listed in the home command strip.
+- `module-manager/`: core module inventory contract for the home Modules action
+  and local enablement controls.
 - `browser/`: Host Browser firmware contract; runtime browser captures and
   profiles live under `state/browser/`.
 - `observation/`: Observation firmware contract; the latest debug snapshot
