@@ -6,6 +6,7 @@ const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
 const SPACE_WIDGET_LAYOUTS_STORAGE_KEY = "wasmAgent.spaceWidgetLayouts.v2";
 const AGENT_SESSIONS_STORAGE_KEY = "wasmAgent.agentSessions.v1";
 const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
+const AGENT_MODELS_STORAGE_KEY = "wasmAgent.agentModels.v1";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
@@ -336,6 +337,7 @@ const state = {
   agentTurnTimeoutMs: DEFAULT_AGENT_TURN_TIMEOUT_MS,
   agentTokenUsage: null,
   agentAvailableModels: [],
+  agentModelSettings: readAgentModelSettings(),
   agentPendingImages: [],
   agentPendingAttachmentSummaries: [],
   agentOpenMessageMenuId: "",
@@ -1251,6 +1253,33 @@ function saveAgentLayout() {
   }
 }
 
+function readAgentModelSettings() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(AGENT_MODELS_STORAGE_KEY) || "{}");
+    if (!raw || typeof raw !== "object") return { models: [], hiddenModels: [], selectedByNode: {} };
+    return {
+      models: Array.isArray(raw.models) ? raw.models.map(normalizeAgentModelEntry).filter(Boolean) : [],
+      hiddenModels: Array.isArray(raw.hiddenModels) ? raw.hiddenModels.map((item) => cleanText(item, "").toLowerCase()).filter(Boolean) : [],
+      selectedByNode: raw.selectedByNode && typeof raw.selectedByNode === "object"
+        ? Object.fromEntries(Object.entries(raw.selectedByNode).map(([nodeId, model]) => [
+            cleanText(nodeId, "orchestrator"),
+            normalizeAgentModelEntry(model),
+          ]).filter(([, model]) => Boolean(model)))
+        : {},
+    };
+  } catch {
+    return { models: [], hiddenModels: [], selectedByNode: {} };
+  }
+}
+
+function saveAgentModelSettings() {
+  try {
+    localStorage.setItem(AGENT_MODELS_STORAGE_KEY, JSON.stringify(state.agentModelSettings));
+  } catch {
+    // Model selection is local convenience state; the default model still works.
+  }
+}
+
 function activeAgentSession() {
   let session = state.agentSessions.find((item) => item.id === state.activeAgentSessionId);
   if (!session) {
@@ -1327,19 +1356,17 @@ function agentModelKey(model) {
 }
 
 function agentModelCatalog() {
-  const layout = widgetLayout("topology");
-  layout.agentModels = Array.isArray(layout.agentModels)
-    ? layout.agentModels.map(normalizeAgentModelEntry).filter(Boolean)
+  state.agentModelSettings.models = Array.isArray(state.agentModelSettings.models)
+    ? state.agentModelSettings.models.map(normalizeAgentModelEntry).filter(Boolean)
     : [];
-  return layout.agentModels;
+  return state.agentModelSettings.models;
 }
 
 function agentHiddenModelKeys() {
-  const layout = widgetLayout("topology");
-  layout.agentHiddenModels = Array.isArray(layout.agentHiddenModels)
-    ? layout.agentHiddenModels.map((item) => cleanText(item, "").toLowerCase()).filter(Boolean)
+  state.agentModelSettings.hiddenModels = Array.isArray(state.agentModelSettings.hiddenModels)
+    ? state.agentModelSettings.hiddenModels.map((item) => cleanText(item, "").toLowerCase()).filter(Boolean)
     : [];
-  return layout.agentHiddenModels;
+  return state.agentModelSettings.hiddenModels;
 }
 
 function addAgentModelToCatalog(model) {
@@ -1347,7 +1374,7 @@ function addAgentModelToCatalog(model) {
   if (!normalized) return null;
   const catalog = agentModelCatalog();
   const key = agentModelKey(normalized);
-  widgetLayout("topology").agentHiddenModels = agentHiddenModelKeys().filter((item) => item !== key);
+  state.agentModelSettings.hiddenModels = agentHiddenModelKeys().filter((item) => item !== key);
   const index = catalog.findIndex((item) => agentModelKey(item) === key);
   if (index >= 0) {
     catalog[index] = { ...catalog[index], ...normalized };
@@ -1361,9 +1388,8 @@ function addAgentModelToCatalog(model) {
 function removeAgentModelFromCatalog(model) {
   const key = agentModelKey(model);
   if (!key) return;
-  const layout = widgetLayout("topology");
-  layout.agentModels = agentModelCatalog().filter((item) => agentModelKey(item) !== key);
-  if (!agentHiddenModelKeys().includes(key)) layout.agentHiddenModels.push(key);
+  state.agentModelSettings.models = agentModelCatalog().filter((item) => agentModelKey(item) !== key);
+  if (!agentHiddenModelKeys().includes(key)) state.agentModelSettings.hiddenModels.push(key);
 }
 
 function agentDefaultModelForNode(nodeId = agentTargetNode()) {
@@ -1391,14 +1417,15 @@ function availableAgentModels() {
 }
 
 function selectedAgentModel() {
-  const override = normalizeAgentModelEntry(nodeModelOverride(agentTargetNode()));
-  return override || null;
+  const selected = state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+  return normalizeAgentModelEntry(selected) || null;
 }
 
 function applyAgentModelToTarget(model) {
   const normalized = normalizeAgentModelEntry(model);
   if (!normalized) return null;
-  nodeModelOverrides()[agentTargetNode()] = {
+  state.agentModelSettings.selectedByNode = state.agentModelSettings.selectedByNode || {};
+  state.agentModelSettings.selectedByNode[agentTargetNode()] = {
     id: normalized.id,
     name: normalized.name,
     provider: normalized.provider,
@@ -1409,16 +1436,13 @@ function applyAgentModelToTarget(model) {
 }
 
 function persistAgentModelSelection() {
-  saveWidgetLayout();
-  state.nodes = state.nodes.map((node) => (node.id === agentTargetNode() ? normalizeNode(node.raw || node) : node));
+  saveAgentModelSettings();
   renderAgentModelSelect();
-  renderTopology();
-  renderNodeList();
 }
 
-function promptForAgentModel() {
+function promptForAgentModel(seed = "") {
   const current = selectedAgentModel() || agentDefaultModelForNode();
-  const raw = window.prompt("Model id", current?.id || current?.label || "");
+  const raw = window.prompt("Model id", seed || current?.id || current?.label || "");
   const id = cleanText(raw, "").slice(0, 180);
   if (!id) return null;
   return normalizeAgentModelEntry({ id, name: id, label: id });
@@ -1432,7 +1456,7 @@ function renderAgentModelSelect() {
   const fragment = document.createDocumentFragment();
   const defaultOption = document.createElement("option");
   defaultOption.value = "__default__";
-  defaultOption.textContent = defaultModel?.label ? `Default: ${defaultModel.label}` : "Default model";
+  defaultOption.textContent = defaultModel?.label || "Default model";
   fragment.append(defaultOption);
   for (const model of models) {
     const option = document.createElement("option");
@@ -1456,6 +1480,7 @@ function renderAgentModelSelect() {
   }
   els.agentModelSelect.replaceChildren(fragment);
   els.agentModelSelect.value = activeModel ? `model:${activeModel.id}` : "__default__";
+  els.agentModelSelect.title = activeModel?.label || defaultModel?.label || "Default model";
 }
 
 async function loadAgentModels() {
@@ -10886,7 +10911,7 @@ function wireEvents() {
       selectedModel = selectedAgentModel();
       if (selectedModel && window.confirm(`Remove ${selectedModel.label} from this chat model list?`)) {
         removeAgentModelFromCatalog(selectedModel);
-        delete nodeModelOverrides()[agentTargetNode()];
+        delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
         persistAgentModelSelection();
       } else {
         renderAgentModelSelect();
@@ -10894,7 +10919,7 @@ function wireEvents() {
       return;
     }
     if (value === "__default__") {
-      delete nodeModelOverrides()[agentTargetNode()];
+      delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
     } else if (value.startsWith("model:")) {
       const modelId = value.slice("model:".length);
       selectedModel = availableAgentModels().find((model) => model.id === modelId) || null;

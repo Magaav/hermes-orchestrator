@@ -4027,9 +4027,9 @@ details.agent-action-row .agent-action-row-summary {
 }
 
 .agent-form-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px minmax(142px, 1fr) max-content 34px;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
   min-width: 0;
 }
@@ -4102,8 +4102,9 @@ details.agent-action-row .agent-action-row-summary {
 }
 
 .agent-token-usage {
-  flex: 1 1 auto;
-  max-width: none;
+  justify-self: end;
+  min-width: 58px;
+  max-width: 82px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4111,29 +4112,31 @@ details.agent-action-row .agent-action-row-summary {
   font-size: 10px;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
-  text-align: center;
+  text-align: right;
 }
 
 .agent-model-select {
-  flex-shrink: 0;
-  max-width: 160px;
-  min-height: 28px;
-  min-width: 80px;
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  min-height: 34px;
   border: 1px solid rgba(147, 170, 203, 0.24);
   border-radius: var(--radius);
   background: rgba(8, 14, 24, 0.96);
-  color: var(--dim);
-  font-size: 10px;
-  font-weight: 700;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
   font-family: inherit;
-  padding: 0 6px;
+  padding: 0 8px;
   cursor: pointer;
-  transition: border-color 0.15s, color 0.15s;
+  text-overflow: ellipsis;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 
 .agent-model-select:hover {
   border-color: rgba(147, 170, 203, 0.5);
   color: var(--text);
+  background: rgba(12, 20, 34, 0.98);
 }
 
 .agent-attach-button {

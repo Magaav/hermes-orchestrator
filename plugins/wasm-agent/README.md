@@ -238,7 +238,9 @@ can switch between orchestrator and worker nodes without leaving the panel. The
 composer row also includes a single model selector immediately left of token
 usage. It lists bridge-advertised models plus locally saved chat models, can add
 a typed model id, can remove the currently selected saved model, and forwards
-the selected model id with the chat turn.
+the selected model id with the chat turn. Chat model choices are stored in a
+small assistant-specific local storage record, separate from topology widget
+layout, so adding a model from Home or any user space remains visible.
 This first inner-agent surface is chat-only: it can see the structured context
 sent with the turn, but it does not execute UI, browser, node lifecycle, or
 shell actions from the browser. Bridge calls are bounded by a visible timeout

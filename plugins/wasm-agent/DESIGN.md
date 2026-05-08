@@ -249,6 +249,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   send controls live in the row below the text area. The model selector is the
   one-place control for choosing default/current, selecting a saved model,
   adding a model id, or removing the active saved model from the chat list.
+  Chat model state must use assistant-owned local storage, not a widget layout
+  key that can be sanitized away when another space is active.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned
