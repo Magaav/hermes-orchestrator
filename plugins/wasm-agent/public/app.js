@@ -26,11 +26,14 @@ const SPACE_PAN_MOMENTUM_SAMPLE_MS = 120;
 const SPACE_PAN_MOMENTUM_LAUNCH_MULTIPLIER = 1.08;
 const SPACE_PAN_MOMENTUM_FRAME_MS = 1000 / 60;
 const SPACE_PAN_MOMENTUM_MAX_MS = 1200;
-const CANVAS_DENSITY_MAX = 10;
+const CANVAS_AREA_MAX = 10;
+const SPACE_DISTANCE_MIN = 0.5;
+const SPACE_DISTANCE_MAX = 2;
+const SPACE_DISTANCE_STEP = 0.05;
 const RESOURCE_POLL_MS = 2500;
 const SECURITY_POLL_MS = 5000;
 const USER_EVENT_LIMIT = 160;
-const DEFAULT_AGENT_TURN_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_AGENT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const AGENT_MAX_IMAGES = 8;
 const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
 const AGENT_PANEL_VIEWPORT_GAP_PX = 0;
@@ -58,7 +61,7 @@ const SPACE_APP_DEFINITIONS = [
   { id: "studio", label: "Studio", short: "Studio" },
   { id: "browser-proof", label: "Browser", short: "Web", module: "host-browser" },
   { id: "drop-to-copy", label: "Drop", short: "Drop" },
-  { id: "security-loop", label: "Security", short: "Sec" },
+  { id: "security-loop", label: "Security", short: "Sec", desktopOnly: true },
 ];
 const SPACE_APP_MAPPINGS = {
   home: [],
@@ -96,6 +99,7 @@ const els = {
   spaceBoard: document.querySelector("#spaceBoard"),
   appLayer: document.querySelector("#appLayer"),
   spaceMiniMap: document.querySelector("#spaceMiniMap"),
+  spaceZoomInfo: document.querySelector("#spaceZoomInfo"),
   spaceLabel: document.querySelector("#spaceLabel"),
   spaceOrganizeButton: document.querySelector("#spaceOrganizeButton"),
   spaceConfigButton: document.querySelector("#spaceConfigButton"),
@@ -106,6 +110,7 @@ const els = {
   homeModulesButton: document.querySelector("#homeModulesButton"),
   spaceContextMenu: document.querySelector("#spaceContextMenu"),
   nodeContextMenu: document.querySelector("#nodeContextMenu"),
+  nodeStatsBalloon: document.querySelector("#nodeStatsBalloon"),
   appContextMenu: document.querySelector("#appContextMenu"),
   editAppButton: document.querySelector("#editAppButton"),
   copyAppIdButton: document.querySelector("#copyAppIdButton"),
@@ -187,9 +192,13 @@ const els = {
   securityRefreshButton: document.querySelector("#securityRefreshButton"),
   securityLoopStatus: document.querySelector("#securityLoopStatus"),
   securityLoopSummary: document.querySelector("#securityLoopSummary"),
+  securityLoopRun: document.querySelector("#securityLoopRun"),
+  securityLoopRuns: document.querySelector("#securityLoopRuns"),
   securityFindingQueue: document.querySelector("#securityFindingQueue"),
   securityPanelStatus: document.querySelector("#securityPanelStatus"),
   securityPanelSummary: document.querySelector("#securityPanelSummary"),
+  securityPanelRun: document.querySelector("#securityPanelRun"),
+  securityPanelRuns: document.querySelector("#securityPanelRuns"),
   securityPanelFindingQueue: document.querySelector("#securityPanelFindingQueue"),
   agentOverlay: document.querySelector("#agentOverlay"),
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
@@ -210,6 +219,7 @@ const els = {
   agentForm: document.querySelector("#agentForm"),
   agentModeSelect: document.querySelector("#agentModeSelect"),
   agentNodeSelect: document.querySelector("#agentNodeSelect"),
+  agentModelSelect: document.querySelector("#agentModelSelect"),
   agentInput: document.querySelector("#agentInput"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
   agentSendButton: document.querySelector("#agentSendButton"),
@@ -257,8 +267,10 @@ const state = {
   devicesLoadedAt: "",
   nodes: [],
   tasks: [],
-  securityLoop: null,
-  securityFindings: [],
+	  securityLoop: null,
+	  securityLatestRun: null,
+	  securityRuns: [],
+	  securityFindings: [],
   securityBusy: false,
   securityInterval: 0,
   securityEvidenceId: "",
@@ -267,7 +279,14 @@ const state = {
   taskId: "",
   taskTimer: 0,
   actionBusy: "",
-  lastError: "",
+  activeNodeStatsId: "",
+	  nodeStats: {},
+	  nodeStatsInterval: 0,
+	  nodeStatsBusy: "",
+	  nodeStatsBucket: "hour",
+  nodeStatsPosition: null,
+  nodeStatsSuppressDismissUntil: 0,
+	  lastError: "",
   widgetLayout: INITIAL_SPACE_WIDGET_LAYOUTS.home || {},
   widgetZ: WIDGET_Z_BASE,
   activeWidgetId: "",
@@ -316,6 +335,7 @@ const state = {
   agentThinkingMessageId: "",
   agentTurnTimeoutMs: DEFAULT_AGENT_TURN_TIMEOUT_MS,
   agentTokenUsage: null,
+  agentAvailableModels: [],
   agentPendingImages: [],
   agentPendingAttachmentSummaries: [],
   agentOpenMessageMenuId: "",
@@ -328,8 +348,18 @@ const state = {
   appButtonCache: new Map(),
   spaceMiniMapVisible: false,
   spaceMiniMapHideTimer: 0,
+  spaceZoomInfoVisible: false,
+  spaceZoomInfoHideTimer: 0,
   spacePanMomentumFrame: 0,
   spacePanMomentumActive: false,
+  spaceDistanceCommitTimer: 0,
+  spaceZoomMiniMapTimer: 0,
+  spaceGesturePointers: new Map(),
+  spacePinchActive: false,
+  spacePinchStartDistance: 0,
+  spacePinchStartCanvasDistance: 1,
+  spacePinchChanged: false,
+  spacePinchSuppressPanUntil: 0,
 };
 
 function bytesFromBase64(value) {
@@ -656,8 +686,9 @@ function renderObservation() {
 function moduleCard(module) {
   const enabled = isModuleEnabled(module.id);
   const core = Boolean(module.core);
+  const unavailable = !moduleServerAvailable(module.id);
   const card = document.createElement("article");
-  card.className = `module-card${enabled ? " enabled" : ""}${core ? " core" : ""}`;
+  card.className = `module-card${enabled ? " enabled" : ""}${core ? " core" : ""}${unavailable ? " unavailable" : ""}`;
 
   const copy = document.createElement("div");
   copy.className = "module-copy";
@@ -674,10 +705,10 @@ function moduleCard(module) {
   const input = document.createElement("input");
   input.type = "checkbox";
   input.checked = enabled;
-  input.disabled = core;
+  input.disabled = core || unavailable;
   input.setAttribute("aria-label", `${enabled ? "Disable" : "Enable"} ${module.title}`);
   const control = document.createElement("span");
-  control.textContent = core ? "Core" : (enabled ? "On" : "Off");
+  control.textContent = unavailable ? "Unavailable" : (core ? "Core" : (enabled ? "On" : "Off"));
   input.addEventListener("change", () => {
     setModuleEnabled(module.id, input.checked);
   });
@@ -799,6 +830,11 @@ function applyModuleVisibility() {
 }
 
 function setModuleEnabled(moduleId, enabled) {
+  if (!moduleServerAvailable(moduleId)) {
+    renderModules();
+    applyModuleVisibility();
+    return;
+  }
   if (moduleDefinitionById(moduleId)?.core) {
     state.moduleSettings[moduleId] = true;
     renderModules();
@@ -836,6 +872,28 @@ function bytes(value) {
     unit += 1;
   }
   return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unit]}`;
+}
+
+function compactCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) return "-";
+  if (number >= 1_000_000_000) return `${(number / 1_000_000_000).toFixed(1)}B`;
+  if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1)}M`;
+  if (number >= 1_000) return `${(number / 1_000).toFixed(1)}K`;
+  return String(Math.round(number));
+}
+
+function formatCost(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "$0";
+  if (number < 0.01) return `<$0.01`;
+  return `$${number.toFixed(2)}`;
+}
+
+function formatSignedCount(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return "";
+  return `+${compactCount(number)}`;
 }
 
 function compactGb(value) {
@@ -888,7 +946,7 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
     ...defaultWidgetLayoutForPanel(panel),
     ...sanitizeWidgetLayoutForPanel(layout, panel),
   };
-  applyCanvasDensity({ renderMiniMap: false });
+  applyCanvasGeometry({ renderMiniMap: false });
   applyWidgetLayout();
   renderSpaceMiniMap();
 }
@@ -1044,7 +1102,15 @@ function moduleDefinitionById(moduleId) {
   return MODULE_DEFINITIONS.find((module) => module.id === moduleId) || null;
 }
 
+function moduleServerAvailable(moduleId) {
+  if (moduleId === "host-browser") {
+    return state.config?.features?.hostBrowser?.enabled !== false;
+  }
+  return true;
+}
+
 function isModuleEnabled(moduleId) {
+  if (!moduleServerAvailable(moduleId)) return false;
   if (moduleDefinitionById(moduleId)?.core) return true;
   if (Object.prototype.hasOwnProperty.call(state.moduleSettings, moduleId)) {
     return state.moduleSettings[moduleId] !== false;
@@ -1229,12 +1295,182 @@ function setAgentTargetNode(nodeId) {
   const previous = state.agentTargetNode;
   state.agentTargetNode = next;
   renderAgentNodeSelect();
+  renderAgentModelSelect();
   if (previous !== next) {
     recordUserEvent("agent.target_node_selected", {
       target: `node:${next}`,
       summary: `Chat target node changed to ${next}`,
       data: { node_id: next, previous_node_id: previous || "" },
     });
+  }
+}
+
+function normalizeAgentModelEntry(raw) {
+  if (!raw) return null;
+  const source = typeof raw === "string" ? { id: raw } : raw;
+  const id = cleanText(source.id || source.model || source.name || "", "").slice(0, 140);
+  const provider = cleanText(source.provider || "", "").slice(0, 64);
+  const name = cleanText(source.name || source.model || id, "").slice(0, 140);
+  const label = cleanText(source.label || formatNodeModel(name, provider) || id, "").slice(0, 180);
+  const modelId = cleanText(id || formatNodeModel(name, provider) || label, "").slice(0, 180);
+  if (!modelId && !label) return null;
+  return {
+    id: modelId || label,
+    name: name || modelId || label,
+    provider,
+    label: label || modelId,
+  };
+}
+
+function agentModelKey(model) {
+  return cleanText(model?.id || formatNodeModel(model?.name, model?.provider) || model?.label, "").toLowerCase();
+}
+
+function agentModelCatalog() {
+  const layout = widgetLayout("topology");
+  layout.agentModels = Array.isArray(layout.agentModels)
+    ? layout.agentModels.map(normalizeAgentModelEntry).filter(Boolean)
+    : [];
+  return layout.agentModels;
+}
+
+function agentHiddenModelKeys() {
+  const layout = widgetLayout("topology");
+  layout.agentHiddenModels = Array.isArray(layout.agentHiddenModels)
+    ? layout.agentHiddenModels.map((item) => cleanText(item, "").toLowerCase()).filter(Boolean)
+    : [];
+  return layout.agentHiddenModels;
+}
+
+function addAgentModelToCatalog(model) {
+  const normalized = normalizeAgentModelEntry(model);
+  if (!normalized) return null;
+  const catalog = agentModelCatalog();
+  const key = agentModelKey(normalized);
+  widgetLayout("topology").agentHiddenModels = agentHiddenModelKeys().filter((item) => item !== key);
+  const index = catalog.findIndex((item) => agentModelKey(item) === key);
+  if (index >= 0) {
+    catalog[index] = { ...catalog[index], ...normalized };
+  } else {
+    catalog.push(normalized);
+  }
+  catalog.sort((a, b) => a.label.localeCompare(b.label));
+  return normalized;
+}
+
+function removeAgentModelFromCatalog(model) {
+  const key = agentModelKey(model);
+  if (!key) return;
+  const layout = widgetLayout("topology");
+  layout.agentModels = agentModelCatalog().filter((item) => agentModelKey(item) !== key);
+  if (!agentHiddenModelKeys().includes(key)) layout.agentHiddenModels.push(key);
+}
+
+function agentDefaultModelForNode(nodeId = agentTargetNode()) {
+  const node = Array.isArray(state.nodes) ? state.nodes.find((n) => n.id === nodeId) : null;
+  return normalizeAgentModelEntry({
+    id: node?.model || formatNodeModel(node?.modelName, node?.modelProvider),
+    name: node?.modelName || node?.model || "",
+    provider: node?.modelProvider || "",
+  });
+}
+
+function availableAgentModels() {
+  const models = new Map();
+  const hidden = new Set(agentHiddenModelKeys());
+  const add = (model) => {
+    const normalized = normalizeAgentModelEntry(model);
+    const key = agentModelKey(normalized);
+    if (key && !hidden.has(key)) models.set(key, normalized);
+  };
+  add(agentDefaultModelForNode());
+  for (const model of state.agentAvailableModels || []) add(model);
+  for (const model of agentModelCatalog()) add(model);
+  for (const override of Object.values(nodeModelOverrides())) add(override);
+  return Array.from(models.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
+
+function selectedAgentModel() {
+  const override = normalizeAgentModelEntry(nodeModelOverride(agentTargetNode()));
+  return override || null;
+}
+
+function applyAgentModelToTarget(model) {
+  const normalized = normalizeAgentModelEntry(model);
+  if (!normalized) return null;
+  nodeModelOverrides()[agentTargetNode()] = {
+    id: normalized.id,
+    name: normalized.name,
+    provider: normalized.provider,
+    label: normalized.label,
+  };
+  addAgentModelToCatalog(normalized);
+  return normalized;
+}
+
+function persistAgentModelSelection() {
+  saveWidgetLayout();
+  state.nodes = state.nodes.map((node) => (node.id === agentTargetNode() ? normalizeNode(node.raw || node) : node));
+  renderAgentModelSelect();
+  renderTopology();
+  renderNodeList();
+}
+
+function promptForAgentModel() {
+  const current = selectedAgentModel() || agentDefaultModelForNode();
+  const raw = window.prompt("Model id", current?.id || current?.label || "");
+  const id = cleanText(raw, "").slice(0, 180);
+  if (!id) return null;
+  return normalizeAgentModelEntry({ id, name: id, label: id });
+}
+
+function renderAgentModelSelect() {
+  if (!els.agentModelSelect) return;
+  const defaultModel = agentDefaultModelForNode();
+  const activeModel = selectedAgentModel();
+  const models = availableAgentModels();
+  const fragment = document.createDocumentFragment();
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "__default__";
+  defaultOption.textContent = defaultModel?.label ? `Default: ${defaultModel.label}` : "Default model";
+  fragment.append(defaultOption);
+  for (const model of models) {
+    const option = document.createElement("option");
+    option.value = `model:${model.id}`;
+    option.textContent = model.label;
+    fragment.append(option);
+  }
+  const separator = document.createElement("option");
+  separator.disabled = true;
+  separator.textContent = "\u2500\u2500\u2500\u2500\u2500";
+  fragment.append(separator);
+  const addOption = document.createElement("option");
+  addOption.value = "__add__";
+  addOption.textContent = "+ Add model...";
+  fragment.append(addOption);
+  if (activeModel) {
+    const removeOption = document.createElement("option");
+    removeOption.value = "__remove__";
+    removeOption.textContent = `Remove ${activeModel.label}`;
+    fragment.append(removeOption);
+  }
+  els.agentModelSelect.replaceChildren(fragment);
+  els.agentModelSelect.value = activeModel ? `model:${activeModel.id}` : "__default__";
+}
+
+async function loadAgentModels() {
+  try {
+    const payload = await bridgeJson("/v1/models", { timeoutMs: 8000 });
+    const data = Array.isArray(payload.data) ? payload.data : [];
+    state.agentAvailableModels = data.map((item) => normalizeAgentModelEntry({
+      id: item.id,
+      name: item.id,
+      label: item.id,
+    })).filter(Boolean);
+    renderAgentModelSelect();
+  } catch {
+    state.agentAvailableModels = [];
+    renderAgentModelSelect();
   }
 }
 
@@ -1283,6 +1519,43 @@ function spaceSurface() {
   return els.spaceBoard || els.spaceViewport;
 }
 
+function formatMultiplier(value) {
+  return `${Number(value).toFixed(2).replace(/\.?0+$/, "")}x`;
+}
+
+function logicalToScreenPx(value) {
+  return Number(value || 0) * canvasDistance();
+}
+
+function screenToLogicalPx(value) {
+  return Number(value || 0) / Math.max(SPACE_DISTANCE_MIN, canvasDistance());
+}
+
+function spaceLogicalRect(surface = spaceSurface()) {
+  const rect = surface?.getBoundingClientRect?.();
+  const distance = canvasDistance();
+  if (!rect) return { width: 1, height: 1, left: 0, top: 0, right: 1, bottom: 1 };
+  return {
+    left: rect.left,
+    top: rect.top,
+    right: rect.left + rect.width / distance,
+    bottom: rect.top + rect.height / distance,
+    width: Math.max(1, rect.width / distance),
+    height: Math.max(1, rect.height / distance),
+  };
+}
+
+function spaceViewportUsableLogicalRect() {
+  const rect = spaceViewportUsableRect();
+  const distance = canvasDistance();
+  if (!rect) return null;
+  return {
+    ...rect,
+    width: Math.max(1, rect.width / distance),
+    height: Math.max(1, rect.height / distance),
+  };
+}
+
 function appliedCanvasBottomPaddingPx() {
   const value = parseFloat(getComputedStyle(els.mainStage || document.documentElement).paddingBottom);
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -1307,7 +1580,7 @@ function spaceViewportUsableRect() {
 
 function widgetCanvasMovementBounds(widget) {
   const board = spaceSurface();
-  const boardRect = board?.getBoundingClientRect?.();
+  const boardRect = spaceLogicalRect(board);
   if (!widget || !boardRect?.width || !boardRect?.height) return null;
   return {
     minLeft: SPACE_CANVAS_EDGE_INSET_PX,
@@ -1326,9 +1599,14 @@ function canvasLayout() {
   return state.widgetLayout.__canvas;
 }
 
-function canvasDensity() {
-  const density = Number(canvasLayout().density || 1);
-  return clamp(Number.isFinite(density) ? density : 1, 1, CANVAS_DENSITY_MAX);
+function canvasArea() {
+  const area = Number(canvasLayout().density || 1);
+  return clamp(Number.isFinite(area) ? area : 1, 1, CANVAS_AREA_MAX);
+}
+
+function canvasDistance() {
+  const distance = Number(canvasLayout().distance || 1);
+  return clamp(Number.isFinite(distance) ? distance : 1, SPACE_DISTANCE_MIN, SPACE_DISTANCE_MAX);
 }
 
 function canvasContentExtent() {
@@ -1336,23 +1614,34 @@ function canvasContentExtent() {
     if (key === "__canvas" || !layout || typeof layout !== "object") return current;
     const appLeft = Number(layout.appLeftPx);
     const appTop = Number(layout.appTopPx);
+    const widgetLeft = Number(layout.leftPx);
+    const widgetTop = Number(layout.topPx);
+    const widgetWidth = Number(layout.widthPx);
+    const widgetHeight = Number(layout.heightPx);
     if (Number.isFinite(appLeft)) current.width = Math.max(current.width, appLeft + 96);
     if (Number.isFinite(appTop)) current.height = Math.max(current.height, appTop + 104);
+    if (Number.isFinite(widgetLeft)) current.width = Math.max(current.width, widgetLeft + (Number.isFinite(widgetWidth) ? widgetWidth : 320));
+    if (Number.isFinite(widgetTop)) current.height = Math.max(current.height, widgetTop + (Number.isFinite(widgetHeight) ? widgetHeight : 220));
     return current;
   }, { width: 0, height: 0 });
 }
 
-function applyCanvasDensity(options = {}) {
+function applyCanvasGeometry(options = {}) {
   const board = spaceSurface();
   const viewport = els.spaceViewport;
   if (!board || !viewport) return;
   const rect = spaceViewportUsableRect() || viewport.getBoundingClientRect();
-  const density = canvasDensity();
+  const area = canvasArea();
+  const distance = canvasDistance();
   const extent = canvasContentExtent();
-  board.style.width = `${Math.max(rect.width, Math.round(rect.width * density), extent.width)}px`;
-  board.style.height = `${Math.max(rect.height, Math.round(rect.height * density), extent.height)}px`;
-  drawCanvas();
-  updateSpaceNavigationHints();
+  const logicalWidth = Math.max(rect.width / distance, Math.round(rect.width * area), extent.width);
+  const logicalHeight = Math.max(rect.height / distance, Math.round(rect.height * area), extent.height);
+  board.style.setProperty("--space-distance", String(distance));
+  board.dataset.spaceDistance = String(distance);
+  board.style.width = `${Math.max(rect.width, Math.round(logicalWidth * distance))}px`;
+  board.style.height = `${Math.max(rect.height, Math.round(logicalHeight * distance))}px`;
+  if (options.drawCanvas !== false) drawCanvas();
+  if (options.updateNavigation !== false) updateSpaceNavigationHints();
   if (options.renderMiniMap !== false) renderSpaceMiniMap();
 }
 
@@ -1521,10 +1810,10 @@ function miniMapAppEntityFromButton(button, metrics, boardBounds) {
   const styleLeft = parseFloat(button.style.left || "");
   const styleTop = parseFloat(button.style.top || "");
   const rawButtonLeft = Number.isFinite(Number(layout.appLeftPx))
-    ? Number(layout.appLeftPx)
+    ? logicalToScreenPx(Number(layout.appLeftPx))
     : (Number.isFinite(styleLeft) ? styleLeft : 0);
   const rawButtonTop = Number.isFinite(Number(layout.appTopPx))
-    ? Number(layout.appTopPx)
+    ? logicalToScreenPx(Number(layout.appTopPx))
     : (Number.isFinite(styleTop) ? styleTop : 0);
   const rawLeft = rawButtonLeft + Math.max(0, ((button.offsetWidth || 62) - width) / 2);
   const rawTop = rawButtonTop + 6;
@@ -1682,7 +1971,7 @@ function setSpaceMiniMapVisible(visible) {
   window.clearTimeout(state.spaceMiniMapHideTimer);
   state.spaceMiniMapHideTimer = 0;
   const nextVisible = Boolean(visible && spaceMiniMapCanRender());
-  els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", nextVisible);
+  els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", nextVisible || state.spaceZoomInfoVisible);
   if (nextVisible) {
     state.spaceMiniMapVisible = true;
     map.hidden = false;
@@ -1694,8 +1983,39 @@ function setSpaceMiniMapVisible(visible) {
   }
   state.spaceMiniMapVisible = false;
   map.classList.remove("is-visible");
+  els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", state.spaceZoomInfoVisible);
   state.spaceMiniMapHideTimer = window.setTimeout(() => {
     if (!state.spaceMiniMapVisible) map.hidden = true;
+  }, SPACE_MINIMAP_HIDE_MS);
+}
+
+function renderSpaceZoomInfo() {
+  const info = els.spaceZoomInfo;
+  if (!info) return;
+  info.textContent = formatMultiplier(canvasDistance());
+}
+
+function setSpaceZoomInfoVisible(visible) {
+  const info = els.spaceZoomInfo;
+  if (!info) return;
+  window.clearTimeout(state.spaceZoomInfoHideTimer);
+  state.spaceZoomInfoHideTimer = 0;
+  const nextVisible = Boolean(visible);
+  if (nextVisible) {
+    state.spaceZoomInfoVisible = true;
+    els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", true);
+    renderSpaceZoomInfo();
+    info.hidden = false;
+    window.requestAnimationFrame(() => {
+      if (state.spaceZoomInfoVisible) info.classList.add("is-visible");
+    });
+    return;
+  }
+  state.spaceZoomInfoVisible = false;
+  info.classList.remove("is-visible");
+  els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", state.spaceMiniMapVisible);
+  state.spaceZoomInfoHideTimer = window.setTimeout(() => {
+    if (!state.spaceZoomInfoVisible) info.hidden = true;
   }, SPACE_MINIMAP_HIDE_MS);
 }
 
@@ -1703,57 +2023,177 @@ function freezeWidgetPixelLayout() {
   const surface = spaceSurface();
   if (!surface) return;
   const surfaceRect = surface.getBoundingClientRect();
+  const distance = canvasDistance();
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
     const id = widget.dataset.widgetId;
     if (!id || widget.hidden || widget.classList.contains("is-minimized") || widget.classList.contains("is-maximized")) return;
     const rect = widget.getBoundingClientRect();
     const layout = widgetLayout(id);
-    const left = rect.left - surfaceRect.left;
-    const top = rect.top - surfaceRect.top;
+    const left = (rect.left - surfaceRect.left) / distance;
+    const top = (rect.top - surfaceRect.top) / distance;
+    const width = rect.width / distance;
+    const height = rect.height / distance;
     layout.leftPx = Math.round(left);
     layout.topPx = Math.round(top);
-    layout.widthPx = Math.round(rect.width);
-    layout.heightPx = Math.round(rect.height);
-    layout.leftPct = left / Math.max(1, surfaceRect.width);
-    layout.topPct = top / Math.max(1, surfaceRect.height);
-    layout.widthPct = rect.width / Math.max(1, surfaceRect.width);
-    layout.heightPct = rect.height / Math.max(1, surfaceRect.height);
+    layout.widthPx = Math.round(width);
+    layout.heightPx = Math.round(height);
+    layout.leftPct = left / Math.max(1, surfaceRect.width / distance);
+    layout.topPct = top / Math.max(1, surfaceRect.height / distance);
+    layout.widthPct = width / Math.max(1, surfaceRect.width / distance);
+    layout.heightPct = height / Math.max(1, surfaceRect.height / distance);
   });
 }
 
-function normalizedCanvasDensity(value) {
+function normalizedCanvasArea(value) {
   const number = Number(value);
-  return clamp(Math.round((Number.isFinite(number) ? number : 1) * 4) / 4, 1, CANVAS_DENSITY_MAX);
+  return clamp(Math.round((Number.isFinite(number) ? number : 1) * 4) / 4, 1, CANVAS_AREA_MAX);
 }
 
-function commitCanvasDensityChange(origin = "control") {
+function normalizedCanvasDistance(value) {
+  const number = Number(value);
+  const normalized = clamp(
+    Math.round((Number.isFinite(number) ? number : 1) / SPACE_DISTANCE_STEP) * SPACE_DISTANCE_STEP,
+    SPACE_DISTANCE_MIN,
+    SPACE_DISTANCE_MAX
+  );
+  return Number(normalized.toFixed(2));
+}
+
+function commitCanvasAreaChange(origin = "control") {
   saveWidgetLayout();
-  recordUserEvent("workspace.space_density_changed", {
+  recordUserEvent("workspace.space_area_changed", {
     target: `space:${activeSpaceStorageId()}`,
-    summary: `Space density ${canvasDensity()}x`,
-    data: { space_id: activeSpaceStorageId(), density: canvasDensity(), origin },
+    summary: `Space area ${formatMultiplier(canvasArea())}`,
+    data: { space_id: activeSpaceStorageId(), area: canvasArea(), origin },
   });
 }
 
-function setCanvasDensityValue(value, options = {}) {
+function commitCanvasDistanceChange(origin = "control") {
+  saveWidgetLayout();
+  recordUserEvent("workspace.space_distance_changed", {
+    target: `space:${activeSpaceStorageId()}`,
+    summary: `Space distance ${formatMultiplier(canvasDistance())}`,
+    data: { space_id: activeSpaceStorageId(), distance: canvasDistance(), origin },
+  });
+}
+
+function setCanvasAreaValue(value, options = {}) {
   const layout = canvasLayout();
-  const next = normalizedCanvasDensity(value);
-  const previous = canvasDensity();
+  const next = normalizedCanvasArea(value);
+  const previous = canvasArea();
   if (next === previous && !options.force) return next;
   layout.density = next;
-  applyCanvasDensity();
+  applyCanvasGeometry();
   applyWidgetLayout();
-  updateDensityDial(options.control);
+  updateAreaDial(options.control);
   if (options.persist !== false) {
-    commitCanvasDensityChange(options.origin || "control");
+    commitCanvasAreaChange(options.origin || "control");
   }
   if (options.render !== false) renderConfigModal();
   return next;
 }
 
-function setCanvasDensity(delta) {
+function setCanvasArea(delta) {
   freezeWidgetPixelLayout();
-  return setCanvasDensityValue(canvasDensity() + delta, { origin: "step" });
+  return setCanvasAreaValue(canvasArea() + delta, { origin: "step" });
+}
+
+function setCanvasDistanceValue(value, options = {}) {
+  const layout = canvasLayout();
+  const next = normalizedCanvasDistance(value);
+  const previous = canvasDistance();
+  if (next === previous && !options.force) return next;
+  if (options.freeze !== false) freezeWidgetPixelLayout();
+  layout.distance = next;
+  applyCanvasGeometry({
+    drawCanvas: options.drawCanvas,
+    renderMiniMap: options.renderMiniMap,
+    updateNavigation: options.updateNavigation,
+  });
+  if (options.layout === false) {
+    applySpaceDistanceScreenPositions();
+  } else {
+    applyWidgetLayout();
+  }
+  updateDistanceDial(options.control);
+  if (options.zoomInfo) renderSpaceZoomInfo();
+  if (options.persist !== false) {
+    commitCanvasDistanceChange(options.origin || "control");
+  }
+  if (options.render !== false) renderConfigModal();
+  return next;
+}
+
+function setCanvasDistance(delta) {
+  return setCanvasDistanceValue(canvasDistance() + delta, { origin: "step" });
+}
+
+function applySpaceDistanceScreenPositions() {
+  document.querySelectorAll(".space-app-button[data-widget-app]").forEach((button) => {
+    const id = button.dataset.widgetApp;
+    const layout = id ? state.widgetLayout[id] || {} : {};
+    const left = Number(layout.appLeftPx);
+    const top = Number(layout.appTopPx);
+    if (Number.isFinite(left)) button.style.left = `${logicalToScreenPx(left)}px`;
+    if (Number.isFinite(top)) button.style.top = `${logicalToScreenPx(top)}px`;
+  });
+  document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
+    if (widget.hidden || widget.classList.contains("is-minimized") || widget.classList.contains("is-maximized")) return;
+    const id = widget.dataset.widgetId;
+    const layout = id ? state.widgetLayout[id] || {} : {};
+    const left = Number(layout.leftPx);
+    const top = Number(layout.topPx);
+    if (Number.isFinite(left)) widget.style.left = `${logicalToScreenPx(left)}px`;
+    if (Number.isFinite(top)) widget.style.top = `${logicalToScreenPx(top)}px`;
+  });
+}
+
+function scheduleCanvasDistanceCommit(origin = "gesture") {
+  window.clearTimeout(state.spaceDistanceCommitTimer);
+  state.spaceDistanceCommitTimer = window.setTimeout(() => {
+    state.spaceDistanceCommitTimer = 0;
+    applyWidgetLayout();
+    commitCanvasDistanceChange(origin);
+  }, 180);
+}
+
+function viewportGestureAnchor(clientX, clientY) {
+  const viewport = els.spaceViewport;
+  const rect = viewport?.getBoundingClientRect?.();
+  if (!viewport || !rect) return null;
+  return {
+    x: clamp(clientX - rect.left, 0, viewport.clientWidth),
+    y: clamp(clientY - rect.top, 0, viewport.clientHeight),
+  };
+}
+
+function setCanvasDistanceAround(value, anchor, options = {}) {
+  const viewport = els.spaceViewport;
+  if (!viewport || !anchor) return canvasDistance();
+  const previous = canvasDistance();
+  const next = normalizedCanvasDistance(value);
+  if (next === previous && !options.force) return next;
+  const logicalX = (viewport.scrollLeft + anchor.x) / Math.max(SPACE_DISTANCE_MIN, previous);
+  const logicalY = (viewport.scrollTop + anchor.y) / Math.max(SPACE_DISTANCE_MIN, previous);
+  setCanvasDistanceValue(next, {
+    ...options,
+    persist: options.persist ?? false,
+    render: options.render ?? false,
+    renderMiniMap: options.renderMiniMap ?? false,
+  });
+  viewport.scrollLeft = clamp(Math.round(logicalX * next - anchor.x), 0, Math.max(0, viewport.scrollWidth - viewport.clientWidth));
+  viewport.scrollTop = clamp(Math.round(logicalY * next - anchor.y), 0, Math.max(0, viewport.scrollHeight - viewport.clientHeight));
+  if (options.updateNavigation !== false) updateSpaceNavigationHints();
+  if (options.renderMiniMap !== false) renderSpaceMiniMap();
+  return next;
+}
+
+function scheduleSpaceZoomMiniMapHide() {
+  window.clearTimeout(state.spaceZoomMiniMapTimer);
+  state.spaceZoomMiniMapTimer = window.setTimeout(() => {
+    state.spaceZoomMiniMapTimer = 0;
+    if (!state.spacePinchActive && !state.spacePanMomentumActive) setSpaceZoomInfoVisible(false);
+  }, 520);
 }
 
 function resetWidgetPosition(widget) {
@@ -1808,6 +2248,8 @@ function mappedAppIdsForPanel(panel = state.activePanel) {
 
 function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
   if (Object.prototype.hasOwnProperty.call(FIXED_WIDGET_LAYOUT, widgetId)) return true;
+  const app = appDefinitionById(widgetId);
+  if (app?.desktopOnly && isCompactViewport()) return false;
   return mappedAppIdsForPanel(panel).has(widgetId);
 }
 
@@ -1979,6 +2421,7 @@ function spaceApps(panel = state.activePanel) {
   const spaceId = activeSpaceStorageId(panel);
   return SPACE_APP_DEFINITIONS.filter((app) => {
     if (!mappedIds.has(app.id)) return false;
+    if (app.desktopOnly && isCompactViewport()) return false;
     if (app.home && spaceId !== "home") return false;
     return !app.module || isModuleEnabled(app.module);
   });
@@ -2074,7 +2517,7 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
   }
   const label = button.querySelector(".space-app-icon + span");
   if (label) label.textContent = widgetShort(app.id);
-  const viewportRect = spaceSurface()?.getBoundingClientRect?.() || { width: 1, height: 1 };
+  const viewportRect = spaceLogicalRect();
   const defaultLeftPct = 0.04 + (index % 3) * 0.088;
   const defaultTopPct = 0.12 + Math.floor(index / 3) * 0.14;
   const buttonWidth = button.offsetWidth || 62;
@@ -2095,8 +2538,8 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
     layout.appTopPx = top;
     layout.appLeftPct = left / Math.max(1, viewportRect.width);
     layout.appTopPct = top / Math.max(1, viewportRect.height);
-    button.style.left = `${left}px`;
-    button.style.top = `${top}px`;
+    button.style.left = `${logicalToScreenPx(left)}px`;
+    button.style.top = `${logicalToScreenPx(top)}px`;
     occupied.push(appRect(left, top, buttonWidth, buttonHeight));
     return;
   }
@@ -2105,8 +2548,8 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
   layout.appTopPx = top;
   layout.appLeftPct = left / Math.max(1, viewportRect.width);
   layout.appTopPct = top / Math.max(1, viewportRect.height);
-  button.style.left = `${left}px`;
-  button.style.top = `${top}px`;
+  button.style.left = `${logicalToScreenPx(left)}px`;
+  button.style.top = `${logicalToScreenPx(top)}px`;
   occupied.push(appRect(left, top, buttonWidth, buttonHeight));
 }
 
@@ -2131,11 +2574,11 @@ function organizerTopInsetPx(board) {
   const title = els.spaceOrganizeButton?.closest?.(".space-title") || els.spaceLabel?.closest?.(".space-title");
   const titleRect = title?.getBoundingClientRect?.();
   if (!boardRect || !titleRect) return APP_ORGANIZER_TOP_INSET_PX;
-  const titleBottom = Math.ceil(titleRect.bottom - boardRect.top + 4);
+  const titleBottom = Math.ceil(screenToLogicalPx(titleRect.bottom - boardRect.top + 4));
   const homeCoreModuleList = activeSpaceStorageId() === "home" ? board.querySelector(".home-actions") : null;
   const homeCoreModuleRect = homeCoreModuleList?.getBoundingClientRect?.();
   const homeCoreModuleBottom = homeCoreModuleRect && homeCoreModuleRect.width && homeCoreModuleRect.height
-    ? Math.ceil(homeCoreModuleRect.bottom - boardRect.top + 4)
+    ? Math.ceil(screenToLogicalPx(homeCoreModuleRect.bottom - boardRect.top + 4))
     : 0;
   return Math.max(APP_ORGANIZER_TOP_INSET_PX, titleBottom, homeCoreModuleBottom);
 }
@@ -2152,17 +2595,20 @@ function organizeSpaceAppsInViewport() {
   const gapY = 0;
   const leftInset = 0;
   const topInset = organizerTopInsetPx(board);
-  const boardWidth = Math.max(buttonWidth, board.offsetWidth || viewport.clientWidth);
-  const boardHeight = Math.max(buttonHeight, board.offsetHeight || viewport.clientHeight);
-  const visibleColumns = Math.max(1, Math.floor((Math.max(buttonWidth, viewport.clientWidth - leftInset) + gapX) / (buttonWidth + gapX)));
+  const boardRect = spaceLogicalRect(board);
+  const boardWidth = Math.max(buttonWidth, boardRect.width);
+  const boardHeight = Math.max(buttonHeight, boardRect.height);
+  const visibleWidth = Math.max(1, viewport.clientWidth / canvasDistance());
+  const visibleHeight = Math.max(1, viewport.clientHeight / canvasDistance());
+  const visibleColumns = Math.max(1, Math.floor((Math.max(buttonWidth, visibleWidth - leftInset) + gapX) / (buttonWidth + gapX)));
   const boardColumns = Math.max(1, Math.floor((boardWidth + gapX) / (buttonWidth + gapX)));
   const columns = Math.min(apps.length, visibleColumns, boardColumns);
   const rows = Math.ceil(apps.length / columns);
   const blockWidth = columns * buttonWidth + Math.max(0, columns - 1) * gapX;
   const blockHeight = rows * buttonHeight + Math.max(0, rows - 1) * gapY;
-  const rawStartLeft = snapToAppGrid(viewport.scrollLeft + leftInset);
+  const rawStartLeft = snapToAppGrid(screenToLogicalPx(viewport.scrollLeft) + leftInset);
   const startLeft = clamp(rawStartLeft, 0, Math.max(0, boardWidth - blockWidth));
-  const rawStartTop = snapToAppGrid(viewport.scrollTop + topInset);
+  const rawStartTop = snapToAppGrid(screenToLogicalPx(viewport.scrollTop) + topInset);
   const startTop = clamp(rawStartTop, 0, Math.max(0, boardHeight - blockHeight));
   apps.forEach((app, index) => {
     const column = index % columns;
@@ -2173,10 +2619,10 @@ function organizeSpaceAppsInViewport() {
     layout.appLeftPx = left;
     layout.appTopPx = top;
     layout.appOrganized = true;
-    layout.appLeftPct = left / Math.max(1, board.offsetWidth || viewport.scrollWidth || viewport.clientWidth);
-    layout.appTopPct = top / Math.max(1, board.offsetHeight || viewport.scrollHeight || viewport.clientHeight);
+    layout.appLeftPct = left / Math.max(1, boardWidth);
+    layout.appTopPct = top / Math.max(1, boardHeight);
   });
-  const overflowRows = Math.max(0, rows - Math.max(1, Math.floor((viewport.clientHeight - topInset + gapY) / (buttonHeight + gapY))));
+  const overflowRows = Math.max(0, rows - Math.max(1, Math.floor((visibleHeight - topInset + gapY) / (buttonHeight + gapY))));
   renderAppLayer();
   renderSpaceMiniMap();
   saveWidgetLayout();
@@ -2201,8 +2647,8 @@ function installAppButtonDragging(button, appId) {
     if (!isPrimaryPointer(event)) return;
     const startRect = button.getBoundingClientRect();
     const viewportRect = viewport.getBoundingClientRect();
-    const startLeft = startRect.left - viewportRect.left;
-    const startTop = startRect.top - viewportRect.top;
+    const startLeft = screenToLogicalPx(startRect.left - viewportRect.left);
+    const startTop = screenToLogicalPx(startRect.top - viewportRect.top);
     const startX = event.clientX;
     const startY = event.clientY;
     let moved = false;
@@ -2215,12 +2661,13 @@ function installAppButtonDragging(button, appId) {
     }
     const move = (moveEvent) => {
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
-      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
-      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
-      const left = clamp(startLeft + moveEvent.clientX - startX, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
-      const top = clamp(startTop + moveEvent.clientY - startY, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
-      button.style.left = `${left}px`;
-      button.style.top = `${top}px`;
+      const logicalRect = spaceLogicalRect(viewport);
+      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
+      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
+      const left = clamp(startLeft + screenToLogicalPx(moveEvent.clientX - startX), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
+      const top = clamp(startTop + screenToLogicalPx(moveEvent.clientY - startY), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
+      button.style.left = `${logicalToScreenPx(left)}px`;
+      button.style.top = `${logicalToScreenPx(top)}px`;
     };
     const end = (endEvent) => {
       button.classList.remove("is-dragging");
@@ -2234,35 +2681,41 @@ function installAppButtonDragging(button, appId) {
         // Capture may already be released by the browser.
       }
       if (!moved) {
-        button.style.left = `${startLeft}px`;
-        button.style.top = `${startTop}px`;
+        button.style.left = `${logicalToScreenPx(startLeft)}px`;
+        button.style.top = `${logicalToScreenPx(startTop)}px`;
         return;
       }
       const layout = widgetLayout(appId);
-      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
-      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
+      const logicalRect = spaceLogicalRect(viewport);
+      const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalRect.width - button.offsetWidth - SPACE_CANVAS_EDGE_INSET_PX);
+      const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalRect.height - button.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
       const occupied = Array.from(els.appLayer.querySelectorAll(".space-app-button"))
         .filter((item) => item !== button)
         .map((item) => {
           const rect = item.getBoundingClientRect();
-          return appRect(rect.left - viewportRect.left, rect.top - viewportRect.top, rect.width, rect.height);
+          return appRect(
+            screenToLogicalPx(rect.left - viewportRect.left),
+            screenToLogicalPx(rect.top - viewportRect.top),
+            screenToLogicalPx(rect.width),
+            screenToLogicalPx(rect.height)
+          );
         });
       const { left, top } = nearestOpenAppPosition(
-        parseFloat(button.style.left || "0"),
-        parseFloat(button.style.top || "0"),
+        screenToLogicalPx(parseFloat(button.style.left || "0")),
+        screenToLogicalPx(parseFloat(button.style.top || "0")),
         button.offsetWidth,
         button.offsetHeight,
         maxLeft,
         maxTop,
         occupied
       );
-      button.style.left = `${left}px`;
-      button.style.top = `${top}px`;
+      button.style.left = `${logicalToScreenPx(left)}px`;
+      button.style.top = `${logicalToScreenPx(top)}px`;
       layout.appLeftPx = left;
       layout.appTopPx = top;
       layout.appOrganized = false;
-      layout.appLeftPct = left / Math.max(1, viewportRect.width);
-      layout.appTopPct = top / Math.max(1, viewportRect.height);
+      layout.appLeftPct = left / Math.max(1, logicalRect.width);
+      layout.appTopPct = top / Math.max(1, logicalRect.height);
       saveWidgetLayout();
       button.dataset.dragMoved = "true";
       window.setTimeout(() => {
@@ -2314,7 +2767,7 @@ function applyWidgetLayout() {
   const viewport = spaceSurface();
   if (!viewport) return;
   applyWidgetChromeAll();
-  const viewportRect = viewport.getBoundingClientRect();
+  const viewportRect = spaceLogicalRect(viewport);
   let maxZ = state.widgetZ;
   let containedAny = false;
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
@@ -2373,8 +2826,8 @@ function applyWidgetLayout() {
       const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - widget.offsetHeight - SPACE_CANVAS_EDGE_INSET_PX);
       const left = clamp(Number.isFinite(leftPx) ? leftPx : leftPct * viewportRect.width, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
       const top = clamp(Number.isFinite(topPx) ? topPx : topPct * viewportRect.height, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
-      widget.style.left = `${left}px`;
-      widget.style.top = `${top}px`;
+      widget.style.left = `${logicalToScreenPx(left)}px`;
+      widget.style.top = `${logicalToScreenPx(top)}px`;
       widget.style.right = "auto";
       widget.style.bottom = "auto";
       layout.leftPx = Math.round(left);
@@ -2398,22 +2851,25 @@ function applyWidgetLayout() {
 function fitWidgetToVisibleViewport(widget, widgetId, options = {}) {
   const visibleRect = spaceViewportUsableRect();
   if (!widget || !visibleRect?.width || !visibleRect?.height) return { changed: false };
-  const bounds = widgetDimensionBounds(widgetId, visibleRect);
+  const distance = canvasDistance();
+  const logicalVisibleRect = spaceViewportUsableLogicalRect() || visibleRect;
+  const bounds = widgetDimensionBounds(widgetId, logicalVisibleRect);
   const rect = widget.getBoundingClientRect();
-  const width = Math.round(rect.width);
-  const height = Math.round(rect.height);
-  const nextWidth = Math.round(clamp(width, 1, bounds.maxWidth));
+  const width = Math.round(rect.width / distance);
+  const height = Math.round(rect.height / distance);
+  const allowHorizontalCanvasOverflow = isCompactViewport();
+  const nextWidth = allowHorizontalCanvasOverflow ? width : Math.round(clamp(width, 1, bounds.maxWidth));
   const nextHeight = Math.round(clamp(height, 1, bounds.maxHeight));
   const updateLayout = options.updateLayout !== false;
   const layout = updateLayout ? widgetLayout(widgetId) : null;
   let changed = false;
-  if (width > nextWidth) {
+  if (!allowHorizontalCanvasOverflow && width > nextWidth) {
     widget.style.width = `${nextWidth}px`;
     widget.style.right = "auto";
     widget.style.aspectRatio = "auto";
     if (layout) {
       layout.widthPx = nextWidth;
-      layout.widthPct = nextWidth / Math.max(1, visibleRect.width);
+      layout.widthPct = nextWidth / Math.max(1, logicalVisibleRect.width);
     }
     changed = true;
   }
@@ -2423,11 +2879,11 @@ function fitWidgetToVisibleViewport(widget, widgetId, options = {}) {
     widget.style.aspectRatio = "auto";
     if (layout) {
       layout.heightPx = nextHeight;
-      layout.heightPct = nextHeight / Math.max(1, visibleRect.height);
+      layout.heightPct = nextHeight / Math.max(1, logicalVisibleRect.height);
     }
     changed = true;
   }
-  return { changed, height: nextHeight, width: nextWidth };
+  return { changed, height: Math.round(nextHeight * distance), width: Math.round(nextWidth * distance) };
 }
 
 function containWidgetInCanvasBounds(widget, widgetId, options = {}) {
@@ -2436,25 +2892,29 @@ function containWidgetInCanvasBounds(widget, widgetId, options = {}) {
   if (!widget || !boardRect?.width || !boardRect?.height) return { changed: false };
   const rect = widget.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return { changed: false };
+  const distance = canvasDistance();
   const updateLayout = options.updateLayout !== false;
   const layout = updateLayout ? widgetLayout(widgetId) : null;
-  const left = rect.left - boardRect.left;
-  const top = rect.top - boardRect.top;
-  const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.width - rect.width - SPACE_CANVAS_EDGE_INSET_PX);
-  const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, boardRect.height - rect.height - SPACE_CANVAS_EDGE_INSET_PX);
+  const left = (rect.left - boardRect.left) / distance;
+  const top = (rect.top - boardRect.top) / distance;
+  const width = rect.width / distance;
+  const height = rect.height / distance;
+  const logicalBoardRect = spaceLogicalRect(board);
+  const maxLeft = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalBoardRect.width - width - SPACE_CANVAS_EDGE_INSET_PX);
+  const maxTop = Math.max(SPACE_CANVAS_EDGE_INSET_PX, logicalBoardRect.height - height - SPACE_CANVAS_EDGE_INSET_PX);
   const nextLeft = clamp(left, SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
   const nextTop = clamp(top, SPACE_CANVAS_EDGE_INSET_PX, maxTop);
   const changed = Math.abs(nextLeft - left) > 0.5 || Math.abs(nextTop - top) > 0.5;
   if (!changed) return { changed: false, left: Math.round(left), top: Math.round(top) };
-  widget.style.left = `${Math.round(nextLeft)}px`;
-  widget.style.top = `${Math.round(nextTop)}px`;
+  widget.style.left = `${Math.round(logicalToScreenPx(nextLeft))}px`;
+  widget.style.top = `${Math.round(logicalToScreenPx(nextTop))}px`;
   widget.style.right = "auto";
   widget.style.bottom = "auto";
   if (layout) {
     layout.leftPx = Math.round(nextLeft);
     layout.topPx = Math.round(nextTop);
-    layout.leftPct = nextLeft / Math.max(1, boardRect.width);
-    layout.topPct = nextTop / Math.max(1, boardRect.height);
+    layout.leftPct = nextLeft / Math.max(1, logicalBoardRect.width);
+    layout.topPct = nextTop / Math.max(1, logicalBoardRect.height);
   }
   return { changed: true, left: Math.round(nextLeft), top: Math.round(nextTop) };
 }
@@ -2564,16 +3024,16 @@ function installWidgetDragging() {
 
       const viewportRect = viewport.getBoundingClientRect();
       const widgetRect = widget.getBoundingClientRect();
-      const startLeft = widgetRect.left - viewportRect.left;
-      const startTop = widgetRect.top - viewportRect.top;
+      const startLeft = screenToLogicalPx(widgetRect.left - viewportRect.left);
+      const startTop = screenToLogicalPx(widgetRect.top - viewportRect.top);
       const startX = event.clientX;
       const startY = event.clientY;
 
-      widget.style.left = `${startLeft}px`;
-      widget.style.top = `${startTop}px`;
+      widget.style.left = `${logicalToScreenPx(startLeft)}px`;
+      widget.style.top = `${logicalToScreenPx(startTop)}px`;
       widget.style.right = "auto";
       widget.style.bottom = "auto";
-      widget.style.transform = "none";
+      widget.style.transform = "";
       widget.classList.add("is-dragging");
       document.body.classList.add("is-widget-dragging");
       bringWidgetForward(widget);
@@ -2592,10 +3052,10 @@ function installWidgetDragging() {
       const move = (moveEvent) => {
         const bounds = widgetCanvasMovementBounds(widget);
         if (!bounds) return;
-        const left = clamp(startLeft + moveEvent.clientX - startX, bounds.minLeft, bounds.maxLeft);
-        const top = clamp(startTop + moveEvent.clientY - startY, bounds.minTop, bounds.maxTop);
-        widget.style.left = `${left}px`;
-        widget.style.top = `${top}px`;
+        const left = clamp(startLeft + screenToLogicalPx(moveEvent.clientX - startX), bounds.minLeft, bounds.maxLeft);
+        const top = clamp(startTop + screenToLogicalPx(moveEvent.clientY - startY), bounds.minTop, bounds.maxTop);
+        widget.style.left = `${logicalToScreenPx(left)}px`;
+        widget.style.top = `${logicalToScreenPx(top)}px`;
       };
 
       const end = () => {
@@ -2609,9 +3069,9 @@ function installWidgetDragging() {
         } catch {
           // Capture may already be released by the browser.
         }
-        const finalLeft = parseFloat(widget.style.left || "0");
-        const finalTop = parseFloat(widget.style.top || "0");
-        const bounds = widgetCanvasMovementBounds(widget) || { width: viewportRect.width, height: viewportRect.height };
+        const finalLeft = screenToLogicalPx(parseFloat(widget.style.left || "0"));
+        const finalTop = screenToLogicalPx(parseFloat(widget.style.top || "0"));
+        const bounds = widgetCanvasMovementBounds(widget) || spaceLogicalRect(viewport);
         state.widgetLayout[widget.dataset.widgetId] = {
           ...(state.widgetLayout[widget.dataset.widgetId] || {}),
           leftPx: Math.round(finalLeft),
@@ -2674,13 +3134,13 @@ function installWidgetResizing() {
       event.preventDefault();
       event.stopPropagation();
 
-      const viewportRect = viewport.getBoundingClientRect();
-      const boardRect = viewportRect;
+      const viewportRect = spaceLogicalRect(viewport);
+      const boardVisualRect = viewport.getBoundingClientRect();
       const widgetRect = widget.getBoundingClientRect();
-      const startLeft = widgetRect.left - boardRect.left;
-      const startTop = widgetRect.top - boardRect.top;
-      const startWidth = widgetRect.width;
-      const startHeight = widgetRect.height;
+      const startLeft = screenToLogicalPx(widgetRect.left - boardVisualRect.left);
+      const startTop = screenToLogicalPx(widgetRect.top - boardVisualRect.top);
+      const startWidth = widget.offsetWidth;
+      const startHeight = widget.offsetHeight;
       const startX = event.clientX;
       const startY = event.clientY;
       const bounds = widgetDimensionBounds(widget.dataset.widgetId, viewportRect);
@@ -2688,8 +3148,8 @@ function installWidgetResizing() {
       const minHeight = bounds.minHeight;
       let finished = false;
 
-      widget.style.left = `${startLeft}px`;
-      widget.style.top = `${startTop}px`;
+      widget.style.left = `${logicalToScreenPx(startLeft)}px`;
+      widget.style.top = `${logicalToScreenPx(startTop)}px`;
       widget.style.right = "auto";
       widget.style.bottom = "auto";
       widget.style.width = `${startWidth}px`;
@@ -2715,8 +3175,8 @@ function installWidgetResizing() {
         const movementBounds = widgetCanvasMovementBounds(widget);
         const maxWidth = Math.min(bounds.maxWidth, Math.max(minWidth, (movementBounds?.maxLeft || viewportRect.width) - startLeft + widget.offsetWidth));
         const maxHeight = Math.min(bounds.maxHeight, Math.max(minHeight, (movementBounds?.maxTop || viewportRect.height) - startTop + widget.offsetHeight));
-        const width = clamp(startWidth + moveEvent.clientX - startX, minWidth, maxWidth);
-        const height = clamp(startHeight + moveEvent.clientY - startY, minHeight, maxHeight);
+        const width = clamp(startWidth + screenToLogicalPx(moveEvent.clientX - startX), minWidth, maxWidth);
+        const height = clamp(startHeight + screenToLogicalPx(moveEvent.clientY - startY), minHeight, maxHeight);
         widget.style.width = `${width}px`;
         widget.style.height = `${height}px`;
       };
@@ -2739,12 +3199,12 @@ function installWidgetResizing() {
         }
         state.widgetLayout[widget.dataset.widgetId] = {
           ...(state.widgetLayout[widget.dataset.widgetId] || {}),
-          leftPx: Math.round(parseFloat(widget.style.left || "0")),
-          topPx: Math.round(parseFloat(widget.style.top || "0")),
+          leftPx: Math.round(screenToLogicalPx(parseFloat(widget.style.left || "0"))),
+          topPx: Math.round(screenToLogicalPx(parseFloat(widget.style.top || "0"))),
           widthPx: Math.round(widget.offsetWidth),
           heightPx: Math.round(widget.offsetHeight),
-          leftPct: parseFloat(widget.style.left || "0") / Math.max(1, viewportRect.width),
-          topPct: parseFloat(widget.style.top || "0") / Math.max(1, viewportRect.height),
+          leftPct: screenToLogicalPx(parseFloat(widget.style.left || "0")) / Math.max(1, viewportRect.width),
+          topPct: screenToLogicalPx(parseFloat(widget.style.top || "0")) / Math.max(1, viewportRect.height),
           widthPct: widget.offsetWidth / Math.max(1, viewportRect.width),
           heightPct: widget.offsetHeight / Math.max(1, viewportRect.height),
           z: Number(widget.style.zIndex || 4),
@@ -2786,6 +3246,8 @@ async function loadConfig() {
       if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
         state.agentTurnTimeoutMs = timeoutSec * 1000;
       }
+      applyModuleVisibility();
+      renderModules();
     }
   } catch {
     // Keep the local default when the config route is unavailable.
@@ -3143,7 +3605,12 @@ async function bridgeJson(path, options = {}) {
 
 async function postAgentMessage(body, pendingMessage, options = {}) {
   if (!("ReadableStream" in window) || !("TextDecoder" in window)) {
-    return fetchJson("/agent/session/message", { ...options, method: "POST", body });
+    return fetchJson("/agent/session/message", {
+      ...options,
+      timeoutMs: options.timeoutMs || options.idleTimeoutMs,
+      method: "POST",
+      body,
+    });
   }
   return streamAgentMessage(body, pendingMessage, options);
 }
@@ -3152,14 +3619,24 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort();
   if (options.signal) options.signal.addEventListener("abort", abortFromCaller, { once: true });
-  const timeout = window.setTimeout(() => controller.abort(), Number(options.timeoutMs || 30000));
+  const idleTimeoutMs = Number(options.idleTimeoutMs || options.timeoutMs || 30000);
+  let idleTimeout = 0;
+  const resetIdleTimeout = () => {
+    window.clearTimeout(idleTimeout);
+    idleTimeout = window.setTimeout(() => controller.abort(), idleTimeoutMs);
+  };
+  resetIdleTimeout();
   try {
     const response = await fetch("/agent/session/message/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wasm-Agent-Device-Id": clientDeviceId(),
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
+    resetIdleTimeout();
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -3170,6 +3647,7 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      resetIdleTimeout();
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
@@ -3185,7 +3663,7 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
     if (!finalPayload) throw new Error("The embedded chat stream ended without a final response.");
     return finalPayload;
   } finally {
-    window.clearTimeout(timeout);
+    window.clearTimeout(idleTimeout);
     if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
   }
 }
@@ -3201,6 +3679,13 @@ function handleAgentStreamLine(line, pendingMessage) {
   }
   if (payload.type === "action" && payload.action) {
     mergeAgentAction(pendingMessage, payload.action);
+  }
+  if (payload.type === "heartbeat") {
+    if (payload.action) mergeAgentAction(pendingMessage, payload.action);
+    updateAgentPendingMessage(pendingMessage, {
+      phase: payload.phase || "Waiting for Hermes",
+      content: payload.message || pendingMessage.content,
+    });
   }
   if (payload.type === "error") {
     throw new Error(payload.error?.message || "Embedded chat stream failed.");
@@ -5778,6 +6263,7 @@ async function sendAgentMessage(text) {
   updateAgentSendButton();
   els.agentStatus.textContent = "Thinking";
   const targetNode = agentTargetNode();
+  const chatModel = selectedAgentModel();
   const turnStartedAt = Date.now();
   const mode = els.agentModeSelect.value;
   const userImages = state.agentPendingImages.map((image) => ({
@@ -5920,8 +6406,8 @@ async function sendAgentMessage(text) {
       agentAction(`Ask ${targetNode}`, "running", "POST /agent/session/message", {
         id: "client_ask_orchestrator",
         kind: "model",
-        meta: mode,
-        arguments: { endpoint: "/agent/session/message", mode, target_node: targetNode },
+        meta: chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
+        arguments: { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
       }),
     ];
     const pendingMessage = appendAgentMessage("assistant", `Waiting for ${targetNode}...`, {
@@ -5959,11 +6445,13 @@ async function sendAgentMessage(text) {
       attachments: payloadAttachments.length ? payloadAttachments : undefined,
       mode,
       target_node: targetNode,
+      model: chatModel?.id || undefined,
+      model_provider: chatModel?.provider || undefined,
       space_id: activeSpaceStorageId(),
       observation: compactObservation,
       transcript,
     }, pendingMessage, {
-      timeoutMs: state.agentTurnTimeoutMs + 5000,
+      idleTimeoutMs: state.agentTurnTimeoutMs + 5000,
       signal: state.agentAbortController.signal,
     });
     const reply = payload.agent?.reply || "I did not receive a response from the embedded agent adapter.";
@@ -6037,29 +6525,45 @@ async function sendAgentMessage(text) {
 function normalizeNode(raw) {
   const id = cleanText(raw.id || raw.node_id || raw.title, "unknown");
   const activity = raw.activity || {};
+  const rawStatus = raw.raw || {};
   const running = Boolean(raw.running || raw.status === "running" || raw.status === "working");
+  const llmActive = Boolean(activity.llm_active || rawStatus.activity?.llm_active);
   const status = cleanText(activity.state || raw.status || (running ? "running" : "stopped"), "unknown");
+  const engineStatus = running ? "online" : status;
   const statusKey = status.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
   const statusClass = /error|fail|missing|unhealthy/.test(statusKey)
     ? "error"
     : /stop|exit|down|offline/.test(statusKey)
       ? "stopped"
       : running || /work|run|active|ready|idle|online|healthy/.test(statusKey)
-        ? statusKey || "running"
+        ? (statusKey === "working" ? "running" : (statusKey || "running"))
         : "unknown";
   const runtime = cleanText(raw.runtime?.type || raw.raw?.runtime_type, "runtime");
   const modelOverride = nodeModelOverride(id);
   const overriddenModel = formatNodeModel(modelOverride.name, modelOverride.provider);
+  const modelName = activity.model || rawStatus.default_model_env || raw.default_model_env || "";
+  const modelProvider = rawStatus.default_model_provider_env || raw.default_model_provider_env || "";
+  const tokenTotal = Number(activity.total_tokens || rawStatus.session_total_tokens || 0);
   return {
-    raw,
-    id,
-    title: cleanText(raw.title || id, id),
-    running,
-    status,
-    statusClass,
+	    raw,
+	    id,
+	    title: cleanText(raw.title || id, id),
+	    running,
+	    llmActive,
+	    status,
+	    engineStatus,
+	    statusClass,
     runtime,
-    model: cleanText(overriddenModel || activity.model, ""),
+    model: cleanText(overriddenModel || formatNodeModel(modelName, modelProvider), ""),
+    modelName: cleanText(modelName, ""),
+    modelProvider: cleanText(modelProvider, ""),
     modelOverride,
+	    tokenUsage: {
+	      total_tokens: Number.isFinite(tokenTotal) && tokenTotal > 0 ? tokenTotal : 0,
+	      api_calls: Number(activity.api_calls || 0),
+	      delta_tokens: 0,
+	      source: cleanText(activity.source, ""),
+	    },
     taskPreview: cleanText(activity.task_preview, ""),
     actions: Array.isArray(raw.actions) ? raw.actions : [],
   };
@@ -6075,8 +6579,10 @@ async function refresh(origin = "auto") {
     state.bridgeReady = false;
     state.nodes = [];
     state.tasks = [];
-    state.securityLoop = null;
-    state.securityFindings = [];
+	    state.securityLoop = null;
+	    state.securityLatestRun = null;
+	    state.securityRuns = [];
+	    state.securityFindings = [];
     renderAll();
     return;
   }
@@ -6086,11 +6592,17 @@ async function refresh(origin = "auto") {
     state.bridgeReady = true;
     state.lastError = "";
 
-    const [nodes, tasks] = await Promise.all([
-      bridgeJson("/nodes").catch(() => ({ nodes: [] })),
-      bridgeJson("/tasks").catch(() => ({ tasks: [] })),
-    ]);
-    state.nodes = (nodes.nodes || []).map(normalizeNode);
+	    const previousTokens = new Map(state.nodes.map((node) => [node.id, Number(node.tokenUsage?.total_tokens || 0)]));
+	    const [nodes, tasks] = await Promise.all([
+	      bridgeJson("/nodes").catch(() => ({ nodes: [] })),
+	      bridgeJson("/tasks").catch(() => ({ tasks: [] })),
+	    ]);
+	    state.nodes = (nodes.nodes || []).map(normalizeNode).map((node) => {
+	      const previous = previousTokens.get(node.id);
+	      const current = Number(node.tokenUsage?.total_tokens || 0);
+	      const delta = Number.isFinite(previous) && current > previous ? current - previous : 0;
+	      return { ...node, tokenUsage: { ...node.tokenUsage, delta_tokens: delta } };
+	    });
     state.tasks = tasks.tasks || [];
     if (!state.resourceInterval && (resourcesWidgetIsOpen() || !["auto", "startup"].includes(origin))) {
       await loadResources(origin).catch(() => {});
@@ -6538,9 +7050,10 @@ function renderTopology() {
   els.selectedNode.textContent = state.selectedNode;
   els.topologyNodes.replaceChildren(
     ...nodes.map((node, index) => {
+      const work = nodeWorkState(node);
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `topology-node${node.id === state.selectedNode ? " active" : ""}`;
+      button.className = `topology-node${node.id === state.selectedNode ? " active" : ""}${work.working ? " working" : ""}`;
       Object.assign(button.style, nodePosition(node, index, nodes.length));
       button.addEventListener("click", (event) => {
         if (button.dataset.dragMoved === "true") {
@@ -6559,25 +7072,69 @@ function renderTopology() {
       const strong = document.createElement("strong");
       strong.textContent = node.title;
       const dot = document.createElement("span");
-      dot.className = `state-dot ${node.statusClass}`;
+      dot.className = `state-dot ${work.working ? "working" : node.statusClass}`;
       title.append(strong, dot);
 
       const runtime = document.createElement("div");
       runtime.className = "node-meta";
-      runtime.textContent = `${node.status} / ${node.runtime}`;
+      runtime.textContent = `${work.label} / ${node.runtime}`;
 
-      const model = document.createElement("div");
-      model.className = "node-meta";
-      model.textContent = node.model || "Hermes runtime";
+	      const model = document.createElement("div");
+	      model.className = "node-meta";
+	      model.textContent = node.model || "Hermes runtime";
 
-      button.append(title, runtime, model);
-      return button;
-    })
-  );
+      const tokens = document.createElement("div");
+      tokens.className = `node-meta${node.tokenUsage?.delta_tokens ? " token-moving" : ""}`;
+      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens ${formatSignedCount(node.tokenUsage?.delta_tokens)}`.trim();
+
+      button.append(title, runtime, model, tokens);
+	      return button;
+	    })
+	  );
 }
 
 function nodeById(nodeId) {
   return state.nodes.find((node) => node.id === nodeId) || null;
+}
+
+function securityRunTaskDetail(task) {
+  return task?.task && typeof task.task === "object" ? task.task : (task || {});
+}
+
+function latestSecurityTaskForNode(nodeId) {
+  const tasks = Array.isArray(state.securityLatestRun?.tasks) ? state.securityLatestRun.tasks : [];
+  return tasks.find((task) => {
+    const detail = securityRunTaskDetail(task);
+    return (task.target_node || detail.target_node) === nodeId;
+  }) || null;
+}
+
+function taskIsActive(task) {
+  const detail = securityRunTaskDetail(task);
+  return ["queued", "submitted", "running", "started", "stopping"].includes(String(detail.status || "").toLowerCase());
+}
+
+function securityLatestRunIsActive() {
+  const status = String(state.securityLatestRun?.runner_status || "").toLowerCase();
+  return ["queued", "submitted", "running", "started", "stopping"].includes(status);
+}
+
+function nodeWorkState(node) {
+  const task = latestSecurityTaskForNode(node.id);
+  const detail = securityRunTaskDetail(task);
+  const hasTokenDelta = Number(node.tokenUsage?.delta_tokens || 0) > 0;
+  const taskActive = securityLatestRunIsActive() && taskIsActive(task);
+  const working = Boolean(hasTokenDelta || taskActive);
+  if (taskActive) {
+    return { working: true, label: `working / ${detail.status || "run"}`, detail };
+  }
+  if (hasTokenDelta) {
+    return { working: true, label: "spending tokens", detail };
+  }
+  if (node.llmActive) {
+    return { working: false, label: "LLM signal", detail };
+  }
+  return { working, label: `${node.engineStatus} / ${node.status}`, detail };
 }
 
 function nodeModelOverrides() {
@@ -6607,6 +7164,49 @@ function hideNodeContextMenu(options = {}) {
   }
 }
 
+function hideNodeStatsBalloon(options = {}) {
+  if (options.passive && performance.now() < state.nodeStatsSuppressDismissUntil && !options.force) return;
+  if (!options.skipHistory && closeUiNavigationLayer("node-stats-balloon")) return;
+  if (state.nodeStatsInterval) {
+    window.clearInterval(state.nodeStatsInterval);
+    state.nodeStatsInterval = 0;
+  }
+  state.activeNodeStatsId = "";
+  state.nodeStatsPosition = null;
+  if (els.nodeStatsBalloon) els.nodeStatsBalloon.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("node-stats-balloon", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function suppressNodeStatsDismiss(ms = 220) {
+  state.nodeStatsSuppressDismissUntil = Math.max(state.nodeStatsSuppressDismissUntil, performance.now() + ms);
+}
+
+function positionNodeStatsBalloon(event) {
+  if (!els.nodeStatsBalloon) return;
+  els.nodeStatsBalloon.hidden = false;
+  const rect = els.nodeStatsBalloon.getBoundingClientRect();
+  const gap = 10;
+  const sourceX = Number.isFinite(event?.clientX) ? event.clientX : window.innerWidth / 2 - rect.width / 2;
+  const sourceY = Number.isFinite(event?.clientY) ? event.clientY : window.innerHeight / 2 - rect.height / 2;
+  const left = Math.max(gap, Math.min(window.innerWidth - rect.width - gap, sourceX + 8));
+  const top = Math.max(gap, Math.min(window.innerHeight - rect.height - gap, sourceY + 8));
+  state.nodeStatsPosition = { left, top };
+  applyNodeStatsPosition();
+}
+
+function applyNodeStatsPosition() {
+  if (!els.nodeStatsBalloon || !state.nodeStatsPosition) return;
+  const rect = els.nodeStatsBalloon.getBoundingClientRect();
+  const gap = 10;
+  const left = Math.max(gap, Math.min(window.innerWidth - rect.width - gap, state.nodeStatsPosition.left));
+  const top = Math.max(gap, Math.min(window.innerHeight - rect.height - gap, state.nodeStatsPosition.top));
+  state.nodeStatsPosition = { left, top };
+  els.nodeStatsBalloon.style.left = `${left}px`;
+  els.nodeStatsBalloon.style.top = `${top}px`;
+}
+
 function positionNodeContextMenu(event) {
   if (!els.nodeContextMenu) return;
   els.nodeContextMenu.hidden = false;
@@ -6628,39 +7228,418 @@ function nodeContextActions(node) {
     stop_node: ["stop_node", "stop"],
     update_node: ["update_node", "update"],
   };
-  return preferred.map((name) => {
-    const action = node.actions.find((item) => (aliases[name] || [name]).includes(item.action));
-    return action || {
+	  return preferred.map((name) => {
+	    const action = node.actions.find((item) => (aliases[name] || [name]).includes(item.action));
+	    return action || {
       id: `${node.id}:${name}`,
       action: name,
       label: name.replace("_node", ""),
       endpoint: `/nodes/${encodeURIComponent(node.id)}/action`,
       method: "POST",
       payload_template: { action: name, payload: {} },
-      enabled: true,
-      destructive: name !== "start_node",
-    };
+	      enabled: true,
+	      destructive: name !== "start_node",
+	    };
+	  });
+	}
+
+function numberFromTokenText(value) {
+  const match = String(value || "").match(/([0-9][0-9,._]*)\s*tokens/i);
+  if (!match) return 0;
+  const number = Number(match[1].replace(/[,_]/g, ""));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function tokenStatsFromNodeStats(node, statsPayload) {
+  const stats = statsPayload?.stats || statsPayload || {};
+  const usage = stats.usage || {};
+  const activity = stats.activity || {};
+  const logs = stats.logs || {};
+  const usageTotals = usage.totals || {};
+  const statusActivity = stats.status?.activity || {};
+  const totals = activity.totals || {};
+  const last = activity.last_activity || {};
+  const logTotals = logs.totals || {};
+  const totalTokens = Number(usageTotals.total_tokens || statusActivity.total_tokens || totals.total_tokens || numberFromTokenText(last.response_preview) || node.tokenUsage?.total_tokens || 0);
+  const apiCalls = Number(usageTotals.api_calls || statusActivity.api_calls || totals.api_call_count || node.tokenUsage?.api_calls || 0);
+  const toolCount = Number(usageTotals.tool_call_count || totals.tool_count || last.tool_count || 0);
+  const warnings = Number(logTotals.warnings || 0);
+  const errors = Number((logTotals.errors || 0) + (logTotals.tracebacks || 0));
+  return {
+    total_tokens: Number.isFinite(totalTokens) && totalTokens > 0 ? totalTokens : 0,
+    api_calls: Number.isFinite(apiCalls) && apiCalls > 0 ? apiCalls : 0,
+    tool_count: Number.isFinite(toolCount) && toolCount > 0 ? toolCount : 0,
+    sessions: Number(usageTotals.sessions || 0),
+    input_tokens: Number(usageTotals.input_tokens || 0),
+    output_tokens: Number(usageTotals.output_tokens || 0),
+    cache_read_tokens: Number(usageTotals.cache_read_tokens || 0),
+    estimated_cost_usd: Number(usageTotals.estimated_cost_usd || 0),
+    events: Number(totals.events || 0),
+    warnings: Number.isFinite(warnings) ? warnings : 0,
+    errors: Number.isFinite(errors) ? errors : 0,
+    last_activity_at: cleanText(statusActivity.last_signal_at || last.ts, ""),
+    source: cleanText(activity.source_type || statusActivity.source || activity.source || node.tokenUsage?.source, ""),
+    model: cleanText(statusActivity.model || node.modelName || node.model, ""),
+    provider: cleanText(node.modelProvider, ""),
+    llm_active: Boolean(statusActivity.llm_active),
+    status: cleanText(stats.status?.status || statusActivity.state || node.status, "unknown"),
+    usage_buckets: Array.isArray(usage.buckets) ? usage.buckets : [],
+    recent_events: Array.isArray(activity.recent_events) ? activity.recent_events : [],
+  };
+}
+
+function statsDaysForBucket(bucket) {
+  if (bucket === "hour") return 1;
+  if (bucket === "weekly") return 7;
+  if (bucket === "monthly") return 30;
+  return 1;
+}
+
+function filteredStatsBuckets(bucket, buckets) {
+  const items = Array.isArray(buckets) ? buckets : [];
+  if (bucket !== "hour") return items;
+  const now = Date.now();
+  const cutoff = now - 60 * 60 * 1000;
+  const recent = items.filter((item) => {
+    const stamp = Date.parse(item.end_at || item.start_at || "");
+    return Number.isFinite(stamp) && stamp >= cutoff;
   });
+  return recent.length ? recent : items.slice(-1);
+}
+
+function nodeStatsMetric(label, value) {
+  const item = document.createElement("div");
+  item.className = "node-stats-metric";
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  const valueEl = document.createElement("strong");
+  valueEl.textContent = value;
+  item.append(labelEl, valueEl);
+  return item;
+}
+
+function drawNodeStatsChart(svg, buckets) {
+  if (!svg) return;
+  svg.replaceChildren();
+  svg.setAttribute("viewBox", "0 0 680 250");
+  const width = 680;
+  const height = 250;
+  const left = 54;
+  const right = 18;
+  const top = 18;
+  const bottom = 64;
+  const plotWidth = width - left - right;
+  const plotHeight = height - top - bottom;
+  const values = buckets.map((item) => Number(item.total_tokens || 0));
+  const max = Math.max(1, ...values);
+  [0, Math.ceil(max / 2), max].forEach((value) => {
+    const y = top + plotHeight - (value / max) * plotHeight;
+    const grid = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    grid.setAttribute("x1", String(left));
+    grid.setAttribute("x2", String(width - right));
+    grid.setAttribute("y1", String(y));
+    grid.setAttribute("y2", String(y));
+    grid.setAttribute("stroke", "rgba(147, 170, 203, 0.16)");
+    svg.append(grid);
+    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    label.setAttribute("x", String(left - 8));
+    label.setAttribute("y", String(y + 4));
+    label.setAttribute("text-anchor", "end");
+    label.setAttribute("fill", "rgba(207, 227, 255, 0.72)");
+    label.setAttribute("font-size", "10");
+    label.textContent = compactCount(value);
+    svg.append(label);
+  });
+  const axis = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  axis.setAttribute("d", `M${left} ${top + plotHeight} H${width - right} M${left} ${top + plotHeight} V${top}`);
+  axis.setAttribute("stroke", "rgba(147, 170, 203, 0.42)");
+  axis.setAttribute("fill", "none");
+  svg.append(axis);
+  if (!buckets.length || !values.some((value) => value > 0)) {
+    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    text.setAttribute("x", String(width / 2));
+    text.setAttribute("y", String(height / 2));
+    text.setAttribute("text-anchor", "middle");
+    text.setAttribute("fill", "rgba(207, 227, 255, 0.72)");
+    text.setAttribute("font-size", "13");
+    text.textContent = "No token samples yet";
+    svg.append(text);
+    return;
+  }
+  const step = buckets.length > 1 ? plotWidth / (buckets.length - 1) : 0;
+  const chartPoints = buckets.map((item, index) => {
+    const x = left + index * step;
+    const y = top + plotHeight - (Number(item.total_tokens || 0) / max) * plotHeight;
+    return { x, y };
+  });
+  const pathData = chartPoints.map((point, index) => {
+    if (index === 0) return `M${point.x} ${point.y}`;
+    const previous = chartPoints[index - 1];
+    const control = Math.max(1, (point.x - previous.x) / 2);
+    return `C${previous.x + control} ${previous.y}, ${point.x - control} ${point.y}, ${point.x} ${point.y}`;
+  }).join(" ");
+  const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  line.setAttribute("d", pathData);
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", "rgba(124, 228, 176, 0.92)");
+  line.setAttribute("stroke-width", "3");
+  line.setAttribute("stroke-linecap", "round");
+  svg.append(line);
+  buckets.forEach((item, index) => {
+    const { x, y } = chartPoints[index];
+    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    dot.setAttribute("cx", String(x));
+    dot.setAttribute("cy", String(y));
+    dot.setAttribute("r", "4");
+    dot.setAttribute("fill", "rgba(125, 220, 255, 0.95)");
+    svg.append(dot);
+    if (index % Math.max(1, Math.ceil(buckets.length / 8)) === 0) {
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.setAttribute("x", String(x));
+      label.setAttribute("y", String(top + plotHeight + 42));
+      label.setAttribute("text-anchor", "end");
+      label.setAttribute("fill", "rgba(207, 227, 255, 0.72)");
+      label.setAttribute("font-size", "9");
+      label.setAttribute("transform", `rotate(-45 ${x} ${top + plotHeight + 42})`);
+      label.textContent = cleanText(item.label || item.start_label || String(index + 1), "");
+      svg.append(label);
+    }
+  });
+}
+
+function renderNodeStatsEvents(events) {
+  const wrap = document.createElement("div");
+  wrap.className = "node-stats-events";
+  const recent = events.slice(0, 5);
+  if (!recent.length) {
+    const empty = document.createElement("div");
+    empty.className = "node-stats-event";
+    empty.innerHTML = "<strong>No activity samples</strong><span>Token and event history will appear after this node records activity.</span>";
+    wrap.append(empty);
+    return wrap;
+  }
+  recent.forEach((event) => {
+    const item = document.createElement("div");
+    item.className = "node-stats-event";
+    const title = document.createElement("strong");
+    title.textContent = `${cleanText(event.ts, "activity").replace("T", " ").replace("Z", "")} / ${cleanText(event.outcome, "unknown")}`;
+    const body = document.createElement("span");
+    body.textContent = cleanText(event.response_preview || event.message_preview, "No message preview");
+    item.append(title, body);
+    wrap.append(item);
+  });
+  return wrap;
+}
+
+function beginNodeStatsDrag(event, handle) {
+  if (!handle || !els.nodeStatsBalloon) return;
+  if (!isPrimaryPointer(event)) return;
+  if (event.target.closest("button,input,textarea,select,a")) return;
+  event.preventDefault();
+  event.stopPropagation();
+  suppressNodeStatsDismiss(400);
+  const rect = els.nodeStatsBalloon.getBoundingClientRect();
+  const startLeft = rect.left;
+  const startTop = rect.top;
+  const startX = event.clientX;
+  const startY = event.clientY;
+  els.nodeStatsBalloon.classList.add("is-dragging");
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch {
+    // Window listeners below keep dragging responsive when capture is unavailable.
+  }
+  const move = (moveEvent) => {
+    moveEvent.preventDefault();
+    state.nodeStatsPosition = {
+      left: startLeft + moveEvent.clientX - startX,
+      top: startTop + moveEvent.clientY - startY,
+    };
+    applyNodeStatsPosition();
+  };
+  const end = () => {
+    els.nodeStatsBalloon.classList.remove("is-dragging");
+    suppressNodeStatsDismiss(180);
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", end);
+    window.removeEventListener("pointercancel", end);
+    try {
+      handle.releasePointerCapture(event.pointerId);
+    } catch {
+      // The browser may already have released capture.
+    }
+  };
+  window.addEventListener("pointermove", move, { passive: false });
+  window.addEventListener("pointerup", end, { once: true });
+  window.addEventListener("pointercancel", end, { once: true });
+}
+
+function installNodeStatsBalloonInteractions() {
+  if (!els.nodeStatsBalloon) return;
+  els.nodeStatsBalloon.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    suppressNodeStatsDismiss();
+    const handle = event.target.closest?.(".node-stats-head");
+    if (handle) beginNodeStatsDrag(event, handle);
+  }, { capture: true });
+  els.nodeStatsBalloon.addEventListener("click", (event) => {
+    event.stopPropagation();
+    suppressNodeStatsDismiss();
+  });
+}
+
+function renderNodeStatsBalloon() {
+  if (!els.nodeStatsBalloon || !state.activeNodeStatsId) return;
+  const node = nodeById(state.activeNodeStatsId) || normalizeNode({ id: state.activeNodeStatsId, status: "unknown" });
+  const payload = state.nodeStats[state.activeNodeStatsId] || {};
+	  const tokenStats = tokenStatsFromNodeStats(node, payload);
+	  const loading = state.nodeStatsBusy === state.activeNodeStatsId;
+	  const work = nodeWorkState(node);
+
+  const head = document.createElement("div");
+  head.className = "node-stats-head";
+  const title = document.createElement("div");
+  title.className = "node-stats-title";
+  const strong = document.createElement("strong");
+  strong.textContent = node.title;
+	  const meta = document.createElement("span");
+	  meta.textContent = `${work.label} / ${node.runtime}`;
+	  title.append(strong, meta);
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", () => hideNodeStatsBalloon({ force: true }));
+  head.append(title, close);
+
+	  const segments = document.createElement("div");
+	  segments.className = "node-stats-segments";
+	  ["hour", "daily", "weekly", "monthly"].forEach((bucket) => {
+	    const button = document.createElement("button");
+	    button.type = "button";
+	    button.textContent = bucket;
+	    button.className = state.nodeStatsBucket === bucket ? "active" : "";
+	    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressNodeStatsDismiss();
+	      state.nodeStatsBucket = bucket;
+	      void loadNodeStats(node.id, "manual");
+	    });
+	    segments.append(button);
+	  });
+
+	  const grid = document.createElement("div");
+	  grid.className = "node-stats-grid";
+	  grid.append(
+	    nodeStatsMetric("Status", tokenStats.llm_active ? "working" : tokenStats.status),
+	    nodeStatsMetric("Tokens", tokenStats.total_tokens ? compactCount(tokenStats.total_tokens) : "0"),
+	    nodeStatsMetric("Sessions", compactCount(tokenStats.sessions || 0)),
+	    nodeStatsMetric("Cost", formatCost(tokenStats.estimated_cost_usd)),
+	    nodeStatsMetric("Activity", compactCount(tokenStats.events || 0)),
+	    nodeStatsMetric("Tools", compactCount(tokenStats.tool_count || 0)),
+	    nodeStatsMetric("Warnings", compactCount(tokenStats.warnings || 0)),
+	    nodeStatsMetric("Errors", compactCount(tokenStats.errors || 0)),
+	    nodeStatsMetric("Input", compactCount(tokenStats.input_tokens || 0)),
+	    nodeStatsMetric("Output", compactCount(tokenStats.output_tokens || 0)),
+	    nodeStatsMetric("Cache read", compactCount(tokenStats.cache_read_tokens || 0)),
+	    nodeStatsMetric("API calls", compactCount(tokenStats.api_calls || 0))
+	  );
+
+	  const model = document.createElement("p");
+	  model.className = "node-stats-source";
+	  model.textContent = `${tokenStats.provider || "unknown"}/${tokenStats.model || "unknown"} / ${loading ? "refreshing" : (tokenStats.last_activity_at ? tokenStats.last_activity_at.replace("T", " ").replace("Z", "") : "no activity")}`;
+
+	  const chartTitle = document.createElement("div");
+	  chartTitle.className = "node-stats-section-title";
+	  chartTitle.textContent = "Token Consumption";
+	  const chart = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+	  chart.setAttribute("class", "node-stats-chart");
+	  drawNodeStatsChart(chart, filteredStatsBuckets(state.nodeStatsBucket, tokenStats.usage_buckets));
+
+	  const eventsTitle = document.createElement("div");
+	  eventsTitle.className = "node-stats-section-title";
+	  eventsTitle.textContent = "Activity Log";
+
+	  const source = document.createElement("p");
+	  source.className = "node-stats-source";
+	  source.textContent = payload.error || tokenStats.source || "Token statistics are read from the node stats endpoint.";
+	  els.nodeStatsBalloon.replaceChildren(head, segments, grid, model, chartTitle, chart, eventsTitle, renderNodeStatsEvents(tokenStats.recent_events), source);
+  applyNodeStatsPosition();
+}
+
+async function loadNodeStats(nodeId, origin = "manual") {
+  if (!nodeId) return;
+  state.nodeStatsBusy = nodeId;
+  renderNodeStatsBalloon();
+  try {
+	    const requestedBucket = state.nodeStatsBucket === "hour" ? "daily" : (state.nodeStatsBucket || "daily");
+	    const bucket = encodeURIComponent(requestedBucket);
+	    const days = statsDaysForBucket(state.nodeStatsBucket);
+	    const payload = await bridgeJson(`/nodes/${encodeURIComponent(nodeId)}/stats?bucket=${bucket}&days=${days}`);
+    state.nodeStats[nodeId] = payload;
+    renderNodeStatsBalloon();
+    if (origin !== "poll") {
+      const stats = tokenStatsFromNodeStats(nodeById(nodeId) || normalizeNode({ id: nodeId }), payload);
+      recordUserEvent("fleet.node_statistics_loaded", {
+        target: `node:${nodeId}`,
+        summary: `Loaded statistics for ${nodeId}`,
+        data: { node_id: nodeId, total_tokens: stats.total_tokens, api_calls: stats.api_calls },
+      });
+    }
+  } catch (error) {
+    state.lastError = error.message;
+    state.nodeStats[nodeId] = { error: error.message };
+    renderNodeStatsBalloon();
+  } finally {
+    state.nodeStatsBusy = "";
+    renderNodeStatsBalloon();
+  }
+}
+
+function openNodeStatsBalloon(node, event) {
+  if (!els.nodeStatsBalloon) return;
+  hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+  state.activeNodeStatsId = node.id;
+  positionNodeStatsBalloon(event);
+  renderNodeStatsBalloon();
+  void loadNodeStats(node.id, "manual");
+  if (state.nodeStatsInterval) window.clearInterval(state.nodeStatsInterval);
+  state.nodeStatsInterval = window.setInterval(() => {
+    if (state.activeNodeStatsId) void loadNodeStats(state.activeNodeStatsId, "poll");
+  }, RESOURCE_POLL_MS);
+  pushUiNavigationLayer("node-stats-balloon", () => hideNodeStatsBalloon({ skipHistory: true, skipStack: true }));
 }
 
 function showNodeContextMenu(node, event) {
   event.preventDefault();
-  event.stopPropagation();
-  if (!els.nodeContextMenu) return;
-  state.activeNodeMenuId = node.id;
-  selectNode(node.id);
-  const editButton = document.createElement("button");
-  editButton.type = "button";
-  editButton.setAttribute("role", "menuitem");
-  editButton.textContent = "Edit";
-  editButton.addEventListener("click", (clickEvent) => {
-    clickEvent.stopPropagation();
-    hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
-    openNodeEditModal(node.id);
-  });
-  els.nodeContextMenu.replaceChildren(
-    editButton,
-    ...nodeContextActions(node).map((action) => {
+	  event.stopPropagation();
+	  if (!els.nodeContextMenu) return;
+	  state.activeNodeMenuId = node.id;
+	  selectNode(node.id);
+	  const editButton = document.createElement("button");
+	  editButton.type = "button";
+	  editButton.setAttribute("role", "menuitem");
+	  editButton.textContent = "Edit";
+	  editButton.addEventListener("click", (clickEvent) => {
+	    clickEvent.stopPropagation();
+	    hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+	    openNodeEditModal(node.id);
+	  });
+	    const statisticsButton = document.createElement("button");
+	  statisticsButton.type = "button";
+	  statisticsButton.setAttribute("role", "menuitem");
+	  statisticsButton.textContent = "Statistics";
+	  statisticsButton.addEventListener("click", (clickEvent) => {
+	    clickEvent.preventDefault();
+	    clickEvent.stopPropagation();
+      suppressNodeStatsDismiss();
+      hideNodeContextMenu({ skipHistory: true, replaceHistory: true });
+	    openNodeStatsBalloon(nodeById(node.id) || node, clickEvent);
+	  });
+	  els.nodeContextMenu.replaceChildren(
+	    editButton,
+	    statisticsButton,
+	    ...nodeContextActions(node).map((action) => {
       const button = document.createElement("button");
       button.type = "button";
       button.setAttribute("role", "menuitem");
@@ -6727,6 +7706,7 @@ function saveNodeEdit(event) {
   state.nodes = state.nodes.map((node) => (node.id === nodeId ? normalizeNode(node.raw || node) : node));
   renderTopology();
   renderNodeList();
+  renderAgentModelSelect();
   closeNodeEditModal({ skipHistory: true, replaceHistory: true });
   recordUserEvent("fleet.node_edit_saved", {
     target: `node:${nodeId}`,
@@ -6743,6 +7723,7 @@ function resetNodeEdit() {
   state.nodes = state.nodes.map((node) => (node.id === nodeId ? normalizeNode(node.raw || node) : node));
   renderTopology();
   renderNodeList();
+  renderAgentModelSelect();
   openNodeEditModal(nodeId);
   recordUserEvent("fleet.node_edit_reset", {
     target: `node:${nodeId}`,
@@ -6754,9 +7735,10 @@ function resetNodeEdit() {
 function renderNodeList() {
   const nodes = state.nodes.length ? state.nodes : [normalizeNode({ id: "orchestrator", status: "unknown" })];
   els.nodeList.replaceChildren(
-    ...nodes.map((node) => {
-      const card = document.createElement("article");
-      card.className = `node-card${node.id === state.selectedNode ? " active" : ""}`;
+	    ...nodes.map((node) => {
+	      const work = nodeWorkState(node);
+	      const card = document.createElement("article");
+	      card.className = `node-card${node.id === state.selectedNode ? " active" : ""}${work.working ? " working" : ""}`;
       card.tabIndex = 0;
       card.addEventListener("click", () => selectNode(node.id));
       card.addEventListener("keydown", (event) => {
@@ -6767,14 +7749,17 @@ function renderNodeList() {
       });
       const title = document.createElement("strong");
       title.textContent = node.title;
-      const meta = document.createElement("div");
-      meta.className = "node-meta";
-      meta.textContent = `${node.status} / ${node.runtime}`;
-      const preview = document.createElement("div");
-      preview.className = "node-meta";
-      preview.textContent = node.taskPreview || "No active task preview";
-      card.append(title, meta, preview, renderNodeActions(node));
-      return card;
+	      const meta = document.createElement("div");
+	      meta.className = "node-meta";
+	      meta.textContent = `${work.label} / ${node.runtime}`;
+	      const tokens = document.createElement("div");
+	      tokens.className = `node-meta${node.tokenUsage?.delta_tokens ? " token-moving" : ""}`;
+	      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens ${formatSignedCount(node.tokenUsage?.delta_tokens)} / ${compactCount(node.tokenUsage?.api_calls || 0)} calls`.trim();
+	      const preview = document.createElement("div");
+	      preview.className = "node-meta";
+	      preview.textContent = node.taskPreview || "No active task preview";
+	      card.append(title, meta, tokens, preview, renderNodeActions(node));
+	      return card;
     })
   );
 }
@@ -6906,6 +7891,18 @@ function securitySeverityClass(severity) {
   return "low";
 }
 
+function securityRunStatusClass(status) {
+  const value = String(status || "").toLowerCase();
+  if (["running", "queued", "submitted", "started", "stopping"].includes(value)) return "warn";
+  if (["completed", "succeeded"].includes(value)) return "ok";
+  if (["failed", "timeout", "cancelled"].includes(value)) return "err";
+  return "muted";
+}
+
+function formatSecurityTime(value) {
+  return value ? String(value).replace("T", " ").replace("Z", "") : "none";
+}
+
 function renderSecuritySummary(container, loop = state.securityLoop) {
   if (!container) return;
   if (!isAdminUser()) {
@@ -6930,8 +7927,145 @@ function renderSecuritySummary(container, loop = state.securityLoop) {
     metric("Rejected", String(loop.rejected_count || 0)),
     metric("Top score", String(loop.top_score || 0)),
     metric("Latest", loop.latest_run_at ? loop.latest_run_at.replace("T", " ").replace("Z", "") : "none"),
-    metric("Freshness", loop.stale ? "stale" : "live")
-  );
+	    metric("Freshness", loop.stale ? "stale" : "live")
+	  );
+	}
+
+function renderSecurityRun(container, latestRun = state.securityLatestRun) {
+  if (!container) return;
+  if (!isAdminUser()) {
+    container.replaceChildren();
+    return;
+  }
+  if (!latestRun || !latestRun.run_id) {
+    const card = document.createElement("article");
+    card.className = "security-run-card muted";
+    card.innerHTML = "<strong>No runner execution yet</strong>";
+    container.replaceChildren(card);
+    return;
+  }
+
+  const card = document.createElement("article");
+  card.className = `security-run-card ${securityRunStatusClass(latestRun.runner_status)}`;
+
+  const head = document.createElement("div");
+  head.className = "security-finding-head";
+  const title = document.createElement("strong");
+  title.textContent = latestRun.run_id;
+  const status = document.createElement("span");
+  status.className = `security-status ${securityRunStatusClass(latestRun.runner_status)}`;
+  status.textContent = latestRun.runner_status || "unknown";
+  head.append(title, status);
+
+  const meta = document.createElement("div");
+  meta.className = "security-finding-meta";
+  [
+    latestRun.mode || "mode",
+	    latestRun.delivery || "delivery",
+	    latestRun.value?.verdict || "value pending",
+	    `probes ${latestRun.probe_count || 0}`,
+	    `failed ${latestRun.failed_probe_count || 0}`,
+    `findings ${latestRun.finding_count || 0}`,
+    `errors ${latestRun.error_count || 0}`,
+    formatSecurityTime(latestRun.started_at),
+  ].forEach((value) => {
+    const chip = document.createElement("span");
+    chip.textContent = value;
+    meta.append(chip);
+  });
+
+  const tasks = document.createElement("div");
+  tasks.className = "security-run-tasks";
+  const taskItems = Array.isArray(latestRun.tasks) ? latestRun.tasks : [];
+  if (!taskItems.length) {
+    const empty = document.createElement("span");
+    empty.className = "security-status muted";
+    empty.textContent = "no node task";
+    tasks.append(empty);
+	  } else {
+	    taskItems.forEach((task) => {
+	      const taskDetail = task.task && typeof task.task === "object" ? task.task : task;
+	      const item = document.createElement("div");
+	      item.className = "security-run-task";
+	      const node = document.createElement("strong");
+	      node.textContent = task.target_node || taskDetail.target_node || "node";
+	      const taskStatus = document.createElement("span");
+	      taskStatus.className = `security-status ${securityRunStatusClass(taskDetail.status)}`;
+	      taskStatus.textContent = taskDetail.status || "unknown";
+	      const detail = document.createElement("span");
+	      detail.textContent = taskDetail.run_id ? truncateText(taskDetail.run_id, 34) : "no run id";
+	      item.append(node, taskStatus, detail);
+	      if (taskDetail.error || task.error) {
+	        const error = document.createElement("p");
+	        error.className = "security-evidence-preview";
+	        error.textContent = truncateText(taskDetail.error || task.error, 180);
+	        item.append(error);
+	      }
+      tasks.append(item);
+    });
+  }
+
+	  const errors = Array.isArray(latestRun.errors) ? latestRun.errors : [];
+	  const valueNote = document.createElement("p");
+	  valueNote.className = "security-value-note";
+	  valueNote.textContent = latestRun.value?.recommendation || "Run value will be scored when this execution finishes.";
+	  if (errors.length) {
+	    const errorList = document.createElement("p");
+	    errorList.className = "security-evidence-preview";
+	    errorList.textContent = errors.map((error) => truncateText(error, 160)).join(" | ");
+	    card.append(head, meta, tasks, valueNote, errorList);
+	  } else {
+	    card.append(head, meta, tasks, valueNote);
+	  }
+  container.replaceChildren(card);
+}
+
+function renderSecurityRunHistory(container, options = {}) {
+  if (!container) return;
+  if (!isAdminUser()) {
+    container.replaceChildren();
+    return;
+  }
+  const runs = state.securityRuns.slice(0, options.limit || 8);
+  if (!runs.length) {
+    const empty = document.createElement("article");
+    empty.className = "security-run-card muted";
+    empty.innerHTML = "<strong>No run history yet</strong>";
+    container.replaceChildren(empty);
+    return;
+  }
+  container.replaceChildren(...runs.map((run) => {
+    const card = document.createElement("article");
+    card.className = `security-run-history-card ${securityRunStatusClass(run.runner_status)}`;
+    const head = document.createElement("div");
+    head.className = "security-finding-head";
+    const title = document.createElement("strong");
+    title.textContent = run.run_id || "security run";
+    const status = document.createElement("span");
+    status.className = `security-status ${securityRunStatusClass(run.runner_status)}`;
+    status.textContent = run.runner_status || "unknown";
+    head.append(title, status);
+
+    const meta = document.createElement("div");
+    meta.className = "security-finding-meta";
+    [
+      formatSecurityTime(run.started_at),
+      run.value?.verdict || "value pending",
+      `tokens ${compactCount(run.value?.token_delta || 0)}`,
+      `api ${compactCount(run.value?.api_call_delta || 0)}`,
+      `findings ${run.finding_count || 0}`,
+    ].forEach((value) => {
+      const chip = document.createElement("span");
+      chip.textContent = value;
+      meta.append(chip);
+    });
+
+    const summary = document.createElement("p");
+    summary.className = "security-run-summary";
+    summary.textContent = run.summary || "No attacker summary recorded.";
+    card.append(head, meta, summary);
+    return card;
+  }));
 }
 
 function securityFindingById(findingId) {
@@ -7059,7 +8193,11 @@ function renderSecurityLoop() {
   });
   renderSecuritySummary(els.securityLoopSummary, loop);
   renderSecuritySummary(els.securityPanelSummary, loop);
-  renderSecurityQueue(els.securityFindingQueue, { limit: 12, compact: false });
+	  renderSecurityRun(els.securityLoopRun);
+	  renderSecurityRun(els.securityPanelRun);
+	  renderSecurityRunHistory(els.securityLoopRuns, { limit: 4 });
+	  renderSecurityRunHistory(els.securityPanelRuns, { limit: 80 });
+	  renderSecurityQueue(els.securityFindingQueue, { limit: 12, compact: false });
   renderSecurityQueue(els.securityPanelFindingQueue, { limit: 20, compact: true });
 }
 
@@ -7083,9 +8221,14 @@ async function loadSecurityLoop(origin = "auto") {
   state.securityBusy = true;
   if (els.securityRefreshButton) els.securityRefreshButton.disabled = true;
   try {
-    const payload = await fetchJson("/security-loop/findings?limit=80", { timeoutMs: 10000 });
-    state.securityLoop = payload.security_loop || null;
-    state.securityFindings = Array.isArray(payload.findings) ? payload.findings : [];
+	    const [payload, runsPayload] = await Promise.all([
+	      fetchJson("/security-loop/findings?limit=80", { timeoutMs: 10000 }),
+	      fetchJson("/security-loop/runs?limit=80", { timeoutMs: 10000 }).catch(() => ({ runs: [] })),
+	    ]);
+	    state.securityLoop = payload.security_loop || null;
+	    state.securityLatestRun = state.securityLoop?.latest_run || null;
+	    state.securityRuns = Array.isArray(runsPayload.runs) ? runsPayload.runs : [];
+	    state.securityFindings = Array.isArray(payload.findings) ? payload.findings : [];
     renderSecurityLoop();
     if (origin === "manual") {
       recordUserEvent("security.loop_loaded", {
@@ -7601,6 +8744,7 @@ function renderAll() {
   renderModules();
   renderSecurityLoop();
   renderAgentNodeSelect();
+  renderAgentModelSelect();
   renderLogin();
   renderRoleVisibility();
   syncSecurityPolling();
@@ -7647,7 +8791,8 @@ function renderArtifacts() {
   const layoutItems = [
     "positions: browser-local",
     "widget geometry: browser-local",
-    `space density: browser-local, 1x-${CANVAS_DENSITY_MAX}x`,
+    `space area: browser-local, 1x-${CANVAS_AREA_MAX}x`,
+    `space distance: browser-local, ${SPACE_DISTANCE_MIN}x-${SPACE_DISTANCE_MAX}x`,
   ];
   els.artifactList.replaceChildren(
     artifactCard("spaces/", `${spaceItems.length} local`, spaceItems),
@@ -7903,7 +9048,7 @@ async function copyActiveAppId() {
 
 function populateAppEditForm(widgetId) {
   const meta = widgetMeta(widgetId);
-  const bounds = widgetDimensionBounds(widgetId, spaceSurface()?.getBoundingClientRect?.());
+  const bounds = widgetDimensionBounds(widgetId, spaceLogicalRect());
   if (els.appEditModalTitle) els.appEditModalTitle.textContent = `Edit ${widgetTitle(widgetId)}`;
   if (els.appEditModalMeta) els.appEditModalMeta.textContent = widgetId;
   if (els.appEditNameInput) els.appEditNameInput.value = cleanText(meta.title, widgetDefaultLabel(widgetId));
@@ -8177,7 +9322,8 @@ function renderConfigModal() {
   timelineButton.addEventListener("click", openTimelineFromConfig);
   const rows = [
     renderStorageControl(),
-    renderCanvasDensityControl(),
+    renderCanvasAreaControl(),
+    renderCanvasDistanceControl(),
   ];
   if (activeSpaceStorageId() === "home") rows.push(renderLauncherPreferenceControl());
   rows.push(timelineButton);
@@ -8346,74 +9492,74 @@ async function importStorageBackup(file) {
   }
 }
 
-function renderCanvasDensityControl() {
+function renderCanvasAreaControl() {
   const wrap = document.createElement("div");
-  wrap.className = "config-density-control";
+  wrap.className = "config-area-control";
   const head = document.createElement("div");
-  head.className = "config-density-head";
+  head.className = "config-area-head";
   const label = document.createElement("strong");
-  label.textContent = "Space density";
+  label.textContent = "Space area";
   const value = document.createElement("span");
-  value.className = "config-density-value";
-  value.textContent = `${canvasDensity().toFixed(2).replace(/\.00$/, "")}x`;
+  value.className = "config-area-value";
+  value.textContent = formatMultiplier(canvasArea());
   const input = document.createElement("input");
-  input.className = "config-density-input";
+  input.className = "config-area-input";
   input.type = "number";
   input.min = "1";
-  input.max = String(CANVAS_DENSITY_MAX);
+  input.max = String(CANVAS_AREA_MAX);
   input.step = "0.25";
   input.inputMode = "decimal";
-  input.setAttribute("aria-label", "Space density value");
+  input.setAttribute("aria-label", "Space area value");
   const dial = document.createElement("div");
-  dial.className = "config-density-line";
+  dial.className = "config-area-line";
   dial.tabIndex = 0;
   dial.setAttribute("role", "slider");
-  dial.setAttribute("aria-label", "Space density");
+  dial.setAttribute("aria-label", "Space area");
   dial.setAttribute("aria-valuemin", "1");
-  dial.setAttribute("aria-valuemax", String(CANVAS_DENSITY_MAX));
+  dial.setAttribute("aria-valuemax", String(CANVAS_AREA_MAX));
   dial.setAttribute("aria-valuestep", "0.25");
   const knob = document.createElement("span");
-  knob.className = "config-density-line-knob";
+  knob.className = "config-area-line-knob";
   knob.setAttribute("aria-hidden", "true");
   dial.append(knob);
   head.append(label, value, input);
   wrap.append(head, dial);
-  updateDensityDial(wrap);
-  installDensityDial(wrap, dial);
-  installDensityInput(wrap, input);
+  updateAreaDial(wrap);
+  installAreaDial(wrap, dial);
+  installAreaInput(wrap, input);
   return wrap;
 }
 
-function updateDensityDial(control = null) {
-  const wrap = control || els.configDetails?.querySelector?.(".config-density-control");
+function updateAreaDial(control = null) {
+  const wrap = control || els.configDetails?.querySelector?.(".config-area-control");
   if (!wrap) return;
-  const density = canvasDensity();
-  const progress = (density - 1) / (CANVAS_DENSITY_MAX - 1);
-  wrap.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
-  const value = wrap.querySelector(".config-density-value");
-  if (value) value.textContent = `${density.toFixed(2).replace(/\.00$/, "")}x`;
-  const input = wrap.querySelector(".config-density-input");
-  if (input && document.activeElement !== input) input.value = String(density);
-  const dial = wrap.querySelector(".config-density-line");
+  const area = canvasArea();
+  const progress = (area - 1) / (CANVAS_AREA_MAX - 1);
+  wrap.style.setProperty("--area-progress", `${Math.round(progress * 100)}%`);
+  const value = wrap.querySelector(".config-area-value");
+  if (value) value.textContent = formatMultiplier(area);
+  const input = wrap.querySelector(".config-area-input");
+  if (input && document.activeElement !== input) input.value = String(Number(area.toFixed(2)));
+  const dial = wrap.querySelector(".config-area-line");
   if (dial) {
-    dial.style.setProperty("--density-progress", `${Math.round(progress * 100)}%`);
-    dial.setAttribute("aria-valuenow", String(density));
-    dial.setAttribute("aria-valuetext", `${density}x`);
+    dial.style.setProperty("--area-progress", `${Math.round(progress * 100)}%`);
+    dial.setAttribute("aria-valuenow", String(area));
+    dial.setAttribute("aria-valuetext", formatMultiplier(area));
   }
 }
 
-function densityFromDialPointer(dial, event) {
+function areaFromDialPointer(dial, event) {
   const rect = dial.getBoundingClientRect();
   const progress = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-  return normalizedCanvasDensity(1 + progress * (CANVAS_DENSITY_MAX - 1));
+  return normalizedCanvasArea(1 + progress * (CANVAS_AREA_MAX - 1));
 }
 
-function installDensityInput(wrap, input) {
+function installAreaInput(wrap, input) {
   if (!wrap || !input) return;
   const commit = (origin = "input") => {
-    const next = normalizedCanvasDensity(input.value);
+    const next = normalizedCanvasArea(input.value);
     freezeWidgetPixelLayout();
-    setCanvasDensityValue(next, { control: wrap, origin, force: true });
+    setCanvasAreaValue(next, { control: wrap, origin, force: true });
   };
   input.addEventListener("change", () => commit("input"));
   input.addEventListener("keydown", (event) => {
@@ -8424,17 +9570,17 @@ function installDensityInput(wrap, input) {
   });
 }
 
-function installDensityDial(wrap, dial) {
+function installAreaDial(wrap, dial) {
   if (!wrap || !dial) return;
   let dragging = false;
   let changed = false;
   const move = (event) => {
     if (!dragging) return;
     event.preventDefault();
-    const previous = canvasDensity();
-    const next = densityFromDialPointer(dial, event);
+    const previous = canvasArea();
+    const next = areaFromDialPointer(dial, event);
     changed = next !== previous || changed;
-    setCanvasDensityValue(next, {
+    setCanvasAreaValue(next, {
       control: wrap,
       persist: false,
       render: false,
@@ -8456,7 +9602,7 @@ function installDensityDial(wrap, dial) {
       // Capture may already be released by the browser.
     }
     if (changed) {
-      commitCanvasDensityChange("dial");
+      commitCanvasAreaChange("dial");
       renderConfigModal();
     }
   };
@@ -8486,13 +9632,160 @@ function installDensityDial(wrap, dial) {
       ArrowDown: -0.25,
       ArrowRight: 0.25,
       ArrowUp: 0.25,
-      Home: 1 - canvasDensity(),
-      End: CANVAS_DENSITY_MAX - canvasDensity(),
+      Home: 1 - canvasArea(),
+      End: CANVAS_AREA_MAX - canvasArea(),
     }[event.key];
     if (delta === undefined) return;
     event.preventDefault();
     freezeWidgetPixelLayout();
-    setCanvasDensityValue(canvasDensity() + delta, { control: wrap, origin: "dial-key" });
+    setCanvasAreaValue(canvasArea() + delta, { control: wrap, origin: "dial-key" });
+  });
+}
+
+function renderCanvasDistanceControl() {
+  const wrap = document.createElement("div");
+  wrap.className = "config-distance-control";
+  const head = document.createElement("div");
+  head.className = "config-distance-head";
+  const label = document.createElement("strong");
+  label.textContent = "Space distance";
+  const value = document.createElement("span");
+  value.className = "config-distance-value";
+  value.textContent = formatMultiplier(canvasDistance());
+  const input = document.createElement("input");
+  input.className = "config-distance-input";
+  input.type = "number";
+  input.min = String(SPACE_DISTANCE_MIN);
+  input.max = String(SPACE_DISTANCE_MAX);
+  input.step = String(SPACE_DISTANCE_STEP);
+  input.inputMode = "decimal";
+  input.setAttribute("aria-label", "Space distance value");
+  const dial = document.createElement("div");
+  dial.className = "config-distance-line";
+  dial.tabIndex = 0;
+  dial.setAttribute("role", "slider");
+  dial.setAttribute("aria-label", "Space distance");
+  dial.setAttribute("aria-valuemin", String(SPACE_DISTANCE_MIN));
+  dial.setAttribute("aria-valuemax", String(SPACE_DISTANCE_MAX));
+  dial.setAttribute("aria-valuestep", String(SPACE_DISTANCE_STEP));
+  const knob = document.createElement("span");
+  knob.className = "config-distance-line-knob";
+  knob.setAttribute("aria-hidden", "true");
+  dial.append(knob);
+  head.append(label, value, input);
+  wrap.append(head, dial);
+  updateDistanceDial(wrap);
+  installDistanceDial(wrap, dial);
+  installDistanceInput(wrap, input);
+  return wrap;
+}
+
+function updateDistanceDial(control = null) {
+  const wrap = control || els.configDetails?.querySelector?.(".config-distance-control");
+  if (!wrap) return;
+  const distance = canvasDistance();
+  const progress = (distance - SPACE_DISTANCE_MIN) / (SPACE_DISTANCE_MAX - SPACE_DISTANCE_MIN);
+  wrap.style.setProperty("--distance-progress", `${Math.round(progress * 100)}%`);
+  const value = wrap.querySelector(".config-distance-value");
+  if (value) value.textContent = formatMultiplier(distance);
+  const input = wrap.querySelector(".config-distance-input");
+  if (input && document.activeElement !== input) input.value = String(Number(distance.toFixed(2)));
+  const dial = wrap.querySelector(".config-distance-line");
+  if (dial) {
+    dial.style.setProperty("--distance-progress", `${Math.round(progress * 100)}%`);
+    dial.setAttribute("aria-valuenow", String(distance));
+    dial.setAttribute("aria-valuetext", formatMultiplier(distance));
+  }
+}
+
+function distanceFromDialPointer(dial, event) {
+  const rect = dial.getBoundingClientRect();
+  const progress = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+  return normalizedCanvasDistance(SPACE_DISTANCE_MIN + progress * (SPACE_DISTANCE_MAX - SPACE_DISTANCE_MIN));
+}
+
+function installDistanceInput(wrap, input) {
+  if (!wrap || !input) return;
+  const commit = (origin = "input") => {
+    const next = normalizedCanvasDistance(input.value);
+    setCanvasDistanceValue(next, { control: wrap, origin, force: true });
+  };
+  input.addEventListener("change", () => commit("input"));
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    input.blur();
+    commit("input-enter");
+  });
+}
+
+function installDistanceDial(wrap, dial) {
+  if (!wrap || !dial) return;
+  let dragging = false;
+  let changed = false;
+  const move = (event) => {
+    if (!dragging) return;
+    event.preventDefault();
+    const previous = canvasDistance();
+    const next = distanceFromDialPointer(dial, event);
+    changed = next !== previous || changed;
+    setCanvasDistanceValue(next, {
+      control: wrap,
+      persist: false,
+      render: false,
+    });
+  };
+  const end = (event) => {
+    if (!dragging) return;
+    dragging = false;
+    dial.classList.remove("is-dragging");
+    dial.removeEventListener("pointermove", move);
+    dial.removeEventListener("pointerup", end);
+    dial.removeEventListener("pointercancel", end);
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", end);
+    window.removeEventListener("pointercancel", end);
+    try {
+      dial.releasePointerCapture(event.pointerId);
+    } catch {
+      // Capture may already be released by the browser.
+    }
+    if (changed) {
+      commitCanvasDistanceChange("dial");
+      renderConfigModal();
+    }
+  };
+  dial.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    event.preventDefault();
+    dragging = true;
+    changed = false;
+    dial.classList.add("is-dragging");
+    try {
+      dial.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners below keep the dial responsive when capture is unavailable.
+    }
+    move(event);
+    dial.addEventListener("pointermove", move, { passive: false });
+    dial.addEventListener("pointerup", end, { once: true });
+    dial.addEventListener("pointercancel", end, { once: true });
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+  dial.addEventListener("keydown", (event) => {
+    const delta = {
+      ArrowLeft: -SPACE_DISTANCE_STEP,
+      ArrowDown: -SPACE_DISTANCE_STEP,
+      ArrowRight: SPACE_DISTANCE_STEP,
+      ArrowUp: SPACE_DISTANCE_STEP,
+      Home: SPACE_DISTANCE_MIN - canvasDistance(),
+      End: SPACE_DISTANCE_MAX - canvasDistance(),
+    }[event.key];
+    if (delta === undefined) return;
+    event.preventDefault();
+    setCanvasDistanceValue(canvasDistance() + delta, { control: wrap, origin: "dial-key" });
   });
 }
 
@@ -9084,9 +10377,174 @@ function drawCanvas() {
   ctx.fillRect(0, 0, width, height);
 }
 
+function spaceDistanceGestureBlocked(target) {
+  return Boolean(target?.closest?.(".widget,.space-app-button,.home-actions,.space-title,.space-config-button,.space-minimap,.space-zoom-info,.modal-backdrop,.agent-overlay"));
+}
+
+function wheelDeltaPixels(event, viewport) {
+  const unit = event.deltaMode === 1
+    ? 16
+    : event.deltaMode === 2
+      ? Math.max(1, viewport?.clientHeight || window.innerHeight || 1)
+      : 1;
+  return event.deltaY * unit;
+}
+
+function spacePointerDistance(first, second) {
+  return Math.hypot(second.clientX - first.clientX, second.clientY - first.clientY);
+}
+
+function spacePointerMidpoint(first, second) {
+  return {
+    clientX: (first.clientX + second.clientX) / 2,
+    clientY: (first.clientY + second.clientY) / 2,
+  };
+}
+
+function spacePinchPair() {
+  const pointers = Array.from(state.spaceGesturePointers.values());
+  return pointers.length >= 2 ? [pointers[0], pointers[1]] : null;
+}
+
+function startSpacePinchZoom(viewport) {
+  const pair = spacePinchPair();
+  if (!viewport || !pair) return;
+  const distance = spacePointerDistance(pair[0], pair[1]);
+  if (distance <= 0) return;
+  stopSpacePanMomentum();
+  freezeWidgetPixelLayout();
+  viewport.classList.remove("is-panning");
+  viewport.classList.add("is-zooming");
+  state.spacePinchActive = true;
+  state.spacePinchChanged = false;
+  state.spacePinchStartDistance = distance;
+  state.spacePinchStartCanvasDistance = canvasDistance();
+  state.spacePinchSuppressPanUntil = Number.POSITIVE_INFINITY;
+  setSpaceZoomInfoVisible(true);
+}
+
+function endSpacePinchZoom(viewport) {
+  if (!state.spacePinchActive) return;
+  state.spacePinchActive = false;
+  state.spacePinchSuppressPanUntil = state.spaceGesturePointers.size
+    ? Number.POSITIVE_INFINITY
+    : performance.now() + 220;
+  viewport?.classList.remove("is-zooming");
+  if (state.spacePinchChanged) {
+    scheduleCanvasDistanceCommit("pinch");
+    scheduleSpaceZoomMiniMapHide();
+  } else {
+    setSpaceZoomInfoVisible(false);
+  }
+}
+
+function updateSpacePinchZoom(event, viewport) {
+  if (!state.spacePinchActive) return;
+  const pair = spacePinchPair();
+  if (!pair || state.spacePinchStartDistance <= 0) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const currentDistance = spacePointerDistance(pair[0], pair[1]);
+  const midpoint = spacePointerMidpoint(pair[0], pair[1]);
+  const anchor = viewportGestureAnchor(midpoint.clientX, midpoint.clientY);
+  const next = state.spacePinchStartCanvasDistance * (currentDistance / state.spacePinchStartDistance);
+  const previous = canvasDistance();
+  const applied = setCanvasDistanceAround(next, anchor, {
+    origin: "pinch",
+    persist: false,
+      render: false,
+      layout: false,
+      freeze: false,
+      renderMiniMap: false,
+      drawCanvas: false,
+      updateNavigation: false,
+      zoomInfo: true,
+  });
+  state.spacePinchChanged = state.spacePinchChanged || applied !== previous;
+  if (state.spacePinchChanged) setSpaceZoomInfoVisible(true);
+}
+
+function installSpaceDistanceGestures(viewport) {
+  if (!viewport) return;
+  viewport.addEventListener("wheel", (event) => {
+    if (spaceDistanceGestureBlocked(event.target)) return;
+    const delta = wheelDeltaPixels(event, viewport);
+    if (Math.abs(delta) < 0.5) return;
+    const anchor = viewportGestureAnchor(event.clientX, event.clientY);
+    if (!anchor) return;
+    event.preventDefault();
+    stopSpacePanMomentum();
+    const previous = canvasDistance();
+    const next = previous * Math.exp(-delta * 0.0012);
+    const applied = setCanvasDistanceAround(next, anchor, {
+      origin: "wheel",
+      persist: false,
+      render: false,
+      layout: false,
+      renderMiniMap: false,
+      zoomInfo: true,
+    });
+    if (applied !== previous) {
+      setSpaceZoomInfoVisible(true);
+      scheduleCanvasDistanceCommit("wheel");
+      scheduleSpaceZoomMiniMapHide();
+    }
+  }, { passive: false });
+
+  viewport.addEventListener("pointerdown", (event) => {
+    if (event.pointerType !== "touch") return;
+    if (spaceDistanceGestureBlocked(event.target)) return;
+    state.spaceGesturePointers.set(event.pointerId, {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+    try {
+      viewport.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can already be owned by a nested browser surface.
+    }
+    if (state.spaceGesturePointers.size >= 2) {
+      event.preventDefault();
+      startSpacePinchZoom(viewport);
+    }
+  }, { passive: false });
+
+  viewport.addEventListener("pointermove", (event) => {
+    if (!state.spaceGesturePointers.has(event.pointerId)) return;
+    state.spaceGesturePointers.set(event.pointerId, {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+    });
+    updateSpacePinchZoom(event, viewport);
+  }, { passive: false });
+
+  const removePointer = (event) => {
+    if (!state.spaceGesturePointers.has(event.pointerId)) return;
+    const hadPinch = state.spacePinchActive || state.spacePinchSuppressPanUntil === Number.POSITIVE_INFINITY;
+    state.spaceGesturePointers.delete(event.pointerId);
+    try {
+      viewport.releasePointerCapture(event.pointerId);
+    } catch {
+      // The browser may release capture before this cleanup handler runs.
+    }
+    if (state.spaceGesturePointers.size < 2) endSpacePinchZoom(viewport);
+    if (!state.spaceGesturePointers.size && hadPinch && !state.spacePinchActive) {
+      state.spacePinchSuppressPanUntil = performance.now() + 220;
+      viewport.classList.remove("is-zooming");
+    }
+  };
+
+  viewport.addEventListener("pointerup", removePointer);
+  viewport.addEventListener("pointercancel", removePointer);
+  viewport.addEventListener("lostpointercapture", removePointer);
+}
+
 function installSpacePanning() {
   const viewport = els.spaceViewport;
   if (!viewport) return;
+  installSpaceDistanceGestures(viewport);
   viewport.addEventListener("scroll", () => {
     updateSpaceNavigationHints();
     applyMaximizedWidgetLayouts();
@@ -9096,6 +10554,7 @@ function installSpacePanning() {
   viewport.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
     if (event.target.closest?.(".widget,.space-app-button,.home-actions,.space-title,.space-config-button,.modal-backdrop,.agent-overlay")) return;
+    if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
     const canPanX = viewport.scrollWidth > viewport.clientWidth + 1;
     const canPanY = viewport.scrollHeight > viewport.clientHeight + 1;
     if (!canPanX && !canPanY) return;
@@ -9120,6 +10579,7 @@ function installSpacePanning() {
     }
     const move = (moveEvent) => {
       moveEvent.preventDefault();
+      if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
       const now = performance.now();
       const dt = Math.max(1, now - lastTime);
@@ -9155,6 +10615,7 @@ function installSpacePanning() {
       } catch {
         // The browser may release capture before the cleanup handler runs.
       }
+      if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
       if (moved) {
         endEvent.preventDefault();
         endEvent.stopPropagation();
@@ -9214,24 +10675,33 @@ function wireEvents() {
       },
     });
   });
-  document.addEventListener("click", (event) => {
-    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu();
-    if (!event.target.closest?.("#nodeContextMenu")) hideNodeContextMenu();
-    if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
-    if (!event.target.closest?.("#launcherLogin")) setLoginOpen(false);
-  });
+	  document.addEventListener("click", (event) => {
+      const target = event.target;
+      const insideNodeStats = Boolean(target.closest?.("#nodeStatsBalloon"));
+	    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu();
+	    if (!event.target.closest?.("#nodeContextMenu")) hideNodeContextMenu();
+	    if (!insideNodeStats) hideNodeStatsBalloon({ passive: true });
+	    if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
+	    if (!event.target.closest?.("#launcherLogin")) setLoginOpen(false);
+	  });
+  installNodeStatsBalloonInteractions();
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
     if (!closeTopUiNavigationLayer()) return;
     event.preventDefault();
     event.stopPropagation();
   });
-  window.addEventListener("resize", () => hideSpaceContextMenu({ skipHistory: true, replaceHistory: true }));
-  window.addEventListener("resize", () => hideNodeContextMenu({ skipHistory: true, replaceHistory: true }));
-  window.addEventListener("resize", () => hideAppContextMenu({ skipHistory: true, replaceHistory: true }));
+	  window.addEventListener("resize", () => hideSpaceContextMenu({ skipHistory: true, replaceHistory: true }));
+	  window.addEventListener("resize", () => hideNodeContextMenu({ skipHistory: true, replaceHistory: true }));
+	  window.addEventListener("resize", () => hideNodeStatsBalloon({ skipHistory: true, replaceHistory: true }));
+	  window.addEventListener("resize", () => hideAppContextMenu({ skipHistory: true, replaceHistory: true }));
   const refreshViewportLayout = () => {
     syncVisualViewportSize();
-    applyCanvasDensity();
+    applyCanvasGeometry({
+      drawCanvas: options.drawCanvas,
+      renderMiniMap: options.renderMiniMap,
+      updateNavigation: options.updateNavigation,
+    });
     applyWidgetLayout();
   };
   window.addEventListener("resize", refreshViewportLayout);
@@ -9399,6 +10869,43 @@ function wireEvents() {
   });
   els.agentNewSessionButton.addEventListener("click", newAgentSession);
   els.agentNodeSelect?.addEventListener("change", () => setAgentTargetNode(els.agentNodeSelect.value));
+  els.agentModelSelect?.addEventListener("change", function() {
+    const value = this.value;
+    let selectedModel = null;
+    if (value === "__add__") {
+      selectedModel = promptForAgentModel();
+      if (selectedModel) {
+        applyAgentModelToTarget(selectedModel);
+        persistAgentModelSelection();
+      } else {
+        renderAgentModelSelect();
+      }
+      return;
+    }
+    if (value === "__remove__") {
+      selectedModel = selectedAgentModel();
+      if (selectedModel && window.confirm(`Remove ${selectedModel.label} from this chat model list?`)) {
+        removeAgentModelFromCatalog(selectedModel);
+        delete nodeModelOverrides()[agentTargetNode()];
+        persistAgentModelSelection();
+      } else {
+        renderAgentModelSelect();
+      }
+      return;
+    }
+    if (value === "__default__") {
+      delete nodeModelOverrides()[agentTargetNode()];
+    } else if (value.startsWith("model:")) {
+      const modelId = value.slice("model:".length);
+      selectedModel = availableAgentModels().find((model) => model.id === modelId) || null;
+      if (selectedModel) applyAgentModelToTarget(selectedModel);
+    }
+    persistAgentModelSelection();
+    recordUserEvent("agent.model_selected", {
+      target: `node:${agentTargetNode()}`,
+      data: { value, model: selectedModel?.label || "" },
+    });
+  });
   els.agentForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void sendAgentMessage(els.agentInput.value);
@@ -9446,7 +10953,7 @@ function wireEvents() {
   window.addEventListener("popstate", handleAppPopState);
   if ("ResizeObserver" in window) {
     const spaceResizeObserver = new ResizeObserver(() => {
-      applyCanvasDensity();
+      applyCanvasGeometry();
       applyWidgetLayout();
     });
     spaceResizeObserver.observe(els.spaceViewport);
@@ -9498,6 +11005,7 @@ async function bootstrapAuthenticatedApp() {
   await loadDevices("bootstrap");
   await loadUserSpaces();
   await loadLocalStorageEstimate();
+  await loadAgentModels();
   await loadWasm();
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   updateAgentSendButton();

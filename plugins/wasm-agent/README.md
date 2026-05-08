@@ -19,6 +19,19 @@ cleaner app shell.
 - Does not start, stop, copy, or patch Space Agent.
 - Does not modify `/local/plugins/hermes-space-ui`.
 
+## Legacy Boundary
+
+For `wasm-agent` work, `/local/plugins/hermes-space-ui` is legacy comparison
+infrastructure. It remains useful for side-by-side parity checks and for the
+older Space Agent integration, but it is not the implementation surface for
+fixing wasm-agent behavior. New wasm-agent features, security-loop automation,
+auth hardening, browser-stream policy, and account-space behavior should live
+under `/local/plugins/wasm-agent` or orchestrator-owned shared scripts/docs.
+
+Do not patch `hermes-space-ui` to make a wasm-agent flow pass unless there is an
+explicit migration or compatibility task that names both plugins and documents
+the cross-plugin reason.
+
 ## Architecture Vision
 
 `wasm-agent` should grow as a modular runtime rather than a single tangled app.
@@ -54,9 +67,18 @@ command strip, while Admin and user spaces map their working apps. Widgets
 remain hidden unless their app is mapped into the active space or is later
 ported into that space.
 App buttons snap to a non-overlapping `5px`
-app-layer grid on drop and keep pixel placement stable across viewport resize,
-while widgets store pixel geometry so changing space density does not resize
-them. Clicking an already-open app icon minimizes its widget again, and app
+app-layer grid on drop and keep logical pixel placement stable across viewport
+resize, while widgets store logical pixel geometry. Changing Space area expands
+the board without resizing widgets; changing Space distance scales app icons and
+opened widgets visually around those logical positions. On desktop, wheeling over
+the empty canvas adjusts Space distance around the cursor point instead of
+scrolling the hidden board. On mobile, a two-finger pinch adjusts Space distance
+around the midpoint between the touches. While wheel or pinch zooming, the
+top-right config button fades away and its anchor shows the current zoom value
+above the minimap if the minimap is also visible. Pinch updates use a
+lightweight visual pass during the gesture and defer the full widget layout/save
+pass until the gesture settles.
+Clicking an already-open app icon minimizes its widget again, and app
 icons and widgets remain draggable on mobile. A small organize button beside
 each canvas title rewrites the active space's app icon positions into a tidy
 grid starting flush with the current viewport's left canvas edge and below the
@@ -64,9 +86,9 @@ title controls. The title itself shares the config button's top edge and lines
 up with the app icon's inner-left edge, while the organize and config controls
 share the same `34px` square icon-button size. It adds no gaps between icon
 boxes; if the apps do not all fit, the grid continues past the viewport in
-organized rows. The organizer wraps inside the current density-sized canvas by
-measuring the packed block before it writes positions, and does not trigger a
-canvas-density recalculation. Organized icon positions stay compact until the
+organized rows. The organizer wraps inside the current area-sized logical
+canvas by measuring the packed block before it writes positions, and does not
+trigger a canvas-area recalculation. Organized icon positions stay compact until the
 user manually drags an app again, and the manual app/widget bounds use the same
 flush canvas edge with no hidden inset. Manual app collision checks
 also allow icons to sit directly side by side, matching the organizer, and a
@@ -74,7 +96,7 @@ plain tap-to-open does not rewrite icon placement. Organized slots keep the
 actual app-button pixel width instead of being rounded away from a valid slot by
 the visual grid. Empty canvas panning uses the
 same one-finger/click-drag gesture on mobile and desktop, but only moves when
-space density or content makes the board larger than the visible viewport. On
+space area, space distance, or content makes the board larger than the visible viewport. On
 release, recent drag speed launches a short inertial glide so a fast spin keeps
 the viewport moving smoothly across the board. The native workspace scrollbars
 are hidden; subtle edge glows show when more board content exists to the left,
@@ -89,20 +111,20 @@ minimum sizes. Opened apps are represented by their widget footprint instead of
 also drawing a duplicate app-icon marker; minimized app markers are positioned
 from the painted app-icon rectangle after minimized state is confirmed from
 layout. Its viewport marker and entity markers both use the scroll container's
-logical coordinate space, so space density changes, the launcher, and the
+logical coordinate space, so space area/distance changes, the launcher, and the
 painted board rectangle cannot skew the minimap projection. A fully visible icon
 stays inside the viewport marker at every board edge.
 On mobile and tablet widths, Home/Admin/User space frames collapse to one actual
 canvas row when the side panel is hidden, so minimap viewport height is the
 visible canvas height rather than an old inspector-row layout. The minimap uses
-the density-sized canvas dimensions, not widget-inflated scroll dimensions, and
+the area/distance-sized canvas dimensions, not widget-inflated scroll dimensions, and
 open widgets are rerendered back inside that canvas if a saved/default position
 would overflow it, using the canvas origin as the initial recovery point rather
 than padding away from the edge. On mobile browsers, the shell height is synced
 from `window.visualViewport.height` and the outer canvas wrapper reserves the
 measured visual-viewport bottom inset, so Android navigation bars or similar
 device chrome do not sit on top of draggable widgets. Widget drag and resize
-bounds still use the density-sized canvas on mobile and desktop, while the
+bounds still use the area/distance-sized canvas on mobile and desktop, while the
 minimap also reads the board dimensions rather than the padded wrapper.
 The app marker is a small symbolic dot, but its size is capped from the icon's
 projected footprint and clamped inside the projected viewport whenever the
@@ -113,8 +135,10 @@ layout is sanitized against the active app mapping so Home-only state cannot
 leak into user-created spaces. If a minimized widget opens
 outside the visible canvas viewport, it is
 moved to the canvas initial point: the top-left beginning of the board. Opened
-widgets are also shrunk to the visible canvas on mobile so density-expanded
-boards do not make windows wider than the device screen. Right-clicking an app
+widgets stay inside the area-sized canvas on mobile while horizontal resizing
+can grow past the visible device screen and use the canvas scroll/pan surface.
+Height is still constrained to the visible canvas so window controls remain
+reachable. Right-clicking an app
 icon or widget header, or long-pressing it on mobile, opens an app menu with
 Edit and Copy app id. Edit persists title, icon text/image, and min/max
 dimensions in the current browser's local device layout. Widget layout is
@@ -210,7 +234,11 @@ avatar reveals a chat panel that sends the user's message plus the current
 bounded observation snapshot through the existing Hermes bridge
 `/v1/chat/completions` endpoint. The chat header includes a node selector under
 the `Chat` title; bridge-backed turns include that `target_node`, so operators
-can switch between orchestrator and worker nodes without leaving the panel.
+can switch between orchestrator and worker nodes without leaving the panel. The
+composer row also includes a single model selector immediately left of token
+usage. It lists bridge-advertised models plus locally saved chat models, can add
+a typed model id, can remove the currently selected saved model, and forwards
+the selected model id with the chat turn.
 This first inner-agent surface is chat-only: it can see the structured context
 sent with the turn, but it does not execute UI, browser, node lifecycle, or
 shell actions from the browser. Bridge calls are bounded by a visible timeout
@@ -350,8 +378,10 @@ remote runtime, or point it at a local `tesseract.min.js` bundle.
 Each in-flight assistant reply now appears immediately as a response bubble with
 a small header. The header shows that Hermes is thinking, the current phase,
 and an elapsed counter that rolls from seconds to minutes and then hours for
-long turns. The frontend and backend share the same configured turn timeout, so
-slow bridge/model calls are visible instead of looking idle.
+long turns. The browser timeout is stream-inactivity based: it resets whenever
+the backend sends an action, heartbeat, or final payload. The backend owns the
+bridge/model timeout and emits heartbeat rows while Hermes is still working, so
+slow active turns stay visible instead of being mistaken for a dead request.
 
 Assistant turns also render a compact action chain. While a turn is running the
 chain stays open and grows with the visible client-side phases; when the adapter
@@ -364,7 +394,8 @@ the action trail.
 
 The browser prefers `/agent/session/message/stream` for embedded chat turns.
 That endpoint returns newline-delimited JSON action events as local adapter
-tools finish, then a final agent payload; older browsers can still fall back to
+tools finish, sends periodic heartbeat rows while waiting for Hermes/model
+output, then sends a final agent payload; older browsers can still fall back to
 the non-streaming `/agent/session/message` route.
 
 The transcript sent to `/agent/session/message` is intentionally pre-turn
@@ -447,11 +478,12 @@ the widget above the app layer, except Timeline, which stays fixed behind the
 space config flow. Connected Devices is a Home core module page, so it does
 not appear in Admin or user spaces unless a later porting flow maps it there. The
 config modal header identifies the current space while the options list omits a
-duplicate Space card. Each space config includes
-one draggable space-density line that expands or shrinks that space's scrollable board
-between `1x` and `10x` without changing current widget width/height; its knob
-stays within the line boundaries. App positions, widget geometry, topology card
-positions, and density are saved only in browser local storage by default, so a
+duplicate Space card. Each space config includes a draggable Space area line
+that expands or shrinks that space's scrollable board between `1x` and `10x`
+without changing current logical widget width/height, plus a Space distance line
+that scales app icons and opened widgets between `0.5x` and `2x`; both knobs
+stay within the line boundaries. App positions, widget geometry, topology card
+positions, area, and distance are saved only in browser local storage by default, so a
 newly seen device starts from the default projection instead of inheriting
 another screen's coordinates. Config storage shows account usage plus local
 disk availability and exposes Export/Import buttons for portable local backups;
@@ -500,6 +532,12 @@ must fail closed:
   HTTPS reverse proxy and reach wasm-agent on `127.0.0.1`.
 - Protected routes must continue returning `401 auth_required` until a signed
   allowed-account session cookie is present.
+- Host Browser WebSocket streams must reject missing or cross-origin `Origin`
+  headers before the upgrade.
+- Host Browser is disabled by default when
+  `HERMES_WASM_AGENT_PUBLIC_ORIGIN` is an HTTPS origin. Keep it disabled for
+  public launch unless CDP and private-network isolation have been reviewed;
+  explicit opt-in uses `HERMES_WASM_AGENT_BROWSER_ENABLED=1`.
 
 Public deployment on this host terminates TLS at Caddy for
 `https://wa.colmeio.com`, then reverse-proxies to the Python server on
@@ -610,9 +648,95 @@ Run checks:
 /local/plugins/wasm-agent/scripts/doctor.sh
 ```
 
-The doctor runs the source smoke test, image-card golden coverage, and the UI
-navigation history regression that keeps chat minimize from navigating back to
-an older space after the user changes spaces with chat open.
+The doctor runs the source smoke test, image-card golden coverage,
+security-loop policy/runner tests, and the UI navigation history regression
+that keeps chat minimize from navigating back to an older space after the user
+changes spaces with chat open.
+
+Run the public-launch security gate before exposing the app outside a trusted
+local network:
+
+```bash
+/local/plugins/wasm-agent/scripts/public_launch_security_check.sh
+```
+
+Use [`PUBLIC_LAUNCH_SECURITY.md`](./PUBLIC_LAUNCH_SECURITY.md) as the full
+checklist and evidence template. For staging, set
+`HERMES_WASM_AGENT_PUBLIC_URL=https://...` so the route and header probes hit
+the deployed origin.
+
+Run a bounded security-loop audit:
+
+```bash
+/local/plugins/wasm-agent/scripts/security_loop_run.py
+```
+
+The runner performs cheap local probes against `http://127.0.0.1:8877`, writes
+failed probes into the Admin security dashboard, submits a bounded
+`hermes-attack` audit directly to that node's Hermes Runs API, and asks
+`hermes-defense` for mitigation plans when deterministic findings exist. It
+does not silently apply fixes. Add `--wait-sec 120` when you want the runner to
+poll node task output and ingest any JSON findings returned by `hermes-attack`;
+if the native node run is still active at the deadline, the runner records
+`timeout` and requests `/v1/runs/{run_id}/stop`. Native delivery reads
+`API_SERVER_*` from `/local/agents/envs/<node>.env`; `--delivery bridge` is kept
+only as a legacy compatibility path.
+
+Keep bounded audits running sequentially:
+
+```bash
+/local/plugins/wasm-agent/scripts/security_loop_auto_start.sh
+```
+
+The loop executes `security_loop_run.py`, waits for that pass to finish, then
+sleeps before the next pass. It uses a lock file under `state/security-loop/` so
+manual and automatic runs do not overlap. Defaults are `all` mode, 300 seconds
+of node polling, and a 300 second interval; override them with
+`HERMES_WASM_AGENT_SECURITY_MODE`, `HERMES_WASM_AGENT_SECURITY_WAIT_SEC`,
+`HERMES_WASM_AGENT_SECURITY_INTERVAL_SEC`, and
+`HERMES_WASM_AGENT_SECURITY_SURFACES`. Identical clean node audits are capped by
+`HERMES_WASM_AGENT_SECURITY_MAX_CLEAN_REPEAT`, default `3`, so the loop turns
+repeated clean coverage into launch-readiness evidence instead of spending tokens
+forever. Use `--force-node-task` for a one-off manual override. Stop the loop with
+`/local/plugins/wasm-agent/scripts/security_loop_auto_stop.sh`.
+
+The Admin `Security Loop` widget and the Admin `Security` side panel show two
+separate things. The canvas widget is desktop-only; mobile operators should use
+the Admin `Security` side panel instead of opening the widget from the app
+layer.
+
+- Latest runner execution: mode, delivery backend, probe counts, node task ids,
+  and whether `hermes-attack` is running, completed, failed, timed out, or was
+  stopped. The widget keeps this run history inside a scrollable run-log topic.
+- Findings queue: actionable `hermes.security_loop.finding.v1` records that
+  failed deterministic probes or `hermes-attack` returned as JSON. Clean runs
+  can have a visible latest execution with zero findings.
+
+The Topology widget also exposes live node runtime value. Node cards display the
+working engine state, provider/model label, token deltas, and current token
+total. Right-click a node and choose `Statistics` to open a polling balloon for
+token consumption, sessions, cost, activity, tool calls, warnings/errors, an
+`hour` window, a smoothed token chart, and the latest activity log. The
+statistics balloon can be moved by dragging its header, and changing time
+windows keeps the balloon open. For the
+security-loop pair,
+`hermes-attack` and `hermes-defense` should be configured as
+`opencode-go/deepseek-v4-flash` in their local env files.
+
+Run history is available through `GET /security-loop/runs` and is rendered in the
+Security Loop widget and Security panel. The runner includes a host-collected
+authenticated route map in the `hermes-attack` prompt so it can reason about
+logged-in platform paths without receiving cookies or tokens.
+
+For useful node audits, prefer focused runs over broad sweeps:
+
+```bash
+/local/plugins/wasm-agent/scripts/security_loop_run.py --mode all --surface auth --surface browser --wait-sec 300
+```
+
+If a run times out, check the latest-run card in the Security panel, narrow the
+surface list, or increase `--wait-sec`. Defense planning starts only after a
+concrete finding exists; until then, `hermes-defense` stays idle by design.
 
 ## Environment
 
@@ -639,7 +763,8 @@ an older space after the user changes spaces with chat open.
 - `HERMES_WASM_AGENT_AUTH_SECRET_PATH`: optional signed-cookie secret path
   override, default `plugins/wasm-agent/state/db/sqlite/wa_auth_secret`.
 - `HERMES_WASM_AGENT_CHAT_TIMEOUT_SEC`: embedded assistant bridge/model turn
-  timeout, default `300`, clamped between 30 seconds and 6 hours.
+  timeout, default `1800`, clamped between 30 seconds and 6 hours. The browser
+  treats this as a stream-inactivity budget, not a total wall-clock limit.
 - `HERMES_WASM_AGENT_FORWARD_IMAGE_URLS`: opt in to forwarding raw `image_url`
   chat content parts to the bridge, default `0`. Leave disabled for text-only
   providers such as DeepSeek-compatible endpoints; the adapter still forwards
@@ -651,6 +776,10 @@ an older space after the user changes spaces with chat open.
 - `HERMES_WASM_AGENT_ATTACHMENT_MAX_AGE_SEC`: maximum local attachment asset
   age before old image assets are pruned, default `1209600`.
 - `HERMES_WASM_AGENT_CHROMIUM`: optional Chromium/Chrome binary override.
+- `HERMES_WASM_AGENT_BROWSER_ENABLED`: opt in/out of the Host Browser backend.
+  When unset, local HTTP development enables it and public HTTPS deployment
+  disables it. Set to `1` on public hosts only after CDP/private-network
+  isolation is reviewed.
 - `HERMES_WASM_AGENT_BROWSER_CDP_URL`: host Chromium DevTools endpoint, default
   `http://127.0.0.1:9233`. Set to an empty value to skip CDP and use the
   one-shot Chromium fallback.

@@ -23,7 +23,7 @@ import time
 import uuid
 from ipaddress import ip_address
 from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
@@ -44,7 +44,7 @@ DEFAULT_BROWSER_STREAM_FPS = 4.0
 DEFAULT_BROWSER_STREAM_QUALITY = 62
 DEFAULT_BROWSER_STREAM_EVERY_NTH_FRAME = 3
 DEFAULT_BROWSER_SESSION_TTL_SEC = 30 * 60
-DEFAULT_AGENT_BRIDGE_TIMEOUT_SEC = 5 * 60
+DEFAULT_AGENT_BRIDGE_TIMEOUT_SEC = 30 * 60
 DEFAULT_AGENT_IMAGE_MAX_BYTES = 1024 * 1024
 DEFAULT_AGENT_IMAGE_LIMIT = 8
 DEFAULT_AGENT_BRIDGE_IMAGE_BYTES = 900 * 1024
@@ -94,6 +94,8 @@ class WasmAgentServer(ThreadingHTTPServer):
 
 class WasmAgentHandler(SimpleHTTPRequestHandler):
     server: WasmAgentServer
+    server_version = "wasm-agent"
+    sys_version = ""
 
     def __init__(self, *args: Any, directory: str | None = None, **kwargs: Any) -> None:
         super().__init__(*args, directory=directory, **kwargs)
@@ -118,6 +120,23 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             )
             return
         if path == "/browser/stream":
+            try:
+                require_browser_feature_enabled(self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+                return
+            if not same_origin_websocket(self):
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "origin_rejected",
+                            "message": "WebSocket origin does not match this wasm-agent host.",
+                        },
+                    },
+                )
+                return
             serve_browser_stream(self)
             return
         if path.startswith("/bridge/"):
@@ -174,6 +193,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                         "required": True,
                         "userTable": "user_tb",
                     },
+                    "features": {
+                        "hostBrowser": {
+                            "enabled": browser_feature_enabled(self),
+                            "publicDefaultDisabled": public_deployment(self),
+                        },
+                    },
                     "compareWith": {
                         "hermesSpaceUiPwa": "http://127.0.0.1:8787",
                         "hermesSpaceUiBridge": "http://127.0.0.1:8790",
@@ -229,11 +254,25 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except ValueError:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": {"code": "invalid_limit", "message": "limit must be a number."}})
             return
+        if path == "/security-loop/runs":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                limit = int(str((query.get("limit") or ["24"])[0] or "24"))
+                self._json(HTTPStatus.OK, list_security_loop_runs(self.server, limit=limit))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except ValueError:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": {"code": "invalid_limit", "message": "limit must be a number."}})
+            return
         super().do_GET()
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = request_origin(self)
+        allowed = {item for item in {public_origin(), request_host_origin(self)} if item}
+        if origin and origin in allowed:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", "0")
@@ -262,6 +301,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/browser/open":
             try:
+                require_browser_feature_enabled(self)
                 body = self._read_json()
                 self._json(HTTPStatus.OK, {"ok": True, "browser": capture_browser(self.server, body)})
             except BrowserError as exc:
@@ -286,6 +326,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/browser/input":
             try:
+                require_browser_feature_enabled(self)
                 body = self._read_json()
                 self._json(HTTPStatus.OK, {"ok": True, "browser": browser_input(self.server, body)})
             except BrowserError as exc:
@@ -298,6 +339,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/browser/close":
             try:
+                require_browser_feature_enabled(self)
                 body = self._read_json()
                 self._json(HTTPStatus.OK, {"ok": True, "browser": close_browser_session(self.server, body)})
             except BrowserError as exc:
@@ -454,8 +496,15 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Endpoint was not found")
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+        if public_deployment(self):
+            self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        self.send_header("Content-Security-Policy", content_security_policy(self))
         super().end_headers()
 
     def translate_path(self, path: str) -> str:
@@ -569,6 +618,76 @@ def google_client_id() -> str:
 
 def public_origin() -> str:
     return os.getenv("HERMES_WASM_AGENT_PUBLIC_ORIGIN", "").strip().rstrip("/")
+
+
+def env_bool(name: str) -> bool | None:
+    raw = os.getenv(name, "").strip() or env_file_value(name)
+    if not raw:
+        return None
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def public_deployment(handler: BaseHTTPRequestHandler | None = None) -> bool:
+    if public_origin().lower().startswith("https://"):
+        return True
+    if handler:
+        forwarded_proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+        if forwarded_proto == "https":
+            return True
+        host = (handler.headers.get("Host", "") or "").split(":", 1)[0].strip().lower()
+        if host and host not in {"127.0.0.1", "localhost", "::1"}:
+            return True
+    return False
+
+
+def browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> bool:
+    configured = env_bool("HERMES_WASM_AGENT_BROWSER_ENABLED")
+    if configured is not None:
+        return configured
+    return not public_deployment(handler)
+
+
+def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> None:
+    if browser_feature_enabled(handler):
+        return
+    raise BrowserError(
+        "browser_disabled",
+        (
+            "Host Browser is disabled for public deployments. Set "
+            "HERMES_WASM_AGENT_BROWSER_ENABLED=1 only after CDP and "
+            "private-network isolation are reviewed."
+        ),
+        status=HTTPStatus.FORBIDDEN,
+    )
+
+
+def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> str:
+    img_src = "'self' data: blob: https://accounts.google.com"
+    connect_src = "'self' https://accounts.google.com"
+    if not public_deployment(handler):
+        img_src = "'self' data: blob: https:"
+        connect_src = "'self' ws: wss: http://127.0.0.1:* http://localhost:*"
+    script_src = "'self' https://accounts.google.com https://cdn.jsdelivr.net"
+    if not public_deployment(handler):
+        script_src = "'self' 'unsafe-inline' https://accounts.google.com https://cdn.jsdelivr.net"
+    return (
+        "default-src 'self'; "
+        f"script-src {script_src}; "
+        "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
+        f"img-src {img_src}; "
+        f"connect-src {connect_src}; "
+        "frame-src https://accounts.google.com; "
+        "worker-src 'self' blob:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    )
 
 
 def allowed_admin_emails() -> set[str]:
@@ -1251,6 +1370,104 @@ def security_loop_summary_path(server: WasmAgentServer) -> Path:
     return security_loop_dir(server) / "summary.json"
 
 
+def security_loop_latest_run_path(server: WasmAgentServer) -> Path:
+    return security_loop_dir(server) / "latest-run.json"
+
+
+def security_loop_latest_run(server: WasmAgentServer) -> dict[str, Any]:
+    latest = read_json_file(security_loop_latest_run_path(server), {})
+    if not isinstance(latest, dict):
+        return {}
+    return compact_security_loop_run(latest)
+
+
+def security_loop_run_summary(run: dict[str, Any]) -> str:
+    surfaces = ", ".join(str(item) for item in (run.get("surfaces") if isinstance(run.get("surfaces"), list) else [])[:6]) or "default surfaces"
+    value = run.get("value") if isinstance(run.get("value"), dict) else {}
+    verdict = str(value.get("verdict") or "value pending")
+    finding_count = int(run.get("finding_count") or 0)
+    failed_probe_count = int(run.get("failed_probe_count") or 0)
+    tasks = run.get("tasks") if isinstance(run.get("tasks"), list) else []
+    task_bits: list[str] = []
+    for item in tasks[:3]:
+        if not isinstance(item, dict):
+            continue
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        node = str(item.get("target_node") or task.get("target_node") or "node")
+        status = str(task.get("status") or ("dry-run" if item.get("dry_run") else "unknown"))
+        reason = str(task.get("reason") or "")
+        task_bits.append(f"{node}:{status}{'/' + reason if reason else ''}")
+    task_text = ", ".join(task_bits) or "no node task"
+    return clipped(f"{surfaces}; probes failed {failed_probe_count}; findings {finding_count}; tasks {task_text}; value {verdict}", 420)
+
+
+def compact_security_loop_run(latest: dict[str, Any]) -> dict[str, Any]:
+    tasks = []
+    for item in latest.get("tasks") if isinstance(latest.get("tasks"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        task = item.get("task") if isinstance(item.get("task"), dict) else {}
+        tasks.append({
+            "target_node": clipped(str(item.get("target_node") or task.get("target_node") or "node"), 80),
+            "status": clipped(str(task.get("status") or ("dry-run" if item.get("dry_run") else "unknown")), 40),
+            "reason": clipped(str(task.get("reason") or ""), 120),
+            "clean_repeat_streak": int(task.get("clean_repeat_streak") or 0),
+            "max_clean_repeat": int(task.get("max_clean_repeat") or 0),
+            "run_id": clipped(str(task.get("run_id") or task.get("task_id") or ""), 120),
+            "api_url": clipped(str(task.get("api_url") or ""), 180),
+            "has_response": bool((task.get("result") if isinstance(task.get("result"), dict) else {}).get("response")),
+            "error": clipped(str(task.get("error") or ""), 500),
+            "stop_status": task.get("stop_status") if isinstance(task.get("stop_status"), dict) else {},
+        })
+    raw_value = latest.get("value") if isinstance(latest.get("value"), dict) else {}
+    value = {
+        "verdict": clipped(str(raw_value.get("verdict") or ""), 80),
+        "recommendation": clipped(str(raw_value.get("recommendation") or ""), 500),
+        "launch_candidate": bool(raw_value.get("launch_candidate")),
+        "token_delta": int(raw_value.get("token_delta") or 0),
+        "api_call_delta": int(raw_value.get("api_call_delta") or 0),
+        "clean_repeat_streak_before": int(raw_value.get("clean_repeat_streak_before") or 0),
+        "clean_repeat_streak_after": int(raw_value.get("clean_repeat_streak_after") or 0),
+        "max_clean_repeat": int(raw_value.get("max_clean_repeat") or 0),
+    } if raw_value else {}
+    return {
+        "run_id": clipped(str(latest.get("run_id") or ""), 120),
+        "run_key": clipped(str(latest.get("run_key") or ""), 40),
+        "runner_status": clipped(str(latest.get("runner_status") or ("completed" if latest.get("finished_at") else "unknown")), 40),
+        "mode": clipped(str(latest.get("mode") or ""), 40),
+        "delivery": clipped(str(latest.get("delivery") or ""), 40),
+        "started_at": clipped(str(latest.get("started_at") or ""), 40),
+        "finished_at": clipped(str(latest.get("finished_at") or ""), 40),
+        "probe_count": int(latest.get("probe_count") or 0),
+        "failed_probe_count": int(latest.get("failed_probe_count") or 0),
+        "finding_count": int(latest.get("finding_count") or len(latest.get("findings") if isinstance(latest.get("findings"), list) else [])),
+        "error_count": len(latest.get("errors") if isinstance(latest.get("errors"), list) else []),
+        "errors": [clipped(str(error), 500) for error in (latest.get("errors") if isinstance(latest.get("errors"), list) else [])[:4]],
+        "value": value,
+        "tasks": tasks,
+        "summary": security_loop_run_summary(latest),
+    }
+
+
+def list_security_loop_runs(server: WasmAgentServer, *, limit: int = 24) -> dict[str, Any]:
+    if limit < 1 or limit > 200:
+        raise BrowserError("invalid_limit", "limit must be between 1 and 200.", status=HTTPStatus.BAD_REQUEST)
+    run_dir = security_loop_dir(server) / "runs"
+    runs: list[dict[str, Any]] = []
+    if run_dir.exists():
+        for path in sorted(run_dir.glob("security-run-*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+            raw = read_json_file(path, {})
+            if isinstance(raw, dict):
+                runs.append(compact_security_loop_run(raw))
+            if len(runs) >= limit:
+                break
+    return {
+        "ok": True,
+        "schema": "hermes.security_loop.runs.v1",
+        "runs": runs,
+    }
+
+
 def security_loop_append(server: WasmAgentServer, payload: dict[str, Any]) -> None:
     path = security_loop_findings_path(server)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1285,6 +1502,24 @@ def bounded_float(value: Any, fallback: float) -> float:
     except (TypeError, ValueError):
         number = fallback
     return max(0.0, min(1.0, number))
+
+
+def positive_int(value: Any, fallback: int = 1) -> int:
+    try:
+        number = int(float(value))
+    except (TypeError, ValueError):
+        number = fallback
+    return max(1, number)
+
+
+def security_finding_fingerprint(finding: dict[str, Any]) -> str:
+    parts = [
+        str(finding.get("source_node") or "").strip().lower(),
+        str(finding.get("target_surface") or finding.get("surface") or "").strip().lower(),
+        str(finding.get("category") or "").strip().lower(),
+        str(finding.get("summary") or "").strip().lower(),
+    ]
+    return hashlib.sha256("\n".join(parts).encode("utf-8", "replace")).hexdigest()[:24]
 
 
 def security_finding_current(server: WasmAgentServer) -> dict[str, dict[str, Any]]:
@@ -1329,6 +1564,10 @@ def normalize_security_finding(raw: dict[str, Any], user: dict[str, Any] | None)
         "exploitability": exploitability,
         "score": security_score(severity, confidence, exploitability, target_surface),
         "status": status,
+        "fingerprint": clipped(str(raw.get("fingerprint") or security_finding_fingerprint(raw)), 80),
+        "first_seen_at": clipped(str(raw.get("first_seen_at") or raw.get("created_at") or now), 40),
+        "last_seen_at": now,
+        "occurrence_count": positive_int(raw.get("occurrence_count"), 1),
         "summary": clipped(str(raw.get("summary") or "Security finding"), 360),
         "evidence_preview": clipped(str(raw.get("evidence_preview") or raw.get("evidence") or ""), 900),
         "task_id": clipped(str(raw.get("task_id") or ""), 96),
@@ -1349,8 +1588,38 @@ def save_security_loop_finding(
     raw = body.get("finding") if isinstance(body.get("finding"), dict) else body
     finding = normalize_security_finding(raw, user)
     current = security_finding_current(server)
+    raw_status_supplied = isinstance(raw, dict) and "status" in raw
+    matching_id = ""
+    for item_id, item in current.items():
+        fingerprint = str(item.get("fingerprint") or security_finding_fingerprint(item))
+        if fingerprint == finding["fingerprint"]:
+            matching_id = item_id
+            break
+    if matching_id:
+        existing = current[matching_id]
+        occurrence_count = positive_int(existing.get("occurrence_count"), 1) + 1
+        finding = {
+            **finding,
+            "id": existing.get("id") or matching_id,
+            "created_at": existing.get("created_at") or finding["created_at"],
+            "first_seen_at": existing.get("first_seen_at") or existing.get("created_at") or finding["first_seen_at"],
+            "occurrence_count": occurrence_count,
+        }
+        if not raw_status_supplied and str(existing.get("status") or "") in SECURITY_LOOP_STATUSES:
+            finding = {
+                **finding,
+                "status": existing["status"],
+                "decision_reason": existing.get("decision_reason") or finding["decision_reason"],
+                "decided_by": existing.get("decided_by") or finding["decided_by"],
+                "decided_at": existing.get("decided_at") or finding["decided_at"],
+            }
+        current.pop(finding["id"], None)
     current[finding["id"]] = finding
-    security_loop_append(server, {"event": "finding_saved", "finding": finding, "recorded_at": finding["updated_at"]})
+    event = {"event": "finding_saved", "finding": finding, "recorded_at": finding["updated_at"]}
+    if matching_id:
+        event["deduped"] = True
+        event["matched_finding_id"] = matching_id
+    security_loop_append(server, event)
     write_security_finding_current(server, current)
     return {"ok": True, "finding": finding, "security_loop": security_loop_status(server, current=current)["security_loop"]}
 
@@ -1420,6 +1689,7 @@ def security_loop_status(
         "schema": "hermes.security_loop.status.v1",
         "security_loop": {
             "actors": {"attack": "hermes-attack", "defense": "hermes-defense"},
+            "latest_run": security_loop_latest_run(server),
             "latest_run_at": latest,
             "stale": stale,
             "stale_after_sec": SECURITY_LOOP_STALE_AFTER_SEC,
@@ -1452,6 +1722,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/modules",
             "/index.html",
             "/styles.css",
+            "/boot.js",
             "/app.js",
             "/manifest.webmanifest",
             "/sw.js",
@@ -1499,12 +1770,20 @@ def same_origin_post(handler: WasmAgentHandler) -> bool:
     return origin in allowed
 
 
+def same_origin_websocket(handler: WasmAgentHandler) -> bool:
+    origin = request_origin(handler)
+    if not origin:
+        return False
+    allowed = {item for item in {public_origin(), request_host_origin(handler)} if item}
+    return origin in allowed
+
+
 def bridge_route_allowed(method: str, path: str) -> bool:
     method = method.upper()
     if not path.startswith("/") or path.startswith("/bridge/") or "://" in path:
         return False
     if method == "GET":
-        if path in {"/health", "/nodes", "/resources", "/tasks", "/capabilities"}:
+        if path in {"/health", "/nodes", "/resources", "/tasks", "/capabilities", "/v1/models"}:
             return True
         if re.fullmatch(r"/nodes/[A-Za-z0-9_.-]+", path):
             return True
@@ -2869,6 +3148,12 @@ def tool_action_arguments(tool: dict[str, Any]) -> dict[str, Any]:
         args["forwarded_count"] = tool.get("forwarded_count")
         args["summarized_count"] = tool.get("summarized_count")
         args["image_card_count"] = tool.get("image_card_count")
+    if name == "search":
+        args["command"] = f"rg -n {tool.get('query') or ''} /local"
+    if name == "git_status":
+        args["command"] = "git -C /local status --short"
+    if name == "git_diff_stat":
+        args["command"] = "git -C /local diff --stat"
     if name == "doctor":
         args["command"] = "scripts/doctor.sh"
     return args
@@ -3471,16 +3756,33 @@ def agent_bridge_timeout_sec() -> float:
     return max(30.0, min(6 * 60 * 60.0, value))
 
 
+def requested_agent_model(body: dict[str, Any]) -> dict[str, str] | None:
+    model_id = str(body.get("model") or "").strip()
+    provider = str(body.get("model_provider") or "").strip()
+    if not model_id and not provider:
+        return None
+    if provider and model_id and "/" not in model_id:
+        label = f"{provider}/{model_id}"
+    else:
+        label = model_id or provider
+    return {
+        "id": clipped(label, 180),
+        "provider": clipped(provider, 80),
+    }
+
+
 def call_agent_bridge(
     server: WasmAgentServer,
     message: str,
     tools: list[dict[str, Any]],
     transcript: list[dict[str, str]],
     target_node: str,
+    selected_model: dict[str, str] | None = None,
     images: list[dict[str, Any]] | None = None,
     image_card_focus: bool = False,
 ) -> tuple[str, str, dict[str, Any] | None]:
     timeout_sec = agent_bridge_timeout_sec()
+    model_id = str((selected_model or {}).get("id") or "embedded-hermes")
     context_label = "Image-card tool results" if image_card_focus else "Tool results"
     text_content = (
         f"Recent transcript:\n{json.dumps(transcript, ensure_ascii=True)}\n\n"
@@ -3501,6 +3803,7 @@ def call_agent_bridge(
         user_content = text_content
     system_content = (
         f"You are the configured embedded agent inside wasm-agent talking through target node `{target_node}`. "
+        f"The selected chat model is `{model_id}`. "
         "Use compact tool results to answer briefly. You may inspect context, "
         "but do not claim you executed mutations or shell actions beyond listed tools. "
         "If the current user message is ambiguous and includes attachments, treat words like 'it' or 'this' "
@@ -3547,7 +3850,7 @@ def call_agent_bridge(
 
     def build_payload(content: str | list[dict[str, Any]]) -> dict[str, Any]:
         return {
-            "model": "embedded-hermes",
+            "model": model_id,
             "stream": False,
             "target_node": target_node,
             "messages": [
@@ -3790,6 +4093,7 @@ def embedded_agent_message(
     if mode not in {"auto", "local", "bridge"}:
         raise BrowserError("agent_invalid_mode", "Agent mode must be auto, local, or bridge.")
     target_node = str(body.get("target_node") or body.get("node_id") or "orchestrator").strip() or "orchestrator"
+    selected_model = requested_agent_model(body)
     raw_attachment_present = bool(body.get("images") or body.get("attachments"))
     image_focused_turn = raw_attachment_present and image_question_hint(message)
     before_tree = safe_worktree_tree_sha(server)
@@ -3843,7 +4147,7 @@ def embedded_agent_message(
                 "label": "Infer from image card",
                 "status": "running",
                 "detail": f"{target_node} / image_card",
-                "meta": "waiting",
+                "meta": (selected_model or {}).get("id") or "waiting",
             })
         focus_tools = redact_image_card_focus_tools([attachment_manifest] if attachment_manifest else tools)
         reply, source, token_usage = call_agent_bridge(
@@ -3852,6 +4156,7 @@ def embedded_agent_message(
             focus_tools,
             transcript,
             target_node,
+            selected_model=selected_model,
             images=None,
             image_card_focus=True,
         )
@@ -3890,9 +4195,17 @@ def embedded_agent_message(
                 "label": "Receive final reply",
                 "status": "running",
                 "detail": f"{target_node} / {mode}",
-                "meta": "waiting",
+                "meta": (selected_model or {}).get("id") or "waiting",
             })
-        reply, source, token_usage = call_agent_bridge(server, message, tools, transcript, target_node, images=bridge_images)
+        reply, source, token_usage = call_agent_bridge(
+            server,
+            message,
+            tools,
+            transcript,
+            target_node,
+            selected_model=selected_model,
+            images=bridge_images,
+        )
     duration_ms = int((time.monotonic() - started) * 1000)
     context_bytes = sum(text_size(tool) for tool in tools)
     after_tree = safe_worktree_tree_sha(server)
@@ -3940,6 +4253,7 @@ def embedded_agent_message(
             "context_bytes": context_bytes,
             "context_estimated_tokens": max(1, context_bytes // 4),
             "token_usage": token_usage,
+            "selected_model": selected_model,
             "model_tokens_avoided": source.startswith("local_"),
             "attachments": {
                 "received": image_count,
@@ -3974,18 +4288,49 @@ def stream_embedded_agent_message(
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
 
-    def emit_action(action: dict[str, Any]) -> None:
-        write_ndjson(handler, {"type": "action", "action": action})
+    events: "queue.Queue[dict[str, Any]]" = queue.Queue()
+    started = time.monotonic()
 
-    try:
-        result = embedded_agent_message(handler.server, body, user=user, action_callback=emit_action)
-        write_ndjson(handler, {"type": "final", "agent": result})
-    except BrowserError as exc:
-        write_ndjson(handler, {"type": "error", "error": {"code": exc.code, "message": exc.message}})
-    except (BrokenPipeError, ConnectionResetError):
-        return
-    except Exception as exc:
-        write_ndjson(handler, {"type": "error", "error": {"code": "agent_error", "message": str(exc)}})
+    def emit_action(action: dict[str, Any]) -> None:
+        events.put({"type": "action", "action": action})
+
+    def run_turn() -> None:
+        try:
+            result = embedded_agent_message(handler.server, body, user=user, action_callback=emit_action)
+            events.put({"type": "final", "agent": result})
+        except BrowserError as exc:
+            events.put({"type": "error", "error": {"code": exc.code, "message": exc.message}})
+        except Exception as exc:
+            events.put({"type": "error", "error": {"code": "agent_error", "message": str(exc)}})
+
+    worker = threading.Thread(target=run_turn, name="wasm-agent-chat-turn", daemon=True)
+    worker.start()
+
+    while True:
+        try:
+            payload = events.get(timeout=15)
+        except queue.Empty:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            payload = {
+                "type": "heartbeat",
+                "phase": "Waiting for Hermes",
+                "message": "Hermes is still working...",
+                "elapsed_ms": elapsed_ms,
+                "action": {
+                    "id": "node_reply",
+                    "kind": "model",
+                    "label": "Waiting for Hermes",
+                    "status": "running",
+                    "detail": f"{elapsed_ms // 1000}s elapsed",
+                    "meta": "bridge active",
+                },
+            }
+        try:
+            write_ndjson(handler, payload)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        if payload.get("type") in {"final", "error"}:
+            return
 
 
 def dev_hmr_files(server: WasmAgentServer) -> list[Path]:
@@ -4316,7 +4661,9 @@ def serve_browser_stream(handler: WasmAgentHandler) -> None:
         handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
         return
 
-    accept = base64.b64encode(hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii")).digest()).decode("ascii")
+    accept = base64.b64encode(
+        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
+    ).decode("ascii")
     handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
     handler.send_header("Upgrade", "websocket")
     handler.send_header("Connection", "Upgrade")
@@ -4438,7 +4785,10 @@ class CdpWebSocket:
         if b" 101 " not in response.split(b"\r\n", 1)[0]:
             raise BrowserError("cdp_ws_handshake_failed", "CDP websocket handshake failed.")
         accept = base64.b64encode(
-            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+            hashlib.sha1(
+                (key + WEBSOCKET_GUID).encode("ascii"),
+                usedforsecurity=False,
+            ).digest()
         ).decode("ascii")
         if f"sec-websocket-accept: {accept}".encode("ascii").lower() not in response.lower():
             raise BrowserError("cdp_ws_handshake_failed", "CDP websocket accept key did not match.")

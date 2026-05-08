@@ -62,19 +62,19 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   widget footprint instead of a duplicate app-icon marker; minimized app markers
   are positioned from the painted app-icon rectangle after minimized state is
   confirmed from layout. The viewport marker and entity markers both use the
-  scroll container's logical coordinate space, so space density changes, the
+  scroll container's logical coordinate space, so space area/distance changes, the
   launcher, and the painted board rectangle cannot skew the minimap projection.
   A fully visible icon remains inside the viewport marker at every board edge.
   On mobile/tablet breakpoints, Home/Admin/User space frames must collapse to
   one actual canvas row whenever the side panel is hidden; hidden inspector rows
   must not inflate the scroll viewport height used by minimap math. The minimap
-  must use density-sized board/canvas dimensions, not widget-inflated scroll
+  must use area/distance-sized board/canvas dimensions, not widget-inflated scroll
   dimensions; overflowing widgets are rerendered back into the canvas bounds
   instead of expanding the canvas. Mobile shell height must follow
   `window.visualViewport.height` when available, and the outer canvas wrapper
   must reserve the measured visual-viewport bottom inset without
   platform-specific guard offsets. Mobile widget dragging and resizing must
-  still use the real density-sized canvas bounds, just like desktop, while
+  still use the real area/distance-sized canvas bounds, just like desktop, while
   minimap board dimensions also come from the canvas rather than the padded
   wrapper.
   App markers are symbolic dots, but their
@@ -96,8 +96,9 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   deleted as a user-created space.
 - User-created spaces are account-owned working canvases. They may contain
   draggable app buttons and opened widgets, with widget layout persisted in
-  browser local storage by default. Do not POST app/widget geometry or density
-  to the server unless a premium sync/backup mode is explicitly implemented.
+  browser local storage by default. Do not POST app/widget geometry, area, or
+  distance to the server unless a premium sync/backup mode is explicitly
+  implemented.
 - The shell must not reintroduce the removed header/status chrome, command
   form, canvas label, summary panel, or dock.
 - Home-level actions sit on the black homespace itself. The primary action may
@@ -114,10 +115,21 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   canvas, not the scrollable board contents. It is layered above app icons and
   below widgets. It opens the space-local Timeline lane; Home uses the
   account-global `home` timeline. Timeline is a fixed config action, not an
-  app-layer icon. Space config also owns a draggable space-density line;
-  increasing density expands the scrollable board width and height for that
-  space without resizing existing widgets, and the slider knob must remain
-  within the line boundaries at minimum and maximum density.
+  app-layer icon. Space config also owns a draggable Space area line; increasing
+  area expands the scrollable board width and height for that space without
+  resizing existing logical widget geometry. Space config also owns a draggable
+  Space distance line that scales app icons and opened widgets visually without
+  rewriting their saved logical positions. Desktop wheel over the empty canvas
+  must adjust Space distance around the cursor point rather than native-scrolling
+  the hidden board. Mobile two-finger pinch must adjust Space distance around
+  the midpoint between both touches. During wheel or pinch zoom, the top-right
+  config button anchor must show the current zoom value. The zoom value may
+  appear at the same time as the panning minimap, but it must sit on the higher
+  z layer. The pinch hot path must avoid full widget layout, minimap rendering,
+  and canvas redraw work on every pointer move; it should update board size,
+  distance CSS, and existing app/widget screen positions, then commit the full
+  layout/save pass after the gesture settles. Both slider knobs must remain
+  within the line boundaries at minimum and maximum values.
 - Apps are account/user entities that are mapped into spaces. Home lists core
   modules in its command strip; Admin and user spaces map their own working
   apps. A widget must stay hidden in a space unless that app is mapped into the
@@ -134,15 +146,17 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   a predictable grid starting flush with the current visible canvas edge, with
   no added gaps between icon boxes, and overflowing downward in rows only when
   the mapped app count cannot fit. It must measure the packed block, place that
-  block inside the current density-sized canvas, and avoid forcing
-  canvas-density recomputation. Organized positions are authoritative until a
+  block inside the current area-sized logical canvas, and avoid forcing
+  canvas-area recomputation. Organized positions are authoritative until a
   user manually drags an app again. App icons and widgets remain draggable on
   mobile; widgets remain free-positioned.
 - When a minimized widget opens outside the visible canvas viewport, it is
   moved to the canvas initial point: the top-left beginning of the board.
-- Opened widgets must fit the visible canvas viewport on mobile. Space density
-  may expand the scrollable board, but it must not make a widget window wider
-  than the current device screen.
+- Opened widgets must stay bounded by the area-sized canvas on mobile. Space
+  area may expand the scrollable board, and widget resize may grow a window
+  horizontally beyond the current device screen so operators can pan across it;
+  height still fits the visible canvas so the header and controls remain
+  reachable.
 - Right-clicking an app icon or widget header opens the app menu; mobile uses a
   still long-press. The menu exposes Edit and Copy app id. Editing persists the
   app/widget title, icon text/image, and min/max dimensions in the current
@@ -158,7 +172,7 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
   shareable/backupable/marketplace-ready, but app positions, widget positions,
-  sizes, and space density stay client-local unless premium sync is explicit.
+  sizes, Space area, and Space distance stay client-local unless premium sync is explicit.
 - The Resources Monitor polls live host resource data while it is open and
   renders one metric row per line in this order: Nodes, Disk, RAM, CPU,
   Processes, Uptime. RAM and Disk use compact `usedGB/totalGB` values.
@@ -166,12 +180,16 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   or long-pressing a topology node opens a node menu with Edit followed by
   Restart, Start, Stop, Update. Node Edit persists a local model
   `provider/name` override. Individual topology node cards are draggable within
-  the topology widget and persist their positions with the widget layout.
+  the topology widget and persist their positions with the widget layout. The
+  node statistics balloon opens from that menu, remains open while changing
+  `hour`/`daily`/`weekly`/`monthly`, and can be moved by dragging its header.
 - Admin includes the Security Loop widget and Security side-panel view for the
   platform-level `hermes-attack` / `hermes-defense` loop. It must show concise
   chronological findings sorted by score, compact evidence previews, status and
-  severity chips, and human-gated decisions. Raw logs stay behind evidence,
-  task, or log drill-ins rather than in the main queue.
+  severity chips, and human-gated decisions. The canvas Security Loop widget is
+  desktop-only; mobile access belongs in the Admin Security side panel. Run
+  history/logs inside the widget must stay in a scrollable run-log topic. Raw
+  logs stay behind evidence, task, or log drill-ins rather than in the main queue.
 - Widget header controls prioritize minimize/maximize at the far right. Status
   chips may be present, but they must sit before the window controls.
 - Widgets must remain draggable and resizable on desktop and mobile unless
@@ -221,12 +239,16 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Action rows must be meaningful: show the action kind, status, concise detail,
   and an expandable arguments/result preview when the adapter has one.
 - During active turns, local adapter action events should stream into the open
-  chain before the final response collapses the chain.
+  chain before the final response collapses the chain. Stream heartbeats count
+  as activity and should keep long Hermes/model waits visible rather than
+  letting the browser apply a total wall-clock timeout.
 - Local development HMR must reload the client automatically for JavaScript,
   module descriptor, HTML, manifest, and server-source changes, with reloads
   deferred only while an assistant turn is actively running.
-- The composer is bottom anchored: attachment, token usage, and send controls
-  live in the row below the text area.
+- The composer is bottom anchored: attachment, model selector, token usage, and
+  send controls live in the row below the text area. The model selector is the
+  one-place control for choosing default/current, selecting a saved model,
+  adding a model id, or removing the active saved model from the chat list.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned

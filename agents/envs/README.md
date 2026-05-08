@@ -74,6 +74,12 @@ These variables are not mandatory for every node, but they are part of the suppo
 | `DISCORD_AUTO_THREAD_IGNORE_CHANNELS` | `csv string` | comma-separated channel ids | unset | Channels excluded from auto-thread behavior. |
 | `DISCORD_ROLE_ACL_SAFE_COMMANDS` | `csv string` | command names such as `status,help,usage,provider` | `status,help,usage,provider` | Used by the Discord slash governance runtime to define commands that remain allowed under ACL-safe mode. Documented in `/local/docs/agents/node.env.md`. |
 | `DISCORD_ROLE_ACL_FALLBACK_HIERARCHY` | `csv string` | role names in priority order | unset | Used by the Discord slash governance runtime as a role-name fallback when live role fetch is unavailable. Documented in `/local/docs/agents/node.env.md`. |
+| `API_SERVER_ENABLED` | `bool` | `true` or `false` | disabled | Enables the node's native Hermes Runs API. Required for wasm-agent security-loop native node tasks. |
+| `API_SERVER_HOST` | `string` | bind host such as `0.0.0.0` or `127.0.0.1` | `127.0.0.1` | Use `0.0.0.0` for worker nodes that wasm-agent reaches through the Docker bridge IP. |
+| `API_SERVER_PORT` | `int` | TCP port such as `8643` | none for worker nodes; `8642` for orchestrator tools | Native Runs API port consumed by host-owned tools such as `plugins/wasm-agent/scripts/security_loop_run.py`. |
+| `API_SERVER_KEY` | `string` | bearer token | none | Optional bearer token. Recommended whenever `API_SERVER_HOST` is reachable beyond process-local loopback. |
+| `API_SERVER_MODEL_NAME` | `string` | model id such as `deepseek-v4-flash` | node default model | Model label exposed by the native Runs API and wasm-agent topology. |
+| `HERMES_INFERENCE_PROVIDER` | `string` | provider id such as `opencode-go` | node default provider | Provider label exposed by the native Runs API and wasm-agent topology. Security-loop `hermes-attack` and `hermes-defense` should use `opencode-go` with `API_SERVER_MODEL_NAME=deepseek-v4-flash`. |
 | `NVIDIA_API_KEY` | `string` | API key | none | NVIDIA provider credential. |
 | `OPENROUTER_API_KEY` | `string` | API key | none | OpenRouter credential. |
 | `MINIMAX_API_KEY` | `string` | API key | none | MiniMax credential. |

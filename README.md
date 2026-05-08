@@ -35,6 +35,10 @@ Use these rules before evolving this project:
 - Prefer extension layers before core edits: Hermes Agent changes should use plugins, skills, tools, hooks, or components; Space Agent changes should use modules, customware bundles, extension points, or components.
 - If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
 - Treat `/local/plugins/hermes-space-ui` as a Hermes Orchestrator plugin that may ship Space Agent modules, not as permission to patch Space Agent internals directly.
+- For `wasm-agent` work, treat `/local/plugins/hermes-space-ui` as the legacy
+  Space Agent UI path and comparison surface. Do not patch it to fix wasm-agent
+  behavior unless a task explicitly names a cross-plugin migration or
+  compatibility change.
 - Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
 - For long Space OS evolution runs, keep resumability as a first-class deliverable:
   update the active roadmap before or during each major direction change, commit

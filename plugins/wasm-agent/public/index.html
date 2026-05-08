@@ -7,21 +7,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
     <title>WASM Agent</title>
-    <script>
-      window.__WASM_AGENT_DISABLE_SW__ = true;
-      if ("serviceWorker" in navigator) {
-        const resetKey = "wasmAgent.swReset.v2";
-        Promise.all([
-          navigator.serviceWorker.getRegistrations().then((items) => Promise.all(items.map((item) => item.unregister()))),
-          "caches" in window ? caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))) : Promise.resolve(),
-        ]).then(() => {
-          if (!sessionStorage.getItem(resetKey) && navigator.serviceWorker.controller) {
-            sessionStorage.setItem(resetKey, "1");
-            window.location.reload();
-          }
-        }).catch(() => {});
-      }
-    </script>
+    <script src="/boot.js"></script>
   </head>
   <body>
     <div id="app" class="os-shell" data-status="booting" data-panel="home" data-auth="checking">
@@ -58,6 +44,7 @@
         <button id="deleteSpaceButton" class="danger" type="button" role="menuitem">Delete space</button>
       </div>
       <div id="nodeContextMenu" class="node-context-menu" role="menu" aria-label="Node actions" hidden></div>
+      <section id="nodeStatsBalloon" class="node-stats-balloon" aria-label="Node statistics" hidden></section>
       <div id="appContextMenu" class="app-context-menu" role="menu" aria-label="App actions" hidden>
         <button id="editAppButton" type="button" role="menuitem">Edit</button>
         <button id="copyAppIdButton" type="button" role="menuitem">Copy app id</button>
@@ -379,14 +366,25 @@
                   <span id="securityLoopStatus" class="widget-chip">security</span>
                 </span>
               </header>
-              <div id="securityLoopSummary" class="security-summary"></div>
-              <div id="securityFindingQueue" class="security-finding-queue"></div>
+              <div class="security-widget-body">
+                <section class="security-topic" aria-label="Security summary">
+                  <div id="securityLoopSummary" class="security-summary"></div>
+                </section>
+                <section class="security-topic security-topic-log" aria-label="Security run log">
+                  <div id="securityLoopRun" class="security-run"></div>
+                  <div id="securityLoopRuns" class="security-run-history"></div>
+                </section>
+                <section class="security-topic" aria-label="Security finding queue">
+                  <div id="securityFindingQueue" class="security-finding-queue"></div>
+                </section>
+              </div>
               <div class="widget-resize-handle" data-widget-resize="security-loop" title="Resize Security Loop" aria-hidden="true"></div>
             </article>
             </div>
           </section>
           <button id="spaceConfigButton" class="space-config-button icon-button" type="button" title="Space config" aria-label="Space config"></button>
           <div id="spaceMiniMap" class="space-minimap" aria-hidden="true" hidden></div>
+          <div id="spaceZoomInfo" class="space-zoom-info" aria-live="polite" hidden></div>
 
           <aside id="sidePanel" class="side-panel" aria-label="Workspace inspector">
             <div class="panel-tabs" role="tablist">
@@ -442,8 +440,10 @@
                 <h2>Security</h2>
                 <span id="securityPanelStatus" class="widget-chip">loop</span>
               </div>
-              <div id="securityPanelSummary" class="security-summary"></div>
-              <div id="securityPanelFindingQueue" class="security-finding-queue panel-security-queue"></div>
+	              <div id="securityPanelSummary" class="security-summary"></div>
+	              <div id="securityPanelRun" class="security-run"></div>
+	              <div id="securityPanelRuns" class="security-run-history"></div>
+	              <div id="securityPanelFindingQueue" class="security-finding-queue panel-security-queue"></div>
             </section>
           </aside>
         </main>
@@ -535,6 +535,8 @@
                 <path d="m16.1 9.1-5.95 5.95a4.1 4.1 0 0 1-5.8-5.8l6.55-6.55a2.85 2.85 0 0 1 4.03 4.03l-6.55 6.55a1.6 1.6 0 0 1-2.26-2.26l5.88-5.88"></path>
               </svg>
             </button>
+            <select id="agentModelSelect" class="agent-model-select" aria-label="Chat model">
+            </select>
             <span id="agentTokenUsage" class="agent-token-usage" title="Exact model token usage for the last turn">Tokens -</span>
             <button id="agentSendButton" class="agent-send-button" type="submit" aria-label="Send message" title="Send">
               <svg class="agent-send-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">

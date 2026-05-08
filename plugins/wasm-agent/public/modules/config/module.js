@@ -2,7 +2,7 @@ export const moduleDefinition = {
   id: "config",
   title: "Config",
   status: "core space",
-  detail: "Owns space settings such as storage, density, timeline access, and launcher preference.",
+  detail: "Owns space settings such as storage, area, distance, timeline access, and launcher preference.",
   defaultEnabled: true,
   core: true,
   firmware: "/modules/config/module.js",

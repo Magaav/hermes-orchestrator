@@ -53,7 +53,7 @@ the artifact.
 
 ## Device-Local Layout
 
-App positions, widget positions, widget sizes, and space density are
+App positions, widget positions, widget sizes, Space area, and Space distance are
 client-local preferences. They should not synchronize across the account by
 default because screen size and personal layout taste are device-specific.
 

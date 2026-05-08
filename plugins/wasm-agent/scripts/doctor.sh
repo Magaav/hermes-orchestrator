@@ -31,6 +31,7 @@ fi
 
 python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
 python3 "${PLUGIN_DIR}/tests/security_loop_policy.test.py"
+python3 "${PLUGIN_DIR}/tests/security_loop_runner.test.py"
 
 if [[ -s "${PID_FILE}" ]]; then
   python3 - "$HOST" "$PORT" <<'PY'

@@ -14,10 +14,10 @@ Expected local files include:
 - `users/<acc_id>/spaces/<space_id>/`, account-owned space metadata.
 - `users/<acc_id>/device-settings.json`, the account's current main-device
   pointer for the Connected Devices flow.
-- App positions, widget geometry, topology card positions, and space density
-  are browser-local PWA state by default, not files under this server state
-  root. Server-retained layout sync/backup is reserved for a future premium
-  storage path.
+- App positions, widget geometry, topology card positions, Space area, and
+  Space distance are browser-local PWA state by default, not files under this
+  server state root. Server-retained layout sync/backup is reserved for a
+  future premium storage path.
 - `users/<acc_id>/timelines/<space_id>/`, account/space-local Timeline
   metadata and automatic checkpoint fingerprint cache. The versioned Timeline
   module contract lives under `public/modules/timeline/`; these directories are
