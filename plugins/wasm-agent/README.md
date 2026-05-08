@@ -236,11 +236,18 @@ bounded observation snapshot through the existing Hermes bridge
 the `Chat` title; bridge-backed turns include that `target_node`, so operators
 can switch between orchestrator and worker nodes without leaving the panel. The
 composer row also includes a single model selector immediately left of token
-usage. It lists bridge-advertised models plus locally saved chat models, can add
-a typed model id, can remove the currently selected saved model, and forwards
-the selected model id with the chat turn. Chat model choices are stored in a
+usage. It lists bridge-advertised models plus locally saved chat models without
+duplicating the node default. Choosing a saved model or adding a typed model id
+opens an in-chat setup balloon instead of a native browser prompt; the backend
+validates the provider/model id, writes it into the target node env and
+`.hermes/config.yaml`, updates `API_SERVER_MODEL_NAME`, restarts the node, waits
+for the runtime to report the model, and probes `/v1/chat/completions` before
+the model is saved in the selector. Failed setup rolls the node env/config back.
+The same selector can remove the currently selected saved model through the
+balloon, leaving the node default intact. Chat model choices are stored in a
 small assistant-specific local storage record, separate from topology widget
-layout, so adding a model from Home or any user space remains visible.
+layout, so adding a model from Home or any user space remains visible after
+validation.
 This first inner-agent surface is chat-only: it can see the structured context
 sent with the turn, but it does not execute UI, browser, node lifecycle, or
 shell actions from the browser. Bridge calls are bounded by a visible timeout

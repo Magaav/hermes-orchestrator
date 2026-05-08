@@ -51,6 +51,7 @@ DEFAULT_AGENT_BRIDGE_IMAGE_BYTES = 900 * 1024
 DEFAULT_AGENT_BRIDGE_IMAGE_SINGLE_BYTES = 640 * 1024
 DEFAULT_AGENT_BRIDGE_REQUEST_BYTES = 1536 * 1024
 DEFAULT_AGENT_BRIDGE_FORWARD_IMAGE_URLS = False
+DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC = 6 * 60
 DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
@@ -420,6 +421,27 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "attachment_error", "message": str(exc)}},
                 )
             return
+        if path == "/agent/models/setup":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, {"ok": True, "model_setup": setup_agent_model(self.server, body)})
+            except AgentModelSetupError as exc:
+                self._json(
+                    exc.status,
+                    {
+                        "ok": False,
+                        "error": {"code": exc.code, "message": exc.message},
+                        "model_setup": {"steps": exc.steps},
+                    },
+                )
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "model_setup_error", "message": str(exc)}},
+                )
+            return
         if path == "/agent/session/message":
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
@@ -583,6 +605,19 @@ class BrowserError(RuntimeError):
         self.code = code
         self.message = message
         self.status = status
+
+
+class AgentModelSetupError(BrowserError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        steps: list[dict[str, str]],
+        status: HTTPStatus = HTTPStatus.BAD_GATEWAY,
+    ) -> None:
+        super().__init__(code, message, status=status)
+        self.steps = steps
 
 
 def wa_env_path() -> Path:
@@ -3768,6 +3803,362 @@ def requested_agent_model(body: dict[str, Any]) -> dict[str, str] | None:
     return {
         "id": clipped(label, 180),
         "provider": clipped(provider, 80),
+    }
+
+
+def _safe_agent_node_id(raw: Any) -> str:
+    node_id = str(raw or "orchestrator").strip() or "orchestrator"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", node_id):
+        raise BrowserError("invalid_node", "Node id contains unsupported characters.")
+    return node_id
+
+
+def _node_env_root(server: WasmAgentServer) -> Path:
+    return Path(os.getenv("HERMES_AGENTS_ENVS_ROOT", str(repo_root(server) / "agents" / "envs"))).resolve()
+
+
+def _node_env_path(server: WasmAgentServer, node_id: str) -> Path:
+    root = _node_env_root(server)
+    path = (root / f"{node_id}.env").resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise BrowserError("invalid_node", "Node env path escapes the configured env root.") from exc
+    if not path.exists():
+        raise BrowserError("node_env_missing", f"Node env file was not found for {node_id}.", status=HTTPStatus.NOT_FOUND)
+    return path
+
+
+def _node_config_path(server: WasmAgentServer, node_id: str) -> Path:
+    return (repo_root(server) / "agents" / "nodes" / node_id / ".hermes" / "config.yaml").resolve()
+
+
+def _parse_env_text(text: str) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        if key:
+            env[key] = value
+    return env
+
+
+def _shell_env_value(value: str) -> str:
+    if re.fullmatch(r"[A-Za-z0-9_./:@+=-]*", value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _replace_or_append_env_value(text: str, key: str, value: str) -> str:
+    lines = text.splitlines()
+    replacement = f"{key}={_shell_env_value(value)}"
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") or "=" not in stripped:
+            continue
+        existing_key = stripped.split("=", 1)[0].strip()
+        if existing_key == key:
+            lines[index] = replacement
+            break
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(replacement)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _parse_setup_model(raw_model: Any, env: dict[str, str]) -> dict[str, str]:
+    raw = str(raw_model or "").strip()
+    raw = re.sub(r"\s+", "", raw)
+    if not raw:
+        raise BrowserError("missing_model", "Model id is required.")
+    if not re.fullmatch(r"[A-Za-z0-9._:/@+=-]{2,180}", raw):
+        raise BrowserError("invalid_model", "Model id contains unsupported characters.")
+    if "/" in raw:
+        provider, model_name = raw.split("/", 1)
+    else:
+        provider = (
+            env.get("NODE_AGENT_DEFAULT_MODEL_PROVIDER")
+            or env.get("DEFAULT_MODEL_PROVIDER")
+            or env.get("HERMES_INFERENCE_PROVIDER")
+            or ""
+        ).strip()
+        model_name = raw
+    if not provider or not model_name:
+        raise BrowserError("invalid_model", "Use a provider/model id, for example opencode-go/kimi-k2.6.")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{2,80}", provider):
+        raise BrowserError("invalid_model_provider", "Model provider contains unsupported characters.")
+    if not re.fullmatch(r"[A-Za-z0-9._:/@+=-]{1,160}", model_name):
+        raise BrowserError("invalid_model_name", "Model name contains unsupported characters.")
+    model_id = f"{provider}/{model_name}"
+    return {
+        "id": clipped(model_id, 180),
+        "provider": clipped(provider, 80),
+        "name": clipped(model_name, 160),
+        "label": clipped(model_id, 180),
+    }
+
+
+def _write_node_model_env(env_path: Path, text: str, model: dict[str, str]) -> None:
+    updated = text
+    provider = model["provider"]
+    model_name = model["name"]
+    model_id = model["id"]
+    for key, value in (
+        ("NODE_AGENT_DEFAULT_MODEL_PROVIDER", provider),
+        ("NODE_AGENT_DEFAULT_MODEL", model_name),
+        ("HERMES_INFERENCE_PROVIDER", provider),
+        ("API_SERVER_MODEL_NAME", model_id),
+    ):
+        updated = _replace_or_append_env_value(updated, key, value)
+    env_path.write_text(updated, encoding="utf-8")
+
+
+def _write_node_model_config(config_path: Path, model: dict[str, str]) -> bool:
+    if not config_path.exists():
+        return False
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        raise BrowserError("yaml_unavailable", "PyYAML is required to update the node model config.") from exc
+    loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(loaded, dict):
+        loaded = {}
+    model_cfg = loaded.get("model")
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    previous_provider = str(model_cfg.get("provider") or loaded.get("provider") or "").strip()
+    model_cfg["default"] = model["name"]
+    model_cfg["provider"] = model["provider"]
+    if previous_provider and previous_provider != model["provider"]:
+        model_cfg.pop("base_url", None)
+        model_cfg.pop("api_mode", None)
+    loaded["model"] = model_cfg
+    loaded["provider"] = model["provider"]
+    config_path.write_text(yaml.safe_dump(loaded, sort_keys=False), encoding="utf-8")
+    return True
+
+
+def _setup_step(steps: list[dict[str, str]], label: str, status: str, detail: str = "") -> None:
+    steps.append({"label": label, "status": status, "detail": clipped(detail, 240)})
+
+
+def _fail_model_setup(
+    code: str,
+    message: str,
+    steps: list[dict[str, str]],
+    *,
+    status: HTTPStatus = HTTPStatus.BAD_GATEWAY,
+) -> None:
+    for step in reversed(steps):
+        if step.get("status") == "running":
+            step["status"] = "failed"
+            break
+    raise AgentModelSetupError(code, message, steps=steps, status=status)
+
+
+def _request_node_restart(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
+    return bridge_proxy(
+        server,
+        "POST",
+        f"/nodes/{quote(node_id, safe='')}/action",
+        {"action": "restart_node", "payload": {}},
+    )
+
+
+def _bridge_node_payload(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
+    payload = bridge_proxy(server, "GET", f"/nodes/{quote(node_id, safe='')}", None)
+    node = payload.get("node") if isinstance(payload.get("node"), dict) else payload
+    return node if isinstance(node, dict) else {}
+
+
+def _node_reports_model(server: WasmAgentServer, node_id: str, model: dict[str, str]) -> bool:
+    node = _bridge_node_payload(server, node_id)
+    raw = node.get("raw") if isinstance(node.get("raw"), dict) else {}
+    model_name = str(raw.get("default_model_env") or node.get("default_model_env") or "").strip()
+    provider = str(raw.get("default_model_provider_env") or node.get("default_model_provider_env") or "").strip()
+    return model_name == model["name"] and provider == model["provider"]
+
+
+def _node_api_base_url(server: WasmAgentServer, node_id: str) -> str:
+    env_key = f"HERMES_SPACE_UI_API_SERVER_{node_id.upper().replace('-', '_')}_URL"
+    explicit = str(os.getenv(env_key) or os.getenv("HERMES_SPACE_UI_API_SERVER_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    env = _parse_env_text(_node_env_path(server, node_id).read_text(encoding="utf-8"))
+    port = str(env.get("API_SERVER_PORT") or "").strip()
+    host = str(env.get("API_SERVER_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    if host == "0.0.0.0":
+        host = "127.0.0.1"
+    if not port and node_id == "orchestrator":
+        port = "8642"
+    if not port:
+        raise BrowserError("api_server_url_not_configured", "No native Hermes API server port is configured for this node.")
+    return f"http://{host}:{port}".rstrip("/")
+
+
+def _node_api_key(server: WasmAgentServer, node_id: str) -> str:
+    env_key = f"HERMES_SPACE_UI_API_SERVER_{node_id.upper().replace('-', '_')}_KEY"
+    explicit = str(os.getenv(env_key) or os.getenv("HERMES_SPACE_UI_API_SERVER_KEY") or "").strip()
+    if explicit:
+        return explicit
+    env = _parse_env_text(_node_env_path(server, node_id).read_text(encoding="utf-8"))
+    return str(env.get("API_SERVER_KEY") or "").strip()
+
+
+def _node_api_json(
+    server: WasmAgentServer,
+    node_id: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout: float = 20,
+) -> dict[str, Any]:
+    base_url = _node_api_base_url(server, node_id)
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    key = _node_api_key(server, node_id)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    request = Request(f"{base_url}{path}", data=data, headers=headers, method=method.upper())
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:600]
+        raise BrowserError("api_server_http_error", detail or str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        raise BrowserError("api_server_unreachable", str(exc.reason), status=HTTPStatus.BAD_GATEWAY) from exc
+    try:
+        parsed = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise BrowserError("api_server_non_json", raw[:600], status=HTTPStatus.BAD_GATEWAY) from exc
+    return parsed if isinstance(parsed, dict) else {"result": parsed}
+
+
+def _node_api_models_include(server: WasmAgentServer, node_id: str, model_id: str) -> bool:
+    payload = _node_api_json(server, node_id, "GET", "/v1/models", timeout=8)
+    data = payload.get("data") if isinstance(payload.get("data"), list) else []
+    ids = {str(item.get("id") or "").strip() for item in data if isinstance(item, dict)}
+    return model_id in ids
+
+
+def _wait_for_model_runtime(server: WasmAgentServer, node_id: str, model: dict[str, str], deadline: float) -> None:
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            if not _node_reports_model(server, node_id, model):
+                last_error = "node status has not reported the requested default model yet"
+            elif _node_api_models_include(server, node_id, model["id"]):
+                return
+            else:
+                last_error = "native /v1/models has not advertised the requested model yet"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(1.5)
+    raise BrowserError("model_runtime_not_ready", last_error or "Hermes runtime did not report the requested model.")
+
+
+def _probe_agent_model(server: WasmAgentServer, node_id: str, model: dict[str, str]) -> dict[str, Any]:
+    timeout_sec = min(DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC, max(60.0, agent_bridge_timeout_sec()))
+    payload = {
+        "model": model["id"],
+        "stream": False,
+        "target_node": node_id,
+        "messages": [
+            {"role": "system", "content": "Reply with exactly MODEL_VALIDATION_OK."},
+            {"role": "user", "content": "MODEL_VALIDATION_OK"},
+        ],
+        "timeout_sec": timeout_sec,
+    }
+    request = Request(
+        f"{server.bridge_url}/v1/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout_sec) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:600]
+        raise BrowserError("model_probe_http_error", detail or str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
+    except Exception as exc:
+        raise BrowserError("model_probe_failed", str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+    content = str(message.get("content") or "").strip()
+    if not content:
+        raise BrowserError("model_probe_unexpected", "Validation returned an empty assistant response.")
+    return {
+        "reply": clipped(content, 240),
+        "usage": data.get("usage") if isinstance(data.get("usage"), dict) else None,
+    }
+
+
+def setup_agent_model(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+    target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or "orchestrator")
+    env_path = _node_env_path(server, target_node)
+    original_env = env_path.read_text(encoding="utf-8")
+    env = _parse_env_text(original_env)
+    model = _parse_setup_model(body.get("model") or body.get("id") or body.get("name"), env)
+    config_path = _node_config_path(server, target_node)
+    original_config = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    steps: list[dict[str, str]] = []
+    wrote_runtime = False
+
+    _setup_step(steps, "Validate model id", "done", model["id"])
+    try:
+        _setup_step(steps, "Write node default", "running", target_node)
+        _write_node_model_env(env_path, original_env, model)
+        wrote_runtime = True
+        config_changed = _write_node_model_config(config_path, model)
+        steps[-1]["status"] = "done"
+        steps[-1]["detail"] = "env + config" if config_changed else "env"
+
+        _setup_step(steps, "Restart Hermes node", "running", target_node)
+        try:
+            restart_payload = _request_node_restart(server, target_node)
+            steps[-1]["status"] = "done"
+            steps[-1]["detail"] = str(restart_payload.get("status") or restart_payload.get("action") or "restart requested")
+        except Exception as exc:
+            if target_node != "orchestrator":
+                raise
+            steps[-1]["status"] = "done"
+            steps[-1]["detail"] = f"restart requested; bridge reconnected after: {clipped(str(exc), 120)}"
+
+        _setup_step(steps, "Wait for runtime model", "running", model["id"])
+        _wait_for_model_runtime(server, target_node, model, time.monotonic() + DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC)
+        steps[-1]["status"] = "done"
+
+        _setup_step(steps, "Probe model response", "running", model["id"])
+        probe = _probe_agent_model(server, target_node, model)
+        steps[-1]["status"] = "done"
+        steps[-1]["detail"] = probe.get("reply", "")
+    except Exception as exc:
+        if wrote_runtime:
+            env_path.write_text(original_env, encoding="utf-8")
+            if original_config is not None:
+                config_path.write_text(original_config, encoding="utf-8")
+            try:
+                _request_node_restart(server, target_node)
+            except Exception:
+                pass
+        message = f"Model setup failed and was rolled back: {exc}"
+        _fail_model_setup("model_setup_failed", clipped(message, 700), steps)
+
+    return {
+        "target_node": target_node,
+        "model": model,
+        "steps": steps,
     }
 
 

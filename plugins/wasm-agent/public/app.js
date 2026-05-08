@@ -221,6 +221,12 @@ const els = {
   agentModeSelect: document.querySelector("#agentModeSelect"),
   agentNodeSelect: document.querySelector("#agentNodeSelect"),
   agentModelSelect: document.querySelector("#agentModelSelect"),
+  agentModelBalloon: document.querySelector("#agentModelBalloon"),
+  agentModelTitle: document.querySelector("#agentModelTitle"),
+  agentModelForm: document.querySelector("#agentModelForm"),
+  agentModelInput: document.querySelector("#agentModelInput"),
+  agentModelProgress: document.querySelector("#agentModelProgress"),
+  agentModelCancelButton: document.querySelector("#agentModelCancelButton"),
   agentInput: document.querySelector("#agentInput"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
   agentSendButton: document.querySelector("#agentSendButton"),
@@ -338,6 +344,15 @@ const state = {
   agentTokenUsage: null,
   agentAvailableModels: [],
   agentModelSettings: readAgentModelSettings(),
+  agentModelSetup: {
+    open: false,
+    mode: "add",
+    input: "",
+    busy: false,
+    status: "idle",
+    steps: [],
+  },
+  agentModelSetupTimer: 0,
   agentPendingImages: [],
   agentPendingAttachmentSummaries: [],
   agentOpenMessageMenuId: "",
@@ -1337,9 +1352,15 @@ function setAgentTargetNode(nodeId) {
 function normalizeAgentModelEntry(raw) {
   if (!raw) return null;
   const source = typeof raw === "string" ? { id: raw } : raw;
-  const id = cleanText(source.id || source.model || source.name || "", "").slice(0, 140);
-  const provider = cleanText(source.provider || "", "").slice(0, 64);
-  const name = cleanText(source.name || source.model || id, "").slice(0, 140);
+  let id = cleanText(source.id || source.model || source.name || "", "").slice(0, 140);
+  let provider = cleanText(source.provider || "", "").slice(0, 64);
+  let name = cleanText(source.name || source.model || id, "").slice(0, 140);
+  if (!provider && id.includes("/")) {
+    const [first, ...rest] = id.split("/");
+    provider = cleanText(first, "").slice(0, 64);
+    name = cleanText(rest.join("/"), name).slice(0, 140);
+  }
+  if (provider && name && id === name) id = formatNodeModel(name, provider);
   const label = cleanText(source.label || formatNodeModel(name, provider) || id, "").slice(0, 180);
   const modelId = cleanText(id || formatNodeModel(name, provider) || label, "").slice(0, 180);
   if (!modelId && !label) return null;
@@ -1351,8 +1372,35 @@ function normalizeAgentModelEntry(raw) {
   };
 }
 
+function agentModelKeys(model) {
+  const normalized = normalizeAgentModelEntry(model);
+  if (!normalized) return [];
+  const candidates = [
+    normalized.id,
+    normalized.label,
+    formatNodeModel(normalized.name, normalized.provider),
+  ];
+  return Array.from(new Set(
+    candidates
+      .map((item) => cleanText(item, "").toLowerCase())
+      .filter(Boolean)
+  ));
+}
+
 function agentModelKey(model) {
-  return cleanText(model?.id || formatNodeModel(model?.name, model?.provider) || model?.label, "").toLowerCase();
+  return agentModelKeys(model)[0] || "";
+}
+
+function sameAgentModel(left, right) {
+  const normalizedLeft = normalizeAgentModelEntry(left);
+  const normalizedRight = normalizeAgentModelEntry(right);
+  if (!normalizedLeft || !normalizedRight) return false;
+  const leftKeys = new Set(agentModelKeys(left));
+  if (agentModelKeys(right).some((key) => leftKeys.has(key))) return true;
+  const leftName = cleanText(normalizedLeft.name, "").toLowerCase();
+  const rightName = cleanText(normalizedRight.name, "").toLowerCase();
+  if (!leftName || leftName !== rightName) return false;
+  return !normalizedLeft.provider || !normalizedRight.provider;
 }
 
 function agentModelCatalog() {
@@ -1373,9 +1421,9 @@ function addAgentModelToCatalog(model) {
   const normalized = normalizeAgentModelEntry(model);
   if (!normalized) return null;
   const catalog = agentModelCatalog();
-  const key = agentModelKey(normalized);
-  state.agentModelSettings.hiddenModels = agentHiddenModelKeys().filter((item) => item !== key);
-  const index = catalog.findIndex((item) => agentModelKey(item) === key);
+  const keys = agentModelKeys(normalized);
+  state.agentModelSettings.hiddenModels = agentHiddenModelKeys().filter((item) => !keys.includes(item));
+  const index = catalog.findIndex((item) => sameAgentModel(item, normalized));
   if (index >= 0) {
     catalog[index] = { ...catalog[index], ...normalized };
   } else {
@@ -1386,10 +1434,12 @@ function addAgentModelToCatalog(model) {
 }
 
 function removeAgentModelFromCatalog(model) {
-  const key = agentModelKey(model);
-  if (!key) return;
-  state.agentModelSettings.models = agentModelCatalog().filter((item) => agentModelKey(item) !== key);
-  if (!agentHiddenModelKeys().includes(key)) state.agentModelSettings.hiddenModels.push(key);
+  const keys = agentModelKeys(model);
+  if (!keys.length) return;
+  state.agentModelSettings.models = agentModelCatalog().filter((item) => !sameAgentModel(item, model));
+  const hidden = new Set(agentHiddenModelKeys());
+  keys.forEach((key) => hidden.add(key));
+  state.agentModelSettings.hiddenModels = Array.from(hidden);
 }
 
 function agentDefaultModelForNode(nodeId = agentTargetNode()) {
@@ -1402,18 +1452,27 @@ function agentDefaultModelForNode(nodeId = agentTargetNode()) {
 }
 
 function availableAgentModels() {
-  const models = new Map();
+  const models = [];
   const hidden = new Set(agentHiddenModelKeys());
   const add = (model) => {
     const normalized = normalizeAgentModelEntry(model);
-    const key = agentModelKey(normalized);
-    if (key && !hidden.has(key)) models.set(key, normalized);
+    const keys = agentModelKeys(normalized);
+    if (!keys.length || keys.some((key) => hidden.has(key))) return;
+    const existing = models.find((item) => sameAgentModel(item, normalized));
+    if (existing) {
+      Object.assign(existing, {
+        ...normalized,
+        label: existing.label || normalized.label,
+      });
+    } else {
+      models.push(normalized);
+    }
   };
   add(agentDefaultModelForNode());
   for (const model of state.agentAvailableModels || []) add(model);
   for (const model of agentModelCatalog()) add(model);
   for (const override of Object.values(nodeModelOverrides())) add(override);
-  return Array.from(models.values()).sort((a, b) => a.label.localeCompare(b.label));
+  return models.sort((a, b) => a.label.localeCompare(b.label));
 }
 
 function selectedAgentModel() {
@@ -1440,18 +1499,15 @@ function persistAgentModelSelection() {
   renderAgentModelSelect();
 }
 
-function promptForAgentModel(seed = "") {
-  const current = selectedAgentModel() || agentDefaultModelForNode();
-  const raw = window.prompt("Model id", seed || current?.id || current?.label || "");
-  const id = cleanText(raw, "").slice(0, 180);
-  if (!id) return null;
-  return normalizeAgentModelEntry({ id, name: id, label: id });
-}
-
 function renderAgentModelSelect() {
   if (!els.agentModelSelect) return;
   const defaultModel = agentDefaultModelForNode();
-  const activeModel = selectedAgentModel();
+  let activeModel = selectedAgentModel();
+  if (activeModel && defaultModel && sameAgentModel(activeModel, defaultModel)) {
+    delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+    activeModel = null;
+    saveAgentModelSettings();
+  }
   const models = availableAgentModels();
   const fragment = document.createDocumentFragment();
   const defaultOption = document.createElement("option");
@@ -1459,6 +1515,7 @@ function renderAgentModelSelect() {
   defaultOption.textContent = defaultModel?.label || "Default model";
   fragment.append(defaultOption);
   for (const model of models) {
+    if (defaultModel && sameAgentModel(model, defaultModel)) continue;
     const option = document.createElement("option");
     option.value = `model:${model.id}`;
     option.textContent = model.label;
@@ -1496,6 +1553,235 @@ async function loadAgentModels() {
   } catch {
     state.agentAvailableModels = [];
     renderAgentModelSelect();
+  }
+}
+
+function defaultAgentModelSetupSteps(activeIndex = 0) {
+  const labels = [
+    "Validate model id",
+    "Write node default",
+    "Restart Hermes node",
+    "Wait for runtime model",
+    "Probe model response",
+  ];
+  return labels.map((label, index) => ({
+    label,
+    status: index < activeIndex ? "done" : index === activeIndex ? "running" : "pending",
+    detail: "",
+  }));
+}
+
+function normalizeAgentModelStep(step) {
+  const source = step && typeof step === "object" ? step : {};
+  return {
+    label: cleanText(source.label, "Model setup"),
+    status: cleanText(source.status, "pending"),
+    detail: cleanText(source.detail, ""),
+  };
+}
+
+function clearAgentModelSetupTimer() {
+  window.clearInterval(state.agentModelSetupTimer);
+  state.agentModelSetupTimer = 0;
+}
+
+function renderAgentModelSetupBalloon() {
+  const setup = state.agentModelSetup;
+  if (!els.agentModelBalloon) return;
+  els.agentModelBalloon.hidden = !setup.open;
+  if (!setup.open) return;
+  const removeMode = setup.mode === "remove";
+  if (els.agentModelTitle) {
+    els.agentModelTitle.textContent = removeMode
+      ? "Remove model"
+      : setup.busy
+        ? "Setting model"
+        : "Set model";
+  }
+  if (els.agentModelInput) {
+    els.agentModelInput.readOnly = setup.busy || removeMode;
+    if (document.activeElement !== els.agentModelInput || removeMode) {
+      els.agentModelInput.value = setup.input || "";
+    }
+  }
+  const steps = (Array.isArray(setup.steps) ? setup.steps : []).map(normalizeAgentModelStep);
+  if (els.agentModelProgress) {
+    els.agentModelProgress.replaceChildren(...steps.map((step) => {
+      const row = document.createElement("div");
+      const status = step.status === "failed" ? "failed" : step.status === "done" ? "done" : step.status === "running" ? "running" : "pending";
+      row.className = `agent-model-step is-${status}`;
+      const body = document.createElement("div");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      body.append(label);
+      if (step.detail) {
+        const detail = document.createElement("span");
+        detail.textContent = step.detail;
+        body.append(detail);
+      }
+      row.append(body);
+      return row;
+    }));
+  }
+}
+
+function setAgentModelSetup(patch) {
+  state.agentModelSetup = {
+    ...state.agentModelSetup,
+    ...patch,
+  };
+  renderAgentModelSetupBalloon();
+}
+
+function openAgentModelSetup(mode = "add", model = null, options = {}) {
+  clearAgentModelSetupTimer();
+  const normalized = normalizeAgentModelEntry(model);
+  const current = normalized || selectedAgentModel() || agentDefaultModelForNode();
+  setAgentBalloon("model");
+  setAgentModelSetup({
+    open: true,
+    mode,
+    input: cleanText(current?.id || current?.label || "", "").slice(0, 180),
+    busy: false,
+    status: "idle",
+    steps: mode === "remove"
+      ? [{ label: `Remove ${current?.label || "selected model"}`, status: "running", detail: agentTargetNode() }]
+      : [],
+  });
+  window.requestAnimationFrame(() => {
+    els.agentModelInput?.focus();
+    if (mode !== "remove") els.agentModelInput?.select();
+    if (options.auto) void submitAgentModelSetup();
+  });
+}
+
+function closeAgentModelSetup() {
+  if (state.agentModelSetup.busy) return;
+  clearAgentModelSetupTimer();
+  setAgentModelSetup({ open: false, status: "idle", steps: [] });
+  renderAgentModelSelect();
+}
+
+function startAgentModelSetupProgress() {
+  clearAgentModelSetupTimer();
+  let activeIndex = 0;
+  setAgentModelSetup({ steps: defaultAgentModelSetupSteps(activeIndex) });
+  state.agentModelSetupTimer = window.setInterval(() => {
+    activeIndex = Math.min(activeIndex + 1, 4);
+    setAgentModelSetup({ steps: defaultAgentModelSetupSteps(activeIndex) });
+  }, 1600);
+}
+
+function modelSetupInputValue() {
+  return cleanText(els.agentModelInput?.value || state.agentModelSetup.input, "").slice(0, 180);
+}
+
+function completeAgentModelRemove() {
+  const selected = selectedAgentModel();
+  if (!selected) {
+    closeAgentModelSetup();
+    return;
+  }
+  removeAgentModelFromCatalog(selected);
+  delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+  persistAgentModelSelection();
+  setAgentModelSetup({
+    busy: false,
+    status: "done",
+    steps: [{ label: `Removed ${selected.label}`, status: "done", detail: agentTargetNode() }],
+  });
+  recordUserEvent("agent.model_removed", {
+    target: `node:${agentTargetNode()}`,
+    summary: `Removed ${selected.label}`,
+    data: { model: selected.id },
+  });
+  window.setTimeout(() => {
+    if (state.agentModelSetup.status === "done") closeAgentModelSetup();
+  }, 900);
+}
+
+async function submitAgentModelSetup(event) {
+  event?.preventDefault();
+  if (state.agentModelSetup.busy) return;
+  if (state.agentModelSetup.mode === "remove") {
+    completeAgentModelRemove();
+    return;
+  }
+  const rawModel = modelSetupInputValue();
+  if (!rawModel) {
+    setAgentModelSetup({
+      status: "failed",
+      steps: [{ label: "Validate model id", status: "failed", detail: "Model id is required" }],
+    });
+    return;
+  }
+  const targetNode = agentTargetNode();
+  setAgentModelSetup({
+    input: rawModel,
+    busy: true,
+    status: "running",
+  });
+  startAgentModelSetupProgress();
+  recordUserEvent("agent.model_setup_started", {
+    target: `node:${targetNode}`,
+    summary: `Setting ${rawModel}`,
+    data: { model: rawModel },
+  });
+  try {
+    const payload = await fetchJson("/agent/models/setup", {
+      method: "POST",
+      timeoutMs: DEFAULT_AGENT_TURN_TIMEOUT_MS + 30000,
+      body: {
+        target_node: targetNode,
+        model: rawModel,
+      },
+    });
+    clearAgentModelSetupTimer();
+    const setup = payload.model_setup || {};
+    const normalized = normalizeAgentModelEntry(setup.model || rawModel);
+    if (normalized) {
+      applyAgentModelToTarget(normalized);
+      persistAgentModelSelection();
+    }
+    setAgentModelSetup({
+      busy: false,
+      status: "done",
+      input: normalized?.id || rawModel,
+      steps: Array.isArray(setup.steps) ? setup.steps.map(normalizeAgentModelStep) : defaultAgentModelSetupSteps(5),
+    });
+    await refresh();
+    await loadAgentModels();
+    const defaultModel = agentDefaultModelForNode(targetNode);
+    if (normalized && defaultModel && sameAgentModel(normalized, defaultModel)) {
+      delete state.agentModelSettings.selectedByNode?.[targetNode];
+      saveAgentModelSettings();
+    }
+    renderAgentModelSelect();
+    recordUserEvent("agent.model_setup_finished", {
+      target: `node:${targetNode}`,
+      summary: `Set ${normalized?.label || rawModel}`,
+      data: { model: normalized?.id || rawModel },
+    });
+    window.setTimeout(() => {
+      if (state.agentModelSetup.status === "done") closeAgentModelSetup();
+    }, 1200);
+  } catch (error) {
+    clearAgentModelSetupTimer();
+    const setup = error.payload?.model_setup || {};
+    const fallbackSteps = state.agentModelSetup.steps.length
+      ? state.agentModelSetup.steps.map((step) => step.status === "running" ? { ...step, status: "failed", detail: error.message } : step)
+      : [{ label: "Set model", status: "failed", detail: error.message }];
+    setAgentModelSetup({
+      busy: false,
+      status: "failed",
+      steps: Array.isArray(setup.steps) && setup.steps.length ? setup.steps.map(normalizeAgentModelStep) : fallbackSteps,
+    });
+    renderAgentModelSelect();
+    recordUserEvent("agent.model_setup_failed", {
+      target: `node:${targetNode}`,
+      summary: error.message,
+      data: { model: rawModel, error: error.message },
+    });
   }
 }
 
@@ -3615,7 +3901,10 @@ async function fetchJson(path, options = {}) {
       payload = { ok: false, error: { message: text.slice(0, 600) } };
     }
     if (!response.ok || payload.ok === false) {
-      throw new Error(payload?.error?.message || `HTTP ${response.status}`);
+      const error = new Error(payload?.error?.message || `HTTP ${response.status}`);
+      error.payload = payload;
+      error.status = response.status;
+      throw error;
     }
     return payload;
   } finally {
@@ -6003,9 +6292,14 @@ function setAgentBalloon(kind) {
   const sessionsOpen = kind === "sessions";
   const contextOpen = kind === "context";
   const settingsOpen = kind === "settings";
+  const modelOpen = kind === "model";
   if (els.agentSessionsBalloon) els.agentSessionsBalloon.hidden = !sessionsOpen;
   if (els.agentContextBalloon) els.agentContextBalloon.hidden = !contextOpen;
   if (els.agentSettingsBalloon) els.agentSettingsBalloon.hidden = !settingsOpen;
+  if (els.agentModelBalloon && !modelOpen && !state.agentModelSetup.busy) {
+    state.agentModelSetup.open = false;
+    renderAgentModelSetupBalloon();
+  }
   els.agentSessionsButton?.setAttribute("aria-expanded", sessionsOpen ? "true" : "false");
   els.agentContextButton?.setAttribute("aria-expanded", contextOpen ? "true" : "false");
   els.agentSettingsButton?.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
@@ -6016,7 +6310,9 @@ function toggleAgentBalloon(kind) {
     ? els.agentSessionsBalloon
     : kind === "settings"
       ? els.agentSettingsBalloon
-      : els.agentContextBalloon;
+      : kind === "model"
+        ? els.agentModelBalloon
+        : els.agentContextBalloon;
   setAgentBalloon(target?.hidden ? kind : "");
 }
 
@@ -6566,7 +6862,7 @@ function normalizeNode(raw) {
   const runtime = cleanText(raw.runtime?.type || raw.raw?.runtime_type, "runtime");
   const modelOverride = nodeModelOverride(id);
   const overriddenModel = formatNodeModel(modelOverride.name, modelOverride.provider);
-  const modelName = activity.model || rawStatus.default_model_env || raw.default_model_env || "";
+  const modelName = rawStatus.default_model_env || raw.default_model_env || activity.model || "";
   const modelProvider = rawStatus.default_model_provider_env || raw.default_model_provider_env || "";
   const tokenTotal = Number(activity.total_tokens || rawStatus.session_total_tokens || 0);
   return {
@@ -10889,7 +11185,7 @@ function wireEvents() {
     toggleAgentBalloon("settings");
   });
   els.agentPanel.addEventListener("click", (event) => {
-    if (event.target.closest?.(".agent-balloon, .agent-tool-button")) return;
+    if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select")) return;
     setAgentBalloon("");
   });
   els.agentNewSessionButton.addEventListener("click", newAgentSession);
@@ -10898,32 +11194,26 @@ function wireEvents() {
     const value = this.value;
     let selectedModel = null;
     if (value === "__add__") {
-      selectedModel = promptForAgentModel();
-      if (selectedModel) {
-        applyAgentModelToTarget(selectedModel);
-        persistAgentModelSelection();
-      } else {
-        renderAgentModelSelect();
-      }
+      openAgentModelSetup("add");
+      renderAgentModelSelect();
       return;
     }
     if (value === "__remove__") {
       selectedModel = selectedAgentModel();
-      if (selectedModel && window.confirm(`Remove ${selectedModel.label} from this chat model list?`)) {
-        removeAgentModelFromCatalog(selectedModel);
-        delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
-        persistAgentModelSelection();
-      } else {
-        renderAgentModelSelect();
-      }
+      if (selectedModel) openAgentModelSetup("remove", selectedModel);
+      renderAgentModelSelect();
       return;
     }
     if (value === "__default__") {
       delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
     } else if (value.startsWith("model:")) {
       const modelId = value.slice("model:".length);
-      selectedModel = availableAgentModels().find((model) => model.id === modelId) || null;
-      if (selectedModel) applyAgentModelToTarget(selectedModel);
+      selectedModel = availableAgentModels().find((model) => model.id === modelId || agentModelKeys(model).includes(modelId.toLowerCase())) || null;
+      if (selectedModel) {
+        openAgentModelSetup("set", selectedModel, { auto: true });
+        renderAgentModelSelect();
+        return;
+      }
     }
     persistAgentModelSelection();
     recordUserEvent("agent.model_selected", {
@@ -10931,6 +11221,8 @@ function wireEvents() {
       data: { value, model: selectedModel?.label || "" },
     });
   });
+  els.agentModelForm?.addEventListener("submit", (event) => void submitAgentModelSetup(event));
+  els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   els.agentForm.addEventListener("submit", (event) => {
     event.preventDefault();
     void sendAgentMessage(els.agentInput.value);

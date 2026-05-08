@@ -525,6 +525,21 @@
         <div id="agentMessages" class="agent-messages" aria-live="polite">
           <div class="agent-message assistant">I can see this workspace snapshot and help evolve the app from here.</div>
         </div>
+        <section id="agentModelBalloon" class="agent-balloon agent-model-balloon" aria-label="Model setup" hidden>
+          <div class="agent-balloon-head">
+            <strong id="agentModelTitle">Set model</strong>
+            <button id="agentModelCancelButton" class="icon-button" type="button" title="Cancel" aria-label="Cancel model setup">
+              <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
+            </button>
+          </div>
+          <form id="agentModelForm" class="agent-model-form" autocomplete="off">
+            <label class="agent-model-field">
+              <span>Model</span>
+              <input id="agentModelInput" type="text" placeholder="opencode-go/kimi-k2.6" spellcheck="false" autocapitalize="off">
+            </label>
+            <div id="agentModelProgress" class="agent-model-progress" aria-live="polite"></div>
+          </form>
+        </section>
         <form id="agentForm" class="agent-form" autocomplete="off">
           <div id="agentImagePreview" class="agent-image-preview" hidden></div>
           <input type="file" id="agentImageInput" accept="image/*" multiple hidden>
