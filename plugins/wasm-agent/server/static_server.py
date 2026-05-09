@@ -57,6 +57,8 @@ DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
 DEFAULT_USER_QUOTA_BYTES = 1024 * 1024 * 1024
+SPACE_AREA_MIN_PX = 1
+SPACE_AREA_MAX_PX = 2000
 DEVICE_ONLINE_WINDOW_SEC = 3 * 60
 SECURITY_LOOP_STALE_AFTER_SEC = 24 * 60 * 60
 WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
@@ -64,6 +66,46 @@ DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
 DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_db.sqlite3"
 DEFAULT_AUTH_SECRET_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_auth_secret"
 AUTH_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 30
+ACTIVE_BRIDGE_TASK_STATUSES = {"active", "in_progress", "pending", "queued", "running", "started", "stopping", "submitted", "working"}
+CORE_FIRMWARE_PREFIXES = (
+    "docs/roadmap/",
+    "plugins/wasm-agent/ARTIFACTS.md",
+    "plugins/wasm-agent/DESIGN.md",
+    "plugins/wasm-agent/README.md",
+    "plugins/wasm-agent/conf/",
+    "plugins/wasm-agent/public/",
+    "plugins/wasm-agent/scripts/",
+    "plugins/wasm-agent/server/",
+    "plugins/wasm-agent/tests/",
+)
+WIS_SPACE_SCHEMA = "hermes.wasm_agent.wis.space.v1"
+WIS_PATCH_SCHEMA = "hermes.wasm_agent.wis.patch.v1"
+WIS_PATCH_RESULT_SCHEMA = "hermes.wasm_agent.wis.patch_result.v1"
+SHARED_SPACE_SCHEMA = "hermes.wasm_agent.shared_space.v1"
+SHARED_SPACE_LIST_SCHEMA = "hermes.wasm_agent.shared_spaces.v1"
+SHARED_SPACE_ROOM_SCHEMA = "hermes.wasm_agent.shared_space.room.v1"
+SHARED_SPACE_ROOM_EVENT_SCHEMA = "hermes.wasm_agent.shared_space.room_event.v1"
+SHARED_SPACE_PRESENCE_SCHEMA = "hermes.wasm_agent.shared_space.presence.v1"
+SHARED_SPACE_PRESENCE_TTL_SEC = 20
+SHARED_SPACE_EVENT_LIMIT = 240
+GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
+AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
+AGENT_MUTATION_ALLOWED_EXTENSIONS = {
+    ".css",
+    ".html",
+    ".js",
+    ".json",
+    ".md",
+    ".py",
+    ".sh",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+}
+AGENT_MUTATION_MAX_OPS = 8
+AGENT_MUTATION_MAX_FILE_BYTES = 2 * 1024 * 1024
+AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES = 128 * 1024
 _SNOWFLAKE_LOCK = threading.Lock()
 _SNOWFLAKE_LAST_MS = -1
 _SNOWFLAKE_SEQUENCE = 0
@@ -224,6 +266,33 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/spaces":
             try:
                 self._json(HTTPStatus.OK, list_user_spaces(self.server, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/spaces/shared":
+            try:
+                self._json(HTTPStatus.OK, list_shared_spaces(self.server, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/spaces/room":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                body = {
+                    "action": "read",
+                    "shared_space_id": str((query.get("shared_space_id") or query.get("shared_space") or [""])[0] or ""),
+                    "space_id": str((query.get("space_id") or query.get("space") or [""])[0] or ""),
+                }
+                self._json(HTTPStatus.OK, shared_space_room(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/wis/artifacts":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                space_id = str((query.get("space") or ["home"])[0] or "home")
+                shared_space_id = str((query.get("shared_space") or [""])[0] or "")
+                self._json(HTTPStatus.OK, list_wis_artifacts(self.server, user, space_id, shared_space_id=shared_space_id))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -478,6 +547,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "timeline_error", "message": str(exc)}},
                 )
             return
+        if path == "/timeline/stepback":
+            try:
+                body = self._read_json(max_bytes=16 * 1024)
+                self._json(HTTPStatus.OK, {"ok": True, "stepback": timeline_stepback(self.server, body, user)})
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "timeline_error", "message": str(exc)}},
+                )
+            return
         if path == "/spaces":
             try:
                 body = self._read_json(max_bytes=256 * 1024)
@@ -488,6 +569,54 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "spaces_error", "message": str(exc)}},
+                )
+            return
+        if path == "/spaces/share":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, share_user_space(self.server, user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "space_share_error", "message": str(exc)}},
+                )
+            return
+        if path == "/spaces/join":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, join_shared_space(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "space_join_error", "message": str(exc)}},
+                )
+            return
+        if path == "/spaces/room":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, shared_space_room(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "space_room_error", "message": str(exc)}},
+                )
+            return
+        if path == "/wis/artifacts/patch":
+            try:
+                body = self._read_json(max_bytes=512 * 1024)
+                self._json(HTTPStatus.OK, {"ok": True, "wis_patch": patch_wis_artifact(self.server, user, body)})
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "wis_patch_error", "message": str(exc)}},
                 )
             return
         if path == "/security-loop/findings":
@@ -929,6 +1058,447 @@ def user_timeline_dir(server: WasmAgentServer, user: dict[str, Any] | None, spac
     return path
 
 
+def user_wis_dir(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str = "home") -> Path:
+    path = user_space_dir(server, user, space_id) / "wis"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def shared_spaces_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "shared-spaces"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def shared_space_dir(server: WasmAgentServer, shared_space_id: str) -> Path:
+    sid = safe_state_id(shared_space_id, "")
+    if not sid:
+        raise BrowserError("invalid_shared_space", "shared_space_id is required.")
+    path = shared_spaces_dir(server) / sid
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def repo_relative_string(server: WasmAgentServer, path: Path) -> str:
+    root = repo_root(server).resolve()
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def user_sandbox_prefix(server: WasmAgentServer, user: dict[str, Any] | None) -> str:
+    prefix = repo_relative_string(server, user_root(server, user))
+    return prefix.rstrip("/")
+
+
+def path_has_prefix(path: str, prefixes: tuple[str, ...] | list[str]) -> bool:
+    value = str(path or "").strip().lstrip("/")
+    return any(value == prefix.rstrip("/") or value.startswith(prefix.rstrip("/") + "/") for prefix in prefixes)
+
+
+def node_has_global_authority(target_node: str, user: dict[str, Any] | None) -> bool:
+    node = str(target_node or "").strip().lower()
+    return user_is_admin(user) and node in GLOBAL_AGENT_NODE_IDS
+
+
+def default_agent_target_node(user: dict[str, Any] | None) -> str:
+    return "orchestrator" if user_is_admin(user) else AGENT_DEFAULT_SANDBOX_NODE_ID
+
+
+def ensure_agent_target_allowed(user: dict[str, Any] | None, target_node: str) -> None:
+    if user_is_admin(user):
+        return
+    if str(target_node or "").strip().lower() in GLOBAL_AGENT_NODE_IDS:
+        raise BrowserError(
+            "agent_target_denied",
+            "Only an admin can route embedded chat turns to the global orchestrator. Select an account-owned sandbox node.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+
+
+def agent_mutation_policy(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    target_node: str,
+) -> dict[str, Any]:
+    sandbox_prefix = user_sandbox_prefix(server, user)
+    global_authority = node_has_global_authority(target_node, user)
+    if global_authority:
+        return {
+            "schema": "hermes.wasm_agent.mutation_policy.v1",
+            "target_node": target_node,
+            "scope": "global-orchestrator",
+            "user_id": user_id(user),
+            "admin": True,
+            "can_modify_core_firmware": True,
+            "can_patch_wis_artifacts": True,
+            "allowed_write_roots": [str(repo_root(server).resolve())],
+            "protected_prefixes": [],
+            "userland_patch_schemas": [WIS_PATCH_SCHEMA],
+            "rule": "The orchestrator may modify wasm-agent source, core modules, firmware, docs, and user-space state.",
+        }
+    return {
+        "schema": "hermes.wasm_agent.mutation_policy.v1",
+        "target_node": target_node,
+        "scope": "user-sandbox",
+        "user_id": user_id(user),
+        "admin": user_is_admin(user),
+        "can_modify_core_firmware": False,
+        "can_patch_wis_artifacts": True,
+        "allowed_write_roots": [str(user_root(server, user).resolve())],
+        "allowed_repo_prefixes": [sandbox_prefix],
+        "protected_prefixes": list(CORE_FIRMWARE_PREFIXES),
+        "userland_patch_schemas": [WIS_PATCH_SCHEMA],
+        "rule": "Sandboxed nodes may only mutate the mounted account-owned wasm-user sandbox; core wasm-agent firmware/source changes must be delegated to the orchestrator.",
+    }
+
+
+def mutation_block_spec() -> dict[str, Any]:
+    return {
+        "schema": "hermes.wasm_agent.mutation_spec.v1",
+        "format": "Return a fenced json code block with schema hermes.wasm_agent.mutation.v1.",
+        "example": {
+            "schema": "hermes.wasm_agent.mutation.v1",
+            "operations": [
+                {
+                    "op": "replace",
+                    "path": "plugins/wasm-agent/public/styles.css",
+                    "find": "width: clamp(120px, 50%, 218px);",
+                    "replace": "width: clamp(120px, calc(50% + 8px), 218px);",
+                },
+                {
+                    "op": "append",
+                    "path": "plugins/wasm-agent/README.md",
+                    "after": "## Runtime Contract\n",
+                    "insert": "\nSmall runtime note.\n",
+                }
+            ],
+        },
+        "ops": ["replace", "append"],
+        "required_fields": {
+            "replace": ["path", "find", "replace"],
+            "append": ["path", "insert"],
+            "append_optional": ["after"],
+        },
+        "limits": {
+            "max_operations": AGENT_MUTATION_MAX_OPS,
+            "exact_replace_only": True,
+            "max_total_replace_bytes": AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES,
+        },
+    }
+
+
+def wis_patch_block_spec() -> dict[str, Any]:
+    return {
+        "schema": "hermes.wasm_agent.wis.patch_spec.v1",
+        "format": f"Return a fenced json block with schema {WIS_PATCH_SCHEMA} for userland WIS/interface artifacts.",
+        "example": {
+            "schema": WIS_PATCH_SCHEMA,
+            "space_id": "current-space",
+            "artifact_id": "main",
+            "operations": [
+                {"op": "set_title", "title": "Deploy Checklist"},
+                {
+                    "op": "append_child",
+                    "parent_id": "doc",
+                    "node": {
+                        "id": "deploy-title",
+                        "type": "heading",
+                        "level": 1,
+                        "text": "Deploy Checklist",
+                    },
+                },
+            ],
+        },
+        "ops": [
+            "set_title",
+            "set_state",
+            "set_node_text",
+            "set_node_props",
+            "set_node_action",
+            "append_child",
+            "add_node",
+            "remove_node",
+            "replace_node",
+            "add_document",
+        ],
+        "limits": {
+            "max_operations": 40,
+            "max_artifact_bytes": 512 * 1024,
+            "core_firmware": "denied outside admin orchestrator source mutation policy",
+        },
+    }
+
+
+def extract_agent_mutation_payloads(reply: str) -> tuple[str, list[dict[str, Any]]]:
+    text = str(reply or "")
+    payloads: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    fence_re = re.compile(r"```(?:json|wasm-agent-mutation|mutation)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+    for match in fence_re.finditer(text):
+        block = match.group(1).strip()
+        if "hermes.wasm_agent.mutation.v1" not in block:
+            continue
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == "hermes.wasm_agent.mutation.v1":
+            payloads.append(payload)
+            spans.append(match.span())
+    tag_re = re.compile(r"<wasm-agent-mutation>\s*(.*?)\s*</wasm-agent-mutation>", re.DOTALL | re.IGNORECASE)
+    for match in tag_re.finditer(text):
+        block = match.group(1).strip()
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == "hermes.wasm_agent.mutation.v1":
+            payloads.append(payload)
+            spans.append(match.span())
+    if not spans:
+        return text, payloads
+    cleaned = text
+    for start, end in sorted(spans, reverse=True):
+        cleaned = cleaned[:start].rstrip() + "\n\n" + cleaned[end:].lstrip()
+    return cleaned.strip(), payloads
+
+
+def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, Any]]]:
+    text = str(reply or "")
+    payloads: list[dict[str, Any]] = []
+    spans: list[tuple[int, int]] = []
+    fence_re = re.compile(r"```(?:json|wis-patch|patch)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
+    for match in fence_re.finditer(text):
+        block = match.group(1).strip()
+        if WIS_PATCH_SCHEMA not in block:
+            continue
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == WIS_PATCH_SCHEMA:
+            payloads.append(payload)
+            spans.append(match.span())
+    tag_re = re.compile(r"<wis-patch>\s*(.*?)\s*</wis-patch>", re.DOTALL | re.IGNORECASE)
+    for match in tag_re.finditer(text):
+        block = match.group(1).strip()
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("schema") == WIS_PATCH_SCHEMA:
+            payloads.append(payload)
+            spans.append(match.span())
+    if not spans:
+        return text, payloads
+    cleaned = text
+    for start, end in sorted(spans, reverse=True):
+        cleaned = cleaned[:start].rstrip() + "\n\n" + cleaned[end:].lstrip()
+    return cleaned.strip(), payloads
+
+
+def apply_agent_wis_patches_from_reply(
+    server: WasmAgentServer,
+    reply: str,
+    *,
+    user: dict[str, Any] | None,
+    space_id: str,
+) -> tuple[str, dict[str, Any] | None]:
+    cleaned_reply, payloads = extract_agent_wis_patch_payloads(reply)
+    if not payloads:
+        return reply, None
+    result: dict[str, Any] = {
+        "schema": WIS_PATCH_RESULT_SCHEMA,
+        "applied": False,
+        "patches": [],
+        "operations": 0,
+        "errors": [],
+    }
+    for payload in payloads:
+        patch = json_clone(payload)
+        patch.setdefault("space_id", space_id)
+        try:
+            patch_result = patch_wis_artifact(server, user, patch)
+            result["patches"].append(patch_result)
+            result["operations"] += int(patch_result.get("operations") or 0)
+            result["applied"] = bool(result["applied"] or patch_result.get("applied"))
+        except BrowserError as exc:
+            result["errors"].append(exc.message)
+        except Exception as exc:
+            result["errors"].append(str(exc))
+    summary = append_agent_wis_patch_summary(cleaned_reply, result)
+    return summary, result
+
+
+def mutation_path_allowed(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    policy: dict[str, Any],
+    raw_path: str,
+) -> Path:
+    root = repo_root(server).resolve()
+    path = Path(str(raw_path or "")).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    resolved = path.resolve()
+    if ".git" in resolved.parts:
+        raise BrowserError("agent_mutation_path_denied", "Mutation paths may not target .git.")
+    allowed_roots = [
+        Path(str(item)).resolve()
+        for item in policy.get("allowed_write_roots", [])
+        if str(item or "").strip()
+    ]
+    if not allowed_roots:
+        raise BrowserError("agent_mutation_path_denied", "No mutation write roots are available.")
+    if not any(resolved == allowed or allowed in resolved.parents for allowed in allowed_roots):
+        raise BrowserError("agent_mutation_path_denied", "Mutation path is outside the allowed write roots.")
+    relative = repo_relative_string(server, resolved)
+    if policy.get("scope") == "global-orchestrator" and not path_has_prefix(relative, CORE_FIRMWARE_PREFIXES):
+        raise BrowserError("agent_mutation_path_denied", "Global chat mutations are limited to wasm-agent firmware and docs.")
+    allowed_prefixes = policy.get("allowed_repo_prefixes") if isinstance(policy.get("allowed_repo_prefixes"), list) else []
+    if allowed_prefixes and not path_has_prefix(relative, allowed_prefixes):
+        raise BrowserError("agent_mutation_path_denied", "Mutation path is outside the allowed repo prefixes.")
+    protected = policy.get("protected_prefixes") if isinstance(policy.get("protected_prefixes"), list) else []
+    if protected and path_has_prefix(relative, protected):
+        raise BrowserError("agent_mutation_path_denied", "Mutation path targets protected core firmware.")
+    if resolved.suffix.lower() not in AGENT_MUTATION_ALLOWED_EXTENSIONS:
+        raise BrowserError("agent_mutation_path_denied", "Mutation path must be a recognized text source file.")
+    return resolved
+
+
+def apply_agent_mutations_from_reply(
+    server: WasmAgentServer,
+    reply: str,
+    *,
+    user: dict[str, Any] | None,
+    mutation_policy: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    cleaned_reply, payloads = extract_agent_mutation_payloads(reply)
+    if not payloads:
+        return reply, None
+    result: dict[str, Any] = {
+        "schema": "hermes.wasm_agent.mutation_result.v1",
+        "applied": False,
+        "files": [],
+        "operations": 0,
+        "errors": [],
+    }
+    operations: list[dict[str, Any]] = []
+    for payload in payloads:
+        items = payload.get("operations")
+        if isinstance(items, list):
+            operations.extend([item for item in items if isinstance(item, dict)])
+    if not operations:
+        result["errors"].append("No valid mutation operations were provided.")
+        return append_agent_mutation_summary(cleaned_reply, result), result
+    if len(operations) > AGENT_MUTATION_MAX_OPS:
+        result["errors"].append(f"Too many mutation operations: {len(operations)} > {AGENT_MUTATION_MAX_OPS}.")
+        return append_agent_mutation_summary(cleaned_reply, result), result
+
+    pending: dict[Path, str] = {}
+    changed_files: set[str] = set()
+    total_replace_bytes = 0
+    try:
+        for operation in operations:
+            op = str(operation.get("op") or operation.get("operation") or "replace").strip().lower()
+            path = mutation_path_allowed(server, user, mutation_policy, str(operation.get("path") or ""))
+            if path.exists() and path.stat().st_size > AGENT_MUTATION_MAX_FILE_BYTES:
+                raise BrowserError("agent_mutation_file_too_large", "Mutation target file is too large.")
+            if not path.exists() and op != "append":
+                raise BrowserError("agent_mutation_file_missing", "Mutation target file does not exist.")
+            current = pending.get(path)
+            if current is None:
+                current = path.read_text(encoding="utf-8") if path.exists() else ""
+            if op == "replace":
+                find = str(operation.get("find") or "")
+                replace = str(operation.get("replace") or "")
+                if not find:
+                    raise BrowserError("agent_mutation_invalid_replace", "Replace operations require a non-empty find string.")
+                count = current.count(find)
+                if count != 1:
+                    raise BrowserError(
+                        "agent_mutation_non_unique_match",
+                        f"Replace match count for {repo_relative_string(server, path)} was {count}, expected 1.",
+                    )
+                total_replace_bytes += len(find.encode("utf-8")) + len(replace.encode("utf-8"))
+                if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
+                    raise BrowserError("agent_mutation_too_large", "Mutation replacement payload is too large.")
+                pending[path] = current.replace(find, replace, 1)
+            elif op == "append":
+                insert = str(
+                    operation.get("insert")
+                    or operation.get("text")
+                    or operation.get("content")
+                    or operation.get("value")
+                    or operation.get("body")
+                    or ""
+                )
+                after = str(operation.get("after") or "")
+                if not insert:
+                    raise BrowserError("agent_mutation_invalid_append", "Append operations require a non-empty insert field.")
+                total_replace_bytes += len(insert.encode("utf-8"))
+                if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
+                    raise BrowserError("agent_mutation_too_large", "Mutation append payload is too large.")
+                if after:
+                    count = current.count(after)
+                    if count != 1:
+                        raise BrowserError(
+                            "agent_mutation_non_unique_match",
+                            f"Append anchor count for {repo_relative_string(server, path)} was {count}, expected 1.",
+                        )
+                    pending[path] = current.replace(after, after + insert, 1)
+                else:
+                    pending[path] = current + insert
+            else:
+                raise BrowserError("agent_mutation_invalid_op", f"Unsupported mutation op: {op}.")
+            changed_files.add(repo_relative_string(server, path))
+    except BrowserError as exc:
+        result["errors"].append(exc.message)
+        return append_agent_mutation_summary(cleaned_reply, result), result
+    except Exception as exc:
+        result["errors"].append(str(exc))
+        return append_agent_mutation_summary(cleaned_reply, result), result
+
+    for path, content in pending.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    result.update({
+        "applied": bool(pending),
+        "files": sorted(changed_files),
+        "operations": len(operations),
+    })
+    return append_agent_mutation_summary(cleaned_reply, result), result
+
+
+def append_agent_mutation_summary(reply: str, result: dict[str, Any]) -> str:
+    base = str(reply or "").strip()
+    if result.get("applied"):
+        files = ", ".join(f"`{item}`" for item in result.get("files", [])[:6])
+        summary = f"Applied source mutation to {files}."
+    else:
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        summary = f"Mutation was not applied: {errors[0] if errors else 'no valid mutation was provided'}"
+    return f"{base}\n\n{summary}".strip()
+
+
+def append_agent_wis_patch_summary(reply: str, result: dict[str, Any]) -> str:
+    base = str(reply or "").strip()
+    if result.get("applied"):
+        patches = result.get("patches") if isinstance(result.get("patches"), list) else []
+        targets = ", ".join(
+            f"`{item.get('artifact_id', 'main')}`"
+            for item in patches[:6]
+            if isinstance(item, dict)
+        )
+        summary = f"Applied WIS/userland patch to {targets or 'artifact'}."
+    else:
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        summary = f"WIS/userland patch was not applied: {errors[0] if errors else 'no valid patch was provided'}"
+    return f"{base}\n\n{summary}".strip()
+
+
 def user_attachment_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
     path = user_root(server, user) / "attachments"
     path.mkdir(parents=True, exist_ok=True)
@@ -1313,6 +1883,32 @@ def import_user_storage(
     return list_user_spaces(server, user, handler)
 
 
+def normalized_space_area_pixel(value: Any) -> int | None:
+    try:
+        number = int(round(float(value)))
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if number < SPACE_AREA_MIN_PX:
+        return SPACE_AREA_MIN_PX
+    if number > SPACE_AREA_MAX_PX:
+        return SPACE_AREA_MAX_PX
+    return number
+
+
+def sanitize_space_area(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    width = normalized_space_area_pixel(
+        value.get("width_px", value.get("widthPx", value.get("width")))
+    )
+    height = normalized_space_area_pixel(
+        value.get("height_px", value.get("heightPx", value.get("height")))
+    )
+    if width is None or height is None:
+        return None
+    return {"width_px": width, "height_px": height}
+
+
 def list_user_spaces(
     server: WasmAgentServer,
     user: dict[str, Any] | None,
@@ -1324,11 +1920,20 @@ def list_user_spaces(
     for path in user_space_paths:
         meta = read_json_file(path / "space.json", {})
         if isinstance(meta, dict) and path.name not in {"home", "admin"}:
+            shared_space_id = str(meta.get("shared_space_id") or "")
+            space_area = sanitize_space_area(meta.get("space_area"))
+            if shared_space_id:
+                shared_record = read_shared_space_record(server, shared_space_id)
+                if shared_record and user_can_access_shared_space(shared_record, user):
+                    space_area = sanitize_space_area(shared_record.get("space_area")) or space_area
             spaces.append({
                 "id": path.name,
                 "title": clipped(str(meta.get("title") or path.name), 120),
                 "created_at": str(meta.get("created_at") or ""),
                 "updated_at": str(meta.get("updated_at") or ""),
+                "shared": bool(meta.get("shared")),
+                "shared_space_id": shared_space_id,
+                "space_area": space_area or {},
             })
     return {
         "ok": True,
@@ -1337,6 +1942,7 @@ def list_user_spaces(
         "layout_policy": "client-local",
         "storage": user_storage(server, user),
         "spaces": spaces,
+        "shared_spaces": list_shared_spaces(server, user).get("spaces", []),
         "widget_layouts": {},
     }
 
@@ -1358,6 +1964,32 @@ def save_user_spaces(
             raise BrowserError("invalid_space_delete", "Only user-created spaces can be deleted.")
         shutil.rmtree(user_space_dir(server, user, space_id), ignore_errors=True)
         return list_user_spaces(server, user, handler)
+    if action in {"area", "space_area"}:
+        space_id = safe_state_id(str(body.get("space_id") or ""), "")
+        if not space_id or space_id in {"home", "admin"}:
+            raise BrowserError("invalid_space_area", "Only user-created spaces can store shared area metadata.")
+        space_area = sanitize_space_area(body.get("space_area"))
+        if not space_area:
+            raise BrowserError("invalid_space_area", "space_area must include width_px and height_px.")
+        space_path = user_spaces_dir(server, user) / space_id / "space.json"
+        meta = read_json_file(space_path, {})
+        if not isinstance(meta, dict) or not meta:
+            raise BrowserError("space_not_found", "That space was not found.", status=HTTPStatus.NOT_FOUND)
+        shared_space_id = safe_state_id(str(
+            body.get("shared_space_id")
+            or meta.get("shared_space_id")
+            or ""
+        ), "")
+        meta["space_area"] = space_area
+        meta["updated_at"] = now
+        write_json_file(space_path, meta)
+        if shared_space_id:
+            record = read_shared_space_record(server, shared_space_id)
+            if record and user_can_access_shared_space(record, user):
+                record["space_area"] = space_area
+                record["updated_at"] = now
+                write_json_file(shared_space_record_path(server, shared_space_id), record)
+        return list_user_spaces(server, user, handler)
     if action == "replace":
         spaces = body.get("spaces")
         if not isinstance(spaces, list):
@@ -1373,18 +2005,730 @@ def save_user_spaces(
             root = user_space_dir(server, user, space_id)
             existing = read_json_file(root / "space.json", {})
             created_at = str(item.get("created_at") or (existing.get("created_at") if isinstance(existing, dict) else "") or now)
+            title = clipped(str(item.get("title") or space_id), 120)
+            shared_space_id = safe_state_id(str(
+                item.get("shared_space_id")
+                or (existing.get("shared_space_id") if isinstance(existing, dict) else "")
+                or ""
+            ), "")
+            shared = bool(item.get("shared") or (existing.get("shared") if isinstance(existing, dict) else False) or shared_space_id)
+            space_area = sanitize_space_area(item.get("space_area")) or (
+                sanitize_space_area(existing.get("space_area")) if isinstance(existing, dict) else None
+            )
             write_json_file(root / "space.json", {
                 "schema": "hermes.wasm_agent.space.v1",
                 "id": space_id,
-                "title": clipped(str(item.get("title") or space_id), 120),
+                "title": title,
+                "shared": shared,
+                "shared_space_id": shared_space_id,
+                "space_area": space_area or {},
                 "created_at": created_at,
                 "updated_at": now,
             })
+            if shared_space_id:
+                record = read_shared_space_record(server, shared_space_id)
+                if record and user_can_access_shared_space(record, user):
+                    record["title"] = title
+                    # Shared area is canonical after creation; targeted area patches update it.
+                    if space_area and not sanitize_space_area(record.get("space_area")):
+                        record["space_area"] = space_area
+                    record["updated_at"] = now
+                    write_json_file(shared_space_record_path(server, shared_space_id), record)
         for path in user_spaces_dir(server, user).iterdir():
             if path.is_dir() and path.name not in {"home", "admin"} and path.name not in seen:
                 shutil.rmtree(path, ignore_errors=True)
         return list_user_spaces(server, user, handler)
     raise BrowserError("invalid_space_action", "Unsupported space action.")
+
+
+def iso_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def json_clone(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=True))
+
+
+def shared_space_record_path(server: WasmAgentServer, shared_space_id: str) -> Path:
+    return shared_space_dir(server, shared_space_id) / "shared-space.json"
+
+
+def read_shared_space_record(server: WasmAgentServer, shared_space_id: str) -> dict[str, Any]:
+    payload = read_json_file(shared_space_record_path(server, shared_space_id), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def shared_space_member_ids(record: dict[str, Any]) -> set[str]:
+    members = record.get("members") if isinstance(record.get("members"), list) else []
+    return {str(item.get("user_id") if isinstance(item, dict) else item) for item in members if str(item).strip()}
+
+
+def user_can_access_shared_space(record: dict[str, Any], user: dict[str, Any] | None) -> bool:
+    uid = user_id(user)
+    return user_is_admin(user) or str(record.get("owner_user_id") or "") == uid or uid in shared_space_member_ids(record)
+
+
+def public_shared_space_record(
+    record: dict[str, Any],
+    user: dict[str, Any] | None,
+    server: WasmAgentServer | None = None,
+) -> dict[str, Any]:
+    owner = str(record.get("owner_user_id") or "")
+    uid = user_id(user)
+    sid = str(record.get("id") or "")
+    payload = {
+        "schema": SHARED_SPACE_SCHEMA,
+        "id": sid,
+        "title": clipped(str(record.get("title") or "Shared Space"), 120),
+        "owner_user_id": owner,
+        "member_count": len(shared_space_member_ids(record)),
+        "online_count": 0,
+        "created_at": str(record.get("created_at") or ""),
+        "updated_at": str(record.get("updated_at") or ""),
+        "capabilities": record.get("capabilities") if isinstance(record.get("capabilities"), list) else [],
+        "local_space_id": str(record.get("local_space_id") or ""),
+        "source_space_id": str(record.get("source_space_id") or ""),
+        "space_area": sanitize_space_area(record.get("space_area")) or {},
+        "joined": user_can_access_shared_space(record, user),
+        "owner": owner == uid,
+    }
+    if sid and server:
+        try:
+            payload.update(shared_space_presence_summary(read_shared_space_presence(server, sid), int(time.time())))
+        except Exception:
+            payload["online_count"] = 0
+    if payload["joined"] or user_is_admin(user):
+        payload["join_code"] = str(record.get("join_code") or "")
+    return payload
+
+
+def list_shared_spaces(server: WasmAgentServer, user: dict[str, Any] | None) -> dict[str, Any]:
+    spaces = []
+    for path in sorted(shared_spaces_dir(server).iterdir()):
+        if not path.is_dir():
+            continue
+        record = read_json_file(path / "shared-space.json", {})
+        if isinstance(record, dict) and user_can_access_shared_space(record, user):
+            spaces.append(public_shared_space_record(record, user, server))
+    return {
+        "ok": True,
+        "schema": SHARED_SPACE_LIST_SCHEMA,
+        "spaces": spaces,
+    }
+
+
+def shared_space_presence_path(server: WasmAgentServer, shared_space_id: str) -> Path:
+    return shared_space_dir(server, shared_space_id) / "presence.json"
+
+
+def shared_space_events_path(server: WasmAgentServer, shared_space_id: str) -> Path:
+    return shared_space_dir(server, shared_space_id) / "room-events.json"
+
+
+def read_shared_space_presence(server: WasmAgentServer, shared_space_id: str) -> dict[str, Any]:
+    payload = read_json_file(shared_space_presence_path(server, shared_space_id), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def sanitize_room_event_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return ""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except (OverflowError, TypeError, ValueError):
+            return 0
+        return value if math.isfinite(number) else 0
+    if isinstance(value, str):
+        return clipped(value, 4000)
+    if isinstance(value, list):
+        return [sanitize_room_event_payload(item, depth=depth + 1) for item in value[:32]]
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, item in list(value.items())[:48]:
+            clean_key = safe_state_id(str(key), "")
+            if not clean_key:
+                continue
+            if re.search(r"password|secret|token|api[_-]?key|authorization|cookie|session", clean_key, re.I):
+                clean[clean_key] = "[redacted]"
+            else:
+                clean[clean_key] = sanitize_room_event_payload(item, depth=depth + 1)
+        return clean
+    return clipped(str(value), 400)
+
+
+def prune_shared_space_presence(payload: dict[str, Any], now: int) -> dict[str, Any]:
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    live_entries = {
+        key: item
+        for key, item in entries.items()
+        if isinstance(item, dict) and now - int(item.get("last_seen") or 0) <= SHARED_SPACE_PRESENCE_TTL_SEC
+    }
+    return {
+        "schema": SHARED_SPACE_PRESENCE_SCHEMA,
+        "updated_at": iso_timestamp(),
+        "entries": live_entries,
+    }
+
+
+def touch_shared_space_presence(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler,
+    shared_space_id: str,
+    space_id: str,
+) -> dict[str, Any]:
+    now = int(time.time())
+    presence = prune_shared_space_presence(read_shared_space_presence(server, shared_space_id), now)
+    user_agent = clipped(str(handler.headers.get("User-Agent") or "Browser"), 360)
+    device_id = request_account_device_id(user, handler)
+    key = f"{user_id(user)}:{device_id}"
+    entries = presence.get("entries") if isinstance(presence.get("entries"), dict) else {}
+    entries[key] = {
+        "user_id": user_id(user),
+        "device_id": device_id,
+        "space_id": safe_state_id(space_id, ""),
+        "label": browser_label(user_agent),
+        "last_seen": now,
+    }
+    presence["entries"] = entries
+    presence["updated_at"] = iso_timestamp()
+    write_json_file(shared_space_presence_path(server, shared_space_id), presence)
+    return presence
+
+
+def shared_space_presence_summary(presence: dict[str, Any], now: int | None = None) -> dict[str, int]:
+    now = now or int(time.time())
+    entries = presence.get("entries") if isinstance(presence.get("entries"), dict) else {}
+    online_users = {
+        str(item.get("user_id") or "")
+        for item in entries.values()
+        if isinstance(item, dict) and now - int(item.get("last_seen") or 0) <= SHARED_SPACE_PRESENCE_TTL_SEC
+    }
+    online_users.discard("")
+    online_devices = [
+        item
+        for item in entries.values()
+        if isinstance(item, dict) and now - int(item.get("last_seen") or 0) <= SHARED_SPACE_PRESENCE_TTL_SEC
+    ]
+    return {"online_count": len(online_users), "online_device_count": len(online_devices)}
+
+
+def read_shared_space_events(server: WasmAgentServer, shared_space_id: str) -> list[dict[str, Any]]:
+    payload = read_json_file(shared_space_events_path(server, shared_space_id), {})
+    events = payload.get("events") if isinstance(payload, dict) and isinstance(payload.get("events"), list) else []
+    return [event for event in events if isinstance(event, dict)][-SHARED_SPACE_EVENT_LIMIT:]
+
+
+def append_shared_space_room_event(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    shared_space_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    events = read_shared_space_events(server, shared_space_id)
+    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
+    event = {
+        "schema": SHARED_SPACE_ROOM_EVENT_SCHEMA,
+        "id": f"room_evt_{next_snowflake_id():x}",
+        "kind": event_kind,
+        "sender_user_id": user_id(user),
+        "created_at": iso_timestamp(),
+        "payload": sanitize_room_event_payload(body.get("payload") if isinstance(body.get("payload"), dict) else {}),
+    }
+    events.append(event)
+    write_json_file(shared_space_events_path(server, shared_space_id), {
+        "schema": "hermes.wasm_agent.shared_space.room_events.v1",
+        "updated_at": iso_timestamp(),
+        "events": events[-SHARED_SPACE_EVENT_LIMIT:],
+    })
+    return event
+
+
+def public_shared_space_room(
+    server: WasmAgentServer,
+    record: dict[str, Any],
+    user: dict[str, Any] | None,
+    presence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    sid = str(record.get("id") or "")
+    now = int(time.time())
+    current_presence = prune_shared_space_presence(presence or read_shared_space_presence(server, sid), now)
+    summary = shared_space_presence_summary(current_presence, now)
+    member_count = len(shared_space_member_ids(record))
+    return {
+        "schema": SHARED_SPACE_ROOM_SCHEMA,
+        "id": sid,
+        "title": clipped(str(record.get("title") or "Shared Space"), 120),
+        "member_count": member_count,
+        "online_count": summary["online_count"],
+        "online_device_count": summary["online_device_count"],
+        "space_area": sanitize_space_area(record.get("space_area")) or {},
+        "capabilities": record.get("capabilities") if isinstance(record.get("capabilities"), list) else [],
+        "updated_at": str(record.get("updated_at") or ""),
+        "presence_ttl_sec": SHARED_SPACE_PRESENCE_TTL_SEC,
+        "events": read_shared_space_events(server, sid)[-40:],
+        "joined": user_can_access_shared_space(record, user),
+    }
+
+
+def shared_space_room(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    shared_space_id = safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), "")
+    if not shared_space_id:
+        raise BrowserError("invalid_shared_space", "shared_space_id is required.")
+    record = read_shared_space_record(server, shared_space_id)
+    if not record:
+        raise BrowserError("shared_space_not_found", "That shared space was not found.", status=HTTPStatus.NOT_FOUND)
+    if not user_can_access_shared_space(record, user):
+        raise BrowserError("shared_space_denied", "You cannot access that shared space.", status=HTTPStatus.FORBIDDEN)
+    action = str(body.get("action") or "presence").strip().lower()
+    space_id = safe_state_id(str(body.get("space_id") or record.get("local_space_id") or ""), "")
+    presence = read_shared_space_presence(server, shared_space_id)
+    if action in {"presence", "join", "heartbeat"}:
+        presence = touch_shared_space_presence(server, user, handler, shared_space_id, space_id)
+    elif action in {"event", "message", "signal"}:
+        presence = touch_shared_space_presence(server, user, handler, shared_space_id, space_id)
+        append_shared_space_room_event(server, user, shared_space_id, body)
+    elif action != "read":
+        raise BrowserError("invalid_space_room_action", "Unsupported shared-space room action.")
+    return {"ok": True, "room": public_shared_space_room(server, record, user, presence)}
+
+
+def copy_user_wis_to_shared(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str, shared_space_id: str) -> None:
+    source = user_wis_dir(server, user, space_id)
+    target = shared_space_dir(server, shared_space_id) / "wis"
+    target.mkdir(parents=True, exist_ok=True)
+    if any(target.glob("*.json")):
+        return
+    for item in source.glob("*.json"):
+        if item.is_file():
+            shutil.copy2(item, target / item.name)
+
+
+def share_user_space(server: WasmAgentServer, user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    space_id = safe_state_id(str(body.get("space_id") or ""), "")
+    if not space_id or space_id in {"home", "admin"}:
+        raise BrowserError("invalid_space_share", "Only user-created spaces can be shared.")
+    space_path = user_spaces_dir(server, user) / space_id / "space.json"
+    meta = read_json_file(space_path, {})
+    if not isinstance(meta, dict) or not meta:
+        raise BrowserError("space_not_found", "That space was not found.", status=HTTPStatus.NOT_FOUND)
+    now = iso_timestamp()
+    shared_space_id = safe_state_id(str(meta.get("shared_space_id") or body.get("shared_space_id") or f"share_{next_snowflake_id():x}"), "")
+    join_code = safe_state_id(str(body.get("join_code") or uuid.uuid4().hex[:12]), "")
+    record = read_shared_space_record(server, shared_space_id)
+    if record and not user_can_access_shared_space(record, user):
+        raise BrowserError("shared_space_denied", "You cannot update that shared space.", status=HTTPStatus.FORBIDDEN)
+    space_area = (
+        sanitize_space_area(body.get("space_area"))
+        or sanitize_space_area(meta.get("space_area"))
+        or sanitize_space_area(record.get("space_area"))
+    )
+    members = record.get("members") if isinstance(record.get("members"), list) else []
+    uid = user_id(user)
+    if uid not in shared_space_member_ids({"members": members}):
+        members.append({"user_id": uid, "role": "owner", "joined_at": now})
+    record = {
+        "schema": SHARED_SPACE_SCHEMA,
+        "id": shared_space_id,
+        "join_code": str(record.get("join_code") or join_code),
+        "owner_user_id": str(record.get("owner_user_id") or uid),
+        "source_space_id": space_id,
+        "local_space_id": space_id,
+        "title": clipped(str(body.get("title") or meta.get("title") or space_id), 120),
+        "space_area": space_area or {},
+        "members": members,
+        "capabilities": ["chat", "wis-patch", "automation", "component-evolution"],
+        "created_at": str(record.get("created_at") or now),
+        "updated_at": now,
+    }
+    write_json_file(shared_space_record_path(server, shared_space_id), record)
+    copy_user_wis_to_shared(server, user, space_id, shared_space_id)
+    meta.update({
+        "shared": True,
+        "shared_space_id": shared_space_id,
+        "space_area": space_area or {},
+        "updated_at": now,
+    })
+    write_json_file(space_path, meta)
+    return {"ok": True, "shared_space": public_shared_space_record(record, user, server)}
+
+
+def find_shared_space_by_join(server: WasmAgentServer, token: str) -> dict[str, Any]:
+    target = safe_state_id(token, "")
+    for path in sorted(shared_spaces_dir(server).iterdir()):
+        if not path.is_dir():
+            continue
+        record = read_json_file(path / "shared-space.json", {})
+        if not isinstance(record, dict):
+            continue
+        if safe_state_id(str(record.get("id") or ""), "") == target or safe_state_id(str(record.get("join_code") or ""), "") == target:
+            return record
+    raise BrowserError("shared_space_not_found", "That shared space or join code was not found.", status=HTTPStatus.NOT_FOUND)
+
+
+def join_token_from_text(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = urlparse(text)
+        query = parse_qs(parsed.query)
+        for key in ("join_space", "join_code", "shared_space"):
+            values = query.get(key)
+            if values:
+                return str(values[0] or "").strip()
+        parts = [part for part in parsed.path.split("/") if part]
+        for marker in ("join", "join-space", "shared-space"):
+            if marker in parts:
+                index = parts.index(marker)
+                if index + 1 < len(parts):
+                    return parts[index + 1].strip()
+    except Exception:
+        pass
+    return text
+
+
+def join_shared_space(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    token = join_token_from_text(str(body.get("join_code") or body.get("shared_space_id") or ""))
+    if not token:
+        raise BrowserError("invalid_join_code", "join_code or shared_space_id is required.")
+    record = find_shared_space_by_join(server, token)
+    now = iso_timestamp()
+    uid = user_id(user)
+    members = record.get("members") if isinstance(record.get("members"), list) else []
+    if uid not in shared_space_member_ids({"members": members}):
+        members.append({"user_id": uid, "role": "member", "joined_at": now})
+    record["members"] = members
+    record["updated_at"] = now
+    write_json_file(shared_space_record_path(server, str(record.get("id") or "")), record)
+    local_space_id = safe_state_id(str(body.get("local_space_id") or record.get("id") or ""), "shared-space")
+    write_json_file(user_space_dir(server, user, local_space_id) / "space.json", {
+        "schema": "hermes.wasm_agent.space.v1",
+        "id": local_space_id,
+        "title": clipped(str(record.get("title") or local_space_id), 120),
+        "shared": True,
+        "shared_space_id": str(record.get("id") or ""),
+        "space_area": sanitize_space_area(record.get("space_area")) or {},
+        "created_at": now,
+        "updated_at": now,
+    })
+    return {
+        "ok": True,
+        "shared_space": public_shared_space_record(record, user, server),
+        "spaces": list_user_spaces(server, user, handler),
+    }
+
+
+def default_wis_artifact(artifact_id: str, title: str = "") -> dict[str, Any]:
+    aid = safe_state_id(artifact_id, "main")
+    label = clipped(title or aid.replace("-", " ").replace("_", " ").title() or "WIS Space", 120)
+    return {
+        "schema": WIS_SPACE_SCHEMA,
+        "id": aid,
+        "title": label,
+        "version": 1,
+        "entryDocumentId": "main",
+        "sandbox": {
+            "network": False,
+            "iframe": False,
+            "backend": False,
+            "externalScripts": False,
+        },
+        "documents": [
+            {
+                "id": "main",
+                "url": f"wis://local/{aid}",
+                "title": label,
+                "state": {},
+                "tree": {
+                    "id": "doc",
+                    "type": "document",
+                    "role": "document",
+                    "children": [
+                        {
+                            "id": "title",
+                            "type": "heading",
+                            "level": 1,
+                            "text": label,
+                            "children": [],
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+
+
+def wis_artifact_root(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    space_id: str,
+    shared_space_id: str = "",
+) -> tuple[Path, str]:
+    sid = safe_state_id(shared_space_id, "")
+    if sid:
+        record = read_shared_space_record(server, sid)
+        if not record:
+            raise BrowserError("shared_space_not_found", "That shared space was not found.", status=HTTPStatus.NOT_FOUND)
+        if not user_can_access_shared_space(record, user):
+            raise BrowserError("shared_space_denied", "You cannot mutate that shared space.", status=HTTPStatus.FORBIDDEN)
+        path = shared_space_dir(server, sid) / "wis"
+        path.mkdir(parents=True, exist_ok=True)
+        return path, f"shared:{sid}"
+    return user_wis_dir(server, user, space_id), f"user:{user_id(user)}:{safe_state_id(space_id, 'home')}"
+
+
+def wis_artifact_file(root: Path, artifact_id: str) -> Path:
+    aid = safe_state_id(artifact_id, "main")
+    return root / f"{aid}.json"
+
+
+def list_wis_artifacts(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    space_id: str = "home",
+    *,
+    shared_space_id: str = "",
+) -> dict[str, Any]:
+    root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
+    artifacts = []
+    for path in sorted(root.glob("*.json")):
+        payload = read_json_file(path, {})
+        if isinstance(payload, dict):
+            artifacts.append({
+                "id": safe_state_id(str(payload.get("id") or path.stem), path.stem),
+                "title": clipped(str(payload.get("title") or path.stem), 120),
+                "schema": str(payload.get("schema") or ""),
+                "version": payload.get("version", 1),
+                "updated_at": str(payload.get("updated_at") or ""),
+            })
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.wis.artifacts.v1",
+        "scope": scope,
+        "space_id": safe_state_id(space_id, "home"),
+        "shared_space_id": safe_state_id(shared_space_id, ""),
+        "artifacts": artifacts,
+    }
+
+
+def wis_value_set(data: dict[str, Any], key: str, value: Any) -> None:
+    parts = [safe_state_id(part, "") for part in str(key or "").split(".") if safe_state_id(part, "")]
+    if not parts:
+        raise BrowserError("invalid_wis_patch", "State operations require a key.")
+    target = data
+    for part in parts[:-1]:
+        existing = target.get(part)
+        if not isinstance(existing, dict):
+            existing = {}
+            target[part] = existing
+        target = existing
+    target[parts[-1]] = json_clone(value)
+
+
+def wis_find_node(node: dict[str, Any] | None, node_id: str) -> dict[str, Any] | None:
+    if not isinstance(node, dict):
+        return None
+    if str(node.get("id") or "") == node_id:
+        return node
+    for child in node.get("children") if isinstance(node.get("children"), list) else []:
+        found = wis_find_node(child, node_id)
+        if found:
+            return found
+    return None
+
+
+def wis_remove_node(node: dict[str, Any], node_id: str) -> bool:
+    children = node.get("children")
+    if not isinstance(children, list):
+        return False
+    for index, child in enumerate(children):
+        if isinstance(child, dict) and str(child.get("id") or "") == node_id:
+            del children[index]
+            return True
+        if isinstance(child, dict) and wis_remove_node(child, node_id):
+            return True
+    return False
+
+
+def sanitize_wis_node(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise BrowserError("invalid_wis_patch", "WIS node payload must be an object.")
+    node_id = safe_state_id(str(raw.get("id") or f"node_{next_snowflake_id():x}"), "")
+    if not node_id:
+        raise BrowserError("invalid_wis_patch", "WIS node id is required.")
+    node = {
+        "id": node_id,
+        "type": safe_state_id(str(raw.get("type") or "section"), "section"),
+        "role": clipped(str(raw.get("role") or ""), 80),
+        "text": clipped(str(raw.get("text") or ""), 1000),
+        "props": json_clone(raw.get("props") if isinstance(raw.get("props"), dict) else {}),
+        "children": [],
+    }
+    if raw.get("level"):
+        node["level"] = int(raw.get("level") or 1)
+    if isinstance(raw.get("action"), dict):
+        node["action"] = json_clone(raw["action"])
+    children = raw.get("children")
+    if isinstance(children, list):
+        node["children"] = [sanitize_wis_node(child) for child in children[:80]]
+    return node
+
+
+def wis_patch_document(definition: dict[str, Any], document_id: str) -> dict[str, Any]:
+    documents = definition.setdefault("documents", [])
+    if not isinstance(documents, list):
+        documents = []
+        definition["documents"] = documents
+    doc_id = safe_state_id(document_id or definition.get("entryDocumentId") or "main", "main")
+    for document in documents:
+        if isinstance(document, dict) and str(document.get("id") or "") == doc_id:
+            document.setdefault("state", {})
+            document.setdefault("tree", {"id": "doc", "type": "document", "children": []})
+            return document
+    document = {
+        "id": doc_id,
+        "url": f"wis://local/{doc_id}",
+        "title": doc_id,
+        "state": {},
+        "tree": {"id": "doc", "type": "document", "role": "document", "children": []},
+    }
+    documents.append(document)
+    if not definition.get("entryDocumentId"):
+        definition["entryDocumentId"] = doc_id
+    return document
+
+
+def apply_wis_patch_operations(definition: dict[str, Any], patch: dict[str, Any]) -> int:
+    operations = patch.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise BrowserError("invalid_wis_patch", "WIS patch requires operations.")
+    if len(operations) > 40:
+        raise BrowserError("invalid_wis_patch", "WIS patch has too many operations.")
+    changed = 0
+    for operation in operations:
+        if not isinstance(operation, dict):
+            continue
+        op = str(operation.get("op") or "").strip()
+        document = wis_patch_document(definition, str(operation.get("document_id") or patch.get("document_id") or definition.get("entryDocumentId") or "main"))
+        tree = document.setdefault("tree", {"id": "doc", "type": "document", "children": []})
+        state = document.setdefault("state", {})
+        if op in {"set_title", "set_artifact_title"}:
+            title = clipped(str(operation.get("title") or operation.get("value") or ""), 120)
+            if title:
+                definition["title"] = title
+                document["title"] = title
+                changed += 1
+        elif op == "set_state":
+            wis_value_set(state, str(operation.get("key") or ""), operation.get("value"))
+            changed += 1
+        elif op == "set_node_text":
+            node = wis_find_node(tree, str(operation.get("node_id") or ""))
+            if not node:
+                raise BrowserError("invalid_wis_patch", "WIS node was not found.")
+            node["text"] = clipped(str(operation.get("text") or ""), 2000)
+            changed += 1
+        elif op == "set_node_props":
+            node = wis_find_node(tree, str(operation.get("node_id") or ""))
+            if not node:
+                raise BrowserError("invalid_wis_patch", "WIS node was not found.")
+            props = operation.get("props")
+            if not isinstance(props, dict):
+                raise BrowserError("invalid_wis_patch", "set_node_props requires props.")
+            current = node.get("props") if isinstance(node.get("props"), dict) else {}
+            current.update(json_clone(props))
+            node["props"] = current
+            changed += 1
+        elif op == "set_node_action":
+            node = wis_find_node(tree, str(operation.get("node_id") or ""))
+            if not node:
+                raise BrowserError("invalid_wis_patch", "WIS node was not found.")
+            action = operation.get("action")
+            if not isinstance(action, dict):
+                raise BrowserError("invalid_wis_patch", "set_node_action requires action.")
+            node["action"] = json_clone(action)
+            changed += 1
+        elif op in {"append_child", "add_node"}:
+            parent = wis_find_node(tree, str(operation.get("parent_id") or "doc"))
+            if not parent:
+                raise BrowserError("invalid_wis_patch", "WIS parent node was not found.")
+            children = parent.setdefault("children", [])
+            if not isinstance(children, list):
+                children = []
+                parent["children"] = children
+            children.append(sanitize_wis_node(operation.get("node")))
+            changed += 1
+        elif op == "remove_node":
+            node_id = str(operation.get("node_id") or "")
+            if node_id == "doc" or not wis_remove_node(tree, node_id):
+                raise BrowserError("invalid_wis_patch", "WIS node could not be removed.")
+            changed += 1
+        elif op == "replace_node":
+            node_id = str(operation.get("node_id") or "")
+            if node_id == "doc":
+                document["tree"] = sanitize_wis_node(operation.get("node"))
+                changed += 1
+            elif wis_remove_node(tree, node_id):
+                parent = wis_find_node(tree, str(operation.get("parent_id") or "doc")) or tree
+                parent.setdefault("children", []).append(sanitize_wis_node(operation.get("node")))
+                changed += 1
+            else:
+                raise BrowserError("invalid_wis_patch", "WIS node was not found.")
+        elif op == "add_document":
+            wis_patch_document(definition, str(operation.get("document_id") or "main"))
+            changed += 1
+        else:
+            raise BrowserError("invalid_wis_patch", f"Unsupported WIS patch operation: {op}.")
+    return changed
+
+
+def patch_wis_artifact(server: WasmAgentServer, user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    patch = body.get("patch") if isinstance(body.get("patch"), dict) else body
+    if not isinstance(patch, dict) or patch.get("schema") != WIS_PATCH_SCHEMA:
+        raise BrowserError("invalid_wis_patch", f"WIS patch schema must be {WIS_PATCH_SCHEMA}.")
+    space_id = safe_state_id(str(patch.get("space_id") or body.get("space_id") or "home"), "home")
+    shared_space_id = safe_state_id(str(patch.get("shared_space_id") or body.get("shared_space_id") or ""), "")
+    artifact_id = safe_state_id(str(patch.get("artifact_id") or body.get("artifact_id") or "main"), "main")
+    root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
+    path = wis_artifact_file(root, artifact_id)
+    existing = read_json_file(path, {})
+    definition = existing if isinstance(existing, dict) and existing.get("schema") == WIS_SPACE_SCHEMA else default_wis_artifact(artifact_id, str(patch.get("title") or ""))
+    changed = apply_wis_patch_operations(definition, patch)
+    now = iso_timestamp()
+    definition["id"] = artifact_id
+    definition["schema"] = WIS_SPACE_SCHEMA
+    definition["updated_at"] = now
+    definition["version"] = int(definition.get("version") or 1) + 1
+    encoded = json.dumps(definition, ensure_ascii=True).encode("utf-8")
+    if not shared_space_id:
+        ensure_user_quota(server, user, len(encoded))
+    if len(encoded) > 512 * 1024:
+        raise BrowserError("wis_artifact_too_large", "WIS artifact exceeds the 512 KB limit.")
+    write_json_file(path, definition)
+    return {
+        "schema": WIS_PATCH_RESULT_SCHEMA,
+        "applied": changed > 0,
+        "scope": scope,
+        "space_id": space_id,
+        "shared_space_id": shared_space_id,
+        "artifact_id": artifact_id,
+        "operations": changed,
+        "path": repo_relative_string(server, path),
+        "updated_at": now,
+    }
 
 
 def security_loop_dir(server: WasmAgentServer) -> Path:
@@ -1778,9 +3122,11 @@ def is_public_request(method: str, path: str) -> bool:
 
 def requires_admin_request(method: str, path: str) -> bool:
     method = method.upper()
-    if path.startswith(("/bridge/", "/browser/", "/security-loop/", "/agent/", "/observation/")):
+    if path.startswith(("/bridge/", "/browser/", "/security-loop/")):
         return True
-    if path.startswith("/timeline/"):
+    if path.startswith("/agent/models/"):
+        return True
+    if path.startswith("/timeline/") and path not in {"/timeline/status", "/timeline/stepback"}:
         return True
     return False
 
@@ -2082,6 +3428,23 @@ def timeline_ref_name(raw: str) -> str:
     return base or f"checkpoint-{int(time.time())}"
 
 
+def timeline_metadata_by_ref(metadata_dir: Path) -> dict[str, dict[str, Any]]:
+    records: dict[str, dict[str, Any]] = {}
+    if not metadata_dir.exists():
+        return records
+    for path in sorted(metadata_dir.glob("*.json"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)[:240]:
+        if path.name == "auto-latest.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        ref = str(payload.get("ref") or "")
+        if ref:
+            records[ref] = payload
+    return records
+
+
 def timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None, *, space_id: str = "home") -> dict[str, Any]:
     branch = git_output(server, ["branch", "--show-current"]) or "detached"
     head = git_output(server, ["rev-parse", "--short", "HEAD"])
@@ -2091,11 +3454,39 @@ def timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None,
     branches_raw = git_output(server, ["branch", "--format=%(refname:short)|%(objectname:short)|%(committerdate:relative)"], timeout=5)
     timeline_id = safe_state_id(space_id, "home")
     timeline_root = user_timeline_dir(server, user, timeline_id)
+    metadata_by_ref = timeline_metadata_by_ref(timeline_root)
     checkpoints_raw = git_output(
         server,
-        ["for-each-ref", f"refs/wasm-agent-timeline/{user_id(user)}/{timeline_id}", "--format=%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)"],
+        [
+            "for-each-ref",
+            f"refs/wasm-agent-timeline/{user_id(user)}/{timeline_id}",
+            "--sort=-creatordate",
+            "--format=%(refname)|%(refname:short)|%(objectname:short)|%(creatordate:iso8601)|%(subject)",
+        ],
         timeout=5,
     )
+    checkpoints: list[dict[str, Any]] = []
+    for item in checkpoints_raw.splitlines() if checkpoints_raw else []:
+        parts = item.split("|")
+        if len(parts) < 5:
+            continue
+        ref, short_ref, object_head, created_at = parts[:4]
+        subject = "|".join(parts[4:])
+        metadata = metadata_by_ref.get(ref, {})
+        checkpoints.append(
+            {
+                "ref": ref,
+                "name": short_ref.replace(f"wasm-agent-timeline/{user_id(user)}/{timeline_id}/", "", 1),
+                "head": object_head,
+                "created_at": created_at,
+                "subject": subject,
+                "phase": metadata.get("phase") or "checkpoint",
+                "before_ref": metadata.get("before_ref") or "",
+                "after_ref": metadata.get("after_ref") or "",
+                "changed_count": len(metadata.get("changed_files") or []),
+                "scope": metadata.get("scope") or "",
+            }
+        )
     return {
         "schema": "hermes.wasm_agent.timeline.v1",
         "branch": branch,
@@ -2113,16 +3504,7 @@ def timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None,
             for item in branches_raw.splitlines()
             if item.count("|") >= 2
         ][:12],
-        "checkpoints": [
-            {
-                "name": item.split("|")[0].replace(f"wasm-agent-timeline/{user_id(user)}/{timeline_id}/", "", 1),
-                "head": item.split("|")[1],
-                "created_at": item.split("|")[2],
-                "subject": "|".join(item.split("|")[3:]),
-            }
-            for item in checkpoints_raw.splitlines()
-            if item.count("|") >= 3
-        ][:16],
+        "checkpoints": checkpoints[:24],
         "actions": [
             {
                 "id": "auto_checkpoint_on_change",
@@ -2144,9 +3526,9 @@ def timeline_status(server: WasmAgentServer, user: dict[str, Any] | None = None,
             },
             {
                 "id": "restore_checkpoint",
-                "label": "Restore",
-                "enabled": False,
-                "description": "Planned confirmation-gated action: restore files from a selected checkpoint.",
+                "label": "Stepback",
+                "enabled": True,
+                "description": "Confirmation-gated action: restore the workspace to the selected run's before-checkpoint.",
             },
         ],
     }
@@ -2183,6 +3565,8 @@ def create_timeline_checkpoint(
     automatic: bool,
     user: dict[str, Any] | None = None,
     space_id: str = "home",
+    tree_sha: str | None = None,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dirty = git_output(server, ["status", "--short"], timeout=5)
     untracked = [line for line in dirty.splitlines() if line.startswith("?? ")]
@@ -2190,7 +3574,13 @@ def create_timeline_checkpoint(
     metadata_dir = user_timeline_dir(server, user, timeline_id)
     ensure_user_quota(server, user)
     metadata_dir.mkdir(parents=True, exist_ok=True)
-    tree_sha, temp_index = checkpoint_tree(server, metadata_dir)
+    temp_index: Path | None = None
+    if tree_sha:
+        verify_tree = git_run(server, ["cat-file", "-e", f"{tree_sha}^{{tree}}"], timeout=5)
+        if verify_tree.returncode != 0:
+            raise BrowserError("timeline_checkpoint_failed", "Timeline checkpoint tree does not exist.")
+    else:
+        tree_sha, temp_index = checkpoint_tree(server, metadata_dir)
     commit_proc = git_run(server, ["commit-tree", tree_sha, "-p", "HEAD", "-m", message], timeout=8)
     sha = (commit_proc.stdout or "").strip()
     if commit_proc.returncode != 0 or not sha:
@@ -2199,10 +3589,11 @@ def create_timeline_checkpoint(
     update_proc = git_run(server, ["update-ref", ref, sha], timeout=8)
     if update_proc.returncode != 0:
         raise BrowserError("timeline_checkpoint_failed", clipped(update_proc.stderr or "Could not write timeline ref."))
-    try:
-        temp_index.unlink(missing_ok=True)
-    except Exception:
-        pass
+    if temp_index:
+        try:
+            temp_index.unlink(missing_ok=True)
+        except Exception:
+            pass
     metadata = {
         "schema": "hermes.wasm_agent.timeline_checkpoint.v1",
         "ref": ref,
@@ -2219,6 +3610,8 @@ def create_timeline_checkpoint(
         "untracked_count": len(untracked),
         "untracked_note": "Checkpoint uses a temporary git index and captures untracked non-ignored files without changing the real index.",
     }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     (metadata_dir / f"{label}-{metadata['created_at']}.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True),
         encoding="utf-8",
@@ -2236,11 +3629,14 @@ def timeline_auto_checkpoint(
     *,
     message: str | None = None,
     tree_sha: str | None = None,
+    before_tree: str | None = None,
+    before_ref: str | None = None,
+    changed_files: list[dict[str, Any]] | None = None,
     user: dict[str, Any] | None = None,
     space_id: str = "home",
 ) -> dict[str, Any] | None:
     dirty = git_output(server, ["status", "--short"], timeout=5)
-    if not dirty:
+    if not dirty and (not tree_sha or before_tree == tree_sha):
         return None
     metadata_dir = user_timeline_dir(server, user, space_id)
     metadata_dir.mkdir(parents=True, exist_ok=True)
@@ -2263,6 +3659,15 @@ def timeline_auto_checkpoint(
         automatic=True,
         user=user,
         space_id=space_id,
+        tree_sha=tree_sha,
+        extra_metadata={
+            "phase": "after_run",
+            "before_tree": before_tree or "",
+            "before_ref": before_ref or "",
+            "after_tree": tree_sha,
+            "changed_files": changed_files or [],
+            "scope": timeline_scope_for_paths(server, [str(item.get("path") or "") for item in (changed_files or [])], user),
+        },
     )
     state_path.write_text(
         json.dumps(
@@ -2280,6 +3685,197 @@ def timeline_auto_checkpoint(
         encoding="utf-8",
     )
     return metadata
+
+
+def timeline_scope_for_paths(server: WasmAgentServer, paths: list[str], user: dict[str, Any] | None = None) -> str:
+    clean_paths = [str(path or "").lstrip("/") for path in paths if str(path or "").strip()]
+    if any(path_has_prefix(path, CORE_FIRMWARE_PREFIXES) for path in clean_paths):
+        return "core-firmware"
+    if user is not None:
+        sandbox_prefix = user_sandbox_prefix(server, user)
+        if clean_paths and all(path_has_prefix(path, [sandbox_prefix]) for path in clean_paths):
+            return "user-sandbox"
+    return "global"
+
+
+def ensure_timeline_paths_allowed(server: WasmAgentServer, user: dict[str, Any] | None, paths: list[str]) -> str:
+    scope = timeline_scope_for_paths(server, paths, user)
+    if user_is_admin(user):
+        return scope
+    sandbox_prefix = user_sandbox_prefix(server, user)
+    blocked = [path for path in paths if not path_has_prefix(path, [sandbox_prefix])]
+    if blocked:
+        raise BrowserError(
+            "timeline_stepback_denied",
+            "Only an admin orchestrator can step back core firmware or shared repository paths.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+    return "user-sandbox"
+
+
+def resolve_timeline_ref(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    space_id: str,
+    raw_ref: str,
+) -> str:
+    value = str(raw_ref or "").strip()
+    if not value:
+        raise BrowserError("timeline_missing_ref", "Timeline stepback needs a checkpoint ref.")
+    if value.startswith("wasm-agent-timeline/"):
+        value = f"refs/{value}"
+    timeline_id = safe_state_id(space_id, "home")
+    namespace = f"refs/wasm-agent-timeline/{user_id(user)}/{timeline_id}/"
+    if not value.startswith(namespace):
+        value = f"{namespace}{timeline_ref_name(value)}"
+    verify = git_run(server, ["rev-parse", "--verify", value], timeout=5)
+    if verify.returncode != 0:
+        raise BrowserError("timeline_ref_not_found", "Timeline checkpoint was not found.", status=HTTPStatus.NOT_FOUND)
+    return value
+
+
+def checkpoint_metadata_for_ref(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str, ref: str) -> dict[str, Any]:
+    return timeline_metadata_by_ref(user_timeline_dir(server, user, space_id)).get(ref, {})
+
+
+def commit_tree_sha(server: WasmAgentServer, ref: str) -> str:
+    tree = git_output(server, ["show", "-s", "--format=%T", ref], timeout=5)
+    if not tree:
+        raise BrowserError("timeline_ref_invalid", "Timeline checkpoint does not point to a valid tree.")
+    return tree
+
+
+def diff_name_status(server: WasmAgentServer, before_tree: str, after_tree: str) -> list[tuple[str, list[str]]]:
+    proc = git_run(server, ["diff", "--name-status", before_tree, after_tree], timeout=8)
+    if proc.returncode != 0:
+        raise BrowserError("timeline_diff_failed", clipped(proc.stderr or "Could not compare checkpoint trees."))
+    rows: list[tuple[str, list[str]]] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            rows.append((parts[0], parts[1:]))
+    return rows
+
+
+def safe_delete_repo_path(server: WasmAgentServer, rel_path: str) -> None:
+    root = repo_root(server).resolve()
+    target = (root / rel_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise BrowserError("timeline_stepback_denied", "Restore path escaped the repository.", status=HTTPStatus.FORBIDDEN) from exc
+    if target.is_dir() and not target.is_symlink():
+        shutil.rmtree(target)
+    else:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_paths_from_tree(server: WasmAgentServer, target_tree: str, rows: list[tuple[str, list[str]]]) -> dict[str, Any]:
+    restore_paths: list[str] = []
+    delete_paths: list[str] = []
+    for status, paths in rows:
+        if not paths:
+            continue
+        code = status[:1]
+        if code == "A":
+            delete_paths.append(paths[-1])
+        elif code == "R":
+            if len(paths) >= 2:
+                delete_paths.append(paths[-1])
+                restore_paths.append(paths[0])
+            else:
+                restore_paths.append(paths[-1])
+        else:
+            restore_paths.append(paths[-1])
+    for rel_path in sorted(set(delete_paths), key=lambda value: value.count("/"), reverse=True):
+        safe_delete_repo_path(server, rel_path)
+    restored = 0
+    unique_restore_paths = sorted(set(restore_paths))
+    for offset in range(0, len(unique_restore_paths), 80):
+        batch = unique_restore_paths[offset:offset + 80]
+        if not batch:
+            continue
+        proc = git_run(server, ["restore", "--source", target_tree, "--", *batch], timeout=20)
+        if proc.returncode != 0:
+            raise BrowserError("timeline_stepback_failed", clipped(proc.stderr or "Could not restore checkpoint paths."))
+        restored += len(batch)
+    return {"restored_paths": restored, "deleted_paths": len(set(delete_paths))}
+
+
+def timeline_stepback(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
+    space_id = safe_state_id(str(body.get("space_id") or body.get("timeline_id") or "home"), "home")
+    requested_ref = str(body.get("ref") or body.get("checkpoint") or "")
+    selected_ref = resolve_timeline_ref(server, user, space_id, requested_ref)
+    selected_metadata = checkpoint_metadata_for_ref(server, user, space_id, selected_ref)
+    target_ref = selected_ref
+    if body.get("before_run", True) and selected_metadata.get("before_ref"):
+        target_ref = resolve_timeline_ref(server, user, space_id, str(selected_metadata.get("before_ref")))
+    target_tree = commit_tree_sha(server, target_ref)
+    current_tree = worktree_tree_sha(server)
+    rows = diff_name_status(server, target_tree, current_tree)
+    paths = sorted({path for _, row_paths in rows for path in row_paths if path})
+    scope = ensure_timeline_paths_allowed(server, user, paths)
+    changed = changed_files_between_trees(server, target_tree, current_tree)
+    if body.get("preview"):
+        return {
+            "schema": "hermes.wasm_agent.timeline_stepback.v1",
+            "preview": True,
+            "selected_ref": selected_ref,
+            "target_ref": target_ref,
+            "target_tree": target_tree,
+            "scope": scope,
+            "changed_files": changed,
+            "path_count": len(paths),
+        }
+    if not paths:
+        return {
+            "schema": "hermes.wasm_agent.timeline_stepback.v1",
+            "preview": False,
+            "selected_ref": selected_ref,
+            "target_ref": target_ref,
+            "target_tree": target_tree,
+            "after_tree": current_tree,
+            "scope": scope,
+            "changed_files": [],
+            "path_count": 0,
+            "restored_paths": 0,
+            "deleted_paths": 0,
+            "no_op": True,
+        }
+    before_restore = create_timeline_checkpoint(
+        server,
+        label=timeline_ref_name(f"before-stepback-{space_id}"),
+        message=f"wasm-agent before stepback for {space_id}",
+        automatic=True,
+        user=user,
+        space_id=space_id,
+        tree_sha=current_tree,
+        extra_metadata={
+            "phase": "before_stepback",
+            "target_ref": target_ref,
+            "selected_ref": selected_ref,
+            "changed_files": changed,
+            "scope": scope,
+        },
+    )
+    applied = restore_paths_from_tree(server, target_tree, rows)
+    after_tree = worktree_tree_sha(server)
+    return {
+        "schema": "hermes.wasm_agent.timeline_stepback.v1",
+        "preview": False,
+        "selected_ref": selected_ref,
+        "target_ref": target_ref,
+        "target_tree": target_tree,
+        "after_tree": after_tree,
+        "scope": scope,
+        "changed_files": changed,
+        "path_count": len(paths),
+        "before_restore_checkpoint": before_restore,
+        **applied,
+    }
 
 
 def worktree_tree_sha(server: WasmAgentServer) -> str:
@@ -2325,6 +3921,12 @@ def changed_files_between_trees(server: WasmAgentServer, before_tree: str, after
         status = parts[0]
         path = parts[-1]
         additions, deletions = numstat.get(path, (None, None))
+        patch_proc = git_run(
+            server,
+            ["diff", "--unified=3", "--no-ext-diff", before_tree, after_tree, "--", path],
+            timeout=8,
+        )
+        patch_text = clipped(patch_proc.stdout, 24000) if patch_proc.returncode == 0 else ""
         files.append(
             {
                 "status": status,
@@ -2333,9 +3935,10 @@ def changed_files_between_trees(server: WasmAgentServer, before_tree: str, after
                 "additions": additions,
                 "deletions": deletions,
                 "diff": f"+{additions or 0} -{deletions or 0}" if additions is not None or deletions is not None else "",
+                "diff_patch": patch_text,
             }
         )
-    return files[:40]
+    return files
 
 
 def run_checkpoint_summary(message: str) -> str:
@@ -3119,15 +4722,40 @@ def tool_action_label(tool: dict[str, Any]) -> str:
         "current_turn_observation": "Inspect current UI",
         "observation_latest": "Read latest observation",
         "app_map": "Map wasm-agent surface",
+        "ui_symbol_resolver": "Resolve UI symbols",
         "git_status": "Check worktree status",
         "git_diff_stat": "Summarize source diff",
         "timeline_status": "Read Timeline state",
-        "attachment_manifest": "Build image cards",
+        "user_scope_status": "Read user sandbox policy",
+        "attachment_manifest": "Build attachment cards",
         "read_file": "Read file",
         "search": "Search repository",
         "doctor": "Run wasm-agent doctor",
     }
     return labels.get(name, f"Run {name}")
+
+
+def tool_action_kind(tool: dict[str, Any]) -> str:
+    name = str(tool.get("tool") or "tool")
+    wasm_tools = {
+        "current_turn_observation",
+        "observation_latest",
+        "app_map",
+        "ui_symbol_resolver",
+        "git_status",
+        "git_diff_stat",
+        "timeline_status",
+        "user_scope_status",
+        "attachment_manifest",
+        "read_file",
+        "search",
+        "doctor",
+    }
+    return "run-wasm" if name in wasm_tools else "tool"
+
+
+def tool_action_topic(tool: dict[str, Any]) -> str:
+    return "run-wasm" if tool_action_kind(tool) == "run-wasm" else "run-wasm"
 
 
 def tool_action_detail(tool: dict[str, Any]) -> str:
@@ -3145,6 +4773,10 @@ def tool_action_detail(tool: dict[str, Any]) -> str:
     if name == "app_map":
         files = content.get("primary_files") if isinstance(content.get("primary_files"), list) else []
         return f"{len(files)} files / {content.get('write_boundary', 'local boundary')}"
+    if name == "ui_symbol_resolver":
+        symbols = content.get("symbols") if isinstance(content.get("symbols"), list) else []
+        matches = sum(len(item.get("matches") or []) for item in symbols if isinstance(item, dict))
+        return f"{len(symbols)} symbols / {matches} matches"
     if name == "git_status":
         lines = [line for line in output.splitlines() if line.strip()]
         return "clean" if not lines else f"{len(lines)} changed paths"
@@ -3152,12 +4784,16 @@ def tool_action_detail(tool: dict[str, Any]) -> str:
         return first_nonempty_line(output, "no tracked diff")
     if name == "timeline_status":
         return f"{content.get('branch', '-')} / {content.get('dirty_count', 0)} dirty / {content.get('checkpoint_count', 0)} checkpoints"
+    if name == "user_scope_status":
+        policy = content.get("policy") if isinstance(content.get("policy"), dict) else {}
+        return f"{policy.get('scope', 'scope')} / user {policy.get('user_id', '-')}"
     if name == "attachment_manifest":
         received = content.get("received_count", 0)
         forwarded = content.get("forwarded_count", 0)
         summarized = content.get("summarized_count", 0)
         cards = content.get("image_card_count", 0)
-        return f"{received} received / {cards} cards / {forwarded} raw to bridge / {summarized} summarized"
+        videos = content.get("video_attachment_count", 0)
+        return f"{received} received / {cards} image cards / {videos} videos / {forwarded} raw to bridge / {summarized} summarized"
     if name == "read_file":
         return f"{tool.get('path') or '-'} / {tool.get('bytes') or 0} bytes"
     if name == "search":
@@ -3183,8 +4819,12 @@ def tool_action_arguments(tool: dict[str, Any]) -> dict[str, Any]:
         args["forwarded_count"] = tool.get("forwarded_count")
         args["summarized_count"] = tool.get("summarized_count")
         args["image_card_count"] = tool.get("image_card_count")
+        args["video_attachment_count"] = tool.get("video_attachment_count")
     if name == "search":
         args["command"] = f"rg -n {tool.get('query') or ''} /local"
+    if name == "ui_symbol_resolver":
+        args["query"] = tool.get("query")
+        args["files"] = ["public/index.html", "public/app.js", "public/styles.css"]
     if name == "git_status":
         args["command"] = "git -C /local status --short"
     if name == "git_diff_stat":
@@ -3224,6 +4864,7 @@ def tool_action_event(tool: dict[str, Any], index: int) -> dict[str, Any]:
         status = "error"
     return {
         "id": f"tool_{index}_{name}",
+        "topic": tool_action_topic(tool),
         "kind": "tool",
         "label": tool_action_label(tool),
         "status": status,
@@ -3232,6 +4873,145 @@ def tool_action_event(tool: dict[str, Any], index: int) -> dict[str, Any]:
         "arguments": tool_action_arguments(tool),
         "preview": tool_action_preview(tool),
     }
+
+
+def final_agent_action_status(status: Any) -> str:
+    value = str(status or "done").lower()
+    if value in {"running", "queued", "submitted", "pending", "in_progress", "working"}:
+        return "done"
+    if value in {"failed", "failure"}:
+        return "error"
+    return value or "done"
+
+
+def finalize_agent_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    finalized: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        finalized.append({
+            **action,
+            "status": final_agent_action_status(action.get("status")),
+        })
+    return finalized
+
+
+def action_denial_detail(result: dict[str, Any] | None, fallback: str) -> str:
+    errors = result.get("errors") if isinstance(result, dict) and isinstance(result.get("errors"), list) else []
+    for error in errors:
+        text = str(error or "").strip()
+        if text:
+            return clipped(text, 180)
+    return fallback
+
+
+def token_int_value(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, float):
+        return max(0, int(value)) if math.isfinite(value) else None
+    if isinstance(value, str):
+        clean = value.strip().replace(",", "").replace("_", "")
+        if re.fullmatch(r"\d+(?:\.\d+)?", clean):
+            return max(0, int(float(clean)))
+    return None
+
+
+def first_token_int(payload: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = token_int_value(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_token_usage(usage: Any, source: str = "") -> dict[str, Any] | None:
+    if not isinstance(usage, dict):
+        return None
+    prompt = first_token_int(
+        usage,
+        "prompt_tokens",
+        "input_tokens",
+        "input_token_count",
+        "inputTokenCount",
+        "tokens_in",
+        "prompt",
+    )
+    completion = first_token_int(
+        usage,
+        "completion_tokens",
+        "output_tokens",
+        "output_token_count",
+        "outputTokenCount",
+        "candidatesTokenCount",
+        "tokens_out",
+        "completion",
+    )
+    total = first_token_int(
+        usage,
+        "total_tokens",
+        "total_token_count",
+        "totalTokenCount",
+        "tokens",
+        "total",
+    )
+    if total is None and (prompt is not None or completion is not None):
+        total = int(prompt or 0) + int(completion or 0)
+    if prompt is None and total is not None and completion is not None:
+        prompt = max(0, total - completion)
+    if completion is None and total is not None and prompt is not None:
+        completion = max(0, total - prompt)
+    if prompt is None and completion is None and total is None:
+        return None
+    normalized = {
+        "prompt_tokens": int(prompt or 0),
+        "completion_tokens": int(completion or 0),
+        "input_tokens": int(prompt or 0),
+        "output_tokens": int(completion or 0),
+        "total_tokens": int(total or 0),
+    }
+    usage_source = source or str(usage.get("source") or usage.get("provider") or "")
+    if usage_source:
+        normalized["source"] = usage_source
+    return normalized
+
+
+def token_usage_candidates(payload: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    if depth > 3 or not isinstance(payload, dict):
+        return []
+    candidates = [payload]
+    for key in (
+        "token_usage",
+        "usage",
+        "usage_metadata",
+        "usageMetadata",
+        "metadata",
+        "metrics",
+        "stats",
+        "totals",
+        "model_usage",
+        "token_counts",
+    ):
+        child = payload.get(key)
+        if isinstance(child, dict):
+            candidates.extend(token_usage_candidates(child, depth=depth + 1))
+    return candidates
+
+
+def token_usage_from_payloads(*payloads: Any, source: str = "") -> dict[str, Any] | None:
+    seen: set[int] = set()
+    for payload in payloads:
+        for candidate in token_usage_candidates(payload):
+            ident = id(candidate)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            usage = normalize_token_usage(candidate, source=source)
+            if usage is not None:
+                return usage
+    return None
 
 
 def agent_action_events(
@@ -3245,11 +5025,17 @@ def agent_action_events(
     duration_ms: int,
     token_usage: dict[str, Any] | None,
     auto_checkpoint: dict[str, Any] | None,
+    before_checkpoint: dict[str, Any] | None,
     changed: list[dict[str, Any]],
+    bridge_trace: dict[str, Any] | None,
+    mutation_policy: dict[str, Any] | None,
+    wis_patch_result: dict[str, Any] | None,
+    mutation_result: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     actions: list[dict[str, Any]] = [
         {
             "id": "turn_intake",
+            "topic": "run-wasm",
             "kind": "turn",
             "label": "Receive chat turn",
             "status": "done",
@@ -3257,14 +5043,57 @@ def agent_action_events(
             "meta": f"{transcript_turns} transcript turns / {image_count} images",
         }
     ]
+    if mutation_policy:
+        actions.append({
+            "id": "mutation_policy",
+            "topic": "run-wasm",
+            "kind": "policy",
+            "label": "Apply mutation policy",
+            "status": "done",
+            "detail": str(mutation_policy.get("scope") or "scope"),
+            "meta": "write boundary",
+            "preview": compact_json(mutation_policy, 900),
+        })
     for index, tool in enumerate(tools, 1):
         actions.append(tool_action_event(tool, index))
-    total_tokens = token_usage.get("total_tokens") if isinstance(token_usage, dict) else None
+    actions.extend(bridge_trace_action_events(bridge_trace))
+    if wis_patch_result:
+        applied = bool(wis_patch_result.get("applied"))
+        patches = wis_patch_result.get("patches") if isinstance(wis_patch_result.get("patches"), list) else []
+        actions.append({
+            "id": "apply_wis_patch",
+            "topic": "run-wasm",
+            "kind": "mutation",
+            "label": "Apply WIS/userland patch",
+            "status": "done" if applied else "error",
+            "detail": f"{len(patches)} artifacts / {wis_patch_result.get('operations', 0)} operations" if applied else action_denial_detail(wis_patch_result, "patch denied"),
+            "meta": "adapter",
+            "preview": compact_json(wis_patch_result, 1200),
+            "arguments": {"schema": WIS_PATCH_SCHEMA},
+        })
+    if mutation_result:
+        applied = bool(mutation_result.get("applied"))
+        files = mutation_result.get("files") if isinstance(mutation_result.get("files"), list) else []
+        errors = mutation_result.get("errors") if isinstance(mutation_result.get("errors"), list) else []
+        actions.append({
+            "id": "apply_source_mutation",
+            "topic": "run-wasm",
+            "kind": "mutation",
+            "label": "Apply source mutation",
+            "status": "done" if applied else "error",
+            "detail": f"{len(files)} files / {mutation_result.get('operations', 0)} operations" if applied else action_denial_detail(mutation_result, "mutation denied"),
+            "meta": "adapter",
+            "preview": compact_json(mutation_result, 1200),
+            "arguments": {"schema": "hermes.wasm_agent.mutation.v1"},
+        })
+    normalized_usage = normalize_token_usage(token_usage)
+    total_tokens = normalized_usage.get("total_tokens") if isinstance(normalized_usage, dict) else None
     token_detail = f"{total_tokens} tokens" if isinstance(total_tokens, int) else "tokens unknown"
     actions.append({
         "id": "node_reply",
+        "topic": "run-hermes",
         "kind": "model",
-        "label": "Receive final reply",
+        "label": "Final response",
         "status": "done",
         "detail": f"{source} / {duration_ms} ms",
         "meta": token_detail,
@@ -3278,6 +5107,16 @@ def agent_action_events(
             "detail": f"{len(changed)} paths",
             "preview": compact_json(changed[:12], 900),
         })
+    if before_checkpoint:
+        actions.append({
+            "id": "timeline_before_checkpoint",
+            "kind": "timeline",
+            "label": "Timeline before-run point",
+            "status": "done",
+            "detail": clipped(str(before_checkpoint.get("label") or ""), 160),
+            "meta": str(before_checkpoint.get("sha") or "")[:7],
+            "preview": compact_json(before_checkpoint, 900),
+        })
     if auto_checkpoint:
         actions.append({
             "id": "timeline_checkpoint",
@@ -3288,7 +5127,7 @@ def agent_action_events(
             "meta": str(auto_checkpoint.get("sha") or "")[:7],
             "preview": compact_json(auto_checkpoint, 900),
         })
-    return actions
+    return finalize_agent_actions(actions)
 
 
 def relative_repo_path(server: WasmAgentServer, raw: str) -> Path:
@@ -3387,7 +5226,7 @@ def changed_files(server: WasmAgentServer) -> list[dict[str, Any]]:
                 "diff": f"+{additions or 0} -{deletions or 0}" if additions is not None or deletions is not None else "",
             }
         )
-    return files[:40]
+    return files
 
 
 def agent_git_diff_stat(server: WasmAgentServer) -> dict[str, Any]:
@@ -3414,6 +5253,27 @@ def agent_timeline_status(server: WasmAgentServer, user: dict[str, Any] | None =
                 "checkpoint_count": len(timeline.get("checkpoints") or []),
                 "latest_checkpoint": (timeline.get("checkpoints") or [{}])[0],
                 "actions": timeline.get("actions") or [],
+            },
+            ensure_ascii=True,
+        ),
+    }
+
+
+def agent_user_scope_status(server: WasmAgentServer, user: dict[str, Any] | None, target_node: str = "") -> dict[str, Any]:
+    policy = agent_mutation_policy(server, user, target_node or "sandboxed-node")
+    storage = user_storage(server, user)
+    return {
+        "tool": "user_scope_status",
+        "content": json.dumps(
+            {
+                "policy": policy,
+                "storage": {
+                    "used_bytes": storage.get("used_bytes"),
+                    "limit_bytes": storage.get("limit_bytes"),
+                    "unlimited": storage.get("unlimited"),
+                },
+                "shared_spaces": list_shared_spaces(server, user).get("spaces", []),
+                "wis_patch_schema": WIS_PATCH_SCHEMA,
             },
             ensure_ascii=True,
         ),
@@ -3452,13 +5312,14 @@ def agent_app_map(server: WasmAgentServer) -> dict[str, Any]:
         "content": json.dumps(
             {
                 "goal": "Evolve wasm-agent as the active WASM harness: embedded chat, observation, Timeline recovery, Host Browser stream, and image-card perception.",
-                "write_boundary": "In-app agent proposes changes; outer orchestrator applies filesystem mutations until confirmation-first mutation tools exist.",
+                "write_boundary": "Orchestrator/admin turns may modify wasm-agent globally; sandboxed nodes must only modify the mounted account-owned wasm-user state and ask orchestrator for core firmware/source changes.",
                 "primary_files": entries,
                 "current_chat_contract": {
                     "endpoint": "/agent/session/message",
                     "modes": ["auto", "local", "bridge"],
                     "tools": [
                         "observation_latest",
+                        "ui_symbol_resolver",
                         "read_file",
                         "search",
                         "git_status",
@@ -3468,11 +5329,208 @@ def agent_app_map(server: WasmAgentServer) -> dict[str, Any]:
                         "app_map",
                         "attachment_manifest",
                     ],
+                    "symbol_resolution": "Before saying a UI selector or component is missing, use ui_symbol_resolver. It maps camelCase handles such as agentModelSelect to DOM ids, els.* handles, and kebab-case CSS selectors.",
+                    "userland_patch_schema": WIS_PATCH_SCHEMA,
+                    "share_endpoints": ["/spaces/share", "/spaces/join", "/spaces/shared", "/wis/artifacts/patch"],
                 },
             },
             ensure_ascii=True,
         ),
     }
+
+
+UI_SYMBOL_FILES = [
+    "plugins/wasm-agent/public/index.html",
+    "plugins/wasm-agent/public/app.js",
+    "plugins/wasm-agent/public/styles.css",
+]
+
+
+def camel_to_kebab(value: str) -> str:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", value.replace("_", "-"))
+    return re.sub(r"-+", "-", text).lower()
+
+
+def kebab_to_camel(value: str) -> str:
+    parts = [part for part in re.split(r"[-_\s]+", value) if part]
+    if not parts:
+        return value
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:])
+
+
+def ui_symbol_queries(message: str) -> list[str]:
+    found: list[str] = []
+    for item in re.findall(r"`([^`]{3,80})`", message):
+        found.append(item.strip())
+    for item in re.findall(r"[#.]?[A-Za-z][A-Za-z0-9_]*(?:[A-Z][A-Za-z0-9_]*)+|[#.]?[a-z][a-z0-9]*(?:-[a-z0-9]+)+", message):
+        found.append(item.strip())
+    queries: list[str] = []
+    seen: set[str] = set()
+    for item in found:
+        clean = item.strip().strip("`'\"")
+        if not clean or len(clean) > 80:
+            continue
+        if not re.search(r"[A-Za-z]", clean):
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        queries.append(clean)
+    return queries[:8]
+
+
+def ui_symbol_aliases(query: str) -> list[str]:
+    raw = query.strip()
+    base = raw[1:] if raw.startswith(("#", ".")) else raw
+    variants = [raw, base]
+    kebab = camel_to_kebab(base)
+    camel = kebab_to_camel(base)
+    variants.extend([kebab, camel, f"#{base}", f".{base}", f"#{kebab}", f".{kebab}", f"els.{base}", f"els.{camel}"])
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for item in variants:
+        clean = item.strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        aliases.append(clean)
+    return aliases[:14]
+
+
+def agent_ui_symbol_resolver(server: WasmAgentServer, message: str) -> dict[str, Any] | None:
+    queries = ui_symbol_queries(message)
+    if not queries:
+        return None
+    root = repo_root(server)
+    symbols: list[dict[str, Any]] = []
+    for query in queries:
+        aliases = ui_symbol_aliases(query)
+        matches: list[dict[str, Any]] = []
+        for rel in UI_SYMBOL_FILES:
+            path = root / rel
+            if not path.exists():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            file_match_count = 0
+            for lineno, line in enumerate(lines, 1):
+                line_lower = line.lower()
+                matched_alias = next(
+                    (
+                        alias
+                        for alias in sorted(aliases, key=len, reverse=True)
+                        if alias in line or alias.lower() in line_lower
+                    ),
+                    "",
+                )
+                if not matched_alias:
+                    continue
+                matches.append({
+                    "path": rel,
+                    "line": lineno,
+                    "alias": matched_alias,
+                    "text": clipped(line.strip(), 220),
+                })
+                file_match_count += 1
+                if file_match_count >= 4:
+                    break
+        if matches:
+            symbols.append({
+                "query": query,
+                "aliases": aliases,
+                "matches": matches,
+            })
+    if not symbols:
+        return None
+    return {
+        "tool": "ui_symbol_resolver",
+        "query": clipped(message, 240),
+        "content": json.dumps(
+            {
+                "schema": "hermes.wasm_agent.ui_symbol_resolution.v1",
+                "rule": "Do not answer that a UI symbol is missing when this resolver has matches. Prefer exact path+line evidence and the matched selector/id/handle.",
+                "symbols": symbols,
+            },
+            ensure_ascii=True,
+        ),
+    }
+
+
+def negative_symbol_claim(reply: str) -> bool:
+    text = reply.lower()
+    return any(
+        phrase in text
+        for phrase in (
+            "cannot find",
+            "can't find",
+            "could not find",
+            "couldn't find",
+            "not find",
+            "no matches",
+            "does not exist",
+            "don't see",
+        )
+    )
+
+
+def symbol_resolution_summary(tool: dict[str, Any] | None) -> str:
+    if not tool:
+        return ""
+    content = parsed_tool_content(tool)
+    symbols = content.get("symbols") if isinstance(content.get("symbols"), list) else []
+    lines: list[str] = []
+    for symbol in symbols[:4]:
+        if not isinstance(symbol, dict):
+            continue
+        matches = symbol.get("matches") if isinstance(symbol.get("matches"), list) else []
+        if not matches:
+            continue
+        rendered = []
+        used_paths: set[str] = set()
+        sampled_matches: list[dict[str, Any]] = []
+        for match in matches:
+            if not isinstance(match, dict):
+                continue
+            path = str(match.get("path") or "")
+            if path and path not in used_paths:
+                sampled_matches.append(match)
+                used_paths.add(path)
+            if len(sampled_matches) >= 4:
+                break
+        if len(sampled_matches) < 4:
+            for match in matches:
+                if isinstance(match, dict) and match not in sampled_matches:
+                    sampled_matches.append(match)
+                if len(sampled_matches) >= 4:
+                    break
+        for match in sampled_matches[:4]:
+            if isinstance(match, dict):
+                rendered.append(f"{match.get('path')}:{match.get('line')} ({match.get('alias')})")
+        if rendered:
+            lines.append(f"- `{symbol.get('query')}` -> " + ", ".join(rendered))
+    return "\n".join(lines)
+
+
+def correct_negative_symbol_reply(server: WasmAgentServer, message: str, reply: str) -> str:
+    if not negative_symbol_claim(reply):
+        return reply
+    tool = agent_ui_symbol_resolver(server, message)
+    summary = symbol_resolution_summary(tool)
+    if not summary:
+        return reply
+    return clipped(
+        reply
+        + "\n\nAdapter symbol check: local source lookup found likely UI symbol matches, so the symbol should not be treated as missing:\n"
+        + summary
+        + "\nUse those paths/selectors for the next patch.",
+        8000,
+    )
 
 
 def agent_latest_observation(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3517,6 +5575,7 @@ def infer_agent_tools(
             action_callback(tool_action_event(tool, action_offset + len(tools)))
 
     add_tool(agent_latest_observation(server, user))
+    admin_context_allowed = user_is_admin(user)
     wants_evolution_context = any(
         phrase in lowered
         for phrase in (
@@ -3535,22 +5594,36 @@ def infer_agent_tools(
         )
     )
     if wants_evolution_context:
-        add_tool(agent_app_map(server))
-        add_tool(agent_git_status(server))
-        add_tool(agent_git_diff_stat(server))
+        if admin_context_allowed:
+            add_tool(agent_app_map(server))
+            symbol_tool = agent_ui_symbol_resolver(server, message)
+            if symbol_tool:
+                add_tool(symbol_tool)
+            add_tool(agent_git_status(server))
+            add_tool(agent_git_diff_stat(server))
+        else:
+            add_tool(agent_user_scope_status(server, user))
         add_tool(agent_timeline_status(server, user))
     if "read /local/readme.md" in lowered or "read readme" in lowered or "resume our work" in lowered:
-        add_tool(agent_read_file(server, "/local/README.md"))
-        roadmap = repo_root(server) / "docs" / "roadmap" / "space-os" / "embedded-agent-path.md"
-        if roadmap.exists():
-            add_tool(agent_read_file(server, str(roadmap)))
+        if admin_context_allowed:
+            add_tool(agent_read_file(server, "/local/README.md"))
+            roadmap = repo_root(server) / "docs" / "roadmap" / "space-os" / "embedded-agent-path.md"
+            if roadmap.exists():
+                add_tool(agent_read_file(server, str(roadmap)))
+        else:
+            add_tool(agent_user_scope_status(server, user))
     if "git status" in lowered or "worktree" in lowered:
-        add_tool(agent_git_status(server))
+        if admin_context_allowed:
+            add_tool(agent_git_status(server))
+        else:
+            add_tool(agent_user_scope_status(server, user))
     if "doctor" in lowered or "health" in lowered:
-        add_tool(agent_doctor(server))
+        if admin_context_allowed:
+            add_tool(agent_doctor(server))
     if lowered.startswith("search ") or "\nsearch " in lowered:
-        query = message.split("search ", 1)[1].splitlines()[0]
-        add_tool(agent_search(server, query))
+        if admin_context_allowed:
+            query = message.split("search ", 1)[1].splitlines()[0]
+            add_tool(agent_search(server, query))
     return tools
 
 
@@ -3606,19 +5679,49 @@ def compact_agent_attachment_summaries(attachments: Any) -> list[dict[str, Any]]
     for item in attachments[:DEFAULT_AGENT_IMAGE_LIMIT]:
         if not isinstance(item, dict):
             continue
+        media_type = str(item.get("type") or item.get("original_type") or "")
+        media_kind = str(item.get("media_kind") or "")
+        is_video = media_type.startswith("video/") or media_kind == "video"
+        image_card = (
+            compact_image_card(item.get("image_card"), item)
+            if (isinstance(item.get("image_card"), dict) or not is_video)
+            else None
+        )
         compact.append({
             "name": clipped(str(item.get("name") or "attachment"), 120),
-            "type": clipped(str(item.get("type") or item.get("original_type") or ""), 80),
+            "type": clipped(media_type, 80),
             "size": item.get("size") if isinstance(item.get("size"), int) else None,
             "width": item.get("width") if isinstance(item.get("width"), int) else None,
             "height": item.get("height") if isinstance(item.get("height"), int) else None,
             "original_type": clipped(str(item.get("original_type") or ""), 80),
             "original_size": item.get("original_size") if isinstance(item.get("original_size"), int) else None,
-            "image_card": compact_image_card(item.get("image_card"), item),
+            "image_card": image_card,
+            "video_card": compact_video_card(item.get("video_card"), item),
+            "media_kind": clipped(media_kind, 40),
+            "duration_sec": item.get("duration_sec") if isinstance(item.get("duration_sec"), (int, float)) else None,
             "asset": item.get("asset") if isinstance(item.get("asset"), dict) else None,
             "reason": clipped(str(item.get("reason") or "summarized"), 120),
         })
     return compact
+
+
+def compact_video_card(card: Any, fallback: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    source = card if isinstance(card, dict) else {}
+    fallback = fallback or {}
+    media_type = str(source.get("type") or fallback.get("type") or fallback.get("original_type") or "")
+    media_kind = str(source.get("media_kind") or fallback.get("media_kind") or "")
+    if not (media_type.startswith("video/") or media_kind == "video" or source):
+        return None
+    duration = source.get("duration_sec", fallback.get("duration_sec"))
+    return {
+        "schema": "hermes.wasm_agent.video_card.v1",
+        "name": clipped(str(source.get("name") or fallback.get("name") or "video"), 120),
+        "type": clipped(media_type, 80),
+        "size": source.get("size") if isinstance(source.get("size"), int) else fallback.get("size"),
+        "width": source.get("width") if isinstance(source.get("width"), int) else fallback.get("width"),
+        "height": source.get("height") if isinstance(source.get("height"), int) else fallback.get("height"),
+        "duration_sec": duration if isinstance(duration, (int, float)) else None,
+    }
 
 
 def agent_image_data_url_bytes(image: dict[str, Any]) -> int:
@@ -3653,6 +5756,31 @@ def agent_image_descriptor(
         "image_card": image_card,
         "raw_included": raw_included,
         "forwarded_to_bridge": forwarded_to_bridge,
+        "reason": reason,
+    }
+
+
+def agent_file_descriptor(
+    item: dict[str, Any],
+    *,
+    reason: str = "",
+) -> dict[str, Any]:
+    video_card = compact_video_card(item.get("video_card"), item)
+    media_type = str(item.get("type") or item.get("original_type") or "")
+    media_kind = str(item.get("media_kind") or ("video" if media_type.startswith("video/") else "file"))
+    return {
+        "name": clipped(str(item.get("name") or "attachment"), 120),
+        "type": clipped(media_type, 80),
+        "size": item.get("size") if isinstance(item.get("size"), int) else None,
+        "width": item.get("width") if isinstance(item.get("width"), int) else None,
+        "height": item.get("height") if isinstance(item.get("height"), int) else None,
+        "original_type": clipped(str(item.get("original_type") or ""), 80),
+        "original_size": item.get("original_size") if isinstance(item.get("original_size"), int) else None,
+        "media_kind": clipped(media_kind, 40),
+        "duration_sec": item.get("duration_sec") if isinstance(item.get("duration_sec"), (int, float)) else None,
+        "video_card": video_card,
+        "raw_included": False,
+        "forwarded_to_bridge": False,
         "reason": reason,
     }
 
@@ -3695,15 +5823,21 @@ def plan_bridge_attachments(
             ),
         ))
     for item in summaries:
-        descriptors.append({
-            **agent_image_descriptor(
-                item,
-                raw_included=False,
-                forwarded_to_bridge=False,
-                reason=str(item.get("reason") or "summarized"),
-            ),
-            "size": item.get("size") if isinstance(item.get("size"), int) else None,
-        })
+        media_type = str(item.get("type") or item.get("original_type") or "")
+        is_video = media_type.startswith("video/") or str(item.get("media_kind") or "") == "video"
+        reason = str(item.get("reason") or ("video_metadata_only" if is_video else "summarized"))
+        if is_video and not isinstance(item.get("image_card"), dict):
+            descriptors.append(agent_file_descriptor(item, reason=reason))
+        else:
+            descriptors.append({
+                **agent_image_descriptor(
+                    item,
+                    raw_included=False,
+                    forwarded_to_bridge=False,
+                    reason=reason,
+                ),
+                "size": item.get("size") if isinstance(item.get("size"), int) else None,
+            })
     if not descriptors:
         return forwarded, None
     manifest = {
@@ -3712,6 +5846,7 @@ def plan_bridge_attachments(
         "forwarded_count": len(forwarded),
         "summarized_count": len(descriptors) - len(forwarded),
         "image_card_count": sum(1 for item in descriptors if item.get("image_card")),
+        "video_attachment_count": sum(1 for item in descriptors if item.get("video_card")),
         "bridge_image_bytes": forwarded_bytes,
         "bridge_image_budget_bytes": DEFAULT_AGENT_BRIDGE_IMAGE_BYTES,
         "image_url_forwarding_enabled": may_forward_image_urls,
@@ -3720,10 +5855,12 @@ def plan_bridge_attachments(
             "and the bridge request stays under its size budget; always preserve compact browser-built "
             "image_card metadata for text-only providers. Treat filenames, local URLs, and surrounding "
             "workspace state as context, not visual proof. Do not claim object identity, wallpaper/background "
-            "role, OCR text, or UI placement unless raw vision or user-provided context establishes it."
+            "role, OCR text, UI placement, or video contents unless raw vision/video analysis or user-provided "
+            "context establishes it. Video files are represented as metadata only in this adapter."
         ),
         "semantic_limits": [
             "image_card is browser pixel metadata, not full object recognition",
+            "video_card is filename, type, size, duration, and dimensions metadata only",
             "filename and local_url are not visual evidence",
             "shape hints are not object identity",
             "do not infer wallpaper/background role from a name like bg",
@@ -3735,6 +5872,7 @@ def plan_bridge_attachments(
         "forwarded_count": manifest["forwarded_count"],
         "summarized_count": manifest["summarized_count"],
         "image_card_count": manifest["image_card_count"],
+        "video_attachment_count": manifest["video_attachment_count"],
         "bridge_image_budget_bytes": DEFAULT_AGENT_BRIDGE_IMAGE_BYTES,
         "content": json.dumps(manifest, ensure_ascii=True),
     }
@@ -4162,6 +6300,439 @@ def setup_agent_model(server: WasmAgentServer, body: dict[str, Any]) -> dict[str
     }
 
 
+def provider_text_field(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def compact_bridge_tool_call(raw: Any, index: int = 0) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"id": f"tool_call_{index + 1}", "name": "tool_call", "arguments": clipped(str(raw), 600)}
+    function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+    name = str(function.get("name") or raw.get("name") or raw.get("type") or "tool_call")
+    arguments = function.get("arguments", raw.get("arguments", raw.get("input", {})))
+    if isinstance(arguments, str):
+        arguments_text = clipped(arguments, 900)
+    else:
+        arguments_text = compact_json(arguments, 900)
+    return {
+        "id": str(raw.get("id") or f"tool_call_{index + 1}"),
+        "name": name,
+        "type": str(raw.get("type") or "tool_call"),
+        "arguments": arguments_text,
+    }
+
+
+def collect_bridge_tool_calls(*sources: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for source in sources:
+        items = source if isinstance(source, list) else []
+        for item in items:
+            calls.append(compact_bridge_tool_call(item, len(calls)))
+    return calls[:24]
+
+
+def bridge_task_usage(task: dict[str, Any]) -> dict[str, Any] | None:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    return token_usage_from_payloads(result, task, source="bridge_runs")
+
+
+def bridge_event_name(event: dict[str, Any]) -> str:
+    return str(event.get("event") or event.get("type") or "run.event")
+
+
+def bridge_event_summary(event: dict[str, Any]) -> str:
+    return clipped(
+        str(event.get("summary") or "")
+        or str(event.get("result_preview") or "")
+        or str(event.get("arguments_preview") or "")
+        or str(event.get("details") or "")
+        or str(event.get("preview") or "")
+        or str(event.get("message") or "")
+        or str(event.get("status") or "")
+        or str(event.get("error") or "")
+        or str(event.get("delta") or event.get("text") or "")
+        or str(event.get("tool") or ""),
+        360,
+    )
+
+
+def bridge_event_tool_key(event: dict[str, Any], fallback_index: int = 0) -> str:
+    tool = str(event.get("tool") or "tool").strip() or "tool"
+    call_id = str(
+        event.get("tool_call_id")
+        or event.get("toolCallId")
+        or event.get("call_id")
+        or event.get("callId")
+        or event.get("id")
+        or ""
+    ).strip()
+    return call_id or tool or f"tool_{fallback_index + 1}"
+
+
+def bridge_event_tool_status(event: dict[str, Any]) -> str:
+    name = bridge_event_name(event)
+    raw_status = str(event.get("status") or "").lower()
+    if event.get("error") is True or raw_status in {"error", "failed", "failure"}:
+        return "error"
+    if name == "tool.started":
+        return "running"
+    if name == "tool.completed":
+        return "done"
+    if raw_status in {"completed", "complete", "succeeded", "success"}:
+        return "done"
+    return raw_status or "done"
+
+
+def bridge_event_tool_arguments(event: dict[str, Any]) -> Any:
+    for key in ("args", "arguments", "arguments_preview"):
+        value = event.get(key)
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def bridge_event_preview(event: dict[str, Any]) -> str:
+    for key in ("output", "result_preview", "preview", "summary", "details", "text", "message"):
+        value = event.get(key)
+        if value:
+            return clipped(str(value), 900)
+    return ""
+
+
+def bridge_run_event_action(event: dict[str, Any], index: int = 0) -> dict[str, Any] | None:
+    if not isinstance(event, dict):
+        return None
+    event_name = bridge_event_name(event)
+    if event_name in {"message.delta", "response.output_text.delta"}:
+        return None
+    has_tool_identity = bool(
+        event.get("tool")
+        or event.get("tool_call_id")
+        or event.get("toolCallId")
+        or event.get("call_id")
+        or event.get("callId")
+    )
+    if (event_name in {"tool.started", "tool.completed"} and has_tool_identity) or event.get("tool"):
+        tool = str(event.get("tool") or "tool").strip() or "tool"
+        return {
+            "id": f"bridge_tool_{timeline_ref_name(bridge_event_tool_key(event, index))}",
+            "topic": "run-hermes",
+            "kind": "tool",
+            "label": tool,
+            "status": bridge_event_tool_status(event),
+            "detail": bridge_event_summary(event) or event_name,
+            "meta": event_name,
+            "arguments": bridge_event_tool_arguments(event),
+            "preview": bridge_event_preview(event),
+        }
+    raw_status = str(event.get("status") or "").lower()
+    status = "running"
+    if event_name.endswith(".completed") or raw_status in {"completed", "complete", "succeeded", "success"}:
+        status = "done"
+    if event_name.endswith(".failed") or raw_status in {"failed", "failure", "error"} or event.get("error"):
+        status = "error"
+    return {
+        "id": f"bridge_event_{timeline_ref_name(event_name)}",
+        "topic": "run-hermes",
+        "kind": "trace",
+        "label": f"Hermes: {event_name}",
+        "status": status,
+        "detail": bridge_event_summary(event),
+        "meta": str(event.get("status") or event.get("timestamp") or ""),
+        "preview": compact_json(event, 900),
+    }
+
+
+def bridge_trace_from_task(task: dict[str, Any]) -> dict[str, Any]:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    compact_steps: list[dict[str, Any]] = []
+    tools_by_key: dict[str, dict[str, Any]] = {}
+    reasoning_text = str(result.get("thinking_stream") or "")
+    for index, event in enumerate(events[:36], 1):
+        if not isinstance(event, dict):
+            continue
+        event_name = bridge_event_name(event)
+        if event_name in {"message.delta", "response.output_text.delta"}:
+            continue
+        if event_name in {"tool.started", "tool.completed"} or event.get("tool"):
+            key = bridge_event_tool_key(event, index)
+            tools_by_key[key] = {
+                "id": key,
+                "name": str(event.get("tool") or "tool"),
+                "type": event_name,
+                "status": bridge_event_tool_status(event),
+                "arguments": compact_json(event.get("args") or event.get("arguments") or event.get("preview") or {}, 900),
+                "summary": bridge_event_summary(event),
+            }
+            continue
+        compact_steps.append({
+            "index": index,
+            "kind": event_name,
+            "status": str(event.get("status") or ""),
+            "summary": bridge_event_summary(event),
+            "tool": str(event.get("tool") or ""),
+            "timestamp": event.get("timestamp") or "",
+        })
+        if event_name in {"reasoning.available", "reasoning.delta", "thinking.delta"}:
+            reasoning_text += str(event.get("text") or event.get("delta") or "")
+    if not compact_steps and result.get("last_event"):
+        compact_steps.append({
+            "index": 1,
+            "kind": str(result.get("last_event")),
+            "status": str(result.get("run_status") or task.get("status") or ""),
+            "summary": str(result.get("response") or "")[:240],
+            "tool": "",
+            "timestamp": task.get("updated_at") or "",
+        })
+    return {
+        "schema": "hermes.wasm_agent.bridge_trace.v1",
+        "id": str(result.get("run_id") or task.get("task_id") or ""),
+        "model": str(result.get("model_request") or ""),
+        "finish_reason": str(task.get("status") or result.get("run_status") or ""),
+        "reasoning_summary": summarize_reasoning_surface(reasoning_text, ""),
+        "tool_calls": list(tools_by_key.values())[:24],
+        "steps": compact_steps[:24],
+    }
+
+
+def summarize_reasoning_surface(raw_reasoning: str, explicit_summary: str = "") -> str:
+    if explicit_summary:
+        return clipped(explicit_summary, 900)
+    if raw_reasoning:
+        return (
+            f"Provider returned {len(raw_reasoning)} characters of reasoning content. "
+            "Raw hidden reasoning is not replayed here; use the bridge tool-call rows and final answer trace for the operational path."
+        )
+    return ""
+
+
+def bridge_trace_from_response(data: dict[str, Any]) -> dict[str, Any]:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message_obj = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    raw_reasoning = (
+        provider_text_field(message_obj, ("reasoning", "reasoning_content", "thoughts"))
+        or provider_text_field(choice, ("reasoning", "reasoning_content", "thoughts"))
+        or provider_text_field(data, ("reasoning", "reasoning_content", "thoughts"))
+    )
+    explicit_summary = (
+        provider_text_field(message_obj, ("reasoning_summary", "summary"))
+        or provider_text_field(choice, ("reasoning_summary", "summary"))
+        or provider_text_field(data, ("reasoning_summary", "summary"))
+    )
+    steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+    compact_steps: list[dict[str, Any]] = []
+    step_tool_calls: list[Any] = []
+    for index, step in enumerate(steps[:18], 1):
+        if not isinstance(step, dict):
+            compact_steps.append({"index": index, "kind": "step", "summary": clipped(str(step), 240)})
+            continue
+        step_calls = step.get("tool_calls") if isinstance(step.get("tool_calls"), list) else []
+        step_tool_calls.extend(step_calls)
+        compact_steps.append(
+            {
+                "index": index,
+                "kind": str(step.get("type") or step.get("kind") or "step"),
+                "status": str(step.get("status") or ""),
+                "summary": clipped(str(step.get("summary") or step.get("message") or step.get("name") or ""), 360),
+                "tool_call_count": len(step_calls),
+            }
+        )
+    tool_calls = collect_bridge_tool_calls(
+        message_obj.get("tool_calls"),
+        choice.get("tool_calls"),
+        data.get("tool_calls"),
+        step_tool_calls,
+    )
+    return {
+        "schema": "hermes.wasm_agent.bridge_trace.v1",
+        "id": str(data.get("id") or ""),
+        "model": str(data.get("model") or message_obj.get("model") or ""),
+        "finish_reason": str(choice.get("finish_reason") or ""),
+        "reasoning_summary": summarize_reasoning_surface(raw_reasoning, explicit_summary),
+        "tool_calls": tool_calls,
+        "steps": compact_steps,
+    }
+
+
+def bridge_trace_action_events(trace: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not trace:
+        return []
+    actions: list[dict[str, Any]] = []
+    steps = trace.get("steps") if isinstance(trace.get("steps"), list) else []
+    if steps:
+        actions.append({
+            "id": "bridge_steps",
+            "topic": "run-hermes",
+            "kind": "trace",
+            "label": "Hermes backend trace",
+            "status": "done",
+            "detail": f"{len(steps)} backend events",
+            "meta": trace.get("model") or "bridge",
+            "preview": compact_json(steps, 1200),
+        })
+        for index, step in enumerate(steps[:12], 1):
+            if not isinstance(step, dict):
+                continue
+            kind = str(step.get("kind") or "event")
+            actions.append({
+                "id": f"bridge_event_{index}_{timeline_ref_name(kind)}",
+                "topic": "run-hermes",
+                "kind": "trace",
+                "label": f"Hermes event: {kind}",
+                "status": "done",
+                "detail": clipped(str(step.get("summary") or step.get("status") or ""), 180),
+                "meta": str(step.get("tool") or step.get("timestamp") or ""),
+                "preview": compact_json(step, 900),
+            })
+    tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
+    for index, call in enumerate(tool_calls[:12], 1):
+        call_id = str(call.get("id") or call.get("name") or f"tool_{index}")
+        actions.append({
+            "id": f"bridge_tool_{timeline_ref_name(call_id)}",
+            "topic": "run-hermes",
+            "kind": "tool",
+            "label": str(call.get("name") or "tool"),
+            "status": str(call.get("status") or "done"),
+            "detail": str(call.get("type") or "tool_call"),
+            "meta": call_id,
+            "arguments": {"tool": call.get("name"), "source": "target node trace"},
+            "preview": str(call.get("summary") or call.get("arguments") or ""),
+        })
+    reasoning_summary = str(trace.get("reasoning_summary") or "")
+    if reasoning_summary:
+        actions.append({
+            "id": "bridge_reasoning_summary",
+            "topic": "run-hermes",
+            "kind": "trace",
+            "label": "Bridge reasoning summary",
+            "status": "done",
+            "detail": trace.get("finish_reason") or "provider trace",
+            "meta": trace.get("model") or "bridge",
+            "preview": reasoning_summary,
+        })
+    return actions
+
+
+def call_agent_bridge_runs(
+    server: WasmAgentServer,
+    *,
+    system_content: str,
+    text_content: str,
+    target_node: str,
+    model_id: str,
+    selected_model: dict[str, str] | None,
+    timeout_sec: float,
+    action_callback: Any | None = None,
+) -> tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]:
+    prompt = f"{system_content}\n\n{text_content}".strip()
+    body: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model_id,
+        "timeout_sec": timeout_sec,
+        "stream_events": True,
+    }
+    provider = str((selected_model or {}).get("provider") or "").strip()
+    if provider:
+        body["provider"] = provider
+    if action_callback:
+        action_callback({
+            "id": "bridge_run",
+            "topic": "run-hermes",
+            "kind": "model",
+            "label": "Hermes run",
+            "status": "running",
+            "detail": f"{target_node} / {model_id}",
+            "meta": "Runs API",
+        })
+    request = Request(
+        f"{server.bridge_url}/nodes/{quote(target_node, safe='')}/prompt",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=timeout_sec + 15) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    task = data.get("task") if isinstance(data.get("task"), dict) else {}
+    if not task:
+        raise BrowserError("bridge_runs_empty", "The bridge did not return a Hermes task.")
+    task_id = str(task.get("task_id") or "").strip()
+    if task_id and str(task.get("status") or "").lower() in {"running", "queued", "submitted"}:
+        seen_events = 0
+        deadline = time.monotonic() + timeout_sec
+        poll_delay = 0.35
+        while time.monotonic() < deadline:
+            poll_request = Request(
+                f"{server.bridge_url}/tasks/{quote(task_id, safe='')}",
+                headers={"Accept": "application/json"},
+                method="GET",
+            )
+            with urlopen(poll_request, timeout=min(12.0, max(3.0, deadline - time.monotonic()))) as poll_response:
+                poll_data = json.loads(poll_response.read().decode("utf-8"))
+            polled_task = poll_data.get("task") if isinstance(poll_data.get("task"), dict) else {}
+            if polled_task:
+                task = polled_task
+            result = task.get("result") if isinstance(task.get("result"), dict) else {}
+            events = result.get("events") if isinstance(result.get("events"), list) else []
+            if action_callback:
+                for event_index, event in enumerate(events[seen_events:], seen_events):
+                    action = bridge_run_event_action(event, event_index)
+                    if action:
+                        action_callback(action)
+                seen_events = len(events)
+                run_status = str(result.get("run_status") or task.get("status") or "running")
+                action_callback({
+                    "id": "bridge_run",
+                    "topic": "run-hermes",
+                    "kind": "model",
+                    "label": "Hermes run",
+                    "status": "done" if str(task.get("status") or "").lower() in {"completed", "succeeded"} else "running",
+                    "detail": f"{run_status} / {len(events)} events",
+                    "meta": str(result.get("last_event") or task_id),
+                })
+            if str(task.get("status") or "").lower() not in {"running", "queued", "submitted"}:
+                break
+            time.sleep(poll_delay)
+            poll_delay = min(1.4, poll_delay * 1.25)
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    if str(task.get("status") or "").lower() not in {"completed", "succeeded"}:
+        error = task.get("error") if isinstance(task.get("error"), dict) else {}
+        if action_callback:
+            action_callback({
+                "id": "bridge_run",
+                "topic": "run-hermes",
+                "kind": "model",
+                "label": "Hermes run",
+                "status": "error",
+                "detail": str(error.get("message") or "Hermes Runs API task did not complete."),
+                "meta": task_id,
+            })
+        raise BrowserError(
+            str(error.get("code") or "bridge_runs_failed"),
+            str(error.get("message") or "Hermes Runs API task did not complete."),
+            status=HTTPStatus.BAD_GATEWAY,
+        )
+    reply = str(result.get("response") or result.get("output") or result.get("final_response") or "").strip()
+    if not reply:
+        reply = "The Hermes Runs API returned an empty assistant response."
+    if action_callback:
+        action_callback({
+            "id": "bridge_run",
+            "topic": "run-hermes",
+            "kind": "model",
+            "label": "Hermes run",
+            "status": "done",
+            "detail": str(result.get("last_event") or "completed"),
+            "meta": task_id,
+        })
+    return reply, "bridge_runs", bridge_task_usage(task), bridge_trace_from_task(task)
+
+
 def call_agent_bridge(
     server: WasmAgentServer,
     message: str,
@@ -4171,13 +6742,17 @@ def call_agent_bridge(
     selected_model: dict[str, str] | None = None,
     images: list[dict[str, Any]] | None = None,
     image_card_focus: bool = False,
-) -> tuple[str, str, dict[str, Any] | None]:
+    mutation_policy: dict[str, Any] | None = None,
+    action_callback: Any | None = None,
+) -> tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]:
     timeout_sec = agent_bridge_timeout_sec()
     model_id = str((selected_model or {}).get("id") or "embedded-hermes")
     context_label = "Image-card tool results" if image_card_focus else "Tool results"
     text_content = (
         f"Recent transcript:\n{json.dumps(transcript, ensure_ascii=True)}\n\n"
         f"{context_label}:\n{json.dumps(tools, ensure_ascii=True)}\n\n"
+        f"Mutation block spec:\n{json.dumps(mutation_block_spec(), ensure_ascii=True)}\n\n"
+        f"WIS/userland patch spec:\n{json.dumps(wis_patch_block_spec(), ensure_ascii=True)}\n\n"
         f"User message:\n{message}"
     )
     if images:
@@ -4207,8 +6782,34 @@ def call_agent_bridge(
         "When the user asks about the last clicked UI button, use observation.requested_click_context.last_non_agent_click "
         "instead of assistant open/send events. "
         "When the user asks to evolve the app, produce a concrete, small implementation brief: "
-        "files, behavior, verification, and whether it needs outer-orchestrator application."
+        "files, behavior, verification, and whether it needs adapter-applied mutation."
     )
+    if mutation_policy:
+        scope = str(mutation_policy.get("scope") or "")
+        system_content += (
+            " Mutation policy for this turn: "
+            f"{json.dumps(mutation_policy, ensure_ascii=True)}. "
+            "Respect this boundary exactly. Do not invent source filenames; use app_map paths when present. "
+        )
+        if scope == "global-orchestrator":
+            system_content += (
+                " For small wasm-agent core/source edits, request the change by appending one fenced json block with schema "
+                "`hermes.wasm_agent.mutation.v1` using only exact `replace` or anchored `append` operations. "
+                "Append operations must include a non-empty `insert` string, and may include an `after` anchor. "
+                "Never send an append operation without `insert`; use `replace` when changing existing text. "
+                "For userland components, spaces, automations, dashboards, or games, prefer a fenced json block with schema "
+                f"`{WIS_PATCH_SCHEMA}` so the adapter patches a WIS artifact instead of core firmware. "
+            )
+        else:
+            system_content += (
+                " Do not emit core source mutations. For userland components, spaces, automations, dashboards, or games, "
+                f"append one fenced json block with schema `{WIS_PATCH_SCHEMA}`. "
+                "If the user asks for core wasm-agent behavior, explain that it must be delegated to the admin orchestrator. "
+            )
+        system_content += (
+            " Do not say the change was applied; the adapter will append an applied-or-denied summary after validating the block. "
+            "If exact source text or artifact structure is unknown, ask for the smallest next inspect step instead of guessing."
+        )
     if image_card_focus:
         system_content += (
             " This is an attached-image interpretation turn. Use the image_card metadata as the primary source. "
@@ -4261,6 +6862,20 @@ def call_agent_bridge(
         )
         payload = build_payload(user_content)
         payload_data = json.dumps(payload).encode("utf-8")
+    if not images:
+        try:
+            return call_agent_bridge_runs(
+                server,
+                system_content=system_content,
+                text_content=text_content,
+                target_node=target_node,
+                model_id=model_id,
+                selected_model=selected_model,
+                timeout_sec=timeout_sec,
+                action_callback=action_callback,
+            )
+        except Exception:
+            pass
     request = Request(
         f"{server.bridge_url}/v1/chat/completions",
         data=payload_data,
@@ -4276,13 +6891,13 @@ def call_agent_bridge(
             "completion_tokens": 0,
             "total_tokens": 0,
             "source": "local_fallback",
-        }
+        }, None
     choices = data.get("choices") if isinstance(data.get("choices"), list) else []
-    usage = data.get("usage") if isinstance(data.get("usage"), dict) else None
+    usage = token_usage_from_payloads(data, source="bridge_model")
     if not choices:
-        return "The bridge returned no assistant choices.", "bridge_empty", usage
+        return "The bridge returned no assistant choices.", "bridge_empty", usage, bridge_trace_from_response(data)
     message_obj = choices[0].get("message") if isinstance(choices[0], dict) else {}
-    return str(message_obj.get("content") or "The bridge returned an empty assistant response."), "bridge_model", usage
+    return str(message_obj.get("content") or "The bridge returned an empty assistant response."), "bridge_model", usage, bridge_trace_from_response(data)
 
 
 def attachment_cards_from_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -4428,8 +7043,8 @@ def deterministic_agent_reply(message: str, tools: list[dict[str, Any]], reason:
             "Host Browser stream, Observation, embedded assistant, Timeline recovery, and browser-built image cards "
             "that let text-only nodes reason over compact visual facts.\n\n"
             "What I can do from inside the app now: inspect the latest observation, read allowlisted files, "
-            "search the repo, check git status, and run the wasm-agent doctor. Mutation tools are intentionally "
-            "future work and should be confirmation-first.\n\n"
+            "search the repo, check git status, run the wasm-agent doctor, and request guarded exact-match "
+            "source mutations through the adapter mutation block.\n\n"
             f"Tools used: {tool_names}."
         )
     if (
@@ -4483,8 +7098,44 @@ def embedded_agent_message(
     mode = str(body.get("mode") or "auto").strip().lower()
     if mode not in {"auto", "local", "bridge"}:
         raise BrowserError("agent_invalid_mode", "Agent mode must be auto, local, or bridge.")
-    target_node = str(body.get("target_node") or body.get("node_id") or "orchestrator").strip() or "orchestrator"
+    target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or default_agent_target_node(user))
+    ensure_agent_target_allowed(user, target_node)
     selected_model = requested_agent_model(body)
+    mutation_policy = agent_mutation_policy(server, user, target_node)
+    def emit_step(
+        action_id: str,
+        label: str,
+        status: str,
+        detail: str = "",
+        *,
+        topic: str = "run-wasm",
+        kind: str = "step",
+        meta: str = "",
+        preview: str = "",
+    ) -> None:
+        if action_callback:
+            action_callback({
+                "id": action_id,
+                "topic": topic,
+                "kind": kind,
+                "label": label,
+                "status": status,
+                "detail": detail,
+                "meta": meta,
+                "preview": preview,
+            })
+
+    emit_step("turn_intake", "Receive chat turn", "done", f"{target_node} / {mode}", kind="turn")
+    emit_step(
+        "mutation_policy",
+        "Apply mutation policy",
+        "done",
+        str(mutation_policy.get("scope") or "scope"),
+        kind="policy",
+        meta="write boundary",
+        preview=compact_json(mutation_policy, 900),
+    )
+    emit_step("collect_context", "Collect context", "running", "observation, tools, transcript", kind="context")
     raw_attachment_present = bool(body.get("images") or body.get("attachments"))
     image_focused_turn = raw_attachment_present and image_question_hint(message)
     before_tree = safe_worktree_tree_sha(server)
@@ -4519,8 +7170,10 @@ def embedded_agent_message(
         tools.append(attachment_manifest)
         if action_callback:
             action_callback(tool_action_event(attachment_manifest, len(tools)))
+    emit_step("collect_context", "Collect context", "done", f"{len(tools)} tools / {len(compact_transcript(body))} transcript turns", kind="context")
     image_count = len(images or []) + len(attachment_summaries)
     lowered = message.lower()
+    bridge_trace: dict[str, Any] | None = None
     if mode == "local":
         reply = deterministic_agent_reply(message, tools, "Answered in local-only mode")
         source = "local_deterministic"
@@ -4541,7 +7194,7 @@ def embedded_agent_message(
                 "meta": (selected_model or {}).get("id") or "waiting",
             })
         focus_tools = redact_image_card_focus_tools([attachment_manifest] if attachment_manifest else tools)
-        reply, source, token_usage = call_agent_bridge(
+        reply, source, token_usage, bridge_trace = call_agent_bridge(
             server,
             message,
             focus_tools,
@@ -4550,6 +7203,8 @@ def embedded_agent_message(
             selected_model=selected_model,
             images=None,
             image_card_focus=True,
+            mutation_policy=mutation_policy,
+            action_callback=action_callback,
         )
         if source.startswith("local_"):
             reply = deterministic_agent_reply(
@@ -4582,13 +7237,14 @@ def embedded_agent_message(
         if action_callback:
             action_callback({
                 "id": "node_reply",
+                "topic": "run-hermes",
                 "kind": "model",
-                "label": "Receive final reply",
+                "label": "Final response",
                 "status": "running",
                 "detail": f"{target_node} / {mode}",
                 "meta": (selected_model or {}).get("id") or "waiting",
             })
-        reply, source, token_usage = call_agent_bridge(
+        reply, source, token_usage, bridge_trace = call_agent_bridge(
             server,
             message,
             tools,
@@ -4596,20 +7252,98 @@ def embedded_agent_message(
             target_node,
             selected_model=selected_model,
             images=bridge_images,
+            mutation_policy=mutation_policy,
+            action_callback=action_callback,
         )
+    reply = correct_negative_symbol_reply(server, message, reply)
+    emit_step("decode_hermes_response", "Decode Hermes response", "done", source, topic="run-hermes", kind="trace")
+    space_id = safe_state_id(str(body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home")
+    wis_patch_result: dict[str, Any] | None = None
+    reply, wis_patch_result = apply_agent_wis_patches_from_reply(
+        server,
+        reply,
+        user=user,
+        space_id=space_id,
+    )
+    if action_callback and wis_patch_result:
+        applied = bool(wis_patch_result.get("applied"))
+        patches = wis_patch_result.get("patches") if isinstance(wis_patch_result.get("patches"), list) else []
+        action_callback({
+            "id": "apply_wis_patch",
+            "topic": "run-wasm",
+            "kind": "mutation",
+            "label": "Apply WIS/userland patch",
+            "status": "done" if applied else "error",
+            "detail": (
+                f"{len(patches)} artifacts / {wis_patch_result.get('operations', 0)} operations"
+                if applied
+                else action_denial_detail(wis_patch_result, "patch denied")
+            ),
+            "meta": "adapter",
+            "preview": compact_json(wis_patch_result, 1200),
+            "arguments": {"schema": WIS_PATCH_SCHEMA},
+        })
+    mutation_result: dict[str, Any] | None = None
+    reply, mutation_result = apply_agent_mutations_from_reply(
+        server,
+        reply,
+        user=user,
+        mutation_policy=mutation_policy,
+    )
+    if action_callback and mutation_result:
+        applied = bool(mutation_result.get("applied"))
+        action_callback({
+            "id": "apply_source_mutation",
+            "topic": "run-wasm",
+            "kind": "mutation",
+            "label": "Apply source mutation",
+            "status": "done" if applied else "error",
+            "detail": (
+                f"{len(mutation_result.get('files') if isinstance(mutation_result.get('files'), list) else [])} files / "
+                f"{mutation_result.get('operations', 0)} operations"
+                if applied
+                else action_denial_detail(mutation_result, "mutation denied")
+            ),
+            "meta": "adapter",
+            "preview": compact_json(mutation_result, 1200),
+            "arguments": {"schema": "hermes.wasm_agent.mutation.v1"},
+        })
     duration_ms = int((time.monotonic() - started) * 1000)
+    token_usage = normalize_token_usage(token_usage, source=source) or token_usage
     context_bytes = sum(text_size(tool) for tool in tools)
     after_tree = safe_worktree_tree_sha(server)
     files = changed_files_between_trees(server, before_tree, after_tree)
     checkpoint_summary = run_checkpoint_summary(message)
+    before_checkpoint = (
+        create_timeline_checkpoint(
+            server,
+            label=timeline_ref_name(f"before-chat-{target_node}-{checkpoint_summary}"),
+            message=f"wasm-agent before chat on {target_node}: {checkpoint_summary}",
+            automatic=True,
+            user=user,
+            space_id=space_id,
+            tree_sha=before_tree,
+            extra_metadata={
+                "phase": "before_run",
+                "after_tree": after_tree,
+                "changed_files": files,
+                "scope": timeline_scope_for_paths(server, [str(item.get("path") or "") for item in files], user),
+            },
+        )
+        if files and before_tree
+        else None
+    )
     auto_checkpoint = (
         timeline_auto_checkpoint(
             server,
             f"chat-{target_node}-{checkpoint_summary}",
             message=f"wasm-agent chat on {target_node}: {checkpoint_summary}",
             tree_sha=after_tree,
+            before_tree=before_tree,
+            before_ref=before_checkpoint.get("ref") if before_checkpoint else None,
+            changed_files=files,
             user=user,
-            space_id=safe_state_id(str(body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home"),
+            space_id=space_id,
         )
         if files
         else None
@@ -4631,7 +7365,12 @@ def embedded_agent_message(
             duration_ms=duration_ms,
             token_usage=token_usage,
             auto_checkpoint=auto_checkpoint,
+            before_checkpoint=before_checkpoint,
             changed=files,
+            bridge_trace=bridge_trace,
+            mutation_policy=mutation_policy,
+            wis_patch_result=wis_patch_result,
+            mutation_result=mutation_result,
         ),
         "diagnostics": {
             "source": source,
@@ -4646,15 +7385,26 @@ def embedded_agent_message(
             "token_usage": token_usage,
             "selected_model": selected_model,
             "model_tokens_avoided": source.startswith("local_"),
+            "bridge_trace": bridge_trace,
+            "mutation_policy": mutation_policy,
+            "wis_patch_result": wis_patch_result,
+            "mutation_result": mutation_result,
+            "changed_files_complete": True,
             "attachments": {
                 "received": image_count,
                 "raw_forwarded_to_bridge": len(bridge_images),
                 "summarized": max(0, image_count - len(bridge_images)),
             },
+            "before_checkpoint": {
+                "ref": before_checkpoint.get("ref"),
+                "sha": str(before_checkpoint.get("sha") or "")[:7],
+                "label": before_checkpoint.get("label"),
+            } if before_checkpoint else None,
             "auto_checkpoint": {
                 "ref": auto_checkpoint.get("ref"),
                 "sha": str(auto_checkpoint.get("sha") or "")[:7],
                 "label": auto_checkpoint.get("label"),
+                "before_ref": auto_checkpoint.get("before_ref"),
             } if auto_checkpoint else None,
         },
         "changed_files": files,
@@ -4681,6 +7431,7 @@ def stream_embedded_agent_message(
 
     events: "queue.Queue[dict[str, Any]]" = queue.Queue()
     started = time.monotonic()
+    last_action_label = "Receive chat turn"
 
     def emit_action(action: dict[str, Any]) -> None:
         events.put({"type": "action", "action": action})
@@ -4704,18 +7455,23 @@ def stream_embedded_agent_message(
             elapsed_ms = int((time.monotonic() - started) * 1000)
             payload = {
                 "type": "heartbeat",
-                "phase": "Waiting for Hermes",
-                "message": "Hermes is still working...",
+                "phase": "Hermes bridge active",
+                "message": f"Hermes is still working after {elapsed_ms // 1000}s. Latest step: {last_action_label}.",
                 "elapsed_ms": elapsed_ms,
                 "action": {
                     "id": "node_reply",
+                    "topic": "run-hermes",
                     "kind": "model",
-                    "label": "Waiting for Hermes",
+                    "label": "Hermes bridge active",
                     "status": "running",
-                    "detail": f"{elapsed_ms // 1000}s elapsed",
+                    "detail": f"{elapsed_ms // 1000}s elapsed / latest: {last_action_label}",
                     "meta": "bridge active",
                 },
             }
+        else:
+            action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+            if action.get("label"):
+                last_action_label = clipped(str(action.get("label") or ""), 80)
         try:
             write_ndjson(handler, payload)
         except (BrokenPipeError, ConnectionResetError):

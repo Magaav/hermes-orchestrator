@@ -17,9 +17,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   listed for visibility, but user controls must not disable them.
 - Modules may be hierarchical. The `spaces` module owns Home/Admin/user space
   identity and space routing. A space can expose child modules as pages,
-  actions, apps, widgets, or widget-internal capabilities. Admin and user spaces
-  can map app/widget modules onto the canvas; Home exposes account-level core
-  modules as page actions instead of canvas apps.
+  actions, apps, widgets, or widget-internal capabilities. Admin maps the
+  built-in app/widget modules onto the canvas; user-created spaces start empty
+  and receive apps only through an explicit later mapping/porting flow. Home
+  exposes account-level core modules as page actions instead of canvas apps.
 - Module boundaries should prevent accidental breakage across the tree. A
   child module must not assume it can mutate another module's state directly.
   Cross-module behavior should use explicit registry metadata, mapped ids,
@@ -89,7 +90,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - The space title sits on the same top edge as the fixed config button and its
   left edge aligns with the inner icon edge used by app buttons. The title-row
   organize control and fixed config control use the same `34px` square
-  icon-button size.
+  icon-button size. User-space shells must expose the real active space id in
+  `data-panel` and use a separate shell-kind flag for shared layout styling, so
+  diagnostics and top-level labels show the space name/id instead of the generic
+  `user-space` category.
 - Admin is a fixed launcher space for operational surfaces. It uses the same
   app-layer and widget-layer pattern as other working spaces, has the crown
   launcher icon, shows the `space-admin` title, and must not be stored or
@@ -98,7 +102,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   draggable app buttons and opened widgets, with widget layout persisted in
   browser local storage by default. Do not POST app/widget geometry, area, or
   distance to the server unless a premium sync/backup mode is explicitly
-  implemented.
+  implemented. Launcher entries for user-created spaces are icon-only; the
+  visible rail must not render ordinal labels like `S1`.
 - The shell must not reintroduce the removed header/status chrome, command
   form, canvas label, summary panel, or dock.
 - Home-level actions sit on the black homespace itself. The primary action may
@@ -115,14 +120,26 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   canvas, not the scrollable board contents. It is layered above app icons and
   below widgets. It opens the space-local Timeline lane; Home uses the
   account-global `home` timeline. Timeline is a fixed config action, not an
-  app-layer icon. Space config also owns a draggable Space area line; increasing
-  area expands the scrollable board width and height for that space without
+  app-layer icon. Timeline stepback is confirmation-gated: chat turns that
+  change files record a before-run and after-run checkpoint, and stepback
+  restores the before-run ref after first writing a `before_stepback`
+  checkpoint of the current tree. Non-admin users may only step back paths
+  inside their account-owned sandbox; core firmware/source stepback requires
+  admin orchestrator authority. Space config also owns a minimap-style Space
+  area map; the white viewport border shows the visible canvas inside the
+  configured per-space area. Dragging or typing changes only a draft inside the
+  config modal; the actual board geometry and persisted metadata update only
+  when Apply is clicked. Applied areas can resize up to `2000 x 2000px` without
   resizing existing logical widget geometry. Space config also owns a draggable
   Space distance line that scales app icons and opened widgets visually without
   rewriting their saved logical positions. Desktop wheel over the empty canvas
   must adjust Space distance around the cursor point rather than native-scrolling
-  the hidden board. Mobile two-finger pinch must adjust Space distance around
-  the midpoint between both touches. During wheel or pinch zoom, the top-right
+  the hidden board. Wheel input that starts inside a widget must remain local to
+  that widget: scrollable widget content may move, but the event must not chain
+  into the space viewport. Widget content must reset the board grab cursor;
+  only draggable widget chrome and resize handles should use drag/resize
+  cursors. Mobile two-finger pinch must adjust Space distance
+  around the midpoint between both touches. During wheel or pinch zoom, the top-right
   config button anchor must show the current zoom value. The zoom value may
   appear at the same time as the panning minimap, but it must sit on the higher
   z layer. The pinch hot path must avoid full widget layout, minimap rendering,
@@ -131,12 +148,13 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   layout/save pass after the gesture settles. Both slider knobs must remain
   within the line boundaries at minimum and maximum values.
 - Apps are account/user entities that are mapped into spaces. Home lists core
-  modules in its command strip; Admin and user spaces map their own working
-  apps. A widget must stay hidden in a space unless that app is mapped into the
-  active space or is promoted there by a later porting flow. Per-space widget
-  layout must be sanitized against that mapping so Home-only state cannot be
-  saved into user-created spaces. Connected Devices is a core module page, not
-  a canvas app or widget.
+  modules in its command strip; Admin maps its working apps; user-created spaces
+  map no Admin apps by default, even for admin accounts. A widget must stay
+  hidden in a space unless that app is mapped into the active space or is
+  promoted there by a later porting flow. Per-space widget layout must be
+  sanitized against that mapping so Admin/Home-only state cannot be saved into
+  user-created spaces. Connected Devices is a core module page, not a canvas app
+  or widget.
 - App buttons can be dragged anywhere inside the app layer. Opening an app shows
   its widget above the app layer; minimizing hides only the widget and leaves
   the app button available. App buttons snap to the nearest non-overlapping
@@ -171,8 +189,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   policy, and shareable artifact policy.
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
-  shareable/backupable/marketplace-ready, but app positions, widget positions,
-  sizes, Space area, and Space distance stay client-local unless premium sync is explicit.
+  shareable/backupable/marketplace-ready. App positions, widget positions,
+  sizes, and Space distance stay client-local unless premium sync is explicit;
+  user-space area is per-space metadata so shared spaces keep the same board
+  size across devices.
 - The Resources Monitor polls live host resource data while it is open and
   renders one metric row per line in this order: Nodes, Disk, RAM, CPU,
   Processes, Uptime. RAM and Disk use compact `usedGB/totalGB` values.
@@ -183,6 +203,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   the topology widget and persist their positions with the widget layout. The
   node statistics balloon opens from that menu, remains open while changing
   `hour`/`daily`/`weekly`/`monthly`, and can be moved by dragging its header.
+  Working state must combine embedded-chat run hints, fresh active bridge tasks,
+  security-loop tasks, token deltas, and fresh node-reported `llm_active` so
+  orchestrator work is visible even when it starts from chat, cron, or another
+  client. Stale bridge activity or days-old `running` tasks must age out before
+  painting a node yellow.
 - Admin includes the Security Loop widget and Security side-panel view for the
   platform-level `hermes-attack` / `hermes-defense` loop. It must show concise
   chronological findings sorted by score, compact evidence previews, status and
@@ -203,6 +228,38 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   desktop Escape, and manual minimize/close controls must all close the topmost
   chat, modal, menu, or popover through the same path before normal route
   history is consumed.
+
+## WIS Surface
+
+- WIS is a wasm-agent module and widget, not a Host Browser mode and not an
+  iframe/webview. It must stay under `plugins/wasm-agent/public/modules/wis/`
+  plus shell wiring inside `plugins/wasm-agent`.
+- The first WIS slice is allowed to simulate a tiny browser-like engine, but it
+  must label that boundary honestly: DOM-like tree/state, navigation, events,
+  render loop, sandbox permissions, and agent-readable surface state are real;
+  network loading, HTML/CSS parsing, JavaScript execution, layout engines, and
+  security origins are not real browser implementations yet.
+- WIS automation must use structured state and actions. The supported hook is
+  `window.wasmAgentWis.inspect()`, `window.wasmAgentWis.act(...)`, and
+  `window.wasmAgentWis.exportSpace()`, and the Observation snapshot should carry
+  the same surface state so embedded agents do not guess from pixels.
+- Userland WIS evolution must use validated `hermes.wasm_agent.wis.patch.v1`
+  payloads, not raw source writes. The server-side patcher may update
+  account-owned or joined shared-space WIS artifacts, while core wasm-agent
+  firmware/source remains protected unless the active chat turn has admin
+  orchestrator authority.
+- Shared spaces must have explicit owner/member records and join codes under
+  wasm-agent state. Joining a space should create a local launcher entry and
+  allow collaborative WIS/component/automation evolution without granting access
+  to protected core source.
+- The launcher owns shared-space entry UX: right-click a user space to rename,
+  share, copy its id, or delete it; Space-home owns Join Space and must accept a
+  pasted invite URL as well as a raw join code. Closing context menus must not
+  drive browser history back to Space-home.
+- The initial artifact-space should remain local and portable. It must export a
+  `hermes.wasm_agent.wis.space.v1` definition with explicit no-backend and
+  no-iframe guarantees, and it must not add server endpoints or patch
+  `hermes-space-ui`.
 
 ## Button Icons
 
@@ -238,10 +295,31 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   answer text below the chain.
 - Action rows must be meaningful: show the action kind, status, concise detail,
   and an expandable arguments/result preview when the adapter has one.
+  Do not render empty media rows on text-only turns. Bridge/provider traces may
+  add live Hermes Runs API event and tool-call rows; hidden raw reasoning should
+  be summarized as availability/provenance, not replayed verbatim. Each row
+  should carry a compact visual icon. Completed topic sections should close, and
+  `tool.started` / `tool.completed` must update one tool row's state rather than
+  rendering as two separate rows. Tool rows should show the tool name once; do
+  not repeat `Tool:` plus a `tool` badge plus raw lifecycle text such as
+  `tool.completed`.
 - During active turns, local adapter action events should stream into the open
   chain before the final response collapses the chain. Stream heartbeats count
   as activity and should keep long Hermes/model waits visible rather than
-  letting the browser apply a total wall-clock timeout.
+  letting the browser apply a total wall-clock timeout. Heartbeats should name
+  the current/latest Hermes step instead of showing only a generic waiting
+  message.
+- Assistant transcript auto-scroll is pinned-bottom only. Live updates may
+  grow the chat, but if the user has scrolled upward to inspect a topic or diff,
+  that manual viewport position wins until they scroll back to the bottom.
+- Changed-file rows should expose the exact per-file changed hunks inside an
+  inner diff balloon opened from the file path, not a whole-file dump, raw git
+  metadata, or an ambient worktree diff. The balloon should show only visible
+  `was` / `now` lines with red/green contrast.
+- Source mutation blocks must be exact and small. `replace` uses `find` and
+  `replace`; `append` requires a non-empty `insert` string and may use an
+  `after` anchor. Invalid append blocks should be denied with a visible policy
+  reason, not silently ignored.
 - Local development HMR must reload the client automatically for JavaScript,
   module descriptor, HTML, manifest, and server-source changes, with reloads
   deferred only while an assistant turn is actively running.
@@ -249,8 +327,9 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   send controls live in the row below the text area. The model selector is the
   one-place control for choosing default/current, selecting a saved model,
   adding a model id, or removing the active saved model from the chat list.
-  Chat model state must use assistant-owned local storage, not a widget layout
-  key that can be sanitized away when another space is active.
+  It should render compactly at about half of its track width. Chat model state
+  must use assistant-owned local storage, not a widget layout key that can be
+  sanitized away when another space is active.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned
@@ -273,7 +352,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   be cropped to likely text regions, contrast-stretched, and binarized before
   recognition. Either OCR path must remain timeout bounded and evidence-gated.
   The action chain for image turns must keep the path visible as store, decode,
-  analyze, build image card, and ask node.
+  analyze, build image card, and ask node; text-only turns must skip those media
+  rows entirely.
   Image cards must include an analyzer revision so stale PWA runtimes can be
   diagnosed from the same compact context the model sees. The backend attachment
   store should enrich stale browser cards, and current browser cards missing

@@ -117,6 +117,9 @@ def node_card(node_id: str, raw_status: dict[str, Any]) -> dict[str, Any]:
     activity = raw_status.get("_space_ui_activity")
     if not isinstance(activity, dict):
         activity = {}
+    hermes = raw_status.get("_space_ui_hermes")
+    if not isinstance(hermes, dict):
+        hermes = {}
     if running and bool(activity.get("llm_active")):
         status = "working"
     elif running:
@@ -130,6 +133,7 @@ def node_card(node_id: str, raw_status: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "running": running,
         "activity": activity,
+        "hermes": hermes,
         "runtime": {
             "type": str(raw_status.get("runtime_type") or "unknown"),
             "state_mode": str(raw_status.get("state_mode") or "unknown"),

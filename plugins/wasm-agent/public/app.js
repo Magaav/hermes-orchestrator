@@ -1,5 +1,6 @@
 import { MODULE_DEFINITIONS } from "./modules/index.js";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
+import { createWisSandbox } from "./modules/wis/engine.js";
 
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
@@ -27,14 +28,25 @@ const SPACE_PAN_MOMENTUM_SAMPLE_MS = 120;
 const SPACE_PAN_MOMENTUM_LAUNCH_MULTIPLIER = 1.08;
 const SPACE_PAN_MOMENTUM_FRAME_MS = 1000 / 60;
 const SPACE_PAN_MOMENTUM_MAX_MS = 1200;
-const CANVAS_AREA_MAX = 10;
+const CANVAS_AREA_MIN_PX = 1;
+const CANVAS_AREA_MAX_PX = 2000;
+const CANVAS_AREA_STEP_PX = 10;
 const SPACE_DISTANCE_MIN = 0.5;
 const SPACE_DISTANCE_MAX = 2;
 const SPACE_DISTANCE_STEP = 0.05;
 const RESOURCE_POLL_MS = 2500;
 const SECURITY_POLL_MS = 5000;
 const USER_EVENT_LIMIT = 160;
+const INTERACTION_TRACE_LIMIT = 96;
+const POINTER_MOVE_SAMPLE_MS = 80;
+const WHEEL_TRACE_SAMPLE_MS = 120;
+const SCROLL_TRACE_SAMPLE_MS = 180;
+const SHARED_SPACE_SYNC_POLL_MS = 2500;
+const WIS_EXPORT_PREVIEW_LIMIT = 16000;
+const NODE_ACTIVITY_FRESH_GRACE_SEC = 5;
+const BRIDGE_TASK_ACTIVE_MAX_AGE_MS = 45 * 60 * 1000;
 const DEFAULT_AGENT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
+const AGENT_CHAT_BOTTOM_EPSILON_PX = 8;
 const AGENT_MAX_IMAGES = 8;
 const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
 const AGENT_PANEL_VIEWPORT_GAP_PX = 0;
@@ -55,19 +67,22 @@ const IMAGE_ANALYZER_CACHE = new Map();
 const SCRIPT_RUNTIME_CACHE = new Map();
 const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and help evolve the app from here.";
 const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules", "security"]);
+const GLOBAL_AGENT_NODE_IDS = new Set(["admin-orchestrator", "hermes-orchestrator", "orchestrator"]);
+const AGENT_SANDBOX_NODE_ID = "account-sandbox";
 const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
 const SPACE_APP_DEFINITIONS = [
   { id: "resources", label: "Resources", short: "Res" },
   { id: "topology", label: "Topology", short: "Topo" },
   { id: "studio", label: "Studio", short: "Studio" },
   { id: "browser-proof", label: "Browser", short: "Web", module: "host-browser" },
+  { id: "wis", label: "WIS", short: "WIS", module: "wis" },
   { id: "drop-to-copy", label: "Drop", short: "Drop" },
   { id: "security-loop", label: "Security", short: "Sec", desktopOnly: true },
 ];
 const SPACE_APP_MAPPINGS = {
   home: [],
-  admin: ["resources", "topology", "studio", "browser-proof", "drop-to-copy", "security-loop"],
-  user: ["resources", "topology", "studio", "browser-proof", "drop-to-copy"],
+  admin: ["resources", "topology", "studio", "browser-proof", "wis", "drop-to-copy", "security-loop"],
+  user: [],
 };
 const FIXED_WIDGET_LAYOUT = {
   timeline: { minimized: true },
@@ -96,6 +111,19 @@ const els = {
   browserImage: document.querySelector("#browserImage"),
   browserEmpty: document.querySelector("#browserEmpty"),
   browserMeta: document.querySelector("#browserMeta"),
+  wisStatus: document.querySelector("#wisStatus"),
+  wisLocation: document.querySelector("#wisLocation"),
+  wisDocumentId: document.querySelector("#wisDocumentId"),
+  wisSurface: document.querySelector("#wisSurface"),
+  wisViewport: document.querySelector("#wisViewport"),
+  wisNodeCount: document.querySelector("#wisNodeCount"),
+  wisElementCount: document.querySelector("#wisElementCount"),
+  wisNodeList: document.querySelector("#wisNodeList"),
+  wisEventList: document.querySelector("#wisEventList"),
+  wisSandboxStatus: document.querySelector("#wisSandboxStatus"),
+  wisAutomationState: document.querySelector("#wisAutomationState"),
+  wisExportButton: document.querySelector("#wisExportButton"),
+  wisExportValue: document.querySelector("#wisExportValue"),
   spaceViewport: document.querySelector(".space-viewport"),
   spaceBoard: document.querySelector("#spaceBoard"),
   appLayer: document.querySelector("#appLayer"),
@@ -107,6 +135,7 @@ const els = {
   spaceLauncherList: document.querySelector("#spaceLauncherList"),
   addNodeButton: document.querySelector("#addNodeButton"),
   addSpaceButton: document.querySelector("#addSpaceButton"),
+  joinSpaceButton: document.querySelector("#joinSpaceButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
   spaceContextMenu: document.querySelector("#spaceContextMenu"),
@@ -115,8 +144,30 @@ const els = {
   appContextMenu: document.querySelector("#appContextMenu"),
   editAppButton: document.querySelector("#editAppButton"),
   copyAppIdButton: document.querySelector("#copyAppIdButton"),
+  editSpaceButton: document.querySelector("#editSpaceButton"),
   copySpaceIdButton: document.querySelector("#copySpaceIdButton"),
+  shareSpaceButton: document.querySelector("#shareSpaceButton"),
   deleteSpaceButton: document.querySelector("#deleteSpaceButton"),
+  editSpaceModal: document.querySelector("#editSpaceModal"),
+  editSpaceMeta: document.querySelector("#editSpaceMeta"),
+  editSpaceNameInput: document.querySelector("#editSpaceNameInput"),
+  saveEditSpaceButton: document.querySelector("#saveEditSpaceButton"),
+  cancelEditSpaceButton: document.querySelector("#cancelEditSpaceButton"),
+  closeEditSpaceButton: document.querySelector("#closeEditSpaceButton"),
+  shareSpaceModal: document.querySelector("#shareSpaceModal"),
+  shareSpaceName: document.querySelector("#shareSpaceName"),
+  shareSpaceLinkInput: document.querySelector("#shareSpaceLinkInput"),
+  copyShareSpaceLinkButton: document.querySelector("#copyShareSpaceLinkButton"),
+  nativeShareSpaceButton: document.querySelector("#nativeShareSpaceButton"),
+  whatsappShareSpaceButton: document.querySelector("#whatsappShareSpaceButton"),
+  doneShareSpaceButton: document.querySelector("#doneShareSpaceButton"),
+  closeShareSpaceButton: document.querySelector("#closeShareSpaceButton"),
+  joinSpaceModal: document.querySelector("#joinSpaceModal"),
+  joinSpaceInput: document.querySelector("#joinSpaceInput"),
+  joinSpaceMessage: document.querySelector("#joinSpaceMessage"),
+  confirmJoinSpaceButton: document.querySelector("#confirmJoinSpaceButton"),
+  cancelJoinSpaceButton: document.querySelector("#cancelJoinSpaceButton"),
+  closeJoinSpaceButton: document.querySelector("#closeJoinSpaceButton"),
   deleteSpaceModal: document.querySelector("#deleteSpaceModal"),
   deleteSpaceName: document.querySelector("#deleteSpaceName"),
   deleteSpacePrompt: document.querySelector("#deleteSpacePrompt"),
@@ -310,8 +361,17 @@ const state = {
   browserUrlDraft: "",
   browserUrlDirty: false,
   browserPendingUrl: "",
+  wisSandbox: createWisSandbox(),
+  wisLastExport: null,
+  wisRenderScheduled: false,
   userEvents: [],
   eventSeq: 0,
+  interactionTrace: [],
+  interactionSeq: 0,
+  activePointers: new Map(),
+  pointerTraceInstalled: false,
+  lastWheelTraceAt: 0,
+  lastScrollTraceAt: 0,
   lastLogSummary: null,
   timeline: null,
   timelineBusy: false,
@@ -322,6 +382,11 @@ const state = {
   moduleSettings: readModuleSettings(),
   userSpaces: [],
   userStorage: null,
+  sharedSpaceSyncInterval: 0,
+  sharedSpaceSyncBusy: false,
+  lastSharedSpaceSyncAt: "",
+  sharedRooms: {},
+  configAreaDragActive: false,
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
   activeSpaceMenuId: "",
@@ -330,18 +395,24 @@ const state = {
   activeAppMenuKind: "",
   activeNodeEditId: "",
   mobileLauncherTop: readLauncherPreference(),
+  editSpaceTargetId: "",
+  shareSpaceTargetId: "",
+  shareSpacePayload: null,
   deleteSpaceTargetId: "",
   uiNavigationStack: [],
   uiNavigationSeq: 0,
   agentOpen: false,
   agentDragSuppressClick: false,
   agentBusy: false,
+  nodeRunHints: {},
+  nodeTokenBaselines: {},
   agentAbortController: null,
   agentStopRequested: false,
   agentTurnTimer: 0,
   agentThinkingMessageId: "",
   agentTurnTimeoutMs: DEFAULT_AGENT_TURN_TIMEOUT_MS,
   agentTokenUsage: null,
+  agentDetailsOpenOverrides: {},
   agentAvailableModels: [],
   agentModelSettings: readAgentModelSettings(),
   agentModelSetup: {
@@ -377,6 +448,7 @@ const state = {
   spacePinchStartCanvasDistance: 1,
   spacePinchChanged: false,
   spacePinchSuppressPanUntil: 0,
+  configAreaDraft: null,
 };
 
 function bytesFromBase64(value) {
@@ -464,7 +536,205 @@ function describeEventTarget(target) {
     data_panel: element.dataset?.panel || closestPanel?.dataset?.panel || "",
     data_widget_id: element.dataset?.widgetId || closestWidget?.dataset?.widgetId || "",
     path,
+    form_value: safeElementFormValue(element),
   };
+}
+
+function safeElementFormValue(element) {
+  if (!element || !["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)) return null;
+  const type = String(element.getAttribute("type") || element.type || element.tagName).toLowerCase();
+  const identity = [
+    element.id || "",
+    element.name || "",
+    element.getAttribute("aria-label") || "",
+    element.getAttribute("placeholder") || "",
+    Array.from(element.classList || []).join(" "),
+  ].join(" ").toLowerCase();
+  if (/password|secret|token|api[_-]?key|authorization|credential|cookie|session/.test(`${identity} ${type}`)) {
+    return { type, redacted: true, length: String(element.value || "").length };
+  }
+  if (type === "file" || type === "hidden") return { type, redacted: true, length: 0 };
+  if (type === "checkbox" || type === "radio") return { type, checked: Boolean(element.checked) };
+  const value = String(element.value ?? "");
+  const numericLike = ["number", "range", "color", "date", "datetime-local", "month", "time", "week"].includes(type);
+  const configLike = Boolean(element.closest?.("#configModal") || /config|area|distance|space/.test(identity));
+  return {
+    type,
+    value: numericLike || configLike ? truncateText(value, 120) : "",
+    length: value.length,
+    redacted: !(numericLike || configLike),
+  };
+}
+
+function roundedNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : 0;
+}
+
+function compactRect(rect) {
+  if (!rect) return null;
+  return {
+    left: roundedNumber(rect.left),
+    top: roundedNumber(rect.top),
+    width: roundedNumber(rect.width),
+    height: roundedNumber(rect.height),
+  };
+}
+
+function eventElementAtPoint(event) {
+  return event?.target?.tagName
+    ? event.target
+    : document.elementFromPoint?.(Number(event?.clientX || 0), Number(event?.clientY || 0));
+}
+
+function pointerTraceEntry(event, phase) {
+  const target = eventElementAtPoint(event);
+  const targetRect = target?.getBoundingClientRect?.();
+  const viewportRect = els.spaceViewport?.getBoundingClientRect?.();
+  const started = state.activePointers.get(event.pointerId);
+  const clientX = roundedNumber(event.clientX);
+  const clientY = roundedNumber(event.clientY);
+  const targetLeft = Number(targetRect?.left || 0);
+  const targetTop = Number(targetRect?.top || 0);
+  const viewportLeft = Number(viewportRect?.left || 0);
+  const viewportTop = Number(viewportRect?.top || 0);
+  return {
+    kind: "pointer",
+    phase,
+    pointer_id: Number(event.pointerId || 0),
+    pointer_type: event.pointerType || "",
+    is_primary: event.isPrimary !== false,
+    button: Number(event.button ?? -1),
+    buttons: Number(event.buttons || 0),
+    client: { x: clientX, y: clientY },
+    target_offset: {
+      x: roundedNumber(clientX - targetLeft),
+      y: roundedNumber(clientY - targetTop),
+    },
+    space_viewport_offset: viewportRect ? {
+      x: roundedNumber(clientX - viewportLeft),
+      y: roundedNumber(clientY - viewportTop),
+    } : null,
+    target: summarizeEventTarget(target),
+    target_detail: describeEventTarget(target),
+    target_rect: compactRect(targetRect),
+    capture: {
+      target_has_pointer_capture: Boolean(target?.hasPointerCapture?.(event.pointerId)),
+      active_element: summarizeEventTarget(document.activeElement),
+    },
+    duration_ms: started ? roundedNumber(performance.now() - started.startedAt) : 0,
+    distance_px: started ? roundedNumber(Math.hypot(clientX - started.startX, clientY - started.startY)) : 0,
+  };
+}
+
+function appendInteractionTrace(entry, options = {}) {
+  state.interactionTrace.push({
+    schema: "hermes.space_os.interaction_event.v1",
+    id: `int_${Date.now().toString(36)}_${(state.interactionSeq += 1).toString(36)}`,
+    timestamp: new Date().toISOString(),
+    active_panel: state.activePanel,
+    ...redactValue(entry),
+  });
+  if (state.interactionTrace.length > INTERACTION_TRACE_LIMIT) {
+    state.interactionTrace.splice(0, state.interactionTrace.length - INTERACTION_TRACE_LIMIT);
+  }
+  if (options.publish !== false) {
+    scheduleObservationRender();
+    scheduleObservationPublish();
+  }
+}
+
+function recordPointerInteraction(event, phase) {
+  const now = performance.now();
+  if (phase === "down") {
+    state.activePointers.set(event.pointerId, {
+      pointerId: event.pointerId,
+      pointerType: event.pointerType || "",
+      target: summarizeEventTarget(eventElementAtPoint(event)),
+      startX: roundedNumber(event.clientX),
+      startY: roundedNumber(event.clientY),
+      currentX: roundedNumber(event.clientX),
+      currentY: roundedNumber(event.clientY),
+      startedAt: now,
+      lastMoveAt: 0,
+    });
+  }
+  const pointer = state.activePointers.get(event.pointerId);
+  if (phase === "move") {
+    if (!pointer || now - pointer.lastMoveAt < POINTER_MOVE_SAMPLE_MS) return;
+    pointer.lastMoveAt = now;
+    pointer.currentX = roundedNumber(event.clientX);
+    pointer.currentY = roundedNumber(event.clientY);
+    appendInteractionTrace(pointerTraceEntry(event, phase), { publish: false });
+    scheduleObservationPublish();
+    return;
+  }
+  appendInteractionTrace(pointerTraceEntry(event, phase));
+  if (["up", "cancel"].includes(phase)) state.activePointers.delete(event.pointerId);
+}
+
+function recordWheelInteraction(event) {
+  const now = performance.now();
+  if (now - state.lastWheelTraceAt < WHEEL_TRACE_SAMPLE_MS) return;
+  state.lastWheelTraceAt = now;
+  const target = eventElementAtPoint(event);
+  appendInteractionTrace({
+    kind: "wheel",
+    delta: {
+      x: roundedNumber(event.deltaX),
+      y: roundedNumber(event.deltaY),
+      mode: Number(event.deltaMode || 0),
+    },
+    client: { x: roundedNumber(event.clientX), y: roundedNumber(event.clientY) },
+    target: summarizeEventTarget(target),
+    target_detail: describeEventTarget(target),
+    target_rect: compactRect(target?.getBoundingClientRect?.()),
+    canvas_distance: Number(canvasDistance().toFixed(2)),
+  }, { publish: false });
+  scheduleObservationPublish();
+}
+
+function recordSpaceScrollInteraction() {
+  const now = performance.now();
+  if (now - state.lastScrollTraceAt < SCROLL_TRACE_SAMPLE_MS) return;
+  state.lastScrollTraceAt = now;
+  appendInteractionTrace({
+    kind: "scroll",
+    target: "space-viewport",
+    scroll: {
+      left: roundedNumber(els.spaceViewport?.scrollLeft || 0),
+      top: roundedNumber(els.spaceViewport?.scrollTop || 0),
+    },
+    canvas_distance: Number(canvasDistance().toFixed(2)),
+    canvas_area: serializableSpaceArea(canvasAreaSize()),
+  }, { publish: false });
+  scheduleObservationPublish();
+}
+
+function recordViewportInteraction(kind = "viewport.resize") {
+  appendInteractionTrace({
+    kind,
+    viewport: {
+      width: roundedNumber(window.innerWidth),
+      height: roundedNumber(window.innerHeight),
+      visual_width: roundedNumber(window.visualViewport?.width || window.innerWidth),
+      visual_height: roundedNumber(window.visualViewport?.height || window.innerHeight),
+    },
+  }, { publish: false });
+  scheduleObservationPublish();
+}
+
+function installInteractionTrace() {
+  if (state.pointerTraceInstalled) return;
+  state.pointerTraceInstalled = true;
+  window.addEventListener("pointerdown", (event) => recordPointerInteraction(event, "down"), { capture: true, passive: true });
+  window.addEventListener("pointermove", (event) => recordPointerInteraction(event, "move"), { capture: true, passive: true });
+  window.addEventListener("pointerup", (event) => recordPointerInteraction(event, "up"), { capture: true, passive: true });
+  window.addEventListener("pointercancel", (event) => recordPointerInteraction(event, "cancel"), { capture: true, passive: true });
+  window.addEventListener("wheel", recordWheelInteraction, { capture: true, passive: true });
+  els.spaceViewport?.addEventListener("scroll", recordSpaceScrollInteraction, { passive: true });
+  window.addEventListener("resize", () => recordViewportInteraction("viewport.resize"), { passive: true });
+  window.visualViewport?.addEventListener("resize", () => recordViewportInteraction("visual_viewport.resize"), { passive: true });
 }
 
 function recordUserEvent(type, options = {}) {
@@ -539,6 +809,13 @@ function buildObservationSnapshot() {
         checkpoint_count: state.timeline.checkpoints?.length || 0,
       } : null,
       widget_count: document.querySelectorAll(".widget[data-widget-id]").length,
+      shared_room: activeSharedRoom() ? {
+        id: activeSharedRoom().id || "",
+        online_count: Number(activeSharedRoom().online_count || 0),
+        member_count: Number(activeSharedRoom().member_count || 0),
+        online_device_count: Number(activeSharedRoom().online_device_count || 0),
+        last_sync_at: state.lastSharedSpaceSyncAt,
+      } : null,
       viewport: { width: Math.round(viewportRect.width || 0), height: Math.round(viewportRect.height || 0) },
       viewport_diagnostics: {
         visual: visualViewport ? {
@@ -612,6 +889,7 @@ function buildObservationSnapshot() {
       last_loaded: state.lastLogSummary,
       visible_summary: truncateText(els.logsOutput?.textContent || "", 240),
     },
+    wis: state.wisSandbox ? state.wisSandbox.inspect() : null,
     analytics: {
       event_count: state.userEvents.length,
       event_limit: USER_EVENT_LIMIT,
@@ -619,6 +897,20 @@ function buildObservationSnapshot() {
       recent_errors: recentErrors,
       last_interaction_at: state.userEvents.at(-1)?.timestamp || "",
       last_non_agent_click: latestNonAgentClick(),
+    },
+    interaction: {
+      trace_limit: INTERACTION_TRACE_LIMIT,
+      trace_count: state.interactionTrace.length,
+      recent_trace: state.interactionTrace.slice(-48).reverse(),
+      active_pointers: Array.from(state.activePointers.values()).map((pointer) => ({
+        pointer_id: Number(pointer.pointerId || 0),
+        pointer_type: pointer.pointerType || "",
+        target: pointer.target || "",
+        start: { x: roundedNumber(pointer.startX), y: roundedNumber(pointer.startY) },
+        current: { x: roundedNumber(pointer.currentX), y: roundedNumber(pointer.currentY) },
+        duration_ms: roundedNumber(performance.now() - pointer.startedAt),
+        distance_px: roundedNumber(Math.hypot(pointer.currentX - pointer.startX, pointer.currentY - pointer.startY)),
+      })),
     },
     user_events: latestEvents(40),
   };
@@ -700,6 +992,237 @@ function renderObservation() {
   els.observationSnapshot.textContent = JSON.stringify(snapshot, null, 2);
 }
 
+function wisSurfaceState() {
+  try {
+    return state.wisSandbox?.inspect?.() || null;
+  } catch (error) {
+    state.lastError = error.message || String(error);
+    return null;
+  }
+}
+
+function scheduleWisRender() {
+  if (state.wisRenderScheduled) return;
+  state.wisRenderScheduled = true;
+  const scheduleFrame = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+  scheduleFrame(() => {
+    state.wisRenderScheduled = false;
+    renderWis();
+    scheduleObservationRender();
+    scheduleObservationPublish();
+  });
+}
+
+function compactWisAction(action) {
+  return {
+    type: action?.type || "",
+    targetId: action?.targetId || "",
+    documentId: action?.documentId || "",
+    value_length: action?.value === undefined ? 0 : String(action.value).length,
+  };
+}
+
+function runWisAction(action, origin = "surface") {
+  if (!state.wisSandbox) return { ok: false, error: "wis_unavailable" };
+  const request = action && typeof action === "object" ? action : {};
+  const result = state.wisSandbox.act(request);
+  recordUserEvent("wis.automation_action", {
+    source: origin === "automation" ? "wasm-agent-automation" : "wis",
+    target: `wis:${request.targetId || request.documentId || request.type || "surface"}`,
+    summary: `${request.type || "act"} ${result.ok ? "ok" : "failed"}`,
+    data: {
+      action: compactWisAction(request),
+      result,
+      surface: wisSurfaceState()?.document?.id || "",
+    },
+  });
+  return result;
+}
+
+function exportWisSpace(origin = "surface") {
+  if (!state.wisSandbox) return null;
+  const payload = state.wisSandbox.exportSpace();
+  state.wisLastExport = payload;
+  recordUserEvent("wis.space_exported", {
+    source: origin === "automation" ? "wasm-agent-automation" : "wis",
+    target: `wis:${payload.space?.id || "space"}`,
+    summary: `Exported ${payload.space?.id || "WIS space"}`,
+    data: {
+      schema: payload.schema,
+      document_count: payload.space?.documents?.length || 0,
+      backend_dependency: payload.guarantees?.backendDependency,
+      iframe_primary_architecture: payload.guarantees?.iframePrimaryArchitecture,
+    },
+  });
+  renderWis();
+  return payload;
+}
+
+function installWisAutomationHook() {
+  if (!state.wisSandbox || state.wisAutomationInstalled) return;
+  state.wisUnsubscribe = state.wisSandbox.subscribe(scheduleWisRender);
+  window.wasmAgentWis = {
+    inspect() {
+      return wisSurfaceState();
+    },
+    act(action) {
+      const result = runWisAction(action, "automation");
+      return { result, surface: wisSurfaceState() };
+    },
+    exportSpace() {
+      return exportWisSpace("automation");
+    },
+  };
+  state.wisAutomationInstalled = true;
+}
+
+function wisFocusState() {
+  const active = document.activeElement;
+  if (!active?.dataset?.wisNodeId) return null;
+  return {
+    id: active.dataset.wisNodeId,
+    start: Number.isFinite(active.selectionStart) ? active.selectionStart : null,
+    end: Number.isFinite(active.selectionEnd) ? active.selectionEnd : null,
+  };
+}
+
+function restoreWisFocus(focus) {
+  if (!focus?.id || !els.wisViewport) return;
+  const target = Array.from(els.wisViewport.querySelectorAll("[data-wis-node-id]"))
+    .find((element) => element.dataset.wisNodeId === focus.id);
+  if (!target) return;
+  target.focus({ preventScroll: true });
+  if (target instanceof HTMLInputElement && focus.start !== null && focus.end !== null) {
+    try {
+      target.setSelectionRange(focus.start, focus.end);
+    } catch {
+      // Some input types do not support text selection.
+    }
+  }
+}
+
+function wisNodeClass(type) {
+  return `wis-node wis-node-${String(type || "element").replace(/[^a-z0-9_-]/gi, "-").toLowerCase()}`;
+}
+
+function renderWisTreeNode(node) {
+  if (!node) return document.createTextNode("");
+  let element;
+  if (node.type === "document") element = document.createElement("div");
+  else if (node.type === "section") element = document.createElement("section");
+  else if (node.type === "heading") element = document.createElement(`h${clamp(Number(node.level) || 2, 1, 6)}`);
+  else if (node.type === "text") element = document.createElement("p");
+  else if (node.type === "button") element = document.createElement("button");
+  else if (node.type === "input") element = document.createElement("input");
+  else if (node.type === "list") element = document.createElement("ul");
+  else if (node.type === "list-item") element = document.createElement("li");
+  else element = document.createElement("div");
+
+  element.dataset.wisNodeId = node.id || "";
+  element.className = wisNodeClass(node.type);
+  if (node.role) element.setAttribute("role", node.role);
+  const extraClass = String(node.props?.className || "").replace(/[^A-Za-z0-9_ -]/g, "").trim();
+  if (extraClass) element.classList.add(...extraClass.split(/\s+/).filter(Boolean));
+
+  if (node.type === "button") {
+    element.type = "button";
+    element.textContent = node.text || node.id || "Action";
+    element.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      runWisAction({ type: "click", targetId: node.id }, "surface");
+    });
+  } else if (node.type === "input") {
+    element.type = "text";
+    element.value = node.props?.value || "";
+    element.placeholder = node.props?.placeholder || "";
+    element.setAttribute("aria-label", node.props?.placeholder || node.id || "Input");
+    element.addEventListener("input", (event) => {
+      runWisAction({ type: "input", targetId: node.id, value: event.target.value }, "surface");
+    });
+  } else if (node.text) {
+    element.textContent = node.text;
+  }
+
+  for (const child of node.children || []) element.append(renderWisTreeNode(child));
+  return element;
+}
+
+function renderWisSmallRow(className, title, meta) {
+  const row = document.createElement("div");
+  row.className = className;
+  const strong = document.createElement("strong");
+  const span = document.createElement("span");
+  strong.textContent = title;
+  span.textContent = meta;
+  row.append(strong, span);
+  return row;
+}
+
+function renderWisExportValue(payload) {
+  if (!els.wisExportValue || !payload) return;
+  const text = JSON.stringify(payload, null, 2);
+  els.wisExportValue.value = text.length > WIS_EXPORT_PREVIEW_LIMIT
+    ? `${text.slice(0, WIS_EXPORT_PREVIEW_LIMIT)}\n...`
+    : text;
+}
+
+function renderWis() {
+  if (!els.wisViewport) return;
+  installWisAutomationHook();
+  if (!isModuleEnabled("wis")) {
+    if (els.wisStatus) els.wisStatus.textContent = "off";
+    els.wisViewport.replaceChildren();
+    els.wisNodeList?.replaceChildren();
+    els.wisEventList?.replaceChildren();
+    if (els.wisAutomationState) els.wisAutomationState.textContent = "";
+    return;
+  }
+
+  const snapshot = wisSurfaceState();
+  if (!snapshot) return;
+  if (!state.wisLastExport) state.wisLastExport = state.wisSandbox.exportSpace();
+  const focus = wisFocusState();
+  if (els.wisStatus) els.wisStatus.textContent = snapshot.sandbox.status || "sandbox";
+  if (els.wisLocation) els.wisLocation.textContent = snapshot.navigation.url || snapshot.document?.id || "";
+  if (els.wisDocumentId) els.wisDocumentId.textContent = snapshot.document?.id || "-";
+  if (els.wisNodeCount) els.wisNodeCount.textContent = String(snapshot.nodeCount || 0);
+  if (els.wisElementCount) els.wisElementCount.textContent = String(snapshot.elementCount || 0);
+  if (els.wisSandboxStatus) {
+    const permissions = snapshot.sandbox.permissions || {};
+    els.wisSandboxStatus.textContent = [
+      snapshot.sandbox.status || "isolated",
+      permissions.backend === false ? "backend off" : "backend on",
+      permissions.iframe === false ? "iframe off" : "iframe on",
+    ].join(" / ");
+  }
+
+  els.wisViewport.replaceChildren(renderWisTreeNode(snapshot.tree));
+  restoreWisFocus(focus);
+
+  els.wisNodeList?.replaceChildren(
+    ...snapshot.nodes.slice(0, 14).map((node) => (
+      renderWisSmallRow("wis-node-row", node.id || node.type, `${node.type}${node.child_count ? ` / ${node.child_count}` : ""}`)
+    ))
+  );
+  els.wisEventList?.replaceChildren(
+    ...snapshot.recentEvents.slice(0, 8).map((event) => (
+      renderWisSmallRow("wis-event-row", event.type, `${event.target || "surface"} / ${new Date(event.timestamp).toLocaleTimeString()}`)
+    ))
+  );
+  if (els.wisAutomationState) {
+    els.wisAutomationState.textContent = JSON.stringify({
+      schema: snapshot.schema,
+      document: snapshot.document,
+      state: snapshot.state,
+      actions: snapshot.automation.actions.slice(0, 10),
+      inspect: snapshot.automation.inspect,
+      act: snapshot.automation.act,
+    }, null, 2);
+  }
+  renderWisExportValue(state.wisLastExport);
+}
+
 function moduleCard(module) {
   const enabled = isModuleEnabled(module.id);
   const core = Boolean(module.core);
@@ -767,7 +1290,7 @@ function renderTimeline() {
   const checkpoints = (timeline.checkpoints || []).slice(0, 5);
   els.timelineGraph.replaceChildren(
     ...[
-      ...checkpoints.map((checkpoint) => ({ kind: "checkpoint", label: checkpoint.name, meta: checkpoint.head })),
+      ...checkpoints.map((checkpoint) => ({ kind: "checkpoint", label: checkpoint.name, meta: checkpoint.head, checkpoint })),
       ...recent.map((line) => ({ kind: "commit", label: line, meta: "" })),
     ].slice(0, 7).map((item) => {
       const row = document.createElement("div");
@@ -780,6 +1303,20 @@ function renderTimeline() {
       const meta = document.createElement("span");
       meta.textContent = item.meta || item.kind;
       copy.append(title, meta);
+      if (item.checkpoint?.ref) {
+        const action = document.createElement("button");
+        action.type = "button";
+        action.className = "timeline-stepback-button";
+        action.textContent = "Stepback";
+        action.title = "Restore to the point before this checkpoint run";
+        action.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          void stepbackTimeline(item.checkpoint.ref, timeline.timeline_id || activeSpaceStorageId());
+        });
+        row.append(dot, copy, action);
+        return row;
+      }
       row.append(dot, copy);
       return row;
     })
@@ -963,6 +1500,11 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
     ...defaultWidgetLayoutForPanel(panel),
     ...sanitizeWidgetLayoutForPanel(layout, panel),
   };
+  const metadataArea = userSpaceAreaForPanel(panel);
+  const area = metadataArea
+    ? writeCanvasAreaSize(canvasLayout(), metadataArea)
+    : canvasAreaSize();
+  if (!metadataArea) syncSpaceAreaMetadata(panel, area);
   applyCanvasGeometry({ renderMiniMap: false });
   applyWidgetLayout();
   renderSpaceMiniMap();
@@ -1050,6 +1592,154 @@ function saveLocalSpaceWidgetLayouts() {
   }
 }
 
+function userSpaceAreaForPanel(panel = state.activePanel) {
+  const space = isUserSpacePanel(panel) ? userSpaceById(panel) : null;
+  return spaceAreaFromMetadata(space?.space_area);
+}
+
+function canvasAreaSizeForPanel(panel = state.activePanel) {
+  const metadataArea = userSpaceAreaForPanel(panel);
+  if (metadataArea) return metadataArea;
+  const layout = state.spaceWidgetLayouts?.[activeSpaceStorageId(panel)];
+  const canvas = layout?.__canvas && typeof layout.__canvas === "object" ? layout.__canvas : {};
+  return spaceAreaFromMetadata({
+    width_px: canvas.widthPx ?? canvas.width_px,
+    height_px: canvas.heightPx ?? canvas.height_px,
+  }) || legacyCanvasDensityAreaSize(canvas) || initialCanvasAreaSize();
+}
+
+function syncSpaceAreaMetadata(panel, area = canvasAreaSize(), options = {}) {
+  if (!isUserSpacePanel(panel)) return null;
+  const index = state.userSpaces.findIndex((space) => space.id === panel);
+  if (index < 0) return null;
+  const spaceArea = serializableSpaceArea(area);
+  const targetSpace = state.userSpaces[index];
+  const sharedSpaceId = targetSpace.shared_space_id || "";
+  if (sameSpaceArea(targetSpace.space_area, spaceArea)) return spaceArea;
+  state.userSpaces = state.userSpaces.map((space) => {
+    const sameSharedSpace = sharedSpaceId && space.shared_space_id === sharedSpaceId;
+    if (space.id !== panel && !sameSharedSpace) return space;
+    return {
+      ...space,
+      space_area: spaceArea,
+    };
+  });
+  if (options.persist !== false) persistSpaceAreaMetadata(panel, spaceArea);
+  return spaceArea;
+}
+
+function syncActiveSpaceAreaMetadata(area = canvasAreaSize(), options = {}) {
+  return syncSpaceAreaMetadata(state.activePanel, area, options);
+}
+
+function sharedUserSpaceForPanel(panel = state.activePanel) {
+  const space = isUserSpacePanel(panel) ? userSpaceById(panel) : null;
+  return space?.shared_space_id ? space : null;
+}
+
+function activeSharedRoom() {
+  const sharedSpaceId = sharedUserSpaceForPanel()?.shared_space_id || "";
+  return sharedSpaceId ? state.sharedRooms[sharedSpaceId] || null : null;
+}
+
+function remoteSpaceAreaChanged(before, after) {
+  const beforeArea = spaceAreaFromMetadata(before?.space_area);
+  const afterArea = spaceAreaFromMetadata(after?.space_area);
+  if (!before?.shared_space_id || before.shared_space_id !== after?.shared_space_id || !afterArea) return false;
+  return !beforeArea || beforeArea.width !== afterArea.width || beforeArea.height !== afterArea.height;
+}
+
+function updateSharedSpaceSyncPolling() {
+  const shouldPoll = Boolean(state.authUser && sharedUserSpaceForPanel());
+  if (!shouldPoll) {
+    if (state.sharedSpaceSyncInterval) {
+      window.clearInterval(state.sharedSpaceSyncInterval);
+      state.sharedSpaceSyncInterval = 0;
+    }
+    return;
+  }
+  if (!state.sharedSpaceSyncInterval) {
+    state.sharedSpaceSyncInterval = window.setInterval(
+      () => void syncSharedSpaceForOpenClient("shared-space-poll"),
+      SHARED_SPACE_SYNC_POLL_MS
+    );
+    void syncSharedSpaceForOpenClient("shared-space-start");
+  }
+}
+
+async function syncSharedSpaceForOpenClient(origin = "shared-space-poll") {
+  if (state.sharedSpaceSyncBusy || !sharedUserSpaceForPanel()) return;
+  state.sharedSpaceSyncBusy = true;
+  try {
+    await loadSharedSpaceRoom({ origin });
+    state.lastSharedSpaceSyncAt = new Date().toISOString();
+  } catch (error) {
+    recordUserEvent("workspace.shared_space_sync_error", {
+      target: `space:${state.activePanel}`,
+      summary: error.message,
+      data: { origin, error: error.message },
+    });
+  } finally {
+    state.sharedSpaceSyncBusy = false;
+    updateSharedSpaceSyncPolling();
+  }
+}
+
+function applySharedRoomArea(room, origin = "shared-room") {
+  const activeSpace = sharedUserSpaceForPanel();
+  const roomArea = spaceAreaFromMetadata(room?.space_area);
+  if (!activeSpace || activeSpace.shared_space_id !== room?.id) return false;
+  if (!roomArea) {
+    renderSpaceTitle();
+    renderSpaceLauncher();
+    return false;
+  }
+  const changed = !sameSpaceArea(activeSpace.space_area, roomArea);
+  state.userSpaces = state.userSpaces.map((space) => (
+    space.shared_space_id === room.id ? { ...space, space_area: serializableSpaceArea(roomArea) } : space
+  ));
+  if (!changed || !shouldSyncUserSpacesFromServer()) {
+    renderSpaceTitle();
+    renderSpaceLauncher();
+    return false;
+  }
+  applySpaceWidgetLayout(state.activePanel);
+  renderSpaceTitle();
+  renderSpaceLauncher();
+  recordUserEvent("workspace.shared_space_area_applied", {
+    target: `space:${activeSpace.id}`,
+    summary: `Applied shared space area ${formatAreaSize(roomArea)}`,
+    data: {
+      origin,
+      space_id: activeSpace.id,
+      shared_space_id: room.id,
+      width_px: roomArea.width,
+      height_px: roomArea.height,
+    },
+  });
+  return true;
+}
+
+async function loadSharedSpaceRoom(options = {}) {
+  const space = sharedUserSpaceForPanel();
+  if (!space) return null;
+  const payload = await fetchJson("/spaces/room", {
+    method: "POST",
+    timeoutMs: 5000,
+    body: {
+      action: "presence",
+      space_id: space.id,
+      shared_space_id: space.shared_space_id,
+    },
+  });
+  const room = payload.room || null;
+  if (room?.id) {
+    state.sharedRooms[room.id] = room;
+    applySharedRoomArea(room, options.origin || "shared-room");
+  }
+  return room;
+}
+
 function applyLauncherPreference() {
   if (!els.app) return;
   els.app.dataset.mobileLauncher = state.mobileLauncherTop ? "top" : "left";
@@ -1071,22 +1761,117 @@ function saveUserSpaces() {
   }
 }
 
-async function loadUserSpaces() {
+function persistSpaceAreaMetadata(spaceId, spaceArea) {
+  const space = userSpaceById(spaceId);
+  if (!state.authUser || !space) return;
+  void fetchJson("/spaces", {
+    method: "POST",
+    timeoutMs: 8000,
+    body: {
+      action: "area",
+      space_id: space.id,
+      shared_space_id: space.shared_space_id || "",
+      space_area: spaceArea,
+    },
+  }).then((result) => {
+    if (Array.isArray(result.spaces)) {
+      state.userSpaces = result.spaces;
+      renderSpaceLauncher();
+      updateSharedSpaceSyncPolling();
+    }
+  }).catch((error) => {
+    if (space.shared_space_id && /unsupported space action|invalid_space_action/i.test(error.message || "")) {
+      void persistSharedSpaceAreaViaShare(space, spaceArea);
+      return;
+    }
+    recordUserEvent("workspace.space_area_save_error", {
+      target: `space:${spaceId}`,
+      summary: error.message,
+      data: { error: error.message },
+    });
+  });
+}
+
+async function persistSharedSpaceAreaViaShare(space, spaceArea) {
+  try {
+    const payload = await fetchJson("/spaces/share", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        space_id: space.id,
+        shared_space_id: space.shared_space_id || "",
+        space_area: spaceArea,
+      },
+    });
+    const room = payload.shared_space || null;
+    if (room?.id) state.sharedRooms[room.id] = room;
+    await loadUserSpaces({ origin: "space-area-share-fallback" });
+    recordUserEvent("workspace.space_area_save_fallback", {
+      target: `space:${space.id}`,
+      summary: `Saved shared space area ${formatAreaSize(spaceArea)} through share endpoint`,
+      data: {
+        space_id: space.id,
+        shared_space_id: space.shared_space_id || "",
+        width_px: spaceArea.width_px || 0,
+        height_px: spaceArea.height_px || 0,
+      },
+    });
+  } catch (fallbackError) {
+    recordUserEvent("workspace.space_area_save_error", {
+      target: `space:${space.id}`,
+      summary: fallbackError.message,
+      data: { error: fallbackError.message, fallback: "share" },
+    });
+  }
+}
+
+async function loadUserSpaces(options = {}) {
   if (!state.authUser) return;
+  const activePanel = state.activePanel;
+  const beforeActiveSpace = userSpaceById(activePanel);
   try {
     const payload = await fetchJson("/spaces", { timeoutMs: 8000 });
     state.userSpaces = Array.isArray(payload.spaces) ? payload.spaces : [];
     state.userStorage = payload.storage || null;
     state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
-    applySpaceWidgetLayout(state.activePanel);
+    const afterActiveSpace = userSpaceById(activePanel);
+    const activeAreaChanged = remoteSpaceAreaChanged(beforeActiveSpace, afterActiveSpace);
+    if (shouldSyncUserSpacesFromServer()) applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
+    renderSpaceTitle();
+    updateSharedSpaceSyncPolling();
+    if (activeAreaChanged && shouldSyncUserSpacesFromServer()) {
+      const area = spaceAreaFromMetadata(afterActiveSpace?.space_area);
+      recordUserEvent("workspace.shared_space_area_applied", {
+        target: `space:${activePanel}`,
+        summary: `Applied shared space area ${formatAreaSize(area)}`,
+        data: {
+          origin: options.origin || "spaces-load",
+          space_id: activePanel,
+          shared_space_id: afterActiveSpace?.shared_space_id || "",
+          width_px: area?.width || 0,
+          height_px: area?.height || 0,
+        },
+      });
+    }
   } catch (error) {
     recordUserEvent("workspace.spaces_load_error", {
       target: "spaces",
       summary: error.message,
       data: { error: error.message },
     });
+  } finally {
+    updateSharedSpaceSyncPolling();
   }
+}
+
+function shouldSyncUserSpacesFromServer() {
+  return Boolean(state.authUser && !state.configAreaDragActive && (!els.configModal || els.configModal.hidden));
+}
+
+async function syncUserSpacesForOpenClient(origin = "auto") {
+  if (origin === "startup" || !shouldSyncUserSpacesFromServer()) return;
+  await loadUserSpaces({ origin });
 }
 
 async function loadLocalStorageEstimate() {
@@ -1305,15 +2090,25 @@ function activeAgentSession() {
   return session;
 }
 
+function isGlobalAgentNodeId(nodeId) {
+  return GLOBAL_AGENT_NODE_IDS.has(cleanText(nodeId, "").toLowerCase());
+}
+
+function defaultAgentTargetNode() {
+  return isAdminUser() ? "orchestrator" : AGENT_SANDBOX_NODE_ID;
+}
+
 function agentTargetNode() {
-  return cleanText(state.agentTargetNode || state.selectedNode || "orchestrator", "orchestrator");
+  const fallback = defaultAgentTargetNode();
+  const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
+  return !isAdminUser() && isGlobalAgentNodeId(target) ? AGENT_SANDBOX_NODE_ID : target;
 }
 
 function availableAgentNodes() {
-  const ids = new Set(["orchestrator"]);
-  if (state.selectedNode) ids.add(state.selectedNode);
+  const ids = new Set([defaultAgentTargetNode()]);
+  if (state.selectedNode && (isAdminUser() || !isGlobalAgentNodeId(state.selectedNode))) ids.add(state.selectedNode);
   state.nodes.forEach((node) => {
-    if (node.id) ids.add(node.id);
+    if (node.id && (isAdminUser() || !isGlobalAgentNodeId(node.id))) ids.add(node.id);
   });
   return Array.from(ids);
 }
@@ -1335,7 +2130,8 @@ function renderAgentNodeSelect() {
 }
 
 function setAgentTargetNode(nodeId) {
-  const next = cleanText(nodeId, "orchestrator");
+  const requested = cleanText(nodeId, defaultAgentTargetNode());
+  const next = !isAdminUser() && isGlobalAgentNodeId(requested) ? AGENT_SANDBOX_NODE_ID : requested;
   const previous = state.agentTargetNode;
   state.agentTargetNode = next;
   renderAgentNodeSelect();
@@ -1910,9 +2706,137 @@ function canvasLayout() {
   return state.widgetLayout.__canvas;
 }
 
-function canvasArea() {
-  const area = Number(canvasLayout().density || 1);
-  return clamp(Number.isFinite(area) ? area : 1, 1, CANVAS_AREA_MAX);
+function normalizedAreaPixel(value, fallback = CANVAS_AREA_MIN_PX) {
+  const number = Number(value);
+  const base = Number.isFinite(number) ? number : fallback;
+  return clamp(Math.round(base), CANVAS_AREA_MIN_PX, CANVAS_AREA_MAX_PX);
+}
+
+function spaceAreaFromMetadata(value) {
+  if (!value || typeof value !== "object") return null;
+  const width = Number(value.width_px ?? value.widthPx ?? value.width);
+  const height = Number(value.height_px ?? value.heightPx ?? value.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
+  return {
+    width: normalizedAreaPixel(width),
+    height: normalizedAreaPixel(height),
+  };
+}
+
+function serializableSpaceArea(area = canvasAreaSize()) {
+  const normalized = normalizedCanvasAreaSize(area);
+  return {
+    width_px: normalized.width,
+    height_px: normalized.height,
+  };
+}
+
+function sameSpaceArea(left, right) {
+  const a = spaceAreaFromMetadata(left);
+  const b = spaceAreaFromMetadata(right);
+  return Boolean(a && b && a.width === b.width && a.height === b.height);
+}
+
+function initialCanvasAreaSize() {
+  const viewport = els.spaceViewport;
+  const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
+  const distance = canvasDistance();
+  const width = Number(rect?.width || viewport?.clientWidth || window.innerWidth || 1) / Math.max(SPACE_DISTANCE_MIN, distance);
+  const height = Number(rect?.height || viewport?.clientHeight || window.innerHeight || 1) / Math.max(SPACE_DISTANCE_MIN, distance);
+  return {
+    width: normalizedAreaPixel(width),
+    height: normalizedAreaPixel(height),
+  };
+}
+
+function normalizedCanvasAreaSize(value, fallback = initialCanvasAreaSize()) {
+  const raw = value && typeof value === "object" ? value : {};
+  return {
+    width: normalizedAreaPixel(raw.width ?? raw.widthPx ?? raw.width_px, fallback.width),
+    height: normalizedAreaPixel(raw.height ?? raw.heightPx ?? raw.height_px, fallback.height),
+  };
+}
+
+function legacyCanvasDensityAreaSize(layout) {
+  const density = Number(layout?.density);
+  if (!Number.isFinite(density) || density <= 0) return null;
+  const viewport = initialCanvasAreaSize();
+  return normalizedCanvasAreaSize({
+    width: viewport.width * density,
+    height: viewport.height * density,
+  }, viewport);
+}
+
+function writeCanvasAreaSize(layout, area) {
+  const normalized = normalizedCanvasAreaSize(area);
+  layout.widthPx = normalized.width;
+  layout.heightPx = normalized.height;
+  delete layout.density;
+  return normalized;
+}
+
+function canvasAreaSize() {
+  const layout = canvasLayout();
+  const existing = spaceAreaFromMetadata({
+    width_px: layout.widthPx ?? layout.width_px,
+    height_px: layout.heightPx ?? layout.height_px,
+  }) || legacyCanvasDensityAreaSize(layout) || initialCanvasAreaSize();
+  return writeCanvasAreaSize(layout, existing);
+}
+
+function formatAreaSize(area = canvasAreaSize()) {
+  const normalized = normalizedCanvasAreaSize(area);
+  return `${normalized.width} x ${normalized.height}px`;
+}
+
+function configAreaDraft() {
+  return normalizedCanvasAreaSize(state.configAreaDraft || canvasAreaSize());
+}
+
+function scheduleAreaMapUpdate(control = null) {
+  const wrap = control || els.configDetails?.querySelector?.(".config-area-control");
+  if (!wrap || wrap.dataset.areaMapFrame) return;
+  wrap.dataset.areaMapFrame = "pending";
+  window.requestAnimationFrame(() => {
+    delete wrap.dataset.areaMapFrame;
+    updateAreaMap(wrap);
+  });
+}
+
+function setConfigAreaDraft(area, control = null, options = {}) {
+  state.configAreaDraft = normalizedCanvasAreaSize(area, configAreaDraft());
+  if (options.defer) scheduleAreaMapUpdate(control);
+  else updateAreaMap(control);
+  return state.configAreaDraft;
+}
+
+function configAreaDraftChanged() {
+  const draft = configAreaDraft();
+  const current = canvasAreaSize();
+  return draft.width !== current.width || draft.height !== current.height;
+}
+
+function resetConfigAreaDraft(control = null) {
+  state.configAreaDraft = canvasAreaSize();
+  updateAreaMap(control);
+}
+
+function applyConfigAreaDraft(control = null) {
+  if (!configAreaDraftChanged()) {
+    resetConfigAreaDraft(control);
+    return;
+  }
+  const next = configAreaDraft();
+  freezeWidgetPixelLayout();
+  setCanvasAreaValue(next, {
+    control,
+    origin: "apply",
+    force: true,
+    render: false,
+  });
+  state.configAreaDraft = canvasAreaSize();
+  renderConfigModal();
+  window.requestAnimationFrame(() => updateAreaMap());
 }
 
 function canvasDistance() {
@@ -1942,11 +2866,11 @@ function applyCanvasGeometry(options = {}) {
   const viewport = els.spaceViewport;
   if (!board || !viewport) return;
   const rect = spaceViewportUsableRect() || viewport.getBoundingClientRect();
-  const area = canvasArea();
+  const area = canvasAreaSize();
   const distance = canvasDistance();
   const extent = canvasContentExtent();
-  const logicalWidth = Math.max(rect.width / distance, Math.round(rect.width * area), extent.width);
-  const logicalHeight = Math.max(rect.height / distance, Math.round(rect.height * area), extent.height);
+  const logicalWidth = Math.max(rect.width / distance, area.width, extent.width);
+  const logicalHeight = Math.max(rect.height / distance, area.height, extent.height);
   board.style.setProperty("--space-distance", String(distance));
   board.dataset.spaceDistance = String(distance);
   board.style.width = `${Math.max(rect.width, Math.round(logicalWidth * distance))}px`;
@@ -2355,11 +3279,6 @@ function freezeWidgetPixelLayout() {
   });
 }
 
-function normalizedCanvasArea(value) {
-  const number = Number(value);
-  return clamp(Math.round((Number.isFinite(number) ? number : 1) * 4) / 4, 1, CANVAS_AREA_MAX);
-}
-
 function normalizedCanvasDistance(value) {
   const number = Number(value);
   const normalized = clamp(
@@ -2371,11 +3290,13 @@ function normalizedCanvasDistance(value) {
 }
 
 function commitCanvasAreaChange(origin = "control") {
+  const area = canvasAreaSize();
   saveWidgetLayout();
+  syncActiveSpaceAreaMetadata(area);
   recordUserEvent("workspace.space_area_changed", {
     target: `space:${activeSpaceStorageId()}`,
-    summary: `Space area ${formatMultiplier(canvasArea())}`,
-    data: { space_id: activeSpaceStorageId(), area: canvasArea(), origin },
+    summary: `Space area ${formatAreaSize(area)}`,
+    data: { space_id: activeSpaceStorageId(), width_px: area.width, height_px: area.height, origin },
   });
 }
 
@@ -2390,13 +3311,13 @@ function commitCanvasDistanceChange(origin = "control") {
 
 function setCanvasAreaValue(value, options = {}) {
   const layout = canvasLayout();
-  const next = normalizedCanvasArea(value);
-  const previous = canvasArea();
-  if (next === previous && !options.force) return next;
-  layout.density = next;
+  const next = normalizedCanvasAreaSize(value, canvasAreaSize());
+  const previous = canvasAreaSize();
+  if (next.width === previous.width && next.height === previous.height && !options.force) return next;
+  writeCanvasAreaSize(layout, next);
   applyCanvasGeometry();
   applyWidgetLayout();
-  updateAreaDial(options.control);
+  updateAreaMap(options.control);
   if (options.persist !== false) {
     commitCanvasAreaChange(options.origin || "control");
   }
@@ -2406,7 +3327,8 @@ function setCanvasAreaValue(value, options = {}) {
 
 function setCanvasArea(delta) {
   freezeWidgetPixelLayout();
-  return setCanvasAreaValue(canvasArea() + delta, { origin: "step" });
+  const area = canvasAreaSize();
+  return setCanvasAreaValue({ width: area.width + delta, height: area.height + delta }, { origin: "step" });
 }
 
 function setCanvasDistanceValue(value, options = {}) {
@@ -2558,6 +3480,8 @@ function mappedAppIdsForPanel(panel = state.activePanel) {
 }
 
 function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
+  if (!isAdminUser() && isAdminPanel(panel)) return false;
+  if (!isAdminUser() && isUserSpacePanel(panel)) return false;
   if (Object.prototype.hasOwnProperty.call(FIXED_WIDGET_LAYOUT, widgetId)) return true;
   const app = appDefinitionById(widgetId);
   if (app?.desktopOnly && isCompactViewport()) return false;
@@ -3886,6 +4810,7 @@ async function fetchJson(path, options = {}) {
   try {
     const response = await fetch(path, {
       method: options.method || "GET",
+      cache: options.cache || "no-store",
       headers: {
         "Content-Type": "application/json",
         "X-Wasm-Agent-Device-Id": clientDeviceId(),
@@ -3954,6 +4879,14 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
     if (!response.ok || !response.body) {
       throw new Error(`HTTP ${response.status}`);
     }
+    mergeAgentAction(pendingMessage, {
+      id: "client_ask_orchestrator",
+      topic: "run-hermes",
+      kind: "model",
+      status: "done",
+      detail: "stream accepted",
+      meta: "handshake",
+    });
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -4159,8 +5092,30 @@ function closeAgentChat() {
   if (!closeUiNavigationLayer("agent-chat")) setAgentOpen(false);
 }
 
+function agentChatScrollSnapshot() {
+  const scroller = els.agentMessages;
+  if (!scroller) return { pinned: true, top: 0 };
+  const distanceFromBottom = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+  return {
+    pinned: distanceFromBottom <= AGENT_CHAT_BOTTOM_EPSILON_PX,
+    top: scroller.scrollTop,
+  };
+}
+
+function restoreAgentChatScroll(snapshot = {}) {
+  const scroller = els.agentMessages;
+  if (!scroller) return;
+  if (snapshot.pinned) {
+    scroller.scrollTop = scroller.scrollHeight;
+    return;
+  }
+  const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  scroller.scrollTop = clamp(Number(snapshot.top || 0), 0, maxTop);
+}
+
 function appendAgentMessage(role, content, extra = {}) {
   const session = activeAgentSession();
+  const scrollSnapshot = agentChatScrollSnapshot();
   const message = {
     id: `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
     role,
@@ -4174,7 +5129,7 @@ function appendAgentMessage(role, content, extra = {}) {
   saveAgentSessions();
   renderAgentSessions();
   els.agentMessages.append(renderAgentMessage(message));
-  els.agentMessages.scrollTop = els.agentMessages.scrollHeight;
+  restoreAgentChatScroll(scrollSnapshot);
   return message;
 }
 
@@ -4186,9 +5141,13 @@ function renderAgentMessage(message) {
   const header = message.role === "assistant" && (message.pending || Number.isFinite(message.duration_ms))
     ? agentTurnHeader(message)
     : null;
-  const body = document.createElement("div");
-  body.className = "agent-message-body";
-  body.textContent = message.content;
+  const body = message.role === "assistant" && !message.pending
+    ? renderAgentMarkdown(message.content)
+    : document.createElement("div");
+  if (!body.classList.contains("agent-message-body")) {
+    body.className = "agent-message-body";
+    body.textContent = message.content;
+  }
   if (message.images && message.images.length > 0) {
     const grid = document.createElement("div");
     grid.className = "agent-message-images";
@@ -4203,12 +5162,286 @@ function renderAgentMessage(message) {
   }
   const imageCards = renderAgentImageCards(message);
   if (imageCards) wrap.append(imageCards);
+  const fileAttachments = renderAgentFileAttachments(message);
+  if (fileAttachments) wrap.append(fileAttachments);
   if (header) wrap.append(header);
   const actions = message.role === "assistant" ? agentActionsChain(message) : null;
   if (actions) wrap.append(actions);
   wrap.append(body);
-  const changedFiles = message.role === "assistant" ? changedFilesFooter(message.changed_files || []) : null;
+  const changedFiles = message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
   if (changedFiles) wrap.append(changedFiles);
+  return wrap;
+}
+
+function renderAgentFileAttachments(message) {
+  const entries = (Array.isArray(message.attachments) ? message.attachments : [])
+    .filter((item) => item && typeof item === "object" && !item.image_card);
+  if (!entries.length) return null;
+  const list = document.createElement("div");
+  list.className = "agent-file-attachments";
+  for (const entry of entries) {
+    const item = document.createElement("div");
+    item.className = "agent-file-attachment";
+    const name = document.createElement("strong");
+    const meta = document.createElement("span");
+    name.textContent = cleanText(entry.name, "Attachment");
+    meta.textContent = attachmentMetaText(entry);
+    item.append(name, meta);
+    list.append(item);
+  }
+  return list;
+}
+
+function renderAgentMarkdown(content) {
+  const body = document.createElement("div");
+  body.className = "agent-message-body agent-markdown";
+  appendMarkdownBlocks(body, String(content || "").replace(/\r\n?/g, "\n").split("\n"));
+  return body;
+}
+
+function appendMarkdownBlocks(container, lines) {
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] || "";
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fence = line.match(/^ {0,3}(```+|~~~+)\s*([A-Za-z0-9_+.-]*)\s*$/);
+    if (fence) {
+      const marker = fence[1];
+      const lang = fence[2] || "";
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !String(lines[index] || "").startsWith(marker)) {
+        codeLines.push(lines[index] || "");
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      if (lang) code.className = `language-${lang.replace(/[^A-Za-z0-9_+.-]/g, "")}`;
+      code.textContent = codeLines.join("\n");
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const el = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(el, heading[2]);
+      container.append(el);
+      index += 1;
+      continue;
+    }
+
+    if (/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      container.append(document.createElement("hr"));
+      index += 1;
+      continue;
+    }
+
+    if (/^ {0,3}>/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^ {0,3}>/.test(lines[index] || "")) {
+        quoteLines.push(String(lines[index] || "").replace(/^ {0,3}>\s?/, ""));
+        index += 1;
+      }
+      const quote = document.createElement("blockquote");
+      appendMarkdownBlocks(quote, quoteLines);
+      container.append(quote);
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      const tableLines = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length && /\|/.test(lines[index] || "") && String(lines[index] || "").trim()) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      container.append(renderMarkdownTable(tableLines));
+      continue;
+    }
+
+    const listMatch = line.match(/^ {0,3}(?:([-*+])|(\d+)[.)])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const list = document.createElement(ordered ? "ol" : "ul");
+      while (index < lines.length) {
+        const match = String(lines[index] || "").match(/^ {0,3}(?:([-*+])|(\d+)[.)])\s+(.+)$/);
+        if (!match || Boolean(match[2]) !== ordered) break;
+        const item = document.createElement("li");
+        const task = match[3].match(/^\[([ xX])]\s+(.+)$/);
+        if (task) {
+          item.className = "task-list-item";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.disabled = true;
+          checkbox.checked = task[1].toLowerCase() === "x";
+          item.append(checkbox, " ");
+          appendInlineMarkdown(item, task[2]);
+        } else {
+          appendInlineMarkdown(item, match[3]);
+        }
+        list.append(item);
+        index += 1;
+      }
+      container.append(list);
+      continue;
+    }
+
+    const paragraph = [line.trim()];
+    index += 1;
+    while (
+      index < lines.length
+      && String(lines[index] || "").trim()
+      && !isMarkdownBlockStart(lines, index)
+    ) {
+      paragraph.push(String(lines[index] || "").trim());
+      index += 1;
+    }
+    const p = document.createElement("p");
+    appendInlineMarkdown(p, paragraph.join(" "));
+    container.append(p);
+  }
+}
+
+function isMarkdownBlockStart(lines, index) {
+  const line = String(lines[index] || "");
+  return Boolean(
+    line.match(/^ {0,3}(```+|~~~+)/)
+    || line.match(/^(#{1,6})\s+/)
+    || line.match(/^ {0,3}>/)
+    || line.match(/^ {0,3}(?:[-*+]|\d+[.)])\s+/)
+    || /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)
+    || isMarkdownTableStart(lines, index)
+  );
+}
+
+function appendInlineMarkdown(parent, text) {
+  let rest = String(text || "");
+  while (rest) {
+    const markers = ["`", "[", "**", "__", "*", "_"]
+      .map((marker) => ({ marker, index: rest.indexOf(marker) }))
+      .filter((item) => item.index >= 0)
+      .sort((a, b) => (a.index - b.index) || (b.marker.length - a.marker.length));
+    if (!markers.length) {
+      parent.append(document.createTextNode(rest));
+      return;
+    }
+    const { marker, index } = markers[0];
+    if (index > 0) {
+      parent.append(document.createTextNode(rest.slice(0, index)));
+      rest = rest.slice(index);
+      continue;
+    }
+    if (marker === "`") {
+      const end = rest.indexOf("`", 1);
+      if (end > 0) {
+        const code = document.createElement("code");
+        code.textContent = rest.slice(1, end);
+        parent.append(code);
+        rest = rest.slice(end + 1);
+        continue;
+      }
+    }
+    if (marker === "[") {
+      const link = rest.match(/^\[([^\]]+)]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
+      if (link) {
+        const href = safeMarkdownUrl(link[2]);
+        if (href) {
+          const anchor = document.createElement("a");
+          anchor.href = href;
+          anchor.target = "_blank";
+          anchor.rel = "noopener noreferrer";
+          appendInlineMarkdown(anchor, link[1]);
+          parent.append(anchor);
+        } else {
+          parent.append(document.createTextNode(link[1]));
+        }
+        rest = rest.slice(link[0].length);
+        continue;
+      }
+    }
+    if (marker === "**" || marker === "__") {
+      const end = rest.indexOf(marker, marker.length);
+      if (end > marker.length) {
+        const strong = document.createElement("strong");
+        appendInlineMarkdown(strong, rest.slice(marker.length, end));
+        parent.append(strong);
+        rest = rest.slice(end + marker.length);
+        continue;
+      }
+    }
+    if ((marker === "*" || marker === "_") && rest.length > 2 && !/\s/.test(rest[1])) {
+      const end = rest.indexOf(marker, 1);
+      if (end > 1) {
+        const em = document.createElement("em");
+        appendInlineMarkdown(em, rest.slice(1, end));
+        parent.append(em);
+        rest = rest.slice(end + 1);
+        continue;
+      }
+    }
+    parent.append(document.createTextNode(rest[0]));
+    rest = rest.slice(1);
+  }
+}
+
+function safeMarkdownUrl(raw) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(value)) return value;
+  return "";
+}
+
+function splitMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableDivider(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isMarkdownTableStart(lines, index) {
+  return Boolean(
+    index + 1 < lines.length
+    && /\|/.test(lines[index] || "")
+    && isMarkdownTableDivider(lines[index + 1] || "")
+  );
+}
+
+function renderMarkdownTable(lines) {
+  const wrap = document.createElement("div");
+  wrap.className = "agent-markdown-table-wrap";
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const body = document.createElement("tbody");
+  const headers = splitMarkdownTableRow(lines[0]);
+  const headerRow = document.createElement("tr");
+  headers.forEach((header) => {
+    const th = document.createElement("th");
+    appendInlineMarkdown(th, header);
+    headerRow.append(th);
+  });
+  head.append(headerRow);
+  lines.slice(2).forEach((line) => {
+    const row = document.createElement("tr");
+    const cells = splitMarkdownTableRow(line);
+    headers.forEach((_, cellIndex) => {
+      const td = document.createElement("td");
+      appendInlineMarkdown(td, cells[cellIndex] || "");
+      row.append(td);
+    });
+    body.append(row);
+  });
+  table.append(head, body);
+  wrap.append(table);
   return wrap;
 }
 
@@ -4378,31 +5611,44 @@ function copyAgentMessageText(message) {
   });
 }
 
+function bindAgentDetailsOpenState(details, key, defaultOpen = false, options = {}) {
+  if (!details || !key) return;
+  const overrides = state.agentDetailsOpenOverrides || {};
+  state.agentDetailsOpenOverrides = overrides;
+  details.dataset.agentOpenKey = key;
+  const status = cleanText(options.status, "");
+  const existing = overrides[key];
+  const overrideOpen = existing && typeof existing === "object"
+    ? Boolean(existing.open)
+    : Boolean(existing);
+  const overrideStatus = existing && typeof existing === "object" ? cleanText(existing.status, "") : "";
+  if (options.autoCloseOnDone && status === "done" && overrideOpen && overrideStatus !== "done") {
+    delete overrides[key];
+  }
+  details.open = Object.prototype.hasOwnProperty.call(overrides, key)
+    ? (overrides[key] && typeof overrides[key] === "object" ? Boolean(overrides[key].open) : Boolean(overrides[key]))
+    : Boolean(defaultOpen);
+  details.addEventListener("click", (event) => {
+    if (!event.target?.closest?.("summary")) return;
+    window.setTimeout(() => {
+      overrides[key] = { open: Boolean(details.open), status };
+    }, 0);
+  });
+  details.addEventListener("toggle", (event) => {
+    if (event.isTrusted) overrides[key] = { open: Boolean(details.open), status };
+  });
+}
+
 function renderAgentMessages() {
   const session = activeAgentSession();
-  const prevScrollTop = els.agentMessages.scrollTop;
-  // Snapshot which messages have their actions-chain details open
-  const openChains = new Map();
-  for (const child of els.agentMessages.querySelectorAll(".agent-message")) {
-    const mid = child.dataset.messageId;
-    const chain = child.querySelector(".agent-actions-chain");
-    if (mid && chain) openChains.set(mid, chain.open);
-  }
+  const scrollSnapshot = agentChatScrollSnapshot();
   els.agentMessages.replaceChildren();
   for (const message of session.messages) {
     els.agentMessages.append(renderAgentMessage(message));
   }
-  // Restore open state for actions-chain details that were open before
-  for (const child of els.agentMessages.querySelectorAll(".agent-message")) {
-    const mid = child.dataset.messageId;
-    if (openChains.get(mid)) {
-      const chain = child.querySelector(".agent-actions-chain");
-      if (chain) chain.open = true;
-    }
-  }
   renderAgentDiagnostics(session.diagnostics || {});
   renderAgentContextPreview(session.context_preview || []);
-  els.agentMessages.scrollTop = prevScrollTop;
+  restoreAgentChatScroll(scrollSnapshot);
 }
 
 function renderAgentSessions() {
@@ -4486,18 +5732,105 @@ function fmtCompactToken(n) {
   s = s.replace(/0$/, ''); // strip trailing zero, keep at least one decimal
   return `\u25c8 ${s}${unit}`;
 }
+
+function tokenNumber(value) {
+  if (Number.isFinite(value)) return Math.max(0, Math.floor(value));
+  if (typeof value === "string") {
+    const clean = value.trim().replace(/[, _]/g, "");
+    if (/^\d+(\.\d+)?$/.test(clean)) return Math.max(0, Math.floor(Number(clean)));
+  }
+  return null;
+}
+
+function firstTokenNumber(usage, keys) {
+  for (const key of keys) {
+    const value = tokenNumber(usage?.[key]);
+    if (value !== null) return value;
+  }
+  return null;
+}
+
+function normalizeAgentTokenUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const prompt = firstTokenNumber(usage, ["prompt_tokens", "input_tokens", "input_token_count", "inputTokenCount", "tokens_in", "prompt"]);
+  const completion = firstTokenNumber(usage, ["completion_tokens", "output_tokens", "output_token_count", "outputTokenCount", "candidatesTokenCount", "tokens_out", "completion"]);
+  let total = firstTokenNumber(usage, ["total_tokens", "total_token_count", "totalTokenCount", "tokens", "total"]);
+  let input = prompt;
+  let output = completion;
+  if (total === null && (input !== null || output !== null)) total = (input || 0) + (output || 0);
+  if (input === null && total !== null && output !== null) input = Math.max(0, total - output);
+  if (output === null && total !== null && input !== null) output = Math.max(0, total - input);
+  if (total === null && input === null && output === null) return null;
+  return {
+    ...usage,
+    prompt_tokens: input || 0,
+    completion_tokens: output || 0,
+    input_tokens: input || 0,
+    output_tokens: output || 0,
+    total_tokens: total || 0,
+  };
+}
+
 function updateAgentTokenUsage(usage = state.agentTokenUsage) {
-  state.agentTokenUsage = usage || null;
+  const normalized = normalizeAgentTokenUsage(usage);
+  state.agentTokenUsage = normalized || null;
   if (!els.agentTokenUsage) return;
-  const total = usage && Number.isFinite(usage.total_tokens) ? usage.total_tokens : null;
+  const total = normalized ? normalized.total_tokens : null;
   els.agentTokenUsage.textContent = fmtCompactToken(total);
-  els.agentTokenUsage.title = usage
-    ? `Exact model tokens: input ${usage.prompt_tokens || 0}, output ${usage.completion_tokens || 0}, total ${total || 0}`
+  els.agentTokenUsage.title = normalized
+    ? `Exact model tokens: input ${normalized.prompt_tokens || 0}, output ${normalized.completion_tokens || 0}, total ${total || 0}`
     : "Exact model token usage for the last turn";
 }
 
-function changedFilesFooter(files = []) {
+function agentFileDiffText(file = {}) {
+  return cleanText(file.diff_patch || file.patch || file.unified_diff || "", "");
+}
+
+function agentFileDiffLines(patch = "") {
+  return String(patch || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("+++") || line.startsWith("---")) return null;
+      if (line.startsWith("+")) return { kind: "now", text: line.slice(1) || " " };
+      if (line.startsWith("-")) return { kind: "before", text: line.slice(1) || " " };
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function renderAgentFileDiffBalloon(patch = "") {
+  const balloon = document.createElement("div");
+  balloon.className = "agent-file-diff-balloon";
+  const lines = agentFileDiffLines(patch);
+  if (!lines.length) {
+    const empty = document.createElement("div");
+    empty.className = "agent-file-diff-empty";
+    empty.textContent = "No changed hunks available.";
+    balloon.append(empty);
+    return balloon;
+  }
+  const list = document.createElement("div");
+  list.className = "agent-file-diff-lines";
+  lines.forEach((line) => {
+    const row = document.createElement("div");
+    const tag = document.createElement("span");
+    const code = document.createElement("code");
+    row.className = `agent-file-diff-line is-${line.kind}`;
+    tag.className = "agent-file-diff-tag";
+    tag.textContent = line.kind === "before" ? "was" : "now";
+    code.textContent = line.text;
+    row.append(tag, code);
+    list.append(row);
+  });
+  balloon.append(list);
+  return balloon;
+}
+
+function changedFilesFooter(files = [], message = {}) {
   if (!files.length) return null;
+  const checkpoint = message?.diagnostics?.auto_checkpoint || message?.diagnostics?.checkpoint || null;
+  const checkpointRef = checkpoint?.ref || "";
   const totals = files.reduce(
     (sum, file) => ({
       additions: sum.additions + (Number.isFinite(file.additions) ? file.additions : 0),
@@ -4508,6 +5841,7 @@ function changedFilesFooter(files = []) {
   const details = document.createElement("details");
   const summary = document.createElement("summary");
   details.className = "agent-changed-details";
+  if (message?.id) bindAgentDetailsOpenState(details, `changed:${message.id}`);
   summary.className = "agent-changed-summary";
   summary.replaceChildren(
     document.createTextNode(`${files.length} files changed `),
@@ -4515,24 +5849,45 @@ function changedFilesFooter(files = []) {
     document.createTextNode(" "),
     statSpan(`-${totals.deletions}`, "del")
   );
+  if (checkpointRef) {
+    const stepback = document.createElement("button");
+    stepback.type = "button";
+    stepback.className = "agent-stepback-button";
+    stepback.textContent = "Stepback";
+    stepback.title = "Restore the timeline to the point before this run";
+    stepback.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void stepbackTimeline(checkpointRef, message.space_id || activeSpaceStorageId());
+    });
+    summary.append(stepback);
+  }
   const list = document.createElement("div");
   list.className = "agent-file-list";
   list.replaceChildren(
     ...files.map((file) => {
-      const item = document.createElement("div");
+      const patch = agentFileDiffText(file);
+      const item = document.createElement(patch ? "details" : "div");
       item.className = "agent-file-row";
+      if (patch && message?.id) bindAgentDetailsOpenState(item, `changed-file:${message.id}:${cleanText(file.path || file.full_path || String(file), "")}`);
+      const row = document.createElement(patch ? "summary" : "div");
+      row.className = "agent-file-row-summary";
       const path = document.createElement("span");
       const stats = document.createElement("span");
       path.className = "agent-file-path";
       stats.className = "agent-file-diff";
       path.textContent = file.full_path || file.path || String(file);
-      path.title = file.full_path || file.path || String(file);
+      path.title = patch ? `Show changed hunks for ${path.textContent}` : path.textContent;
       stats.replaceChildren(
         statSpan(`+${Number.isFinite(file.additions) ? file.additions : 0}`, "add"),
         document.createTextNode(" "),
         statSpan(`-${Number.isFinite(file.deletions) ? file.deletions : 0}`, "del")
       );
-      item.append(path, stats);
+      row.append(path, stats);
+      item.append(row);
+      if (patch) {
+        item.append(renderAgentFileDiffBalloon(patch));
+      }
       return item;
     })
   );
@@ -4540,12 +5895,52 @@ function changedFilesFooter(files = []) {
   return details;
 }
 
+async function stepbackTimeline(ref, spaceId = activeSpaceStorageId()) {
+  const checkpointRef = cleanText(ref, "");
+  if (!checkpointRef) return;
+  if (!window.confirm("Step back this timeline to the point before that run? Current files touched by the run will be restored.")) {
+    return;
+  }
+  const startedAt = performance.now();
+  try {
+    const payload = await fetchJson("/timeline/stepback", {
+      method: "POST",
+      timeoutMs: 30000,
+      body: {
+        ref: checkpointRef,
+        space_id: spaceId,
+        before_run: true,
+      },
+    });
+    const result = payload.stepback || {};
+    state.timeline = null;
+    await loadTimeline("stepback").catch(() => {});
+    els.taskOutput.textContent = `Timeline stepback restored ${result.restored_paths || 0} paths and removed ${result.deleted_paths || 0}.`;
+    recordUserEvent("timeline.stepback_applied", {
+      target: "timeline",
+      summary: `Stepped back ${spaceId}`,
+      data: { ref: checkpointRef, path_count: result.path_count || 0, scope: result.scope || "" },
+      duration_ms: performance.now() - startedAt,
+    });
+  } catch (error) {
+    state.lastError = error.message;
+    els.taskOutput.textContent = error.message;
+    recordUserEvent("timeline.stepback_error", {
+      target: "timeline",
+      summary: error.message,
+      data: { ref: checkpointRef, error: error.message },
+      duration_ms: performance.now() - startedAt,
+    });
+  }
+}
+
 function agentActionsChain(message) {
   const actions = Array.isArray(message.actions) ? message.actions : [];
   if (!actions.length) return null;
+  const topics = groupAgentActions(actions);
   const details = document.createElement("details");
   details.className = "agent-actions-chain";
-  details.open = Boolean(message.pending);
+  bindAgentDetailsOpenState(details, message?.id ? `actions:${message.id}` : "", Boolean(message.pending));
   const summary = document.createElement("summary");
   summary.className = "agent-actions-summary";
   const running = actions.find((action) => action.status === "running");
@@ -4563,18 +5958,149 @@ function agentActionsChain(message) {
   summary.append(summaryLabel, summaryMeta);
   const list = document.createElement("div");
   list.className = "agent-actions-list";
-  list.replaceChildren(...actions.map(renderAgentActionRow));
+  list.replaceChildren(...topics.map((topic) => renderAgentActionTopic(topic, message)));
   details.append(summary, list);
   return details;
 }
 
-function renderAgentActionRow(action) {
+function groupAgentActions(actions) {
+  const order = ["run-wasm", "run-hermes"];
+  const groups = new Map(order.map((topic) => [topic, { topic, actions: [] }]));
+  for (const action of actions) {
+    const topic = agentActionTopic(action);
+    if (!groups.has(topic)) groups.set(topic, { topic, actions: [] });
+    groups.get(topic).actions.push(action);
+  }
+  return [...groups.values()].filter((group) => group.actions.length);
+}
+
+function agentActionTopic(action) {
+  const topic = cleanText(action.topic, "");
+  if (topic === "run-wasm" || topic === "run-hermes") return topic;
+  const kind = cleanText(action.kind, "");
+  const id = cleanText(action.id, "");
+  if (
+    kind === "run-hermes"
+    || kind === "model"
+    || kind === "trace"
+    || id === "node_reply"
+    || id.startsWith("bridge_")
+    || id.startsWith("client_ask_")
+  ) {
+    return "run-hermes";
+  }
+  return "run-wasm";
+}
+
+function agentActionInnerKind(action) {
+  const kind = cleanText(action.kind, "step");
+  if (kind !== "run-wasm" && kind !== "run-hermes") return kind;
+  const id = cleanText(action.id, "");
+  const label = cleanText(action.label, "").toLowerCase();
+  if (id === "turn_intake") return "turn";
+  if (id === "mutation_policy") return "policy";
+  if (id === "node_reply" || id.startsWith("client_ask_")) return "model";
+  if (id === "bridge_steps" || id === "bridge_reasoning_summary") return "trace";
+  if (id.startsWith("bridge_tool_") || id.startsWith("tool_")) return "tool";
+  if (id.startsWith("client_store_") || id.startsWith("client_decode_") || id.startsWith("client_analyze_") || id.startsWith("client_build_")) return "media";
+  if (label.includes("context")) return "context";
+  return "step";
+}
+
+function actionTopicStatus(actions) {
+  if (actions.some((action) => action.status === "error")) return "error";
+  if (actions.some((action) => action.status === "running")) return "running";
+  return "done";
+}
+
+function agentActionIconText(action, kind = "") {
+  const status = cleanText(action?.status, "");
+  if (status === "error") return "⚠️";
+  if (status === "running") return "⏳";
+  const id = cleanText(action?.id, "");
+  const label = cleanText(action?.label, "").toLowerCase();
+  if (kind === "turn" || id === "turn_intake") return "📥";
+  if (kind === "policy") return "🛡️";
+  if (kind === "context" || label.includes("context")) return "🧭";
+  if (kind === "media") return "🖼️";
+  if (kind === "model") return "🧠";
+  if (kind === "tool") return "🔧";
+  if (kind === "trace") return "🔎";
+  if (kind === "mutation") return "✏️";
+  if (kind === "timeline") return "🕘";
+  return "✓";
+}
+
+function agentTopicIconText(topic, status = "") {
+  if (status === "error") return "⚠️";
+  if (status === "running") return "⏳";
+  return topic === "run-hermes" ? "🪽" : "🧩";
+}
+
+function cleanAgentActionLabel(action, kind = "") {
+  const raw = cleanText(action?.label, "Action");
+  if (kind === "tool") return raw.replace(/^tool:\s*/i, "") || "tool";
+  return raw;
+}
+
+function cleanAgentActionMeta(action, status = "", kind = "") {
+  const meta = cleanText(action?.meta, status);
+  if (kind === "tool" && /^tool\.(started|completed)$/i.test(meta)) return status === "done" ? "done" : status;
+  return meta;
+}
+
+function renderAgentActionTopic(group, message) {
+  const topicActions = group.actions || [];
+  const status = actionTopicStatus(topicActions);
+  const details = document.createElement("details");
+  details.className = `agent-action-topic ${status} kind-${group.topic}`;
+  bindAgentDetailsOpenState(
+    details,
+    message?.id ? `topic:${message.id}:${group.topic}` : "",
+    Boolean(message?.pending && (status === "running" || status === "error")),
+    { status, autoCloseOnDone: true }
+  );
+  const summary = document.createElement("summary");
+  summary.className = "agent-action-topic-summary";
+  const dot = document.createElement("span");
+  dot.className = "agent-action-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const main = document.createElement("span");
+  main.className = "agent-action-main";
+  const label = document.createElement("strong");
+  const detail = document.createElement("span");
+  const badge = document.createElement("span");
+  const meta = document.createElement("span");
+  badge.className = "agent-action-topic-kind";
+  meta.className = "agent-action-meta";
+  label.textContent = `${agentTopicIconText(group.topic, status)} ${group.topic}`;
+  detail.textContent = topicActions
+    .map((action) => agentActionInnerKind(action))
+    .filter((kind, index, list) => kind && list.indexOf(kind) === index)
+    .slice(0, 4)
+    .join(" / ");
+  badge.textContent = status;
+  meta.textContent = `${topicActions.length}`;
+  main.append(label);
+  if (detail.textContent) main.append(detail);
+  summary.append(dot, main, badge, meta);
+  const list = document.createElement("div");
+  list.className = "agent-action-topic-list";
+  list.replaceChildren(...topicActions.map((action, index) => renderAgentActionRow(action, message, index)));
+  details.append(summary, list);
+  return details;
+}
+
+function renderAgentActionRow(action, message = {}, index = 0) {
   const hasPreview = Boolean(action.preview || action.arguments);
   const row = document.createElement(hasPreview ? "details" : "div");
   const status = cleanText(action.status, "done");
-  const kind = cleanText(action.kind, "step");
+  const kind = agentActionInnerKind(action);
   row.className = `agent-action-row ${status} kind-${kind}`;
-  if (hasPreview && action.open) row.open = true;
+  if (hasPreview && message?.id) {
+    bindAgentDetailsOpenState(row, `row:${message.id}:${cleanText(action.id, "") || `${kind}-${index}`}`, Boolean(action.open));
+  }
+  if (hasPreview && action.open && !message?.id) row.open = true;
   const head = document.createElement(hasPreview ? "summary" : "div");
   head.className = "agent-action-row-summary";
   const dot = document.createElement("span");
@@ -4589,8 +6115,8 @@ function renderAgentActionRow(action) {
   badge.className = "agent-action-kind";
   meta.className = "agent-action-meta";
   badge.textContent = kind;
-  meta.textContent = cleanText(action.meta, status);
-  label.textContent = cleanText(action.label, "Action");
+  meta.textContent = cleanAgentActionMeta(action, status, kind);
+  label.textContent = `${agentActionIconText(action, kind)} ${cleanAgentActionLabel(action, kind)}`;
   detail.textContent = cleanText(action.detail, "");
   main.append(label);
   if (detail.textContent) main.append(detail);
@@ -4622,8 +6148,18 @@ function mergeAgentAction(message, nextAction) {
   if (!message || !nextAction) return;
   const actions = Array.isArray(message.actions) ? [...message.actions] : [];
   const actionId = nextAction.id || `act_${actions.length + 1}`;
-  const index = actions.findIndex((action) => action.id === actionId);
   const normalized = { ...nextAction, id: actionId };
+  let index = actions.findIndex((action) => action.id === actionId);
+  if (index < 0 && ["done", "error"].includes(cleanText(normalized.status, "").toLowerCase())) {
+    index = actions.findIndex((action) => (
+      cleanText(action.status, "").toLowerCase() === "running"
+      && cleanText(action.topic, "") === cleanText(normalized.topic, "")
+      && cleanText(action.kind, "") === cleanText(normalized.kind, "")
+      && cleanText(action.label, "") === cleanText(normalized.label, "")
+      && cleanText(action.meta, "").startsWith("tool.started")
+      && cleanText(normalized.meta, "").startsWith("tool.completed")
+    ));
+  }
   if (index >= 0) {
     actions[index] = { ...actions[index], ...normalized };
   } else {
@@ -4632,10 +6168,21 @@ function mergeAgentAction(message, nextAction) {
   updateAgentPendingMessage(message, { actions });
 }
 
+function finalAgentActionStatus(status) {
+  const value = cleanText(status, "done").toLowerCase();
+  if (["running", "queued", "submitted", "pending", "in_progress", "working"].includes(value)) return "done";
+  if (["failed", "failure"].includes(value)) return "error";
+  return value || "done";
+}
+
+function finalizeAgentActionRow(action = {}) {
+  return { ...action, status: finalAgentActionStatus(action.status) };
+}
+
 function agentActionRowsFromPayload(agent, fallbackActions = []) {
   const actions = Array.isArray(agent?.actions) ? agent.actions : [];
-  if (actions.length) return actions;
-  const rows = fallbackActions.map((action) => ({ ...action, status: action.status === "running" ? "done" : action.status }));
+  if (actions.length) return actions.map(finalizeAgentActionRow);
+  const rows = fallbackActions.map(finalizeAgentActionRow);
   const previews = Array.isArray(agent?.context_preview) ? agent.context_preview : [];
   previews.forEach((item) => {
     rows.push(agentAction(`Tool: ${cleanText(item.tool, "context")}`, "done", cleanText(item.path || item.query || item.preview, "")));
@@ -4688,12 +6235,76 @@ function agentAttachmentSummary(image, reason) {
   };
 }
 
+function isAgentImageFile(file) {
+  return Boolean(file?.type?.startsWith("image/"));
+}
+
+function isAgentVideoFile(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  return type === "video/mp4" || name.endsWith(".mp4");
+}
+
+function isAgentAttachmentFile(file) {
+  return isAgentImageFile(file) || isAgentVideoFile(file);
+}
+
+function attachmentMetaText(entry) {
+  const type = cleanText(entry?.type || entry?.original_type, "file");
+  const size = bytes(Number(entry?.size || entry?.original_size || 0));
+  const duration = Number(entry?.duration_sec ?? entry?.video_card?.duration_sec);
+  const durationText = Number.isFinite(duration) && duration > 0 ? `${duration.toFixed(duration >= 10 ? 0 : 1)}s` : "";
+  const dimensions = entry?.width && entry?.height ? `${entry.width}x${entry.height}` : "";
+  return [type, size, dimensions, durationText].filter((item) => item && item !== "-").join(" / ");
+}
+
 function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result || ""));
     reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
     reader.readAsDataURL(file);
+  });
+}
+
+function readVideoFileSummary(file) {
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      URL.revokeObjectURL(objectUrl);
+      const width = Number(video.videoWidth || 0);
+      const height = Number(video.videoHeight || 0);
+      const duration = Number(video.duration || 0);
+      resolve({
+        name: cleanText(file.name, "Attached video"),
+        type: cleanText(file.type || "video/mp4", "video/mp4"),
+        size: Number.isFinite(file.size) ? file.size : undefined,
+        width: Number.isFinite(width) && width > 0 ? width : undefined,
+        height: Number.isFinite(height) && height > 0 ? height : undefined,
+        duration_sec: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 10) / 10 : undefined,
+        media_kind: "video",
+        video_card: {
+          schema: "hermes.wasm_agent.video_card.v1",
+          name: cleanText(file.name, "Attached video"),
+          type: cleanText(file.type || "video/mp4", "video/mp4"),
+          size: Number.isFinite(file.size) ? file.size : undefined,
+          width: Number.isFinite(width) && width > 0 ? width : undefined,
+          height: Number.isFinite(height) && height > 0 ? height : undefined,
+          duration_sec: Number.isFinite(duration) && duration > 0 ? Math.round(duration * 10) / 10 : undefined,
+        },
+        reason: "video_metadata_only",
+      });
+    };
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = finish;
+    video.onerror = finish;
+    window.setTimeout(finish, 2500);
+    video.src = objectUrl;
   });
 }
 
@@ -5963,18 +7574,22 @@ async function readFileDataUrl(file) {
 }
 
 function handleAgentFiles(fileList) {
-  const files = Array.from(fileList).filter((f) => f.type.startsWith("image/"));
+  const files = Array.from(fileList).filter(isAgentAttachmentFile);
   if (!files.length) return;
   const pendingCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
   const slots = Math.max(0, AGENT_MAX_IMAGES - pendingCount);
   const selected = files.slice(0, slots);
   if (!selected.length) return;
-  Promise.allSettled(selected.map(readFileDataUrl)).then((results) => {
+  Promise.allSettled(selected.map((file) => isAgentVideoFile(file) ? readVideoFileSummary(file) : readFileDataUrl(file))).then((results) => {
     const entries = results.filter((item) => item.status === "fulfilled").map((item) => item.value);
     let nextBytes = agentPendingImageBytes();
     const accepted = [];
     const summarized = [];
     for (const entry of entries) {
+      if (String(entry?.media_kind || "").toLowerCase() === "video" || String(entry?.type || "").startsWith("video/")) {
+        summarized.push(entry);
+        continue;
+      }
       const bytes = agentImagePayloadBytes(entry);
       if (bytes > AGENT_IMAGE_MAX_BYTES || nextBytes + bytes > AGENT_IMAGE_TOTAL_MAX_BYTES) {
         summarized.push(agentAttachmentSummary(entry, "summarized_to_fit_request_budget"));
@@ -5992,7 +7607,7 @@ function handleAgentFiles(fileList) {
       els.agentStatus.textContent = summarized.length ? "Attachments summarized" : "Attachment failed";
       recordUserEvent("agent.image_attach_error", {
         target: "agent-form",
-        summary: `Could not attach ${skippedCount} image${skippedCount === 1 ? "" : "s"} as raw payload`,
+        summary: `Could not attach ${skippedCount} file${skippedCount === 1 ? "" : "s"} as raw payload`,
         data: {
           error: rejected[0]?.reason?.message || "",
           summarized_count: summarized.length,
@@ -6056,7 +7671,9 @@ function renderPendingPreviews() {
     label.textContent = entry.name;
     const meta = document.createElement("span");
     meta.className = "agent-image-preview-file-meta";
-    meta.textContent = "summarized";
+    meta.textContent = entry.media_kind === "video" || String(entry.type || "").startsWith("video/")
+      ? attachmentMetaText(entry)
+      : "summarized";
     const remove = document.createElement("button");
     remove.className = "agent-image-preview-remove";
     remove.type = "button";
@@ -6127,8 +7744,24 @@ async function storeAgentImageAsset(entry, signal) {
 }
 
 async function storeAgentAttachmentAssets(images, attachments, pendingMessage) {
-  const entries = [...images, ...attachments].filter((entry) => entry?.data_url);
-  if (!entries.length) return { stored: 0, failed: 0 };
+  const allEntries = [...images, ...attachments];
+  const entries = allEntries.filter((entry) => entry?.data_url);
+  const metadataOnly = allEntries.length - entries.length;
+  if (!entries.length) {
+    if (allEntries.length) {
+      mergeAgentAction(pendingMessage, {
+        id: "client_store_image_assets",
+        topic: "run-wasm",
+        kind: "media",
+        label: "Prepare attachments",
+        status: "done",
+        detail: `${metadataOnly} metadata-only`,
+        meta: "local metadata",
+        preview: agentImageCardPreview(images, attachments),
+      });
+    }
+    return { stored: 0, failed: 0 };
+  }
   let stored = 0;
   let failed = 0;
   for (const entry of entries) {
@@ -6145,20 +7778,22 @@ async function storeAgentAttachmentAssets(images, attachments, pendingMessage) {
     }
     mergeAgentAction(pendingMessage, {
       id: "client_store_image_assets",
+      topic: "run-wasm",
       kind: "media",
-      label: "Store image assets",
+      label: "Prepare attachments",
       status: failed ? "error" : "running",
-      detail: `${stored}/${entries.length} stored${failed ? ` / ${failed} failed` : ""}`,
+      detail: `${stored}/${entries.length} stored${metadataOnly ? ` / ${metadataOnly} metadata-only` : ""}${failed ? ` / ${failed} failed` : ""}`,
       meta: "local store",
       preview: agentImageCardPreview(images, attachments),
     });
   }
   mergeAgentAction(pendingMessage, {
     id: "client_store_image_assets",
+    topic: "run-wasm",
     kind: "media",
-    label: "Store image assets",
+    label: "Prepare attachments",
     status: failed ? "error" : "done",
-    detail: `${stored}/${entries.length} stored${failed ? ` / ${failed} failed` : ""}`,
+    detail: `${stored}/${entries.length} stored${metadataOnly ? ` / ${metadataOnly} metadata-only` : ""}${failed ? ` / ${failed} failed` : ""}`,
     meta: "local store",
     preview: agentImageCardPreview(images, attachments),
   });
@@ -6201,7 +7836,6 @@ function updateAgentPendingMessage(message, updates = {}) {
   Object.assign(message, updates);
   saveAgentSessions();
   renderAgentMessages();
-  els.agentMessages.scrollTop = els.agentMessages.scrollHeight;
 }
 
 function stopAgentMessage() {
@@ -6576,7 +8210,7 @@ async function sendAgentMessage(text) {
   const content = cleanText(text, "");
   const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
   if (!content && !attachmentCount) return;
-  const userMessageContent = content || `Attached ${attachmentCount} image${attachmentCount === 1 ? "" : "s"}.`;
+  const userMessageContent = content || `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
   state.agentBusy = true;
   state.agentStopRequested = false;
   state.agentAbortController = new AbortController();
@@ -6586,7 +8220,15 @@ async function sendAgentMessage(text) {
   const targetNode = agentTargetNode();
   const chatModel = selectedAgentModel();
   const turnStartedAt = Date.now();
+  const runHintId = `chat_${turnStartedAt}_${Math.random().toString(36).slice(2, 7)}`;
   const mode = els.agentModeSelect.value;
+  setNodeRunHint(targetNode, {
+    id: runHintId,
+    source: "embedded chat",
+    status: "running",
+    started_at: new Date(turnStartedAt).toISOString(),
+    preview: truncateText(userMessageContent, 120),
+  });
   const userImages = state.agentPendingImages.map((image) => ({
     data_url: image.data_url,
     name: image.name,
@@ -6611,6 +8253,9 @@ async function sendAgentMessage(text) {
     image_card: attachment.image_card,
     asset: attachment.asset,
     reason: attachment.reason,
+    media_kind: attachment.media_kind,
+    duration_sec: attachment.duration_sec,
+    video_card: attachment.video_card,
   }));
   const requestTranscript = agentTranscriptForRequest();
   clearAgentPendingImages();
@@ -6627,15 +8272,19 @@ async function sendAgentMessage(text) {
       image_card: attachment.image_card,
       asset: attachment.asset,
       reason: attachment.reason,
+      media_kind: attachment.media_kind,
+      duration_sec: attachment.duration_sec,
+      video_card: attachment.video_card,
     })),
   });
-  els.agentInput.value = "";
+  els.agentInput.innerText = "";
   recordUserEvent("agent.message_submitted", {
     target: `node:${targetNode}`,
     summary: `Submitted embedded assistant message to ${targetNode}`,
     data: {
       message_length: userMessageContent.length,
       image_count: userImages.length,
+      attachment_count: attachmentCount,
       summarized_attachment_count: userAttachments.length,
       image_bytes: userImages.reduce((sum, image) => sum + (Number.isFinite(image.size) ? image.size : 0), 0),
       panel: state.activePanel,
@@ -6654,17 +8303,23 @@ async function sendAgentMessage(text) {
         selected_node: observation.fleet.selected_node,
         chat_target_node: targetNode,
         node_count: observation.fleet.node_count,
+        nodes: (observation.fleet.nodes || []).slice(0, 12),
         last_error: observation.fleet.last_error,
       },
       tasks: {
         active_task_id: observation.tasks.active_task_id,
         status: observation.tasks.status,
+        recent: (observation.tasks.recent || []).slice(0, 8),
         last_output_summary: observation.tasks.last_output_summary,
       },
       logs: observation.logs,
       requested_click_context: {
         last_non_agent_click: observation.analytics.last_non_agent_click,
         note: "Use last_non_agent_click, not chat open/send events, when the user asks what UI button they clicked last.",
+      },
+      interaction: {
+        recent_trace: (observation.interaction?.recent_trace || []).slice(0, 16),
+        active_pointers: observation.interaction?.active_pointers || [],
       },
       recent_events: observation.user_events.slice(0, 12),
     };
@@ -6679,6 +8334,7 @@ async function sendAgentMessage(text) {
     ));
     const initialActions = [
       agentAction("Prepare compact context", "done", `${transcript.length} transcript turns / ${compactObservation.recent_events.length} UI events`, {
+        topic: "run-wasm",
         kind: "context",
         meta: "snapshot",
         arguments: {
@@ -6693,50 +8349,60 @@ async function sendAgentMessage(text) {
           recent_events: compactObservation.recent_events.slice(0, 3),
         }, null, 2),
       }),
-      agentAction("Store image assets", attachmentCount ? "running" : "done", attachmentCount ? `${attachmentCount} queued` : "none", {
+    ];
+    if (attachmentCount) {
+      initialActions.push(
+        agentAction("Prepare attachments", "running", `${attachmentCount} queued`, {
         id: "client_store_image_assets",
+        topic: "run-wasm",
         kind: "media",
-        meta: attachmentCount ? "local store" : "empty",
-        arguments: attachmentCount ? { endpoint: "/agent/attachments", count: attachmentCount } : undefined,
+        meta: "local store",
+        arguments: { endpoint: "/agent/attachments", count: attachmentCount },
       }),
-      agentAction("Decode pixels", "done", attachmentCount ? `${imageCards.filter((card) => card.dimensions).length}/${attachmentCount} decoded` : "none", {
+        agentAction("Decode pixels", "done", `${imageCards.filter((card) => card.dimensions).length}/${attachmentCount} decoded`, {
         id: "client_decode_pixels",
+        topic: "run-wasm",
         kind: "media",
         meta: "Canvas",
       }),
-      agentAction("Analyze image", "done", attachmentCount ? `${imageCards.length} local image cards` : "none", {
+        agentAction("Analyze attachments", "done", `${imageCards.length} local cards`, {
         id: "client_analyze_image",
+        topic: "run-wasm",
         kind: "media",
         meta: "browser + lazy modules",
-        arguments: attachmentCount
-          ? {
+        arguments: {
               raw_images: userImages.length,
               summarized: summarizedCount,
               raw_budget_bytes: AGENT_IMAGE_TOTAL_MAX_BYTES,
               raw_bytes: imageBytes,
               analyzer_modules: analyzerModules,
-            }
-          : undefined,
+            },
       }),
-      agentAction("Build image cards", "done", attachmentCount ? `${imageCards.length} cards` : "none", {
+        agentAction("Build attachment cards", "done", `${imageCards.length} cards`, {
         id: "client_build_image_cards",
+        topic: "run-wasm",
         kind: "media",
-        meta: attachmentCount ? `${Math.round(imageBytes / 1024)} KB raw` : "empty",
-        preview: attachmentCount ? JSON.stringify(imageCards, null, 2) : "",
-      }),
+        meta: `${Math.round(imageBytes / 1024)} KB raw`,
+        preview: JSON.stringify(imageCards, null, 2),
+      })
+      );
+    }
+    initialActions.push(
       agentAction(`Ask ${targetNode}`, "running", "POST /agent/session/message", {
         id: "client_ask_orchestrator",
+        topic: "run-hermes",
         kind: "model",
         meta: chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
         arguments: { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
-      }),
-    ];
+      })
+    );
     const pendingMessage = appendAgentMessage("assistant", `Waiting for ${targetNode}...`, {
       pending: true,
       phase: "Inspecting context",
       target_node: targetNode,
       mode,
       turn_started_at: turnStartedAt,
+      space_id: activeSpaceStorageId(),
       actions: initialActions,
     });
     startAgentTurnTimer(pendingMessage);
@@ -6758,6 +8424,9 @@ async function sendAgentMessage(text) {
       image_card: attachment.image_card,
       asset: attachment.asset,
       reason: attachment.reason,
+      media_kind: attachment.media_kind,
+      duration_sec: attachment.duration_sec,
+      video_card: attachment.video_card,
     }));
     const payload = await postAgentMessage({
       session_id: activeAgentSession().id,
@@ -6783,6 +8452,8 @@ async function sendAgentMessage(text) {
     pendingMessage.phase = "";
     pendingMessage.duration_ms = payload.agent?.duration_ms || Date.now() - turnStartedAt;
     pendingMessage.changed_files = changedFiles;
+    pendingMessage.diagnostics = payload.agent?.diagnostics || {};
+    pendingMessage.space_id = activeSpaceStorageId();
     pendingMessage.actions = agentActionRowsFromPayload(payload.agent, initialActions);
     session.diagnostics = payload.agent?.diagnostics || {};
     updateAgentTokenUsage(payload.agent?.diagnostics?.token_usage || null);
@@ -6792,7 +8463,6 @@ async function sendAgentMessage(text) {
     renderAgentDiagnostics(payload.agent?.diagnostics || {});
     renderAgentContextPreview(payload.agent?.context_preview || []);
     renderAgentMessages();
-    els.agentMessages.scrollTop = els.agentMessages.scrollHeight;
     recordUserEvent("agent.message_finished", {
       target: "agent-overlay",
       summary: "Embedded assistant replied",
@@ -6833,6 +8503,7 @@ async function sendAgentMessage(text) {
       data: { error: error.message },
     });
   } finally {
+    clearNodeRunHint(targetNode, runHintId);
     state.agentBusy = false;
     state.agentAbortController = null;
     state.agentStopRequested = false;
@@ -6843,13 +8514,58 @@ async function sendAgentMessage(text) {
   }
 }
 
+function nodeTokenBaseline(nodeId, currentTotal) {
+  const id = cleanText(nodeId, "");
+  const total = Number(currentTotal || 0);
+  const safeTotal = Number.isFinite(total) && total > 0 ? total : 0;
+  if (!id) return safeTotal;
+  if (!Object.prototype.hasOwnProperty.call(state.nodeTokenBaselines, id) || safeTotal < Number(state.nodeTokenBaselines[id] || 0)) {
+    state.nodeTokenBaselines[id] = safeTotal;
+  }
+  return Number(state.nodeTokenBaselines[id] || 0);
+}
+
+function nodeAbsoluteTokens(node) {
+  const value = Number(node?.tokenUsage?.absolute_total_tokens ?? node?.tokenUsage?.total_tokens ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function timestampAgeMs(value) {
+  const stamp = Date.parse(String(value || ""));
+  if (!Number.isFinite(stamp)) return null;
+  return Math.max(0, Date.now() - stamp);
+}
+
+function nodeActivityIsFresh(activity = {}) {
+  const ageSec = Number(activity.last_signal_age_sec);
+  const windowSec = Number(activity.active_window_sec || 30);
+  const maxAgeSec = Math.max(1, windowSec) + NODE_ACTIVITY_FRESH_GRACE_SEC;
+  if (Number.isFinite(ageSec)) return ageSec <= maxAgeSec;
+  const ageMs = timestampAgeMs(activity.last_signal_at);
+  if (ageMs !== null) return ageMs <= maxAgeSec * 1000;
+  return true;
+}
+
+function bridgeTaskIsFresh(task) {
+  if (!task) return false;
+  const detail = task && typeof task.task === "object" ? task.task : {};
+  const ageMs = timestampAgeMs(detail.updated_at || task.updated_at || detail.created_at || task.created_at);
+  return ageMs === null || ageMs <= BRIDGE_TASK_ACTIVE_MAX_AGE_MS;
+}
+
 function normalizeNode(raw) {
   const id = cleanText(raw.id || raw.node_id || raw.title, "unknown");
   const activity = raw.activity || {};
   const rawStatus = raw.raw || {};
-  const running = Boolean(raw.running || raw.status === "running" || raw.status === "working");
-  const llmActive = Boolean(activity.llm_active || rawStatus.activity?.llm_active);
-  const status = cleanText(activity.state || raw.status || (running ? "running" : "stopped"), "unknown");
+  const statusActivity = rawStatus.status?.activity || raw.status?.activity || rawStatus.activity || {};
+  const combinedActivity = { ...statusActivity, ...activity };
+  const freshActivity = nodeActivityIsFresh(combinedActivity);
+  const rawStatusValue = cleanText(raw.status, "");
+  const rawStatusKey = rawStatusValue.toLowerCase();
+  const running = Boolean(raw.running || rawStatusKey === "running" || rawStatusKey === "working");
+  const llmActive = freshActivity && Boolean(activity.llm_active || statusActivity.llm_active);
+  const activeStatus = freshActivity ? cleanText(activity.state || statusActivity.state, "") : "";
+  const status = cleanText(activeStatus || (running ? "idle" : rawStatusValue || "stopped"), "unknown");
   const engineStatus = running ? "online" : status;
   const statusKey = status.toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
   const statusClass = /error|fail|missing|unhealthy/.test(statusKey)
@@ -6860,11 +8576,13 @@ function normalizeNode(raw) {
         ? (statusKey === "working" ? "running" : (statusKey || "running"))
         : "unknown";
   const runtime = cleanText(raw.runtime?.type || raw.raw?.runtime_type, "runtime");
+  const hermesRuntime = raw.hermes || rawStatus._space_ui_hermes || {};
+  const hermesVersion = cleanText(hermesRuntime.version ? `Hermes v${hermesRuntime.version}` : "", "");
   const modelOverride = nodeModelOverride(id);
   const overriddenModel = formatNodeModel(modelOverride.name, modelOverride.provider);
   const modelName = rawStatus.default_model_env || raw.default_model_env || activity.model || "";
   const modelProvider = rawStatus.default_model_provider_env || raw.default_model_provider_env || "";
-  const tokenTotal = Number(activity.total_tokens || rawStatus.session_total_tokens || 0);
+  const tokenTotal = Number(activity.total_tokens || statusActivity.total_tokens || rawStatus.session_total_tokens || 0);
   return {
 	    raw,
 	    id,
@@ -6875,17 +8593,19 @@ function normalizeNode(raw) {
 	    engineStatus,
 	    statusClass,
     runtime,
+    hermesVersion,
     model: cleanText(overriddenModel || formatNodeModel(modelName, modelProvider), ""),
     modelName: cleanText(modelName, ""),
     modelProvider: cleanText(modelProvider, ""),
     modelOverride,
 	    tokenUsage: {
 	      total_tokens: Number.isFinite(tokenTotal) && tokenTotal > 0 ? tokenTotal : 0,
-	      api_calls: Number(activity.api_calls || 0),
+	      absolute_total_tokens: Number.isFinite(tokenTotal) && tokenTotal > 0 ? tokenTotal : 0,
+	      api_calls: Number(activity.api_calls || statusActivity.api_calls || 0),
 	      delta_tokens: 0,
-	      source: cleanText(activity.source, ""),
+	      source: cleanText(activity.source || statusActivity.source, ""),
 	    },
-    taskPreview: cleanText(activity.task_preview, ""),
+    taskPreview: cleanText(activity.task_preview || statusActivity.message_preview || statusActivity.response_preview, ""),
     actions: Array.isArray(raw.actions) ? raw.actions : [],
   };
 }
@@ -6896,6 +8616,7 @@ function taskPreview(task) {
 }
 
 async function refresh(origin = "auto") {
+  await syncUserSpacesForOpenClient(origin);
   if (!isAdminUser()) {
     state.bridgeReady = false;
     state.nodes = [];
@@ -6913,16 +8634,28 @@ async function refresh(origin = "auto") {
     state.bridgeReady = true;
     state.lastError = "";
 
-	    const previousTokens = new Map(state.nodes.map((node) => [node.id, Number(node.tokenUsage?.total_tokens || 0)]));
+	    const previousTokens = new Map(state.nodes.map((node) => [node.id, nodeAbsoluteTokens(node)]));
 	    const [nodes, tasks] = await Promise.all([
 	      bridgeJson("/nodes").catch(() => ({ nodes: [] })),
 	      bridgeJson("/tasks").catch(() => ({ tasks: [] })),
 	    ]);
 	    state.nodes = (nodes.nodes || []).map(normalizeNode).map((node) => {
 	      const previous = previousTokens.get(node.id);
-	      const current = Number(node.tokenUsage?.total_tokens || 0);
+	      const current = nodeAbsoluteTokens(node);
+	      const baseline = nodeTokenBaseline(node.id, current);
+	      const sinceRestart = Math.max(0, current - baseline);
 	      const delta = Number.isFinite(previous) && current > previous ? current - previous : 0;
-	      return { ...node, tokenUsage: { ...node.tokenUsage, delta_tokens: delta } };
+	      return {
+	        ...node,
+	        tokenUsage: {
+	          ...node.tokenUsage,
+	          absolute_total_tokens: current,
+	          baseline_tokens: baseline,
+	          total_tokens: sinceRestart,
+	          delta_tokens: delta,
+	          reset_scope: "widget",
+	        }
+	      };
 	    });
     state.tasks = tasks.tasks || [];
     if (!state.resourceInterval && (resourcesWidgetIsOpen() || !["auto", "startup"].includes(origin))) {
@@ -7402,11 +9135,11 @@ function renderTopology() {
 
 	      const model = document.createElement("div");
 	      model.className = "node-meta";
-	      model.textContent = node.model || "Hermes runtime";
+	      model.textContent = `${node.hermesVersion || "Hermes version unknown"} / ${node.model || "Hermes runtime"}`;
 
       const tokens = document.createElement("div");
       tokens.className = `node-meta${node.tokenUsage?.delta_tokens ? " token-moving" : ""}`;
-      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens ${formatSignedCount(node.tokenUsage?.delta_tokens)}`.trim();
+      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens since restart ${formatSignedCount(node.tokenUsage?.delta_tokens)}`.trim();
 
       button.append(title, runtime, model, tokens);
 	      return button;
@@ -7430,22 +9163,68 @@ function latestSecurityTaskForNode(nodeId) {
   }) || null;
 }
 
+function setNodeRunHint(nodeId, hint = {}) {
+  const id = cleanText(nodeId, "");
+  if (!id) return;
+  state.nodeRunHints[id] = { ...hint, active: true };
+  renderTopology();
+  renderNodeList();
+}
+
+function clearNodeRunHint(nodeId, hintId = "") {
+  const id = cleanText(nodeId, "");
+  if (!id || !state.nodeRunHints[id]) return;
+  if (hintId && state.nodeRunHints[id].id && state.nodeRunHints[id].id !== hintId) return;
+  delete state.nodeRunHints[id];
+  renderTopology();
+  renderNodeList();
+}
+
 function taskIsActive(task) {
+  if (!bridgeTaskIsFresh(task)) return false;
   const detail = securityRunTaskDetail(task);
-  return ["queued", "submitted", "running", "started", "stopping"].includes(String(detail.status || "").toLowerCase());
+  return ["active", "in_progress", "pending", "queued", "submitted", "running", "started", "stopping", "working"].includes(String(detail.status || task?.status || "").toLowerCase());
 }
 
 function securityLatestRunIsActive() {
   const status = String(state.securityLatestRun?.runner_status || "").toLowerCase();
-  return ["queued", "submitted", "running", "started", "stopping"].includes(status);
+  return ["active", "in_progress", "pending", "queued", "submitted", "running", "started", "stopping", "working"].includes(status);
+}
+
+function bridgeTaskTarget(task) {
+  const detail = task && typeof task.task === "object" ? task.task : {};
+  return cleanText(task?.target_node || task?.node_id || detail.target_node || detail.node_id || task?.metadata?.target_node, "");
+}
+
+function bridgeTaskStatus(task) {
+  const detail = task && typeof task.task === "object" ? task.task : {};
+  return cleanText(task?.status || detail.status || task?.state || detail.state, "");
+}
+
+function latestBridgeTaskForNode(nodeId) {
+  const id = cleanText(nodeId, "");
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+  return tasks.find((task) => bridgeTaskTarget(task) === id && taskIsActive(task))
+    || tasks.find((task) => bridgeTaskTarget(task) === id)
+    || null;
 }
 
 function nodeWorkState(node) {
-  const task = latestSecurityTaskForNode(node.id);
-  const detail = securityRunTaskDetail(task);
+  const runHint = state.nodeRunHints?.[node.id] || null;
+  const bridgeTask = latestBridgeTaskForNode(node.id);
+  const securityTask = latestSecurityTaskForNode(node.id);
+  const detail = bridgeTask || securityRunTaskDetail(securityTask);
   const hasTokenDelta = Number(node.tokenUsage?.delta_tokens || 0) > 0;
-  const taskActive = securityLatestRunIsActive() && taskIsActive(task);
+  const bridgeTaskActive = taskIsActive(bridgeTask);
+  const securityTaskActive = securityLatestRunIsActive() && taskIsActive(securityTask);
+  const taskActive = bridgeTaskActive || securityTaskActive;
   const working = Boolean(hasTokenDelta || taskActive);
+  if (runHint?.active) {
+    return { working: true, label: `working / ${runHint.source || "chat"}`, detail: runHint };
+  }
+  if (bridgeTaskActive) {
+    return { working: true, label: `working / ${bridgeTaskStatus(bridgeTask) || "task"}`, detail };
+  }
   if (taskActive) {
     return { working: true, label: `working / ${detail.status || "run"}`, detail };
   }
@@ -7453,7 +9232,7 @@ function nodeWorkState(node) {
     return { working: true, label: "spending tokens", detail };
   }
   if (node.llmActive) {
-    return { working: false, label: "LLM signal", detail };
+    return { working: true, label: "working / LLM", detail };
   }
   return { working, label: `${node.engineStatus} / ${node.status}`, detail };
 }
@@ -8075,11 +9854,14 @@ function renderNodeList() {
 	      meta.textContent = `${work.label} / ${node.runtime}`;
 	      const tokens = document.createElement("div");
 	      tokens.className = `node-meta${node.tokenUsage?.delta_tokens ? " token-moving" : ""}`;
-	      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens ${formatSignedCount(node.tokenUsage?.delta_tokens)} / ${compactCount(node.tokenUsage?.api_calls || 0)} calls`.trim();
+	      tokens.textContent = `${compactCount(node.tokenUsage?.total_tokens || 0)} tokens since restart ${formatSignedCount(node.tokenUsage?.delta_tokens)} / ${compactCount(node.tokenUsage?.api_calls || 0)} calls`.trim();
+	      const version = document.createElement("div");
+	      version.className = "node-meta";
+	      version.textContent = node.hermesVersion || "Hermes version unknown";
 	      const preview = document.createElement("div");
 	      preview.className = "node-meta";
 	      preview.textContent = node.taskPreview || "No active task preview";
-	      card.append(title, meta, tokens, preview, renderNodeActions(node));
+	      card.append(title, meta, version, tokens, preview, renderNodeActions(node));
 	      return card;
     })
   );
@@ -9063,6 +10845,7 @@ function renderAll() {
   renderTimeline();
   renderObservation();
   renderModules();
+  renderWis();
   renderSecurityLoop();
   renderAgentNodeSelect();
   renderAgentModelSelect();
@@ -9112,7 +10895,7 @@ function renderArtifacts() {
   const layoutItems = [
     "positions: browser-local",
     "widget geometry: browser-local",
-    `space area: browser-local, 1x-${CANVAS_AREA_MAX}x`,
+    `space area: per-space metadata, up to ${CANVAS_AREA_MAX_PX}x${CANVAS_AREA_MAX_PX}px`,
     `space distance: browser-local, ${SPACE_DISTANCE_MIN}x-${SPACE_DISTANCE_MAX}x`,
   ];
   els.artifactList.replaceChildren(
@@ -9183,11 +10966,6 @@ function closeArtifactsModal(options = {}) {
   }
 }
 
-function userSpaceInitial(title) {
-  const text = cleanText(title, "S");
-  return text.slice(0, 1).toUpperCase();
-}
-
 function userSpaceById(spaceId) {
   return state.userSpaces.find((space) => space.id === spaceId) || null;
 }
@@ -9197,7 +10975,14 @@ function activeSpaceTitle(panel = state.activePanel) {
   if (panel === "home") return "space-home";
   if (isAdminPanel(panel)) return "space-admin";
   const space = userSpaceById(panel);
-  return cleanText(space?.title || panel, panel);
+  const base = cleanText(space?.title || panel, panel);
+  const room = space?.shared_space_id ? state.sharedRooms[space.shared_space_id] : null;
+  const online = Number(room?.online_count);
+  const members = Number(room?.member_count);
+  if (Number.isFinite(online) && Number.isFinite(members) && members > 0) {
+    return `${base} ${online}/${members}`;
+  }
+  return base;
 }
 
 function renderSpaceTitle() {
@@ -9277,10 +11062,7 @@ function createAdminLauncherButton() {
   glyph.setAttribute("aria-hidden", "true");
   glyph.append(createAdminCrownIcon());
 
-  const label = document.createElement("span");
-  label.textContent = "Admin";
-
-  button.append(glyph, label);
+  button.append(glyph);
   button.addEventListener("click", () => setPanel("admin"));
   return button;
 }
@@ -9303,6 +11085,261 @@ async function copyActiveSpaceId() {
     });
   } finally {
     hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
+  }
+}
+
+function shareLinkForCode(joinCode) {
+  const url = new URL(window.location.origin);
+  url.pathname = "/home";
+  url.searchParams.set("join_space", joinCode);
+  return url.toString();
+}
+
+function joinCodeFromText(value) {
+  const raw = cleanText(value, "");
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, window.location.origin);
+    const direct = url.searchParams.get("join_space")
+      || url.searchParams.get("join_code")
+      || url.searchParams.get("shared_space")
+      || "";
+    if (direct) return cleanText(direct, "");
+    const parts = url.pathname.split("/").filter(Boolean);
+    const marker = parts.findIndex((part) => ["join", "join-space", "shared-space"].includes(part));
+    if (marker >= 0 && parts[marker + 1]) return cleanText(parts[marker + 1], "");
+  } catch {
+    // Plain join codes are expected too.
+  }
+  return raw;
+}
+
+function pendingJoinCodeFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("join_space") || params.get("join_code") || params.get("shared_space") || "";
+}
+
+function clearJoinCodeFromUrl() {
+  const url = new URL(window.location.href);
+  ["join_space", "join_code", "shared_space"].forEach((key) => url.searchParams.delete(key));
+  window.history.replaceState(uiNavigationState(), "", url);
+}
+
+function maybeOpenJoinSpaceFromUrl() {
+  const joinCode = pendingJoinCodeFromUrl();
+  if (!joinCode) return;
+  setPanel("home");
+  openJoinSpaceModal(joinCode);
+}
+
+function openEditSpaceModal() {
+  const space = userSpaceById(state.activeSpaceMenuId);
+  if (!space || !els.editSpaceModal) return;
+  state.editSpaceTargetId = space.id;
+  if (els.editSpaceMeta) els.editSpaceMeta.textContent = space.id;
+  if (els.editSpaceNameInput) els.editSpaceNameInput.value = space.title || space.id;
+  hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
+  els.editSpaceModal.hidden = false;
+  pushUiNavigationLayer("edit-space-modal", () => closeEditSpaceModal({ skipHistory: true, skipStack: true }));
+  window.setTimeout(() => els.editSpaceNameInput?.focus(), 0);
+  recordUserEvent("workspace.space_edit_opened", {
+    target: `space:${space.id}`,
+    summary: `Opened editor for ${space.title}`,
+    data: { space_id: space.id },
+  });
+}
+
+function closeEditSpaceModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("edit-space-modal")) return;
+  if (els.editSpaceModal) els.editSpaceModal.hidden = true;
+  state.editSpaceTargetId = "";
+  if (!options.skipStack) {
+    closeUiNavigationLayer("edit-space-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+function saveEditedSpace() {
+  const space = userSpaceById(state.editSpaceTargetId);
+  if (!space) return;
+  const nextTitle = cleanText(els.editSpaceNameInput?.value, space.title || space.id).slice(0, 80);
+  const index = state.userSpaces.findIndex((item) => item.id === space.id);
+  if (index >= 0) {
+    state.userSpaces[index] = {
+      ...state.userSpaces[index],
+      title: nextTitle,
+      updated_at: new Date().toISOString(),
+    };
+  }
+  saveUserSpaces();
+  renderSpaceLauncher();
+  renderSpaceTitle();
+  closeEditSpaceModal({ skipHistory: true, replaceHistory: true });
+  recordUserEvent("workspace.space_edit_saved", {
+    target: `space:${space.id}`,
+    summary: `Renamed ${space.id}`,
+    data: { space_id: space.id, title: nextTitle },
+  });
+}
+
+function renderShareSpaceModal() {
+  const payload = state.shareSpacePayload || {};
+  const space = userSpaceById(state.shareSpaceTargetId);
+  const shared = payload.shared_space || {};
+  const joinCode = shared.join_code || payload.join_code || "";
+  const link = joinCode ? shareLinkForCode(joinCode) : "";
+  if (els.shareSpaceName) els.shareSpaceName.textContent = space?.title || shared.title || "Space";
+  if (els.shareSpaceLinkInput) els.shareSpaceLinkInput.value = link;
+  if (els.nativeShareSpaceButton) els.nativeShareSpaceButton.disabled = !navigator.share || !link;
+  if (els.copyShareSpaceLinkButton) els.copyShareSpaceLinkButton.disabled = !link;
+  if (els.whatsappShareSpaceButton) els.whatsappShareSpaceButton.disabled = !link;
+}
+
+async function shareActiveSpace() {
+  const space = userSpaceById(state.activeSpaceMenuId);
+  if (!space) return;
+  const spaceArea = syncSpaceAreaMetadata(space.id, canvasAreaSizeForPanel(space.id)) || serializableSpaceArea(canvasAreaSizeForPanel(space.id));
+  try {
+    const payload = await fetchJson("/spaces/share", {
+      method: "POST",
+      timeoutMs: 10000,
+      body: { space_id: space.id, space_area: spaceArea },
+    });
+    const shared = payload.shared_space || {};
+    const index = state.userSpaces.findIndex((item) => item.id === space.id);
+    if (index >= 0) {
+      state.userSpaces[index] = {
+        ...state.userSpaces[index],
+        shared: true,
+        shared_space_id: shared.id || state.userSpaces[index].shared_space_id || "",
+        space_area: spaceArea,
+      };
+    }
+    renderSpaceLauncher();
+    state.shareSpaceTargetId = space.id;
+    state.shareSpacePayload = payload;
+    renderShareSpaceModal();
+    if (els.shareSpaceModal) {
+      els.shareSpaceModal.hidden = false;
+      pushUiNavigationLayer("share-space-modal", () => closeShareSpaceModal({ skipHistory: true, skipStack: true }));
+    }
+    recordUserEvent("workspace.space_shared", {
+      target: `space:${space.id}`,
+      summary: `Shared ${space.title}`,
+      data: {
+        space_id: space.id,
+        shared_space_id: shared.id || "",
+        share_link_ready: Boolean(shared.join_code),
+      },
+    });
+  } catch (error) {
+    state.lastError = error.message;
+    recordUserEvent("workspace.space_share_error", {
+      target: `space:${space.id}`,
+      summary: error.message,
+      data: { space_id: space.id, error: error.message },
+    });
+  } finally {
+    hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
+  }
+}
+
+function closeShareSpaceModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("share-space-modal")) return;
+  if (els.shareSpaceModal) els.shareSpaceModal.hidden = true;
+  state.shareSpaceTargetId = "";
+  state.shareSpacePayload = null;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("share-space-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+async function copyShareSpaceLink() {
+  const link = cleanText(els.shareSpaceLinkInput?.value, "");
+  if (!link) return;
+  await navigator.clipboard?.writeText(link);
+  recordUserEvent("workspace.space_share_link_copied", {
+    target: `space:${state.shareSpaceTargetId || "space"}`,
+    summary: "Copied space invite link",
+    data: { space_id: state.shareSpaceTargetId || "" },
+  });
+}
+
+async function nativeShareSpace() {
+  const link = cleanText(els.shareSpaceLinkInput?.value, "");
+  if (!link || !navigator.share) return;
+  const space = userSpaceById(state.shareSpaceTargetId);
+  await navigator.share({
+    title: space?.title || "wasm-agent Space",
+    text: `Join ${space?.title || "this wasm-agent Space"}`,
+    url: link,
+  });
+}
+
+function shareSpaceToWhatsApp() {
+  const link = cleanText(els.shareSpaceLinkInput?.value, "");
+  if (!link) return;
+  const space = userSpaceById(state.shareSpaceTargetId);
+  const text = encodeURIComponent(`Join ${space?.title || "this wasm-agent Space"}: ${link}`);
+  window.open(`https://wa.me/?text=${text}`, "_blank", "noopener,noreferrer");
+}
+
+function openJoinSpaceModal(prefill = "") {
+  if (!els.joinSpaceModal) return;
+  if (els.joinSpaceInput) els.joinSpaceInput.value = prefill;
+  if (els.joinSpaceMessage) els.joinSpaceMessage.textContent = "";
+  els.joinSpaceModal.hidden = false;
+  pushUiNavigationLayer("join-space-modal", () => closeJoinSpaceModal({ skipHistory: true, skipStack: true }));
+  window.setTimeout(() => els.joinSpaceInput?.focus(), 0);
+  recordUserEvent("workspace.join_space_opened", {
+    target: "space-home",
+    summary: "Opened join space dialog",
+    data: { prefilled: Boolean(prefill) },
+  });
+}
+
+function closeJoinSpaceModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("join-space-modal")) return;
+  if (els.joinSpaceModal) els.joinSpaceModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("join-space-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+async function joinSpaceFromModal() {
+  const joinCode = joinCodeFromText(els.joinSpaceInput?.value);
+  if (!joinCode) {
+    if (els.joinSpaceMessage) els.joinSpaceMessage.textContent = "Paste an invite link or join code.";
+    return;
+  }
+  try {
+    if (els.joinSpaceMessage) els.joinSpaceMessage.textContent = "Joining...";
+    const payload = await fetchJson("/spaces/join", {
+      method: "POST",
+      timeoutMs: 10000,
+      body: { join_code: joinCode },
+    });
+    const result = payload.spaces || {};
+    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    renderSpaceLauncher();
+    const shared = payload.shared_space || {};
+    const joinedSpace = state.userSpaces.find((space) => space.shared_space_id === shared.id)
+      || state.userSpaces.find((space) => space.id === shared.id);
+    closeJoinSpaceModal({ skipHistory: true, replaceHistory: true });
+    clearJoinCodeFromUrl();
+    if (joinedSpace) setPanel(joinedSpace.id);
+    recordUserEvent("workspace.space_joined", {
+      target: `shared-space:${shared.id || joinCode}`,
+      summary: `Joined ${shared.title || "space"}`,
+      data: { shared_space_id: shared.id || "", local_space_id: joinedSpace?.id || "" },
+    });
+  } catch (error) {
+    if (els.joinSpaceMessage) els.joinSpaceMessage.textContent = error.message;
+    state.lastError = error.message;
+    recordUserEvent("workspace.space_join_error", {
+      target: "space-home",
+      summary: error.message,
+      data: { error: error.message },
+    });
   }
 }
 
@@ -9564,7 +11601,7 @@ function renderSpaceLauncher() {
   if (!els.spaceLauncherList) return;
   els.spaceLauncherList.replaceChildren();
   if (isAdminUser()) els.spaceLauncherList.append(createAdminLauncherButton());
-  state.userSpaces.forEach((space, index) => {
+  state.userSpaces.forEach((space) => {
     const button = document.createElement("button");
     button.className = "space-launch-button";
     button.type = "button";
@@ -9574,14 +11611,10 @@ function renderSpaceLauncher() {
     button.classList.toggle("active", state.activePanel === space.id);
 
     const glyph = document.createElement("span");
-    glyph.className = "space-launch-glyph";
+    glyph.className = "space-launch-glyph user-space-launch-glyph";
     glyph.setAttribute("aria-hidden", "true");
-    glyph.textContent = userSpaceInitial(space.title);
 
-    const label = document.createElement("span");
-    label.textContent = `S${index + 1}`;
-
-    button.append(glyph, label);
+    button.append(glyph);
     button.addEventListener("click", () => setPanel(space.id));
     button.addEventListener("contextmenu", (event) => showSpaceContextMenu(space, event));
     els.spaceLauncherList.append(button);
@@ -9592,13 +11625,20 @@ function createUserSpace() {
   if (!ensureMainDeviceForEvolution("create space")) return;
   const createdAt = new Date().toISOString();
   const nextNumber = state.userSpaces.length + 1;
+  const area = initialCanvasAreaSize();
   const space = {
     id: `space_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
     title: `Space ${nextNumber}`,
     created_at: createdAt,
+    space_area: serializableSpaceArea(area),
   };
   state.userSpaces.push(space);
   state.spaceWidgetLayouts[space.id] = defaultWidgetLayoutForPanel(space.id);
+  state.spaceWidgetLayouts[space.id].__canvas = {
+    widthPx: area.width,
+    heightPx: area.height,
+    distance: 1,
+  };
   saveLocalSpaceWidgetLayouts();
   saveUserSpaces();
   renderSpaceLauncher();
@@ -9615,8 +11655,11 @@ function openHomeDevices() {
 }
 
 function openConfigModal() {
-  renderConfigModal();
+  state.configAreaDraft = canvasAreaSize();
   if (els.configModal) els.configModal.hidden = false;
+  updateSharedSpaceSyncPolling();
+  renderConfigModal();
+  window.requestAnimationFrame(() => updateAreaMap());
   pushUiNavigationLayer("config-modal", () => closeConfigModal({ skipHistory: true, skipStack: true }));
   void loadTimeline("config").catch(() => {});
   recordUserEvent("home.config_opened", {
@@ -9628,6 +11671,8 @@ function openConfigModal() {
 function closeConfigModal(options = {}) {
   if (!options.skipHistory && closeUiNavigationLayer("config-modal")) return;
   if (els.configModal) els.configModal.hidden = true;
+  state.configAreaDraft = null;
+  updateSharedSpaceSyncPolling();
   if (!options.skipStack) {
     closeUiNavigationLayer("config-modal", { skipHistory: true, replaceHistory: true });
   }
@@ -9649,6 +11694,7 @@ function renderConfigModal() {
   if (activeSpaceStorageId() === "home") rows.push(renderLauncherPreferenceControl());
   rows.push(timelineButton);
   els.configDetails.replaceChildren(...rows);
+  window.requestAnimationFrame(() => updateAreaMap());
 }
 
 function storagePercent(used, total) {
@@ -9822,144 +11868,263 @@ function renderCanvasAreaControl() {
   label.textContent = "Space area";
   const value = document.createElement("span");
   value.className = "config-area-value";
-  value.textContent = formatMultiplier(canvasArea());
-  const input = document.createElement("input");
-  input.className = "config-area-input";
-  input.type = "number";
-  input.min = "1";
-  input.max = String(CANVAS_AREA_MAX);
-  input.step = "0.25";
-  input.inputMode = "decimal";
-  input.setAttribute("aria-label", "Space area value");
-  const dial = document.createElement("div");
-  dial.className = "config-area-line";
-  dial.tabIndex = 0;
-  dial.setAttribute("role", "slider");
-  dial.setAttribute("aria-label", "Space area");
-  dial.setAttribute("aria-valuemin", "1");
-  dial.setAttribute("aria-valuemax", String(CANVAS_AREA_MAX));
-  dial.setAttribute("aria-valuestep", "0.25");
-  const knob = document.createElement("span");
-  knob.className = "config-area-line-knob";
-  knob.setAttribute("aria-hidden", "true");
-  dial.append(knob);
-  head.append(label, value, input);
-  wrap.append(head, dial);
-  updateAreaDial(wrap);
-  installAreaDial(wrap, dial);
-  installAreaInput(wrap, input);
+  value.textContent = formatAreaSize(configAreaDraft());
+  const inputs = document.createElement("div");
+  inputs.className = "config-area-inputs";
+  const widthField = document.createElement("label");
+  widthField.className = "config-area-field";
+  const widthLabel = document.createElement("span");
+  widthLabel.textContent = "W";
+  const widthInput = document.createElement("input");
+  widthInput.className = "config-area-input config-area-width-input";
+  widthInput.type = "number";
+  widthInput.min = String(CANVAS_AREA_MIN_PX);
+  widthInput.max = String(CANVAS_AREA_MAX_PX);
+  widthInput.step = String(CANVAS_AREA_STEP_PX);
+  widthInput.inputMode = "numeric";
+  widthInput.setAttribute("aria-label", "Space area width");
+  widthField.append(widthLabel, widthInput);
+  const heightField = document.createElement("label");
+  heightField.className = "config-area-field";
+  const heightLabel = document.createElement("span");
+  heightLabel.textContent = "H";
+  const heightInput = document.createElement("input");
+  heightInput.className = "config-area-input config-area-height-input";
+  heightInput.type = "number";
+  heightInput.min = String(CANVAS_AREA_MIN_PX);
+  heightInput.max = String(CANVAS_AREA_MAX_PX);
+  heightInput.step = String(CANVAS_AREA_STEP_PX);
+  heightInput.inputMode = "numeric";
+  heightInput.setAttribute("aria-label", "Space area height");
+  heightField.append(heightLabel, heightInput);
+  inputs.append(widthField, heightField);
+  const map = document.createElement("div");
+  map.className = "config-area-map";
+  map.tabIndex = 0;
+  map.setAttribute("role", "slider");
+  map.setAttribute("aria-label", "Resize space area");
+  map.setAttribute("aria-valuemin", String(CANVAS_AREA_MIN_PX));
+  map.setAttribute("aria-valuemax", String(CANVAS_AREA_MAX_PX));
+  const board = document.createElement("div");
+  board.className = "config-area-map-board";
+  const viewport = document.createElement("span");
+  viewport.className = "config-area-map-viewport";
+  viewport.setAttribute("aria-hidden", "true");
+  const handle = document.createElement("span");
+  handle.className = "config-area-map-handle";
+  handle.setAttribute("aria-hidden", "true");
+  board.append(handle);
+  map.append(board, viewport);
+  const actions = document.createElement("div");
+  actions.className = "config-area-actions";
+  const revertButton = document.createElement("button");
+  revertButton.type = "button";
+  revertButton.className = "config-area-revert-button";
+  revertButton.textContent = "Revert";
+  revertButton.addEventListener("click", () => resetConfigAreaDraft(wrap));
+  const applyButton = document.createElement("button");
+  applyButton.type = "button";
+  applyButton.className = "config-area-apply-button";
+  applyButton.textContent = "Apply";
+  applyButton.addEventListener("click", () => applyConfigAreaDraft(wrap));
+  actions.append(revertButton, applyButton);
+  head.append(label, value);
+  wrap.append(head, inputs, map, actions);
+  updateAreaMap(wrap);
+  installAreaMap(wrap, map);
+  installAreaInput(wrap);
   return wrap;
 }
 
-function updateAreaDial(control = null) {
+function visibleCanvasAreaRect(area = canvasAreaSize()) {
+  const viewport = els.spaceViewport;
+  if (!viewport) return { left: 0, top: 0, width: area.width, height: area.height };
+  const distance = canvasDistance();
+  const visibleHeight = spaceViewportUsableRect()?.height || viewport.clientHeight || area.height;
+  const left = clamp(viewport.scrollLeft / Math.max(SPACE_DISTANCE_MIN, distance), 0, area.width);
+  const top = clamp(viewport.scrollTop / Math.max(SPACE_DISTANCE_MIN, distance), 0, area.height);
+  const width = clamp((viewport.clientWidth || area.width) / Math.max(SPACE_DISTANCE_MIN, distance), CANVAS_AREA_MIN_PX, area.width);
+  const height = clamp(visibleHeight / Math.max(SPACE_DISTANCE_MIN, distance), CANVAS_AREA_MIN_PX, area.height);
+  return {
+    left,
+    top,
+    width: Math.max(CANVAS_AREA_MIN_PX, Math.min(width, Math.max(CANVAS_AREA_MIN_PX, area.width - left))),
+    height: Math.max(CANVAS_AREA_MIN_PX, Math.min(height, Math.max(CANVAS_AREA_MIN_PX, area.height - top))),
+  };
+}
+
+function areaMapViewportPixelRect(stageWidth, stageHeight) {
+  const area = canvasAreaSize();
+  const rect = visibleCanvasAreaRect(area);
+  const max = CANVAS_AREA_MAX_PX;
+  const left = clamp(Math.floor((rect.left / max) * stageWidth), 0, Math.max(0, stageWidth - 1));
+  const top = clamp(Math.floor((rect.top / max) * stageHeight), 0, Math.max(0, stageHeight - 1));
+  const right = clamp(Math.ceil(((rect.left + rect.width) / max) * stageWidth), left + 1, stageWidth);
+  const bottom = clamp(Math.ceil(((rect.top + rect.height) / max) * stageHeight), top + 1, stageHeight);
+  return {
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  };
+}
+
+function applyAreaMapPixelRect(element, rect) {
+  element.style.left = `${rect.left}px`;
+  element.style.top = `${rect.top}px`;
+  element.style.width = `${rect.width}px`;
+  element.style.height = `${rect.height}px`;
+}
+
+function updateAreaMap(control = null) {
   const wrap = control || els.configDetails?.querySelector?.(".config-area-control");
   if (!wrap) return;
-  const area = canvasArea();
-  const progress = (area - 1) / (CANVAS_AREA_MAX - 1);
-  wrap.style.setProperty("--area-progress", `${Math.round(progress * 100)}%`);
+  const area = configAreaDraft();
   const value = wrap.querySelector(".config-area-value");
-  if (value) value.textContent = formatMultiplier(area);
-  const input = wrap.querySelector(".config-area-input");
-  if (input && document.activeElement !== input) input.value = String(Number(area.toFixed(2)));
-  const dial = wrap.querySelector(".config-area-line");
-  if (dial) {
-    dial.style.setProperty("--area-progress", `${Math.round(progress * 100)}%`);
-    dial.setAttribute("aria-valuenow", String(area));
-    dial.setAttribute("aria-valuetext", formatMultiplier(area));
+  if (value) value.textContent = formatAreaSize(area);
+  const widthInput = wrap.querySelector(".config-area-width-input");
+  if (widthInput && document.activeElement !== widthInput) widthInput.value = String(area.width);
+  const heightInput = wrap.querySelector(".config-area-height-input");
+  if (heightInput && document.activeElement !== heightInput) heightInput.value = String(area.height);
+  const map = wrap.querySelector(".config-area-map");
+  const board = wrap.querySelector(".config-area-map-board");
+  const viewport = wrap.querySelector(".config-area-map-viewport");
+  if (map && board && viewport) {
+    const rect = map.getBoundingClientRect();
+    const stageWidth = Math.max(1, Math.round(rect.width || map.clientWidth || 1));
+    const stageHeight = Math.max(1, Math.round(rect.height || map.clientHeight || stageWidth));
+    const boardWidth = clamp(Math.round((area.width / CANVAS_AREA_MAX_PX) * stageWidth), 1, stageWidth);
+    const boardHeight = clamp(Math.round((area.height / CANVAS_AREA_MAX_PX) * stageHeight), 1, stageHeight);
+    board.style.width = `${boardWidth}px`;
+    board.style.height = `${boardHeight}px`;
+    applyAreaMapPixelRect(viewport, areaMapViewportPixelRect(stageWidth, stageHeight));
+    map.setAttribute("aria-valuenow", String(Math.max(area.width, area.height)));
+    map.setAttribute("aria-valuetext", formatAreaSize(area));
   }
+  const changed = configAreaDraftChanged();
+  const dragging = wrap.classList.contains("is-area-dragging") || Boolean(map?.classList.contains("is-dragging"));
+  const active = changed || dragging;
+  wrap.classList.toggle("is-area-draft", active);
+  wrap.classList.toggle("is-area-current", !active);
+  if (map) {
+    map.classList.toggle("is-area-draft", active);
+    map.classList.toggle("is-area-current", !active);
+  }
+  const applyButton = wrap.querySelector(".config-area-apply-button");
+  const revertButton = wrap.querySelector(".config-area-revert-button");
+  if (applyButton) applyButton.disabled = !changed;
+  if (revertButton) revertButton.disabled = !changed;
 }
 
-function areaFromDialPointer(dial, event) {
-  const rect = dial.getBoundingClientRect();
-  const progress = clamp((event.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
-  return normalizedCanvasArea(1 + progress * (CANVAS_AREA_MAX - 1));
-}
-
-function installAreaInput(wrap, input) {
-  if (!wrap || !input) return;
-  const commit = (origin = "input") => {
-    const next = normalizedCanvasArea(input.value);
-    freezeWidgetPixelLayout();
-    setCanvasAreaValue(next, { control: wrap, origin, force: true });
-  };
-  input.addEventListener("change", () => commit("input"));
-  input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    input.blur();
-    commit("input-enter");
+function areaFromMapPointer(map, event, fixedRect = null) {
+  const rect = fixedRect || map.getBoundingClientRect();
+  const x = clamp(event.clientX - rect.left, 0, Math.max(1, rect.width));
+  const y = clamp(event.clientY - rect.top, 0, Math.max(1, rect.height));
+  return normalizedCanvasAreaSize({
+    width: (x / Math.max(1, rect.width)) * CANVAS_AREA_MAX_PX,
+    height: (y / Math.max(1, rect.height)) * CANVAS_AREA_MAX_PX,
   });
 }
 
-function installAreaDial(wrap, dial) {
-  if (!wrap || !dial) return;
+function installAreaInput(wrap) {
+  const widthInput = wrap?.querySelector?.(".config-area-width-input");
+  const heightInput = wrap?.querySelector?.(".config-area-height-input");
+  if (!wrap || !widthInput || !heightInput) return;
+  const commit = (origin = "input") => {
+    const current = configAreaDraft();
+    const next = normalizedCanvasAreaSize({
+      width: widthInput.value || current.width,
+      height: heightInput.value || current.height,
+    }, current);
+    setConfigAreaDraft(next, wrap);
+    recordUserEvent("workspace.space_area_draft_changed", {
+      target: `space:${activeSpaceStorageId()}`,
+      summary: `Draft space area ${formatAreaSize(next)}`,
+      data: { space_id: activeSpaceStorageId(), width_px: next.width, height_px: next.height, origin },
+    });
+  };
+  [widthInput, heightInput].forEach((input) => {
+    input.addEventListener("change", () => commit("input"));
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      input.blur();
+      commit("input-enter");
+    });
+  });
+}
+
+function installAreaMap(wrap, map) {
+  if (!wrap || !map) return;
   let dragging = false;
   let changed = false;
+  let dragRect = null;
   const move = (event) => {
     if (!dragging) return;
     event.preventDefault();
-    const previous = canvasArea();
-    const next = areaFromDialPointer(dial, event);
-    changed = next !== previous || changed;
-    setCanvasAreaValue(next, {
-      control: wrap,
-      persist: false,
-      render: false,
-    });
+    event.stopPropagation();
+    const previous = configAreaDraft();
+    const next = areaFromMapPointer(map, event, dragRect);
+    changed = next.width !== previous.width || next.height !== previous.height || changed;
+    setConfigAreaDraft(next, wrap, { defer: true });
   };
   const end = (event) => {
     if (!dragging) return;
     dragging = false;
-    dial.classList.remove("is-dragging");
-    dial.removeEventListener("pointermove", move);
-    dial.removeEventListener("pointerup", end);
-    dial.removeEventListener("pointercancel", end);
+    state.configAreaDragActive = false;
+    dragRect = null;
+    map.classList.remove("is-dragging");
+    wrap.classList.remove("is-area-dragging");
+    map.removeEventListener("pointermove", move);
+    map.removeEventListener("pointerup", end);
+    map.removeEventListener("pointercancel", end);
     window.removeEventListener("pointermove", move);
     window.removeEventListener("pointerup", end);
     window.removeEventListener("pointercancel", end);
     try {
-      dial.releasePointerCapture(event.pointerId);
+      map.releasePointerCapture(event.pointerId);
     } catch {
       // Capture may already be released by the browser.
     }
-    if (changed) {
-      commitCanvasAreaChange("dial");
-      renderConfigModal();
-    }
+    updateSharedSpaceSyncPolling();
+    if (changed) updateAreaMap(wrap);
   };
-  dial.addEventListener("pointerdown", (event) => {
+  map.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
     event.preventDefault();
-    freezeWidgetPixelLayout();
+    event.stopPropagation();
     dragging = true;
     changed = false;
-    dial.classList.add("is-dragging");
+    state.configAreaDragActive = true;
+    dragRect = map.getBoundingClientRect();
+    map.classList.add("is-dragging");
+    wrap.classList.add("is-area-dragging");
     try {
-      dial.setPointerCapture(event.pointerId);
+      map.setPointerCapture(event.pointerId);
     } catch {
-      // Window listeners below keep the dial responsive when capture is unavailable.
+      // Window listeners below keep the map responsive when capture is unavailable.
     }
     move(event);
-    dial.addEventListener("pointermove", move, { passive: false });
-    dial.addEventListener("pointerup", end, { once: true });
-    dial.addEventListener("pointercancel", end, { once: true });
+    map.addEventListener("pointermove", move, { passive: false });
+    map.addEventListener("pointerup", end, { once: true });
+    map.addEventListener("pointercancel", end, { once: true });
     window.addEventListener("pointermove", move, { passive: false });
     window.addEventListener("pointerup", end, { once: true });
     window.addEventListener("pointercancel", end, { once: true });
   });
-  dial.addEventListener("keydown", (event) => {
-    const delta = {
-      ArrowLeft: -0.25,
-      ArrowDown: -0.25,
-      ArrowRight: 0.25,
-      ArrowUp: 0.25,
-      Home: 1 - canvasArea(),
-      End: CANVAS_AREA_MAX - canvasArea(),
-    }[event.key];
-    if (delta === undefined) return;
+  map.addEventListener("keydown", (event) => {
+    const area = configAreaDraft();
+    const step = event.shiftKey ? CANVAS_AREA_STEP_PX * 5 : CANVAS_AREA_STEP_PX;
+    let next = null;
+    if (event.key === "ArrowLeft") next = { width: area.width - step, height: area.height };
+    if (event.key === "ArrowRight") next = { width: area.width + step, height: area.height };
+    if (event.key === "ArrowUp") next = { width: area.width, height: area.height - step };
+    if (event.key === "ArrowDown") next = { width: area.width, height: area.height + step };
+    if (event.key === "Home") next = initialCanvasAreaSize();
+    if (event.key === "End") next = { width: CANVAS_AREA_MAX_PX, height: CANVAS_AREA_MAX_PX };
+    if (!next) return;
     event.preventDefault();
-    freezeWidgetPixelLayout();
-    setCanvasAreaValue(canvasArea() + delta, { control: wrap, origin: "dial-key" });
+    setConfigAreaDraft(next, wrap);
   });
 }
 
@@ -10212,7 +12377,8 @@ function setPanel(panel, options = {}) {
   saveLocalSpaceWidgetLayouts();
   const userSpacePanel = isUserSpacePanel(panel);
   state.activePanel = panel;
-  els.app.dataset.panel = userSpacePanel ? "user-space" : panel;
+  els.app.dataset.panel = panel;
+  els.app.dataset.panelKind = userSpacePanel ? "user-space" : panel;
   els.app.dataset.activeSpace = userSpacePanel ? panel : "";
   els.panelTabs.forEach((button) => button.classList.toggle("active", button.dataset.panel === panel));
   els.panelButtons.forEach((button) => {
@@ -10223,6 +12389,7 @@ function setPanel(panel, options = {}) {
   applySpaceWidgetLayout(panel);
   renderSpaceTitle();
   renderSpaceLauncher();
+  updateSharedSpaceSyncPolling();
   syncResourcePolling();
   syncSecurityPolling();
   if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
@@ -10702,13 +12869,85 @@ function spaceDistanceGestureBlocked(target) {
   return Boolean(target?.closest?.(".widget,.space-app-button,.home-actions,.space-title,.space-config-button,.space-minimap,.space-zoom-info,.modal-backdrop,.agent-overlay"));
 }
 
-function wheelDeltaPixels(event, viewport) {
+function preventSpaceWheelDefault(event) {
+  if (event.cancelable !== false) event.preventDefault();
+  event.stopPropagation();
+}
+
+function wheelDeltaPixelsForAxis(event, viewport, axis) {
+  const value = axis === "x" ? event.deltaX : event.deltaY;
   const unit = event.deltaMode === 1
     ? 16
     : event.deltaMode === 2
       ? Math.max(1, viewport?.clientHeight || window.innerHeight || 1)
       : 1;
-  return event.deltaY * unit;
+  return value * unit;
+}
+
+function wheelDeltaPixels(event, viewport) {
+  return wheelDeltaPixelsForAxis(event, viewport, "y");
+}
+
+function wheelScrollAxisDelta(event, viewport) {
+  const deltaX = wheelDeltaPixelsForAxis(event, viewport, "x");
+  const deltaY = wheelDeltaPixelsForAxis(event, viewport, "y");
+  if (event.shiftKey && Math.abs(deltaX) < 0.5) {
+    return { x: deltaY, y: 0 };
+  }
+  return { x: deltaX, y: deltaY };
+}
+
+function wheelScrollableOverflow(value) {
+  return value === "auto" || value === "scroll" || value === "overlay";
+}
+
+function canScrollWheelAxis(element, delta, axis) {
+  if (Math.abs(delta) < 0.5) return false;
+  const style = window.getComputedStyle(element);
+  const overflow = axis === "x" ? style.overflowX : style.overflowY;
+  if (!wheelScrollableOverflow(overflow)) return false;
+  const scrollSize = axis === "x" ? element.scrollWidth : element.scrollHeight;
+  const clientSize = axis === "x" ? element.clientWidth : element.clientHeight;
+  const max = scrollSize - clientSize;
+  if (max <= 1) return false;
+  const current = axis === "x" ? element.scrollLeft : element.scrollTop;
+  return delta < 0 ? current > 0 : current < max - 1;
+}
+
+function widgetWheelScrollableElement(target, widget, deltas) {
+  let element = target instanceof Element ? target : target?.parentElement || null;
+  while (element && widget.contains(element)) {
+    if (canScrollWheelAxis(element, deltas.x, "x") || canScrollWheelAxis(element, deltas.y, "y")) {
+      return element;
+    }
+    if (element === widget) break;
+    element = element.parentElement;
+  }
+  return null;
+}
+
+function containWidgetWheel(event, viewport) {
+  const widget = event.target?.closest?.(".widget");
+  if (!widget) return false;
+  if (event.defaultPrevented) {
+    event.stopPropagation();
+    return true;
+  }
+  const deltas = wheelScrollAxisDelta(event, viewport);
+  const scroller = widgetWheelScrollableElement(event.target, widget, deltas);
+  if (scroller) {
+    if (Math.abs(deltas.x) >= 0.5) scroller.scrollLeft += deltas.x;
+    if (Math.abs(deltas.y) >= 0.5) scroller.scrollTop += deltas.y;
+  }
+  preventSpaceWheelDefault(event);
+  return true;
+}
+
+function containBlockedSpaceWheel(event, viewport) {
+  if (containWidgetWheel(event, viewport)) return true;
+  if (!spaceDistanceGestureBlocked(event.target)) return false;
+  preventSpaceWheelDefault(event);
+  return true;
 }
 
 function spacePointerDistance(first, second) {
@@ -10788,12 +13027,12 @@ function updateSpacePinchZoom(event, viewport) {
 function installSpaceDistanceGestures(viewport) {
   if (!viewport) return;
   viewport.addEventListener("wheel", (event) => {
-    if (spaceDistanceGestureBlocked(event.target)) return;
+    if (containBlockedSpaceWheel(event, viewport)) return;
+    preventSpaceWheelDefault(event);
     const delta = wheelDeltaPixels(event, viewport);
     if (Math.abs(delta) < 0.5) return;
     const anchor = viewportGestureAnchor(event.clientX, event.clientY);
     if (!anchor) return;
-    event.preventDefault();
     stopSpacePanMomentum();
     const previous = canvasDistance();
     const next = previous * Math.exp(-delta * 0.0012);
@@ -10984,6 +13223,8 @@ function installModalBackdropDismiss(modal, close) {
 
 function wireEvents() {
   syncVisualViewportSize();
+  installWisAutomationHook();
+  installInteractionTrace();
   els.app.addEventListener("click", (event) => {
     recordUserEvent("workspace.click", {
       target: summarizeEventTarget(event.target),
@@ -10999,7 +13240,7 @@ function wireEvents() {
 	  document.addEventListener("click", (event) => {
       const target = event.target;
       const insideNodeStats = Boolean(target.closest?.("#nodeStatsBalloon"));
-	    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu();
+	    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
 	    if (!event.target.closest?.("#nodeContextMenu")) hideNodeContextMenu();
 	    if (!insideNodeStats) hideNodeStatsBalloon({ passive: true });
 	    if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
@@ -11062,6 +13303,7 @@ function wireEvents() {
   els.browserForwardButton.addEventListener("click", () => void sendBrowserInput("forward"));
   els.browserReloadButton.addEventListener("click", () => void sendBrowserInput("reload"));
   els.browserLiveButton.addEventListener("click", toggleBrowserLive);
+  els.wisExportButton?.addEventListener("click", () => exportWisSpace("surface"));
   els.browserScreen.addEventListener("click", (event) => {
     const point = browserImagePoint(event);
     if (!point) return;
@@ -11121,12 +13363,41 @@ function wireEvents() {
   els.timelineRefreshButton.addEventListener("click", () => void loadTimeline("manual"));
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
+  els.joinSpaceButton?.addEventListener("click", () => openJoinSpaceModal());
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
   els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
+  els.editSpaceButton?.addEventListener("click", openEditSpaceModal);
   els.copySpaceIdButton?.addEventListener("click", () => void copyActiveSpaceId());
+  els.shareSpaceButton?.addEventListener("click", () => void shareActiveSpace());
   els.deleteSpaceButton?.addEventListener("click", openDeleteSpaceModal);
+  els.saveEditSpaceButton?.addEventListener("click", saveEditedSpace);
+  els.cancelEditSpaceButton?.addEventListener("click", closeEditSpaceModal);
+  els.closeEditSpaceButton?.addEventListener("click", closeEditSpaceModal);
+  els.editSpaceNameInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      saveEditedSpace();
+    }
+  });
+  installModalBackdropDismiss(els.editSpaceModal, closeEditSpaceModal);
+  els.copyShareSpaceLinkButton?.addEventListener("click", () => void copyShareSpaceLink());
+  els.nativeShareSpaceButton?.addEventListener("click", () => void nativeShareSpace());
+  els.whatsappShareSpaceButton?.addEventListener("click", shareSpaceToWhatsApp);
+  els.doneShareSpaceButton?.addEventListener("click", closeShareSpaceModal);
+  els.closeShareSpaceButton?.addEventListener("click", closeShareSpaceModal);
+  installModalBackdropDismiss(els.shareSpaceModal, closeShareSpaceModal);
+  els.confirmJoinSpaceButton?.addEventListener("click", () => void joinSpaceFromModal());
+  els.cancelJoinSpaceButton?.addEventListener("click", closeJoinSpaceModal);
+  els.closeJoinSpaceButton?.addEventListener("click", closeJoinSpaceModal);
+  els.joinSpaceInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void joinSpaceFromModal();
+    }
+  });
+  installModalBackdropDismiss(els.joinSpaceModal, closeJoinSpaceModal);
   els.editAppButton?.addEventListener("click", () => openAppEditModal());
   els.copyAppIdButton?.addEventListener("click", () => void copyActiveAppId());
   els.deleteSpaceConfirmInput?.addEventListener("input", renderDeleteSpaceModal);
@@ -11225,12 +13496,12 @@ function wireEvents() {
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   els.agentForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void sendAgentMessage(els.agentInput.value);
+    void sendAgentMessage(els.agentInput.innerText);
   });
   els.agentInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      void sendAgentMessage(els.agentInput.value);
+      void sendAgentMessage(els.agentInput.innerText);
     }
   });
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
@@ -11251,6 +13522,12 @@ function wireEvents() {
     if (imageFiles.length) {
       event.preventDefault();
       handleAgentFiles(imageFiles);
+      return;
+    }
+    const text = event.clipboardData?.getData("text/plain");
+    if (text != null) {
+      event.preventDefault();
+      document.execCommand("insertText", false, text);
     }
   });
   els.agentForm.addEventListener("dragover", (event) => {
@@ -11280,6 +13557,7 @@ function wireEvents() {
     saveAgentLayout();
   };
   window.addEventListener("resize", resetAgentAfterViewportChange);
+  window.addEventListener("focus", () => void syncUserSpacesForOpenClient("focus"));
   window.visualViewport?.addEventListener("resize", resetAgentAfterViewportChange);
   window.visualViewport?.addEventListener("scroll", () => {
     state.agentLayout = clampAgentLayout(state.agentLayout);
@@ -11331,6 +13609,7 @@ async function bootstrapAuthenticatedApp() {
   applyAgentLayout();
   setPanel(panelFromPath(), { updateUrl: false });
   initializeUiNavigationFromUrl();
+  maybeOpenJoinSpaceFromUrl();
   drawCanvas();
   renderAuthGate();
   await refresh("startup");

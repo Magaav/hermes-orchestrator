@@ -48,11 +48,13 @@ be visible in the module inventory, but they should not be user-disabled.
 Modules are hierarchical. The `spaces` module owns Home, Admin, and user space
 identity. A space can expose child modules as pages, actions, apps, widgets,
 analyzers, or widget-internal capabilities. Home presents account-level core
-modules as page actions; Admin and user spaces map working app/widget modules
-onto the canvas. Plugins should extend this tree through module descriptors,
-space mappings, local state, and runtime data instead of patching unrelated
-core code. That keeps the shared mainframe small and performance-conscious
-while leaving each wasm-agent instance free to evolve its own module tree.
+modules as page actions, while Admin maps the built-in working app/widget
+modules onto the canvas. User-created spaces start empty and receive apps only
+through an explicit later mapping/porting flow. Plugins should extend this tree
+through module descriptors, space mappings, local state, and runtime data
+instead of patching unrelated core code. That keeps the shared mainframe small
+and performance-conscious while leaving each wasm-agent instance free to evolve
+its own module tree.
 
 The current app is an early browser-view parity surface, not a full replacement
 for `hermes-space-ui`. It now presents a workspace shell with a left launcher
@@ -63,16 +65,22 @@ working space now has two visual layers: an app layer with draggable app
 buttons, and a widget layer where opened widgets sit above those apps as
 draggable, resizable windows with minimize and maximize controls. Apps are
 account/user entities mapped into spaces: Home exposes core modules in its
-command strip, while Admin and user spaces map their working apps. Widgets
-remain hidden unless their app is mapped into the active space or is later
-ported into that space.
+command strip, Admin maps built-in working apps, and user-created spaces stay
+empty until apps are explicitly mapped or ported there. Widgets remain hidden
+unless their app is mapped into the active space or is later ported into that
+space.
 App buttons snap to a non-overlapping `5px`
 app-layer grid on drop and keep logical pixel placement stable across viewport
-resize, while widgets store logical pixel geometry. Changing Space area expands
-the board without resizing widgets; changing Space distance scales app icons and
+resize, while widgets store logical pixel geometry. A newly created space stores
+its current viewport as an absolute Space area, then Space config can resize
+that per-space area up to `2000 x 2000px` without resizing widgets; shared
+spaces carry the same configured area across devices. Changing Space distance scales app icons and
 opened widgets visually around those logical positions. On desktop, wheeling over
 the empty canvas adjusts Space distance around the cursor point instead of
-scrolling the hidden board. On mobile, a two-finger pinch adjusts Space distance
+scrolling the hidden board. Wheel events that start inside opened widgets stay
+inside that widget, so inner widget scroll areas can move without panning the
+space canvas. Widget bodies reset the canvas grab cursor; only widget headers
+and resize handles advertise drag affordances. On mobile, a two-finger pinch adjusts Space distance
 around the midpoint between the touches. While wheel or pinch zooming, the
 top-right config button fades away and its anchor shows the current zoom value
 above the minimap if the minimap is also visible. Pinch updates use a
@@ -212,6 +220,33 @@ canvas. The URL bar keeps an edit draft separate from stream URL updates, so
 clicking Open or pressing Enter after typing a second domain uses the typed
 value even if the previous page is still emitting frames.
 
+The WIS widget is the first client-only browser-substrate slice. It is not a
+webview and does not use an iframe. It renders a local `wis://` document model
+through wasm-agent itself, keeps DOM-like tree/state, navigation, input events,
+rendered nodes, and sandbox permissions in a small JS engine under
+`public/modules/wis/`, and exposes structured automation through
+`window.wasmAgentWis.inspect()`, `window.wasmAgentWis.act(...)`, and
+`window.wasmAgentWis.exportSpace()`. The bundled example artifact-space is a
+counter/task app that can be clicked, edited, inspected, and exported as
+`hermes.wasm_agent.wis.space.v1` without calling the bridge, Host Browser, or
+any new backend endpoint.
+The server also gives WIS a userland persistence path: chat/model replies can
+include a validated `hermes.wasm_agent.wis.patch.v1` block, and the adapter
+applies it only to the active account-owned or joined shared-space WIS artifact.
+Space sharing starts with `/spaces/share`, `/spaces/join`, `/spaces/shared`,
+and `/wis/artifacts/patch`; a shared space record tracks owner/member identity,
+join code, and collaborative capabilities while leaving core wasm-agent firmware
+outside userland write scope. In the launcher, right-clicking a user space can
+rename it, open a share dialog with a copyable invite URL, use the browser share
+sheet, or send the URL through WhatsApp. Space-home exposes Join Space so another
+signed-in account can paste either the full invite URL or the raw join code.
+Open shared spaces also use `/spaces/room` as the member-gated collaboration
+tunnel. The room heartbeat stores short-lived presence, returns online/member
+counts for the space title, carries the canonical shared `space_area`, and keeps
+a bounded sanitized event feed for future shared chat, WIS co-creation, and
+WebRTC signaling. The title displays the active room as `name online/members`,
+for example `playground 2/2`.
+
 The Observation inspector is the first embedded-agent framework layer. It keeps
 a session-only, in-memory ring buffer of app-local semantic events and renders
 the current `hermes.space_os.observation.v1` snapshot that an embedded agent
@@ -222,11 +257,17 @@ orchestrator side can inspect the most recent clicked element or UI event for
 that account. It captures workspace clicks, widget focus/drag/resize/minimize
 and maximize actions, app-button opens, browser navigation and forwarded input
 actions, task submits, node action requests, logs loads, bridge refreshes,
-stream frame health, timings, and errors. It does not persist a durable
-observation history, upload it, capture OS-wide input, or install a
-document-level raw key recorder. Typed text forwarded into the Host Browser is
+stream frame health, timings, and errors. It also stores a bounded,
+privacy-safe interaction trace for recent pointer, wheel, Space scroll, and
+viewport resize mechanics: coordinates, target summaries, element rectangles,
+pointer capture state, durations, and movement distance are kept, but text input
+values and OS-wide input are not. It does not persist a durable observation
+history, upload it, capture OS-wide input, or install a document-level raw key
+recorder. Typed text forwarded into the Host Browser is
 summarized/redacted; submitted Hermes prompts are summarized with length
-metadata because the user already submitted them to the bridge.
+metadata because the user already submitted them to the bridge. Embedded chat
+turns receive a clipped copy of the latest interaction trace so UI debugging can
+reason about drag/resize mechanics without replaying full browser activity.
 
 The embedded assistant now has a global avatar overlay that sits above every
 app panel, including Home, OS Space, Fleet, Logs, and Observation. Opening the
@@ -235,9 +276,11 @@ bounded observation snapshot through the existing Hermes bridge
 `/v1/chat/completions` endpoint. The chat header includes a node selector under
 the `Chat` title; bridge-backed turns include that `target_node`, so operators
 can switch between orchestrator and worker nodes without leaving the panel. The
-composer row also includes a single model selector immediately left of token
-usage. It lists bridge-advertised models plus locally saved chat models without
-duplicating the node default. Choosing a saved model or adding a typed model id
+composer row also includes a compact model selector immediately left of token
+usage. It renders at half of its composer track so token usage and send controls
+stay visible while still listing bridge-advertised models plus locally saved
+chat models without duplicating the node default. Choosing a saved model or
+adding a typed model id
 opens an in-chat setup balloon instead of a native browser prompt; the backend
 validates the provider/model id, writes it into the target node env and
 `.hermes/config.yaml`, updates `API_SERVER_MODEL_NAME`, restarts the node, waits
@@ -262,7 +305,14 @@ bridge model for a reply. The browser sends only a clipped recent transcript,
 not the full local conversation store. When the user asks to evolve the app
 from chat, the adapter adds app-map, worktree, and Timeline context so the
 in-app assistant can answer with a compact implementation brief while the
-selected node remains the execution target. This keeps the avatar aligned with
+selected node remains the execution target. Each turn also sends a mutation
+policy: admin `orchestrator` turns may discuss global wasm-agent firmware/source
+changes, while sandboxed worker nodes are constrained to the current
+account-owned wasm-user state root and must delegate core changes back to
+orchestrator. Sandboxed/userland turns should emit WIS patch blocks for spaces,
+components, automations, dashboards, games, and other portable artifacts instead
+of source mutations. Non-admin accounts cannot route embedded chat turns to the global
+orchestrator node; they must use an account-owned sandbox node. This keeps the avatar aligned with
 the project philosophy of
 performance, efficiency, and simplicity: small context by default, tools on
 demand, visible timeouts, and no mutation actions.
@@ -278,9 +328,11 @@ Assistant replies no longer render a separate proposal card. App-change
 conversation stays in the normal transcript, while recovery evidence lives in
 the Timeline road. The adapter snapshots the worktree before and after each
 chat turn; if the turn did not change files, the reply has no changed-files
-footer and no automatic Timeline point. If files did change, the adapter creates
-a named git-backed Timeline checkpoint using a short subject based on the
-target node and the user's prompt.
+footer and no automatic Timeline point. If files did change, the adapter reports
+the complete changed-file list, creates a before-run Timeline checkpoint, then
+creates the named after-run checkpoint using a short subject based on the target
+node and the user's prompt. The changed-files footer exposes a Stepback action
+that restores the tree to the before-run checkpoint through the Timeline API.
 
 The avatar mode selector controls how `/agent/session/message` answers:
 `Auto` uses local deterministic answers for known cheap resume/readme prompts
@@ -399,13 +451,34 @@ above the final reply text. Each action carries a kind badge, status, focused
 detail text, and an expandable arguments/result preview so inspect tools feel
 closer to Discord's tool-call trail instead of generic progress rows. This
 keeps the final answer at the bottom of the assistant bubble while preserving
-the action trail.
+the action trail. Empty media actions are omitted when no files are attached,
+and bridge responses can add live Hermes Runs API event/tool-call trace rows
+plus a reasoning availability summary without replaying raw hidden reasoning.
+Rows carry a small visual icon, completed `run-wasm` / `run-hermes` topic
+sections collapse by default, and `tool.started` / `tool.completed` update one
+tool row from running to done instead of rendering as duplicate rows. Tool rows
+show the tool name once, keep the `tool` kind badge, and hide raw lifecycle
+metadata such as `tool.completed` unless that metadata is the only useful
+status signal.
 
 The browser prefers `/agent/session/message/stream` for embedded chat turns.
 That endpoint returns newline-delimited JSON action events as local adapter
 tools finish, sends periodic heartbeat rows while waiting for Hermes/model
 output, then sends a final agent payload; older browsers can still fall back to
 the non-streaming `/agent/session/message` route.
+Long bridge waits keep updating the running action row with a `Hermes bridge
+active` heartbeat that names the latest completed step rather than reducing the
+turn to a generic waiting state.
+Streaming updates only auto-scroll the transcript when the user is already at
+the bottom. If the user scrolls upward to inspect an earlier topic, new action
+events still render but the viewport stays on the inspected content until the
+user returns to the bottom.
+
+Admin orchestrator source mutations use the `hermes.wasm_agent.mutation.v1`
+block. `replace` operations require exact `find`/`replace` text. `append`
+operations require a non-empty `insert` string and may include an `after`
+anchor; append blocks without insert text are denied and surfaced in the
+action row.
 
 The transcript sent to `/agent/session/message` is intentionally pre-turn
 context only: it excludes the current user message, pending assistant bubble,
@@ -438,8 +511,11 @@ before/after worktree tree diff for that single request. Ambient dirty worktree
 state is not shown as if the chat turn created it. The footer lives inside the
 assistant message instead of the modal chrome, shows one collapsed summary row
 by default, and expands to one full-path row per changed file with `+/-` counts.
-The expanded list stays scroll limited after roughly four rows, so changed-file
-reporting does not steal the main chat area.
+Clicking a changed file path opens a compact inner diff balloon for that file's
+changed hunks only. The balloon hides git metadata and shows only `was` and
+`now` lines with red/green contrast, so the user can inspect the before/after
+patch without leaving the chat. The expanded list stays scroll limited, so
+changed-file reporting does not steal the main chat area.
 
 The Modules panel is a local module management surface for the shadow PWA. It
 shows locked core modules plus optional development, runtime, and
@@ -462,8 +538,12 @@ Admin uses `admin`, and user-created spaces use their own space id. Timeline
 points are created automatically after chat turns that actually change the
 worktree, using a temporary git index so tracked and untracked non-ignored files
 can be captured without changing the real index or moving the current worktree.
-Branch, merge, and restore actions are shown as planned confirmation-gated
-actions until the UI can preview exact file effects and stop/rollback behavior.
+Stepback is confirmation-gated and active for Timeline checkpoints; it restores
+the selected run's before-ref and first writes a `before_stepback` checkpoint of
+the current tree. Non-admin users can only step back paths inside their
+account-owned sandbox, while core firmware/source paths require admin
+orchestrator authority. Branch and merge actions remain planned until the UI can
+preview exact file effects and stop/rollback behavior.
 Timeline metadata is local runtime state under
 `state/users/<acc_id>/timelines/<space_id>/` and is gitignored.
 
@@ -482,24 +562,38 @@ admins are shown as unlimited. Home's config button opens the account-global
 `home` Timeline lane. The launcher also has a fixed `space-admin` space with a
 crown icon. New spaces are persisted under
 `state/users/<acc_id>/spaces/<space_id>/` and appear in the left global rail
-below Admin. Space widgets start minimized as app icons; clicking an app opens
-the widget above the app layer, except Timeline, which stays fixed behind the
-space config flow. Connected Devices is a Home core module page, so it does
+below Admin. Admin space widgets start minimized as app icons; clicking an app
+opens the widget above the app layer, except Timeline, which stays fixed behind
+the space config flow. User-created spaces start without Admin apps or opened
+widgets. Connected Devices is a Home core module page, so it does
 not appear in Admin or user spaces unless a later porting flow maps it there. The
 config modal header identifies the current space while the options list omits a
-duplicate Space card. Each space config includes a draggable Space area line
-that expands or shrinks that space's scrollable board between `1x` and `10x`
-without changing current logical widget width/height, plus a Space distance line
-that scales app icons and opened widgets between `0.5x` and `2x`; both knobs
-stay within the line boundaries. App positions, widget geometry, topology card
-positions, area, and distance are saved only in browser local storage by default, so a
-newly seen device starts from the default projection instead of inheriting
-another screen's coordinates. Config storage shows account usage plus local
+duplicate Space card. Each space config includes a minimap-style Space area map:
+the white border shows the current viewport within the configured area, and
+dragging the map edits only a draft area until Apply is clicked; Apply resizes
+that space's absolute area up to `2000 x 2000px` without changing current
+logical widget width/height. Space distance remains a line control that scales
+app icons and opened widgets between `0.5x` and `2x`.
+Area-map drags redraw at animation-frame cadence and hold the viewport marker in
+the active visual state until the pointer is released. The white viewport border
+is drawn as a full-map overlay from the currently applied viewport rather than
+as a child of the resizing draft rectangle, so it stays steady while resizing
+the draft.
+App positions, widget geometry, topology card positions, and distance are saved
+only in browser local storage by default, while user-space area is stored with
+the space metadata so joined/shared spaces open with the same area on every
+device. Open clients refresh that shared space metadata on focus, during the
+regular workspace refresh loop, and through a focused `2.5s` active shared-space
+room heartbeat; Space config keeps remote area applies paused so local drafts
+are left untouched until Apply or Revert while presence still updates. Config
+storage shows account usage plus local
 disk availability and exposes Export/Import buttons for portable local backups;
 exports include the browser-local layout payload, while imports restore that
 payload back into the current browser.
 The shell stays fixed while the
-inner board can be scrolled or one-finger/click-drag panned. Home config also
+inner board can be scrolled or one-finger/click-drag panned. Mouse-wheel input
+over the canvas changes Space distance instead of native-scrolling the board,
+and widget-local wheel input is contained before it can reach the board. Home config also
 includes a mobile launcher preference that can put the launcher on the top edge on narrow
 screens. Right-clicking a user-created space opens a local menu for copying the
 space id or deleting the space; the delete modal requires the exact
@@ -518,8 +612,11 @@ available in `conf/wa.env`. wasm-agent is account-gated: unauthenticated
 requests can load only the login shell/static assets and auth endpoints, while
 bridge, browser, timeline, agent, attachment, health, observation, and user
 space services require an authenticated session. Admin accounts must be listed
-with `ADMIN_EMAIL`; standard accounts must be listed with `USER_EMAILS`. If both
-lists are empty, every Google account is rejected. Other verified Google
+with `ADMIN_EMAIL`; standard accounts must be listed with `USER_EMAILS`, or
+`USER_EMAILS` must stay empty for an admin-only deployment. Non-admin sessions
+must never route embedded chat turns to the global orchestrator target; they are
+kept on an account-sandbox target and core/source changes must be delegated to
+admin. If both lists are empty, every Google account is rejected. Other verified Google
 accounts are rejected before a row is created. The local backend verifies Google
 ID tokens through Google's token verification endpoint and stores allowed
 accounts in `/local/plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3` under
@@ -533,8 +630,9 @@ must fail closed:
 
 - Keep `plugins/wasm-agent/conf/wa.env` machine-local and untracked.
 - Set exactly the intended admin with `ADMIN_EMAIL=<google-account>`.
-- List standard accounts explicitly with `USER_EMAILS=<account>,<account>`; do
-  not use a broad Google-login policy until tenant isolation is reviewed.
+- Leave `USER_EMAILS=` empty for admin-only access, or list standard accounts
+  explicitly with `USER_EMAILS=<account>,<account>`; do not use a broad
+  Google-login policy until tenant isolation is reviewed.
 - Keep `GOOGLE_LOGIN_CLIENT_ID` configured in `conf/wa.env` for the same Google OAuth client
   whose authorized JavaScript origins include the production origin.
 - Do not expose the app port directly; public traffic should terminate at the
@@ -723,7 +821,10 @@ layer.
 
 The Topology widget also exposes live node runtime value. Node cards display the
 working engine state, provider/model label, token deltas, and current token
-total. Right-click a node and choose `Statistics` to open a polling balloon for
+total. It marks a node as working from embedded-chat run hints, bridge task
+status, security-loop runs, token deltas, and node-reported `llm_active` state,
+so orchestrator activity is visible even when the work started outside the
+Topology widget. Right-click a node and choose `Statistics` to open a polling balloon for
 token consumption, sessions, cost, activity, tool calls, warnings/errors, an
 `hour` window, a smoothed token chart, and the latest activity log. The
 statistics balloon can be moved by dragging its header, and changing time

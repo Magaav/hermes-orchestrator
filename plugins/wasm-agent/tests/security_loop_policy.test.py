@@ -44,6 +44,107 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertFalse(server_mod.bridge_route_allowed("POST", "/shell"))
         self.assertFalse(server_mod.bridge_route_allowed("GET", "http://127.0.0.1:8790/nodes"))
 
+    def test_agent_mutation_policy_separates_orchestrator_and_sandbox(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_root = Path(tmp) / "plugins" / "wasm-agent"
+            state_dir = plugin_root / "state"
+            state_dir.mkdir(parents=True)
+            fake_server = SimpleNamespace(plugin_root=plugin_root, state_dir=state_dir)
+            admin = {"id": "1", "email": "admin@example.com", "role": "admin"}
+            user = {"id": "2", "email": "user@example.com", "role": "user"}
+
+            global_policy = server_mod.agent_mutation_policy(fake_server, admin, "orchestrator")
+            sandbox_policy = server_mod.agent_mutation_policy(fake_server, user, "worker-2")
+
+            self.assertEqual(global_policy["scope"], "global-orchestrator")
+            self.assertTrue(global_policy["can_modify_core_firmware"])
+            self.assertEqual(sandbox_policy["scope"], "user-sandbox")
+            self.assertFalse(sandbox_policy["can_modify_core_firmware"])
+            self.assertEqual(server_mod.default_agent_target_node(admin), "orchestrator")
+            self.assertEqual(server_mod.default_agent_target_node(user), "account-sandbox")
+            server_mod.ensure_agent_target_allowed(admin, "orchestrator")
+            with self.assertRaises(server_mod.BrowserError):
+                server_mod.ensure_agent_target_allowed(user, "orchestrator")
+            self.assertEqual(
+                server_mod.ensure_timeline_paths_allowed(
+                    fake_server,
+                    user,
+                    ["plugins/wasm-agent/state/users/2/spaces/home/app.json"],
+                ),
+                "user-sandbox",
+            )
+            with self.assertRaises(server_mod.BrowserError):
+                server_mod.ensure_timeline_paths_allowed(fake_server, user, ["plugins/wasm-agent/public/app.js"])
+
+    def test_bridge_trace_from_task_summarizes_reasoning_without_raw_text(self) -> None:
+        task = {
+            "task_id": "space-ui-1",
+            "status": "completed",
+            "result": {
+                "run_id": "run_1",
+                "thinking_stream": "private reasoning text",
+                "events": [
+                    {"event": "tool.started", "tool": "read_file", "preview": "/local/README.md"},
+                    {"event": "tool.completed", "tool": "read_file", "status": "ok"},
+                    {"event": "run.completed", "status": "completed"},
+                ],
+            },
+        }
+        trace = server_mod.bridge_trace_from_task(task)
+        self.assertEqual(trace["id"], "run_1")
+        self.assertEqual(len(trace["tool_calls"]), 1)
+        self.assertGreaterEqual(len(trace["steps"]), 1)
+        self.assertEqual(trace["tool_calls"][0]["name"], "read_file")
+        self.assertEqual(trace["tool_calls"][0]["status"], "done")
+        self.assertIn("Provider returned", trace["reasoning_summary"])
+        self.assertNotIn("private reasoning text", trace["reasoning_summary"])
+
+    def test_ui_symbol_resolver_prevents_false_not_found_claims(self) -> None:
+        fake_server = SimpleNamespace(plugin_root=PLUGIN_ROOT, state_dir=PLUGIN_ROOT / "state")
+        tool = server_mod.agent_ui_symbol_resolver(
+            fake_server,
+            "`agentModelSelect` right padding should match the visible select",
+        )
+        self.assertIsNotNone(tool)
+        summary = server_mod.symbol_resolution_summary(tool)
+        self.assertIn("agentModelSelect", summary)
+        self.assertIn("plugins/wasm-agent/public/index.html", summary)
+        self.assertIn("plugins/wasm-agent/public/styles.css", summary)
+        corrected = server_mod.correct_negative_symbol_reply(
+            fake_server,
+            "`agentModelSelect` right padding should match the visible select",
+            "I cannot find `agentModelSelect` in the source tree.",
+        )
+        self.assertIn("Adapter symbol check", corrected)
+        self.assertIn(".agent-model-select", corrected)
+
+    def test_final_agent_actions_and_token_usage_are_normalized(self) -> None:
+        actions = server_mod.finalize_agent_actions([
+            {"id": "bridge_run", "status": "running"},
+            {"id": "tool_read", "status": "failed"},
+        ])
+        self.assertEqual(actions[0]["status"], "done")
+        self.assertEqual(actions[1]["status"], "error")
+        usage = server_mod.normalize_token_usage({
+            "input_tokens": "1,200",
+            "output_tokens": 34.8,
+        }, source="bridge_runs")
+        self.assertEqual(usage["prompt_tokens"], 1200)
+        self.assertEqual(usage["completion_tokens"], 34)
+        self.assertEqual(usage["total_tokens"], 1234)
+        self.assertEqual(usage["source"], "bridge_runs")
+        task_usage = server_mod.bridge_task_usage({
+            "result": {
+                "usage": {
+                    "totals": {
+                        "input_tokens": "50",
+                        "output_tokens": "7",
+                    }
+                }
+            }
+        })
+        self.assertEqual(task_usage["total_tokens"], 57)
+
     def test_browser_stream_requires_same_origin_websocket(self) -> None:
         same_origin = self.fake_handler({
             "Host": "wa.example.test",

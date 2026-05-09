@@ -6,6 +6,7 @@ import { moduleDefinition as artifacts } from "./artifacts/module.js";
 import { moduleDefinition as config } from "./config/module.js";
 import { moduleDefinition as moduleManager } from "./module-manager/module.js";
 import { moduleDefinition as browser } from "./browser/module.js";
+import { moduleDefinition as wis } from "./wis/module.js";
 import { moduleDefinition as assistant } from "./assistant/module.js";
 import { moduleDefinition as timeline } from "./timeline/module.js";
 import { moduleDefinition as imageCardCore } from "./image-card-core/module.js";
@@ -23,6 +24,7 @@ export const MODULE_DEFINITIONS = [
   config,
   moduleManager,
   browser,
+  wis,
   assistant,
   timeline,
   imageCardCore,

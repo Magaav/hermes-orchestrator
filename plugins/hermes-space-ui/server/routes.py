@@ -287,6 +287,7 @@ class OrchestratorClient:
         if running_task:
             activity.update(activity_from_running_task(running_task))
         payload["_space_ui_activity"] = activity
+        payload["_space_ui_hermes"] = node_hermes_runtime_snapshot(self.settings, node)
         return payload
 
     def tail_node_logs(self, node_id: str, *, lines: int = 80) -> dict[str, Any]:
@@ -1171,15 +1172,19 @@ class OrchestratorClient:
                 details={"node_id": node, "response": created},
             )
         if task_id:
+            created_usage = token_usage_from_payload(created)
+            initial_result: dict[str, Any] = {
+                "node_id": node,
+                "run_id": run_id,
+                "session_id": session_id,
+                "model_request": run_payload.get("model"),
+                "run_status": "running",
+            }
+            if usage_has_signal(created_usage):
+                initial_result["token_usage"] = created_usage
             self.task_store.update_running(
                 task_id,
-                result={
-                    "node_id": node,
-                    "run_id": run_id,
-                    "session_id": session_id,
-                    "model_request": run_payload.get("model"),
-                    "run_status": "running",
-                },
+                result=initial_result,
             )
             self._start_run_event_collector(node, run_id, task_id)
             self._raise_if_task_cancelled(task_id, node, run_id)
@@ -1192,16 +1197,20 @@ class OrchestratorClient:
             last_status = status
             state = str(status.get("status") or "").lower()
             if task_id:
+                status_usage = token_usage_from_payload(status)
+                running_result: dict[str, Any] = {
+                    "node_id": node,
+                    "run_id": run_id,
+                    "session_id": session_id,
+                    "model_request": run_payload.get("model"),
+                    "run_status": state or "running",
+                    "last_event": status.get("last_event"),
+                }
+                if usage_has_signal(status_usage):
+                    running_result["token_usage"] = status_usage
                 self.task_store.update_running(
                     task_id,
-                    result={
-                        "node_id": node,
-                        "run_id": run_id,
-                        "session_id": session_id,
-                        "model_request": run_payload.get("model"),
-                        "run_status": state or "running",
-                        "last_event": status.get("last_event"),
-                    },
+                    result=running_result,
                 )
                 self.task_store.record_status_event(task_id, status)
             if state == "completed":
@@ -1224,16 +1233,20 @@ class OrchestratorClient:
         except BridgeError as exc:
             stop_status = {"error": exc.code, "message": exc.message}
         if task_id:
+            last_usage = token_usage_from_payload(last_status)
+            timeout_result: dict[str, Any] = {
+                "node_id": node,
+                "run_id": run_id,
+                "session_id": session_id,
+                "model_request": run_payload.get("model"),
+                "run_status": "timeout",
+                "last_event": last_status.get("last_event"),
+            }
+            if usage_has_signal(last_usage):
+                timeout_result["token_usage"] = last_usage
             self.task_store.update_running(
                 task_id,
-                result={
-                    "node_id": node,
-                    "run_id": run_id,
-                    "session_id": session_id,
-                    "model_request": run_payload.get("model"),
-                    "run_status": "timeout",
-                    "last_event": last_status.get("last_event"),
-                },
+                result=timeout_result,
             )
         raise BridgeError(
             "api_server_run_timeout",
@@ -1290,7 +1303,16 @@ def compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
     if tool_value:
         payload["tool"] = str(tool_value).strip()[:200]
 
-    for key in ("run_id", "status", "state", "source"):
+    call_id = (
+        merged.get("tool_call_id")
+        or merged.get("toolCallId")
+        or merged.get("call_id")
+        or merged.get("callId")
+    )
+    if call_id:
+        payload["tool_call_id"] = str(call_id).strip()[:200]
+
+    for key in ("run_id", "status", "state", "source", "sequence"):
         value = str(merged.get(key) or "").strip()
         if value:
             payload["status" if key == "state" else key] = value[:200]
@@ -1298,6 +1320,8 @@ def compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
     args = merged.get("args")
     if args is None:
         args = merged.get("arguments")
+    if args is None:
+        args = merged.get("arguments_preview")
     if isinstance(args, str):
         try:
             parsed_args = json.loads(args)
@@ -1325,11 +1349,11 @@ def compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
         payload["command"] = str(command)[:4000]
 
     text_aliases = {
-        "preview": ("preview", "label", "summary"),
+        "preview": ("preview", "summary", "label"),
         "text": ("text", "thinking", "reasoning", "content"),
         "delta": ("delta", "content_delta", "text_delta"),
-        "output": ("output", "stdout", "stderr", "result"),
-        "message": ("message", "detail"),
+        "output": ("output", "stdout", "stderr", "result", "result_preview"),
+        "message": ("message", "detail", "details"),
         "error": ("error", "exception"),
     }
     limits = {
@@ -1368,8 +1392,9 @@ def compact_run_event(event: dict[str, Any]) -> dict[str, Any]:
             payload["duration"] = round(float(merged.get("duration") or merged.get("elapsed") or 0), 3)
         except (TypeError, ValueError):
             pass
-    if "usage" in merged and isinstance(merged.get("usage"), dict):
-        payload["usage"] = merged["usage"]
+    usage = token_usage_from_payload(merged)
+    if usage_has_signal(usage):
+        payload["usage"] = usage
     if "error" in merged and isinstance(merged.get("error"), bool):
         payload["error"] = bool(merged.get("error"))
     return payload
@@ -1464,10 +1489,19 @@ class TaskStore:
             existing = self._tasks.get(task_id)
             if not existing or existing.get("status") != "running":
                 return existing
+            existing_result = existing.get("result") if isinstance(existing.get("result"), dict) else {}
             merged_result = {
-                **(existing.get("result") if isinstance(existing.get("result"), dict) else {}),
+                **existing_result,
                 **(result or {}),
             }
+            incoming_usage = None
+            if isinstance(result, dict):
+                incoming_usage = result.get("token_usage") or result.get("usage")
+            if usage_has_signal(token_usage_from_payload(incoming_usage)):
+                merged_result["token_usage"] = merge_token_usage(
+                    token_usage_from_payload(existing_result.get("token_usage")),
+                    token_usage_from_payload(incoming_usage),
+                )
             task = {
                 **existing,
                 "updated_at": utc_now(),
@@ -1498,9 +1532,10 @@ class TaskStore:
         event_name = str(status.get("last_event") or "").strip()
         run_id = str(status.get("run_id") or status.get("id") or "").strip()
         run_status = str(status.get("status") or "").strip()
-        if not event_name:
+        usage = token_usage_from_payload(status)
+        if not event_name and not usage_has_signal(usage):
             return None
-        marker = f"{run_id}:{event_name}:{run_status}"
+        marker = f"{run_id}:{event_name}:{run_status}:{usage.get('total_tokens') or 0}"
         with self._lock:
             existing = self._tasks.get(task_id)
             result = existing.get("result") if isinstance(existing, dict) and isinstance(existing.get("result"), dict) else {}
@@ -1513,11 +1548,12 @@ class TaskStore:
         return self.record_event(
             task_id,
             {
-                "event": event_name,
+                "event": event_name or "run.status",
                 "run_id": run_id,
                 "status": run_status,
                 "source": "run_status",
                 "timestamp": status.get("updated_at") or time.time(),
+                "usage": usage,
             },
         )
 
@@ -1535,6 +1571,12 @@ class TaskStore:
                 event_count = 1
             result["event_count"] = event_count
             result["last_event"] = event_name
+            usage = token_usage_from_payload(compact)
+            if usage_has_signal(usage):
+                result["token_usage"] = merge_token_usage(
+                    token_usage_from_payload(result.get("token_usage")),
+                    usage,
+                )
 
             if event_name in {"message.delta", "response.output_text.delta"}:
                 delta = str(compact.get("delta") or compact.get("text") or "")
@@ -1560,7 +1602,7 @@ class TaskStore:
                 "result": result,
             }
             self._tasks[task_id] = task
-            if event_name not in {"message.delta", "response.output_text.delta"}:
+            if event_name not in {"message.delta", "response.output_text.delta"} or usage_has_signal(usage):
                 self._save()
             return task
 
@@ -2737,6 +2779,169 @@ def parse_iso_timestamp(value: Any) -> float | None:
         return None
 
 
+def token_usage_from_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    usage_keys = {
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "api_calls",
+        "api_call_count",
+    }
+    nested_keys = ("usage", "token_usage", "tokenUsage", "metrics", "resource_usage")
+    candidates: list[dict[str, Any]] = []
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 2 or not isinstance(value, dict):
+            return
+        if any(key in value for key in usage_keys):
+            candidates.append(value)
+        for key in nested_keys:
+            nested = value.get(key)
+            if isinstance(nested, dict):
+                visit(nested, depth + 1)
+
+    visit(payload)
+    merged: dict[str, Any] = {}
+    for candidate in candidates:
+        merged = merge_token_usage(merged, normalize_token_usage(candidate))
+    return merged
+
+
+def normalize_token_usage(usage: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = integer(usage.get("input_tokens") or usage.get("prompt_tokens"))
+    output_tokens = integer(usage.get("output_tokens") or usage.get("completion_tokens"))
+    cache_read_tokens = integer(usage.get("cache_read_tokens"))
+    cache_write_tokens = integer(usage.get("cache_write_tokens"))
+    reasoning_tokens = integer(usage.get("reasoning_tokens"))
+    total_tokens = integer(
+        usage.get("total_tokens")
+        or usage.get("total")
+        or usage.get("tokens")
+    )
+    component_total = input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens
+    if total_tokens <= 0:
+        total_tokens = component_total
+    return {
+        "input_tokens": max(0, input_tokens),
+        "output_tokens": max(0, output_tokens),
+        "cache_read_tokens": max(0, cache_read_tokens),
+        "cache_write_tokens": max(0, cache_write_tokens),
+        "reasoning_tokens": max(0, reasoning_tokens),
+        "total_tokens": max(0, total_tokens),
+        "api_calls": max(0, integer(usage.get("api_calls") or usage.get("api_call_count"))),
+        "source": str(usage.get("source") or usage.get("provider") or "").strip()[:120],
+        "model": str(usage.get("model") or "").strip()[:160],
+    }
+
+
+def usage_has_signal(usage: dict[str, Any]) -> bool:
+    return any(
+        integer(usage.get(key)) > 0
+        for key in (
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+            "api_calls",
+        )
+    )
+
+
+def merge_token_usage(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    current_usage = normalize_token_usage(current) if isinstance(current, dict) else {}
+    incoming_usage = normalize_token_usage(incoming) if isinstance(incoming, dict) else {}
+    if not usage_has_signal(current_usage):
+        return incoming_usage if usage_has_signal(incoming_usage) else {}
+    if not usage_has_signal(incoming_usage):
+        return current_usage
+    merged: dict[str, Any] = {}
+    for key in (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "api_calls",
+    ):
+        merged[key] = max(integer(current_usage.get(key)), integer(incoming_usage.get(key)))
+    component_total = (
+        merged["input_tokens"]
+        + merged["output_tokens"]
+        + merged["cache_read_tokens"]
+        + merged["cache_write_tokens"]
+        + merged["reasoning_tokens"]
+    )
+    merged["total_tokens"] = max(integer(merged.get("total_tokens")), component_total)
+    merged["source"] = str(incoming_usage.get("source") or current_usage.get("source") or "")
+    merged["model"] = str(incoming_usage.get("model") or current_usage.get("model") or "")
+    return merged
+
+
+def task_token_usage(task: dict[str, Any]) -> dict[str, Any]:
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    usage = token_usage_from_payload(result.get("token_usage"))
+    usage = merge_token_usage(usage, token_usage_from_payload(result.get("usage")))
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    for event in events:
+        usage = merge_token_usage(usage, token_usage_from_payload(event))
+    return usage
+
+
+def node_hermes_runtime_snapshot(settings: BridgeSettings, node_id: str) -> dict[str, Any]:
+    node = validate_node_id(node_id)
+    root = settings.agents_root / "nodes" / node / "hermes-agent"
+    env = load_env_file(settings.agents_root / "envs" / f"{node}.env")
+    version = ""
+    release_date = ""
+    source = ""
+
+    init_path = root / "hermes_cli" / "__init__.py"
+    if init_path.exists():
+        try:
+            text = init_path.read_text(encoding="utf-8", errors="replace")
+            version_match = re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", text)
+            release_match = re.search(r"__release_date__\s*=\s*['\"]([^'\"]+)['\"]", text)
+            if version_match:
+                version = version_match.group(1).strip()
+                source = str(init_path)
+            if release_match:
+                release_date = release_match.group(1).strip()
+        except OSError:
+            pass
+
+    pyproject_path = root / "pyproject.toml"
+    if not version and pyproject_path.exists():
+        try:
+            text = pyproject_path.read_text(encoding="utf-8", errors="replace")
+            project_match = re.search(r"(?m)^version\s*=\s*['\"]([^'\"]+)['\"]", text)
+            if project_match:
+                version = project_match.group(1).strip()
+                source = str(pyproject_path)
+        except OSError:
+            pass
+
+    return {
+        "schema": "hermes.space_ui.node_hermes_runtime.v1",
+        "available": bool(root.exists()),
+        "version": version,
+        "release_date": release_date,
+        "source": source,
+        "root": str(root),
+        "api_model": str(env.get("API_SERVER_MODEL_NAME") or ""),
+        "inference_provider": str(env.get("HERMES_INFERENCE_PROVIDER") or ""),
+    }
+
+
 def node_activity_snapshot(settings: BridgeSettings, node_id: str) -> dict[str, Any]:
     node = validate_node_id(node_id)
     now_ts = time.time()
@@ -2865,6 +3070,11 @@ def activity_from_running_task(task: dict[str, Any]) -> dict[str, Any]:
     age = max(0.0, time.time() - updated_ts) if updated_ts else None
     prompt = str(task.get("prompt") or "")
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    usage = task_token_usage(task)
+    run_id = str(result.get("run_id") or "")
+    api_calls = integer(usage.get("api_calls"))
+    if run_id and api_calls <= 0:
+        api_calls = 1
     return {
         "llm_active": True,
         "state": "working",
@@ -2874,12 +3084,18 @@ def activity_from_running_task(task: dict[str, Any]) -> dict[str, Any]:
         "last_signal_age_sec": round(age, 1) if age is not None else None,
         "session_id": str(task.get("task_id") or ""),
         "platform": "space-ui",
-        "model": str(result.get("model_request") or ""),
-        "api_calls": 0,
-        "total_tokens": 0,
+        "model": str(usage.get("model") or result.get("model_request") or ""),
+        "api_calls": api_calls,
+        "total_tokens": integer(usage.get("total_tokens")),
+        "input_tokens": integer(usage.get("input_tokens")),
+        "output_tokens": integer(usage.get("output_tokens")),
+        "cache_read_tokens": integer(usage.get("cache_read_tokens")),
+        "cache_write_tokens": integer(usage.get("cache_write_tokens")),
+        "reasoning_tokens": integer(usage.get("reasoning_tokens")),
+        "token_usage": usage,
         "reason": "running Space UI task",
         "task_id": str(task.get("task_id") or ""),
-        "run_id": str(result.get("run_id") or ""),
+        "run_id": run_id,
         "run_status": str(result.get("run_status") or ""),
         "last_event": str(result.get("last_event") or ""),
         "task_preview": prompt[:160],

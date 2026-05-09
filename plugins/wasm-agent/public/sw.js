@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v35";
+const CACHE_NAME = "wasm-agent-v39";
 const ASSETS = [
   "/",
   "/index.html",
@@ -9,6 +9,8 @@ const ASSETS = [
   "/modules/hmr/module.js",
   "/modules/spaces/module.js",
   "/modules/browser/module.js",
+  "/modules/wis/module.js",
+  "/modules/wis/engine.js",
   "/modules/observation/module.js",
   "/modules/devices/module.js",
   "/modules/artifacts/module.js",

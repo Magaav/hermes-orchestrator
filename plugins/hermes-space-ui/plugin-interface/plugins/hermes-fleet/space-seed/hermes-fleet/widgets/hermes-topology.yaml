@@ -26,6 +26,7 @@ renderer: |-
       statsDays: 1,
       statsTimer: null,
       layoutTimer: null,
+      tokenBaselines: {},
       sessionZ: 0
     };
 
@@ -44,12 +45,14 @@ renderer: |-
       .ht-stage{position:relative;min-height:0;overflow:hidden;border:1px solid rgba(148,167,201,.1);border-radius:8px;background:radial-gradient(circle at 30% 18%,rgba(125,220,255,.09),transparent 28%),rgba(3,10,20,.44);}
       .ht-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;}
       .ht-nodes{position:absolute;inset:0;}
-      .ht-node{position:absolute;width:142px;min-height:66px;box-sizing:border-box;border:1px solid rgba(148,167,201,.22);border-radius:8px;background:rgba(16,33,62,.94);padding:9px 10px;cursor:grab;box-shadow:0 10px 26px rgba(0,0,0,.22);transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease;text-align:left;color:#eff6ff;}
+      .ht-node{position:absolute;width:156px;min-height:86px;box-sizing:border-box;border:1px solid rgba(148,167,201,.22);border-radius:8px;background:rgba(16,33,62,.94);padding:9px 10px;cursor:grab;box-shadow:0 10px 26px rgba(0,0,0,.22);transition:border-color .18s ease, transform .18s ease, box-shadow .18s ease;text-align:left;color:#eff6ff;}
       .ht-node:active{cursor:grabbing;}
       .ht-node:hover,.ht-node.selected{border-color:rgba(125,220,255,.72);transform:translateY(-1px);}
       .ht-node.dragging{z-index:3;border-color:rgba(124,228,176,.82);box-shadow:0 14px 34px rgba(0,0,0,.34);}
       .ht-node-name{font-size:13px;font-weight:750;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .ht-node-meta{font-size:10px;color:#9fb0c9;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-node-version{font-size:10px;color:#cfe3ff;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+      .ht-node-tokens{font-size:10px;color:#7ce4b0;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums;}
       .ht-pill{display:inline-flex;align-items:center;gap:5px;margin-top:7px;font-size:10px;color:#cfe3ff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
       .ht-pill::before{content:"";flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:#f87171;}
       .ht-pill.running::before{background:#7ce4b0;}
@@ -244,6 +247,53 @@ renderer: |-
       el.textContent = displayStatus(node);
     }
 
+    function nodeHermesRuntime(node) {
+      const hermes = node?.hermes || node?.raw?._space_ui_hermes || {};
+      return hermes && typeof hermes === "object" ? hermes : {};
+    }
+
+    function nodeHermesLabel(node) {
+      const hermes = nodeHermesRuntime(node);
+      const version = String(hermes.version || "").trim();
+      return version ? `Hermes v${version}` : "Hermes version unknown";
+    }
+
+    function nodeTokenTotal(node) {
+      const activity = node?.activity || node?.raw?._space_ui_activity || {};
+      const raw = node?.raw || {};
+      const value = Number(
+        activity.total_tokens
+        || raw.session_total_tokens
+        || raw.status?.activity?.total_tokens
+        || raw.activity?.total_tokens
+        || 0
+      );
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+
+    function syncTokenBaselines(nodes) {
+      for (const node of nodes || []) {
+        const id = String(node?.id || node?.node_id || "");
+        if (!id) continue;
+        const total = nodeTokenTotal(node);
+        if (!Object.prototype.hasOwnProperty.call(state.tokenBaselines, id) || total < Number(state.tokenBaselines[id] || 0)) {
+          state.tokenBaselines[id] = total;
+        }
+      }
+    }
+
+    function tokensSinceWidgetStart(node) {
+      const id = String(node?.id || node?.node_id || "");
+      const total = nodeTokenTotal(node);
+      const baseline = Object.prototype.hasOwnProperty.call(state.tokenBaselines, id)
+        ? Number(state.tokenBaselines[id] || 0)
+        : total;
+      if (id && !Object.prototype.hasOwnProperty.call(state.tokenBaselines, id)) {
+        state.tokenBaselines[id] = total;
+      }
+      return Math.max(0, total - baseline);
+    }
+
     function statsDaysForBucket(bucket) {
       if (bucket === "weekly") return 7;
       if (bucket === "monthly") return 30;
@@ -282,8 +332,8 @@ renderer: |-
     function autoLayout(nodes) {
       const width = Math.max(340, stageEl.clientWidth || 640);
       const height = Math.max(260, stageEl.clientHeight || 380);
-      const cardW = 142;
-      const cardH = 72;
+      const cardW = 156;
+      const cardH = 92;
       const center = { x: width / 2 - cardW / 2, y: height / 2 - cardH / 2 };
       const positions = {};
       const hub = nodes.find((node) => node.id === "orchestrator") || nodes[0];
@@ -309,8 +359,8 @@ renderer: |-
       for (const node of state.nodes) {
         const current = state.positions[node.id] || fallback[node.id] || { x: 12, y: 12 };
         state.positions[node.id] = {
-          x: clamp(Number(current.x || 0), 12, width - 154),
-          y: clamp(Number(current.y || 0), 12, height - 84)
+          x: clamp(Number(current.x || 0), 12, width - 168),
+          y: clamp(Number(current.y || 0), 12, height - 104)
         };
       }
     }
@@ -400,10 +450,14 @@ renderer: |-
         card.innerHTML = `
           <div class="ht-node-name"></div>
           <div class="ht-node-meta"></div>
+          <div class="ht-node-version"></div>
+          <div class="ht-node-tokens"></div>
           <div class="ht-pill ${statusClass(node)}"></div>
         `;
         card.querySelector(".ht-node-name").textContent = node.title || node.id;
         card.querySelector(".ht-node-meta").textContent = `${node.runtime?.type || "runtime"} / ${node.runtime?.state_mode || "state"}`;
+        card.querySelector(".ht-node-version").textContent = nodeHermesLabel(node);
+        card.querySelector(".ht-node-tokens").textContent = `${formatNumber(tokensSinceWidgetStart(node))} tokens`;
         renderStatusPill(card.querySelector(".ht-pill"), node);
         card.addEventListener("contextmenu", (event) => {
           event.preventDefault();
@@ -414,10 +468,10 @@ renderer: |-
 
         if (hubPos && node.id !== hub.id) {
           const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-          line.setAttribute("x1", String(hubPos.x + 71));
-          line.setAttribute("y1", String(hubPos.y + 36));
-          line.setAttribute("x2", String(pos.x + 71));
-          line.setAttribute("y2", String(pos.y + 36));
+          line.setAttribute("x1", String(hubPos.x + 78));
+          line.setAttribute("y1", String(hubPos.y + 46));
+          line.setAttribute("x2", String(pos.x + 78));
+          line.setAttribute("y2", String(pos.y + 46));
           line.setAttribute("stroke", node.running ? "rgba(125,220,255,.62)" : "rgba(248,113,113,.5)");
           line.setAttribute("stroke-width", "2");
           line.setAttribute("stroke-dasharray", node.running ? "0" : "6 6");
@@ -434,7 +488,7 @@ renderer: |-
       countEl.textContent = `${working}/${state.nodes.length} working / ${running} running`;
       if (!node) return;
       detailTitleEl.textContent = node.title || node.id;
-      detailSubEl.textContent = `${displayStatus(node)} / ${node.runtime?.type || "runtime"} / ${node.paths?.clone_root || "no clone path"}`;
+      detailSubEl.textContent = `${displayStatus(node)} / ${nodeHermesLabel(node)} / ${formatNumber(tokensSinceWidgetStart(node))} tokens since widget restart`;
     }
 
     async function loadNodes(options = {}) {
@@ -445,6 +499,7 @@ renderer: |-
       freshnessEl.textContent = "Updating";
       const data = await hermes("/nodes");
       state.nodes = Array.isArray(data.nodes) ? data.nodes : [];
+      syncTokenBaselines(state.nodes);
       freshnessEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       drawTopology();
     }

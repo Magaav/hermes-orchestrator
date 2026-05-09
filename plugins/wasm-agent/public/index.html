@@ -10,7 +10,7 @@
     <script src="/boot.js"></script>
   </head>
   <body>
-    <div id="app" class="os-shell" data-status="booting" data-panel="home" data-auth="checking">
+    <div id="app" class="os-shell" data-status="booting" data-panel="home" data-panel-kind="home" data-auth="checking">
       <aside class="launcher" aria-label="Workspace launcher">
         <button class="launcher-mark active" type="button" data-panel="home" title="space-home" aria-label="space-home">
           <svg class="home-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -40,7 +40,9 @@
       </aside>
 
       <div id="spaceContextMenu" class="space-context-menu" role="menu" aria-label="Space menu" hidden>
+        <button id="editSpaceButton" type="button" role="menuitem">Edit</button>
         <button id="copySpaceIdButton" type="button" role="menuitem">Copy space id</button>
+        <button id="shareSpaceButton" type="button" role="menuitem">Share space</button>
         <button id="deleteSpaceButton" class="danger" type="button" role="menuitem">Delete space</button>
       </div>
       <div id="nodeContextMenu" class="node-context-menu" role="menu" aria-label="Node actions" hidden></div>
@@ -49,6 +51,69 @@
         <button id="editAppButton" type="button" role="menuitem">Edit</button>
         <button id="copyAppIdButton" type="button" role="menuitem">Copy app id</button>
       </div>
+
+      <section id="editSpaceModal" class="modal-backdrop" aria-label="Edit space" hidden>
+        <article class="modal-card" role="dialog" aria-modal="true" aria-labelledby="editSpaceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="editSpaceTitle">Edit space</h2>
+              <p id="editSpaceMeta">Space</p>
+            </div>
+            <button id="closeEditSpaceButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <label class="confirm-field">
+            <span>Name</span>
+            <input id="editSpaceNameInput" type="text" autocomplete="off" maxlength="80">
+          </label>
+          <div class="modal-actions">
+            <button id="cancelEditSpaceButton" type="button">Cancel</button>
+            <button id="saveEditSpaceButton" type="button">Save</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="shareSpaceModal" class="modal-backdrop" aria-label="Share space" hidden>
+        <article class="modal-card" role="dialog" aria-modal="true" aria-labelledby="shareSpaceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="shareSpaceTitle">Share space</h2>
+              <p id="shareSpaceName">Space</p>
+            </div>
+            <button id="closeShareSpaceButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <label class="confirm-field">
+            <span>Invite link</span>
+            <input id="shareSpaceLinkInput" type="text" readonly>
+          </label>
+          <div class="modal-actions share-actions">
+            <button id="copyShareSpaceLinkButton" type="button">Copy</button>
+            <button id="nativeShareSpaceButton" type="button">Share</button>
+            <button id="whatsappShareSpaceButton" type="button">WhatsApp</button>
+            <button id="doneShareSpaceButton" type="button">Done</button>
+          </div>
+        </article>
+      </section>
+
+      <section id="joinSpaceModal" class="modal-backdrop" aria-label="Join space" hidden>
+        <article class="modal-card" role="dialog" aria-modal="true" aria-labelledby="joinSpaceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="joinSpaceTitle">Join space</h2>
+              <p>Paste a space invite link or join code.</p>
+            </div>
+            <button id="closeJoinSpaceButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <label class="confirm-field">
+            <span>Invite</span>
+            <input id="joinSpaceInput" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <p id="joinSpaceMessage" class="modal-message"></p>
+          <div class="modal-actions">
+            <button id="cancelJoinSpaceButton" type="button">Cancel</button>
+            <button id="confirmJoinSpaceButton" type="button">Join</button>
+          </div>
+        </article>
+      </section>
 
       <section id="deleteSpaceModal" class="modal-backdrop" aria-label="Delete space confirmation" hidden>
         <article class="modal-card" role="dialog" aria-modal="true" aria-labelledby="deleteSpaceTitle">
@@ -241,6 +306,7 @@
               <canvas id="spaceCanvas"></canvas>
               <div class="home-actions" aria-label="Homespace actions">
                 <button id="addSpaceButton" class="home-action-button primary" type="button" title="New Space" aria-label="New Space"><span>New Space</span></button>
+                <button id="joinSpaceButton" class="home-action-button join" type="button" title="Join Space" aria-label="Join Space"><span>Join Space</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
@@ -337,6 +403,63 @@
               </div>
               <div id="browserMeta" class="browser-meta">Click pixels to focus. Type, Enter, and scroll are forwarded to host Chromium.</div>
               <div class="widget-resize-handle" data-widget-resize="browser-proof" title="Resize Host Browser" aria-hidden="true"></div>
+            </article>
+
+            <article class="widget wis-widget" data-widget-id="wis" data-module-target="wis">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>WIS</span>
+                <span class="widget-head-actions">
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize WIS"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize WIS"></button>
+                  <span id="wisStatus" class="widget-chip">sandbox</span>
+                </span>
+              </header>
+              <div class="wis-shell">
+                <section id="wisSurface" class="wis-surface" tabindex="0" role="application" aria-label="WIS surface">
+                  <div class="wis-surface-bar">
+                    <span id="wisLocation">wis://local/counter-app</span>
+                  </div>
+                  <div id="wisViewport" class="wis-viewport"></div>
+                </section>
+                <aside class="wis-panel" aria-label="WIS control panel">
+                  <dl class="wis-facts">
+                    <div>
+                      <dt>URL</dt>
+                      <dd id="wisDocumentId">counter-app</dd>
+                    </div>
+                    <div>
+                      <dt>Nodes</dt>
+                      <dd id="wisNodeCount">0</dd>
+                    </div>
+                    <div>
+                      <dt>Elements</dt>
+                      <dd id="wisElementCount">0</dd>
+                    </div>
+                    <div>
+                      <dt>Sandbox</dt>
+                      <dd id="wisSandboxStatus">isolated</dd>
+                    </div>
+                  </dl>
+                  <section class="wis-panel-section" aria-label="Loaded nodes">
+                    <header>Nodes</header>
+                    <div id="wisNodeList" class="wis-node-list"></div>
+                  </section>
+                  <section class="wis-panel-section" aria-label="Recent WIS events">
+                    <header>Events</header>
+                    <div id="wisEventList" class="wis-event-list"></div>
+                  </section>
+                  <section class="wis-panel-section" aria-label="Automation state">
+                    <header>Automation</header>
+                    <pre id="wisAutomationState" class="wis-automation-state"></pre>
+                  </section>
+                  <section class="wis-panel-section wis-export-section" aria-label="WIS export">
+                    <header>Export</header>
+                    <button id="wisExportButton" class="widget-add-button" type="button">Export</button>
+                    <textarea id="wisExportValue" class="wis-export-value" readonly spellcheck="false"></textarea>
+                  </section>
+                </aside>
+              </div>
+              <div class="widget-resize-handle" data-widget-resize="wis" title="Resize WIS" aria-hidden="true"></div>
             </article>
 
             <article class="widget drop-widget" data-widget-id="drop-to-copy">
@@ -542,8 +665,8 @@
         </section>
         <form id="agentForm" class="agent-form" autocomplete="off">
           <div id="agentImagePreview" class="agent-image-preview" hidden></div>
-          <input type="file" id="agentImageInput" accept="image/*" multiple hidden>
-          <textarea id="agentInput" rows="3" placeholder="Talk to Hermes"></textarea>
+          <input type="file" id="agentImageInput" accept="image/*,video/mp4,.mp4" multiple hidden>
+          <div id="agentInput" contenteditable="true" class="agent-message-body agent-markdown" data-placeholder="Talk to Hermes"></div>
           <div class="agent-form-row">
             <button id="agentAttachButton" class="agent-attach-button" type="button" aria-label="Attach image" title="Attach image">
               <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">

@@ -103,12 +103,14 @@ if have node; then
   run_check "public/app.js parses as an ES module" bash -c "node --input-type=module --check < '${PLUGIN_DIR}/public/app.js'"
   run_check "wasm smoke test" node "${PLUGIN_DIR}/tests/wasm_agent_smoke.test.js"
   run_check "UI navigation history test" node "${PLUGIN_DIR}/tests/ui_navigation_history.test.js"
+  run_check "WIS engine test" node "${PLUGIN_DIR}/tests/wis_engine.test.js"
 else
   fail "node is required for frontend launch checks"
 fi
 
 if have python3; then
   run_check "image card golden test" python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
+  run_check "WIS shared-space behavior test" python3 "${PLUGIN_DIR}/tests/wis_shared_space.test.py"
   run_check "security loop policy test" python3 "${PLUGIN_DIR}/tests/security_loop_policy.test.py"
   run_check "security loop runner test" python3 "${PLUGIN_DIR}/tests/security_loop_runner.test.py"
 else
@@ -122,6 +124,7 @@ if have curl; then
   expect_status_any "bridge nodes unauthenticated" GET "/bridge/nodes" 401 403
   expect_status_any "security loop unauthenticated" GET "/security-loop/status" 401 403
   expect_status_any "timeline unauthenticated" GET "/timeline/status" 401 403
+  expect_status_any "shared room unauthenticated" GET "/spaces/room?shared_space_id=probe" 401 403
   expect_status_any "browser open unauthenticated" POST "/browser/open" 401 403
   expect_status_any "agent attachment unauthenticated" GET "/agent/attachments/probe" 401 403
 
@@ -142,6 +145,14 @@ if have curl; then
     pass "cross-origin non-public POST rejected before mutation"
   else
     fail "cross-origin non-public POST returned ${cross_status}, expected 401 or 403"
+  fi
+
+  room_cross_status="$(http_status POST "${TARGET_URL}/spaces/room" "https://evil.example")"
+  rm -f /tmp/wasm-agent-security-body.$$
+  if [[ "${room_cross_status}" == "401" || "${room_cross_status}" == "403" ]]; then
+    pass "cross-origin shared room POST rejected before mutation"
+  else
+    fail "cross-origin shared room POST returned ${room_cross_status}, expected 401 or 403"
   fi
 
   cors_headers="$(curl -ksSI "${TARGET_URL}/" 2>/dev/null || true)"

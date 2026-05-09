@@ -12,7 +12,14 @@ SERVER_ROOT = PLUGIN_ROOT / "server"
 if str(SERVER_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVER_ROOT))
 
-from routes import BridgeSettings, OrchestratorClient, TaskStore, compact_run_event, rewrite_exhaust_slash_prompt
+from routes import (
+    BridgeSettings,
+    OrchestratorClient,
+    TaskStore,
+    activity_from_running_task,
+    compact_run_event,
+    rewrite_exhaust_slash_prompt,
+)
 
 
 def _settings(tmp_path: Path) -> BridgeSettings:
@@ -45,10 +52,11 @@ class RoutesTest(unittest.TestCase):
             {
                 "type": "tool.started",
                 "run_id": "run_1",
+                "toolCallId": "call_123",
                 "payload": {
                     "tool": "terminal",
-                    "args": {"command": "pwd"},
-                    "preview": "pwd",
+                    "arguments_preview": {"command": "pwd"},
+                    "result_preview": "cwd",
                 },
             }
         )
@@ -57,8 +65,10 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(thinking["text"], "Checking files.")
         self.assertEqual(compact["event"], "tool.started")
         self.assertEqual(compact["tool"], "terminal")
+        self.assertEqual(compact["tool_call_id"], "call_123")
         self.assertEqual(compact["command"], "pwd")
         self.assertEqual(compact["args"]["command"], "pwd")
+        self.assertEqual(compact["output"], "cwd")
 
     def test_task_store_records_thinking_delta_and_cancel_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,6 +85,38 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual(updated["result"]["thinking_stream"], "Checking files.")
             self.assertIs(updated["result"]["cancel_requested"], True)
             self.assertEqual(updated["result"]["run_status"], "stopping")
+
+    def test_task_store_records_live_usage_for_running_activity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = TaskStore(tmp_path)
+            task = store.create_running("prompt", "orchestrator")
+            store.update_running(task["task_id"], result={"run_id": "run_123"})
+
+            store.record_event(
+                task["task_id"],
+                {
+                    "event": "message.delta",
+                    "delta": "hello",
+                    "usage": {
+                        "prompt_tokens": 12,
+                        "completion_tokens": 5,
+                        "total_tokens": 17,
+                    },
+                },
+            )
+
+            updated = store.get(task["task_id"])
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["result"]["token_usage"]["total_tokens"], 17)
+            self.assertEqual(updated["result"]["response_stream"], "hello")
+
+            activity = activity_from_running_task(updated)
+            self.assertEqual(activity["total_tokens"], 17)
+            self.assertEqual(activity["input_tokens"], 12)
+            self.assertEqual(activity["output_tokens"], 5)
+            self.assertEqual(activity["api_calls"], 1)
 
     def test_stop_task_calls_node_run_stop_and_marks_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

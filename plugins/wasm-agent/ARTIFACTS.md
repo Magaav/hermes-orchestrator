@@ -51,11 +51,34 @@ Every shareable entity should eventually use a manifest envelope:
 The artifact is the shareable unit. Device-specific presentation is not part of
 the artifact.
 
+WIS adds a narrower first proof of this direction with
+`hermes.wasm_agent.wis.space.v1`: a portable local document/app definition that
+contains a DOM-like tree, initial state, sandbox permissions, and navigation
+metadata. The current WIS export also includes runtime document state so a
+small interactive surface can be shared or restored without a backend or iframe.
+This is a substrate proof, not the final artifact envelope.
+
+`hermes.wasm_agent.wis.patch.v1`: a validated userland mutation envelope for
+changing WIS artifacts without granting source-file access. It can set artifact
+title/state, edit node text/props/actions, add/remove/replace nodes, and add
+documents inside account-owned or joined shared-space artifact storage.
+
+`hermes.wasm_agent.shared_space.v1`: a server-side state record for a shareable
+space. It tracks owner, members, join code, source/local space ids, configured
+Space area, and collaborative capabilities such as chat, WIS patching,
+automation, and component evolution. Shared-space records live under wasm-agent
+state, while device-local widget/app layout still remains local to each browser.
+The launcher share dialog exposes the join code as a `/home?join_space=...`
+invite URL, and Space-home can join from either that URL or the raw code.
+
 ## Device-Local Layout
 
-App positions, widget positions, widget sizes, Space area, and Space distance are
+App positions, widget positions, widget sizes, and Space distance are
 client-local preferences. They should not synchronize across the account by
 default because screen size and personal layout taste are device-specific.
+User-created Space area is per-space metadata: new spaces initialize it from the
+creating viewport, and shared spaces reuse that same configured area on every
+joined device.
 
 The artifact contains semantic structure: which space exists, which apps are in
 it, what a widget is, and what inner entities it owns. A device creates its own

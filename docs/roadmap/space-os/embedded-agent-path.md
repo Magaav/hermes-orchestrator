@@ -51,7 +51,7 @@ Already available in this repo:
 - Global embedded assistant overlay with a chat panel anchored to the same
   draggable avatar core, local transcript continuity, mode and target-node
   selectors, streaming action chains, compact context previews, and automatic
-  Timeline checkpoints when a turn changes files.
+  Timeline before/after checkpoints plus Stepback when a turn changes files.
 - Browser-built `hermes.wasm_agent.image_card.v1` metadata plus a local
 - per-user `state/users/<acc_id>/attachments` asset store, so image turns can
   give text-only providers compact visual facts instead of raw data URLs.
@@ -75,7 +75,9 @@ Missing for this path:
   current path sends the current compact snapshot per turn and stores only the
   latest account-local debug snapshot.
 - A structured action ABI from the agent back to the UI/runtime.
-- Policy rules for what the embedded agent may see, click, type, submit, or run.
+- Durable policy enforcement for future click/type/submit/run actions. The
+  current chat adapter already sends a mutation policy that distinguishes
+  admin orchestrator authority from account-owned sandboxed worker nodes.
 - Persistent recording/replay of user-visible actions for debugging and trust.
 
 ## Target Experience
@@ -127,7 +129,11 @@ Default turn shape:
 - show a clipped context preview so the user can inspect what was used without
   sending or rendering unbounded tool output
 - keep app-change replies in the normal transcript and let Timeline create
-  named git-backed recovery points automatically only when a turn changes files
+  named git-backed recovery points automatically only when a turn changes files,
+  including a before-run checkpoint, an after-run checkpoint, and a complete
+  changed-file list for the assistant footer
+- show bridge/provider trace rows for steps and tool calls when the target node
+  returns them, while summarizing hidden raw reasoning instead of replaying it
 - expose a simple mode selector (`auto`, `local`, `bridge`) so model-backed
   calls are explicit and measurable
 - keep the avatar draggable and persist local session transcripts so short
@@ -143,8 +149,8 @@ Default turn shape:
 - convert image attachments into compact image cards before the model turn:
   browser decode, Canvas pixel stats, palette, perceptual hash, visual notes,
   lazy analyzer evidence, local asset URL, then `attachment_manifest`
-- scope observations, attachments, spaces, and Timeline reads to the current
-  authenticated account and active space id
+- scope observations, attachments, spaces, Timeline reads, and stepback
+  authority to the current authenticated account and active space id
 
 Initial tool set should be small and inspect-only:
 
@@ -164,7 +170,8 @@ Mutation tools come later and must be confirmation-first:
 
 - `apply_patch`
 - `restart_wasm_agent`
-- timeline branch, merge, and restore actions
+- timeline branch and merge actions; Stepback restore is implemented for
+  checkpoint refs and remains confirmation-gated
 - browser actions
 - node lifecycle actions
 - task submission
@@ -293,6 +300,8 @@ Deliverables:
 - session id and transcript state: partial, browser-memory transcript only
 - observation snapshot attached to each turn: implemented
 - streaming action chain: implemented
+- empty media rows suppressed on text-only turns: implemented
+- topology working hints for embedded-chat turns and bridge tasks: implemented
 - compact image-card context for attachments: implemented
 - lazy image-card analyzer module cache and evidence statuses: implemented
 - lazy OCR fallback using native `TextDetector` plus cached Tesseract.js runtime:
@@ -310,13 +319,17 @@ Deliverables:
 The local `/agent/session/message` adapter exists and remains inspect-only. It
 can gather observation, file, search, worktree, doctor, app-map, Timeline, and
 attachment-manifest context before asking the selected node or answering
-locally. The next hardening work is reliability and context quality, not write
-actions.
+locally. It now exposes complete changed-file lists, bridge/provider step and
+tool-call traces when available, mutation policy context, and Timeline Stepback
+for runs that changed files. The next hardening work is reliability and context
+quality, not broad write actions.
 
 Deliverables:
 
 - verify image-card quality against real screenshots and user images
-- keep action chains accurate across slow bridge calls, aborts, and HMR reloads
+- keep action chains accurate across slow bridge calls, aborts, and HMR reloads:
+  implemented for local tool events, heartbeats, provider traces, and final
+  collapse behavior
 - improve local deterministic resume/harness answers from the updated roadmap
 - keep attachment storage bounded, same-origin, and gitignored: implemented for
   the local asset cache; continue watching real-use retention pressure
