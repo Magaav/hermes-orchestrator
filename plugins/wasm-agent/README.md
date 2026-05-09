@@ -358,10 +358,11 @@ local convenience state, not a durable multi-user account store.
 The composer uses a compact 34px send button with a restrained arrow icon.
 While an embedded assistant turn is running, the button switches to a
 stop-square state and aborts the in-flight `/agent/session/message` request
-when clicked. Markdown is parsed only through the chat renderer: the editable
-composer keeps raw text for reliable cursor behavior, shows a live rendered
-preview when Markdown syntax is present, and sent user messages render through
-the same `agent-message-body agent-markdown` path as assistant replies.
+when clicked. Markdown is parsed through the chat renderer inside the editable
+composer itself: typing or pasting Markdown turns the composer into the
+rendered `agent-message-body agent-markdown` surface, and the DOM is serialized
+back to Markdown when the message is sent. Sent user messages render through
+the same path as assistant replies.
 
 Image attachments are compressed in the browser before they enter the local
 adapter request or transcript cache. The composer also enforces an aggregate raw

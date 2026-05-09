@@ -279,7 +279,6 @@ const els = {
   agentModelProgress: document.querySelector("#agentModelProgress"),
   agentModelCancelButton: document.querySelector("#agentModelCancelButton"),
   agentInput: document.querySelector("#agentInput"),
-  agentInputPreview: document.querySelector("#agentInputPreview"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
   agentSendButton: document.querySelector("#agentSendButton"),
   agentImageInput: document.querySelector("#agentImageInput"),
@@ -388,6 +387,8 @@ const state = {
   lastSharedSpaceSyncAt: "",
   sharedRooms: {},
   configAreaDragActive: false,
+  agentInputRenderTimer: 0,
+  agentInputRendering: false,
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
   activeSpaceMenuId: "",
@@ -5200,8 +5201,18 @@ function renderAgentMarkdown(content) {
   return body;
 }
 
+function normalizeAgentMarkdownText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function agentInputText() {
-  return String(els.agentInput?.innerText || "").replace(/\u00a0/g, " ").replace(/\r\n?/g, "\n");
+  if (!els.agentInput) return "";
+  return normalizeAgentMarkdownText(markdownFromEditableNode(els.agentInput));
 }
 
 function hasMarkdownSyntax(text) {
@@ -5219,17 +5230,181 @@ function hasMarkdownSyntax(text) {
   );
 }
 
-function updateAgentInputPreview() {
-  if (!els.agentInputPreview) return;
-  const content = agentInputText().trimEnd();
-  els.agentInputPreview.replaceChildren();
-  if (!hasMarkdownSyntax(content)) {
-    els.agentInputPreview.hidden = true;
+function plainTextFromNode(node) {
+  return String(node?.innerText || node?.textContent || "").replace(/\u00a0/g, " ");
+}
+
+function markdownEscapeTableCell(value) {
+  return String(value || "").replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
+}
+
+function markdownInlineFromNode(node) {
+  if (!node) return "";
+  if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || "").replace(/\u00a0/g, " ");
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const tag = node.tagName.toLowerCase();
+  if (tag === "br") return "\n";
+  if (tag === "input") return "";
+  const children = Array.from(node.childNodes).map(markdownInlineFromNode).join("");
+  if (!children) return "";
+  if (tag === "strong" || tag === "b") return `**${children}**`;
+  if (tag === "em" || tag === "i") return `*${children}*`;
+  if (tag === "code" && node.closest("pre")) return children;
+  if (tag === "code") return `\`${children.replace(/`/g, "\\`")}\``;
+  if (tag === "a") {
+    const href = node.getAttribute("href") || "";
+    return href ? `[${children}](${href})` : children;
+  }
+  return children;
+}
+
+function elementHasBlockChildren(element) {
+  return Array.from(element.children || []).some((child) => (
+    /^(address|article|aside|blockquote|div|dl|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|ul)$/i
+      .test(child.tagName)
+  ));
+}
+
+function markdownListItemFromNode(item, ordered, index) {
+  const checkbox = item.querySelector(":scope > input[type='checkbox']");
+  const marker = ordered ? `${index + 1}.` : "-";
+  const taskPrefix = checkbox ? `[${checkbox.checked ? "x" : " "}] ` : "";
+  const clone = item.cloneNode(true);
+  clone.querySelectorAll(":scope > input[type='checkbox']").forEach((input) => input.remove());
+  const text = elementHasBlockChildren(clone)
+    ? Array.from(clone.childNodes).map(markdownBlockFromNode).join("\n").trim()
+    : markdownInlineFromNode(clone).trim();
+  const lines = `${taskPrefix}${text}`.trim().split("\n");
+  return `${marker} ${lines.map((line, lineIndex) => (lineIndex ? `  ${line}` : line)).join("\n")}`.trimEnd();
+}
+
+function markdownTableFromNode(table) {
+  const rows = Array.from(table.querySelectorAll("tr"));
+  if (!rows.length) return markdownInlineFromNode(table).trim();
+  const matrix = rows.map((row) => (
+    Array.from(row.children)
+      .filter((cell) => /^(th|td)$/i.test(cell.tagName))
+      .map((cell) => markdownEscapeTableCell(markdownInlineFromNode(cell)))
+  )).filter((row) => row.length);
+  if (!matrix.length) return "";
+  const width = Math.max(...matrix.map((row) => row.length));
+  const fill = (row) => Array.from({ length: width }, (_item, idx) => row[idx] || "");
+  const header = fill(matrix[0]);
+  const body = matrix.slice(1).map(fill);
+  return [
+    `| ${header.join(" | ")} |`,
+    `| ${header.map(() => "---").join(" | ")} |`,
+    ...body.map((row) => `| ${row.join(" | ")} |`),
+  ].join("\n");
+}
+
+function markdownBlockFromNode(node) {
+  if (!node) return "";
+  if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || "").replace(/\u00a0/g, " ").trim();
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const tag = node.tagName.toLowerCase();
+  if (tag === "br") return "\n";
+  if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${markdownInlineFromNode(node).trim()}`.trim();
+  if (tag === "p") return markdownInlineFromNode(node).trim();
+  if (tag === "blockquote") {
+    const quote = Array.from(node.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
+    return quote.split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
+  }
+  if (tag === "pre") {
+    const code = node.querySelector("code");
+    const languageClass = Array.from(code?.classList || []).find((name) => name.startsWith("language-")) || "";
+    const language = languageClass.replace(/^language-/, "");
+    return `\`\`\`${language}\n${String(code?.textContent || node.textContent || "").replace(/\n$/, "")}\n\`\`\``;
+  }
+  if (tag === "ul" || tag === "ol") {
+    const ordered = tag === "ol";
+    return Array.from(node.children)
+      .filter((child) => child.tagName.toLowerCase() === "li")
+      .map((child, index) => markdownListItemFromNode(child, ordered, index))
+      .join("\n");
+  }
+  if (tag === "hr") return "---";
+  if (tag === "table") return markdownTableFromNode(node);
+  if (tag === "div" || tag === "section" || tag === "article") {
+    if (!elementHasBlockChildren(node)) return markdownInlineFromNode(node).trim();
+    return Array.from(node.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
+  }
+  if (tag === "li") return markdownListItemFromNode(node, false, 0);
+  return markdownInlineFromNode(node).trim();
+}
+
+function markdownFromEditableNode(root) {
+  if (!root) return "";
+  if (!root.children.length) return plainTextFromNode(root);
+  return Array.from(root.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
+}
+
+function setCaretAtEnd(element) {
+  if (!element || document.activeElement !== element) return;
+  const range = document.createRange();
+  range.selectNodeContents(element);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function renderAgentInputMarkdown() {
+  if (!els.agentInput || state.agentInputRendering) return;
+  const content = agentInputText();
+  state.agentInputRendering = true;
+  try {
+    if (!content) {
+      els.agentInput.replaceChildren();
+      delete els.agentInput.dataset.renderedMarkdown;
+      return;
+    }
+    if (!hasMarkdownSyntax(content)) {
+      if (els.agentInput.dataset.renderedMarkdown === "true") {
+        els.agentInput.textContent = content;
+        delete els.agentInput.dataset.renderedMarkdown;
+        setCaretAtEnd(els.agentInput);
+      }
+      return;
+    }
+    const rendered = renderAgentMarkdown(content);
+    els.agentInput.replaceChildren(...Array.from(rendered.childNodes));
+    els.agentInput.dataset.renderedMarkdown = "true";
+    setCaretAtEnd(els.agentInput);
+  } finally {
+    state.agentInputRendering = false;
+  }
+}
+
+function scheduleAgentInputMarkdownRender() {
+  if (state.agentInputRendering) return;
+  window.clearTimeout(state.agentInputRenderTimer);
+  state.agentInputRenderTimer = window.setTimeout(renderAgentInputMarkdown, 260);
+}
+
+function clearAgentInput() {
+  window.clearTimeout(state.agentInputRenderTimer);
+  if (!els.agentInput) return;
+  els.agentInput.replaceChildren();
+  delete els.agentInput.dataset.renderedMarkdown;
+}
+
+function insertAgentInputMarkdown(text) {
+  document.execCommand("insertText", false, String(text || ""));
+  renderAgentInputMarkdown();
+}
+
+function agentInputSubmitText() {
+  window.clearTimeout(state.agentInputRenderTimer);
+  return agentInputText();
+}
+
+function maybeRenderAgentInputFromEvent(event) {
+  if (event?.inputType === "insertParagraph") {
+    renderAgentInputMarkdown();
     return;
   }
-  const rendered = renderAgentMarkdown(content);
-  els.agentInputPreview.replaceChildren(...Array.from(rendered.childNodes));
-  els.agentInputPreview.hidden = false;
+  scheduleAgentInputMarkdownRender();
 }
 
 function appendMarkdownBlocks(container, lines) {
@@ -8310,8 +8485,7 @@ async function sendAgentMessage(text) {
       video_card: attachment.video_card,
     })),
   });
-  els.agentInput.innerText = "";
-  updateAgentInputPreview();
+  clearAgentInput();
   recordUserEvent("agent.message_submitted", {
     target: `node:${targetNode}`,
     summary: `Submitted embedded assistant message to ${targetNode}`,
@@ -13530,13 +13704,14 @@ function wireEvents() {
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   els.agentForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void sendAgentMessage(agentInputText());
+    void sendAgentMessage(agentInputSubmitText());
   });
-  els.agentInput.addEventListener("input", updateAgentInputPreview);
+  els.agentInput.addEventListener("input", maybeRenderAgentInputFromEvent);
+  els.agentInput.addEventListener("blur", renderAgentInputMarkdown);
   els.agentInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      void sendAgentMessage(agentInputText());
+      void sendAgentMessage(agentInputSubmitText());
     }
   });
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
@@ -13562,8 +13737,7 @@ function wireEvents() {
     const text = event.clipboardData?.getData("text/plain");
     if (text != null) {
       event.preventDefault();
-      document.execCommand("insertText", false, text);
-      updateAgentInputPreview();
+      insertAgentInputMarkdown(text);
     }
   });
   els.agentForm.addEventListener("dragover", (event) => {

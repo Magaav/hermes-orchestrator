@@ -330,11 +330,12 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   It should render compactly at about half of its track width. Chat model state
   must use assistant-owned local storage, not a widget layout key that can be
   sanitized away when another space is active.
-- Composer Markdown must keep editing and rendering separate. The editable
-  composer stores raw text for selection/cursor reliability, while a live
-  preview and sent user/assistant bubbles use the `agent-message-body
-  agent-markdown` renderer. Do not replace the editable source with parsed
-  Markdown HTML.
+- Composer Markdown uses the editable composer as the rendered input surface.
+  Typing or pasting Markdown should render in place with the
+  `agent-message-body agent-markdown` path, then serialize that editable DOM
+  back to Markdown when sending so the backend still receives text. Keep this
+  lightweight and avoid introducing a separate Markdown editor dependency until
+  the local renderer proves insufficient.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned
