@@ -5515,8 +5515,38 @@ function inlineCodeBeforeSelection() {
   return null;
 }
 
+function inlineCodeAfterSelection() {
+  const selection = window.getSelection?.();
+  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
+  const node = selection.focusNode;
+  if (!node || !els.agentInput.contains(node)) return null;
+  let next = null;
+  if (node === els.agentInput) {
+    next = els.agentInput.childNodes[selection.focusOffset] || null;
+  } else if (node.nodeType === Node.TEXT_NODE) {
+    const text = String(node.textContent || "");
+    if (selection.focusOffset >= text.length) {
+      next = node.nextSibling;
+    }
+  } else if (node.nodeType === Node.ELEMENT_NODE && selection.focusOffset < node.childNodes.length) {
+    next = node.childNodes[selection.focusOffset] || null;
+  }
+  if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "") === AGENT_INPUT_BOUNDARY_TEXT) {
+    next = next.nextSibling;
+  }
+  if (next?.nodeType === Node.ELEMENT_NODE && next.tagName?.toLowerCase() === "code" && !next.closest("pre")) {
+    return next;
+  }
+  return null;
+}
+
 function inlineCodeMarkdownSource(code) {
   return `\`${inlineCodeText(code).replace(/`/g, "\\`")}\``;
+}
+
+function inlineCodeEditableSource(code) {
+  const source = inlineCodeMarkdownSource(code);
+  return source === "``" ? "`" : source;
 }
 
 function removeInlineCodeBoundaryAfter(code) {
@@ -5529,11 +5559,11 @@ function removeInlineCodeBoundaryAfter(code) {
 
 function unwrapInlineCodeForEditing(code) {
   if (!code || !els.agentInput?.contains(code)) return false;
-  const source = inlineCodeMarkdownSource(code);
+  const source = inlineCodeEditableSource(code);
   const text = document.createTextNode(source);
   removeInlineCodeBoundaryAfter(code);
   code.replaceWith(text);
-  const caretOffset = source.length <= 2 ? 1 : source.length - 1;
+  const caretOffset = source.length <= 1 ? source.length : source.length - 1;
   const range = document.createRange();
   range.setStart(text, caretOffset);
   range.collapse(true);
@@ -5578,6 +5608,13 @@ function maybeEscapeInlineCodeBeforeInput(event) {
     unwrapInlineCodeForEditing(code);
     return;
   }
+  if (event?.inputType === "deleteContentForward") {
+    const code = inlineCodeAfterSelection();
+    if (!code) return;
+    event.preventDefault();
+    unwrapInlineCodeForEditing(code);
+    return;
+  }
   if (!insertingText || !event.data) return;
   const code = selectionInlineCodeAtEnd();
   if (code) placeCaretAfterNode(code);
@@ -5594,6 +5631,13 @@ function handleInlineCodeNavigation(event) {
   }
   if (event.key === "Backspace") {
     const code = inlineCodeBeforeSelection();
+    if (!code) return;
+    event.preventDefault();
+    unwrapInlineCodeForEditing(code);
+    return;
+  }
+  if (event.key === "Delete") {
+    const code = inlineCodeAfterSelection();
     if (!code) return;
     event.preventDefault();
     unwrapInlineCodeForEditing(code);
@@ -5758,7 +5802,7 @@ function appendInlineMarkdown(parent, text) {
     }
     if (marker === "`") {
       const end = rest.indexOf("`", 1);
-      if (end > 0) {
+      if (end > 1) {
         const code = document.createElement("code");
         code.textContent = rest.slice(1, end);
         parent.append(code);

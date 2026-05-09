@@ -30,6 +30,7 @@ else
   echo "node not found; skipping wasm smoke test"
 fi
 
+python3 "${PLUGIN_DIR}/tests/agent_input_editor.test.py"
 python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
 python3 "${PLUGIN_DIR}/tests/wis_shared_space.test.py"
 python3 "${PLUGIN_DIR}/tests/security_loop_policy.test.py"
