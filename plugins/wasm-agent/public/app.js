@@ -5344,6 +5344,10 @@ function markdownFromEditableNode(root) {
   return Array.from(root.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
 }
 
+function inlineCodeText(code) {
+  return String(code?.textContent || "").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
+}
+
 function inlineCodeEditableNodes(root) {
   return Array.from(root?.querySelectorAll?.("code") || [])
     .filter((code) => !code.closest("pre"));
@@ -5351,6 +5355,9 @@ function inlineCodeEditableNodes(root) {
 
 function ensureEditableInlineCodeBoundaries(root) {
   for (const code of inlineCodeEditableNodes(root)) {
+    if (!inlineCodeText(code)) {
+      code.textContent = AGENT_INPUT_BOUNDARY_TEXT;
+    }
     const next = code.nextSibling;
     if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "").startsWith(AGENT_INPUT_BOUNDARY_TEXT)) {
       continue;
@@ -5467,11 +5474,130 @@ function placeCaretAfterNode(node) {
   selection?.addRange(range);
 }
 
+function placeCaretInsideInlineCodeEnd(code) {
+  if (!code) return;
+  if (!code.firstChild) code.textContent = AGENT_INPUT_BOUNDARY_TEXT;
+  const target = code.lastChild || code;
+  const text = target.nodeType === Node.TEXT_NODE ? String(target.textContent || "") : "";
+  const offset = target.nodeType === Node.TEXT_NODE ? text.length : code.childNodes.length;
+  const range = document.createRange();
+  range.setStart(target, offset);
+  range.collapse(true);
+  const selection = window.getSelection?.();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function inlineCodeBeforeSelection() {
+  const selection = window.getSelection?.();
+  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
+  const node = selection.focusNode;
+  if (!node || !els.agentInput.contains(node)) return null;
+  let previous = null;
+  if (node === els.agentInput) {
+    previous = els.agentInput.childNodes[Math.max(0, selection.focusOffset - 1)] || null;
+  } else if (node.nodeType === Node.TEXT_NODE) {
+    const text = String(node.textContent || "");
+    if (text.startsWith(AGENT_INPUT_BOUNDARY_TEXT) && selection.focusOffset <= AGENT_INPUT_BOUNDARY_TEXT.length) {
+      previous = node.previousSibling;
+    } else if (selection.focusOffset === 0) {
+      previous = node.previousSibling;
+    }
+  } else if (node.nodeType === Node.ELEMENT_NODE && selection.focusOffset > 0) {
+    previous = node.childNodes[selection.focusOffset - 1] || null;
+  }
+  if (previous?.nodeType === Node.TEXT_NODE && String(previous.textContent || "") === AGENT_INPUT_BOUNDARY_TEXT) {
+    previous = previous.previousSibling;
+  }
+  if (previous?.nodeType === Node.ELEMENT_NODE && previous.tagName?.toLowerCase() === "code" && !previous.closest("pre")) {
+    return previous;
+  }
+  return null;
+}
+
+function inlineCodeMarkdownSource(code) {
+  return `\`${inlineCodeText(code).replace(/`/g, "\\`")}\``;
+}
+
+function removeInlineCodeBoundaryAfter(code) {
+  const next = code?.nextSibling;
+  if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "").startsWith(AGENT_INPUT_BOUNDARY_TEXT)) {
+    next.textContent = String(next.textContent || "").slice(AGENT_INPUT_BOUNDARY_TEXT.length);
+    if (!next.textContent) next.remove();
+  }
+}
+
+function unwrapInlineCodeForEditing(code) {
+  if (!code || !els.agentInput?.contains(code)) return false;
+  const source = inlineCodeMarkdownSource(code);
+  const text = document.createTextNode(source);
+  removeInlineCodeBoundaryAfter(code);
+  code.replaceWith(text);
+  const caretOffset = source.length <= 2 ? 1 : source.length - 1;
+  const range = document.createRange();
+  range.setStart(text, caretOffset);
+  range.collapse(true);
+  const selection = window.getSelection?.();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  delete els.agentInput.dataset.renderedMarkdown;
+  return true;
+}
+
+function selectedAgentInputMarkdownText() {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || !els.agentInput) return "";
+  if (!els.agentInput.contains(selection.anchorNode) || !els.agentInput.contains(selection.focusNode)) return "";
+  const parts = [];
+  for (let index = 0; index < selection.rangeCount; index += 1) {
+    const range = selection.getRangeAt(index);
+    if (!els.agentInput.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== els.agentInput) {
+      continue;
+    }
+    const fragment = range.cloneContents();
+    const wrap = document.createElement("div");
+    wrap.append(fragment);
+    parts.push(elementHasBlockChildren(wrap) ? markdownFromEditableNode(wrap) : markdownInlineFromNode(wrap));
+  }
+  return normalizeAgentMarkdownText(parts.filter(Boolean).join("\n\n"));
+}
+
+function copyAgentInputMarkdown(event) {
+  const markdown = selectedAgentInputMarkdownText();
+  if (!markdown) return;
+  event.preventDefault();
+  event.clipboardData?.setData("text/plain", markdown);
+}
+
 function maybeEscapeInlineCodeBeforeInput(event) {
   const insertingText = event?.inputType === "insertText" || event?.inputType === "insertCompositionText";
+  if (event?.inputType === "deleteContentBackward") {
+    const code = inlineCodeBeforeSelection();
+    if (!code) return;
+    event.preventDefault();
+    unwrapInlineCodeForEditing(code);
+    return;
+  }
   if (!insertingText || !event.data) return;
   const code = selectionInlineCodeAtEnd();
   if (code) placeCaretAfterNode(code);
+}
+
+function handleInlineCodeNavigation(event) {
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+  if (event.key === "ArrowLeft") {
+    const code = inlineCodeBeforeSelection();
+    if (!code) return;
+    event.preventDefault();
+    placeCaretInsideInlineCodeEnd(code);
+    return;
+  }
+  if (event.key === "Backspace") {
+    const code = inlineCodeBeforeSelection();
+    if (!code) return;
+    event.preventDefault();
+    unwrapInlineCodeForEditing(code);
+  }
 }
 
 function maybeRenderAgentInputFromEvent(event) {
@@ -13793,7 +13919,10 @@ function wireEvents() {
   els.agentInput.addEventListener("beforeinput", maybeEscapeInlineCodeBeforeInput);
   els.agentInput.addEventListener("input", maybeRenderAgentInputFromEvent);
   els.agentInput.addEventListener("blur", renderAgentInputMarkdown);
+  els.agentInput.addEventListener("copy", copyAgentInputMarkdown);
   els.agentInput.addEventListener("keydown", (event) => {
+    handleInlineCodeNavigation(event);
+    if (event.defaultPrevented) return;
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       void sendAgentMessage(agentInputSubmitText());

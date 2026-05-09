@@ -365,6 +365,8 @@ frame, and the DOM is serialized back to Markdown when the message is sent.
 Sent user messages render through the same path as assistant replies. Inline
 code keeps an editable boundary after the closing backtick, so an emptied code
 span remains as paired backticks and normal typing can continue after the span.
+Copying selected rendered composer content serializes it back to Markdown, so
+inline code copies with its backticks instead of only its displayed text.
 
 Image attachments are compressed in the browser before they enter the local
 adapter request or transcript cache. The composer also enforces an aggregate raw

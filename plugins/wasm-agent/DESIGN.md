@@ -338,7 +338,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   Markdown editor dependency until the local renderer proves insufficient.
   Inline code must keep paired backticks when emptied and must provide a typing
   escape after the closing backtick instead of trapping the caret inside the
-  `<code>` span.
+  `<code>` span. Copying selected composer content must serialize the rendered
+  DOM back to Markdown so inline code keeps its backticks in the clipboard.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned
