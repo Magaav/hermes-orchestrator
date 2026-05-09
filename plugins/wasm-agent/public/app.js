@@ -69,6 +69,8 @@ const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and hel
 const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules", "security"]);
 const GLOBAL_AGENT_NODE_IDS = new Set(["admin-orchestrator", "hermes-orchestrator", "orchestrator"]);
 const AGENT_SANDBOX_NODE_ID = "account-sandbox";
+const AGENT_INPUT_BOUNDARY_TEXT = "\u200B";
+const AGENT_INPUT_MARKDOWN_TRIGGER_CHARS = new Set(["`", "*", "_", "#", ">", "-", "+", "[", "]", "(", ")", "|", "~"]);
 const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
 const SPACE_APP_DEFINITIONS = [
   { id: "resources", label: "Resources", short: "Res" },
@@ -5204,6 +5206,7 @@ function renderAgentMarkdown(content) {
 function normalizeAgentMarkdownText(value) {
   return String(value || "")
     .replace(/\u00a0/g, " ")
+    .replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "")
     .replace(/\r\n?/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -5231,7 +5234,9 @@ function hasMarkdownSyntax(text) {
 }
 
 function plainTextFromNode(node) {
-  return String(node?.innerText || node?.textContent || "").replace(/\u00a0/g, " ");
+  return String(node?.innerText || node?.textContent || "")
+    .replace(/\u00a0/g, " ")
+    .replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
 }
 
 function markdownEscapeTableCell(value) {
@@ -5245,12 +5250,12 @@ function markdownInlineFromNode(node) {
   const tag = node.tagName.toLowerCase();
   if (tag === "br") return "\n";
   if (tag === "input") return "";
-  const children = Array.from(node.childNodes).map(markdownInlineFromNode).join("");
+  const children = Array.from(node.childNodes).map(markdownInlineFromNode).join("").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
+  if (tag === "code" && node.closest("pre")) return children;
+  if (tag === "code") return `\`${children.replace(/`/g, "\\`")}\``;
   if (!children) return "";
   if (tag === "strong" || tag === "b") return `**${children}**`;
   if (tag === "em" || tag === "i") return `*${children}*`;
-  if (tag === "code" && node.closest("pre")) return children;
-  if (tag === "code") return `\`${children.replace(/`/g, "\\`")}\``;
   if (tag === "a") {
     const href = node.getAttribute("href") || "";
     return href ? `[${children}](${href})` : children;
@@ -5339,6 +5344,21 @@ function markdownFromEditableNode(root) {
   return Array.from(root.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
 }
 
+function inlineCodeEditableNodes(root) {
+  return Array.from(root?.querySelectorAll?.("code") || [])
+    .filter((code) => !code.closest("pre"));
+}
+
+function ensureEditableInlineCodeBoundaries(root) {
+  for (const code of inlineCodeEditableNodes(root)) {
+    const next = code.nextSibling;
+    if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "").startsWith(AGENT_INPUT_BOUNDARY_TEXT)) {
+      continue;
+    }
+    code.after(document.createTextNode(AGENT_INPUT_BOUNDARY_TEXT));
+  }
+}
+
 function setCaretAtEnd(element) {
   if (!element || document.activeElement !== element) return;
   const range = document.createRange();
@@ -5370,6 +5390,7 @@ function renderAgentInputMarkdown() {
     }
     const rendered = renderAgentMarkdown(content);
     els.agentInput.replaceChildren(...Array.from(rendered.childNodes));
+    ensureEditableInlineCodeBoundaries(els.agentInput);
     els.agentInput.dataset.renderedMarkdown = "true";
     setCaretAtEnd(els.agentInput);
   } finally {
@@ -5412,12 +5433,62 @@ function agentInputSubmitText() {
   return agentInputText();
 }
 
+function nodeHasFollowingContentUntil(node, ancestor) {
+  let current = node;
+  while (current && current !== ancestor) {
+    if (current.nextSibling) return true;
+    current = current.parentNode;
+  }
+  return false;
+}
+
+function selectionInlineCodeAtEnd() {
+  const selection = window.getSelection?.();
+  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
+  let node = selection.focusNode;
+  if (!node || !els.agentInput.contains(node)) return null;
+  const code = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest?.("code");
+  if (!code || code.closest("pre") || !els.agentInput.contains(code)) return null;
+  let atEnd = false;
+  if (node === code) {
+    atEnd = selection.focusOffset >= code.childNodes.length;
+  } else if (node.nodeType === Node.TEXT_NODE) {
+    atEnd = selection.focusOffset >= String(node.textContent || "").length && !nodeHasFollowingContentUntil(node, code);
+  }
+  return atEnd ? code : null;
+}
+
+function placeCaretAfterNode(node) {
+  const range = document.createRange();
+  range.setStartAfter(node);
+  range.collapse(true);
+  const selection = window.getSelection?.();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+function maybeEscapeInlineCodeBeforeInput(event) {
+  const insertingText = event?.inputType === "insertText" || event?.inputType === "insertCompositionText";
+  if (!insertingText || !event.data) return;
+  const code = selectionInlineCodeAtEnd();
+  if (code) placeCaretAfterNode(code);
+}
+
 function maybeRenderAgentInputFromEvent(event) {
   if (event?.inputType === "insertParagraph") {
     renderAgentInputMarkdown();
     return;
   }
-  scheduleAgentInputMarkdownRender();
+  const inputType = String(event?.inputType || "");
+  const data = String(event?.data || "");
+  const rendered = els.agentInput?.dataset.renderedMarkdown === "true";
+  if (inputType.startsWith("delete") && rendered) {
+    scheduleAgentInputMarkdownRender();
+    return;
+  }
+  if (inputType.startsWith("insertFromPaste") || Array.from(data).some((char) => AGENT_INPUT_MARKDOWN_TRIGGER_CHARS.has(char))) {
+    scheduleAgentInputMarkdownRender();
+  }
 }
 
 function appendMarkdownBlocks(container, lines) {
@@ -13719,6 +13790,7 @@ function wireEvents() {
     event.preventDefault();
     void sendAgentMessage(agentInputSubmitText());
   });
+  els.agentInput.addEventListener("beforeinput", maybeEscapeInlineCodeBeforeInput);
   els.agentInput.addEventListener("input", maybeRenderAgentInputFromEvent);
   els.agentInput.addEventListener("blur", renderAgentInputMarkdown);
   els.agentInput.addEventListener("keydown", (event) => {
