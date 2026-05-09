@@ -279,6 +279,7 @@ const els = {
   agentModelProgress: document.querySelector("#agentModelProgress"),
   agentModelCancelButton: document.querySelector("#agentModelCancelButton"),
   agentInput: document.querySelector("#agentInput"),
+  agentInputPreview: document.querySelector("#agentInputPreview"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
   agentSendButton: document.querySelector("#agentSendButton"),
   agentImageInput: document.querySelector("#agentImageInput"),
@@ -5141,7 +5142,7 @@ function renderAgentMessage(message) {
   const header = message.role === "assistant" && (message.pending || Number.isFinite(message.duration_ms))
     ? agentTurnHeader(message)
     : null;
-  const body = message.role === "assistant" && !message.pending
+  const body = ["assistant", "user"].includes(message.role) && !message.pending
     ? renderAgentMarkdown(message.content)
     : document.createElement("div");
   if (!body.classList.contains("agent-message-body")) {
@@ -5197,6 +5198,38 @@ function renderAgentMarkdown(content) {
   body.className = "agent-message-body agent-markdown";
   appendMarkdownBlocks(body, String(content || "").replace(/\r\n?/g, "\n").split("\n"));
   return body;
+}
+
+function agentInputText() {
+  return String(els.agentInput?.innerText || "").replace(/\u00a0/g, " ").replace(/\r\n?/g, "\n");
+}
+
+function hasMarkdownSyntax(text) {
+  const value = String(text || "");
+  if (!value.trim()) return false;
+  return Boolean(
+    /^ {0,3}#{1,6}\s+/m.test(value)
+    || /^ {0,3}(```+|~~~+)/m.test(value)
+    || /^ {0,3}>/m.test(value)
+    || /^ {0,3}(?:[-*+]|\d+[.)])\s+/m.test(value)
+    || /^ {0,3}[-*+]\s+\[[ xX]\]\s+/m.test(value)
+    || /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/m.test(value)
+    || /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?/m.test(value)
+    || /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+]\([^) \n]+\))/.test(value)
+  );
+}
+
+function updateAgentInputPreview() {
+  if (!els.agentInputPreview) return;
+  const content = agentInputText().trimEnd();
+  els.agentInputPreview.replaceChildren();
+  if (!hasMarkdownSyntax(content)) {
+    els.agentInputPreview.hidden = true;
+    return;
+  }
+  const rendered = renderAgentMarkdown(content);
+  els.agentInputPreview.replaceChildren(...Array.from(rendered.childNodes));
+  els.agentInputPreview.hidden = false;
 }
 
 function appendMarkdownBlocks(container, lines) {
@@ -8278,6 +8311,7 @@ async function sendAgentMessage(text) {
     })),
   });
   els.agentInput.innerText = "";
+  updateAgentInputPreview();
   recordUserEvent("agent.message_submitted", {
     target: `node:${targetNode}`,
     summary: `Submitted embedded assistant message to ${targetNode}`,
@@ -13496,12 +13530,13 @@ function wireEvents() {
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   els.agentForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void sendAgentMessage(els.agentInput.innerText);
+    void sendAgentMessage(agentInputText());
   });
+  els.agentInput.addEventListener("input", updateAgentInputPreview);
   els.agentInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      void sendAgentMessage(els.agentInput.innerText);
+      void sendAgentMessage(agentInputText());
     }
   });
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
@@ -13528,6 +13563,7 @@ function wireEvents() {
     if (text != null) {
       event.preventDefault();
       document.execCommand("insertText", false, text);
+      updateAgentInputPreview();
     }
   });
   els.agentForm.addEventListener("dragover", (event) => {

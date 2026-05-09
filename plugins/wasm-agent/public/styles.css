@@ -4991,10 +4991,19 @@ details.agent-action-row .agent-action-row-summary {
   max-height: 160px;
   padding: 8px 12px;
   overflow-y: auto;
+  border: 1px solid rgba(147, 170, 203, 0.2);
+  border-radius: var(--radius);
+  background: rgba(5, 12, 22, 0.84);
+  color: var(--text);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  outline: none;
 }
 
 #agentInput:focus {
-  box-shadow: none;
+  border-color: rgba(125, 220, 255, 0.44);
+  box-shadow: 0 0 0 1px rgba(125, 220, 255, 0.12);
 }
 
 #agentInput[data-placeholder]:empty::before {
@@ -5002,6 +5011,22 @@ details.agent-action-row .agent-action-row-summary {
   color: var(--text);
   opacity: 0.5;
   pointer-events: none;
+}
+
+.agent-input-preview {
+  width: 100%;
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid rgba(147, 170, 203, 0.14);
+  border-radius: var(--radius);
+  background: rgba(10, 18, 31, 0.74);
+  padding: 8px 12px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-input-preview[hidden] {
+  display: none;
 }
 
 .agent-send-button {
