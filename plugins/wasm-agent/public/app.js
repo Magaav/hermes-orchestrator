@@ -387,7 +387,7 @@ const state = {
   lastSharedSpaceSyncAt: "",
   sharedRooms: {},
   configAreaDragActive: false,
-  agentInputRenderTimer: 0,
+  agentInputRenderFrame: 0,
   agentInputRendering: false,
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
@@ -5351,6 +5351,7 @@ function setCaretAtEnd(element) {
 
 function renderAgentInputMarkdown() {
   if (!els.agentInput || state.agentInputRendering) return;
+  cancelAgentInputMarkdownRender();
   const content = agentInputText();
   state.agentInputRendering = true;
   try {
@@ -5376,14 +5377,26 @@ function renderAgentInputMarkdown() {
   }
 }
 
+function cancelAgentInputMarkdownRender() {
+  if (!state.agentInputRenderFrame) return;
+  window.cancelAnimationFrame?.(state.agentInputRenderFrame);
+  state.agentInputRenderFrame = 0;
+}
+
 function scheduleAgentInputMarkdownRender() {
-  if (state.agentInputRendering) return;
-  window.clearTimeout(state.agentInputRenderTimer);
-  state.agentInputRenderTimer = window.setTimeout(renderAgentInputMarkdown, 260);
+  if (state.agentInputRendering || state.agentInputRenderFrame) return;
+  if (!window.requestAnimationFrame) {
+    renderAgentInputMarkdown();
+    return;
+  }
+  state.agentInputRenderFrame = window.requestAnimationFrame(() => {
+    state.agentInputRenderFrame = 0;
+    renderAgentInputMarkdown();
+  });
 }
 
 function clearAgentInput() {
-  window.clearTimeout(state.agentInputRenderTimer);
+  cancelAgentInputMarkdownRender();
   if (!els.agentInput) return;
   els.agentInput.replaceChildren();
   delete els.agentInput.dataset.renderedMarkdown;
@@ -5395,7 +5408,7 @@ function insertAgentInputMarkdown(text) {
 }
 
 function agentInputSubmitText() {
-  window.clearTimeout(state.agentInputRenderTimer);
+  cancelAgentInputMarkdownRender();
   return agentInputText();
 }
 

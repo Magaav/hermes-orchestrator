@@ -332,10 +332,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   sanitized away when another space is active.
 - Composer Markdown uses the editable composer as the rendered input surface.
   Typing or pasting Markdown should render in place with the
-  `agent-message-body agent-markdown` path, then serialize that editable DOM
-  back to Markdown when sending so the backend still receives text. Keep this
-  lightweight and avoid introducing a separate Markdown editor dependency until
-  the local renderer proves insufficient.
+  `agent-message-body agent-markdown` path on the next animation frame, then
+  serialize that editable DOM back to Markdown when sending so the backend
+  still receives text. Keep this lightweight and avoid introducing a separate
+  Markdown editor dependency until the local renderer proves insufficient.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned

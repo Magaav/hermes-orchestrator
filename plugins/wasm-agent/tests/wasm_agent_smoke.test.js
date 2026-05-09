@@ -927,6 +927,8 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(appJs.includes("function agentInputSubmitText"), "agent input submit serializer is missing");
   assert(appJs.includes("function hasMarkdownSyntax"), "agent input markdown syntax detector is missing");
   assert(appJs.includes('els.agentInput.addEventListener("input", maybeRenderAgentInputFromEvent)'), "agent input must render markdown while typing");
+  assert(appJs.includes("requestAnimationFrame"), "agent input markdown rendering must be frame-immediate");
+  assert(!appJs.includes("setTimeout(renderAgentInputMarkdown, 260)"), "agent input markdown rendering must not use the old delayed debounce");
   assert(!indexHtml.includes("agentInputPreview"), "agent input must not use a separate markdown preview");
   assert(!stylesCss.includes(".agent-input-preview"), "agent input must not keep separate preview styles");
   assert(designMd.includes("Composer Markdown uses the editable composer as the rendered input surface"), "design contract must document rendered editable markdown input");
