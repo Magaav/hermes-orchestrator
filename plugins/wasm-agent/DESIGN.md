@@ -253,26 +253,23 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   allow collaborative WIS/component/automation evolution without granting access
   to protected core source.
 - Shared-space voice belongs to the room surface, not the assistant chat. The
-  room endpoint is the signaling channel for WebRTC offer/answer/ICE events,
-  live presence supplies target devices, and browser media must flow
-  peer-to-peer with microphone echo cancellation/noise suppression enabled.
-  The voice button joins a room-level voice session, publishes a `join` event,
-  and builds a peer-to-peer mesh with every other device that also joined voice
-  instead of calling devices that are merely present in the shared space. A
-  present peer may auto-join once when another room device joins voice, while
-  explicit Leave starts a short cooldown so the browser does not immediately
-  rejoin. Leaving removes only that device from the voice room; the remaining
-  joined devices keep their peer connections and future joiners are connected
-  automatically. For each peer pair, deterministic device-id ordering chooses
-  one caller so the other side waits and answers instead of both browsers
-  publishing unresolved offers. ICE candidates can arrive before the
-  offer/answer event in the room log, so the client buffers them until the peer
-  connection has a remote description. SDP and ICE candidate text is stored
-  verbatim, and offer/answer SDP is published even when a browser stalls while
-  settling its local description. A local join records the latest room-log join
-  event as the replay baseline; after a leave/rejoin the client must not answer
-  older retained offers or candidates. Deployments may configure TURN/STUN
-  servers through wasm-agent config; the UI should make
+  room endpoint is the signaling channel for voice membership and WebRTC
+  offer/answer/ICE events, but ordinary shared-space presence must never start
+  microphone capture or create peer connections. The only local membership
+  transition into voice is the voice button's local Join request. That path
+  requests microphone access, creates a device-local membership epoch, publishes
+  a `join` event, and refreshes that membership with a short heartbeat while the
+  device stays joined. The WebRTC mesh starts only after local membership
+  exists, and it connects only to remote devices that currently advertise a
+  voice membership in the same room. For each peer pair, deterministic device-id
+  ordering chooses one caller so the other side waits and answers instead of
+  both browsers publishing unresolved offers. Offers, answers, ICE, mute, and
+  leave messages include room id, sender device id, target device id, call id,
+  sender epoch, and target epoch; clients ignore signals that predate their
+  latest local join or do not target the current local epoch. Leaving removes
+  only the leaving device's membership and peer tracks; remote leave or
+  disconnect must never call the local Leave path. Deployments may configure
+  TURN/STUN servers through wasm-agent config; the UI should make
   join, waiting, mute, and leave states visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a

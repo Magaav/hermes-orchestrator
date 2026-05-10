@@ -4,10 +4,13 @@ import { createWisSandbox } from "./modules/wis/engine.js";
 import {
   sharedVoiceEventCreatedMs,
   sharedVoiceEventPrecedesBaseline,
-  latestIncomingSharedVoiceOfferEvent,
   sharedVoiceIncomingOfferEvents as sharedVoiceIncomingOfferEntries,
   sharedVoiceJoinedDeviceIdSet,
   sharedVoiceLatestJoinEvent,
+  sharedVoiceMemberships,
+  sharedVoiceNewJoinEpoch,
+  sharedVoiceSignalMatchesRemoteMembership,
+  sharedVoiceSignalTargetsLocalMembership,
   sharedVoiceShouldInitiateRoomOffer,
   sharedVoiceSignalIsFresh,
   sharedVoiceSignalPayload,
@@ -57,6 +60,8 @@ const SHARED_VOICE_SIGNAL_KIND = "voice-signal";
 const SHARED_VOICE_SIGNAL_SCHEMA = "hermes.wasm_agent.shared_space.voice_signal.v1";
 const SHARED_VOICE_POLL_MS = 900;
 const SHARED_VOICE_STALE_MS = 2 * 60 * 1000;
+const SHARED_VOICE_MEMBERSHIP_STALE_MS = 12000;
+const SHARED_VOICE_MEMBERSHIP_HEARTBEAT_MS = 5000;
 const SHARED_VOICE_DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const WIS_EXPORT_PREVIEW_LIMIT = 16000;
 const NODE_ACTIVITY_FRESH_GRACE_SEC = 5;
@@ -427,14 +432,14 @@ const state = {
     peerConnection: null,
     peers: {},
     pendingIceCandidates: [],
-    autoJoinAttemptKey: "",
-    autoJoinBlockedUntil: 0,
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
     processedSignalIds: new Set(),
     joinedAtMs: 0,
     joinedEventId: "",
+    joinEpoch: "",
+    lastMembershipHeartbeatAt: 0,
     makingOffer: false,
     ignoreOffer: false,
     polite: true,
@@ -1793,10 +1798,6 @@ async function loadSharedSpaceRoom(options = {}) {
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
     queueSharedVoiceRoomProcessing(room);
-    if (options.origin !== "shared-voice-start") void maybeAutoJoinSharedVoice(room).catch((error) => {
-      state.sharedVoice.error = truncateText(error.message || "voice auto-join failed", 80);
-      renderSharedVoice();
-    });
   }
   return room;
 }
@@ -1864,45 +1865,27 @@ function sharedVoiceShouldInitiateOffer(room, peer) {
   return sharedVoiceShouldInitiateRoomOffer(currentDeviceId, peer?.device_id);
 }
 
-function latestIncomingSharedVoiceOffer(room = activeSharedRoom()) {
-  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
-  return latestIncomingSharedVoiceOfferEvent(room?.events, currentDeviceId, {
-    kind: SHARED_VOICE_SIGNAL_KIND,
-    schema: SHARED_VOICE_SIGNAL_SCHEMA,
-    staleMs: SHARED_VOICE_STALE_MS,
-  });
-}
-
 function sharedVoiceJoinedDeviceIds(room = activeSharedRoom()) {
   return sharedVoiceJoinedDeviceIdSet(room?.events, {
     kind: SHARED_VOICE_SIGNAL_KIND,
     schema: SHARED_VOICE_SIGNAL_SCHEMA,
     staleMs: SHARED_VOICE_STALE_MS,
+    membershipTtlMs: SHARED_VOICE_MEMBERSHIP_STALE_MS,
+  });
+}
+
+function sharedVoiceMembershipMap(room = activeSharedRoom()) {
+  return sharedVoiceMemberships(room?.events, {
+    kind: SHARED_VOICE_SIGNAL_KIND,
+    schema: SHARED_VOICE_SIGNAL_SCHEMA,
+    staleMs: SHARED_VOICE_STALE_MS,
+    membershipTtlMs: SHARED_VOICE_MEMBERSHIP_STALE_MS,
   });
 }
 
 function sharedVoiceJoinedPeerCandidates(room = activeSharedRoom()) {
   const joinedDeviceIds = sharedVoiceJoinedDeviceIds(room);
   return sharedVoicePeerCandidates(room).filter((entry) => joinedDeviceIds.has(entry.device_id));
-}
-
-function sharedVoiceAutoJoinKey(room = activeSharedRoom()) {
-  const incoming = latestIncomingSharedVoiceOffer(room);
-  if (incoming?.payload?.call_id) return `offer:${incoming.payload.call_id}`;
-  const joined = sharedVoiceJoinedPeerCandidates(room).map((entry) => entry.device_id).sort();
-  return joined.length ? `join:${room?.id || ""}:${joined.join(",")}` : "";
-}
-
-async function maybeAutoJoinSharedVoice(room = activeSharedRoom()) {
-  const voice = state.sharedVoice;
-  if (!room?.id || voice.active || voice.connecting) return;
-  if (state.config?.features?.sharedVoice?.enabled === false) return;
-  if (Date.now() < Number(voice.autoJoinBlockedUntil || 0)) return;
-  if (sharedVoiceMediaUnavailableReason()) return;
-  const key = sharedVoiceAutoJoinKey(room);
-  if (!key || voice.autoJoinAttemptKey === key) return;
-  voice.autoJoinAttemptKey = key;
-  await startSharedVoice();
 }
 
 function sharedVoiceMediaUnavailableReason() {
@@ -1920,7 +1903,6 @@ function renderSharedVoice() {
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
   const candidates = sharedVoicePeerCandidates(room);
   const joinedCandidates = sharedVoiceJoinedPeerCandidates(room);
-  const incoming = latestIncomingSharedVoiceOffer(room);
   const peers = sharedVoicePeerStates();
   const connectedPeers = peers.filter(sharedVoicePeerIsConnected);
   const connectingPeers = peers.filter((peer) => peer.pc && !sharedVoicePeerIsConnected(peer));
@@ -1936,9 +1918,7 @@ function renderSharedVoice() {
     els.sharedVoiceButton.disabled = voice.active ? false : Boolean(mediaProblem || !room?.id || !currentDeviceId);
     const label = voice.active
       ? "Leave shared voice"
-      : incoming
-        ? "Answer shared voice"
-        : candidates.length
+      : candidates.length
           ? "Join shared voice"
           : "Start shared voice";
     els.sharedVoiceButton.title = mediaProblem || label;
@@ -1962,7 +1942,6 @@ function renderSharedVoice() {
     if (mediaProblem) text = mediaProblem;
     if (!candidates.length && !voice.active && !mediaProblem && currentDeviceId) text = "alone";
     if (joinedCandidates.length && !voice.active) text = "voice ready";
-    if (incoming && !voice.active) text = "incoming";
     if (voice.active && !peers.length) text = "waiting";
     if (voice.waiting) text = "waiting";
     if (voice.connecting || connectingPeers.length) {
@@ -2004,14 +1983,14 @@ function resetSharedVoiceRuntime(keepError = false) {
     peerConnection: null,
     peers: {},
     pendingIceCandidates: [],
-    autoJoinAttemptKey: state.sharedVoice.autoJoinAttemptKey || "",
-    autoJoinBlockedUntil: state.sharedVoice.autoJoinBlockedUntil || 0,
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
     processedSignalIds: new Set(),
     joinedAtMs: 0,
     joinedEventId: "",
+    joinEpoch: "",
+    lastMembershipHeartbeatAt: 0,
     makingOffer: false,
     ignoreOffer: false,
     polite: true,
@@ -2025,11 +2004,30 @@ function startSharedVoicePolling() {
   const pollMs = Number.isFinite(configured) ? clamp(configured, 500, 5000) : SHARED_VOICE_POLL_MS;
   state.sharedVoice.pollInterval = window.setInterval(() => {
     if (!state.sharedVoice.active && !state.sharedVoice.connecting) return;
+    void sendSharedVoiceMembershipHeartbeat();
     void loadSharedSpaceRoom({ origin: "shared-voice-poll" }).catch((error) => {
       state.sharedVoice.error = truncateText(error.message || "voice sync failed", 80);
       renderSharedVoice();
     });
   }, pollMs);
+}
+
+async function sendSharedVoiceMembershipHeartbeat(force = false) {
+  const voice = state.sharedVoice;
+  if (!voice.active || !voice.localStream || !voice.joinEpoch) return null;
+  if (!force && Date.now() - Number(voice.lastMembershipHeartbeatAt || 0) < SHARED_VOICE_MEMBERSHIP_HEARTBEAT_MS) return null;
+  voice.lastMembershipHeartbeatAt = Date.now();
+  return sendSharedVoiceRoomSignal("membership", {
+    joined: true,
+    heartbeat: true,
+    call_id: `voice_room_${voice.roomId || activeSharedRoom()?.id || "shared"}`,
+    join_epoch: voice.joinEpoch,
+    join_event_id: voice.joinedEventId || "",
+  }).catch((error) => {
+    voice.error = truncateText(error.message || "voice membership failed", 80);
+    renderSharedVoice();
+    return null;
+  });
 }
 
 function markSharedVoiceJoinBaseline(room = activeSharedRoom()) {
@@ -2038,11 +2036,13 @@ function markSharedVoiceJoinBaseline(room = activeSharedRoom()) {
     kind: SHARED_VOICE_SIGNAL_KIND,
     schema: SHARED_VOICE_SIGNAL_SCHEMA,
     staleMs: SHARED_VOICE_STALE_MS,
+    membershipTtlMs: SHARED_VOICE_MEMBERSHIP_STALE_MS,
   });
   const event = item?.event || null;
   const joinedAtMs = sharedVoiceEventCreatedMs(event) || Date.now();
   state.sharedVoice.joinedAtMs = Math.max(Number(state.sharedVoice.joinedAtMs || 0), joinedAtMs);
   if (event?.id) state.sharedVoice.joinedEventId = event.id;
+  if (item?.payload?.join_epoch) state.sharedVoice.joinEpoch = String(item.payload.join_epoch);
 }
 
 function sharedVoiceEventBeforeCurrentJoin(event, payload) {
@@ -2052,6 +2052,16 @@ function sharedVoiceEventBeforeCurrentJoin(event, payload) {
     Number(state.sharedVoice.joinedAtMs || 0),
     state.sharedVoice.joinedEventId || "",
   );
+}
+
+function sharedVoiceLocalMembership(room = activeSharedRoom()) {
+  return {
+    roomId: room?.id || state.sharedVoice.roomId || "",
+    deviceId: sharedVoiceCurrentDeviceId(room) || state.sharedVoice.currentDeviceId || "",
+    joinEpoch: state.sharedVoice.joinEpoch || "",
+    joinEventId: state.sharedVoice.joinedEventId || "",
+    joinedAtMs: Number(state.sharedVoice.joinedAtMs || 0),
+  };
 }
 
 function sharedVoicePeerStates() {
@@ -2161,11 +2171,15 @@ function closeSharedVoicePeers() {
 
 function sharedVoiceIncomingOfferEvents(room = activeSharedRoom()) {
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  const local = sharedVoiceLocalMembership(room);
   return sharedVoiceIncomingOfferEntries(room?.events, currentDeviceId, {
     kind: SHARED_VOICE_SIGNAL_KIND,
     schema: SHARED_VOICE_SIGNAL_SCHEMA,
     staleMs: SHARED_VOICE_STALE_MS,
-  });
+  }).filter(({ event, payload }) => (
+    !sharedVoiceEventBeforeCurrentJoin(event, payload)
+    && sharedVoiceSignalTargetsLocalMembership(payload, local)
+  ));
 }
 
 function ensureSharedVoicePeer(room, entry, options = {}) {
@@ -2182,6 +2196,8 @@ function ensureSharedVoicePeer(room, entry, options = {}) {
       userId: cleanText(entry?.user_id || "", ""),
       label: sharedVoicePeerLabel(entry),
       callId: cleanText(options.callId || "", ""),
+      joinEpoch: cleanText(options.joinEpoch || entry?.join_epoch || "", ""),
+      joinEventId: cleanText(options.joinEventId || entry?.join_event_id || "", ""),
       pc: null,
       remoteStream: null,
       audioElement: null,
@@ -2200,6 +2216,8 @@ function ensureSharedVoicePeer(room, entry, options = {}) {
   peer.label = sharedVoicePeerLabel(entry || { device_id: deviceId, user_id: peer.userId, label: peer.label });
   peer.polite = String(currentDeviceId) > String(deviceId);
   if (options.callId) peer.callId = cleanText(options.callId, peer.callId || "");
+  if (options.joinEpoch) peer.joinEpoch = cleanText(options.joinEpoch, peer.joinEpoch || "");
+  if (options.joinEventId) peer.joinEventId = cleanText(options.joinEventId, peer.joinEventId || "");
   if (!peer.pc) {
     peer.pc = createSharedVoicePeerConnection(peer);
     voice.localStream.getAudioTracks().forEach((track) => peer.pc.addTrack(track, voice.localStream));
@@ -2301,8 +2319,16 @@ async function maybeConnectSharedVoiceFromRoom(room) {
 async function syncSharedVoiceRoomPeers(room) {
   const voice = state.sharedVoice;
   if (!voice.active || !voice.localStream || !room?.id) return false;
+  const memberships = sharedVoiceMembershipMap(room);
   const joined = sharedVoiceJoinedPeerCandidates(room);
-  const joinedByDevice = new Map(joined.map((entry) => [entry.device_id, entry]));
+  const joinedByDevice = new Map(joined.map((entry) => {
+    const membership = memberships.get(entry.device_id) || {};
+    return [entry.device_id, {
+      ...entry,
+      join_epoch: membership.joinEpoch || "",
+      join_event_id: membership.joinEventId || "",
+    }];
+  }));
   const incomingOffers = sharedVoiceIncomingOfferEvents(room);
   for (const incoming of incomingOffers) {
     if (!joinedByDevice.has(incoming.payload.from_device_id)) {
@@ -2319,11 +2345,18 @@ async function syncSharedVoiceRoomPeers(room) {
   let connected = false;
   for (const incoming of incomingOffers) {
     const entry = joinedByDevice.get(incoming.payload.from_device_id);
-    const peer = ensureSharedVoicePeer(room, entry, { callId: incoming.payload.call_id });
+    const peer = ensureSharedVoicePeer(room, entry, {
+      callId: incoming.payload.call_id,
+      joinEpoch: incoming.payload.join_epoch || entry?.join_epoch || "",
+      joinEventId: incoming.payload.join_event_id || entry?.join_event_id || "",
+    });
     connected = Boolean(peer) || connected;
   }
   for (const entry of joinedByDevice.values()) {
-    const peer = ensureSharedVoicePeer(room, entry);
+    const peer = ensureSharedVoicePeer(room, entry, {
+      joinEpoch: entry.join_epoch || "",
+      joinEventId: entry.join_event_id || "",
+    });
     if (!peer) continue;
     connected = true;
     if (sharedVoiceShouldInitiateOffer(room, entry)) {
@@ -2347,8 +2380,12 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
   if (!space || !room?.id || !currentDeviceId) {
     throw new Error("Shared voice is not ready.");
   }
-  const toDeviceId = cleanText(details.to_device_id || voice.peerDeviceId || "", "");
+  const toDeviceId = Object.prototype.hasOwnProperty.call(details, "to_device_id")
+    ? cleanText(details.to_device_id || "", "")
+    : "";
   const callId = cleanText(details.call_id || voice.callId || `voice_room_${room.id}`, "");
+  const joinEpoch = cleanText(details.join_epoch || voice.joinEpoch || "", "");
+  const joinEventId = cleanText(details.join_event_id || voice.joinedEventId || "", "");
   const payload = await fetchJson("/spaces/room", {
     method: "POST",
     timeoutMs: 7000,
@@ -2360,10 +2397,13 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
       payload: {
         voice_schema: SHARED_VOICE_SIGNAL_SCHEMA,
         call_id: callId,
+        room_id: room.id,
         type,
         from_user_id: sharedVoiceCurrentUserId(room),
         from_device_id: currentDeviceId,
         to_device_id: toDeviceId,
+        join_epoch: joinEpoch,
+        join_event_id: joinEventId,
         muted: voice.muted,
         ...details,
       },
@@ -2396,6 +2436,8 @@ async function sendSharedVoicePeerSignal(peer, type, details = {}) {
     ...details,
     call_id: peer.callId,
     to_device_id: peer.deviceId,
+    target_join_epoch: peer.joinEpoch || "",
+    target_join_event_id: peer.joinEventId || "",
   });
 }
 
@@ -2468,19 +2510,32 @@ async function handleSharedVoiceSignal(event, payload, room) {
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
   if (!currentDeviceId || payload.from_device_id === currentDeviceId) return true;
   if (payload.to_device_id && payload.to_device_id !== currentDeviceId) return true;
-  if (payload.type === "join") return true;
+  if (payload.room_id && payload.room_id !== room?.id) return true;
+  if (payload.type === "join" || payload.type === "membership") return true;
   if (payload.type === "leave" || payload.type === "hangup") {
-    closeSharedVoicePeer(payload.from_device_id);
+    const peer = voice.peers?.[payload.from_device_id];
+    if (!peer || sharedVoiceSignalMatchesRemoteMembership(payload, peer)) closeSharedVoicePeer(payload.from_device_id);
     return true;
   }
+  if (!sharedVoiceSignalTargetsLocalMembership(payload, sharedVoiceLocalMembership(room))) return true;
   const entry = sharedVoicePeerByDevice(payload.from_device_id, room) || {
     device_id: payload.from_device_id,
     user_id: payload.from_user_id || "",
     label: "Browser",
   };
-  const peer = ensureSharedVoicePeer(room, entry, { callId: payload.type === "offer" ? payload.call_id : "" });
+  const membership = sharedVoiceMembershipMap(room).get(payload.from_device_id) || {};
+  const peer = ensureSharedVoicePeer(room, {
+    ...entry,
+    join_epoch: membership.joinEpoch || payload.join_epoch || "",
+    join_event_id: membership.joinEventId || payload.join_event_id || "",
+  }, {
+    callId: payload.type === "offer" ? payload.call_id : "",
+    joinEpoch: payload.join_epoch || membership.joinEpoch || "",
+    joinEventId: payload.join_event_id || membership.joinEventId || "",
+  });
   const pc = peer?.pc;
   if (!peer || !pc) return false;
+  if (!sharedVoiceSignalMatchesRemoteMembership(payload, peer)) return true;
   if (payload.type === "offer" && payload.call_id !== peer.callId) {
     if (!peer.polite && peer.callId) return true;
     peer.callId = payload.call_id;
@@ -2564,6 +2619,7 @@ async function startSharedVoice() {
   const room = await loadSharedSpaceRoom({ origin: "shared-voice-start" }) || activeSharedRoom();
   if (!room?.id || !room.current_device_id) throw new Error("Shared room is still syncing.");
   resetSharedVoiceRuntime();
+  const joinEpoch = sharedVoiceNewJoinEpoch();
   Object.assign(state.sharedVoice, {
     active: true,
     connecting: false,
@@ -2571,6 +2627,7 @@ async function startSharedVoice() {
     status: "waiting",
     error: "",
     roomId: room.id,
+    joinEpoch,
   });
   renderSharedVoice();
   try {
@@ -2584,8 +2641,9 @@ async function startSharedVoice() {
     });
     state.sharedVoice.localStream = stream;
     startSharedVoicePolling();
-    const joinedRoom = await sendSharedVoiceRoomSignal("join", { joined: true });
+    const joinedRoom = await sendSharedVoiceRoomSignal("join", { joined: true, join_epoch: joinEpoch });
     markSharedVoiceJoinBaseline(joinedRoom || room);
+    await sendSharedVoiceMembershipHeartbeat(true);
     recordUserEvent("workspace.shared_voice_started", {
       target: `shared-space:${room.id}`,
       summary: "Started shared voice",
@@ -2617,7 +2675,6 @@ async function stopSharedVoice(options = {}) {
     await sendSharedVoiceRoomSignal("leave", { reason: cleanText(options.reason, "ended") }).catch(() => {});
   }
   resetSharedVoiceRuntime();
-  state.sharedVoice.autoJoinBlockedUntil = Date.now() + 30000;
   recordUserEvent("workspace.shared_voice_stopped", {
     target: `shared-space:${roomId || "shared"}`,
     summary: "Stopped shared voice",

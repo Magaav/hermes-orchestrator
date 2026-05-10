@@ -593,22 +593,18 @@ the space metadata so joined/shared spaces open with the same area on every
 device. Open clients refresh that shared space metadata on focus, during the
 regular workspace refresh loop, and through a focused `2.5s` active shared-space
 room heartbeat; shared-space voice uses that room heartbeat for presence and
-WebRTC signaling. The in-room voice button joins the room-level voice session,
-publishes a voice `join` event, and then maintains a small peer-to-peer mesh
-with every other device that has joined voice in the room. Passive room presence
-is not enough to receive a call; once one present device joins voice, another
-present device can auto-join once and show the normal Leave/Mute controls. A
-device that leaves only removes itself from the voice room, so remaining joined
-devices keep talking and future joiners are connected automatically. Explicit
-Leave starts a short cooldown to prevent immediate rejoin. For each peer pair,
-stable device-id ordering selects one caller while the other waits to answer,
-avoiding two unresolved simultaneous offers. Because browser ICE can arrive
-before the room's offer/answer event, clients buffer early candidates until the
-remote description is available. SDP and ICE candidate signal text is preserved
-verbatim by the room store, and offer/answer SDP is published even if the browser
-takes too long to settle its local description. Each local voice join also marks
-a room-log baseline, so rejoining a room ignores older offer/answer/ICE events
-instead of replaying stale calls from the retained room history.
+WebRTC signaling. Voice presence is deliberately separate from shared-space
+presence: seeing another device in a space never starts the local microphone or
+creates a peer connection. The in-room voice button is the only local join path;
+it requests microphone access, creates a device-local membership epoch, publishes
+that epoch to the room, and maintains a short heartbeat while the local device
+remains joined. The WebRTC mesh connects only after local membership exists and
+only to other current voice memberships in the same room. Offers, answers, ICE,
+mute, and leave messages carry the sender epoch plus the target epoch; clients
+ignore retained or mismatched signals from previous memberships. A device that
+leaves removes only its own membership and peer tracks, while the other joined
+devices stay in voice. The detailed root-cause report, state machine, and manual
+voice checklist live in [`VOICE_ROOM_LIFECYCLE.md`](./VOICE_ROOM_LIFECYCLE.md).
 Space config keeps remote area applies paused so local drafts are left untouched
 until Apply or Revert while presence still updates. Config
 storage shows account usage plus local

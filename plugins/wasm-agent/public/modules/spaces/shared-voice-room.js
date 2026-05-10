@@ -2,6 +2,12 @@ const DEFAULT_SIGNAL_KIND = "voice-signal";
 const DEFAULT_SIGNAL_SCHEMA = "hermes.wasm_agent.shared_space.voice_signal.v1";
 const DEFAULT_STALE_MS = 2 * 60 * 1000;
 
+export function sharedVoiceNewJoinEpoch(prefix = "voice_join") {
+  const stamp = Date.now().toString(36);
+  const random = Math.random().toString(36).slice(2, 10);
+  return `${prefix}_${stamp}_${random}`;
+}
+
 export function sharedVoiceSignalPayload(event, schema = DEFAULT_SIGNAL_SCHEMA) {
   const payload = event?.payload;
   if (!payload || typeof payload !== "object") return null;
@@ -37,18 +43,42 @@ function sharedVoiceSignalEvents(events, options = {}) {
 }
 
 export function sharedVoiceJoinedDeviceIdSet(events, options = {}) {
-  const joined = new Set();
-  const left = new Set();
-  for (const { payload } of sharedVoiceSignalEvents(events, options).reverse()) {
+  return new Set(sharedVoiceMemberships(events, options).keys());
+}
+
+export function sharedVoiceMemberships(events, options = {}) {
+  const memberships = new Map();
+  const closed = new Map();
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
+  const membershipTtlMs = Number.isFinite(options.membershipTtlMs) ? options.membershipTtlMs : 0;
+  for (const { event, payload } of sharedVoiceSignalEvents(events, options).reverse()) {
     const deviceId = String(payload.from_device_id || "").trim();
-    if (!deviceId || joined.has(deviceId)) continue;
+    if (!deviceId || memberships.has(deviceId)) continue;
+    const membershipEpoch = String(payload.join_epoch || payload.join_event_id || payload.call_id || "").trim();
+    const closeEpoch = String(payload.join_epoch || payload.join_event_id || "").trim();
+    const closedEpochs = closed.get(deviceId) || new Set();
     if (payload.type === "leave" || payload.type === "hangup") {
-      left.add(deviceId);
+      if (closeEpoch) closedEpochs.add(closeEpoch);
+      else closedEpochs.add("*");
+      closed.set(deviceId, closedEpochs);
       continue;
     }
-    if (payload.type === "join" && !left.has(deviceId)) joined.add(deviceId);
+    if (payload.type === "join" || payload.type === "membership") {
+      if (closedEpochs.has("*") || (membershipEpoch && closedEpochs.has(membershipEpoch))) continue;
+      const joinedAtMs = sharedVoiceEventCreatedMs(event);
+      if (membershipTtlMs && joinedAtMs && nowMs - joinedAtMs > membershipTtlMs) continue;
+      memberships.set(deviceId, {
+        deviceId,
+        userId: String(payload.from_user_id || "").trim(),
+        joinEpoch: String(payload.join_epoch || "").trim(),
+        joinEventId: String(payload.join_event_id || event?.id || "").trim(),
+        joinedAtMs,
+        event,
+        payload,
+      });
+    }
   }
-  return joined;
+  return memberships;
 }
 
 export function sharedVoiceLatestJoinEvent(events, currentDeviceId, options = {}) {
@@ -67,6 +97,40 @@ export function sharedVoiceEventPrecedesBaseline(event, baselineMs = 0, baseline
   if (!baselineMs || !createdMs) return false;
   if (createdMs < baselineMs) return true;
   return Boolean(baselineId && createdMs === baselineMs && String(event?.id || "") < String(baselineId));
+}
+
+export function sharedVoiceSignalTargetsLocalMembership(payload, local = {}) {
+  if (!payload || typeof payload !== "object") return false;
+  const localDeviceId = String(local.deviceId || "").trim();
+  if (!localDeviceId || String(payload.to_device_id || "").trim() !== localDeviceId) return false;
+  const targetEpoch = String(payload.target_join_epoch || payload.to_join_epoch || "").trim();
+  const targetJoinEventId = String(payload.target_join_event_id || payload.to_join_event_id || "").trim();
+  const localEpoch = String(local.joinEpoch || "").trim();
+  const localJoinEventId = String(local.joinEventId || "").trim();
+  if (targetEpoch || targetJoinEventId) {
+    return Boolean(
+      (targetEpoch && localEpoch && targetEpoch === localEpoch)
+      || (targetJoinEventId && localJoinEventId && targetJoinEventId === localJoinEventId)
+    );
+  }
+  return !localEpoch && !localJoinEventId;
+}
+
+export function sharedVoiceSignalMatchesRemoteMembership(payload, remote = {}) {
+  if (!payload || typeof payload !== "object") return false;
+  const remoteDeviceId = String(remote.deviceId || "").trim();
+  if (!remoteDeviceId || String(payload.from_device_id || "").trim() !== remoteDeviceId) return false;
+  const epoch = String(payload.join_epoch || "").trim();
+  const joinEventId = String(payload.join_event_id || "").trim();
+  const remoteEpoch = String(remote.joinEpoch || "").trim();
+  const remoteJoinEventId = String(remote.joinEventId || "").trim();
+  if (epoch || joinEventId) {
+    return Boolean(
+      (epoch && remoteEpoch && epoch === remoteEpoch)
+      || (joinEventId && remoteJoinEventId && joinEventId === remoteJoinEventId)
+    );
+  }
+  return !remoteEpoch && !remoteJoinEventId;
 }
 
 export function sharedVoiceIncomingOfferEvents(events, currentDeviceId, options = {}) {
