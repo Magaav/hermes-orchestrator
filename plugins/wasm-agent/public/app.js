@@ -401,7 +401,9 @@ const state = {
   sharedVoice: {
     active: false,
     connecting: false,
+    waiting: false,
     muted: false,
+    peerMuted: false,
     status: "idle",
     error: "",
     roomId: "",
@@ -1861,6 +1863,13 @@ function latestIncomingSharedVoiceOffer(room = activeSharedRoom()) {
   return null;
 }
 
+function sharedVoiceMediaUnavailableReason() {
+  if (!window.isSecureContext) return "HTTPS required";
+  if (!window.RTCPeerConnection) return "WebRTC unavailable";
+  if (!navigator.mediaDevices?.getUserMedia) return "Microphone unavailable";
+  return "";
+}
+
 function renderSharedVoice() {
   if (!els.sharedVoiceBar) return;
   const space = sharedUserSpaceForPanel();
@@ -1878,10 +1887,16 @@ function renderSharedVoice() {
   els.sharedVoiceBar.classList.toggle("is-connecting", Boolean(voice.connecting && !connected && !voice.error));
   els.sharedVoiceBar.classList.toggle("is-error", Boolean(voice.error));
   if (els.sharedVoiceButton) {
-    const mediaReady = Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia);
-    els.sharedVoiceButton.disabled = !mediaReady || (!voice.active && !incoming && !candidates.length);
-    const label = voice.active ? "Leave shared voice" : incoming ? "Answer shared voice" : "Join shared voice";
-    els.sharedVoiceButton.title = mediaReady ? label : "Voice requires WebRTC microphone support";
+    const mediaProblem = sharedVoiceMediaUnavailableReason();
+    els.sharedVoiceButton.disabled = voice.active ? false : Boolean(mediaProblem || !room?.id || !currentDeviceId);
+    const label = voice.active
+      ? "Leave shared voice"
+      : incoming
+        ? "Answer shared voice"
+        : candidates.length
+          ? "Join shared voice"
+          : "Start shared voice";
+    els.sharedVoiceButton.title = mediaProblem || label;
     els.sharedVoiceButton.setAttribute("aria-label", els.sharedVoiceButton.title);
   }
   if (els.sharedVoiceMuteButton) {
@@ -1896,10 +1911,14 @@ function renderSharedVoice() {
     els.sharedVoiceRemoteAudio.play?.().catch(() => {});
   }
   if (els.sharedVoiceStatus) {
-    let text = "alone";
+    const mediaProblem = sharedVoiceMediaUnavailableReason();
+    let text = "start voice";
     if (!currentDeviceId) text = "syncing";
+    if (mediaProblem) text = mediaProblem;
+    if (!candidates.length && !voice.active && !mediaProblem && currentDeviceId) text = "alone";
     if (candidates.length && !voice.active) text = "voice ready";
     if (incoming && !voice.active) text = "incoming";
+    if (voice.waiting) text = "waiting";
     if (voice.connecting) text = `calling ${voice.peerLabel || "peer"}`;
     if (connected) text = voice.peerLabel || "connected";
     if (voice.muted && voice.active) text = `muted ${voice.peerLabel || ""}`.trim();
@@ -1920,7 +1939,9 @@ function resetSharedVoiceRuntime(keepError = false) {
   Object.assign(state.sharedVoice, {
     active: false,
     connecting: false,
+    waiting: false,
     muted: false,
+    peerMuted: false,
     status: "idle",
     error: keepError ? previousError : "",
     roomId: "",
@@ -2009,6 +2030,57 @@ async function makeSharedVoiceOffer() {
   }
 }
 
+async function connectSharedVoiceToPeer(room, peer, incoming = null) {
+  const voice = state.sharedVoice;
+  if (!voice.active || voice.peerConnection || !voice.localStream) return false;
+  if (!room?.id || !room.current_device_id || !peer?.device_id) return false;
+  Object.assign(voice, {
+    waiting: false,
+    connecting: true,
+    status: incoming ? "answering" : "calling",
+    error: "",
+    roomId: room.id,
+    callId: incoming?.payload?.call_id || `voice_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
+    peerDeviceId: peer.device_id,
+    peerUserId: peer.user_id || "",
+    peerLabel: sharedVoicePeerLabel(peer),
+    polite: String(room.current_device_id) > String(peer.device_id),
+  });
+  const pc = createSharedVoicePeerConnection();
+  voice.peerConnection = pc;
+  voice.localStream.getAudioTracks().forEach((track) => pc.addTrack(track, voice.localStream));
+  renderSharedVoice();
+  recordUserEvent("workspace.shared_voice_peer_selected", {
+    target: `shared-space:${room.id}`,
+    summary: `${incoming ? "Answering" : "Calling"} ${voice.peerLabel}`,
+    data: { shared_space_id: room.id, peer_device_id: peer.device_id, incoming: Boolean(incoming) },
+    redacted: true,
+  });
+  if (incoming) {
+    await processSharedVoiceRoom(room);
+  } else {
+    await makeSharedVoiceOffer();
+  }
+  return true;
+}
+
+async function maybeConnectSharedVoiceFromRoom(room) {
+  const voice = state.sharedVoice;
+  if (!voice.active || voice.peerConnection || !voice.localStream || !room?.id) return false;
+  const incoming = latestIncomingSharedVoiceOffer(room);
+  const peer = incoming
+    ? sharedVoicePeerByDevice(incoming.payload.from_device_id, room)
+    : sharedVoicePeerCandidates(room)[0];
+  if (!peer?.device_id) {
+    voice.waiting = true;
+    voice.connecting = false;
+    voice.status = "waiting";
+    renderSharedVoice();
+    return false;
+  }
+  return connectSharedVoiceToPeer(room, peer, incoming);
+}
+
 async function sendSharedVoiceSignal(type, details = {}) {
   const space = sharedUserSpaceForPanel();
   const room = activeSharedRoom();
@@ -2048,7 +2120,10 @@ async function sendSharedVoiceSignal(type, details = {}) {
 function queueSharedVoiceRoomProcessing(room) {
   if (!state.sharedVoice.active || !room?.id) return;
   state.sharedVoice.signalQueue = state.sharedVoice.signalQueue
-    .then(() => processSharedVoiceRoom(room))
+    .then(async () => {
+      await maybeConnectSharedVoiceFromRoom(room);
+      await processSharedVoiceRoom(room);
+    })
     .catch((error) => {
       state.sharedVoice.error = truncateText(error.message || "voice signal failed", 80);
       renderSharedVoice();
@@ -2131,30 +2206,22 @@ async function processSharedVoiceRoom(room) {
 async function startSharedVoice() {
   if (state.sharedVoice.active || state.sharedVoice.connecting) return;
   if (state.config?.features?.sharedVoice?.enabled === false) return;
-  if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) {
-    state.sharedVoice.error = "WebRTC unavailable";
+  const mediaProblem = sharedVoiceMediaUnavailableReason();
+  if (mediaProblem) {
+    state.sharedVoice.error = mediaProblem;
     renderSharedVoice();
     return;
   }
   const room = await loadSharedSpaceRoom({ origin: "shared-voice-start" }) || activeSharedRoom();
-  const incoming = latestIncomingSharedVoiceOffer(room);
-  const peer = incoming
-    ? sharedVoicePeerByDevice(incoming.payload.from_device_id, room)
-    : sharedVoicePeerCandidates(room)[0];
   if (!room?.id || !room.current_device_id) throw new Error("Shared room is still syncing.");
-  if (!peer?.device_id) throw new Error("No one else is present in this shared space.");
   resetSharedVoiceRuntime();
   Object.assign(state.sharedVoice, {
     active: true,
-    connecting: true,
-    status: incoming ? "answering" : "calling",
+    connecting: false,
+    waiting: true,
+    status: "waiting",
     error: "",
     roomId: room.id,
-    callId: incoming?.payload?.call_id || `voice_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
-    peerDeviceId: peer.device_id,
-    peerUserId: peer.user_id || "",
-    peerLabel: sharedVoicePeerLabel(peer),
-    polite: String(room.current_device_id) > String(peer.device_id),
   });
   renderSharedVoice();
   try {
@@ -2167,21 +2234,14 @@ async function startSharedVoice() {
       video: false,
     });
     state.sharedVoice.localStream = stream;
-    const pc = createSharedVoicePeerConnection();
-    state.sharedVoice.peerConnection = pc;
-    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
     startSharedVoicePolling();
     recordUserEvent("workspace.shared_voice_started", {
       target: `shared-space:${room.id}`,
-      summary: `Started shared voice with ${state.sharedVoice.peerLabel}`,
-      data: { shared_space_id: room.id, peer_device_id: peer.device_id },
+      summary: "Started shared voice",
+      data: { shared_space_id: room.id },
       redacted: true,
     });
-    if (incoming) {
-      await processSharedVoiceRoom(room);
-    } else {
-      await makeSharedVoiceOffer();
-    }
+    await maybeConnectSharedVoiceFromRoom(room);
   } catch (error) {
     state.sharedVoice.error = truncateText(error.message || "voice failed", 80);
     resetSharedVoiceRuntime(true);
@@ -2225,7 +2285,9 @@ function toggleSharedVoiceMute() {
   voice.localStream.getAudioTracks().forEach((track) => {
     track.enabled = !voice.muted;
   });
-  void sendSharedVoiceSignal("mute", { muted: voice.muted }).catch(() => {});
+  if (voice.peerDeviceId && voice.callId) {
+    void sendSharedVoiceSignal("mute", { muted: voice.muted }).catch(() => {});
+  }
   renderSharedVoice();
 }
 
@@ -5934,13 +5996,26 @@ function nodeHasFollowingContentUntil(node, ancestor) {
   return false;
 }
 
-function selectionInlineCodeAtEnd() {
+function selectionInlineCode() {
   const selection = window.getSelection?.();
   if (!selection || !selection.isCollapsed || !els.agentInput) return null;
   let node = selection.focusNode;
   if (!node || !els.agentInput.contains(node)) return null;
   const code = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest?.("code");
   if (!code || code.closest("pre") || !els.agentInput.contains(code)) return null;
+  return code;
+}
+
+function selectionEmptyInlineCode() {
+  const code = selectionInlineCode();
+  return code && !inlineCodeText(code) ? code : null;
+}
+
+function selectionInlineCodeAtEnd() {
+  const code = selectionInlineCode();
+  if (!code) return null;
+  const selection = window.getSelection?.();
+  let node = selection.focusNode;
   let atEnd = false;
   if (node === code) {
     atEnd = selection.focusOffset >= code.childNodes.length;
@@ -6087,14 +6162,14 @@ function copyAgentInputMarkdown(event) {
 function maybeEscapeInlineCodeBeforeInput(event) {
   const insertingText = event?.inputType === "insertText" || event?.inputType === "insertCompositionText";
   if (event?.inputType === "deleteContentBackward") {
-    const code = inlineCodeBeforeSelection();
+    const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
     if (!code) return;
     event.preventDefault();
     unwrapInlineCodeForEditing(code);
     return;
   }
   if (event?.inputType === "deleteContentForward") {
-    const code = inlineCodeAfterSelection();
+    const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
     if (!code) return;
     event.preventDefault();
     unwrapInlineCodeForEditing(code);
@@ -6115,14 +6190,14 @@ function handleInlineCodeNavigation(event) {
     return;
   }
   if (event.key === "Backspace") {
-    const code = inlineCodeBeforeSelection();
+    const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
     if (!code) return;
     event.preventDefault();
     unwrapInlineCodeForEditing(code);
     return;
   }
   if (event.key === "Delete") {
-    const code = inlineCodeAfterSelection();
+    const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
     if (!code) return;
     event.preventDefault();
     unwrapInlineCodeForEditing(code);

@@ -58,6 +58,10 @@ Before inviting users, verify:
 - Standard allowlisted user signs in and does not see Admin, bridge, browser,
   node action, or Security surfaces.
 - New Space, Devices, Artifacts, Modules, and Config work for standard users.
+- Two allowlisted users can open the same shared space, start voice before or
+  after both devices are present, and hear each other through the in-room voice
+  control. Configure `HERMES_WASM_AGENT_VOICE_ICE_SERVERS_JSON` with TURN
+  servers if either side cannot establish direct/STUN-only WebRTC audio.
 - Host Browser WebSocket streams reject missing or cross-origin `Origin`
   headers before the upgrade.
 - Host Browser remains disabled on the public HTTPS deployment unless

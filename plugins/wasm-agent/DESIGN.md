@@ -256,9 +256,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   room endpoint is the signaling channel for WebRTC offer/answer/ICE events,
   live presence supplies target devices, and browser media must flow
   peer-to-peer with microphone echo cancellation/noise suppression enabled.
-  Deployments may configure TURN/STUN servers through wasm-agent config; the
-  UI should make join, mute, and leave states visible inside the active shared
-  space.
+  The voice button may be started before another device is visible; the room
+  then shows a waiting state and auto-connects when a peer presence or incoming
+  offer appears. Deployments may configure TURN/STUN servers through
+  wasm-agent config; the UI should make join, waiting, mute, and leave states
+  visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a
   pasted invite URL as well as a raw join code. Closing context menus must not

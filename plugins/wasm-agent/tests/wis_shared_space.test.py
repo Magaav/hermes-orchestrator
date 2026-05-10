@@ -191,6 +191,107 @@ class WisSharedSpaceTest(unittest.TestCase):
         self.assertEqual(event["payload"]["api_token"], "[redacted]")
         self.assertEqual(event["payload"]["to_device_id"], owner_device_id)
 
+    def test_shared_voice_answer_and_ice_round_trip_between_present_devices(self) -> None:
+        self.create_owner_space()
+        shared = static_server.share_user_space(self.server, self.owner, {
+            "space_id": "playground",
+            "title": "Playground",
+        })["shared_space"]
+        static_server.join_shared_space(
+            self.server,
+            self.member,
+            {"join_code": shared["join_code"]},
+            FakeHandler(device_id="member-device"),
+        )
+        owner_handler = FakeHandler(device_id="owner-device")
+        member_handler = FakeHandler(device_id="member-device")
+        owner_room = static_server.shared_space_room(
+            self.server,
+            self.owner,
+            {
+                "action": "presence",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+            },
+            owner_handler,
+        )["room"]
+        member_room = static_server.shared_space_room(
+            self.server,
+            self.member,
+            {
+                "action": "presence",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+            },
+            member_handler,
+        )["room"]
+        owner_device_id = owner_room["current_device_id"]
+        member_device_id = member_room["current_device_id"]
+
+        offer_room = static_server.shared_space_room(
+            self.server,
+            self.owner,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-round-trip",
+                    "type": "offer",
+                    "from_device_id": owner_device_id,
+                    "to_device_id": member_device_id,
+                    "sdp": "v=0\\r\\no=offer\\r\\n",
+                },
+            },
+            owner_handler,
+        )["room"]
+        answer_room = static_server.shared_space_room(
+            self.server,
+            self.member,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-round-trip",
+                    "type": "answer",
+                    "from_device_id": member_device_id,
+                    "to_device_id": owner_device_id,
+                    "sdp": "v=0\\r\\no=answer\\r\\n",
+                },
+            },
+            member_handler,
+        )["room"]
+        ice_room = static_server.shared_space_room(
+            self.server,
+            self.owner,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-round-trip",
+                    "type": "ice-candidate",
+                    "from_device_id": owner_device_id,
+                    "to_device_id": member_device_id,
+                    "candidate": '{"candidate":"candidate:1 1 udp 1 127.0.0.1 9 typ host"}',
+                },
+            },
+            owner_handler,
+        )["room"]
+
+        self.assertEqual(offer_room["online_count"], 2)
+        self.assertEqual(answer_room["events"][-1]["payload"]["type"], "answer")
+        self.assertEqual(answer_room["events"][-1]["payload"]["sdp"], "v=0\\r\\no=answer\\r\\n")
+        self.assertEqual(ice_room["events"][-1]["payload"]["type"], "ice-candidate")
+        self.assertIn("candidate:1", ice_room["events"][-1]["payload"]["candidate"])
+
     def test_wis_patch_applies_to_shared_artifact_scope(self) -> None:
         self.create_owner_space()
         shared = static_server.share_user_space(self.server, self.owner, {"space_id": "playground"})["shared_space"]

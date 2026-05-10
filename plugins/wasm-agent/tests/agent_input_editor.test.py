@@ -289,12 +289,48 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             caret_at_end,
         )
 
+    def make_empty_rendered_code_with_inner_caret(self, caret_offset):
+        self.driver.execute(
+            """
+            const input = document.querySelector("#agentInput");
+            const paragraph = document.createElement("p");
+            const code = document.createElement("code");
+            code.textContent = "\\u200B";
+            paragraph.append(code, document.createTextNode("\\u200B"));
+            input.replaceChildren(paragraph);
+            input.dataset.renderedMarkdown = "true";
+            input.focus();
+            const range = document.createRange();
+            range.setStart(code.firstChild, arguments[0]);
+            range.collapse(true);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return input.innerHTML;
+            """,
+            caret_offset,
+        )
+
     def test_empty_backtick_pair_stays_literal_when_input_starts_with_it(self):
         state = self.set_editor_text("``")
         self.assertEqual(state["text"], "``")
         self.assertEqual(state["rendered"], "")
         self.assertEqual(state["codeCount"], 0)
         self.assertNotIn("<code", state["html"])
+
+    def test_typing_empty_backtick_pair_then_deleting_keeps_one_backtick(self):
+        self.set_editor_text("")
+        self.driver.send_keys(self.driver.element("#agentInput"), "``")
+        state = self.editor_state()
+        self.assertEqual(state["text"], "``")
+        self.assertEqual(state["rendered"], "")
+        self.assertEqual(state["codeCount"], 0)
+
+        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
+        state = self.editor_state()
+        self.assertEqual(state["text"], "`")
+        self.assertEqual(state["rendered"], "")
+        self.assertEqual(state["codeCount"], 0)
 
     def test_emptying_rendered_inline_code_returns_editable_backticks(self):
         state = self.set_editor_text("`test`")
@@ -351,6 +387,21 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
         self.driver.send_keys(self.driver.element("#agentInput"), DELETE)
         state = self.editor_state()
         self.assertEqual(state["text"], "`")
+        self.assertEqual(state["codeCount"], 0)
+
+    def test_deleting_inside_empty_rendered_code_unwraps_to_one_backtick(self):
+        self.make_empty_rendered_code_with_inner_caret(1)
+        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
+        state = self.editor_state()
+        self.assertEqual(state["text"], "`")
+        self.assertEqual(state["rendered"], "")
+        self.assertEqual(state["codeCount"], 0)
+
+        self.make_empty_rendered_code_with_inner_caret(0)
+        self.driver.send_keys(self.driver.element("#agentInput"), DELETE)
+        state = self.editor_state()
+        self.assertEqual(state["text"], "`")
+        self.assertEqual(state["rendered"], "")
         self.assertEqual(state["codeCount"], 0)
 
     def test_copying_rendered_inline_code_preserves_markdown_backticks(self):
