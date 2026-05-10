@@ -258,13 +258,17 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   peer-to-peer with microphone echo cancellation/noise suppression enabled.
   The voice button joins a room-level voice session, publishes a `join` event,
   and only calls peers that also joined voice instead of merely being present in
-  the shared space. When both peers join at the same time, deterministic
+  the shared space. A present peer may auto-join once when another room device
+  joins voice, while explicit Leave starts a short cooldown so the browser does
+  not immediately rejoin. When both peers join at the same time, deterministic
   device-id ordering chooses one caller so the other side waits and answers
   instead of both browsers publishing unresolved offers. ICE candidates can
   arrive before the offer/answer event in the room log, so the client buffers
-  them until the peer connection has a remote description. Deployments may
-  configure TURN/STUN servers through wasm-agent config; the UI should make
-  join, waiting, mute, and leave states visible inside the active shared space.
+  them until the peer connection has a remote description. SDP and ICE
+  candidate text is stored verbatim, and answer SDP is published even when a
+  browser stalls while settling its local description. Deployments may configure
+  TURN/STUN servers through wasm-agent config; the UI should make join, waiting,
+  mute, and leave states visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a
   pasted invite URL as well as a raw join code. Closing context menus must not

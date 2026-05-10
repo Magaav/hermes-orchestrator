@@ -89,7 +89,7 @@ SHARED_SPACE_PRESENCE_SCHEMA = "hermes.wasm_agent.shared_space.presence.v1"
 SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
 SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
-SHARED_SPACE_SIGNAL_TEXT_LIMIT = 24000
+SHARED_SPACE_SIGNAL_TEXT_LIMIT = 131072
 GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
 AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
 AGENT_MUTATION_ALLOWED_EXTENSIONS = {
@@ -2202,7 +2202,7 @@ def sanitize_room_event_payload(value: Any, *, depth: int = 0) -> Any:
             if re.search(r"password|secret|token|api[_-]?key|authorization|cookie|session", clean_key, re.I):
                 clean[clean_key] = "[redacted]"
             elif clean_key in {"sdp", "candidate"}:
-                clean[clean_key] = clipped(str(item), SHARED_SPACE_SIGNAL_TEXT_LIMIT)
+                clean[clean_key] = clipped_verbatim(str(item), SHARED_SPACE_SIGNAL_TEXT_LIMIT)
             else:
                 clean[clean_key] = sanitize_room_event_payload(item, depth=depth + 1)
         return clean
@@ -4749,6 +4749,12 @@ def clipped(value: str, limit: int = 6000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[clipped {len(text) - limit} chars]"
+
+
+def clipped_verbatim(value: str, limit: int = 6000) -> str:
+    if len(value) <= limit:
+        return value
+    return value[:limit]
 
 
 def text_size(value: Any) -> int:

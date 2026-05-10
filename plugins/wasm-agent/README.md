@@ -596,13 +596,17 @@ room heartbeat; shared-space voice uses that room heartbeat for presence and
 WebRTC signaling. The in-room voice button joins the room-level voice session,
 publishes a voice `join` event, waits for another joined voice peer, and then
 auto-connects through offer/answer/ICE events. Passive room presence is not
-enough to receive a call; a device must join voice or leave it. If both devices
-join voice at once, stable device-id ordering selects one caller while the
-other waits to answer, avoiding two unresolved simultaneous offers. Because
+enough to receive a call; once one present device joins voice, another present
+device can auto-join once and show the normal Leave/Mute controls. Explicit
+Leave starts a short cooldown to prevent immediate rejoin. If both devices join
+voice at once, stable device-id ordering selects one caller while the other
+waits to answer, avoiding two unresolved simultaneous offers. Because
 browser ICE can arrive before the room's offer/answer event, clients buffer
-early candidates until the remote description is available. Space config
-keeps remote area applies paused so local drafts are left untouched until Apply
-or Revert while presence still updates. Config
+early candidates until the remote description is available. SDP and ICE
+candidate signal text is preserved verbatim by the room store, and answer SDP
+is published even if the browser takes too long to settle its local description.
+Space config keeps remote area applies paused so local drafts are left untouched
+until Apply or Revert while presence still updates. Config
 storage shows account usage plus local
 disk availability and exposes Export/Import buttons for portable local backups;
 exports include the browser-local layout payload, while imports restore that

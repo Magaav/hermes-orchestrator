@@ -415,6 +415,8 @@ const state = {
     remoteStream: null,
     peerConnection: null,
     pendingIceCandidates: [],
+    autoJoinAttemptKey: "",
+    autoJoinBlockedUntil: 0,
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
@@ -1777,6 +1779,10 @@ async function loadSharedSpaceRoom(options = {}) {
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
     queueSharedVoiceRoomProcessing(room);
+    if (options.origin !== "shared-voice-start") void maybeAutoJoinSharedVoice(room).catch((error) => {
+      state.sharedVoice.error = truncateText(error.message || "voice auto-join failed", 80);
+      renderSharedVoice();
+    });
   }
   return room;
 }
@@ -1881,6 +1887,10 @@ function sharedVoiceJoinedDeviceIds(room = activeSharedRoom()) {
     if (!deviceId || joined.has(deviceId)) continue;
     if (payload.type === "leave" || payload.type === "hangup") {
       left.add(deviceId);
+      if (payload.type === "hangup") {
+        const targetDeviceId = cleanText(payload.to_device_id || "", "");
+        if (targetDeviceId && !joined.has(targetDeviceId)) left.add(targetDeviceId);
+      }
       continue;
     }
     if (payload.type === "join" && !left.has(deviceId)) {
@@ -1893,6 +1903,25 @@ function sharedVoiceJoinedDeviceIds(room = activeSharedRoom()) {
 function sharedVoiceJoinedPeerCandidates(room = activeSharedRoom()) {
   const joinedDeviceIds = sharedVoiceJoinedDeviceIds(room);
   return sharedVoicePeerCandidates(room).filter((entry) => joinedDeviceIds.has(entry.device_id));
+}
+
+function sharedVoiceAutoJoinKey(room = activeSharedRoom()) {
+  const incoming = latestIncomingSharedVoiceOffer(room);
+  if (incoming?.payload?.call_id) return `offer:${incoming.payload.call_id}`;
+  const joined = sharedVoiceJoinedPeerCandidates(room).map((entry) => entry.device_id).sort();
+  return joined.length ? `join:${room?.id || ""}:${joined.join(",")}` : "";
+}
+
+async function maybeAutoJoinSharedVoice(room = activeSharedRoom()) {
+  const voice = state.sharedVoice;
+  if (!room?.id || voice.active || voice.connecting) return;
+  if (state.config?.features?.sharedVoice?.enabled === false) return;
+  if (Date.now() < Number(voice.autoJoinBlockedUntil || 0)) return;
+  if (sharedVoiceMediaUnavailableReason()) return;
+  const key = sharedVoiceAutoJoinKey(room);
+  if (!key || voice.autoJoinAttemptKey === key) return;
+  voice.autoJoinAttemptKey = key;
+  await startSharedVoice();
 }
 
 function sharedVoiceMediaUnavailableReason() {
@@ -1986,6 +2015,8 @@ function resetSharedVoiceRuntime(keepError = false) {
     remoteStream: null,
     peerConnection: null,
     pendingIceCandidates: [],
+    autoJoinAttemptKey: state.sharedVoice.autoJoinAttemptKey || "",
+    autoJoinBlockedUntil: state.sharedVoice.autoJoinBlockedUntil || 0,
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
@@ -2196,6 +2227,33 @@ async function addSharedVoiceIceCandidate(candidate) {
   await pc.addIceCandidate(candidate);
 }
 
+async function setSharedVoiceLocalDescription(description, timeoutMs = 1200) {
+  const voice = state.sharedVoice;
+  const pc = voice.peerConnection;
+  if (!pc) return description;
+  let settled = false;
+  const pending = pc.setLocalDescription(description);
+  await Promise.race([
+    pending.then(
+      () => {
+        settled = true;
+      },
+      (error) => {
+        settled = true;
+        throw error;
+      },
+    ),
+    new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
+  ]);
+  if (!settled) {
+    pending.catch((error) => {
+      voice.error = truncateText(error.message || "local voice description failed", 80);
+      renderSharedVoice();
+    });
+  }
+  return pc.localDescription || description;
+}
+
 function queueSharedVoiceRoomProcessing(room) {
   if (!state.sharedVoice.active || !room?.id) return;
   state.sharedVoice.signalQueue = state.sharedVoice.signalQueue
@@ -2241,8 +2299,8 @@ async function handleSharedVoiceSignal(event, payload, room) {
     await pc.setRemoteDescription(description);
     await flushSharedVoiceIceCandidates();
     const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-    await sendSharedVoiceSignal("answer", { sdp: pc.localDescription?.sdp || answer.sdp || "" });
+    const localAnswer = await setSharedVoiceLocalDescription(answer);
+    await sendSharedVoiceSignal("answer", { sdp: localAnswer?.sdp || answer.sdp || "" });
     return;
   }
   if (payload.type === "answer") {
@@ -2345,6 +2403,7 @@ async function stopSharedVoice(options = {}) {
     await sendSharedVoiceRoomSignal("leave", { reason: cleanText(options.reason, "ended") }).catch(() => {});
   }
   resetSharedVoiceRuntime();
+  state.sharedVoice.autoJoinBlockedUntil = Date.now() + 30000;
   recordUserEvent("workspace.shared_voice_stopped", {
     target: `shared-space:${roomId || "shared"}`,
     summary: "Stopped shared voice",

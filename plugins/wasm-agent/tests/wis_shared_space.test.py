@@ -160,7 +160,7 @@ class WisSharedSpaceTest(unittest.TestCase):
         )["room"]
         owner_device_id = owner_room["current_device_id"]
         member_device_id = static_server.request_account_device_id(self.member, member_handler)
-        long_sdp = "v=0\\r\\n" + ("a=rtpmap:111 opus/48000/2\\r\\n" * 360)
+        long_sdp = "v=0\r\n" + ("a=rtpmap:111 opus/48000/2\r\n" * 360)
 
         room = static_server.shared_space_room(
             self.server,
@@ -280,7 +280,7 @@ class WisSharedSpaceTest(unittest.TestCase):
                     "type": "offer",
                     "from_device_id": owner_device_id,
                     "to_device_id": member_device_id,
-                    "sdp": "v=0\\r\\no=offer\\r\\n",
+                    "sdp": "v=0\r\no=offer\r\n",
                 },
             },
             owner_handler,
@@ -299,7 +299,7 @@ class WisSharedSpaceTest(unittest.TestCase):
                     "type": "answer",
                     "from_device_id": member_device_id,
                     "to_device_id": owner_device_id,
-                    "sdp": "v=0\\r\\no=answer\\r\\n",
+                    "sdp": "v=0\r\no=answer\r\n",
                 },
             },
             member_handler,
@@ -328,7 +328,7 @@ class WisSharedSpaceTest(unittest.TestCase):
         self.assertEqual(join_room["events"][-1]["payload"]["from_device_id"], member_device_id)
         self.assertEqual(offer_room["online_count"], 2)
         self.assertEqual(answer_room["events"][-1]["payload"]["type"], "answer")
-        self.assertEqual(answer_room["events"][-1]["payload"]["sdp"], "v=0\\r\\no=answer\\r\\n")
+        self.assertEqual(answer_room["events"][-1]["payload"]["sdp"], "v=0\r\no=answer\r\n")
         self.assertEqual(ice_room["events"][-1]["payload"]["type"], "ice-candidate")
         self.assertIn("candidate:1", ice_room["events"][-1]["payload"]["candidate"])
 
