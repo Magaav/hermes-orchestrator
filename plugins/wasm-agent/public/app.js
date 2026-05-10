@@ -1843,6 +1843,12 @@ function sharedVoicePeerLabel(peer) {
   return user && device ? `${user} / ${device}` : user || device || "peer";
 }
 
+function sharedVoiceShouldInitiateOffer(room, peer) {
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  if (!currentDeviceId || !peer?.device_id) return false;
+  return String(currentDeviceId) > String(peer.device_id);
+}
+
 function latestIncomingSharedVoiceOffer(room = activeSharedRoom()) {
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
   if (!currentDeviceId) return null;
@@ -2075,6 +2081,16 @@ async function maybeConnectSharedVoiceFromRoom(room) {
     voice.waiting = true;
     voice.connecting = false;
     voice.status = "waiting";
+    renderSharedVoice();
+    return false;
+  }
+  if (!incoming && !sharedVoiceShouldInitiateOffer(room, peer)) {
+    voice.waiting = true;
+    voice.connecting = false;
+    voice.status = "waiting";
+    voice.peerDeviceId = peer.device_id;
+    voice.peerUserId = peer.user_id || "";
+    voice.peerLabel = sharedVoicePeerLabel(peer);
     renderSharedVoice();
     return false;
   }
@@ -6048,6 +6064,28 @@ function placeCaretInsideInlineCodeEnd(code) {
   selection?.addRange(range);
 }
 
+function inlineCodeAtElementEdge(element, atEnd = true) {
+  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
+  const tag = element.tagName?.toLowerCase?.() || "";
+  if (tag === "pre") return null;
+  if (tag === "code") return element.closest("pre") ? null : element;
+  const children = Array.from(element.childNodes || []);
+  const ordered = atEnd ? children.reverse() : children;
+  for (const child of ordered) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      const text = String(child.textContent || "").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
+      if (text) return null;
+      continue;
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue;
+    const code = inlineCodeAtElementEdge(child, atEnd);
+    if (code) return code;
+    const text = plainTextFromNode(child);
+    if (text) return null;
+  }
+  return null;
+}
+
 function inlineCodeBeforeSelection() {
   const selection = window.getSelection?.();
   if (!selection || !selection.isCollapsed || !els.agentInput) return null;
@@ -6071,6 +6109,9 @@ function inlineCodeBeforeSelection() {
   }
   if (previous?.nodeType === Node.ELEMENT_NODE && previous.tagName?.toLowerCase() === "code" && !previous.closest("pre")) {
     return previous;
+  }
+  if (previous?.nodeType === Node.ELEMENT_NODE) {
+    return inlineCodeAtElementEdge(previous, true);
   }
   return null;
 }
@@ -6097,6 +6138,9 @@ function inlineCodeAfterSelection() {
   if (next?.nodeType === Node.ELEMENT_NODE && next.tagName?.toLowerCase() === "code" && !next.closest("pre")) {
     return next;
   }
+  if (next?.nodeType === Node.ELEMENT_NODE) {
+    return inlineCodeAtElementEdge(next, false);
+  }
   return null;
 }
 
@@ -6104,9 +6148,12 @@ function inlineCodeMarkdownSource(code) {
   return `\`${inlineCodeText(code).replace(/`/g, "\\`")}\``;
 }
 
-function inlineCodeEditableSource(code) {
+function inlineCodeEditableSource(code, deleteDirection = "") {
   const source = inlineCodeMarkdownSource(code);
-  return source === "``" ? "`" : source;
+  if (source === "``") return "`";
+  if (deleteDirection === "backward") return source.slice(0, -1);
+  if (deleteDirection === "forward") return source.slice(1);
+  return source;
 }
 
 function removeInlineCodeBoundaryAfter(code) {
@@ -6117,13 +6164,13 @@ function removeInlineCodeBoundaryAfter(code) {
   }
 }
 
-function unwrapInlineCodeForEditing(code) {
+function unwrapInlineCodeForEditing(code, options = {}) {
   if (!code || !els.agentInput?.contains(code)) return false;
-  const source = inlineCodeEditableSource(code);
+  const source = inlineCodeEditableSource(code, options.deleteDirection || "");
   const text = document.createTextNode(source);
   removeInlineCodeBoundaryAfter(code);
   code.replaceWith(text);
-  const caretOffset = source.length <= 1 ? source.length : source.length - 1;
+  const caretOffset = options.deleteDirection === "forward" ? 0 : source.length;
   const range = document.createRange();
   range.setStart(text, caretOffset);
   range.collapse(true);
@@ -6165,14 +6212,14 @@ function maybeEscapeInlineCodeBeforeInput(event) {
     const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
     if (!code) return;
     event.preventDefault();
-    unwrapInlineCodeForEditing(code);
+    unwrapInlineCodeForEditing(code, { deleteDirection: "backward" });
     return;
   }
   if (event?.inputType === "deleteContentForward") {
     const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
     if (!code) return;
     event.preventDefault();
-    unwrapInlineCodeForEditing(code);
+    unwrapInlineCodeForEditing(code, { deleteDirection: "forward" });
     return;
   }
   if (!insertingText || !event.data) return;
@@ -6193,14 +6240,14 @@ function handleInlineCodeNavigation(event) {
     const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
     if (!code) return;
     event.preventDefault();
-    unwrapInlineCodeForEditing(code);
+    unwrapInlineCodeForEditing(code, { deleteDirection: "backward" });
     return;
   }
   if (event.key === "Delete") {
     const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
     if (!code) return;
     event.preventDefault();
-    unwrapInlineCodeForEditing(code);
+    unwrapInlineCodeForEditing(code, { deleteDirection: "forward" });
   }
 }
 
@@ -6216,7 +6263,11 @@ function maybeRenderAgentInputFromEvent(event) {
     scheduleAgentInputMarkdownRender();
     return;
   }
-  if (inputType.startsWith("insertFromPaste") || Array.from(data).some((char) => AGENT_INPUT_MARKDOWN_TRIGGER_CHARS.has(char))) {
+  if (
+    inputType.startsWith("insertFromPaste")
+    || Array.from(data).some((char) => AGENT_INPUT_MARKDOWN_TRIGGER_CHARS.has(char))
+    || hasMarkdownSyntax(agentInputText())
+  ) {
     scheduleAgentInputMarkdownRender();
   }
 }

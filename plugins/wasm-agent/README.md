@@ -595,7 +595,9 @@ regular workspace refresh loop, and through a focused `2.5s` active shared-space
 room heartbeat; shared-space voice uses that room heartbeat for presence and
 WebRTC signaling. The in-room voice button can be started before the second
 device is visible, holds a waiting state, and auto-connects through
-offer/answer/ICE events when a peer joins the same shared space. Space config
+offer/answer/ICE events when a peer joins the same shared space. If both
+devices start voice at once, stable device-id ordering selects one caller while
+the other waits to answer, avoiding two unresolved simultaneous offers. Space config
 keeps remote area applies paused so local drafts are left untouched until Apply
 or Revert while presence still updates. Config
 storage shows account usage plus local
