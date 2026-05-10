@@ -257,17 +257,20 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   live presence supplies target devices, and browser media must flow
   peer-to-peer with microphone echo cancellation/noise suppression enabled.
   The voice button joins a room-level voice session, publishes a `join` event,
-  and only calls peers that also joined voice instead of merely being present in
-  the shared space. A present peer may auto-join once when another room device
-  joins voice, while explicit Leave starts a short cooldown so the browser does
-  not immediately rejoin. When both peers join at the same time, deterministic
-  device-id ordering chooses one caller so the other side waits and answers
-  instead of both browsers publishing unresolved offers. ICE candidates can
-  arrive before the offer/answer event in the room log, so the client buffers
-  them until the peer connection has a remote description. SDP and ICE
-  candidate text is stored verbatim, and offer/answer SDP is published even
-  when a browser stalls while settling its local description. Deployments may
-  configure TURN/STUN servers through wasm-agent config; the UI should make
+  and builds a peer-to-peer mesh with every other device that also joined voice
+  instead of calling devices that are merely present in the shared space. A
+  present peer may auto-join once when another room device joins voice, while
+  explicit Leave starts a short cooldown so the browser does not immediately
+  rejoin. Leaving removes only that device from the voice room; the remaining
+  joined devices keep their peer connections and future joiners are connected
+  automatically. For each peer pair, deterministic device-id ordering chooses
+  one caller so the other side waits and answers instead of both browsers
+  publishing unresolved offers. ICE candidates can arrive before the
+  offer/answer event in the room log, so the client buffers them until the peer
+  connection has a remote description. SDP and ICE candidate text is stored
+  verbatim, and offer/answer SDP is published even when a browser stalls while
+  settling its local description. Deployments may configure TURN/STUN servers
+  through wasm-agent config; the UI should make
   join, waiting, mute, and leave states visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a

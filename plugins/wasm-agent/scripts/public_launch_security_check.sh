@@ -101,7 +101,9 @@ fi
 section "local correctness checks"
 if have node; then
   run_check "public/app.js parses as an ES module" bash -c "node --input-type=module --check < '${PLUGIN_DIR}/public/app.js'"
+  run_check "shared voice room module parses as an ES module" bash -c "node --input-type=module --check < '${PLUGIN_DIR}/public/modules/spaces/shared-voice-room.js'"
   run_check "wasm smoke test" node "${PLUGIN_DIR}/tests/wasm_agent_smoke.test.js"
+  run_check "shared voice room logic test" node "${PLUGIN_DIR}/tests/shared_voice_room.test.mjs"
   run_check "UI navigation history test" node "${PLUGIN_DIR}/tests/ui_navigation_history.test.js"
   run_check "WIS engine test" node "${PLUGIN_DIR}/tests/wis_engine.test.js"
 else

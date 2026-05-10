@@ -594,18 +594,19 @@ device. Open clients refresh that shared space metadata on focus, during the
 regular workspace refresh loop, and through a focused `2.5s` active shared-space
 room heartbeat; shared-space voice uses that room heartbeat for presence and
 WebRTC signaling. The in-room voice button joins the room-level voice session,
-publishes a voice `join` event, waits for another joined voice peer, and then
-auto-connects through offer/answer/ICE events. Passive room presence is not
-enough to receive a call; once one present device joins voice, another present
-device can auto-join once and show the normal Leave/Mute controls. Explicit
-Leave starts a short cooldown to prevent immediate rejoin. If both devices join
-voice at once, stable device-id ordering selects one caller while the other
-waits to answer, avoiding two unresolved simultaneous offers. Because
-browser ICE can arrive before the room's offer/answer event, clients buffer
-early candidates until the remote description is available. SDP and ICE
-candidate signal text is preserved verbatim by the room store, and offer/answer
-SDP is published even if the browser takes too long to settle its local
-description.
+publishes a voice `join` event, and then maintains a small peer-to-peer mesh
+with every other device that has joined voice in the room. Passive room presence
+is not enough to receive a call; once one present device joins voice, another
+present device can auto-join once and show the normal Leave/Mute controls. A
+device that leaves only removes itself from the voice room, so remaining joined
+devices keep talking and future joiners are connected automatically. Explicit
+Leave starts a short cooldown to prevent immediate rejoin. For each peer pair,
+stable device-id ordering selects one caller while the other waits to answer,
+avoiding two unresolved simultaneous offers. Because browser ICE can arrive
+before the room's offer/answer event, clients buffer early candidates until the
+remote description is available. SDP and ICE candidate signal text is preserved
+verbatim by the room store, and offer/answer SDP is published even if the browser
+takes too long to settle its local description.
 Space config keeps remote area applies paused so local drafts are left untouched
 until Apply or Revert while presence still updates. Config
 storage shows account usage plus local
