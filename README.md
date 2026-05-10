@@ -1,3 +1,6 @@
+> Open-core agent infrastructure. Public local runtime. Commercial cloud/network layer in development.
+> Open to incubation, accelerators, grants, strategic funding, infrastructure credits, sponsors, and pilot partners.
+
 # Hermes Orchestrator
 > Host-level control plane for running and managing fleets of containerized Hermes Agent nodes.
 ![Hermes Orchestrator Hero](docs/assets/hero.png)
@@ -407,4 +410,49 @@ Hermes Orchestrator coordinates many runtimes to form a scalable autonomous syst
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
-MIT. See [LICENSE](LICENSE).
+
+GNU Affero General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+Commercial hosted services, managed deployments, wasm-agent-cloud infrastructure, premium connectors, private commercial layers, project names, logos, marks, and branding may be licensed or protected separately. See [COMMERCIAL.md](COMMERCIAL.md) and [TRADEMARK.md](TRADEMARK.md).
+
+## Incubation, Funding & Strategic Support
+
+Hermes Orchestrator / wasm-agent is an open-core effort to build local-first infrastructure for agent fleets, browser-backed workspaces, and shareable agentic artifacts.
+
+The public repository focuses on the local runtime, orchestration layer, plugin contracts, security posture, developer-facing architecture, and documentation.
+
+We are open to:
+
+- incubators and accelerators
+- open-source infrastructure programs
+- AI infrastructure grants
+- strategic funding
+- infrastructure credits
+- GitHub Sponsors
+- design partners
+- paid pilots
+- commercial deployment conversations
+
+Support helps accelerate:
+
+- wasm-agent local runtime
+- wasm-agent-cloud
+- hosted browser workers
+- shared-space relay
+- artifact hosting
+- cloud sync
+- security hardening
+- documentation, demos, and pilot deployments
+
+Commercial hosted services, managed deployments, premium cloud resources, Flux Credits, and wasm-agent-cloud infrastructure may live outside this public repository.
+
+See:
+
+- [Commercial Direction](./COMMERCIAL.md)
+- [Incubation & Strategic Support](./INCUBATION.md)
+- [Trademark Notice](./TRADEMARK.md)
+
+For sponsorship, incubation, funding, credits, or partnership conversations:
+
+- GitHub: https://github.com/Magaav
+- LinkedIn: https://www.linkedin.com/in/vgenaro/
