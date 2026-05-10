@@ -628,6 +628,8 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(appJs.includes("sendSharedVoiceSignal"), "shared voice must signal through shared-space room events");
   assert(appJs.includes("function maybeConnectSharedVoiceFromRoom"), "shared voice must auto-connect once a peer appears");
   assert(appJs.includes("function sharedVoiceShouldInitiateOffer"), "shared voice needs deterministic caller selection to avoid offer glare");
+  assert(appJs.includes("pendingIceCandidates"), "shared voice must buffer ICE candidates that arrive before the offer/answer");
+  assert(appJs.includes("function flushSharedVoiceIceCandidates"), "shared voice must flush early ICE candidates after remote description");
   assert(appJs.includes("waiting: true"), "shared voice must support a waiting state before the peer is present");
   assert(!appJs.includes('throw new Error("No one else is present in this shared space.")'), "shared voice must not fail just because the peer has not appeared yet");
   assert(appJs.includes("workspace.shared_space_area_applied"), "remote shared space-area applies must be observable");

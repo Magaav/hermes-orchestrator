@@ -15,6 +15,7 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ROOT = PLUGIN_ROOT / "public"
 BACKSPACE = "\ue003"
 DELETE = "\ue017"
+ARROW_RIGHT = "\ue014"
 
 
 def free_port():
@@ -269,6 +270,28 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             collapse_to_end,
         )
 
+    def focus_editor_text_offset(self, offset):
+        self.driver.execute(
+            """
+            const input = document.querySelector("#agentInput");
+            input.focus();
+            const walker = document.createTreeWalker(input, NodeFilter.SHOW_TEXT);
+            let node = walker.nextNode();
+            if (!node) {
+              input.append(document.createTextNode(""));
+              node = input.firstChild;
+            }
+            const range = document.createRange();
+            range.setStart(node, Math.min(arguments[0], node.textContent.length));
+            range.collapse(true);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return input.textContent;
+            """,
+            offset,
+        )
+
     def make_empty_rendered_code(self, caret_at_end):
         self.driver.execute(
             """
@@ -347,6 +370,22 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
         self.assertEqual(state["text"], "`test")
         self.assertEqual(state["rendered"], "")
         self.assertEqual(state["codeCount"], 0)
+
+    def test_typing_inside_empty_backticks_keeps_the_whole_word_inside(self):
+        self.set_editor_text("``")
+        self.focus_editor_text_offset(1)
+        self.driver.send_keys(self.driver.element("#agentInput"), "test")
+        state = self.editor_state()
+        self.assertEqual(state["text"], "`test`")
+        self.assertEqual(state["rendered"], "")
+        self.assertEqual(state["codeCount"], 0)
+
+        self.driver.send_keys(self.driver.element("#agentInput"), ARROW_RIGHT)
+        self.driver.send_keys(self.driver.element("#agentInput"), " ")
+        state = self.editor_state()
+        self.assertEqual(state["rendered"], "true")
+        self.assertEqual(state["codeCount"], 1)
+        self.assertEqual(state["codeText"], "test")
 
     def test_emptying_rendered_inline_code_returns_editable_backticks(self):
         state = self.set_editor_text("`test`")

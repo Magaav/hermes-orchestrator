@@ -260,9 +260,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   then shows a waiting state and auto-connects when a peer presence or incoming
   offer appears. When both peers start at the same time, deterministic device-id
   ordering chooses one caller so the other side waits and answers instead of
-  both browsers publishing unresolved offers. Deployments may configure
-  TURN/STUN servers through wasm-agent config; the UI should make join,
-  waiting, mute, and leave states visible inside the active shared space.
+  both browsers publishing unresolved offers. ICE candidates can arrive before
+  the offer/answer event in the room log, so the client buffers them until the
+  peer connection has a remote description. Deployments may configure TURN/STUN
+  servers through wasm-agent config; the UI should make join, waiting, mute,
+  and leave states visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a
   pasted invite URL as well as a raw join code. Closing context menus must not

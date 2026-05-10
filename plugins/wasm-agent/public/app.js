@@ -414,6 +414,7 @@ const state = {
     localStream: null,
     remoteStream: null,
     peerConnection: null,
+    pendingIceCandidates: [],
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
@@ -1958,6 +1959,7 @@ function resetSharedVoiceRuntime(keepError = false) {
     localStream: null,
     remoteStream: null,
     peerConnection: null,
+    pendingIceCandidates: [],
     pollInterval: 0,
     signalBusy: false,
     signalQueue: Promise.resolve(),
@@ -2133,6 +2135,30 @@ async function sendSharedVoiceSignal(type, details = {}) {
   }
 }
 
+async function flushSharedVoiceIceCandidates() {
+  const voice = state.sharedVoice;
+  const pc = voice.peerConnection;
+  if (!pc?.remoteDescription?.type || !voice.pendingIceCandidates.length) return;
+  const pending = voice.pendingIceCandidates.splice(0);
+  for (const candidate of pending) {
+    await pc.addIceCandidate(candidate);
+  }
+}
+
+async function addSharedVoiceIceCandidate(candidate) {
+  const voice = state.sharedVoice;
+  const pc = voice.peerConnection;
+  if (!pc || !candidate) return;
+  if (!pc.remoteDescription?.type) {
+    voice.pendingIceCandidates.push(candidate);
+    if (voice.pendingIceCandidates.length > 80) {
+      voice.pendingIceCandidates.splice(0, voice.pendingIceCandidates.length - 80);
+    }
+    return;
+  }
+  await pc.addIceCandidate(candidate);
+}
+
 function queueSharedVoiceRoomProcessing(room) {
   if (!state.sharedVoice.active || !room?.id) return;
   state.sharedVoice.signalQueue = state.sharedVoice.signalQueue
@@ -2176,6 +2202,7 @@ async function handleSharedVoiceSignal(event, payload, room) {
       await pc.setLocalDescription({ type: "rollback" });
     }
     await pc.setRemoteDescription(description);
+    await flushSharedVoiceIceCandidates();
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     await sendSharedVoiceSignal("answer", { sdp: pc.localDescription?.sdp || answer.sdp || "" });
@@ -2184,13 +2211,14 @@ async function handleSharedVoiceSignal(event, payload, room) {
   if (payload.type === "answer") {
     if (pc.signalingState !== "stable") {
       await pc.setRemoteDescription({ type: "answer", sdp: String(payload.sdp || "") });
+      await flushSharedVoiceIceCandidates();
     }
     return;
   }
   if (payload.type === "ice-candidate") {
     try {
       const candidate = typeof payload.candidate === "string" ? JSON.parse(payload.candidate) : payload.candidate;
-      if (candidate) await pc.addIceCandidate(candidate);
+      await addSharedVoiceIceCandidate(candidate);
     } catch (error) {
       if (!voice.ignoreOffer) throw error;
     }
@@ -5986,6 +6014,36 @@ function scheduleAgentInputMarkdownRender() {
   });
 }
 
+function agentInputSelectionTextOffset() {
+  const selection = window.getSelection?.();
+  if (!selection || !selection.isCollapsed || !els.agentInput) return -1;
+  if (!els.agentInput.contains(selection.focusNode)) return -1;
+  const range = document.createRange();
+  range.selectNodeContents(els.agentInput);
+  try {
+    range.setEnd(selection.focusNode, selection.focusOffset);
+  } catch {
+    return -1;
+  }
+  const wrap = document.createElement("div");
+  wrap.append(range.cloneContents());
+  return plainTextFromNode(wrap).length;
+}
+
+function selectionInsideRawInlineCodeSource() {
+  if (!els.agentInput || els.agentInput.dataset.renderedMarkdown === "true") return false;
+  const text = agentInputText();
+  const offset = agentInputSelectionTextOffset();
+  if (offset <= 0 || offset >= text.length) return false;
+  if (text[offset] !== "`") return false;
+  const before = text.slice(0, offset);
+  const opening = before.lastIndexOf("`");
+  if (opening < 0) return false;
+  const inner = before.slice(opening + 1);
+  if (!inner || inner.includes("\n")) return false;
+  return text[opening - 1] !== "`" && text[offset + 1] !== "`";
+}
+
 function clearAgentInput() {
   cancelAgentInputMarkdownRender();
   if (!els.agentInput) return;
@@ -6268,6 +6326,7 @@ function maybeRenderAgentInputFromEvent(event) {
     || Array.from(data).some((char) => AGENT_INPUT_MARKDOWN_TRIGGER_CHARS.has(char))
     || hasMarkdownSyntax(agentInputText())
   ) {
+    if (selectionInsideRawInlineCodeSource()) return;
     scheduleAgentInputMarkdownRender();
   }
 }

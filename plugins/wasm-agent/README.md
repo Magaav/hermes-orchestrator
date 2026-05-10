@@ -597,7 +597,9 @@ WebRTC signaling. The in-room voice button can be started before the second
 device is visible, holds a waiting state, and auto-connects through
 offer/answer/ICE events when a peer joins the same shared space. If both
 devices start voice at once, stable device-id ordering selects one caller while
-the other waits to answer, avoiding two unresolved simultaneous offers. Space config
+the other waits to answer, avoiding two unresolved simultaneous offers. Because
+browser ICE can arrive before the room's offer/answer event, clients buffer
+early candidates until the remote description is available. Space config
 keeps remote area applies paused so local drafts are left untouched until Apply
 or Revert while presence still updates. Config
 storage shows account usage plus local
