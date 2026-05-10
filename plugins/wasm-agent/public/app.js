@@ -2088,8 +2088,8 @@ async function makeSharedVoiceOffer() {
   try {
     voice.makingOffer = true;
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
-    await pc.setLocalDescription(offer);
-    await sendSharedVoiceSignal("offer", { sdp: pc.localDescription?.sdp || offer.sdp || "" });
+    const localOffer = await setSharedVoiceLocalDescription(offer);
+    await sendSharedVoiceSignal("offer", { sdp: localOffer?.sdp || offer.sdp || "" });
   } finally {
     voice.makingOffer = false;
   }

@@ -603,8 +603,9 @@ voice at once, stable device-id ordering selects one caller while the other
 waits to answer, avoiding two unresolved simultaneous offers. Because
 browser ICE can arrive before the room's offer/answer event, clients buffer
 early candidates until the remote description is available. SDP and ICE
-candidate signal text is preserved verbatim by the room store, and answer SDP
-is published even if the browser takes too long to settle its local description.
+candidate signal text is preserved verbatim by the room store, and offer/answer
+SDP is published even if the browser takes too long to settle its local
+description.
 Space config keeps remote area applies paused so local drafts are left untouched
 until Apply or Revert while presence still updates. Config
 storage shows account usage plus local
