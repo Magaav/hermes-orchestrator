@@ -606,7 +606,9 @@ avoiding two unresolved simultaneous offers. Because browser ICE can arrive
 before the room's offer/answer event, clients buffer early candidates until the
 remote description is available. SDP and ICE candidate signal text is preserved
 verbatim by the room store, and offer/answer SDP is published even if the browser
-takes too long to settle its local description.
+takes too long to settle its local description. Each local voice join also marks
+a room-log baseline, so rejoining a room ignores older offer/answer/ICE events
+instead of replaying stale calls from the retained room history.
 Space config keeps remote area applies paused so local drafts are left untouched
 until Apply or Revert while presence still updates. Config
 storage shows account usage plus local

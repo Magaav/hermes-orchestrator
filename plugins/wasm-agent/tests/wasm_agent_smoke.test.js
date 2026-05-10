@@ -318,7 +318,7 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(appJs.includes("shouldStartDevHmr"), "dev HMR automatic startup guard is missing");
   assert(appJs.includes("__WASM_AGENT_DISABLE_HMR__"), "dev HMR escape hatch is missing");
   assert(swJs.includes("/modules/hmr/dev-hmr.js"), "service worker cache must use relocated HMR module path");
-  assert(swJs.includes("wasm-agent-v41"), "service worker cache revision must invalidate stale client code");
+  assert(swJs.includes("wasm-agent-v42"), "service worker cache revision must invalidate stale client code");
   assert(swJs.includes("/modules/spaces/shared-voice-room.js"), "service worker cache must include shared voice room logic");
   assert(swJs.includes('/auth/session'), "service worker must not cache auth session reads");
   assert(swJs.includes('url.pathname.startsWith("/security-loop/")'), "service worker must not cache security loop reads");

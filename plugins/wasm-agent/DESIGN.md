@@ -269,8 +269,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   offer/answer event in the room log, so the client buffers them until the peer
   connection has a remote description. SDP and ICE candidate text is stored
   verbatim, and offer/answer SDP is published even when a browser stalls while
-  settling its local description. Deployments may configure TURN/STUN servers
-  through wasm-agent config; the UI should make
+  settling its local description. A local join records the latest room-log join
+  event as the replay baseline; after a leave/rejoin the client must not answer
+  older retained offers or candidates. Deployments may configure TURN/STUN
+  servers through wasm-agent config; the UI should make
   join, waiting, mute, and leave states visible inside the active shared space.
 - The launcher owns shared-space entry UX: right-click a user space to rename,
   share, copy its id, or delete it; Space-home owns Join Space and must accept a

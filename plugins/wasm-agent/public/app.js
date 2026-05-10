@@ -2,9 +2,12 @@ import { MODULE_DEFINITIONS } from "./modules/index.js";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
 import {
+  sharedVoiceEventCreatedMs,
+  sharedVoiceEventPrecedesBaseline,
   latestIncomingSharedVoiceOfferEvent,
   sharedVoiceIncomingOfferEvents as sharedVoiceIncomingOfferEntries,
   sharedVoiceJoinedDeviceIdSet,
+  sharedVoiceLatestJoinEvent,
   sharedVoiceShouldInitiateRoomOffer,
   sharedVoiceSignalIsFresh,
   sharedVoiceSignalPayload,
@@ -430,6 +433,8 @@ const state = {
     signalBusy: false,
     signalQueue: Promise.resolve(),
     processedSignalIds: new Set(),
+    joinedAtMs: 0,
+    joinedEventId: "",
     makingOffer: false,
     ignoreOffer: false,
     polite: true,
@@ -2005,6 +2010,8 @@ function resetSharedVoiceRuntime(keepError = false) {
     signalBusy: false,
     signalQueue: Promise.resolve(),
     processedSignalIds: new Set(),
+    joinedAtMs: 0,
+    joinedEventId: "",
     makingOffer: false,
     ignoreOffer: false,
     polite: true,
@@ -2023,6 +2030,28 @@ function startSharedVoicePolling() {
       renderSharedVoice();
     });
   }, pollMs);
+}
+
+function markSharedVoiceJoinBaseline(room = activeSharedRoom()) {
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  const item = sharedVoiceLatestJoinEvent(room?.events, currentDeviceId, {
+    kind: SHARED_VOICE_SIGNAL_KIND,
+    schema: SHARED_VOICE_SIGNAL_SCHEMA,
+    staleMs: SHARED_VOICE_STALE_MS,
+  });
+  const event = item?.event || null;
+  const joinedAtMs = sharedVoiceEventCreatedMs(event) || Date.now();
+  state.sharedVoice.joinedAtMs = Math.max(Number(state.sharedVoice.joinedAtMs || 0), joinedAtMs);
+  if (event?.id) state.sharedVoice.joinedEventId = event.id;
+}
+
+function sharedVoiceEventBeforeCurrentJoin(event, payload) {
+  if (!payload || payload.type === "join") return false;
+  return sharedVoiceEventPrecedesBaseline(
+    event,
+    Number(state.sharedVoice.joinedAtMs || 0),
+    state.sharedVoice.joinedEventId || "",
+  );
 }
 
 function sharedVoicePeerStates() {
@@ -2344,6 +2373,7 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
   if (nextRoom?.id) {
     state.sharedRooms[nextRoom.id] = nextRoom;
     renderSharedVoice();
+    if (type === "join") markSharedVoiceJoinBaseline(nextRoom);
     queueSharedVoiceRoomProcessing(nextRoom);
   }
   return nextRoom;
@@ -2507,6 +2537,10 @@ async function processSharedVoiceRoom(room) {
       if (event.kind !== SHARED_VOICE_SIGNAL_KIND || !sharedVoiceEventIsFresh(event)) continue;
       const payload = sharedVoicePayload(event);
       if (!payload) continue;
+      if (sharedVoiceEventBeforeCurrentJoin(event, payload)) {
+        voice.processedSignalIds.add(event.id);
+        continue;
+      }
       const handled = await handleSharedVoiceSignal(event, payload, room);
       if (handled) voice.processedSignalIds.add(event.id);
     }
@@ -2551,6 +2585,7 @@ async function startSharedVoice() {
     state.sharedVoice.localStream = stream;
     startSharedVoicePolling();
     const joinedRoom = await sendSharedVoiceRoomSignal("join", { joined: true });
+    markSharedVoiceJoinBaseline(joinedRoom || room);
     recordUserEvent("workspace.shared_voice_started", {
       target: `shared-space:${room.id}`,
       summary: "Started shared voice",

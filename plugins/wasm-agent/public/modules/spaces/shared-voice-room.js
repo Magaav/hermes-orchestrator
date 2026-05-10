@@ -15,6 +15,11 @@ export function sharedVoiceSignalIsFresh(event, nowMs = Date.now(), staleMs = DE
   return nowMs - created <= staleMs;
 }
 
+export function sharedVoiceEventCreatedMs(event) {
+  const created = Date.parse(event?.created_at || "");
+  return Number.isFinite(created) ? created : 0;
+}
+
 export function sharedVoiceShouldInitiateRoomOffer(currentDeviceId, peerDeviceId) {
   if (!currentDeviceId || !peerDeviceId) return false;
   return String(currentDeviceId) > String(peerDeviceId);
@@ -44,6 +49,24 @@ export function sharedVoiceJoinedDeviceIdSet(events, options = {}) {
     if (payload.type === "join" && !left.has(deviceId)) joined.add(deviceId);
   }
   return joined;
+}
+
+export function sharedVoiceLatestJoinEvent(events, currentDeviceId, options = {}) {
+  const deviceId = String(currentDeviceId || "").trim();
+  if (!deviceId) return null;
+  for (const item of sharedVoiceSignalEvents(events, options).reverse()) {
+    if (item.payload.type === "join" && String(item.payload.from_device_id || "").trim() === deviceId) {
+      return item;
+    }
+  }
+  return null;
+}
+
+export function sharedVoiceEventPrecedesBaseline(event, baselineMs = 0, baselineId = "") {
+  const createdMs = sharedVoiceEventCreatedMs(event);
+  if (!baselineMs || !createdMs) return false;
+  if (createdMs < baselineMs) return true;
+  return Boolean(baselineId && createdMs === baselineMs && String(event?.id || "") < String(baselineId));
 }
 
 export function sharedVoiceIncomingOfferEvents(events, currentDeviceId, options = {}) {

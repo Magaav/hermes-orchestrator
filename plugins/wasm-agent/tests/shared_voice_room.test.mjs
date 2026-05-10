@@ -63,6 +63,19 @@ function voiceEvent(id, type, from, to = "", callId = "voice-a", offsetMs = 0, e
 }
 
 {
+  const events = [
+    voiceEvent("offer-old", "offer", "alpha", "beta", "voice-old", 0, { sdp: "old" }),
+    voiceEvent("beta-leave", "leave", "beta", "alpha", "voice-old", 1000),
+    voiceEvent("beta-join", "join", "beta", "", "voice-room", 2000),
+    voiceEvent("offer-new", "offer", "alpha", "beta", "voice-new", 3000, { sdp: "new" }),
+  ];
+  const join = room.sharedVoiceLatestJoinEvent(events, "beta", { nowMs: baseMs + 4000 });
+  assert.equal(join.event.id, "beta-join");
+  assert.equal(room.sharedVoiceEventPrecedesBaseline(events[0], room.sharedVoiceEventCreatedMs(join.event), join.event.id), true);
+  assert.equal(room.sharedVoiceEventPrecedesBaseline(events[3], room.sharedVoiceEventCreatedMs(join.event), join.event.id), false);
+}
+
+{
   const offers = room.sharedVoiceIncomingOfferEvents([
     voiceEvent("offer-old", "offer", "alpha", "beta", "voice-old", 0, { sdp: "old" }),
     voiceEvent("hangup-beta", "hangup", "beta", "alpha", "voice-old", 1000),
