@@ -228,6 +228,44 @@ class WisSharedSpaceTest(unittest.TestCase):
         owner_device_id = owner_room["current_device_id"]
         member_device_id = member_room["current_device_id"]
 
+        static_server.shared_space_room(
+            self.server,
+            self.owner,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-room",
+                    "type": "join",
+                    "from_device_id": owner_device_id,
+                    "to_device_id": "",
+                    "joined": True,
+                },
+            },
+            owner_handler,
+        )
+        join_room = static_server.shared_space_room(
+            self.server,
+            self.member,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-room",
+                    "type": "join",
+                    "from_device_id": member_device_id,
+                    "to_device_id": "",
+                    "joined": True,
+                },
+            },
+            member_handler,
+        )["room"]
         offer_room = static_server.shared_space_room(
             self.server,
             self.owner,
@@ -286,6 +324,8 @@ class WisSharedSpaceTest(unittest.TestCase):
             owner_handler,
         )["room"]
 
+        self.assertEqual(join_room["events"][-1]["payload"]["type"], "join")
+        self.assertEqual(join_room["events"][-1]["payload"]["from_device_id"], member_device_id)
         self.assertEqual(offer_room["online_count"], 2)
         self.assertEqual(answer_room["events"][-1]["payload"]["type"], "answer")
         self.assertEqual(answer_room["events"][-1]["payload"]["sdp"], "v=0\\r\\no=answer\\r\\n")

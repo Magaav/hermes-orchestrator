@@ -593,11 +593,12 @@ the space metadata so joined/shared spaces open with the same area on every
 device. Open clients refresh that shared space metadata on focus, during the
 regular workspace refresh loop, and through a focused `2.5s` active shared-space
 room heartbeat; shared-space voice uses that room heartbeat for presence and
-WebRTC signaling. The in-room voice button can be started before the second
-device is visible, holds a waiting state, and auto-connects through
-offer/answer/ICE events when a peer joins the same shared space. If both
-devices start voice at once, stable device-id ordering selects one caller while
-the other waits to answer, avoiding two unresolved simultaneous offers. Because
+WebRTC signaling. The in-room voice button joins the room-level voice session,
+publishes a voice `join` event, waits for another joined voice peer, and then
+auto-connects through offer/answer/ICE events. Passive room presence is not
+enough to receive a call; a device must join voice or leave it. If both devices
+join voice at once, stable device-id ordering selects one caller while the
+other waits to answer, avoiding two unresolved simultaneous offers. Because
 browser ICE can arrive before the room's offer/answer event, clients buffer
 early candidates until the remote description is available. Space config
 keeps remote area applies paused so local drafts are left untouched until Apply

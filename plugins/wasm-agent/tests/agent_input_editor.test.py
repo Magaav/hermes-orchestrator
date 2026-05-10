@@ -334,6 +334,23 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             caret_offset,
         )
 
+    def focus_rendered_code_end(self):
+        self.driver.execute(
+            """
+            const input = document.querySelector("#agentInput");
+            const code = input.querySelector("code");
+            input.focus();
+            const text = code?.firstChild || code;
+            const range = document.createRange();
+            range.setStart(text, text.nodeType === Node.TEXT_NODE ? text.textContent.length : text.childNodes.length);
+            range.collapse(true);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return input.innerHTML;
+            """
+        )
+
     def test_empty_backtick_pair_stays_literal_when_input_starts_with_it(self):
         state = self.set_editor_text("``")
         self.assertEqual(state["text"], "``")
@@ -455,6 +472,19 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
         self.assertEqual(state["text"], "`test")
         self.assertEqual(state["rendered"], "")
         self.assertEqual(state["codeCount"], 0)
+
+    def test_typing_repeated_chars_inside_rendered_inline_code_stays_inside(self):
+        state = self.set_editor_text("`test`")
+        self.assertEqual(state["rendered"], "true")
+        self.focus_rendered_code_end()
+        input_id = self.driver.element("#agentInput")
+        for char in "aaa":
+            self.driver.send_keys(input_id, char)
+        state = self.editor_state()
+        self.assertEqual(state["rendered"], "true")
+        self.assertEqual(state["codeCount"], 1)
+        self.assertEqual(state["codeText"], "testaaa")
+        self.assertNotIn("`testa`aa", state["text"])
 
     def test_deleting_inside_empty_rendered_code_unwraps_to_one_backtick(self):
         self.make_empty_rendered_code_with_inner_caret(1)

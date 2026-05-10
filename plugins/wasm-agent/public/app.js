@@ -1870,6 +1870,31 @@ function latestIncomingSharedVoiceOffer(room = activeSharedRoom()) {
   return null;
 }
 
+function sharedVoiceJoinedDeviceIds(room = activeSharedRoom()) {
+  const events = Array.isArray(room?.events) ? room.events : [];
+  const joined = new Set();
+  const left = new Set();
+  for (const event of [...events].reverse()) {
+    if (event.kind !== SHARED_VOICE_SIGNAL_KIND || !sharedVoiceEventIsFresh(event)) continue;
+    const payload = sharedVoicePayload(event);
+    const deviceId = cleanText(payload?.from_device_id || "", "");
+    if (!deviceId || joined.has(deviceId)) continue;
+    if (payload.type === "leave" || payload.type === "hangup") {
+      left.add(deviceId);
+      continue;
+    }
+    if (payload.type === "join" && !left.has(deviceId)) {
+      joined.add(deviceId);
+    }
+  }
+  return joined;
+}
+
+function sharedVoiceJoinedPeerCandidates(room = activeSharedRoom()) {
+  const joinedDeviceIds = sharedVoiceJoinedDeviceIds(room);
+  return sharedVoicePeerCandidates(room).filter((entry) => joinedDeviceIds.has(entry.device_id));
+}
+
 function sharedVoiceMediaUnavailableReason() {
   if (!window.isSecureContext) return "HTTPS required";
   if (!window.RTCPeerConnection) return "WebRTC unavailable";
@@ -1884,6 +1909,7 @@ function renderSharedVoice() {
   const voice = state.sharedVoice;
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
   const candidates = sharedVoicePeerCandidates(room);
+  const joinedCandidates = sharedVoiceJoinedPeerCandidates(room);
   const incoming = latestIncomingSharedVoiceOffer(room);
   const visible = Boolean(space && state.config?.features?.sharedVoice?.enabled !== false);
   els.sharedVoiceBar.hidden = !visible;
@@ -1923,7 +1949,7 @@ function renderSharedVoice() {
     if (!currentDeviceId) text = "syncing";
     if (mediaProblem) text = mediaProblem;
     if (!candidates.length && !voice.active && !mediaProblem && currentDeviceId) text = "alone";
-    if (candidates.length && !voice.active) text = "voice ready";
+    if (joinedCandidates.length && !voice.active) text = "voice ready";
     if (incoming && !voice.active) text = "incoming";
     if (voice.waiting) text = "waiting";
     if (voice.connecting) text = `calling ${voice.peerLabel || "peer"}`;
@@ -2078,7 +2104,7 @@ async function maybeConnectSharedVoiceFromRoom(room) {
   const incoming = latestIncomingSharedVoiceOffer(room);
   const peer = incoming
     ? sharedVoicePeerByDevice(incoming.payload.from_device_id, room)
-    : sharedVoicePeerCandidates(room)[0];
+    : sharedVoiceJoinedPeerCandidates(room)[0];
   if (!peer?.device_id) {
     voice.waiting = true;
     voice.connecting = false;
@@ -2099,14 +2125,16 @@ async function maybeConnectSharedVoiceFromRoom(room) {
   return connectSharedVoiceToPeer(room, peer, incoming);
 }
 
-async function sendSharedVoiceSignal(type, details = {}) {
+async function sendSharedVoiceRoomSignal(type, details = {}) {
   const space = sharedUserSpaceForPanel();
   const room = activeSharedRoom();
   const voice = state.sharedVoice;
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
-  if (!space || !room?.id || !currentDeviceId || !voice.peerDeviceId || !voice.callId) {
+  if (!space || !room?.id || !currentDeviceId) {
     throw new Error("Shared voice is not ready.");
   }
+  const toDeviceId = cleanText(details.to_device_id || voice.peerDeviceId || "", "");
+  const callId = cleanText(details.call_id || voice.callId || `voice_room_${room.id}`, "");
   const payload = await fetchJson("/spaces/room", {
     method: "POST",
     timeoutMs: 7000,
@@ -2117,11 +2145,11 @@ async function sendSharedVoiceSignal(type, details = {}) {
       shared_space_id: space.shared_space_id,
       payload: {
         voice_schema: SHARED_VOICE_SIGNAL_SCHEMA,
-        call_id: voice.callId,
+        call_id: callId,
         type,
         from_user_id: sharedVoiceCurrentUserId(room),
         from_device_id: currentDeviceId,
-        to_device_id: voice.peerDeviceId,
+        to_device_id: toDeviceId,
         muted: voice.muted,
         ...details,
       },
@@ -2133,6 +2161,15 @@ async function sendSharedVoiceSignal(type, details = {}) {
     renderSharedVoice();
     queueSharedVoiceRoomProcessing(nextRoom);
   }
+  return nextRoom;
+}
+
+async function sendSharedVoiceSignal(type, details = {}) {
+  const voice = state.sharedVoice;
+  if (!voice.peerDeviceId || !voice.callId) {
+    throw new Error("Shared voice is not ready.");
+  }
+  return sendSharedVoiceRoomSignal(type, details);
 }
 
 async function flushSharedVoiceIceCandidates() {
@@ -2279,13 +2316,14 @@ async function startSharedVoice() {
     });
     state.sharedVoice.localStream = stream;
     startSharedVoicePolling();
+    const joinedRoom = await sendSharedVoiceRoomSignal("join", { joined: true });
     recordUserEvent("workspace.shared_voice_started", {
       target: `shared-space:${room.id}`,
       summary: "Started shared voice",
       data: { shared_space_id: room.id },
       redacted: true,
     });
-    await maybeConnectSharedVoiceFromRoom(room);
+    await maybeConnectSharedVoiceFromRoom(joinedRoom || room);
   } catch (error) {
     state.sharedVoice.error = truncateText(error.message || "voice failed", 80);
     resetSharedVoiceRuntime(true);
@@ -2302,6 +2340,9 @@ async function stopSharedVoice(options = {}) {
   const roomId = voice.roomId || "";
   if ((voice.active || voice.connecting) && options.notify !== false && voice.peerDeviceId && voice.callId) {
     await sendSharedVoiceSignal("hangup", { reason: cleanText(options.reason, "ended") }).catch(() => {});
+  }
+  if ((voice.active || voice.connecting) && options.notify !== false) {
+    await sendSharedVoiceRoomSignal("leave", { reason: cleanText(options.reason, "ended") }).catch(() => {});
   }
   resetSharedVoiceRuntime();
   recordUserEvent("workspace.shared_voice_stopped", {
@@ -6281,8 +6322,6 @@ function maybeEscapeInlineCodeBeforeInput(event) {
     return;
   }
   if (!insertingText || !event.data) return;
-  const code = selectionInlineCodeAtEnd();
-  if (code) placeCaretAfterNode(code);
 }
 
 function handleInlineCodeNavigation(event) {
@@ -6317,6 +6356,9 @@ function maybeRenderAgentInputFromEvent(event) {
   const inputType = String(event?.inputType || "");
   const data = String(event?.data || "");
   const rendered = els.agentInput?.dataset.renderedMarkdown === "true";
+  if (rendered && inputType.startsWith("insert") && selectionInlineCode()) {
+    return;
+  }
   if (inputType.startsWith("delete") && rendered) {
     scheduleAgentInputMarkdownRender();
     return;
