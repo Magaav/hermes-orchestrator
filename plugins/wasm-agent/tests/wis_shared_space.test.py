@@ -112,9 +112,17 @@ class WisSharedSpaceTest(unittest.TestCase):
             FakeHandler(device_id="member-device"),
         )["room"]
 
+        member_device_id = static_server.request_account_device_id(
+            self.member,
+            FakeHandler(device_id="member-device"),
+        )
         self.assertEqual(room["schema"], static_server.SHARED_SPACE_ROOM_SCHEMA)
         self.assertEqual(room["member_count"], 2)
         self.assertEqual(room["online_count"], 1)
+        self.assertEqual(room["current_device_id"], member_device_id)
+        self.assertEqual(room["current_user_id"], self.member["id"])
+        self.assertEqual(room["presence"][0]["device_id"], member_device_id)
+        self.assertEqual(room["presence"][0]["user_label"], self.member["email"])
         self.assertEqual(room["events"][-1]["payload"]["api_token"], "[redacted]")
 
         with self.assertRaises(static_server.BrowserError) as denied:
@@ -125,6 +133,63 @@ class WisSharedSpaceTest(unittest.TestCase):
                 FakeHandler(device_id="outsider-device"),
             )
         self.assertEqual(denied.exception.status, static_server.HTTPStatus.FORBIDDEN)
+
+    def test_shared_voice_signal_preserves_sdp_and_targets_present_devices(self) -> None:
+        self.create_owner_space()
+        shared = static_server.share_user_space(self.server, self.owner, {
+            "space_id": "playground",
+            "title": "Playground",
+        })["shared_space"]
+        static_server.join_shared_space(
+            self.server,
+            self.member,
+            {"join_code": shared["join_code"]},
+            FakeHandler(device_id="member-device"),
+        )
+        owner_handler = FakeHandler(device_id="owner-device")
+        member_handler = FakeHandler(device_id="member-device")
+        owner_room = static_server.shared_space_room(
+            self.server,
+            self.owner,
+            {
+                "action": "presence",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+            },
+            owner_handler,
+        )["room"]
+        owner_device_id = owner_room["current_device_id"]
+        member_device_id = static_server.request_account_device_id(self.member, member_handler)
+        long_sdp = "v=0\\r\\n" + ("a=rtpmap:111 opus/48000/2\\r\\n" * 360)
+
+        room = static_server.shared_space_room(
+            self.server,
+            self.member,
+            {
+                "action": "signal",
+                "kind": "voice-signal",
+                "shared_space_id": shared["id"],
+                "space_id": "playground",
+                "payload": {
+                    "voice_schema": "hermes.wasm_agent.shared_space.voice_signal.v1",
+                    "call_id": "voice-test",
+                    "type": "offer",
+                    "from_device_id": member_device_id,
+                    "to_device_id": owner_device_id,
+                    "sdp": long_sdp,
+                    "api_token": "placeholder-value",
+                },
+            },
+            member_handler,
+        )["room"]
+
+        self.assertEqual(room["online_count"], 2)
+        self.assertEqual({entry["device_id"] for entry in room["presence"]}, {owner_device_id, member_device_id})
+        event = room["events"][-1]
+        self.assertEqual(event["kind"], "voice-signal")
+        self.assertEqual(event["payload"]["sdp"], long_sdp)
+        self.assertEqual(event["payload"]["api_token"], "[redacted]")
+        self.assertEqual(event["payload"]["to_device_id"], owner_device_id)
 
     def test_wis_patch_applies_to_shared_artifact_scope(self) -> None:
         self.create_owner_space()

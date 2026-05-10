@@ -88,6 +88,8 @@ SHARED_SPACE_ROOM_EVENT_SCHEMA = "hermes.wasm_agent.shared_space.room_event.v1"
 SHARED_SPACE_PRESENCE_SCHEMA = "hermes.wasm_agent.shared_space.presence.v1"
 SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
+SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
+SHARED_SPACE_SIGNAL_TEXT_LIMIT = 24000
 GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
 AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
 AGENT_MUTATION_ALLOWED_EXTENSIONS = {
@@ -240,6 +242,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                         "hostBrowser": {
                             "enabled": browser_feature_enabled(self),
                             "publicDefaultDisabled": public_deployment(self),
+                        },
+                        "sharedVoice": {
+                            "enabled": True,
+                            "iceServers": shared_voice_ice_servers(),
+                            "signalingPollMs": 900,
                         },
                     },
                     "compareWith": {
@@ -652,7 +659,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
-        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(self), geolocation=(), payment=()")
         if public_deployment(self):
             self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         self.send_header("Content-Security-Policy", content_security_policy(self))
@@ -816,6 +823,41 @@ def browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> bo
     return not public_deployment(handler)
 
 
+def shared_voice_ice_servers() -> list[dict[str, Any]]:
+    raw = os.getenv("HERMES_WASM_AGENT_VOICE_ICE_SERVERS_JSON", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            servers = []
+            for item in parsed[:8]:
+                if not isinstance(item, dict):
+                    continue
+                urls = item.get("urls")
+                if isinstance(urls, str):
+                    clean_urls: str | list[str] = clipped(urls, 400)
+                elif isinstance(urls, list):
+                    clean_urls = [clipped(str(url), 400) for url in urls[:8] if str(url).strip()]
+                else:
+                    continue
+                server: dict[str, Any] = {"urls": clean_urls}
+                if item.get("username"):
+                    server["username"] = clipped(str(item.get("username")), 240)
+                if item.get("credential"):
+                    server["credential"] = clipped(str(item.get("credential")), 500)
+                servers.append(server)
+            if servers:
+                return servers
+    stun_urls = [
+        clipped(item, 400)
+        for item in os.getenv("HERMES_WASM_AGENT_VOICE_STUN_URLS", "stun:stun.l.google.com:19302").split(",")
+        if item.strip()
+    ]
+    return [{"urls": stun_urls or ["stun:stun.l.google.com:19302"]}]
+
+
 def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> None:
     if browser_feature_enabled(handler):
         return
@@ -832,10 +874,10 @@ def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = Non
 
 def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> str:
     img_src = "'self' data: blob: https://accounts.google.com"
-    connect_src = "'self' https://accounts.google.com"
+    connect_src = "'self' https://accounts.google.com stun: turn: turns:"
     if not public_deployment(handler):
         img_src = "'self' data: blob: https:"
-        connect_src = "'self' ws: wss: http://127.0.0.1:* http://localhost:*"
+        connect_src = "'self' ws: wss: http://127.0.0.1:* http://localhost:* stun: turn: turns:"
     script_src = "'self' https://accounts.google.com https://cdn.jsdelivr.net"
     if not public_deployment(handler):
         script_src = "'self' 'unsafe-inline' https://accounts.google.com https://cdn.jsdelivr.net"
@@ -984,6 +1026,12 @@ def user_id(user: dict[str, Any] | None) -> str:
 
 def user_is_admin(user: dict[str, Any] | None) -> bool:
     return str((user or {}).get("role") or "") == "admin" or is_admin_email(str((user or {}).get("email") or ""))
+
+
+def public_user_label(user: dict[str, Any] | None) -> str:
+    if not user:
+        return "Guest"
+    return clipped(str(user.get("email") or user.get("name") or user_id(user) or "User"), 120)
 
 
 def safe_state_id(raw: str, fallback: str = "space") -> str:
@@ -2153,6 +2201,8 @@ def sanitize_room_event_payload(value: Any, *, depth: int = 0) -> Any:
                 continue
             if re.search(r"password|secret|token|api[_-]?key|authorization|cookie|session", clean_key, re.I):
                 clean[clean_key] = "[redacted]"
+            elif clean_key in {"sdp", "candidate"}:
+                clean[clean_key] = clipped(str(item), SHARED_SPACE_SIGNAL_TEXT_LIMIT)
             else:
                 clean[clean_key] = sanitize_room_event_payload(item, depth=depth + 1)
         return clean
@@ -2191,6 +2241,7 @@ def touch_shared_space_presence(
         "device_id": device_id,
         "space_id": safe_state_id(space_id, ""),
         "label": browser_label(user_agent),
+        "user_label": public_user_label(user),
         "last_seen": now,
     }
     presence["entries"] = entries
@@ -2214,6 +2265,28 @@ def shared_space_presence_summary(presence: dict[str, Any], now: int | None = No
         if isinstance(item, dict) and now - int(item.get("last_seen") or 0) <= SHARED_SPACE_PRESENCE_TTL_SEC
     ]
     return {"online_count": len(online_users), "online_device_count": len(online_devices)}
+
+
+def public_shared_space_presence_entries(presence: dict[str, Any], now: int | None = None) -> list[dict[str, Any]]:
+    now = now or int(time.time())
+    entries = presence.get("entries") if isinstance(presence.get("entries"), dict) else {}
+    visible = []
+    for item in entries.values():
+        if not isinstance(item, dict):
+            continue
+        last_seen = int(item.get("last_seen") or 0)
+        if now - last_seen > SHARED_SPACE_PRESENCE_TTL_SEC:
+            continue
+        visible.append({
+            "user_id": safe_state_id(str(item.get("user_id") or ""), ""),
+            "device_id": safe_state_id(str(item.get("device_id") or ""), ""),
+            "space_id": safe_state_id(str(item.get("space_id") or ""), ""),
+            "label": clipped(str(item.get("label") or "Browser"), 80),
+            "user_label": clipped(str(item.get("user_label") or item.get("user_id") or "User"), 120),
+            "last_seen": last_seen,
+        })
+    visible.sort(key=lambda entry: (entry["user_label"].lower(), entry["device_id"]))
+    return visible
 
 
 def read_shared_space_events(server: WasmAgentServer, shared_space_id: str) -> list[dict[str, Any]]:
@@ -2252,6 +2325,7 @@ def public_shared_space_room(
     record: dict[str, Any],
     user: dict[str, Any] | None,
     presence: dict[str, Any] | None = None,
+    current_device_id: str = "",
 ) -> dict[str, Any]:
     sid = str(record.get("id") or "")
     now = int(time.time())
@@ -2269,7 +2343,10 @@ def public_shared_space_room(
         "capabilities": record.get("capabilities") if isinstance(record.get("capabilities"), list) else [],
         "updated_at": str(record.get("updated_at") or ""),
         "presence_ttl_sec": SHARED_SPACE_PRESENCE_TTL_SEC,
-        "events": read_shared_space_events(server, sid)[-40:],
+        "presence": public_shared_space_presence_entries(current_presence, now),
+        "current_user_id": user_id(user),
+        "current_device_id": safe_state_id(current_device_id, ""),
+        "events": read_shared_space_events(server, sid)[-SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT:],
         "joined": user_can_access_shared_space(record, user),
     }
 
@@ -2291,6 +2368,7 @@ def shared_space_room(
     action = str(body.get("action") or "presence").strip().lower()
     space_id = safe_state_id(str(body.get("space_id") or record.get("local_space_id") or ""), "")
     presence = read_shared_space_presence(server, shared_space_id)
+    current_device_id = request_account_device_id(user, handler)
     if action in {"presence", "join", "heartbeat"}:
         presence = touch_shared_space_presence(server, user, handler, shared_space_id, space_id)
     elif action in {"event", "message", "signal"}:
@@ -2298,7 +2376,7 @@ def shared_space_room(
         append_shared_space_room_event(server, user, shared_space_id, body)
     elif action != "read":
         raise BrowserError("invalid_space_room_action", "Unsupported shared-space room action.")
-    return {"ok": True, "room": public_shared_space_room(server, record, user, presence)}
+    return {"ok": True, "room": public_shared_space_room(server, record, user, presence, current_device_id)}
 
 
 def copy_user_wis_to_shared(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str, shared_space_id: str) -> None:

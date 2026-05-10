@@ -42,6 +42,11 @@ const POINTER_MOVE_SAMPLE_MS = 80;
 const WHEEL_TRACE_SAMPLE_MS = 120;
 const SCROLL_TRACE_SAMPLE_MS = 180;
 const SHARED_SPACE_SYNC_POLL_MS = 2500;
+const SHARED_VOICE_SIGNAL_KIND = "voice-signal";
+const SHARED_VOICE_SIGNAL_SCHEMA = "hermes.wasm_agent.shared_space.voice_signal.v1";
+const SHARED_VOICE_POLL_MS = 900;
+const SHARED_VOICE_STALE_MS = 2 * 60 * 1000;
+const SHARED_VOICE_DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
 const WIS_EXPORT_PREVIEW_LIMIT = 16000;
 const NODE_ACTIVITY_FRESH_GRACE_SEC = 5;
 const BRIDGE_TASK_ACTIVE_MAX_AGE_MS = 45 * 60 * 1000;
@@ -254,6 +259,11 @@ const els = {
   securityPanelRun: document.querySelector("#securityPanelRun"),
   securityPanelRuns: document.querySelector("#securityPanelRuns"),
   securityPanelFindingQueue: document.querySelector("#securityPanelFindingQueue"),
+  sharedVoiceBar: document.querySelector("#sharedVoiceBar"),
+  sharedVoiceButton: document.querySelector("#sharedVoiceButton"),
+  sharedVoiceMuteButton: document.querySelector("#sharedVoiceMuteButton"),
+  sharedVoiceStatus: document.querySelector("#sharedVoiceStatus"),
+  sharedVoiceRemoteAudio: document.querySelector("#sharedVoiceRemoteAudio"),
   agentOverlay: document.querySelector("#agentOverlay"),
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
   agentPanel: document.querySelector("#agentPanel"),
@@ -388,6 +398,28 @@ const state = {
   sharedSpaceSyncBusy: false,
   lastSharedSpaceSyncAt: "",
   sharedRooms: {},
+  sharedVoice: {
+    active: false,
+    connecting: false,
+    muted: false,
+    status: "idle",
+    error: "",
+    roomId: "",
+    callId: "",
+    peerDeviceId: "",
+    peerUserId: "",
+    peerLabel: "",
+    localStream: null,
+    remoteStream: null,
+    peerConnection: null,
+    pollInterval: 0,
+    signalBusy: false,
+    signalQueue: Promise.resolve(),
+    processedSignalIds: new Set(),
+    makingOffer: false,
+    ignoreOffer: false,
+    polite: true,
+  },
   configAreaDragActive: false,
   agentInputRenderFrame: 0,
   agentInputRendering: false,
@@ -1740,8 +1772,461 @@ async function loadSharedSpaceRoom(options = {}) {
   if (room?.id) {
     state.sharedRooms[room.id] = room;
     applySharedRoomArea(room, options.origin || "shared-room");
+    renderSharedVoice();
+    queueSharedVoiceRoomProcessing(room);
   }
   return room;
+}
+
+function sharedVoiceIceServers() {
+  const configured = state.config?.features?.sharedVoice?.iceServers;
+  const source = Array.isArray(configured) && configured.length ? configured : SHARED_VOICE_DEFAULT_ICE_SERVERS;
+  const servers = source.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const rawUrls = item.urls;
+    const urls = Array.isArray(rawUrls)
+      ? rawUrls.map((url) => String(url || "").trim()).filter(Boolean)
+      : String(rawUrls || "").trim();
+    if (!urls || (Array.isArray(urls) && !urls.length)) return null;
+    const server = { urls };
+    if (item.username) server.username = String(item.username);
+    if (item.credential) server.credential = String(item.credential);
+    return server;
+  }).filter(Boolean);
+  return servers.length ? servers : SHARED_VOICE_DEFAULT_ICE_SERVERS;
+}
+
+function sharedVoicePayload(event) {
+  const payload = event?.payload;
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.voice_schema !== SHARED_VOICE_SIGNAL_SCHEMA) return null;
+  return payload;
+}
+
+function sharedVoiceEventIsFresh(event) {
+  const created = Date.parse(event?.created_at || "");
+  if (!Number.isFinite(created)) return true;
+  return Date.now() - created <= SHARED_VOICE_STALE_MS;
+}
+
+function sharedVoicePresenceEntries(room = activeSharedRoom()) {
+  const entries = Array.isArray(room?.presence) ? room.presence : [];
+  return entries.filter((entry) => entry && typeof entry === "object" && entry.device_id);
+}
+
+function sharedVoiceCurrentDeviceId(room = activeSharedRoom()) {
+  return cleanText(room?.current_device_id, "");
+}
+
+function sharedVoiceCurrentUserId(room = activeSharedRoom()) {
+  return cleanText(room?.current_user_id, state.authUser?.id || "");
+}
+
+function sharedVoicePeerCandidates(room = activeSharedRoom()) {
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  const currentUserId = sharedVoiceCurrentUserId(room);
+  return sharedVoicePresenceEntries(room)
+    .filter((entry) => entry.device_id !== currentDeviceId)
+    .filter((entry) => entry.user_id !== currentUserId || entry.device_id !== currentDeviceId);
+}
+
+function sharedVoicePeerByDevice(deviceId, room = activeSharedRoom()) {
+  return sharedVoicePresenceEntries(room).find((entry) => entry.device_id === deviceId) || null;
+}
+
+function sharedVoicePeerLabel(peer) {
+  if (!peer) return "peer";
+  const user = cleanText(peer.user_label, "");
+  const device = cleanText(peer.label, "");
+  return user && device ? `${user} / ${device}` : user || device || "peer";
+}
+
+function latestIncomingSharedVoiceOffer(room = activeSharedRoom()) {
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  if (!currentDeviceId) return null;
+  const events = Array.isArray(room?.events) ? room.events : [];
+  const closedCallIds = new Set();
+  for (const event of [...events].reverse()) {
+    if (event.kind !== SHARED_VOICE_SIGNAL_KIND || !sharedVoiceEventIsFresh(event)) continue;
+    const payload = sharedVoicePayload(event);
+    if (!payload) continue;
+    if (payload.type === "hangup" && (payload.to_device_id === currentDeviceId || payload.from_device_id === currentDeviceId)) {
+      closedCallIds.add(payload.call_id);
+      continue;
+    }
+    if (payload.type !== "offer" || closedCallIds.has(payload.call_id)) continue;
+    if (payload.to_device_id !== currentDeviceId || payload.from_device_id === currentDeviceId) continue;
+    return { event, payload };
+  }
+  return null;
+}
+
+function renderSharedVoice() {
+  if (!els.sharedVoiceBar) return;
+  const space = sharedUserSpaceForPanel();
+  const room = activeSharedRoom();
+  const voice = state.sharedVoice;
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  const candidates = sharedVoicePeerCandidates(room);
+  const incoming = latestIncomingSharedVoiceOffer(room);
+  const visible = Boolean(space && state.config?.features?.sharedVoice?.enabled !== false);
+  els.sharedVoiceBar.hidden = !visible;
+  if (!visible) return;
+  const connected = voice.active && voice.peerConnection
+    && ["connected", "completed"].includes(voice.peerConnection.iceConnectionState);
+  els.sharedVoiceBar.classList.toggle("is-active", Boolean(voice.active && !voice.error));
+  els.sharedVoiceBar.classList.toggle("is-connecting", Boolean(voice.connecting && !connected && !voice.error));
+  els.sharedVoiceBar.classList.toggle("is-error", Boolean(voice.error));
+  if (els.sharedVoiceButton) {
+    const mediaReady = Boolean(window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia);
+    els.sharedVoiceButton.disabled = !mediaReady || (!voice.active && !incoming && !candidates.length);
+    const label = voice.active ? "Leave shared voice" : incoming ? "Answer shared voice" : "Join shared voice";
+    els.sharedVoiceButton.title = mediaReady ? label : "Voice requires WebRTC microphone support";
+    els.sharedVoiceButton.setAttribute("aria-label", els.sharedVoiceButton.title);
+  }
+  if (els.sharedVoiceMuteButton) {
+    els.sharedVoiceMuteButton.hidden = !voice.active;
+    els.sharedVoiceMuteButton.disabled = !voice.localStream;
+    els.sharedVoiceMuteButton.setAttribute("aria-pressed", voice.muted ? "true" : "false");
+    els.sharedVoiceMuteButton.title = voice.muted ? "Unmute microphone" : "Mute microphone";
+    els.sharedVoiceMuteButton.setAttribute("aria-label", els.sharedVoiceMuteButton.title);
+  }
+  if (els.sharedVoiceRemoteAudio && voice.remoteStream && els.sharedVoiceRemoteAudio.srcObject !== voice.remoteStream) {
+    els.sharedVoiceRemoteAudio.srcObject = voice.remoteStream;
+    els.sharedVoiceRemoteAudio.play?.().catch(() => {});
+  }
+  if (els.sharedVoiceStatus) {
+    let text = "alone";
+    if (!currentDeviceId) text = "syncing";
+    if (candidates.length && !voice.active) text = "voice ready";
+    if (incoming && !voice.active) text = "incoming";
+    if (voice.connecting) text = `calling ${voice.peerLabel || "peer"}`;
+    if (connected) text = voice.peerLabel || "connected";
+    if (voice.muted && voice.active) text = `muted ${voice.peerLabel || ""}`.trim();
+    if (voice.error) text = voice.error;
+    els.sharedVoiceStatus.textContent = text;
+    els.sharedVoiceStatus.title = text;
+  }
+}
+
+function resetSharedVoiceRuntime(keepError = false) {
+  const previousError = state.sharedVoice.error;
+  if (state.sharedVoice.pollInterval) {
+    window.clearInterval(state.sharedVoice.pollInterval);
+  }
+  state.sharedVoice.localStream?.getTracks?.().forEach((track) => track.stop());
+  state.sharedVoice.peerConnection?.close?.();
+  if (els.sharedVoiceRemoteAudio) els.sharedVoiceRemoteAudio.srcObject = null;
+  Object.assign(state.sharedVoice, {
+    active: false,
+    connecting: false,
+    muted: false,
+    status: "idle",
+    error: keepError ? previousError : "",
+    roomId: "",
+    callId: "",
+    peerDeviceId: "",
+    peerUserId: "",
+    peerLabel: "",
+    localStream: null,
+    remoteStream: null,
+    peerConnection: null,
+    pollInterval: 0,
+    signalBusy: false,
+    signalQueue: Promise.resolve(),
+    processedSignalIds: new Set(),
+    makingOffer: false,
+    ignoreOffer: false,
+    polite: true,
+  });
+  renderSharedVoice();
+}
+
+function startSharedVoicePolling() {
+  if (state.sharedVoice.pollInterval) window.clearInterval(state.sharedVoice.pollInterval);
+  const configured = Number(state.config?.features?.sharedVoice?.signalingPollMs);
+  const pollMs = Number.isFinite(configured) ? clamp(configured, 500, 5000) : SHARED_VOICE_POLL_MS;
+  state.sharedVoice.pollInterval = window.setInterval(() => {
+    if (!state.sharedVoice.active && !state.sharedVoice.connecting) return;
+    void loadSharedSpaceRoom({ origin: "shared-voice-poll" }).catch((error) => {
+      state.sharedVoice.error = truncateText(error.message || "voice sync failed", 80);
+      renderSharedVoice();
+    });
+  }, pollMs);
+}
+
+function createSharedVoicePeerConnection() {
+  const pc = new RTCPeerConnection({
+    iceServers: sharedVoiceIceServers(),
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+  });
+  pc.addEventListener("icecandidate", (event) => {
+    if (!event.candidate) return;
+    void sendSharedVoiceSignal("ice-candidate", {
+      candidate: JSON.stringify(event.candidate.toJSON ? event.candidate.toJSON() : event.candidate),
+    }).catch((error) => {
+      state.sharedVoice.error = truncateText(error.message || "ice failed", 80);
+      renderSharedVoice();
+    });
+  });
+  pc.addEventListener("track", (event) => {
+    const stream = event.streams?.[0] || state.sharedVoice.remoteStream || new MediaStream();
+    if (!event.streams?.[0] && event.track && !stream.getTracks().includes(event.track)) {
+      stream.addTrack(event.track);
+    }
+    state.sharedVoice.remoteStream = stream;
+    state.sharedVoice.connecting = false;
+    state.sharedVoice.status = "connected";
+    renderSharedVoice();
+  });
+  const updateConnection = () => {
+    const status = pc.connectionState || pc.iceConnectionState || "";
+    if (["connected", "completed"].includes(pc.iceConnectionState) || pc.connectionState === "connected") {
+      state.sharedVoice.connecting = false;
+      state.sharedVoice.status = "connected";
+    } else if (["failed", "disconnected", "closed"].includes(status) || pc.iceConnectionState === "failed") {
+      state.sharedVoice.status = status || "disconnected";
+    }
+    renderSharedVoice();
+  };
+  pc.addEventListener("connectionstatechange", updateConnection);
+  pc.addEventListener("iceconnectionstatechange", updateConnection);
+  return pc;
+}
+
+async function makeSharedVoiceOffer() {
+  const voice = state.sharedVoice;
+  const pc = voice.peerConnection;
+  if (!voice.active || !pc) return;
+  try {
+    voice.makingOffer = true;
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+    await sendSharedVoiceSignal("offer", { sdp: pc.localDescription?.sdp || offer.sdp || "" });
+  } finally {
+    voice.makingOffer = false;
+  }
+}
+
+async function sendSharedVoiceSignal(type, details = {}) {
+  const space = sharedUserSpaceForPanel();
+  const room = activeSharedRoom();
+  const voice = state.sharedVoice;
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  if (!space || !room?.id || !currentDeviceId || !voice.peerDeviceId || !voice.callId) {
+    throw new Error("Shared voice is not ready.");
+  }
+  const payload = await fetchJson("/spaces/room", {
+    method: "POST",
+    timeoutMs: 7000,
+    body: {
+      action: "signal",
+      kind: SHARED_VOICE_SIGNAL_KIND,
+      space_id: space.id,
+      shared_space_id: space.shared_space_id,
+      payload: {
+        voice_schema: SHARED_VOICE_SIGNAL_SCHEMA,
+        call_id: voice.callId,
+        type,
+        from_user_id: sharedVoiceCurrentUserId(room),
+        from_device_id: currentDeviceId,
+        to_device_id: voice.peerDeviceId,
+        muted: voice.muted,
+        ...details,
+      },
+    },
+  });
+  const nextRoom = payload.room || null;
+  if (nextRoom?.id) {
+    state.sharedRooms[nextRoom.id] = nextRoom;
+    renderSharedVoice();
+    queueSharedVoiceRoomProcessing(nextRoom);
+  }
+}
+
+function queueSharedVoiceRoomProcessing(room) {
+  if (!state.sharedVoice.active || !room?.id) return;
+  state.sharedVoice.signalQueue = state.sharedVoice.signalQueue
+    .then(() => processSharedVoiceRoom(room))
+    .catch((error) => {
+      state.sharedVoice.error = truncateText(error.message || "voice signal failed", 80);
+      renderSharedVoice();
+    });
+}
+
+async function handleSharedVoiceSignal(event, payload, room) {
+  const voice = state.sharedVoice;
+  const pc = voice.peerConnection;
+  if (!pc || !payload) return;
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  if (!currentDeviceId || payload.from_device_id === currentDeviceId || payload.to_device_id !== currentDeviceId) return;
+  if (voice.peerDeviceId && payload.from_device_id !== voice.peerDeviceId) return;
+  if (payload.type === "offer" && payload.call_id !== voice.callId && payload.from_device_id === voice.peerDeviceId) {
+    if (!voice.polite) return;
+    voice.callId = payload.call_id;
+  }
+  if (payload.call_id !== voice.callId) return;
+  if (payload.type === "hangup") {
+    resetSharedVoiceRuntime();
+    return;
+  }
+  if (payload.type === "mute") {
+    voice.peerMuted = Boolean(payload.muted);
+    renderSharedVoice();
+    return;
+  }
+  if (payload.type === "offer") {
+    const description = { type: "offer", sdp: String(payload.sdp || "") };
+    const offerCollision = voice.makingOffer || pc.signalingState !== "stable";
+    voice.ignoreOffer = !voice.polite && offerCollision;
+    if (voice.ignoreOffer) return;
+    if (offerCollision) {
+      await pc.setLocalDescription({ type: "rollback" });
+    }
+    await pc.setRemoteDescription(description);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await sendSharedVoiceSignal("answer", { sdp: pc.localDescription?.sdp || answer.sdp || "" });
+    return;
+  }
+  if (payload.type === "answer") {
+    if (pc.signalingState !== "stable") {
+      await pc.setRemoteDescription({ type: "answer", sdp: String(payload.sdp || "") });
+    }
+    return;
+  }
+  if (payload.type === "ice-candidate") {
+    try {
+      const candidate = typeof payload.candidate === "string" ? JSON.parse(payload.candidate) : payload.candidate;
+      if (candidate) await pc.addIceCandidate(candidate);
+    } catch (error) {
+      if (!voice.ignoreOffer) throw error;
+    }
+  }
+}
+
+async function processSharedVoiceRoom(room) {
+  const voice = state.sharedVoice;
+  if (!voice.active || voice.signalBusy) return;
+  voice.signalBusy = true;
+  try {
+    const events = Array.isArray(room?.events) ? room.events : [];
+    for (const event of events) {
+      if (!event?.id || voice.processedSignalIds.has(event.id)) continue;
+      if (event.kind !== SHARED_VOICE_SIGNAL_KIND || !sharedVoiceEventIsFresh(event)) continue;
+      const payload = sharedVoicePayload(event);
+      if (!payload) continue;
+      voice.processedSignalIds.add(event.id);
+      await handleSharedVoiceSignal(event, payload, room);
+    }
+    if (voice.processedSignalIds.size > 180) {
+      voice.processedSignalIds = new Set(Array.from(voice.processedSignalIds).slice(-120));
+    }
+  } finally {
+    voice.signalBusy = false;
+  }
+}
+
+async function startSharedVoice() {
+  if (state.sharedVoice.active || state.sharedVoice.connecting) return;
+  if (state.config?.features?.sharedVoice?.enabled === false) return;
+  if (!window.RTCPeerConnection || !navigator.mediaDevices?.getUserMedia) {
+    state.sharedVoice.error = "WebRTC unavailable";
+    renderSharedVoice();
+    return;
+  }
+  const room = await loadSharedSpaceRoom({ origin: "shared-voice-start" }) || activeSharedRoom();
+  const incoming = latestIncomingSharedVoiceOffer(room);
+  const peer = incoming
+    ? sharedVoicePeerByDevice(incoming.payload.from_device_id, room)
+    : sharedVoicePeerCandidates(room)[0];
+  if (!room?.id || !room.current_device_id) throw new Error("Shared room is still syncing.");
+  if (!peer?.device_id) throw new Error("No one else is present in this shared space.");
+  resetSharedVoiceRuntime();
+  Object.assign(state.sharedVoice, {
+    active: true,
+    connecting: true,
+    status: incoming ? "answering" : "calling",
+    error: "",
+    roomId: room.id,
+    callId: incoming?.payload?.call_id || `voice_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`,
+    peerDeviceId: peer.device_id,
+    peerUserId: peer.user_id || "",
+    peerLabel: sharedVoicePeerLabel(peer),
+    polite: String(room.current_device_id) > String(peer.device_id),
+  });
+  renderSharedVoice();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    state.sharedVoice.localStream = stream;
+    const pc = createSharedVoicePeerConnection();
+    state.sharedVoice.peerConnection = pc;
+    stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
+    startSharedVoicePolling();
+    recordUserEvent("workspace.shared_voice_started", {
+      target: `shared-space:${room.id}`,
+      summary: `Started shared voice with ${state.sharedVoice.peerLabel}`,
+      data: { shared_space_id: room.id, peer_device_id: peer.device_id },
+      redacted: true,
+    });
+    if (incoming) {
+      await processSharedVoiceRoom(room);
+    } else {
+      await makeSharedVoiceOffer();
+    }
+  } catch (error) {
+    state.sharedVoice.error = truncateText(error.message || "voice failed", 80);
+    resetSharedVoiceRuntime(true);
+    recordUserEvent("workspace.shared_voice_error", {
+      target: `shared-space:${room.id}`,
+      summary: state.sharedVoice.error,
+      data: { shared_space_id: room.id, error: error.message },
+    });
+  }
+}
+
+async function stopSharedVoice(options = {}) {
+  const voice = state.sharedVoice;
+  const roomId = voice.roomId || "";
+  if ((voice.active || voice.connecting) && options.notify !== false && voice.peerDeviceId && voice.callId) {
+    await sendSharedVoiceSignal("hangup", { reason: cleanText(options.reason, "ended") }).catch(() => {});
+  }
+  resetSharedVoiceRuntime();
+  recordUserEvent("workspace.shared_voice_stopped", {
+    target: `shared-space:${roomId || "shared"}`,
+    summary: "Stopped shared voice",
+    data: { shared_space_id: roomId, reason: options.reason || "" },
+  });
+}
+
+function toggleSharedVoice() {
+  if (state.sharedVoice.active || state.sharedVoice.connecting) {
+    void stopSharedVoice({ reason: "user-toggle" });
+  } else {
+    void startSharedVoice().catch((error) => {
+      state.sharedVoice.error = truncateText(error.message || "voice failed", 80);
+      renderSharedVoice();
+    });
+  }
+}
+
+function toggleSharedVoiceMute() {
+  const voice = state.sharedVoice;
+  if (!voice.active || !voice.localStream) return;
+  voice.muted = !voice.muted;
+  voice.localStream.getAudioTracks().forEach((track) => {
+    track.enabled = !voice.muted;
+  });
+  void sendSharedVoiceSignal("mute", { muted: voice.muted }).catch(() => {});
+  renderSharedVoice();
 }
 
 function applyLauncherPreference() {
@@ -11311,6 +11796,7 @@ function renderAll() {
   renderSecurityLoop();
   renderAgentNodeSelect();
   renderAgentModelSelect();
+  renderSharedVoice();
   renderLogin();
   renderRoleVisibility();
   syncSecurityPolling();
@@ -12835,6 +13321,10 @@ function setPanel(panel, options = {}) {
   panel = normalizePanel(panel);
   if (!isPanelAvailable(panel)) panel = "home";
   const previous = state.activePanel;
+  const nextSharedRoomId = sharedUserSpaceForPanel(panel)?.shared_space_id || "";
+  if (state.sharedVoice.active && state.sharedVoice.roomId && state.sharedVoice.roomId !== nextSharedRoomId) {
+    void stopSharedVoice({ reason: "space-changed" });
+  }
   state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = state.widgetLayout;
   saveLocalSpaceWidgetLayouts();
   const userSpacePanel = isUserSpacePanel(panel);
@@ -12851,6 +13341,7 @@ function setPanel(panel, options = {}) {
   applySpaceWidgetLayout(panel);
   renderSpaceTitle();
   renderSpaceLauncher();
+  renderSharedVoice();
   updateSharedSpaceSyncPolling();
   syncResourcePolling();
   syncSecurityPolling();
@@ -13826,6 +14317,8 @@ function wireEvents() {
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
   els.joinSpaceButton?.addEventListener("click", () => openJoinSpaceModal());
+  els.sharedVoiceButton?.addEventListener("click", toggleSharedVoice);
+  els.sharedVoiceMuteButton?.addEventListener("click", toggleSharedVoiceMute);
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);

@@ -1093,6 +1093,126 @@ h2 {
   color: var(--text);
 }
 
+.shared-voice-bar {
+  display: inline-grid;
+  grid-template-columns: 30px 30px minmax(42px, max-content);
+  align-items: center;
+  gap: 4px;
+  min-height: 34px;
+  padding: 2px 6px 2px 2px;
+  border: 1px solid rgba(147, 170, 203, 0.22);
+  border-radius: 7px;
+  background: rgba(7, 13, 24, 0.72);
+  color: var(--muted);
+  backdrop-filter: blur(12px);
+}
+
+.shared-voice-bar[hidden] {
+  display: none;
+}
+
+.shared-voice-button,
+.shared-voice-mute-button {
+  position: relative;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 6px;
+  background: rgba(237, 245, 255, 0.06);
+  border-color: rgba(147, 170, 203, 0.22);
+}
+
+.shared-voice-button::before {
+  content: "";
+  position: absolute;
+  left: 11px;
+  top: 6px;
+  width: 8px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-radius: 7px;
+}
+
+.shared-voice-button::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 16px;
+  width: 14px;
+  height: 8px;
+  border: 2px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 9px 9px;
+  box-shadow: 5px 7px 0 -4px currentColor;
+}
+
+.shared-voice-mute-button::before,
+.shared-voice-mute-button::after {
+  content: "";
+  position: absolute;
+}
+
+.shared-voice-mute-button::before {
+  left: 8px;
+  top: 8px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.shared-voice-mute-button::after {
+  left: 14px;
+  top: 4px;
+  width: 2px;
+  height: 22px;
+  border-radius: 2px;
+  background: currentColor;
+  transform: rotate(42deg);
+}
+
+.shared-voice-button:hover,
+.shared-voice-button:focus-visible,
+.shared-voice-mute-button:hover,
+.shared-voice-mute-button:focus-visible {
+  color: var(--text);
+  border-color: rgba(125, 220, 255, 0.48);
+}
+
+.shared-voice-bar.is-active {
+  color: var(--mint);
+  border-color: rgba(124, 228, 176, 0.45);
+}
+
+.shared-voice-bar.is-connecting {
+  color: var(--cyan);
+  border-color: rgba(125, 220, 255, 0.42);
+}
+
+.shared-voice-bar.is-error {
+  color: var(--red);
+  border-color: rgba(248, 113, 113, 0.44);
+}
+
+.shared-voice-mute-button[aria-pressed="true"] {
+  color: var(--red);
+}
+
+.shared-voice-status {
+  max-width: min(28vw, 190px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.shared-voice-bar audio {
+  display: none;
+}
+
 .space-config-button {
   position: absolute;
   right: 8px;

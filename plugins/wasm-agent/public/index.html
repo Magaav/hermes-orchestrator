@@ -314,6 +314,12 @@
               <div class="space-title">
                 <button id="spaceOrganizeButton" class="space-organize-button icon-button" type="button" title="Organize canvas apps" aria-label="Organize canvas apps"></button>
                 <span id="spaceLabel" class="space-label">space-home</span>
+                <div id="sharedVoiceBar" class="shared-voice-bar" aria-label="Shared-space voice" hidden>
+                  <button id="sharedVoiceButton" class="shared-voice-button" type="button" title="Join shared voice" aria-label="Join shared voice"></button>
+                  <button id="sharedVoiceMuteButton" class="shared-voice-mute-button" type="button" title="Mute microphone" aria-label="Mute microphone" aria-pressed="false" hidden></button>
+                  <span id="sharedVoiceStatus" class="shared-voice-status">voice</span>
+                  <audio id="sharedVoiceRemoteAudio" autoplay playsinline></audio>
+                </div>
               </div>
               <div id="appLayer" class="app-layer" aria-label="Space apps"></div>
 
