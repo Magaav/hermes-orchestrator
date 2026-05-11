@@ -358,15 +358,15 @@ local convenience state, not a durable multi-user account store.
 The composer uses a compact 34px send button with a restrained arrow icon.
 While an embedded assistant turn is running, the button switches to a
 stop-square state and aborts the in-flight `/agent/session/message` request
-when clicked. Markdown is parsed through the chat renderer inside the editable
-composer itself: typing or pasting Markdown turns the composer into the
-rendered `agent-message-body agent-markdown` surface on the next animation
-frame, and the DOM is serialized back to Markdown when the message is sent.
-Sent user messages render through the same path as assistant replies. Inline
-code keeps an editable boundary after the closing backtick, so an emptied code
-span remains as paired backticks and normal typing can continue after the span.
-Copying selected rendered composer content serializes it back to Markdown, so
-inline code copies with its backticks instead of only its displayed text.
+when clicked. The composer is now a decorated plain-text textarea composer:
+the textarea value is the only source of truth, the browser owns caret,
+selection, copy, paste, undo, redo, IME, and mobile editing, and a
+pointer-transparent overlay mirrors the text with inline decorations. Raw
+Markdown delimiters stay visible while composing, sent user messages render
+through the same safe tokenizer/renderer path as assistant replies, and the
+slash command palette reads the raw value without mutating it until a command
+is explicitly selected. Enter sends, Shift+Enter inserts a newline, and
+Ctrl/Cmd+Enter sends as an explicit keyboard equivalent.
 
 Image attachments are compressed in the browser before they enter the local
 adapter request or transcript cache. The composer also enforces an aggregate raw
@@ -592,8 +592,10 @@ only in browser local storage by default, while user-space area is stored with
 the space metadata so joined/shared spaces open with the same area on every
 device. Open clients refresh that shared space metadata on focus, during the
 regular workspace refresh loop, and through a focused `2.5s` active shared-space
-room heartbeat; shared-space voice uses that room heartbeat for presence and
-WebRTC signaling. Voice presence is deliberately separate from shared-space
+room heartbeat. Production shared-space voice is currently disabled by default
+while `/voice-lab` remains the recovery proof surface. When explicitly enabled,
+shared-space voice uses that room heartbeat for presence and WebRTC signaling.
+Voice presence is deliberately separate from shared-space
 presence: seeing another device in a space never starts the local microphone or
 creates a peer connection. The in-room voice button is the only local join path;
 it requests microphone access, creates a device-local membership epoch, publishes
@@ -605,6 +607,14 @@ ignore retained or mismatched signals from previous memberships. A device that
 leaves removes only its own membership and peer tracks, while the other joined
 devices stay in voice. The detailed root-cause report, state machine, and manual
 voice checklist live in [`VOICE_ROOM_LIFECYCLE.md`](./VOICE_ROOM_LIFECYCLE.md).
+The isolated `/voice-lab` route is the current recovery proof surface for
+two-client voice behavior; production shared-space voice is off unless
+`HERMES_WASM_AGENT_SHARED_VOICE_ENABLED=1` is set, and should not receive more
+lifecycle changes until that lab passes the manual matrix. The staged production
+port now separates voice participant identity from account/browser device
+identity: each page gets a voice-local client/device id, while the account
+device id is carried only as metadata. Production peer discovery reads explicit
+voice memberships rather than ordinary shared-space presence.
 Space config keeps remote area applies paused so local drafts are left untouched
 until Apply or Revert while presence still updates. Config
 storage shows account usage plus local
@@ -927,6 +937,8 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
   seconds.
 - `HERMES_WASM_AGENT_BROWSER_ALLOW_PRIVATE`: set to `1` to allow localhost,
   private, link-local, or reserved browser targets. Disabled by default.
+- `HERMES_WASM_AGENT_SHARED_VOICE_ENABLED`: set to `1` to expose the production
+  shared-space voice controls. Disabled by default during `/voice-lab` recovery.
 - `HERMES_WASM_AGENT_VOICE_STUN_URLS`: comma-separated STUN URLs exposed to
   shared-space WebRTC clients, default `stun:stun.l.google.com:19302`.
 - `HERMES_WASM_AGENT_VOICE_ICE_SERVERS_JSON`: JSON array of full WebRTC ICE

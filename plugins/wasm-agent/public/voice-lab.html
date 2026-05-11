@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>WASM Agent Voice Lab</title>
+    <link rel="stylesheet" href="/voice-lab.css">
+  </head>
+  <body>
+    <main class="voice-lab-shell">
+      <header class="voice-lab-head">
+        <div>
+          <h1>Voice Lab</h1>
+          <p id="authState">checking session</p>
+        </div>
+        <a href="/home">Home</a>
+      </header>
+
+      <section class="voice-lab-controls" aria-label="Voice room controls">
+        <label>
+          <span>room id</span>
+          <input id="roomInput" type="text" autocomplete="off" spellcheck="false" value="voice-lab">
+        </label>
+        <dl class="identity-grid">
+          <div>
+            <dt>localDeviceId</dt>
+            <dd id="localDeviceId"></dd>
+          </div>
+          <div>
+            <dt>localClientId</dt>
+            <dd id="localClientId"></dd>
+          </div>
+        </dl>
+        <div class="button-row">
+          <button id="joinButton" type="button">Join Voice</button>
+          <button id="leaveButton" type="button">Leave Voice</button>
+        </div>
+      </section>
+
+      <section class="voice-lab-grid">
+        <article>
+          <h2>Participants</h2>
+          <ul id="participantList" class="participant-list"></ul>
+        </article>
+        <article>
+          <h2>Local State</h2>
+          <pre id="statePanel" class="state-panel"></pre>
+        </article>
+        <article class="event-log-card">
+          <h2>Event Log</h2>
+          <ol id="eventLog" class="event-log"></ol>
+        </article>
+        <article>
+          <h2>Remote Audio</h2>
+          <div id="remoteAudioList" class="remote-audio-list"></div>
+        </article>
+      </section>
+    </main>
+    <script type="module" src="/voice-lab.js"></script>
+  </body>
+</html>

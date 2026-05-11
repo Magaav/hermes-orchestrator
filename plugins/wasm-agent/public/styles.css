@@ -5103,7 +5103,13 @@ details.agent-action-row .agent-action-row-summary {
   color: var(--text);
 }
 
-.agent-form #agentInput {
+.agent-composer .chat-composer-input-wrap {
+  border-radius: var(--radius);
+  background: rgba(5, 12, 22, 0.84);
+}
+
+.agent-form #agentInput,
+.agent-form #agentInputOverlay {
   flex: 0 0 auto;
   width: 100%;
   min-width: 0;
@@ -5124,17 +5130,6 @@ details.agent-action-row .agent-action-row-summary {
 #agentInput:focus {
   border-color: rgba(125, 220, 255, 0.44);
   box-shadow: 0 0 0 1px rgba(125, 220, 255, 0.12);
-}
-
-#agentInput[data-rendered-markdown="true"] {
-  white-space: normal;
-}
-
-#agentInput[data-placeholder]:empty::before {
-  content: attr(data-placeholder);
-  color: var(--text);
-  opacity: 0.5;
-  pointer-events: none;
 }
 
 .agent-send-button {

@@ -349,19 +349,15 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   It should render compactly at about half of its track width. Chat model state
   must use assistant-owned local storage, not a widget layout key that can be
   sanitized away when another space is active.
-- Composer Markdown uses the editable composer as the rendered input surface.
-  Typing or pasting Markdown should render in place with the
-  `agent-message-body agent-markdown` path on the next animation frame, then
-  serialize that editable DOM back to Markdown when sending so the backend
-  still receives text. Keep this lightweight and avoid introducing a separate
-  Markdown editor dependency until the local renderer proves insufficient.
-  Inline code must render only when there is content between the backticks; an
-  empty pair must stay as literal editable backticks, and deleting through that
-  pair must leave one visible backtick rather than clearing both. Rendered
-  inline code must still provide a typing escape after the closing backtick
-  instead of trapping the caret inside the `<code>` span. Copying selected
-  composer content must serialize the rendered DOM back to Markdown so inline
-  code keeps its backticks in the clipboard.
+- Composer Markdown uses a decorated plain-text textarea composer. The raw
+  textarea value is always the source of truth; the tokenizer, overlay,
+  command palette, preview, and sent-message renderer are disposable views over
+  that string. Do not use `contenteditable`, zero-width boundary characters,
+  DOM serialization, manual caret restoration, or auto-spacing around Markdown
+  delimiters for composer editing. Enter sends, Shift+Enter inserts a newline,
+  and Ctrl/Cmd+Enter sends as an explicit equivalent. The slash command palette
+  must only open for a leading command prefix outside code and must not mutate
+  text until the user selects a command.
 - Do not reintroduce status labels like "Hermes responded" or "Complete" into
   each message card.
 - The token display beside Send must reflect exact model token usage returned

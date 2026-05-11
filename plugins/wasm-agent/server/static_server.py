@@ -90,6 +90,12 @@ SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
 SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
 SHARED_SPACE_SIGNAL_TEXT_LIMIT = 131072
+VOICE_LAB_ROOM_SCHEMA = "hermes.wasm_agent.voice_lab.room.v1"
+VOICE_LAB_ROOM_EVENT_SCHEMA = "hermes.wasm_agent.voice_lab.room_event.v1"
+VOICE_LAB_PRESENCE_SCHEMA = "hermes.wasm_agent.voice_lab.presence.v1"
+VOICE_LAB_PRESENCE_TTL_SEC = 20
+VOICE_LAB_EVENT_LIMIT = 240
+VOICE_LAB_ROOM_PUBLIC_EVENT_LIMIT = 120
 GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
 AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
 AGENT_MUTATION_ALLOWED_EXTENSIONS = {
@@ -244,7 +250,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                             "publicDefaultDisabled": public_deployment(self),
                         },
                         "sharedVoice": {
-                            "enabled": True,
+                            "enabled": shared_voice_enabled(),
+                            "productionDefaultDisabled": True,
                             "iceServers": shared_voice_ice_servers(),
                             "signalingPollMs": 900,
                         },
@@ -291,6 +298,17 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     "space_id": str((query.get("space_id") or query.get("space") or [""])[0] or ""),
                 }
                 self._json(HTTPStatus.OK, shared_space_room(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/voice-lab/room":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                body = {
+                    "action": "read",
+                    "room_id": str((query.get("room_id") or query.get("room") or [""])[0] or ""),
+                }
+                self._json(HTTPStatus.OK, voice_lab_room(self.server, user, body, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -614,6 +632,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "space_room_error", "message": str(exc)}},
                 )
             return
+        if path == "/voice-lab/room":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, voice_lab_room(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "voice_lab_error", "message": str(exc)}},
+                )
+            return
         if path == "/wis/artifacts/patch":
             try:
                 body = self._read_json(max_bytes=512 * 1024)
@@ -666,6 +696,10 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def translate_path(self, path: str) -> str:
+        if path.split("?", 1)[0] == "/voice-lab":
+            return str(self.server.public_root.resolve() / "voice-lab.html")
+        if path.split("?", 1)[0] == "/composer-lab":
+            return str(self.server.public_root.resolve() / "composer-lab.html")
         translated = Path(super().translate_path(path))
         public_root = self.server.public_root.resolve()
         try:
@@ -821,6 +855,11 @@ def browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> bo
     if configured is not None:
         return configured
     return not public_deployment(handler)
+
+
+def shared_voice_enabled() -> bool:
+    configured = env_bool("HERMES_WASM_AGENT_SHARED_VOICE_ENABLED")
+    return bool(configured) if configured is not None else False
 
 
 def shared_voice_ice_servers() -> list[dict[str, Any]]:
@@ -2379,6 +2418,201 @@ def shared_space_room(
     return {"ok": True, "room": public_shared_space_room(server, record, user, presence, current_device_id)}
 
 
+def voice_lab_root(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "voice-lab"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def voice_lab_room_id(raw: str) -> str:
+    room_id = safe_state_id(raw, "")
+    if not room_id:
+        raise BrowserError("invalid_voice_lab_room", "room_id is required.")
+    return room_id
+
+
+def voice_lab_room_dir(server: WasmAgentServer, room_id: str) -> Path:
+    path = voice_lab_root(server) / voice_lab_room_id(room_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def voice_lab_presence_path(server: WasmAgentServer, room_id: str) -> Path:
+    return voice_lab_room_dir(server, room_id) / "presence.json"
+
+
+def voice_lab_events_path(server: WasmAgentServer, room_id: str) -> Path:
+    return voice_lab_room_dir(server, room_id) / "room-events.json"
+
+
+def request_voice_lab_client_id(handler: WasmAgentHandler) -> str:
+    return safe_state_id(str(handler.headers.get("X-Wasm-Agent-Voice-Lab-Client-Id") or ""), "")
+
+
+def request_voice_lab_device_id(user: dict[str, Any] | None, handler: WasmAgentHandler) -> str:
+    explicit = safe_state_id(str(handler.headers.get("X-Wasm-Agent-Voice-Lab-Device-Id") or ""), "")
+    if explicit:
+        return explicit
+    client_id = request_voice_lab_client_id(handler) or request_client_device_id(handler)
+    if client_id:
+        return safe_state_id(f"voice-lab-{client_id}", "")
+    return safe_state_id(f"voice-lab-{request_account_device_id(user, handler)}", "")
+
+
+def read_voice_lab_presence(server: WasmAgentServer, room_id: str) -> dict[str, Any]:
+    payload = read_json_file(voice_lab_presence_path(server, room_id), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def prune_voice_lab_presence(payload: dict[str, Any], now: int) -> dict[str, Any]:
+    entries = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    live_entries = {
+        key: item
+        for key, item in entries.items()
+        if isinstance(item, dict) and now - int(item.get("last_seen") or 0) <= VOICE_LAB_PRESENCE_TTL_SEC
+    }
+    return {
+        "schema": VOICE_LAB_PRESENCE_SCHEMA,
+        "updated_at": iso_timestamp(),
+        "entries": live_entries,
+    }
+
+
+def touch_voice_lab_presence(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler,
+    room_id: str,
+) -> dict[str, Any]:
+    now = int(time.time())
+    presence = prune_voice_lab_presence(read_voice_lab_presence(server, room_id), now)
+    user_agent = clipped(str(handler.headers.get("User-Agent") or "Browser"), 360)
+    device_id = request_voice_lab_device_id(user, handler)
+    client_id = request_voice_lab_client_id(handler)
+    key = f"{user_id(user)}:{client_id or device_id}"
+    entries = presence.get("entries") if isinstance(presence.get("entries"), dict) else {}
+    entries[key] = {
+        "user_id": user_id(user),
+        "device_id": device_id,
+        "client_id": client_id,
+        "label": browser_label(user_agent),
+        "user_label": public_user_label(user),
+        "last_seen": now,
+    }
+    presence["entries"] = entries
+    presence["updated_at"] = iso_timestamp()
+    write_json_file(voice_lab_presence_path(server, room_id), presence)
+    return presence
+
+
+def public_voice_lab_presence_entries(presence: dict[str, Any], now: int | None = None) -> list[dict[str, Any]]:
+    now = now or int(time.time())
+    entries = presence.get("entries") if isinstance(presence.get("entries"), dict) else {}
+    visible = []
+    for item in entries.values():
+        if not isinstance(item, dict):
+            continue
+        last_seen = int(item.get("last_seen") or 0)
+        if now - last_seen > VOICE_LAB_PRESENCE_TTL_SEC:
+            continue
+        visible.append({
+            "user_id": safe_state_id(str(item.get("user_id") or ""), ""),
+            "device_id": safe_state_id(str(item.get("device_id") or ""), ""),
+            "client_id": safe_state_id(str(item.get("client_id") or ""), ""),
+            "label": clipped(str(item.get("label") or "Browser"), 80),
+            "user_label": clipped(str(item.get("user_label") or item.get("user_id") or "User"), 120),
+            "last_seen": last_seen,
+        })
+    visible.sort(key=lambda entry: (entry["user_label"].lower(), entry["device_id"], entry["client_id"]))
+    return visible
+
+
+def read_voice_lab_events(server: WasmAgentServer, room_id: str) -> list[dict[str, Any]]:
+    payload = read_json_file(voice_lab_events_path(server, room_id), {})
+    events = payload.get("events") if isinstance(payload, dict) and isinstance(payload.get("events"), list) else []
+    return [event for event in events if isinstance(event, dict)][-VOICE_LAB_EVENT_LIMIT:]
+
+
+def append_voice_lab_room_event(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    room_id: str,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    events = read_voice_lab_events(server, room_id)
+    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "voice-signal"), "voice-signal")
+    payload = body.get("payload") if isinstance(body.get("payload"), dict) else {}
+    payload = {
+        **payload,
+        "room_id": room_id,
+        "from_user_id": user_id(user),
+        "from_device_id": request_voice_lab_device_id(user, handler),
+        "from_client_id": request_voice_lab_client_id(handler),
+    }
+    event = {
+        "schema": VOICE_LAB_ROOM_EVENT_SCHEMA,
+        "id": f"voice_lab_evt_{next_snowflake_id():x}",
+        "kind": event_kind,
+        "sender_user_id": user_id(user),
+        "created_at": iso_timestamp(),
+        "payload": sanitize_room_event_payload(payload),
+    }
+    events.append(event)
+    write_json_file(voice_lab_events_path(server, room_id), {
+        "schema": "hermes.wasm_agent.voice_lab.room_events.v1",
+        "updated_at": iso_timestamp(),
+        "events": events[-VOICE_LAB_EVENT_LIMIT:],
+    })
+    return event
+
+
+def public_voice_lab_room(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    handler: WasmAgentHandler,
+    room_id: str,
+    presence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rid = voice_lab_room_id(room_id)
+    now = int(time.time())
+    current_presence = prune_voice_lab_presence(presence or read_voice_lab_presence(server, rid), now)
+    visible = public_voice_lab_presence_entries(current_presence, now)
+    online_users = {entry["user_id"] for entry in visible if entry.get("user_id")}
+    return {
+        "schema": VOICE_LAB_ROOM_SCHEMA,
+        "id": rid,
+        "title": f"Voice Lab {rid}",
+        "presence_ttl_sec": VOICE_LAB_PRESENCE_TTL_SEC,
+        "online_count": len(online_users),
+        "online_device_count": len(visible),
+        "presence": visible,
+        "current_user_id": user_id(user),
+        "current_device_id": request_voice_lab_device_id(user, handler),
+        "current_client_id": request_voice_lab_client_id(handler),
+        "events": read_voice_lab_events(server, rid)[-VOICE_LAB_ROOM_PUBLIC_EVENT_LIMIT:],
+    }
+
+
+def voice_lab_room(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    room_id = voice_lab_room_id(str(body.get("room_id") or body.get("room") or ""))
+    action = str(body.get("action") or "presence").strip().lower()
+    presence = read_voice_lab_presence(server, room_id)
+    if action in {"presence", "heartbeat"}:
+        presence = touch_voice_lab_presence(server, user, handler, room_id)
+    elif action == "signal":
+        presence = touch_voice_lab_presence(server, user, handler, room_id)
+        append_voice_lab_room_event(server, user, room_id, body, handler)
+    elif action != "read":
+        raise BrowserError("invalid_voice_lab_action", "Unsupported voice lab room action.")
+    return {"ok": True, "room": public_voice_lab_room(server, user, handler, room_id, presence)}
+
+
 def copy_user_wis_to_shared(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str, shared_space_id: str) -> None:
     source = user_wis_dir(server, user, space_id)
     target = shared_space_dir(server, shared_space_id) / "wis"
@@ -3177,6 +3411,13 @@ def is_public_request(method: str, path: str) -> bool:
             "/observe",
             "/timeline",
             "/modules",
+            "/composer-lab",
+            "/composer-lab.html",
+            "/composer-lab.js",
+            "/voice-lab",
+            "/voice-lab.html",
+            "/voice-lab.css",
+            "/voice-lab.js",
             "/index.html",
             "/styles.css",
             "/boot.js",
@@ -3190,7 +3431,7 @@ def is_public_request(method: str, path: str) -> bool:
             return True
         if path.startswith("/icons/"):
             return True
-        if path.startswith("/modules/") and path.endswith(".js"):
+        if path.startswith("/modules/") and (path.endswith(".js") or path.endswith(".css")):
             return True
         return False
     if method == "POST":

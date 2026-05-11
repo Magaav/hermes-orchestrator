@@ -1,11 +1,14 @@
 import { MODULE_DEFINITIONS } from "./modules/index.js";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
+import { createChatComposer } from "./modules/chat-composer/chat-composer.js";
+import { createCommandPalette } from "./modules/chat-composer/chat-commands.js";
+import { renderChatMarkdownTokens } from "./modules/chat-composer/chat-renderer.js";
+import { tokenizeChatMarkdown } from "./modules/chat-composer/chat-tokenizer.js";
 import {
   sharedVoiceEventCreatedMs,
   sharedVoiceEventPrecedesBaseline,
   sharedVoiceIncomingOfferEvents as sharedVoiceIncomingOfferEntries,
-  sharedVoiceJoinedDeviceIdSet,
   sharedVoiceLatestJoinEvent,
   sharedVoiceMemberships,
   sharedVoiceNewJoinEpoch,
@@ -63,6 +66,8 @@ const SHARED_VOICE_STALE_MS = 2 * 60 * 1000;
 const SHARED_VOICE_MEMBERSHIP_STALE_MS = 12000;
 const SHARED_VOICE_MEMBERSHIP_HEARTBEAT_MS = 5000;
 const SHARED_VOICE_DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+const SHARED_VOICE_LOCAL_CLIENT_ID = `voice_client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+const SHARED_VOICE_LOCAL_DEVICE_ID = `voice_device_${SHARED_VOICE_LOCAL_CLIENT_ID}`.slice(0, 72);
 const WIS_EXPORT_PREVIEW_LIMIT = 16000;
 const NODE_ACTIVITY_FRESH_GRACE_SEC = 5;
 const BRIDGE_TASK_ACTIVE_MAX_AGE_MS = 45 * 60 * 1000;
@@ -90,8 +95,6 @@ const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and hel
 const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules", "security"]);
 const GLOBAL_AGENT_NODE_IDS = new Set(["admin-orchestrator", "hermes-orchestrator", "orchestrator"]);
 const AGENT_SANDBOX_NODE_ID = "account-sandbox";
-const AGENT_INPUT_BOUNDARY_TEXT = "\u200B";
-const AGENT_INPUT_MARKDOWN_TRIGGER_CHARS = new Set(["`", "*", "_", "#", ">", "-", "+", "[", "]", "(", ")", "|", "~"]);
 const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
 const SPACE_APP_DEFINITIONS = [
   { id: "resources", label: "Resources", short: "Res" },
@@ -445,8 +448,7 @@ const state = {
     polite: true,
   },
   configAreaDragActive: false,
-  agentInputRenderFrame: 0,
-  agentInputRendering: false,
+  agentComposer: null,
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
   activeSpaceMenuId: "",
@@ -1833,45 +1835,73 @@ function sharedVoicePresenceEntries(room = activeSharedRoom()) {
   return entries.filter((entry) => entry && typeof entry === "object" && entry.device_id);
 }
 
-function sharedVoiceCurrentDeviceId(room = activeSharedRoom()) {
-  return cleanText(room?.current_device_id, "");
+function sharedVoiceCurrentClientId() {
+  return SHARED_VOICE_LOCAL_CLIENT_ID;
+}
+
+function sharedVoiceCurrentDeviceId(_room = activeSharedRoom()) {
+  return SHARED_VOICE_LOCAL_DEVICE_ID;
 }
 
 function sharedVoiceCurrentUserId(room = activeSharedRoom()) {
   return cleanText(room?.current_user_id, state.authUser?.id || "");
 }
 
-function sharedVoicePeerCandidates(room = activeSharedRoom()) {
-  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
-  const currentUserId = sharedVoiceCurrentUserId(room);
-  return sharedVoicePresenceEntries(room)
-    .filter((entry) => entry.device_id !== currentDeviceId)
-    .filter((entry) => entry.user_id !== currentUserId || entry.device_id !== currentDeviceId);
+function sharedVoiceLocalMembershipState() {
+  const voice = state.sharedVoice;
+  if (voice.status === "leaving") return "leaving";
+  if (voice.connecting) return "joining";
+  if (voice.active && voice.localStream) return "joined";
+  if (voice.active || voice.waiting) return "joining";
+  return "idle";
+}
+
+function sharedVoiceDebugLog(eventType, details = {}) {
+  try {
+    const room = details.room || activeSharedRoom();
+    const voice = state.sharedVoice || {};
+    const payload = details.payload && typeof details.payload === "object" ? details.payload : {};
+    const localDeviceId = sharedVoiceCurrentDeviceId(room);
+    const accepted = Object.prototype.hasOwnProperty.call(details, "accepted") ? Boolean(details.accepted) : !details.ignored;
+    const record = {
+      scope: "wasm-agent.shared-voice",
+      at: new Date().toISOString(),
+      roomId: cleanText(details.roomId || payload.room_id || voice.roomId || room?.id || "", ""),
+      localDeviceId,
+      localClientId: sharedVoiceCurrentClientId(),
+      localMembershipState: sharedVoiceLocalMembershipState(),
+      localJoinEpoch: cleanText(voice.joinEpoch || "", ""),
+      eventType: cleanText(eventType || "", ""),
+      fromDeviceId: cleanText(details.fromDeviceId || payload.from_device_id || "", ""),
+      toDeviceId: cleanText(details.toDeviceId || payload.to_device_id || "", ""),
+      peerDeviceId: cleanText(details.peerDeviceId || "", ""),
+      callId: cleanText(details.callId || payload.call_id || "", ""),
+      accepted,
+      ignored: Boolean(details.ignored),
+      ignoreReason: cleanText(details.ignoreReason || "", ""),
+    };
+    console.debug("[wasm-agent shared-voice]", record);
+  } catch {
+    // Debug logging must never affect voice lifecycle behavior.
+  }
 }
 
 function sharedVoicePeerByDevice(deviceId, room = activeSharedRoom()) {
+  const membership = sharedVoiceMembershipMap(room).get(deviceId);
+  if (membership) return sharedVoicePeerEntryFromMembership(membership, room);
   return sharedVoicePresenceEntries(room).find((entry) => entry.device_id === deviceId) || null;
 }
 
 function sharedVoicePeerLabel(peer) {
   if (!peer) return "peer";
-  const user = cleanText(peer.user_label, "");
-  const device = cleanText(peer.label, "");
+  const user = cleanText(peer.user_label || peer.userId, "");
+  const device = cleanText(peer.label || peer.client_id || peer.clientId || peer.device_id || peer.deviceId, "");
   return user && device ? `${user} / ${device}` : user || device || "peer";
 }
 
 function sharedVoiceShouldInitiateOffer(room, peer) {
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
   return sharedVoiceShouldInitiateRoomOffer(currentDeviceId, peer?.device_id);
-}
-
-function sharedVoiceJoinedDeviceIds(room = activeSharedRoom()) {
-  return sharedVoiceJoinedDeviceIdSet(room?.events, {
-    kind: SHARED_VOICE_SIGNAL_KIND,
-    schema: SHARED_VOICE_SIGNAL_SCHEMA,
-    staleMs: SHARED_VOICE_STALE_MS,
-    membershipTtlMs: SHARED_VOICE_MEMBERSHIP_STALE_MS,
-  });
 }
 
 function sharedVoiceMembershipMap(room = activeSharedRoom()) {
@@ -1883,9 +1913,31 @@ function sharedVoiceMembershipMap(room = activeSharedRoom()) {
   });
 }
 
+function sharedVoicePeerEntryFromMembership(membership, room = activeSharedRoom()) {
+  const payload = membership?.payload || {};
+  const presence = sharedVoicePresenceEntries(room).find((entry) => entry.user_id && entry.user_id === membership.userId) || {};
+  const clientId = cleanText(payload.from_client_id || "", "");
+  const deviceId = cleanText(membership.deviceId || payload.from_device_id || "", "");
+  return {
+    device_id: deviceId,
+    user_id: cleanText(membership.userId || payload.from_user_id || "", ""),
+    user_label: cleanText(presence.user_label || payload.from_user_label || payload.from_user_id || "", ""),
+    label: cleanText(presence.label || clientId || deviceId || "voice tab", ""),
+    client_id: clientId,
+    join_epoch: cleanText(membership.joinEpoch || payload.join_epoch || "", ""),
+    join_event_id: cleanText(membership.joinEventId || payload.join_event_id || "", ""),
+  };
+}
+
+function sharedVoiceMembershipPeerEntries(room = activeSharedRoom()) {
+  const currentDeviceId = sharedVoiceCurrentDeviceId(room);
+  return Array.from(sharedVoiceMembershipMap(room).values())
+    .filter((membership) => membership.deviceId && membership.deviceId !== currentDeviceId)
+    .map((membership) => sharedVoicePeerEntryFromMembership(membership, room));
+}
+
 function sharedVoiceJoinedPeerCandidates(room = activeSharedRoom()) {
-  const joinedDeviceIds = sharedVoiceJoinedDeviceIds(room);
-  return sharedVoicePeerCandidates(room).filter((entry) => joinedDeviceIds.has(entry.device_id));
+  return sharedVoiceMembershipPeerEntries(room);
 }
 
 function sharedVoiceMediaUnavailableReason() {
@@ -1901,7 +1953,6 @@ function renderSharedVoice() {
   const room = activeSharedRoom();
   const voice = state.sharedVoice;
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
-  const candidates = sharedVoicePeerCandidates(room);
   const joinedCandidates = sharedVoiceJoinedPeerCandidates(room);
   const peers = sharedVoicePeerStates();
   const connectedPeers = peers.filter(sharedVoicePeerIsConnected);
@@ -1918,7 +1969,7 @@ function renderSharedVoice() {
     els.sharedVoiceButton.disabled = voice.active ? false : Boolean(mediaProblem || !room?.id || !currentDeviceId);
     const label = voice.active
       ? "Leave shared voice"
-      : candidates.length
+      : joinedCandidates.length
           ? "Join shared voice"
           : "Start shared voice";
     els.sharedVoiceButton.title = mediaProblem || label;
@@ -1940,7 +1991,7 @@ function renderSharedVoice() {
     let text = "start voice";
     if (!currentDeviceId) text = "syncing";
     if (mediaProblem) text = mediaProblem;
-    if (!candidates.length && !voice.active && !mediaProblem && currentDeviceId) text = "alone";
+    if (!joinedCandidates.length && !voice.active && !mediaProblem && currentDeviceId) text = "alone";
     if (joinedCandidates.length && !voice.active) text = "voice ready";
     if (voice.active && !peers.length) text = "waiting";
     if (voice.waiting) text = "waiting";
@@ -2134,6 +2185,11 @@ function closeSharedVoicePeer(deviceId) {
   const voice = state.sharedVoice;
   const peer = voice.peers?.[deviceId];
   if (!peer) return;
+  sharedVoiceDebugLog("peer-connection-closed", {
+    accepted: true,
+    peerDeviceId: deviceId,
+    callId: peer.callId || "",
+  });
   peer.pc?.close?.();
   if (peer.audioElement) {
     peer.audioElement.srcObject = null;
@@ -2233,6 +2289,11 @@ function ensureSharedVoicePeer(room, entry, options = {}) {
 }
 
 function createSharedVoicePeerConnection(peer) {
+  sharedVoiceDebugLog("peer-connection-created", {
+    accepted: true,
+    peerDeviceId: peer.deviceId,
+    callId: peer.callId || "",
+  });
   const pc = new RTCPeerConnection({
     iceServers: sharedVoiceIceServers(),
     bundlePolicy: "max-bundle",
@@ -2302,14 +2363,6 @@ async function makeSharedVoiceOffer(peer) {
     peer.makingOffer = false;
     setSharedVoicePrimaryPeer(peer);
   }
-}
-
-async function connectSharedVoiceToPeer(room, peer, incoming = null) {
-  const peerState = ensureSharedVoicePeer(room, peer, { callId: incoming?.payload?.call_id || "" });
-  if (!peerState) return false;
-  if (!incoming && sharedVoiceShouldInitiateOffer(room, peer)) await makeSharedVoiceOffer(peerState);
-  updateSharedVoiceConnectionStatus();
-  return Boolean(peerState);
 }
 
 async function maybeConnectSharedVoiceFromRoom(room) {
@@ -2401,6 +2454,8 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
         type,
         from_user_id: sharedVoiceCurrentUserId(room),
         from_device_id: currentDeviceId,
+        from_client_id: sharedVoiceCurrentClientId(),
+        from_account_device_id: cleanText(room.current_device_id || "", ""),
         to_device_id: toDeviceId,
         join_epoch: joinEpoch,
         join_event_id: joinEventId,
@@ -2409,6 +2464,21 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
       },
     },
   });
+  sharedVoiceDebugLog(
+    type === "join"
+      ? "join-event-publish"
+      : type === "leave"
+        ? "leave-event-publish"
+        : `${type}-event-publish`,
+    {
+      room,
+      accepted: true,
+      fromDeviceId: currentDeviceId,
+      toDeviceId,
+      peerDeviceId: toDeviceId,
+      callId,
+    },
+  );
   const nextRoom = payload.room || null;
   if (nextRoom?.id) {
     state.sharedRooms[nextRoom.id] = nextRoom;
@@ -2417,15 +2487,6 @@ async function sendSharedVoiceRoomSignal(type, details = {}) {
     queueSharedVoiceRoomProcessing(nextRoom);
   }
   return nextRoom;
-}
-
-async function sendSharedVoiceSignal(type, details = {}) {
-  const voice = state.sharedVoice;
-  const peer = voice.peers?.[voice.peerDeviceId];
-  if (!peer) {
-    throw new Error("Shared voice is not ready.");
-  }
-  return sendSharedVoicePeerSignal(peer, type, details);
 }
 
 async function sendSharedVoicePeerSignal(peer, type, details = {}) {
@@ -2508,16 +2569,81 @@ async function handleSharedVoiceSignal(event, payload, room) {
   const voice = state.sharedVoice;
   if (!payload) return false;
   const currentDeviceId = sharedVoiceCurrentDeviceId(room);
-  if (!currentDeviceId || payload.from_device_id === currentDeviceId) return true;
-  if (payload.to_device_id && payload.to_device_id !== currentDeviceId) return true;
-  if (payload.room_id && payload.room_id !== room?.id) return true;
-  if (payload.type === "join" || payload.type === "membership") return true;
+  if (!voice.active || !voice.localStream) {
+    sharedVoiceDebugLog("event-ignored-local-not-joined", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "local-not-joined",
+    });
+    return true;
+  }
+  if (!currentDeviceId || payload.from_device_id === currentDeviceId) {
+    sharedVoiceDebugLog("event-ignored-target-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "self-or-missing-local-device",
+    });
+    return true;
+  }
+  if (payload.to_device_id && payload.to_device_id !== currentDeviceId) {
+    sharedVoiceDebugLog("event-ignored-target-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "target-device-mismatch",
+    });
+    return true;
+  }
+  if (payload.room_id && payload.room_id !== room?.id) {
+    sharedVoiceDebugLog("event-ignored-target-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "room-mismatch",
+    });
+    return true;
+  }
+  if (payload.type === "join" || payload.type === "membership") {
+    sharedVoiceDebugLog("remote-participant-joined", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: payload.from_device_id || "",
+    });
+    return true;
+  }
   if (payload.type === "leave" || payload.type === "hangup") {
     const peer = voice.peers?.[payload.from_device_id];
     if (!peer || sharedVoiceSignalMatchesRemoteMembership(payload, peer)) closeSharedVoicePeer(payload.from_device_id);
+    sharedVoiceDebugLog("remote-participant-left", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: payload.from_device_id || "",
+    });
     return true;
   }
-  if (!sharedVoiceSignalTargetsLocalMembership(payload, sharedVoiceLocalMembership(room))) return true;
+  if (!sharedVoiceSignalTargetsLocalMembership(payload, sharedVoiceLocalMembership(room))) {
+    sharedVoiceDebugLog("event-ignored-epoch-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "target-epoch-mismatch",
+    });
+    return true;
+  }
   const entry = sharedVoicePeerByDevice(payload.from_device_id, room) || {
     device_id: payload.from_device_id,
     user_id: payload.from_user_id || "",
@@ -2535,23 +2661,75 @@ async function handleSharedVoiceSignal(event, payload, room) {
   });
   const pc = peer?.pc;
   if (!peer || !pc) return false;
-  if (!sharedVoiceSignalMatchesRemoteMembership(payload, peer)) return true;
+  if (!sharedVoiceSignalMatchesRemoteMembership(payload, peer)) {
+    sharedVoiceDebugLog("event-ignored-epoch-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: payload.from_device_id || "",
+      ignoreReason: "remote-epoch-mismatch",
+    });
+    return true;
+  }
   if (payload.type === "offer" && payload.call_id !== peer.callId) {
-    if (!peer.polite && peer.callId) return true;
+    if (!peer.polite && peer.callId) {
+      sharedVoiceDebugLog("event-ignored-target-mismatch", {
+        room,
+        payload,
+        accepted: false,
+        ignored: true,
+        peerDeviceId: peer.deviceId,
+        ignoreReason: "offer-collision",
+      });
+      return true;
+    }
     peer.callId = payload.call_id;
   }
-  if (payload.call_id !== peer.callId) return true;
+  if (payload.call_id !== peer.callId) {
+    sharedVoiceDebugLog("event-ignored-target-mismatch", {
+      room,
+      payload,
+      accepted: false,
+      ignored: true,
+      peerDeviceId: peer.deviceId,
+      ignoreReason: "call-id-mismatch",
+    });
+    return true;
+  }
   if (payload.type === "mute") {
+    sharedVoiceDebugLog("mute-received", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: peer.deviceId,
+    });
     peer.muted = Boolean(payload.muted);
     voice.peerMuted = sharedVoicePeerStates().some((item) => item.muted);
     renderSharedVoice();
     return true;
   }
   if (payload.type === "offer") {
+    sharedVoiceDebugLog("offer-received", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: peer.deviceId,
+    });
     const description = { type: "offer", sdp: String(payload.sdp || "") };
     const offerCollision = peer.makingOffer || pc.signalingState !== "stable";
     peer.ignoreOffer = !peer.polite && offerCollision;
-    if (peer.ignoreOffer) return true;
+    if (peer.ignoreOffer) {
+      sharedVoiceDebugLog("event-ignored-target-mismatch", {
+        room,
+        payload,
+        accepted: false,
+        ignored: true,
+        peerDeviceId: peer.deviceId,
+        ignoreReason: "offer-collision",
+      });
+      return true;
+    }
     if (offerCollision) {
       await pc.setLocalDescription({ type: "rollback" });
     }
@@ -2563,6 +2741,12 @@ async function handleSharedVoiceSignal(event, payload, room) {
     return true;
   }
   if (payload.type === "answer") {
+    sharedVoiceDebugLog("answer-received", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: peer.deviceId,
+    });
     if (pc.signalingState !== "stable") {
       await pc.setRemoteDescription({ type: "answer", sdp: String(payload.sdp || "") });
       await flushSharedVoiceIceCandidates(peer);
@@ -2570,6 +2754,12 @@ async function handleSharedVoiceSignal(event, payload, room) {
     return true;
   }
   if (payload.type === "ice-candidate") {
+    sharedVoiceDebugLog("ice-received", {
+      room,
+      payload,
+      accepted: true,
+      peerDeviceId: peer.deviceId,
+    });
     try {
       const candidate = typeof payload.candidate === "string" ? JSON.parse(payload.candidate) : payload.candidate;
       await addSharedVoiceIceCandidate(peer, candidate);
@@ -2593,6 +2783,14 @@ async function processSharedVoiceRoom(room) {
       const payload = sharedVoicePayload(event);
       if (!payload) continue;
       if (sharedVoiceEventBeforeCurrentJoin(event, payload)) {
+        sharedVoiceDebugLog("stale-event-ignored", {
+          room,
+          payload,
+          accepted: false,
+          ignored: true,
+          peerDeviceId: payload.from_device_id || "",
+          ignoreReason: "before-local-join",
+        });
         voice.processedSignalIds.add(event.id);
         continue;
       }
@@ -2610,8 +2808,14 @@ async function processSharedVoiceRoom(room) {
 async function startSharedVoice() {
   if (state.sharedVoice.active || state.sharedVoice.connecting) return;
   if (state.config?.features?.sharedVoice?.enabled === false) return;
+  sharedVoiceDebugLog("local-join-click", { accepted: true });
   const mediaProblem = sharedVoiceMediaUnavailableReason();
   if (mediaProblem) {
+    sharedVoiceDebugLog("getUserMedia", {
+      accepted: false,
+      ignored: true,
+      ignoreReason: mediaProblem,
+    });
     state.sharedVoice.error = mediaProblem;
     renderSharedVoice();
     return;
@@ -2630,7 +2834,9 @@ async function startSharedVoice() {
     joinEpoch,
   });
   renderSharedVoice();
+  let gotLocalMedia = false;
   try {
+    sharedVoiceDebugLog("getUserMedia", { room, accepted: true, fromDeviceId: sharedVoiceCurrentDeviceId(room) });
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -2639,6 +2845,7 @@ async function startSharedVoice() {
       },
       video: false,
     });
+    gotLocalMedia = true;
     state.sharedVoice.localStream = stream;
     startSharedVoicePolling();
     const joinedRoom = await sendSharedVoiceRoomSignal("join", { joined: true, join_epoch: joinEpoch });
@@ -2652,6 +2859,12 @@ async function startSharedVoice() {
     });
     await maybeConnectSharedVoiceFromRoom(joinedRoom || room);
   } catch (error) {
+    sharedVoiceDebugLog(gotLocalMedia ? "voice-start-failed" : "getUserMedia", {
+      room,
+      accepted: false,
+      ignored: true,
+      ignoreReason: truncateText(error.message || "voice failed", 80),
+    });
     state.sharedVoice.error = truncateText(error.message || "voice failed", 80);
     resetSharedVoiceRuntime(true);
     recordUserEvent("workspace.shared_voice_error", {
@@ -2665,6 +2878,13 @@ async function startSharedVoice() {
 async function stopSharedVoice(options = {}) {
   const voice = state.sharedVoice;
   const roomId = voice.roomId || "";
+  if (voice.active || voice.connecting) {
+    voice.status = "leaving";
+    sharedVoiceDebugLog("local-leave-click", {
+      accepted: true,
+      ignoreReason: cleanText(options.reason, ""),
+    });
+  }
   if ((voice.active || voice.connecting) && options.notify !== false) {
     const peers = sharedVoicePeerStates().filter((peer) => peer.callId);
     for (const peer of peers) {
@@ -2680,6 +2900,56 @@ async function stopSharedVoice(options = {}) {
     summary: "Stopped shared voice",
     data: { shared_space_id: roomId, reason: options.reason || "" },
   });
+}
+
+function sendSharedVoiceLeaveBeacon(reason = "pagehide") {
+  const voice = state.sharedVoice;
+  const space = sharedUserSpaceForPanel();
+  const room = activeSharedRoom();
+  if (!voice.joinEpoch || !space?.shared_space_id || !room?.id) return false;
+  const body = {
+    action: "signal",
+    kind: SHARED_VOICE_SIGNAL_KIND,
+    space_id: space.id,
+    shared_space_id: space.shared_space_id,
+    payload: {
+      voice_schema: SHARED_VOICE_SIGNAL_SCHEMA,
+      call_id: `voice_room_${room.id}`,
+      room_id: room.id,
+      type: "leave",
+      reason,
+      from_user_id: sharedVoiceCurrentUserId(room),
+      from_device_id: sharedVoiceCurrentDeviceId(room),
+      from_client_id: sharedVoiceCurrentClientId(),
+      from_account_device_id: cleanText(room.current_device_id || "", ""),
+      to_device_id: "",
+      join_epoch: voice.joinEpoch,
+      join_event_id: voice.joinedEventId || "",
+    },
+  };
+  const payload = JSON.stringify(body);
+  sharedVoiceDebugLog("leave-event-publish", {
+    room,
+    accepted: true,
+    fromDeviceId: body.payload.from_device_id,
+    toDeviceId: "",
+    callId: body.payload.call_id,
+    ignoreReason: reason,
+  });
+  if (navigator.sendBeacon) {
+    return navigator.sendBeacon("/spaces/room", new Blob([payload], { type: "application/json" }));
+  }
+  fetch("/spaces/room", {
+    method: "POST",
+    cache: "no-store",
+    keepalive: true,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Wasm-Agent-Device-Id": clientDeviceId(),
+    },
+    body: payload,
+  }).catch(() => {});
+  return true;
 }
 
 function toggleSharedVoice() {
@@ -6159,794 +6429,33 @@ function renderAgentFileAttachments(message) {
 }
 
 function renderAgentMarkdown(content) {
-  const body = document.createElement("div");
-  body.className = "agent-message-body agent-markdown";
-  appendMarkdownBlocks(body, String(content || "").replace(/\r\n?/g, "\n").split("\n"));
-  return body;
-}
-
-function normalizeAgentMarkdownText(value) {
-  return String(value || "")
-    .replace(/\u00a0/g, " ")
-    .replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function agentInputText() {
-  if (!els.agentInput) return "";
-  return normalizeAgentMarkdownText(markdownFromEditableNode(els.agentInput));
-}
-
-function hasMarkdownSyntax(text) {
-  const value = String(text || "");
-  if (!value.trim()) return false;
-  return Boolean(
-    /^ {0,3}#{1,6}\s+/m.test(value)
-    || /^ {0,3}(```+|~~~+)/m.test(value)
-    || /^ {0,3}>/m.test(value)
-    || /^ {0,3}(?:[-*+]|\d+[.)])\s+/m.test(value)
-    || /^ {0,3}[-*+]\s+\[[ xX]\]\s+/m.test(value)
-    || /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/m.test(value)
-    || /\|.+\|\s*\n\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?/m.test(value)
-    || /(`[^`\n]+`|\*\*[^*\n]+\*\*|__[^_\n]+__|\[[^\]\n]+]\([^) \n]+\))/.test(value)
-  );
-}
-
-function plainTextFromNode(node) {
-  return String(node?.innerText || node?.textContent || "")
-    .replace(/\u00a0/g, " ")
-    .replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
-}
-
-function markdownEscapeTableCell(value) {
-  return String(value || "").replace(/\|/g, "\\|").replace(/\n+/g, " ").trim();
-}
-
-function markdownInlineFromNode(node) {
-  if (!node) return "";
-  if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || "").replace(/\u00a0/g, " ");
-  if (node.nodeType !== Node.ELEMENT_NODE) return "";
-  const tag = node.tagName.toLowerCase();
-  if (tag === "br") return "\n";
-  if (tag === "input") return "";
-  const children = Array.from(node.childNodes).map(markdownInlineFromNode).join("").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
-  if (tag === "code" && node.closest("pre")) return children;
-  if (tag === "code") return `\`${children.replace(/`/g, "\\`")}\``;
-  if (!children) return "";
-  if (tag === "strong" || tag === "b") return `**${children}**`;
-  if (tag === "em" || tag === "i") return `*${children}*`;
-  if (tag === "a") {
-    const href = node.getAttribute("href") || "";
-    return href ? `[${children}](${href})` : children;
-  }
-  return children;
-}
-
-function elementHasBlockChildren(element) {
-  return Array.from(element.children || []).some((child) => (
-    /^(address|article|aside|blockquote|div|dl|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|ul)$/i
-      .test(child.tagName)
-  ));
-}
-
-function markdownListItemFromNode(item, ordered, index) {
-  const checkbox = item.querySelector(":scope > input[type='checkbox']");
-  const marker = ordered ? `${index + 1}.` : "-";
-  const taskPrefix = checkbox ? `[${checkbox.checked ? "x" : " "}] ` : "";
-  const clone = item.cloneNode(true);
-  clone.querySelectorAll(":scope > input[type='checkbox']").forEach((input) => input.remove());
-  const text = elementHasBlockChildren(clone)
-    ? Array.from(clone.childNodes).map(markdownBlockFromNode).join("\n").trim()
-    : markdownInlineFromNode(clone).trim();
-  const lines = `${taskPrefix}${text}`.trim().split("\n");
-  return `${marker} ${lines.map((line, lineIndex) => (lineIndex ? `  ${line}` : line)).join("\n")}`.trimEnd();
-}
-
-function markdownTableFromNode(table) {
-  const rows = Array.from(table.querySelectorAll("tr"));
-  if (!rows.length) return markdownInlineFromNode(table).trim();
-  const matrix = rows.map((row) => (
-    Array.from(row.children)
-      .filter((cell) => /^(th|td)$/i.test(cell.tagName))
-      .map((cell) => markdownEscapeTableCell(markdownInlineFromNode(cell)))
-  )).filter((row) => row.length);
-  if (!matrix.length) return "";
-  const width = Math.max(...matrix.map((row) => row.length));
-  const fill = (row) => Array.from({ length: width }, (_item, idx) => row[idx] || "");
-  const header = fill(matrix[0]);
-  const body = matrix.slice(1).map(fill);
-  return [
-    `| ${header.join(" | ")} |`,
-    `| ${header.map(() => "---").join(" | ")} |`,
-    ...body.map((row) => `| ${row.join(" | ")} |`),
-  ].join("\n");
-}
-
-function markdownBlockFromNode(node) {
-  if (!node) return "";
-  if (node.nodeType === Node.TEXT_NODE) return String(node.textContent || "").replace(/\u00a0/g, " ").trim();
-  if (node.nodeType !== Node.ELEMENT_NODE) return "";
-  const tag = node.tagName.toLowerCase();
-  if (tag === "br") return "\n";
-  if (/^h[1-6]$/.test(tag)) return `${"#".repeat(Number(tag[1]))} ${markdownInlineFromNode(node).trim()}`.trim();
-  if (tag === "p") return markdownInlineFromNode(node).trim();
-  if (tag === "blockquote") {
-    const quote = Array.from(node.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
-    return quote.split("\n").map((line) => `> ${line}`.trimEnd()).join("\n");
-  }
-  if (tag === "pre") {
-    const code = node.querySelector("code");
-    const languageClass = Array.from(code?.classList || []).find((name) => name.startsWith("language-")) || "";
-    const language = languageClass.replace(/^language-/, "");
-    return `\`\`\`${language}\n${String(code?.textContent || node.textContent || "").replace(/\n$/, "")}\n\`\`\``;
-  }
-  if (tag === "ul" || tag === "ol") {
-    const ordered = tag === "ol";
-    return Array.from(node.children)
-      .filter((child) => child.tagName.toLowerCase() === "li")
-      .map((child, index) => markdownListItemFromNode(child, ordered, index))
-      .join("\n");
-  }
-  if (tag === "hr") return "---";
-  if (tag === "table") return markdownTableFromNode(node);
-  if (tag === "div" || tag === "section" || tag === "article") {
-    if (!elementHasBlockChildren(node)) return markdownInlineFromNode(node).trim();
-    return Array.from(node.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
-  }
-  if (tag === "li") return markdownListItemFromNode(node, false, 0);
-  return markdownInlineFromNode(node).trim();
-}
-
-function markdownFromEditableNode(root) {
-  if (!root) return "";
-  if (!root.children.length) return plainTextFromNode(root);
-  return Array.from(root.childNodes).map(markdownBlockFromNode).filter(Boolean).join("\n\n");
-}
-
-function inlineCodeText(code) {
-  return String(code?.textContent || "").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
-}
-
-function inlineCodeEditableNodes(root) {
-  return Array.from(root?.querySelectorAll?.("code") || [])
-    .filter((code) => !code.closest("pre"));
-}
-
-function ensureEditableInlineCodeBoundaries(root) {
-  for (const code of inlineCodeEditableNodes(root)) {
-    if (!inlineCodeText(code)) {
-      code.textContent = AGENT_INPUT_BOUNDARY_TEXT;
-    }
-    const next = code.nextSibling;
-    if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "").startsWith(AGENT_INPUT_BOUNDARY_TEXT)) {
-      continue;
-    }
-    code.after(document.createTextNode(AGENT_INPUT_BOUNDARY_TEXT));
-  }
-}
-
-function setCaretAtEnd(element) {
-  if (!element || document.activeElement !== element) return;
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-  const selection = window.getSelection();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function renderAgentInputMarkdown() {
-  if (!els.agentInput || state.agentInputRendering) return;
-  cancelAgentInputMarkdownRender();
-  const content = agentInputText();
-  state.agentInputRendering = true;
-  try {
-    if (!content) {
-      els.agentInput.replaceChildren();
-      delete els.agentInput.dataset.renderedMarkdown;
-      return;
-    }
-    if (!hasMarkdownSyntax(content)) {
-      if (els.agentInput.dataset.renderedMarkdown === "true") {
-        els.agentInput.textContent = content;
-        delete els.agentInput.dataset.renderedMarkdown;
-        setCaretAtEnd(els.agentInput);
-      }
-      return;
-    }
-    const rendered = renderAgentMarkdown(content);
-    els.agentInput.replaceChildren(...Array.from(rendered.childNodes));
-    ensureEditableInlineCodeBoundaries(els.agentInput);
-    els.agentInput.dataset.renderedMarkdown = "true";
-    setCaretAtEnd(els.agentInput);
-  } finally {
-    state.agentInputRendering = false;
-  }
-}
-
-function cancelAgentInputMarkdownRender() {
-  if (!state.agentInputRenderFrame) return;
-  window.cancelAnimationFrame?.(state.agentInputRenderFrame);
-  state.agentInputRenderFrame = 0;
-}
-
-function scheduleAgentInputMarkdownRender() {
-  if (state.agentInputRendering || state.agentInputRenderFrame) return;
-  if (!window.requestAnimationFrame) {
-    renderAgentInputMarkdown();
-    return;
-  }
-  state.agentInputRenderFrame = window.requestAnimationFrame(() => {
-    state.agentInputRenderFrame = 0;
-    renderAgentInputMarkdown();
+  return renderChatMarkdownTokens(tokenizeChatMarkdown(content), {
+    className: "agent-message-body agent-markdown chat-rendered-markdown",
   });
-}
-
-function agentInputSelectionTextOffset() {
-  const selection = window.getSelection?.();
-  if (!selection || !selection.isCollapsed || !els.agentInput) return -1;
-  if (!els.agentInput.contains(selection.focusNode)) return -1;
-  const range = document.createRange();
-  range.selectNodeContents(els.agentInput);
-  try {
-    range.setEnd(selection.focusNode, selection.focusOffset);
-  } catch {
-    return -1;
-  }
-  const wrap = document.createElement("div");
-  wrap.append(range.cloneContents());
-  return plainTextFromNode(wrap).length;
-}
-
-function selectionInsideRawInlineCodeSource() {
-  if (!els.agentInput || els.agentInput.dataset.renderedMarkdown === "true") return false;
-  const text = agentInputText();
-  const offset = agentInputSelectionTextOffset();
-  if (offset <= 0 || offset >= text.length) return false;
-  if (text[offset] !== "`") return false;
-  const before = text.slice(0, offset);
-  const opening = before.lastIndexOf("`");
-  if (opening < 0) return false;
-  const inner = before.slice(opening + 1);
-  if (!inner || inner.includes("\n")) return false;
-  return text[opening - 1] !== "`" && text[offset + 1] !== "`";
 }
 
 function clearAgentInput() {
-  cancelAgentInputMarkdownRender();
-  if (!els.agentInput) return;
-  els.agentInput.replaceChildren();
-  delete els.agentInput.dataset.renderedMarkdown;
+  state.agentComposer?.clear?.({ focus: true });
 }
 
-function insertAgentInputMarkdown(text) {
-  document.execCommand("insertText", false, String(text || ""));
-  renderAgentInputMarkdown();
-}
-
-function agentInputSubmitText() {
-  cancelAgentInputMarkdownRender();
-  return agentInputText();
-}
-
-function nodeHasFollowingContentUntil(node, ancestor) {
-  let current = node;
-  while (current && current !== ancestor) {
-    if (current.nextSibling) return true;
-    current = current.parentNode;
-  }
-  return false;
-}
-
-function selectionInlineCode() {
-  const selection = window.getSelection?.();
-  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
-  let node = selection.focusNode;
-  if (!node || !els.agentInput.contains(node)) return null;
-  const code = (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest?.("code");
-  if (!code || code.closest("pre") || !els.agentInput.contains(code)) return null;
-  return code;
-}
-
-function selectionEmptyInlineCode() {
-  const code = selectionInlineCode();
-  return code && !inlineCodeText(code) ? code : null;
-}
-
-function selectionInlineCodeAtEnd() {
-  const code = selectionInlineCode();
-  if (!code) return null;
-  const selection = window.getSelection?.();
-  let node = selection.focusNode;
-  let atEnd = false;
-  if (node === code) {
-    atEnd = selection.focusOffset >= code.childNodes.length;
-  } else if (node.nodeType === Node.TEXT_NODE) {
-    atEnd = selection.focusOffset >= String(node.textContent || "").length && !nodeHasFollowingContentUntil(node, code);
-  }
-  return atEnd ? code : null;
-}
-
-function placeCaretAfterNode(node) {
-  const range = document.createRange();
-  range.setStartAfter(node);
-  range.collapse(true);
-  const selection = window.getSelection?.();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function placeCaretInsideInlineCodeEnd(code) {
-  if (!code) return;
-  if (!code.firstChild) code.textContent = AGENT_INPUT_BOUNDARY_TEXT;
-  const target = code.lastChild || code;
-  const text = target.nodeType === Node.TEXT_NODE ? String(target.textContent || "") : "";
-  const offset = target.nodeType === Node.TEXT_NODE ? text.length : code.childNodes.length;
-  const range = document.createRange();
-  range.setStart(target, offset);
-  range.collapse(true);
-  const selection = window.getSelection?.();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-}
-
-function inlineCodeAtElementEdge(element, atEnd = true) {
-  if (!element || element.nodeType !== Node.ELEMENT_NODE) return null;
-  const tag = element.tagName?.toLowerCase?.() || "";
-  if (tag === "pre") return null;
-  if (tag === "code") return element.closest("pre") ? null : element;
-  const children = Array.from(element.childNodes || []);
-  const ordered = atEnd ? children.reverse() : children;
-  for (const child of ordered) {
-    if (child.nodeType === Node.TEXT_NODE) {
-      const text = String(child.textContent || "").replaceAll(AGENT_INPUT_BOUNDARY_TEXT, "");
-      if (text) return null;
-      continue;
-    }
-    if (child.nodeType !== Node.ELEMENT_NODE) continue;
-    const code = inlineCodeAtElementEdge(child, atEnd);
-    if (code) return code;
-    const text = plainTextFromNode(child);
-    if (text) return null;
-  }
-  return null;
-}
-
-function inlineCodeBeforeSelection() {
-  const selection = window.getSelection?.();
-  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
-  const node = selection.focusNode;
-  if (!node || !els.agentInput.contains(node)) return null;
-  let previous = null;
-  if (node === els.agentInput) {
-    previous = els.agentInput.childNodes[Math.max(0, selection.focusOffset - 1)] || null;
-  } else if (node.nodeType === Node.TEXT_NODE) {
-    const text = String(node.textContent || "");
-    if (text.startsWith(AGENT_INPUT_BOUNDARY_TEXT) && selection.focusOffset <= AGENT_INPUT_BOUNDARY_TEXT.length) {
-      previous = node.previousSibling;
-    } else if (selection.focusOffset === 0) {
-      previous = node.previousSibling;
-    }
-  } else if (node.nodeType === Node.ELEMENT_NODE && selection.focusOffset > 0) {
-    previous = node.childNodes[selection.focusOffset - 1] || null;
-  }
-  if (previous?.nodeType === Node.TEXT_NODE && String(previous.textContent || "") === AGENT_INPUT_BOUNDARY_TEXT) {
-    previous = previous.previousSibling;
-  }
-  if (previous?.nodeType === Node.ELEMENT_NODE && previous.tagName?.toLowerCase() === "code" && !previous.closest("pre")) {
-    return previous;
-  }
-  if (previous?.nodeType === Node.ELEMENT_NODE) {
-    return inlineCodeAtElementEdge(previous, true);
-  }
-  return null;
-}
-
-function inlineCodeAfterSelection() {
-  const selection = window.getSelection?.();
-  if (!selection || !selection.isCollapsed || !els.agentInput) return null;
-  const node = selection.focusNode;
-  if (!node || !els.agentInput.contains(node)) return null;
-  let next = null;
-  if (node === els.agentInput) {
-    next = els.agentInput.childNodes[selection.focusOffset] || null;
-  } else if (node.nodeType === Node.TEXT_NODE) {
-    const text = String(node.textContent || "");
-    if (selection.focusOffset >= text.length) {
-      next = node.nextSibling;
-    }
-  } else if (node.nodeType === Node.ELEMENT_NODE && selection.focusOffset < node.childNodes.length) {
-    next = node.childNodes[selection.focusOffset] || null;
-  }
-  if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "") === AGENT_INPUT_BOUNDARY_TEXT) {
-    next = next.nextSibling;
-  }
-  if (next?.nodeType === Node.ELEMENT_NODE && next.tagName?.toLowerCase() === "code" && !next.closest("pre")) {
-    return next;
-  }
-  if (next?.nodeType === Node.ELEMENT_NODE) {
-    return inlineCodeAtElementEdge(next, false);
-  }
-  return null;
-}
-
-function inlineCodeMarkdownSource(code) {
-  return `\`${inlineCodeText(code).replace(/`/g, "\\`")}\``;
-}
-
-function inlineCodeEditableSource(code, deleteDirection = "") {
-  const source = inlineCodeMarkdownSource(code);
-  if (source === "``") return "`";
-  if (deleteDirection === "backward") return source.slice(0, -1);
-  if (deleteDirection === "forward") return source.slice(1);
-  return source;
-}
-
-function removeInlineCodeBoundaryAfter(code) {
-  const next = code?.nextSibling;
-  if (next?.nodeType === Node.TEXT_NODE && String(next.textContent || "").startsWith(AGENT_INPUT_BOUNDARY_TEXT)) {
-    next.textContent = String(next.textContent || "").slice(AGENT_INPUT_BOUNDARY_TEXT.length);
-    if (!next.textContent) next.remove();
-  }
-}
-
-function unwrapInlineCodeForEditing(code, options = {}) {
-  if (!code || !els.agentInput?.contains(code)) return false;
-  const source = inlineCodeEditableSource(code, options.deleteDirection || "");
-  const text = document.createTextNode(source);
-  removeInlineCodeBoundaryAfter(code);
-  code.replaceWith(text);
-  const caretOffset = options.deleteDirection === "forward" ? 0 : source.length;
-  const range = document.createRange();
-  range.setStart(text, caretOffset);
-  range.collapse(true);
-  const selection = window.getSelection?.();
-  selection?.removeAllRanges();
-  selection?.addRange(range);
-  delete els.agentInput.dataset.renderedMarkdown;
-  return true;
-}
-
-function selectedAgentInputMarkdownText() {
-  const selection = window.getSelection?.();
-  if (!selection || selection.isCollapsed || !els.agentInput) return "";
-  if (!els.agentInput.contains(selection.anchorNode) || !els.agentInput.contains(selection.focusNode)) return "";
-  const parts = [];
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index);
-    if (!els.agentInput.contains(range.commonAncestorContainer) && range.commonAncestorContainer !== els.agentInput) {
-      continue;
-    }
-    const fragment = range.cloneContents();
-    const wrap = document.createElement("div");
-    wrap.append(fragment);
-    parts.push(elementHasBlockChildren(wrap) ? markdownFromEditableNode(wrap) : markdownInlineFromNode(wrap));
-  }
-  return normalizeAgentMarkdownText(parts.filter(Boolean).join("\n\n"));
-}
-
-function copyAgentInputMarkdown(event) {
-  const markdown = selectedAgentInputMarkdownText();
-  if (!markdown) return;
-  event.preventDefault();
-  event.clipboardData?.setData("text/plain", markdown);
-}
-
-function maybeEscapeInlineCodeBeforeInput(event) {
-  const insertingText = event?.inputType === "insertText" || event?.inputType === "insertCompositionText";
-  if (event?.inputType === "deleteContentBackward") {
-    const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
-    if (!code) return;
-    event.preventDefault();
-    unwrapInlineCodeForEditing(code, { deleteDirection: "backward" });
-    return;
-  }
-  if (event?.inputType === "deleteContentForward") {
-    const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
-    if (!code) return;
-    event.preventDefault();
-    unwrapInlineCodeForEditing(code, { deleteDirection: "forward" });
-    return;
-  }
-  if (!insertingText || !event.data) return;
-}
-
-function handleInlineCodeNavigation(event) {
-  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-  if (event.key === "ArrowLeft") {
-    const code = inlineCodeBeforeSelection();
-    if (!code) return;
-    event.preventDefault();
-    placeCaretInsideInlineCodeEnd(code);
-    return;
-  }
-  if (event.key === "Backspace") {
-    const code = selectionEmptyInlineCode() || inlineCodeBeforeSelection();
-    if (!code) return;
-    event.preventDefault();
-    unwrapInlineCodeForEditing(code, { deleteDirection: "backward" });
-    return;
-  }
-  if (event.key === "Delete") {
-    const code = selectionEmptyInlineCode() || inlineCodeAfterSelection();
-    if (!code) return;
-    event.preventDefault();
-    unwrapInlineCodeForEditing(code, { deleteDirection: "forward" });
-  }
-}
-
-function maybeRenderAgentInputFromEvent(event) {
-  if (event?.inputType === "insertParagraph") {
-    renderAgentInputMarkdown();
-    return;
-  }
-  const inputType = String(event?.inputType || "");
-  const data = String(event?.data || "");
-  const rendered = els.agentInput?.dataset.renderedMarkdown === "true";
-  if (rendered && inputType.startsWith("insert") && selectionInlineCode()) {
-    return;
-  }
-  if (inputType.startsWith("delete") && rendered) {
-    scheduleAgentInputMarkdownRender();
-    return;
-  }
-  if (
-    inputType.startsWith("insertFromPaste")
-    || Array.from(data).some((char) => AGENT_INPUT_MARKDOWN_TRIGGER_CHARS.has(char))
-    || hasMarkdownSyntax(agentInputText())
-  ) {
-    if (selectionInsideRawInlineCodeSource()) return;
-    scheduleAgentInputMarkdownRender();
-  }
-}
-
-function appendMarkdownBlocks(container, lines) {
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index] || "";
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    const fence = line.match(/^ {0,3}(```+|~~~+)\s*([A-Za-z0-9_+.-]*)\s*$/);
-    if (fence) {
-      const marker = fence[1];
-      const lang = fence[2] || "";
-      const codeLines = [];
-      index += 1;
-      while (index < lines.length && !String(lines[index] || "").startsWith(marker)) {
-        codeLines.push(lines[index] || "");
-        index += 1;
-      }
-      if (index < lines.length) index += 1;
-      const pre = document.createElement("pre");
-      const code = document.createElement("code");
-      if (lang) code.className = `language-${lang.replace(/[^A-Za-z0-9_+.-]/g, "")}`;
-      code.textContent = codeLines.join("\n");
-      pre.append(code);
-      container.append(pre);
-      continue;
-    }
-
-    const heading = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (heading) {
-      const el = document.createElement(`h${heading[1].length}`);
-      appendInlineMarkdown(el, heading[2]);
-      container.append(el);
-      index += 1;
-      continue;
-    }
-
-    if (/^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
-      container.append(document.createElement("hr"));
-      index += 1;
-      continue;
-    }
-
-    if (/^ {0,3}>/.test(line)) {
-      const quoteLines = [];
-      while (index < lines.length && /^ {0,3}>/.test(lines[index] || "")) {
-        quoteLines.push(String(lines[index] || "").replace(/^ {0,3}>\s?/, ""));
-        index += 1;
-      }
-      const quote = document.createElement("blockquote");
-      appendMarkdownBlocks(quote, quoteLines);
-      container.append(quote);
-      continue;
-    }
-
-    if (isMarkdownTableStart(lines, index)) {
-      const tableLines = [lines[index], lines[index + 1]];
-      index += 2;
-      while (index < lines.length && /\|/.test(lines[index] || "") && String(lines[index] || "").trim()) {
-        tableLines.push(lines[index]);
-        index += 1;
-      }
-      container.append(renderMarkdownTable(tableLines));
-      continue;
-    }
-
-    const listMatch = line.match(/^ {0,3}(?:([-*+])|(\d+)[.)])\s+(.+)$/);
-    if (listMatch) {
-      const ordered = Boolean(listMatch[2]);
-      const list = document.createElement(ordered ? "ol" : "ul");
-      while (index < lines.length) {
-        const match = String(lines[index] || "").match(/^ {0,3}(?:([-*+])|(\d+)[.)])\s+(.+)$/);
-        if (!match || Boolean(match[2]) !== ordered) break;
-        const item = document.createElement("li");
-        const task = match[3].match(/^\[([ xX])]\s+(.+)$/);
-        if (task) {
-          item.className = "task-list-item";
-          const checkbox = document.createElement("input");
-          checkbox.type = "checkbox";
-          checkbox.disabled = true;
-          checkbox.checked = task[1].toLowerCase() === "x";
-          item.append(checkbox, " ");
-          appendInlineMarkdown(item, task[2]);
-        } else {
-          appendInlineMarkdown(item, match[3]);
-        }
-        list.append(item);
-        index += 1;
-      }
-      container.append(list);
-      continue;
-    }
-
-    const paragraph = [line.trim()];
-    index += 1;
-    while (
-      index < lines.length
-      && String(lines[index] || "").trim()
-      && !isMarkdownBlockStart(lines, index)
-    ) {
-      paragraph.push(String(lines[index] || "").trim());
-      index += 1;
-    }
-    const p = document.createElement("p");
-    appendInlineMarkdown(p, paragraph.join(" "));
-    container.append(p);
-  }
-}
-
-function isMarkdownBlockStart(lines, index) {
-  const line = String(lines[index] || "");
-  return Boolean(
-    line.match(/^ {0,3}(```+|~~~+)/)
-    || line.match(/^(#{1,6})\s+/)
-    || line.match(/^ {0,3}>/)
-    || line.match(/^ {0,3}(?:[-*+]|\d+[.)])\s+/)
-    || /^ {0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)
-    || isMarkdownTableStart(lines, index)
-  );
-}
-
-function appendInlineMarkdown(parent, text) {
-  let rest = String(text || "");
-  while (rest) {
-    const markers = ["`", "[", "**", "__", "*", "_"]
-      .map((marker) => ({ marker, index: rest.indexOf(marker) }))
-      .filter((item) => item.index >= 0)
-      .sort((a, b) => (a.index - b.index) || (b.marker.length - a.marker.length));
-    if (!markers.length) {
-      parent.append(document.createTextNode(rest));
-      return;
-    }
-    const { marker, index } = markers[0];
-    if (index > 0) {
-      parent.append(document.createTextNode(rest.slice(0, index)));
-      rest = rest.slice(index);
-      continue;
-    }
-    if (marker === "`") {
-      const end = rest.indexOf("`", 1);
-      if (end > 1) {
-        const code = document.createElement("code");
-        code.textContent = rest.slice(1, end);
-        parent.append(code);
-        rest = rest.slice(end + 1);
-        continue;
-      }
-    }
-    if (marker === "[") {
-      const link = rest.match(/^\[([^\]]+)]\(([^)\s]+)(?:\s+"[^"]*")?\)/);
-      if (link) {
-        const href = safeMarkdownUrl(link[2]);
-        if (href) {
-          const anchor = document.createElement("a");
-          anchor.href = href;
-          anchor.target = "_blank";
-          anchor.rel = "noopener noreferrer";
-          appendInlineMarkdown(anchor, link[1]);
-          parent.append(anchor);
-        } else {
-          parent.append(document.createTextNode(link[1]));
-        }
-        rest = rest.slice(link[0].length);
-        continue;
-      }
-    }
-    if (marker === "**" || marker === "__") {
-      const end = rest.indexOf(marker, marker.length);
-      if (end > marker.length) {
-        const strong = document.createElement("strong");
-        appendInlineMarkdown(strong, rest.slice(marker.length, end));
-        parent.append(strong);
-        rest = rest.slice(end + marker.length);
-        continue;
-      }
-    }
-    if ((marker === "*" || marker === "_") && rest.length > 2 && !/\s/.test(rest[1])) {
-      const end = rest.indexOf(marker, 1);
-      if (end > 1) {
-        const em = document.createElement("em");
-        appendInlineMarkdown(em, rest.slice(1, end));
-        parent.append(em);
-        rest = rest.slice(end + 1);
-        continue;
-      }
-    }
-    parent.append(document.createTextNode(rest[0]));
-    rest = rest.slice(1);
-  }
-}
-
-function safeMarkdownUrl(raw) {
-  const value = String(raw || "").trim();
-  if (!value) return "";
-  if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i.test(value)) return value;
-  return "";
-}
-
-function splitMarkdownTableRow(line) {
-  const trimmed = String(line || "").trim().replace(/^\|/, "").replace(/\|$/, "");
-  return trimmed.split("|").map((cell) => cell.trim());
-}
-
-function isMarkdownTableDivider(line) {
-  const cells = splitMarkdownTableRow(line);
-  return cells.length > 1 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
-}
-
-function isMarkdownTableStart(lines, index) {
-  return Boolean(
-    index + 1 < lines.length
-    && /\|/.test(lines[index] || "")
-    && isMarkdownTableDivider(lines[index + 1] || "")
-  );
-}
-
-function renderMarkdownTable(lines) {
-  const wrap = document.createElement("div");
-  wrap.className = "agent-markdown-table-wrap";
-  const table = document.createElement("table");
-  const head = document.createElement("thead");
-  const body = document.createElement("tbody");
-  const headers = splitMarkdownTableRow(lines[0]);
-  const headerRow = document.createElement("tr");
-  headers.forEach((header) => {
-    const th = document.createElement("th");
-    appendInlineMarkdown(th, header);
-    headerRow.append(th);
+function initializeAgentComposer() {
+  if (state.agentComposer || !els.agentInput) return;
+  state.agentComposer = createChatComposer({
+    textarea: els.agentInput,
+    form: els.agentForm,
+    overlay: document.querySelector("#agentInputOverlay"),
+    commandPaletteElement: document.querySelector("#agentCommandPalette"),
+    createCommandPalette,
+    canSubmit: (raw) => (
+      state.agentBusy
+      || Boolean(String(raw || "").trim())
+      || Boolean(state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length)
+    ),
+    onSend: (raw) => {
+      void sendAgentMessage(raw);
+      return false;
+    },
   });
-  head.append(headerRow);
-  lines.slice(2).forEach((line) => {
-    const row = document.createElement("tr");
-    const cells = splitMarkdownTableRow(line);
-    headers.forEach((_, cellIndex) => {
-      const td = document.createElement("td");
-      appendInlineMarkdown(td, cells[cellIndex] || "");
-      row.append(td);
-    });
-    body.append(row);
-  });
-  table.append(head, body);
-  wrap.append(table);
-  return wrap;
 }
 
 function renderAgentImageCards(message) {
@@ -9711,10 +9220,10 @@ async function sendAgentMessage(text) {
     stopAgentMessage();
     return;
   }
-  const content = cleanText(text, "");
+  const content = String(text ?? "").replace(/\r\n?/g, "\n");
   const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
-  if (!content && !attachmentCount) return;
-  const userMessageContent = content || `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
+  if (!content.trim() && !attachmentCount) return;
+  const userMessageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
   state.agentBusy = true;
   state.agentStopRequested = false;
   state.agentAbortController = new AbortController();
@@ -14763,6 +14272,11 @@ function wireEvents() {
     event.preventDefault();
     event.stopPropagation();
   });
+  window.addEventListener("pagehide", () => {
+    if (!state.sharedVoice.active && !state.sharedVoice.connecting) return;
+    sendSharedVoiceLeaveBeacon("pagehide");
+    resetSharedVoiceRuntime();
+  });
 	  window.addEventListener("resize", () => hideSpaceContextMenu({ skipHistory: true, replaceHistory: true }));
 	  window.addEventListener("resize", () => hideNodeContextMenu({ skipHistory: true, replaceHistory: true }));
 	  window.addEventListener("resize", () => hideNodeStatsBalloon({ skipHistory: true, replaceHistory: true }));
@@ -15006,22 +14520,7 @@ function wireEvents() {
   });
   els.agentModelForm?.addEventListener("submit", (event) => void submitAgentModelSetup(event));
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
-  els.agentForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void sendAgentMessage(agentInputSubmitText());
-  });
-  els.agentInput.addEventListener("beforeinput", maybeEscapeInlineCodeBeforeInput);
-  els.agentInput.addEventListener("input", maybeRenderAgentInputFromEvent);
-  els.agentInput.addEventListener("blur", renderAgentInputMarkdown);
-  els.agentInput.addEventListener("copy", copyAgentInputMarkdown);
-  els.agentInput.addEventListener("keydown", (event) => {
-    handleInlineCodeNavigation(event);
-    if (event.defaultPrevented) return;
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      void sendAgentMessage(agentInputSubmitText());
-    }
-  });
+  initializeAgentComposer();
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
   els.agentImageInput?.addEventListener("change", () => {
     handleAgentFiles(els.agentImageInput.files);
@@ -15041,11 +14540,6 @@ function wireEvents() {
       event.preventDefault();
       handleAgentFiles(imageFiles);
       return;
-    }
-    const text = event.clipboardData?.getData("text/plain");
-    if (text != null) {
-      event.preventDefault();
-      insertAgentInputMarkdown(text);
     }
   });
   els.agentForm.addEventListener("dragover", (event) => {

@@ -1,9 +1,23 @@
-const CACHE_NAME = "wasm-agent-v43";
+const CACHE_NAME = "wasm-agent-v46";
 const ASSETS = [
   "/",
   "/index.html",
+  "/composer-lab",
+  "/composer-lab.html",
+  "/composer-lab.js",
+  "/voice-lab",
+  "/voice-lab.html",
+  "/voice-lab.css",
+  "/voice-lab.js",
   "/styles.css",
   "/app.js",
+  "/modules/chat-composer/chat-composer.css",
+  "/modules/chat-composer/chat-composer.js",
+  "/modules/chat-composer/chat-commands.js",
+  "/modules/chat-composer/chat-overlay.js",
+  "/modules/chat-composer/chat-renderer.js",
+  "/modules/chat-composer/chat-tokenizer.js",
+  "/modules/chat-composer/chat-composer.test.js",
   "/modules/index.js",
   "/modules/hmr/dev-hmr.js",
   "/modules/hmr/module.js",
@@ -51,6 +65,7 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/auth/session" ||
     url.pathname === "/health" ||
     url.pathname === "/observation/latest" ||
+    url.pathname === "/voice-lab/room" ||
     url.pathname.startsWith("/security-loop/") ||
     url.pathname === "/modules/hmr/events"
   ) return;

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/modules/chat-composer/chat-composer.css">
+    <title>Composer Lab</title>
+  </head>
+  <body class="composer-lab-page">
+    <main class="composer-lab-shell">
+      <section class="composer-lab-panel">
+        <header>
+          <h1>Composer Lab</h1>
+          <p>Plain textarea source, decorated overlay, safe preview, command palette, and send preview.</p>
+        </header>
+        <form id="composerLabForm" class="composer-lab-form" autocomplete="off">
+          <div id="composerLabComposer" class="chat-composer composer-lab-composer">
+            <label class="sr-only" for="composerLabTextarea">Message</label>
+            <div class="chat-composer-input-wrap">
+              <div id="composerLabOverlay" class="chat-composer-overlay" aria-hidden="true"></div>
+              <textarea id="composerLabTextarea" rows="7" spellcheck="true" autocapitalize="sentences" placeholder="Talk to Hermes"></textarea>
+            </div>
+            <div id="composerLabPalette" class="chat-command-palette" hidden></div>
+          </div>
+          <div class="composer-lab-actions">
+            <button type="submit">Send</button>
+            <button id="composerLabToggleOverlay" type="button">Toggle overlay</button>
+            <button id="composerLabExport" type="button">Export diagnostics</button>
+          </div>
+        </form>
+        <section class="composer-lab-section">
+          <h2>Inject</h2>
+          <div id="composerLabInject" class="composer-lab-buttons"></div>
+        </section>
+        <section class="composer-lab-section">
+          <h2>Caret</h2>
+          <div class="composer-lab-buttons">
+            <button type="button" data-caret="0">Start</button>
+            <button type="button" data-caret="middle">Middle</button>
+            <button type="button" data-caret="end">End</button>
+          </div>
+        </section>
+        <section class="composer-lab-section">
+          <h2>Live Preview</h2>
+        </section>
+        <div id="composerLabPreview" class="composer-lab-preview"></div>
+        <section class="composer-lab-section">
+          <h2>Sent Preview</h2>
+        </section>
+        <div id="composerLabSent" class="composer-lab-sent"></div>
+      </section>
+
+      <section class="composer-lab-panel">
+        <header>
+          <h2>Diagnostics</h2>
+          <p>Ctrl/Cmd+Enter sends just like Enter. Shift+Enter inserts a newline.</p>
+        </header>
+        <div class="composer-lab-debug">
+          <pre id="composerLabDebug"></pre>
+        </div>
+      </section>
+
+      <section class="composer-lab-panel">
+        <header>
+          <h2>Test Runner</h2>
+          <p>Pure tokenizer, renderer, link, slash-command, security, and resilience checks.</p>
+        </header>
+        <div class="composer-lab-tests">
+          <div class="composer-lab-buttons">
+            <button id="composerLabRunTests" type="button">Run tests</button>
+          </div>
+          <pre id="composerLabTestSummary"></pre>
+          <div id="composerLabTestList" class="composer-lab-test-list"></div>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/composer-lab.js"></script>
+  </body>
+</html>

@@ -14,8 +14,9 @@ import unittest
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_ROOT = PLUGIN_ROOT / "public"
 BACKSPACE = "\ue003"
-DELETE = "\ue017"
+ARROW_LEFT = "\ue012"
 ARROW_RIGHT = "\ue014"
+ENTER = "\ue007"
 
 
 def free_port():
@@ -107,15 +108,14 @@ class WebDriver:
         }
         if chrome_binary:
             chrome_options["binary"] = chrome_binary
-        payload = {
+        data = self._request("POST", "/session", {
             "capabilities": {
                 "alwaysMatch": {
                     "browserName": "chrome",
                     "goog:chromeOptions": chrome_options,
                 }
             }
-        }
-        data = self._request("POST", "/session", payload)
+        })
         self.session_id = data.get("value", {}).get("sessionId") or data.get("sessionId", "")
         if not self.session_id:
             raise AssertionError(f"WebDriver session id missing: {data}")
@@ -187,12 +187,12 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
         deadline = time.time() + 10
         while time.time() < deadline:
             ready = cls.driver.execute(
-                "return document.readyState !== 'loading' && Boolean(document.querySelector('#agentInput'));"
+                "return document.readyState !== 'loading' && Boolean(document.querySelector('#agentInput')?.tagName === 'TEXTAREA');"
             )
             if ready:
                 return
             time.sleep(0.05)
-        raise AssertionError("agent input did not load")
+        raise AssertionError("agent textarea did not load")
 
     @classmethod
     def expose_editor(cls):
@@ -202,38 +202,46 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             const overlay = document.querySelector("#agentOverlay");
             overlay.dataset.open = "true";
             overlay.style.display = "block";
+            const composer = document.querySelector("#agentComposer");
             const input = document.querySelector("#agentInput");
-            Object.assign(input.style, {
+            Object.assign(composer.style, {
               position: "fixed",
               left: "20px",
               top: "20px",
-              width: "460px",
-              minHeight: "96px",
+              width: "520px",
               display: "block",
               opacity: "1",
               pointerEvents: "auto",
               zIndex: "2147483647",
+            });
+            Object.assign(input.style, {
+              minHeight: "96px",
+              display: "block",
+              opacity: "1",
+              pointerEvents: "auto",
             });
             input.hidden = false;
             return true;
             """
         )
 
-    def set_editor_text(self, text):
+    def set_editor_text(self, text, caret=None):
         self.driver.execute(
             """
             const input = document.querySelector("#agentInput");
-            input.replaceChildren(document.createTextNode(arguments[0]));
-            delete input.dataset.renderedMarkdown;
+            input.value = arguments[0];
+            const caret = arguments[1] == null ? input.value.length : arguments[1];
             input.focus();
+            input.setSelectionRange(caret, caret);
             input.dispatchEvent(new InputEvent("input", {
               bubbles: true,
               inputType: "insertText",
-              data: String(arguments[0]).includes("`") ? "`" : String(arguments[0]).slice(-1),
+              data: String(arguments[0]).slice(-1),
             }));
             return true;
             """,
             text,
+            caret,
         )
         return self.editor_state()
 
@@ -244,286 +252,70 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             const input = document.querySelector("#agentInput");
             requestAnimationFrame(() => requestAnimationFrame(() => {
               done({
-                text: input.textContent,
-                html: input.innerHTML,
-                rendered: input.dataset.renderedMarkdown || "",
-                codeCount: input.querySelectorAll("code").length,
-                codeText: input.querySelector("code")?.textContent || "",
+                value: input.value,
+                selectionStart: input.selectionStart,
+                selectionEnd: input.selectionEnd,
+                overlayText: document.querySelector("#agentInputOverlay")?.textContent || "",
+                overlayHtml: document.querySelector("#agentInputOverlay")?.innerHTML || "",
+                paletteHidden: document.querySelector("#agentCommandPalette")?.hidden,
+                firstCommand: document.querySelector("#agentCommandPalette .chat-command-option strong")?.textContent || "",
               });
             }));
             """
         )
 
-    def focus_editor_at_text_edge(self, collapse_to_end):
-        self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            input.focus();
-            const range = document.createRange();
-            range.selectNodeContents(input);
-            range.collapse(!Boolean(arguments[0]));
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return input.textContent;
-            """,
-            collapse_to_end,
-        )
+    def test_textarea_is_raw_source_of_truth(self):
+        state = self.set_editor_text("`test`")
+        self.assertEqual(state["value"], "`test`")
+        self.assertIn("test", state["overlayText"])
+        self.assertNotIn("<code", self.driver.execute("return document.querySelector('#agentInput').innerHTML || ''"))
 
-    def focus_editor_text_offset(self, offset):
-        self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            input.focus();
-            const walker = document.createTreeWalker(input, NodeFilter.SHOW_TEXT);
-            let node = walker.nextNode();
-            if (!node) {
-              input.append(document.createTextNode(""));
-              node = input.firstChild;
-            }
-            const range = document.createRange();
-            range.setStart(node, Math.min(arguments[0], node.textContent.length));
-            range.collapse(true);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return input.textContent;
-            """,
-            offset,
-        )
-
-    def make_empty_rendered_code(self, caret_at_end):
-        self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            const code = document.createElement("code");
-            code.textContent = "\\u200B";
-            input.replaceChildren(code, document.createTextNode("\\u200B"));
-            input.dataset.renderedMarkdown = "true";
-            input.focus();
-            const range = document.createRange();
-            range.setStart(input, arguments[0] ? input.childNodes.length : 0);
-            range.collapse(true);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return input.innerHTML;
-            """,
-            caret_at_end,
-        )
-
-    def make_empty_rendered_code_with_inner_caret(self, caret_offset):
-        self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            const paragraph = document.createElement("p");
-            const code = document.createElement("code");
-            code.textContent = "\\u200B";
-            paragraph.append(code, document.createTextNode("\\u200B"));
-            input.replaceChildren(paragraph);
-            input.dataset.renderedMarkdown = "true";
-            input.focus();
-            const range = document.createRange();
-            range.setStart(code.firstChild, arguments[0]);
-            range.collapse(true);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return input.innerHTML;
-            """,
-            caret_offset,
-        )
-
-    def focus_rendered_code_end(self):
-        self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            const code = input.querySelector("code");
-            input.focus();
-            const text = code?.firstChild || code;
-            const range = document.createRange();
-            range.setStart(text, text.nodeType === Node.TEXT_NODE ? text.textContent.length : text.childNodes.length);
-            range.collapse(true);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return input.innerHTML;
-            """
-        )
-
-    def test_empty_backtick_pair_stays_literal_when_input_starts_with_it(self):
-        state = self.set_editor_text("``")
-        self.assertEqual(state["text"], "``")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-        self.assertNotIn("<code", state["html"])
-
-    def test_typing_empty_backtick_pair_then_deleting_keeps_one_backtick(self):
-        self.set_editor_text("")
-        self.driver.send_keys(self.driver.element("#agentInput"), "``")
-        state = self.editor_state()
-        self.assertEqual(state["text"], "``")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_typing_inline_code_renders_on_closing_backtick(self):
+    def test_closing_backtick_never_requires_trailing_space(self):
         self.set_editor_text("")
         input_id = self.driver.element("#agentInput")
         for char in "`test`":
             self.driver.send_keys(input_id, char)
         state = self.editor_state()
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-        self.assertEqual(state["codeText"], "test")
+        self.assertEqual(state["value"], "`test`")
+        self.assertIn("chat-md-inline-code", state["overlayHtml"])
 
-        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`test")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_typing_inside_empty_backticks_keeps_the_whole_word_inside(self):
-        self.set_editor_text("``")
-        self.focus_editor_text_offset(1)
-        self.driver.send_keys(self.driver.element("#agentInput"), "test")
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`test`")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-        self.driver.send_keys(self.driver.element("#agentInput"), ARROW_RIGHT)
-        self.driver.send_keys(self.driver.element("#agentInput"), " ")
-        state = self.editor_state()
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-        self.assertEqual(state["codeText"], "test")
-
-    def test_emptying_rendered_inline_code_returns_editable_backticks(self):
-        state = self.set_editor_text("`test`")
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-        self.assertEqual(state["codeText"], "test")
-
-        state = self.driver.execute_async(
-            """
-            const done = arguments[arguments.length - 1];
-            const input = document.querySelector("#agentInput");
-            input.querySelector("code").textContent = "";
-            input.focus();
-            input.dispatchEvent(new InputEvent("input", {
-              bubbles: true,
-              inputType: "deleteContentBackward",
-            }));
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              done({
-                text: input.textContent,
-                rendered: input.dataset.renderedMarkdown || "",
-                codeCount: input.querySelectorAll("code").length,
-              });
-            }));
-            """
-        )
-        self.assertEqual(state["text"], "``")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_backspace_and_delete_on_empty_pair_keep_one_backtick(self):
-        self.set_editor_text("``")
-        self.focus_editor_at_text_edge(True)
-        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["codeCount"], 0)
-
-        self.set_editor_text("``")
-        self.focus_editor_at_text_edge(False)
-        self.driver.send_keys(self.driver.element("#agentInput"), DELETE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_legacy_empty_code_span_unwraps_to_one_backtick(self):
-        self.make_empty_rendered_code(True)
-        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["codeCount"], 0)
-
-        self.make_empty_rendered_code(False)
-        self.driver.send_keys(self.driver.element("#agentInput"), DELETE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_backspace_after_rendered_inline_code_removes_closing_backtick(self):
-        state = self.set_editor_text("`test`")
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-
-        self.focus_editor_at_text_edge(True)
-        self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
-        state = self.editor_state()
-        self.assertEqual(state["text"], "`test")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
-
-    def test_typing_repeated_chars_inside_rendered_inline_code_stays_inside(self):
-        state = self.set_editor_text("`test`")
-        self.assertEqual(state["rendered"], "true")
-        self.focus_rendered_code_end()
+    def test_arrow_keys_do_not_mutate_raw_value(self):
+        self.set_editor_text("plain `code` plain")
         input_id = self.driver.element("#agentInput")
-        for char in "aaa":
-            self.driver.send_keys(input_id, char)
+        before = self.editor_state()["value"]
+        self.driver.send_keys(input_id, ARROW_LEFT)
+        self.driver.send_keys(input_id, ARROW_RIGHT)
         state = self.editor_state()
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-        self.assertEqual(state["codeText"], "testaaa")
-        self.assertNotIn("`testa`aa", state["text"])
+        self.assertEqual(state["value"], before)
 
-    def test_deleting_inside_empty_rendered_code_unwraps_to_one_backtick(self):
-        self.make_empty_rendered_code_with_inner_caret(1)
+    def test_backspace_deletes_one_raw_character(self):
+        self.set_editor_text("`test`")
         self.driver.send_keys(self.driver.element("#agentInput"), BACKSPACE)
         state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
+        self.assertEqual(state["value"], "`test")
 
-        self.make_empty_rendered_code_with_inner_caret(0)
-        self.driver.send_keys(self.driver.element("#agentInput"), DELETE)
+    def test_slash_palette_filters_and_inserts_command(self):
+        self.set_editor_text("/g")
         state = self.editor_state()
-        self.assertEqual(state["text"], "`")
-        self.assertEqual(state["rendered"], "")
-        self.assertEqual(state["codeCount"], 0)
+        self.assertFalse(state["paletteHidden"])
+        self.assertEqual(state["firstCommand"], "/goal")
+        self.driver.send_keys(self.driver.element("#agentInput"), ENTER)
+        state = self.editor_state()
+        self.assertEqual(state["value"], "/goal ")
+        self.assertEqual(state["selectionStart"], len("/goal "))
 
-    def test_copying_rendered_inline_code_preserves_markdown_backticks(self):
-        state = self.set_editor_text("test `test` test test")
-        self.assertEqual(state["rendered"], "true")
-        self.assertEqual(state["codeCount"], 1)
-        result = self.driver.execute(
-            """
-            const input = document.querySelector("#agentInput");
-            const range = document.createRange();
-            range.selectNodeContents(input);
-            const selection = window.getSelection();
-            selection.removeAllRanges();
-            selection.addRange(range);
-            const copied = {};
-            const event = new Event("copy", { bubbles: true, cancelable: true });
-            Object.defineProperty(event, "clipboardData", {
-              value: { setData: (type, value) => { copied[type] = value; } },
-            });
-            input.dispatchEvent(event);
-            return { prevented: event.defaultPrevented, text: copied["text/plain"] || "" };
-            """
-        )
-        self.assertTrue(result["prevented"])
-        self.assertEqual(result["text"], "test `test` test test")
+    def test_slash_inside_sentence_does_not_open_palette(self):
+        state = self.set_editor_text("look at /tmp/file")
+        self.assertTrue(state["paletteHidden"])
+
+    def test_native_newline_and_overlay_stay_in_sync(self):
+        self.set_editor_text("hello")
+        input_id = self.driver.element("#agentInput")
+        self.driver.send_keys(input_id, "\ue008" + ENTER)
+        self.driver.send_keys(input_id, "world")
+        state = self.editor_state()
+        self.assertEqual(state["value"], "hello\nworld")
+        self.assertIn("hello\nworld", state["overlayText"])
 
 
 if __name__ == "__main__":

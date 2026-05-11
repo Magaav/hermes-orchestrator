@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#000000">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/modules/chat-composer/chat-composer.css">
     <title>WASM Agent</title>
     <script src="/boot.js"></script>
   </head>
@@ -672,7 +673,14 @@
         <form id="agentForm" class="agent-form" autocomplete="off">
           <div id="agentImagePreview" class="agent-image-preview" hidden></div>
           <input type="file" id="agentImageInput" accept="image/*,video/mp4,.mp4" multiple hidden>
-          <div id="agentInput" contenteditable="true" role="textbox" aria-multiline="true" class="agent-input-editor agent-message-body agent-markdown" data-placeholder="Talk to Hermes"></div>
+          <div id="agentComposer" class="chat-composer agent-composer">
+            <label class="sr-only" for="agentInput">Message Hermes</label>
+            <div class="chat-composer-input-wrap">
+              <div id="agentInputOverlay" class="chat-composer-overlay" aria-hidden="true"></div>
+              <textarea id="agentInput" class="agent-input-editor" rows="4" aria-label="Message Hermes" placeholder="Talk to Hermes" spellcheck="true" autocapitalize="sentences"></textarea>
+            </div>
+            <div id="agentCommandPalette" class="chat-command-palette" hidden></div>
+          </div>
           <div class="agent-form-row">
             <button id="agentAttachButton" class="agent-attach-button" type="button" aria-label="Attach image" title="Attach image">
               <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
