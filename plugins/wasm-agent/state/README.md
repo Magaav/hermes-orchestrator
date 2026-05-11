@@ -38,6 +38,10 @@ Expected local files include:
   conversations, sync cursors, stickers, reactions, and the last 500 cached
   messages per conversation live in IndexedDB when available, with an in-memory
   fallback.
+- Encrypted client-state exports are user-downloaded JSON snapshots of those
+  browser-local stores. The passphrase stays in the browser, and the snapshot is
+  not server state unless an operator or user explicitly stores it outside the
+  repo.
 - `users/<acc_id>/timelines/<space_id>/`, account/space-local Timeline
   metadata and automatic checkpoint fingerprint cache. The versioned Timeline
   module contract lives under `public/modules/timeline/`; these directories are

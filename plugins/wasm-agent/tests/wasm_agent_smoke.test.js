@@ -18,6 +18,7 @@ const chatCommandsJs = fs.readFileSync(path.join(pluginRoot, "public", "modules"
 const swJs = fs.readFileSync(path.join(pluginRoot, "public", "sw.js"), "utf8");
 const iconSvg = fs.readFileSync(path.join(pluginRoot, "public", "icons", "icon.svg"), "utf8");
 const modulesIndexJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "index.js"), "utf8");
+const clientStoreJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "client-state", "client-store.js"), "utf8");
 const wisEngineJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "wis", "engine.js"), "utf8");
 const devHmrJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "hmr", "dev-hmr.js"), "utf8");
 const manifest = JSON.parse(
@@ -252,6 +253,11 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(appJs.includes("openSharedSpaceChat"), "shared-space chat opener is missing");
   assert(appJs.includes("syncSharedSpaceChatEvents"), "shared-space chat sync cursor loop is missing");
   assert(appJs.includes("sendSharedSpaceChatMessage"), "shared-space chat sender is missing");
+  assert(appJs.includes('setAgentView("chat", { keepActiveSession: true })'), "People row chat selection must preserve the selected social session");
+  assert(appJs.includes("exportEncryptedClientState"), "encrypted client-state export UI is missing");
+  assert(appJs.includes("importEncryptedClientState"), "encrypted client-state import UI is missing");
+  assert(clientStoreJs.includes("AES-GCM"), "client-state encrypted backup must use AES-GCM");
+  assert(clientStoreJs.includes("PBKDF2"), "client-state encrypted backup must derive keys with PBKDF2");
   assert(appJs.includes('fetchJson("/account/friends"'), "friend list UI must use account friends endpoint");
   assert(appJs.includes('fetchJson("/sync/events"'), "direct chat UI must use lightweight sync events");
   assert(stylesCss.includes(".agent-people-panel"), "chat people panel styles are missing");

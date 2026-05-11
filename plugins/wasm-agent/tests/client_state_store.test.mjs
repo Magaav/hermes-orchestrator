@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 delete globalThis.indexedDB;
+Object.defineProperty(globalThis, "crypto", { value: webcrypto });
 
 const here = dirname(fileURLToPath(import.meta.url));
 const source = await readFile(resolve(here, "../public/modules/client-state/client-store.js"), "utf8");
@@ -53,3 +55,14 @@ assert.equal((await store.get("syncCursors", "shared-space:share-chat")).cursor,
 assert.equal(await store.remove("messages", "dm-1-2:10"), true);
 assert.equal(await store.get("messages", "dm-1-2:10"), null);
 assert.equal(await store.remove("messages", "missing"), false);
+
+const encrypted = await store.exportEncrypted("correct horse battery staple");
+assert.equal(encrypted.schema, "hermes.wasm_agent.client_first_snapshot.encrypted.v1");
+assert.equal(encrypted.cipher, "AES-256-GCM");
+assert.equal(encrypted.store_counts.conversations, 2);
+await assert.rejects(() => store.decryptSnapshot("wrong passphrase", encrypted));
+
+const restored = createClientFirstStore();
+await restored.importEncrypted("correct horse battery staple", encrypted, { clear: true });
+assert.equal((await restored.get("people", "friendships")).syncCursor, "10");
+assert.equal((await restored.get("syncCursors", "shared-space:share-chat")).cursor, "22");

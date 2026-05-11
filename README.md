@@ -447,7 +447,9 @@ The public `wasm-agent` plugin now includes the client-first People/direct-chat
 foundation for that boundary: account friendship lifecycle metadata and
 accepted-friend sync events are centralized only where identity/relay requires
 it, while chat cache, unread state, emoji/sticker/reaction UI state, and recent
-conversation history stay browser-local by default.
+conversation history stay browser-local by default. Browser-local client-state
+can also be exported/imported as an encrypted passphrase snapshot without
+sending the passphrase or snapshot contents to the wasm-agent backend.
 
 See:
 

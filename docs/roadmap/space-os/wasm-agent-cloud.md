@@ -22,7 +22,10 @@ spaces, chat, and future wasm-agent-cloud instances.
 The browser is the primary runtime owner. It keeps workspace layout, WIS state,
 chat sessions, direct-provider/model preferences, and client artifacts local by
 default. The `client-state` core module provides the IndexedDB-first browser
-storage contract with an in-memory fallback.
+storage contract with an in-memory fallback. The Home config storage card can
+export/import encrypted browser-local client-state snapshots; encryption is
+done in the browser with a passphrase-derived AES-GCM key, and the passphrase is
+never sent to the wasm-agent backend.
 
 The backend stays narrow:
 
@@ -87,9 +90,10 @@ The cloud boundary is intentionally conservative:
 
 ## Next Work
 
-- Add encrypted export/import for browser-local client-state snapshots.
 - Add shared-space chat history conflict handling and richer group-chat
   affordances over `/sync/events`.
+- Add an operator-facing restore drill for encrypted browser snapshots plus
+  `horc space backup` archives so recovery has documented evidence.
 - Add websocket or server-sent event fanout only after the bounded poll has real
   usage evidence and quota needs.
 - Add provider secret handling that keeps direct provider keys in browser or a

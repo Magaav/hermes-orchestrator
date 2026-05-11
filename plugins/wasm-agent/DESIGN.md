@@ -184,6 +184,9 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   People-panel Shared chat row that opens a `shared-space` chat session in the
   same drawer; group chat is text-only in this slice, cursor-polled through
   `/sync/events` by `shared_space_id`, and locally cached like direct chat.
+- Browser-local client-state is exportable/importable from Home config. The
+  encrypted path uses browser Web Crypto with a passphrase-derived AES-GCM key
+  and restores the IndexedDB-first stores before normal backend reconciliation.
 - When a minimized widget opens outside the visible canvas viewport, it is
   moved to the canvas initial point: the top-left beginning of the board.
 - Opened widgets must stay bounded by the area-sized canvas on mobile. Space

@@ -6987,9 +6987,9 @@ function renderAgentChrome() {
   renderAgentPeoplePanel();
 }
 
-function setAgentView(view) {
+function setAgentView(view, options = {}) {
   const nextView = view === "people" ? "people" : "chat";
-  if (state.agentView === "people" && nextView === "chat") {
+  if (state.agentView === "people" && nextView === "chat" && !options.keepActiveSession) {
     switchToMainAgentChat();
     return;
   }
@@ -7381,7 +7381,7 @@ function openDirectChat(user) {
   markConversationRead(session.conversation_id);
   clearSocialToasts("message", session.conversation_id);
   saveAgentSessions();
-  setAgentView("chat");
+  setAgentView("chat", { keepActiveSession: true });
   setAgentOpen(true);
   renderAgentSessions();
   renderAgentMessages();
@@ -7434,7 +7434,7 @@ function openSharedSpaceChat(sharedSpaceId = sharedUserSpaceForPanel()?.shared_s
   markConversationRead(session.conversation_id);
   clearSocialToasts("message", session.conversation_id);
   saveAgentSessions();
-  setAgentView("chat");
+  setAgentView("chat", { keepActiveSession: true });
   setAgentOpen(true);
   renderAgentSessions();
   renderAgentMessages();
@@ -14404,11 +14404,11 @@ function renderStorageControl() {
   actions.className = "config-storage-actions";
   const exportButton = document.createElement("button");
   exportButton.type = "button";
-  exportButton.textContent = "Export";
+  exportButton.textContent = "Cloud export";
   exportButton.addEventListener("click", () => void exportStorageBackup());
   const importButton = document.createElement("button");
   importButton.type = "button";
-  importButton.textContent = "Import";
+  importButton.textContent = "Cloud import";
   const input = document.createElement("input");
   input.type = "file";
   input.accept = "application/json,.json";
@@ -14418,7 +14418,23 @@ function renderStorageControl() {
     if (file) void importStorageBackup(file);
   });
   importButton.addEventListener("click", () => input.click());
-  actions.append(exportButton, importButton, input);
+  const encryptedExportButton = document.createElement("button");
+  encryptedExportButton.type = "button";
+  encryptedExportButton.textContent = "Export encrypted";
+  encryptedExportButton.addEventListener("click", () => void exportEncryptedClientState());
+  const encryptedImportButton = document.createElement("button");
+  encryptedImportButton.type = "button";
+  encryptedImportButton.textContent = "Import encrypted";
+  const encryptedInput = document.createElement("input");
+  encryptedInput.type = "file";
+  encryptedInput.accept = "application/json,.json";
+  encryptedInput.addEventListener("change", () => {
+    const file = encryptedInput.files?.[0];
+    encryptedInput.value = "";
+    if (file) void importEncryptedClientState(file);
+  });
+  encryptedImportButton.addEventListener("click", () => encryptedInput.click());
+  actions.append(exportButton, importButton, input, encryptedExportButton, encryptedImportButton, encryptedInput);
   wrap.append(title, cloud, local, actions);
   return wrap;
 }
@@ -14491,6 +14507,73 @@ async function importStorageBackup(file) {
     });
   } catch (error) {
     recordUserEvent("storage.import_error", {
+      target: "storage",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  }
+}
+
+function promptClientStatePassphrase(action, options = {}) {
+  const passphrase = window.prompt(`Client-state passphrase to ${action}`);
+  if (!passphrase) return "";
+  if (options.confirm) {
+    const confirmation = window.prompt("Repeat the client-state passphrase");
+    if (confirmation !== passphrase) {
+      window.alert("Passphrases did not match.");
+      return "";
+    }
+  }
+  return passphrase;
+}
+
+async function exportEncryptedClientState() {
+  try {
+    const passphrase = promptClientStatePassphrase("encrypt this browser backup", { confirm: true });
+    if (!passphrase) return;
+    const encrypted = await state.clientFirstStore.exportEncrypted(passphrase);
+    downloadJson(`wasm-agent-client-state-${new Date().toISOString().slice(0, 10)}.encrypted.json`, encrypted);
+    recordUserEvent("storage.client_state_exported", {
+      target: "storage",
+      summary: "Exported encrypted browser-local client-state",
+      data: { schema: encrypted.schema || "", store_counts: encrypted.store_counts || {} },
+    });
+  } catch (error) {
+    window.alert(error.message);
+    recordUserEvent("storage.client_state_export_error", {
+      target: "storage",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  }
+}
+
+async function importEncryptedClientState(file) {
+  try {
+    const passphrase = promptClientStatePassphrase("decrypt this browser backup");
+    if (!passphrase) return;
+    const encrypted = await readJsonFile(file);
+    const result = await state.clientFirstStore.importEncrypted(passphrase, encrypted, { clear: true });
+    state.agentSessions = state.agentSessions.filter((session) => !socialChatSession(session));
+    state.agentPeople.friendships = [];
+    state.agentPeople.members = [];
+    state.agentPeople.unreadByConversation = {};
+    state.agentPeople.readCursorByConversation = {};
+    state.agentPeople.syncCursor = "";
+    await loadCachedSocialState();
+    saveAgentSessions();
+    renderAgentSessions();
+    renderAgentMessages();
+    renderAgentPeoplePanel();
+    updatePeopleButtonState();
+    recordUserEvent("storage.client_state_imported", {
+      target: "storage",
+      summary: "Imported encrypted browser-local client-state",
+      data: { imported: result.imported || {} },
+    });
+  } catch (error) {
+    window.alert(error.message);
+    recordUserEvent("storage.client_state_import_error", {
       target: "storage",
       summary: error.message,
       data: { error: error.message },

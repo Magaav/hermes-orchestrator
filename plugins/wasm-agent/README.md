@@ -207,6 +207,12 @@ pending requests, recent direct and shared-space conversations, unread counts,
 cursors, and the last 500 messages per conversation in IndexedDB with an
 in-memory fallback.
 
+The storage card also exposes encrypted browser-local client-state
+export/import. These snapshots cover the IndexedDB-first client stores
+(`people`, conversations/messages, brains, sync cursors, and artifacts), use a
+passphrase-derived AES-GCM key in the browser, and do not send the passphrase or
+snapshot contents to the wasm-agent backend.
+
 The Host Browser widget is deliberately pixel-based, not iframe-based. It asks
 the local `wasm-agent` backend to use host Chromium through CDP, capture a URL,
 and return a PNG data URL for display inside the workspace. It keeps the host
@@ -638,7 +644,10 @@ until Apply or Revert while presence still updates. Config
 storage shows account usage plus local
 disk availability and exposes Export/Import buttons for portable local backups;
 exports include the browser-local layout payload, while imports restore that
-payload back into the current browser.
+payload back into the current browser. It also exposes encrypted client-state
+export/import for the IndexedDB-first browser cache; importing an encrypted
+snapshot replaces the local client-state stores and then reconciles through the
+backend sync APIs.
 The shell stays fixed while the
 inner board can be scrolled or one-finger/click-drag panned. Mouse-wheel input
 over the canvas changes Space distance instead of native-scrolling the board,
@@ -801,6 +810,13 @@ image-card golden coverage, client-first cloud contracts, client-state storage
 coverage, security-loop policy/runner tests, and the UI
 navigation history regression that keeps chat minimize from navigating back to
 an older space after the user changes spaces with chat open.
+
+The heavier private-cloud People/DM/shared-chat acceptance pass is
+`python3 plugins/wasm-agent/tests/people_chat_browser_acceptance.test.py`. It
+starts a temporary cloud-mode server, drives two isolated Chromium profiles, and
+verifies live friendship lifecycle, direct messages, stickers, reactions,
+shared-space chat, unread/toast state, encrypted client-state roundtrip, and
+refresh recovery without writing private cloud data into the repo.
 
 Run the public-launch security gate before exposing the app outside a trusted
 local network:
