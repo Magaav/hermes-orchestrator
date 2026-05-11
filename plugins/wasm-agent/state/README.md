@@ -34,9 +34,10 @@ Expected local files include:
   server state root. Server-retained layout sync/backup is reserved for a
   future premium storage path.
 - People/direct-chat caches are browser-local by default: friends, pending
-  requests, unread counts, direct conversations, sync cursors, stickers,
-  reactions, and the last 500 cached messages per conversation live in
-  IndexedDB when available, with an in-memory fallback.
+  requests, unread counts, direct conversations, shared-space group
+  conversations, sync cursors, stickers, reactions, and the last 500 cached
+  messages per conversation live in IndexedDB when available, with an in-memory
+  fallback.
 - `users/<acc_id>/timelines/<space_id>/`, account/space-local Timeline
   metadata and automatic checkpoint fingerprint cache. The versioned Timeline
   module contract lives under `public/modules/timeline/`; these directories are

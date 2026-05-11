@@ -35,9 +35,20 @@ await store.put("messages", {
   conversation_id: "dm-1-2",
   message: { id: "sync_10", sync_event_id: "10", content: "hello" },
 });
+await store.put("conversations", {
+  id: "space-share-chat",
+  kind: "shared-space",
+  shared_space_id: "share-chat",
+  sync_cursor: "22",
+});
+await store.put("syncCursors", {
+  id: "shared-space:share-chat",
+  cursor: "22",
+});
 
-assert.equal((await store.all("conversations")).length, 1);
+assert.equal((await store.all("conversations")).length, 2);
 assert.equal((await store.all("messages"))[0].message.content, "hello");
+assert.equal((await store.get("syncCursors", "shared-space:share-chat")).cursor, "22");
 
 assert.equal(await store.remove("messages", "dm-1-2:10"), true);
 assert.equal(await store.get("messages", "dm-1-2:10"), null);

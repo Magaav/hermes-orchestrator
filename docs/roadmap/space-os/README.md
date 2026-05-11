@@ -104,8 +104,9 @@ The gate stays complete only when:
 4. Harden the account-space model: verify `USER_EMAILS` standard accounts, per-user 1 GB quota enforcement, account-local observations/attachments, `state/users/<acc_id>/spaces/<space_id>/`, and `state/users/<acc_id>/timelines/<space_id>/` across real sessions.
 5. Continue the client-first wasm-agent-cloud foundation in
    `wasm-agent-cloud.md`: run the two-real-session People/DM acceptance flow
-   against a private cloud root, add shared-space chat cursors, and keep private
-   cloud state outside the public repo while testing `horc space backup`.
+   against a private cloud root, add encrypted client-state export/import, and
+   keep private cloud state outside the public repo while testing
+   `horc space backup`.
 6. Design the orchestrator-owned user-agent lifecycle: each account may create one or more agents, but exactly one main agent should mount `wasm-agent/state/users/<acc_id>/` so it can help evolve that account's spaces, widgets, workflows, and automations.
 7. Harden the embedded assistant path around compact context: keep image cards, observation snapshots, transcript clipping, and Timeline recovery visible in the action chain before adding mutation tools.
 8. Continue hardening the remote-cloud-browser-harness inside `wasm-agent`: domain changes, CPU throttling, frame health, and browser action reliability. The request/response CDP path now has bounded stale target cleanup through an idle session TTL.

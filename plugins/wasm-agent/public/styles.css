@@ -5551,6 +5551,18 @@ details.agent-action-row .agent-action-row-summary {
   grid-template-columns: 34px auto minmax(0, 1fr) 34px;
 }
 
+.agent-form[data-chat-kind="shared-space"] .agent-form-row {
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+}
+
+.agent-form[data-chat-kind="direct"] .agent-send-button {
+  grid-column: 4;
+}
+
+.agent-form[data-chat-kind="shared-space"] .agent-send-button {
+  grid-column: 3;
+}
+
 .agent-direct-tools {
   display: flex;
   gap: 4px;

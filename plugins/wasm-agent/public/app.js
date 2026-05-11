@@ -1792,7 +1792,8 @@ async function syncSharedSpaceForOpenClient(origin = "shared-space-poll") {
   if (state.sharedSpaceSyncBusy || !sharedUserSpaceForPanel()) return;
   state.sharedSpaceSyncBusy = true;
   try {
-    await loadSharedSpaceRoom({ origin });
+    const room = await loadSharedSpaceRoom({ origin });
+    if (room?.id) await syncSharedSpaceChatEvents(room.id, origin);
     state.lastSharedSpaceSyncAt = new Date().toISOString();
   } catch (error) {
     recordUserEvent("workspace.shared_space_sync_error", {
@@ -3241,8 +3242,9 @@ function createAgentSession(title = "New session", options = {}) {
     updated_at: new Date().toISOString(),
     peer: options.peer && typeof options.peer === "object" ? options.peer : null,
     conversation_id: cleanText(options.conversation_id, ""),
+    shared_space_id: cleanText(options.shared_space_id, ""),
     applied_reaction_event_ids: [],
-    messages: kind === "direct" ? [] : [defaultAgentMessage()],
+    messages: kind === "direct" || kind === "shared-space" ? [] : [defaultAgentMessage()],
     diagnostics: null,
     changed_files: [],
     context_preview: [],
@@ -3297,15 +3299,17 @@ function normalizeStoredMessage(message) {
 
 function normalizeStoredSession(session) {
   const source = session && typeof session === "object" ? session : createAgentSession("Main session");
-  const kind = cleanText(source.kind || "agent", "agent") === "direct" ? "direct" : "agent";
+  const rawKind = cleanText(source.kind || "agent", "agent");
+  const kind = rawKind === "direct" || rawKind === "shared-space" ? rawKind : "agent";
   const messages = Array.isArray(source.messages) && source.messages.length
     ? source.messages.map(normalizeStoredMessage)
-    : kind === "direct" ? [] : [defaultAgentMessage()];
+    : kind === "direct" || kind === "shared-space" ? [] : [defaultAgentMessage()];
   return {
     ...source,
     kind,
     peer: source.peer && typeof source.peer === "object" ? source.peer : null,
     conversation_id: cleanText(source.conversation_id, ""),
+    shared_space_id: cleanText(source.shared_space_id, ""),
     sync_cursor: cleanText(source.sync_cursor, ""),
     applied_reaction_event_ids: Array.isArray(source.applied_reaction_event_ids) ? source.applied_reaction_event_ids.slice(-DIRECT_CHAT_MESSAGE_CAP) : [],
     messages,
@@ -6436,7 +6440,7 @@ function appendAgentMessage(role, content, extra = {}) {
   };
   session.messages.push(message);
   session.updated_at = new Date().toISOString();
-  if (role === "user" && session.kind !== "direct") session.title = truncateText(content, 42) || session.title;
+  if (role === "user" && !socialChatSession(session)) session.title = truncateText(content, 42) || session.title;
   saveAgentSessions();
   renderAgentSessions();
   els.agentMessages.append(renderAgentMessage(message));
@@ -6445,16 +6449,18 @@ function appendAgentMessage(role, content, extra = {}) {
 }
 
 function renderAgentMessage(message) {
-  const direct = activeAgentSession().kind === "direct";
+  const session = activeAgentSession();
+  const direct = session.kind === "direct";
+  const socialChat = socialChatSession(session);
   const wrap = document.createElement("div");
-  wrap.className = `agent-message ${message.role}${direct ? " direct-message" : ""}`;
+  wrap.className = `agent-message ${message.role}${socialChat ? " direct-message" : ""}`;
   wrap.dataset.messageId = message.id || "";
   if (message.pending_state) wrap.dataset.pendingState = message.pending_state;
   if (message.pending) wrap.classList.add("is-thinking");
   const header = message.role === "assistant" && (message.pending || Number.isFinite(message.duration_ms))
     ? agentTurnHeader(message)
     : null;
-  const body = direct && message.kind === "sticker"
+  const body = socialChat && message.kind === "sticker"
     ? renderDirectStickerMessage(message)
     : ["assistant", "user"].includes(message.role) && !message.pending
     ? renderAgentMarkdown(message.content)
@@ -6480,16 +6486,16 @@ function renderAgentMessage(message) {
   const fileAttachments = renderAgentFileAttachments(message);
   if (fileAttachments) wrap.append(fileAttachments);
   if (header) wrap.append(header);
-  const actions = !direct && message.role === "assistant" ? agentActionsChain(message) : null;
+  const actions = !socialChat && message.role === "assistant" ? agentActionsChain(message) : null;
   if (actions) wrap.append(actions);
   wrap.append(body);
-  if (direct) {
+  if (socialChat) {
     const meta = renderDirectMessageMeta(message);
     if (meta) wrap.append(meta);
-    const reactions = renderDirectReactions(message);
+    const reactions = direct ? renderDirectReactions(message) : null;
     if (reactions) wrap.append(reactions);
   }
-  const changedFiles = !direct && message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
+  const changedFiles = !socialChat && message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
   if (changedFiles) wrap.append(changedFiles);
   return wrap;
 }
@@ -6510,7 +6516,9 @@ function renderDirectMessageMeta(message) {
   meta.className = "agent-direct-meta";
   const time = new Date(message.timestamp || Date.now());
   const status = message.pending_state === "failed" ? "failed" : message.pending_state === "pending" ? "sending" : "sent";
-  meta.textContent = `${Number.isFinite(time.getTime()) ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""} / ${status}`;
+  const timeText = Number.isFinite(time.getTime()) ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  const sender = cleanText(message.sender_label, "");
+  meta.textContent = [sender && message.role !== "user" ? sender : "", timeText, status].filter(Boolean).join(" / ");
   return meta;
 }
 
@@ -6794,10 +6802,12 @@ function renderAgentMessages() {
   for (const message of session.messages) {
     els.agentMessages.append(renderAgentMessage(message));
   }
-  if (session.kind === "direct" && !session.messages.length) {
+  if (socialChatSession(session) && !session.messages.length) {
     const empty = document.createElement("div");
     empty.className = "agent-direct-empty";
-    empty.textContent = `No messages yet with ${socialUserLabel(session.peer, "this friend")}`;
+    empty.textContent = session.kind === "shared-space"
+      ? "No shared-space messages yet"
+      : `No messages yet with ${socialUserLabel(session.peer, "this friend")}`;
     els.agentMessages.append(empty);
   }
   renderAgentDiagnostics(session.diagnostics || {});
@@ -6820,8 +6830,17 @@ function directConversationId(peerUserId) {
   return `dm-${[current, peer].sort().join("-")}`;
 }
 
+function sharedSpaceConversationId(sharedSpaceId) {
+  const id = cleanText(sharedSpaceId, "");
+  return id ? `space-${id}` : "";
+}
+
+function socialChatSession(session = activeAgentSession()) {
+  return session?.kind === "direct" || session?.kind === "shared-space";
+}
+
 function mainAgentSession() {
-  let session = state.agentSessions.find((item) => item.kind !== "direct");
+  let session = state.agentSessions.find((item) => item.kind !== "direct" && item.kind !== "shared-space");
   if (!session) {
     session = createAgentSession("Main session");
     state.agentSessions.unshift(session);
@@ -6841,6 +6860,10 @@ function switchToMainAgentChat() {
 
 function directSessions() {
   return state.agentSessions.filter((session) => session.kind === "direct" && session.conversation_id);
+}
+
+function sharedSpaceSessions() {
+  return state.agentSessions.filter((session) => session.kind === "shared-space" && session.shared_space_id);
 }
 
 function unreadTotal() {
@@ -6919,9 +6942,13 @@ function renderSocialToasts() {
       dismissSocialToast(toast.id);
       setAgentOpen(true);
       if (toast.action?.conversationId) {
-        const session = directSessionForConversation(toast.action.conversationId);
-        if (session?.peer) {
+        const session = chatSessionForConversation(toast.action.conversationId);
+        if (session?.kind === "direct" && session.peer) {
           openDirectChat(session.peer);
+          return;
+        }
+        if (session?.kind === "shared-space") {
+          openSharedSpaceChat(session.shared_space_id);
           return;
         }
       }
@@ -6935,22 +6962,24 @@ function renderAgentChrome() {
   const session = activeAgentSession();
   const peopleOpen = state.agentView === "people";
   const direct = !peopleOpen && session.kind === "direct";
+  const sharedChat = !peopleOpen && session.kind === "shared-space";
+  const socialChat = direct || sharedChat;
   const peerLabel = socialUserLabel(session.peer, "DM");
-  if (els.agentPanelTitle) els.agentPanelTitle.textContent = peopleOpen ? "People" : direct ? peerLabel : "Chat";
+  if (els.agentPanelTitle) els.agentPanelTitle.textContent = peopleOpen ? "People" : direct ? peerLabel : sharedChat ? session.title || "Space chat" : "Chat";
   if (els.agentPeoplePanel) els.agentPeoplePanel.hidden = !peopleOpen;
   if (els.agentMessages) els.agentMessages.hidden = peopleOpen;
   if (els.agentForm) els.agentForm.hidden = peopleOpen;
-  if (els.agentMainChatButton) els.agentMainChatButton.hidden = !direct;
+  if (els.agentMainChatButton) els.agentMainChatButton.hidden = !socialChat;
   els.agentPeopleButton?.setAttribute("aria-pressed", peopleOpen ? "true" : "false");
   const nodePicker = els.agentNodeSelect?.closest?.(".agent-node-picker");
-  if (nodePicker) nodePicker.hidden = peopleOpen || direct;
-  if (els.agentModelSelect) els.agentModelSelect.hidden = direct;
-  if (els.agentTokenUsage) els.agentTokenUsage.hidden = direct;
+  if (nodePicker) nodePicker.hidden = peopleOpen || socialChat;
+  if (els.agentModelSelect) els.agentModelSelect.hidden = socialChat;
+  if (els.agentTokenUsage) els.agentTokenUsage.hidden = socialChat;
   if (els.agentDirectTools) els.agentDirectTools.hidden = !direct;
-  if (els.agentForm) els.agentForm.dataset.chatKind = direct ? "direct" : "agent";
+  if (els.agentForm) els.agentForm.dataset.chatKind = direct ? "direct" : sharedChat ? "shared-space" : "agent";
   if (els.agentInput) {
-    els.agentInput.placeholder = direct ? `Message ${peerLabel}` : "Talk to Hermes";
-    els.agentInput.setAttribute("aria-label", direct ? `Message ${peerLabel}` : "Message Hermes");
+    els.agentInput.placeholder = direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Talk to Hermes";
+    els.agentInput.setAttribute("aria-label", direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Message Hermes");
   }
   if (!direct) setAgentSocialPicker("");
   updatePeopleButtonState();
@@ -7030,6 +7059,11 @@ function conversationUnreadCount(userId) {
   return Math.max(0, Number(state.agentPeople.unreadByConversation?.[conversationId] || 0));
 }
 
+function sharedSpaceUnreadCount(sharedSpaceId) {
+  const conversationId = sharedSpaceConversationId(sharedSpaceId);
+  return Math.max(0, Number(state.agentPeople.unreadByConversation?.[conversationId] || 0));
+}
+
 function peopleRow(user, options = {}) {
   const id = socialUserId(user);
   const row = document.createElement("article");
@@ -7054,7 +7088,16 @@ function peopleRow(user, options = {}) {
   }
   row.append(avatar, copy);
   if (options.action) row.append(options.action);
-  if (options.openDirect && id) {
+  if (options.onOpen) {
+    row.tabIndex = 0;
+    row.addEventListener("click", () => options.onOpen());
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        options.onOpen();
+      }
+    });
+  } else if (options.openDirect && id) {
     row.tabIndex = 0;
     row.addEventListener("click", () => openDirectChat(user));
     row.addEventListener("keydown", (event) => {
@@ -7104,6 +7147,21 @@ function renderAgentPeoplePanel() {
     return;
   }
   const friendships = Array.isArray(state.agentPeople.friendships) ? state.agentPeople.friendships : [];
+  const sharedSpaceRows = [];
+  const sharedSpace = sharedUserSpaceForPanel();
+  const sharedRoom = activeSharedRoom();
+  if (sharedSpace?.shared_space_id) {
+    const unread = sharedSpaceUnreadCount(sharedSpace.shared_space_id);
+    sharedSpaceRows.push(peopleRow({
+      id: sharedSpace.shared_space_id,
+      label: sharedRoom?.title || sharedSpace.title || "Shared space",
+    }, {
+      kind: "shared-chat",
+      meta: unread ? `${unread} unread` : "space chat",
+      unread,
+      onOpen: () => openSharedSpaceChat(sharedSpace.shared_space_id),
+    }));
+  }
   const friends = [];
   const inbound = [];
   const outbound = [];
@@ -7149,6 +7207,7 @@ function renderAgentPeoplePanel() {
     members.push(peopleRow(member, { kind: "member", meta: "space member", action }));
   }
   const sections = [
+    ...(sharedSpaceRows.length ? [peopleSection("Shared chat", sharedSpaceRows)] : []),
     peopleSection("Friends", friends, state.authUser ? "No friends yet" : "Sign in required"),
     peopleSection("Pending inbound", inbound, "No incoming requests"),
     peopleSection("Pending outbound", outbound, "No sent requests"),
@@ -7335,6 +7394,59 @@ function openDirectChat(user) {
   });
 }
 
+function sharedSpaceUserLabel(userId) {
+  const id = cleanText(userId, "");
+  if (!id) return "Someone";
+  const room = activeSharedRoom();
+  const entries = [
+    ...(Array.isArray(room?.members) ? room.members : []),
+    ...(Array.isArray(room?.presence) ? room.presence : []),
+  ];
+  const match = entries.find((entry) => socialUserId(entry) === id || cleanText(entry?.user_id, "") === id);
+  return match ? socialUserLabel(match, id) : id === cleanText(state.authUser?.id, "") ? publicUserLabel(state.authUser) : id;
+}
+
+function sharedSpaceSessionForId(sharedSpaceId) {
+  const id = cleanText(sharedSpaceId, "");
+  return state.agentSessions.find((session) => session.kind === "shared-space" && session.shared_space_id === id) || null;
+}
+
+function openSharedSpaceChat(sharedSpaceId = sharedUserSpaceForPanel()?.shared_space_id || "") {
+  const id = cleanText(sharedSpaceId, "");
+  if (!id) return;
+  const space = state.userSpaces.find((item) => item.shared_space_id === id) || sharedUserSpaceForPanel();
+  const room = state.sharedRooms[id] || null;
+  const title = room?.title || space?.title || "Space chat";
+  const conversationId = sharedSpaceConversationId(id);
+  let session = sharedSpaceSessionForId(id);
+  if (!session) {
+    session = createAgentSession(title, {
+      kind: "shared-space",
+      shared_space_id: id,
+      conversation_id: conversationId,
+    });
+    state.agentSessions.unshift(session);
+  } else {
+    session.title = title;
+    session.conversation_id = session.conversation_id || conversationId;
+  }
+  state.activeAgentSessionId = session.id;
+  markConversationRead(session.conversation_id);
+  clearSocialToasts("message", session.conversation_id);
+  saveAgentSessions();
+  setAgentView("chat");
+  setAgentOpen(true);
+  renderAgentSessions();
+  renderAgentMessages();
+  void syncSharedSpaceChatEvents(id, "open").catch(() => {});
+  window.setTimeout(() => els.agentInput?.focus(), 0);
+  recordUserEvent("agent.shared_space_chat_opened", {
+    target: `shared-space:${id}`,
+    summary: `Opened shared chat for ${title}`,
+    data: { shared_space_id: id, conversation_id: session.conversation_id },
+  });
+}
+
 async function loadDirectChatEvents(session = activeAgentSession()) {
   if (!session || session.kind !== "direct" || !session.conversation_id) return;
   const after = cleanText(session.sync_cursor || "", "");
@@ -7370,6 +7482,7 @@ function directMessageFromSyncEvent(event) {
     timestamp: eventTimestamp(event),
     sync_event_id: cleanText(event.id, ""),
     author_user_id: cleanText(event.author_user_id, ""),
+    sender_label: cleanText(payload.author_label || payload.sender_label, ""),
     kind: event.kind === "sticker" ? "sticker" : "chat-message",
     sticker,
     pending_state: "sent",
@@ -7379,6 +7492,10 @@ function directMessageFromSyncEvent(event) {
 
 function directSessionForConversation(conversationId) {
   return state.agentSessions.find((session) => session.kind === "direct" && session.conversation_id === conversationId) || null;
+}
+
+function chatSessionForConversation(conversationId) {
+  return state.agentSessions.find((session) => socialChatSession(session) && session.conversation_id === conversationId) || null;
 }
 
 function directSessionForPeer(peerId) {
@@ -7430,7 +7547,9 @@ async function persistDirectSession(session) {
   const retainedMessageIds = new Set((session.messages || []).map((message) => `${session.conversation_id}:${message.sync_event_id || message.id}`));
   await state.clientFirstStore.put("conversations", {
     id: session.conversation_id,
+    kind: "direct",
     peer: session.peer || null,
+    shared_space_id: "",
     sync_cursor: session.sync_cursor || "",
     unread_count: Number(state.agentPeople.unreadByConversation?.[session.conversation_id] || 0),
     updated_at: session.updated_at || new Date().toISOString(),
@@ -7447,6 +7566,117 @@ async function persistDirectSession(session) {
   await Promise.all(cachedMessages
     .filter((item) => item?.conversation_id === session.conversation_id && !retainedMessageIds.has(item.id))
     .map((item) => state.clientFirstStore.remove("messages", item.id).catch(() => false)));
+}
+
+function sharedSpaceMessageFromSyncEvent(event) {
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  return {
+    id: `sync_${event.id}`,
+    role: cleanText(event.author_user_id, "") === currentUserId ? "user" : "assistant",
+    content: cleanText(payload.text || "", ""),
+    timestamp: eventTimestamp(event),
+    sync_event_id: cleanText(event.id, ""),
+    author_user_id: cleanText(event.author_user_id, ""),
+    sender_label: cleanText(payload.author_label || payload.sender_label, sharedSpaceUserLabel(event.author_user_id)),
+    kind: "space-message",
+    pending_state: "sent",
+  };
+}
+
+async function persistSharedSpaceSession(session) {
+  if (!session?.conversation_id || !session.shared_space_id) return;
+  trimDirectMessages(session);
+  const retainedMessageIds = new Set((session.messages || []).map((message) => `${session.conversation_id}:${message.sync_event_id || message.id}`));
+  await state.clientFirstStore.put("conversations", {
+    id: session.conversation_id,
+    kind: "shared-space",
+    title: session.title || "Space chat",
+    shared_space_id: session.shared_space_id,
+    sync_cursor: session.sync_cursor || "",
+    unread_count: Number(state.agentPeople.unreadByConversation?.[session.conversation_id] || 0),
+    updated_at: session.updated_at || new Date().toISOString(),
+  }).catch(() => {});
+  await state.clientFirstStore.put("syncCursors", {
+    id: `shared-space:${session.shared_space_id}`,
+    conversation_id: session.conversation_id,
+    shared_space_id: session.shared_space_id,
+    cursor: session.sync_cursor || "",
+    updated_at: new Date().toISOString(),
+  }).catch(() => {});
+  for (const message of session.messages || []) {
+    await state.clientFirstStore.put("messages", {
+      id: `${session.conversation_id}:${message.sync_event_id || message.id}`,
+      conversation_id: session.conversation_id,
+      shared_space_id: session.shared_space_id,
+      message,
+      created_at: message.timestamp || new Date().toISOString(),
+    }).catch(() => {});
+  }
+  const cachedMessages = await state.clientFirstStore.all("messages").catch(() => []);
+  await Promise.all(cachedMessages
+    .filter((item) => item?.conversation_id === session.conversation_id && !retainedMessageIds.has(item.id))
+    .map((item) => state.clientFirstStore.remove("messages", item.id).catch(() => false)));
+}
+
+async function mergeSharedSpaceSyncEvents(sharedSpaceId, events = [], options = {}) {
+  const id = cleanText(sharedSpaceId, "");
+  if (!id) return false;
+  let changed = false;
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const conversationId = sharedSpaceConversationId(id);
+  let session = sharedSpaceSessionForId(id);
+  if (!session) {
+    const space = state.userSpaces.find((item) => item.shared_space_id === id) || {};
+    session = createAgentSession(space.title || "Space chat", {
+      kind: "shared-space",
+      shared_space_id: id,
+      conversation_id: conversationId,
+    });
+    state.agentSessions.push(session);
+  }
+  for (const event of events) {
+    if (!["chat-message", "message", "space-message"].includes(cleanText(event.kind, ""))) continue;
+    session.sync_cursor = String(event.id || session.sync_cursor || "");
+    const existingEventIds = new Set((session.messages || []).map((message) => cleanText(message.sync_event_id, "")).filter(Boolean));
+    const localId = cleanText(event.payload?.local_message_id, "");
+    const existingLocal = localId ? session.messages.find((message) => message.id === localId) : null;
+    if (existingLocal) {
+      existingLocal.sync_event_id = cleanText(event.id, "");
+      existingLocal.pending_state = "sent";
+      changed = true;
+      continue;
+    }
+    if (existingEventIds.has(cleanText(event.id, ""))) continue;
+    const message = sharedSpaceMessageFromSyncEvent(event);
+    if (!message.content) continue;
+    session.messages.push(message);
+    session.updated_at = new Date().toISOString();
+    changed = true;
+    const activeSharedChat = activeAgentSession().kind === "shared-space" && activeAgentSession().shared_space_id === id && state.agentView === "chat";
+    if (message.author_user_id !== currentUserId && !activeSharedChat) {
+      state.agentPeople.unreadByConversation[conversationId] = Number(state.agentPeople.unreadByConversation[conversationId] || 0) + 1;
+      if (options.notify !== false) {
+        pushSocialToast(
+          "message",
+          session.title || "Space chat",
+          `${message.sender_label}: ${truncateText(message.content, 56)}`,
+          `shared-msg:${event.id}`,
+          { conversationId }
+        );
+      }
+    }
+  }
+  if (changed) {
+    trimDirectMessages(session);
+    saveAgentSessions();
+    await persistSharedSpaceSession(session);
+    await persistPeopleCache();
+    renderAgentSessions();
+    renderAgentPeoplePanel();
+    updatePeopleButtonState();
+  }
+  return changed;
 }
 
 async function mergeDirectSyncEvents(events = [], options = {}) {
@@ -7519,8 +7749,10 @@ function markConversationRead(conversationId) {
   const id = cleanText(conversationId, "");
   if (!id) return;
   state.agentPeople.unreadByConversation[id] = 0;
-  const session = directSessionForConversation(id);
+  const session = chatSessionForConversation(id);
   if (session?.sync_cursor) state.agentPeople.readCursorByConversation[id] = session.sync_cursor;
+  if (session?.kind === "direct") persistDirectSession(session).catch(() => {});
+  if (session?.kind === "shared-space") persistSharedSpaceSession(session).catch(() => {});
   persistPeopleCache().catch(() => {});
   renderAgentPeoplePanel();
   updatePeopleButtonState();
@@ -7532,7 +7764,8 @@ async function syncDirectMessages(origin = "poll") {
   if (state.agentPeople.syncCursor) query.set("after_id", state.agentPeople.syncCursor);
   try {
     const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
-    const events = Array.isArray(payload.events) ? payload.events : [];
+    const events = (Array.isArray(payload.events) ? payload.events : [])
+      .filter((event) => cleanText(event.conversation_id, "").startsWith("dm-"));
     if (events.length) {
       await mergeDirectSyncEvents(events, { notify: origin !== "startup" && origin !== "cache" });
       state.agentPeople.syncCursor = payload.cursor || events.at(-1)?.id || state.agentPeople.syncCursor;
@@ -7548,6 +7781,38 @@ async function syncDirectMessages(origin = "poll") {
     if (origin !== "poll") {
       recordUserEvent("agent.direct_sync_error", {
         target: "agent-direct",
+        summary: error.message,
+        data: { origin, error: error.message },
+      });
+    }
+  }
+}
+
+async function syncSharedSpaceChatEvents(sharedSpaceId, origin = "poll") {
+  if (!state.authUser || !sharedSpaceId) return;
+  const session = sharedSpaceSessionForId(sharedSpaceId);
+  const query = new URLSearchParams({
+    shared_space_id: sharedSpaceId,
+    limit: "120",
+  });
+  if (session?.sync_cursor) query.set("after_id", session.sync_cursor);
+  try {
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    const changed = await mergeSharedSpaceSyncEvents(sharedSpaceId, events, { notify: origin !== "startup" && origin !== "shared-space-start" });
+    const nextSession = sharedSpaceSessionForId(sharedSpaceId);
+    if (nextSession && (payload.cursor || events.at(-1)?.id)) {
+      nextSession.sync_cursor = payload.cursor || events.at(-1)?.id || nextSession.sync_cursor;
+      await persistSharedSpaceSession(nextSession);
+    }
+    if (activeAgentSession().kind === "shared-space" && activeAgentSession().shared_space_id === sharedSpaceId && state.agentView === "chat") {
+      markConversationRead(activeAgentSession().conversation_id);
+      if (changed) renderAgentMessages();
+    }
+  } catch (error) {
+    if (origin !== "shared-space-poll") {
+      recordUserEvent("agent.shared_space_chat_sync_error", {
+        target: `shared-space:${sharedSpaceId}`,
         summary: error.message,
         data: { origin, error: error.message },
       });
@@ -7587,7 +7852,24 @@ async function loadCachedSocialState() {
     const conversations = await state.clientFirstStore.all("conversations");
     const messages = await state.clientFirstStore.all("messages");
     for (const conversation of conversations) {
-      if (!conversation?.id || directSessionForConversation(conversation.id)) continue;
+      if (!conversation?.id || chatSessionForConversation(conversation.id)) continue;
+      if (conversation.kind === "shared-space") {
+        const sharedSpaceId = cleanText(conversation.shared_space_id, "");
+        if (!sharedSpaceId) continue;
+        const session = createAgentSession(conversation.title || "Space chat", {
+          kind: "shared-space",
+          shared_space_id: sharedSpaceId,
+          conversation_id: conversation.id,
+        });
+        session.sync_cursor = cleanText(conversation.sync_cursor, "");
+        session.messages = messages
+          .filter((item) => item?.conversation_id === conversation.id && item.message)
+          .map((item) => item.message)
+          .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")))
+          .slice(-DIRECT_CHAT_MESSAGE_CAP);
+        state.agentSessions.push(session);
+        continue;
+      }
       const peer = conversation.peer && typeof conversation.peer === "object" ? conversation.peer : null;
       if (!peer) continue;
       const session = createAgentSession(socialUserLabel(peer, "DM"), {
@@ -7734,6 +8016,62 @@ async function sendDirectChatMessage(session, text) {
   }
 }
 
+async function sendSharedSpaceChatMessage(session, text) {
+  const content = String(text ?? "").replace(/\r\n?/g, "\n");
+  const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
+  if (!content.trim() && !attachmentCount) return;
+  const messageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
+  const clientEventId = `space_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  state.agentBusy = true;
+  updateAgentSendButton();
+  clearAgentPendingImages();
+  const message = appendAgentMessage("user", messageContent, {
+    kind: "space-message",
+    author_user_id: cleanText(state.authUser?.id, ""),
+    sender_label: publicUserLabel(state.authUser),
+    pending_state: "pending",
+    client_event_id: clientEventId,
+  });
+  clearAgentInput();
+  try {
+    const payload = await fetchJson("/sync/events", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        conversation_id: session.conversation_id || sharedSpaceConversationId(session.shared_space_id),
+        shared_space_id: session.shared_space_id,
+        client_event_id: clientEventId,
+        kind: "space-message",
+        payload: {
+          text: messageContent,
+          local_message_id: message.id,
+          author_label: publicUserLabel(state.authUser),
+          attachment_count: attachmentCount,
+        },
+      },
+    });
+    message.sync_event_id = payload.event?.id || "";
+    message.pending_state = "sent";
+    session.sync_cursor = payload.event?.id || session.sync_cursor || "";
+    saveAgentSessions();
+    await persistSharedSpaceSession(session);
+  } catch (error) {
+    message.pending_state = "failed";
+    message.error = error.message;
+    saveAgentSessions();
+    renderAgentMessages();
+    recordUserEvent("agent.shared_space_message_sync_error", {
+      target: `shared-space:${session.shared_space_id || ""}`,
+      summary: error.message,
+      data: { conversation_id: session.conversation_id || "", error: error.message },
+    });
+  } finally {
+    state.agentBusy = false;
+    state.agentStopRequested = false;
+    updateAgentSendButton();
+  }
+}
+
 async function sendDirectSticker(sticker) {
   const session = activeAgentSession();
   if (session.kind !== "direct" || !sticker?.id || state.agentBusy) return;
@@ -7830,7 +8168,7 @@ function renderAgentSessions() {
       const title = document.createElement("strong");
       const meta = document.createElement("span");
       title.textContent = session.title || "Session";
-      meta.textContent = session.kind === "direct" ? "DM" : `${session.messages?.length || 0} turns`;
+      meta.textContent = session.kind === "direct" ? "DM" : session.kind === "shared-space" ? "Space chat" : `${session.messages?.length || 0} turns`;
       button.append(title, meta);
       button.addEventListener("click", () => {
         switchAgentSession(session.id);
@@ -7846,6 +8184,7 @@ function switchAgentSession(sessionId) {
   state.agentView = "chat";
   const session = activeAgentSession();
   if (session.kind === "direct") markConversationRead(session.conversation_id);
+  if (session.kind === "shared-space") markConversationRead(session.conversation_id);
   renderAgentSessions();
   renderAgentMessages();
 }
@@ -9973,11 +10312,11 @@ async function storeAgentAttachmentAssets(images, attachments, pendingMessage) {
 
 function updateAgentSendButton() {
   if (!els.agentSendButton) return;
-  const direct = activeAgentSession().kind === "direct";
+  const socialChat = socialChatSession(activeAgentSession());
   els.agentSendButton.classList.toggle("is-busy", state.agentBusy);
-  els.agentSendButton.disabled = direct && state.agentBusy;
-  els.agentSendButton.setAttribute("aria-label", state.agentBusy ? (direct ? "Syncing message" : "Stop response") : "Send message");
-  els.agentSendButton.title = state.agentBusy ? (direct ? "Syncing" : "Stop") : "Send";
+  els.agentSendButton.disabled = socialChat && state.agentBusy;
+  els.agentSendButton.setAttribute("aria-label", state.agentBusy ? (socialChat ? "Syncing message" : "Stop response") : "Send message");
+  els.agentSendButton.title = state.agentBusy ? (socialChat ? "Syncing" : "Stop") : "Send";
 }
 
 function updateAgentTurnTimer() {
@@ -10383,6 +10722,10 @@ async function sendAgentMessage(text) {
   const activeSession = activeAgentSession();
   if (activeSession.kind === "direct") {
     await sendDirectChatMessage(activeSession, text);
+    return;
+  }
+  if (activeSession.kind === "shared-space") {
+    await sendSharedSpaceChatMessage(activeSession, text);
     return;
   }
   const content = String(text ?? "").replace(/\r\n?/g, "\n");

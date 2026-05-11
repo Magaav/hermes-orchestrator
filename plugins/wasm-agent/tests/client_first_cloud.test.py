@@ -279,6 +279,92 @@ class ClientFirstCloudTest(unittest.TestCase):
                     )
                 self.assertEqual(removed_friend.exception.status, static_server.HTTPStatus.FORBIDDEN)
 
+    def test_shared_space_chat_events_are_member_gated_ordered_and_deduped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            db_path = state_dir / "db" / "wa.sqlite3"
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(db_path),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                with static_server.auth_connect() as conn:
+                    insert_account(conn, 101, "alice@example.test", "Alice")
+                    insert_account(conn, 202, "bob@example.test", "Bob")
+                    insert_account(conn, 303, "casey@example.test", "Casey")
+
+                server = SimpleNamespace(plugin_root=PLUGIN_ROOT, public_root=PLUGIN_ROOT / "public", state_dir=state_dir)
+                alice = user("101", "alice@example.test")
+                bob = user("202", "bob@example.test")
+                casey = user("303", "casey@example.test")
+                shared_space_id = "share-chat"
+                static_server.write_json_file(
+                    static_server.shared_space_record_path(server, shared_space_id),
+                    {
+                        "schema": static_server.SHARED_SPACE_SCHEMA,
+                        "id": shared_space_id,
+                        "title": "Shared Chat",
+                        "owner_user_id": "101",
+                        "members": [{"user_id": "202"}],
+                        "created_at": static_server.iso_timestamp(),
+                        "updated_at": static_server.iso_timestamp(),
+                    },
+                )
+
+                first = static_server.append_sync_event(
+                    server,
+                    alice,
+                    {
+                        "shared_space_id": shared_space_id,
+                        "client_event_id": "space-hello",
+                        "kind": "space-message",
+                        "payload": {"text": "hello shared space", "local_message_id": "space-local-1"},
+                    },
+                )["event"]
+                duplicate = static_server.append_sync_event(
+                    server,
+                    alice,
+                    {
+                        "shared_space_id": shared_space_id,
+                        "client_event_id": "space-hello",
+                        "kind": "space-message",
+                        "payload": {"text": "hello shared space", "local_message_id": "space-local-1"},
+                    },
+                )["event"]
+                self.assertEqual(duplicate["id"], first["id"])
+                reply = static_server.append_sync_event(
+                    server,
+                    bob,
+                    {
+                        "shared_space_id": shared_space_id,
+                        "client_event_id": "space-reply",
+                        "kind": "space-message",
+                        "payload": {"text": "reply from member"},
+                    },
+                )["event"]
+
+                listed = static_server.list_sync_events(server, bob, {"shared_space_id": [shared_space_id]})
+                self.assertEqual([event["id"] for event in listed["events"]], [first["id"], reply["id"]])
+                self.assertEqual(listed["events"][0]["conversation_id"], f"space-{shared_space_id}")
+                after_first = static_server.list_sync_events(server, alice, {"shared_space_id": [shared_space_id], "after_id": [first["id"]]})
+                self.assertEqual([event["id"] for event in after_first["events"]], [reply["id"]])
+
+                with self.assertRaises(static_server.BrowserError) as denied_list:
+                    static_server.list_sync_events(server, casey, {"shared_space_id": [shared_space_id]})
+                self.assertEqual(denied_list.exception.status, static_server.HTTPStatus.FORBIDDEN)
+                with self.assertRaises(static_server.BrowserError) as denied_send:
+                    static_server.append_sync_event(
+                        server,
+                        casey,
+                        {
+                            "shared_space_id": shared_space_id,
+                            "client_event_id": "space-outsider",
+                            "kind": "space-message",
+                            "payload": {"text": "blocked"},
+                        },
+                    )
+                self.assertEqual(denied_send.exception.status, static_server.HTTPStatus.FORBIDDEN)
+
 
 if __name__ == "__main__":
     unittest.main()

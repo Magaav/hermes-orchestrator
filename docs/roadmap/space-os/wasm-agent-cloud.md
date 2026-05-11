@@ -31,7 +31,7 @@ The backend stays narrow:
   accepted-friend removal
 - shared-space membership, live presence, and bounded room events
 - lightweight `/sync/events` rows for accepted-friend direct chat and shared
-  collaboration cursors
+  collaboration/group-chat cursors
 - metadata-only `/fleet` records plus explicit main-node reservation
 - optional backup through `horc space backup`
 
@@ -62,8 +62,15 @@ messages. If IndexedDB is unavailable, the client uses an in-memory store. The
 current message cache is capped to the last 500 messages per conversation.
 
 This realtime layer is still intentionally simple: it uses a bounded poll
-instead of a websocket service, does not autoplay sound, and does not yet sync
-shared-space room chat history beyond the existing room event contract.
+instead of a websocket service and does not autoplay sound.
+
+Shared spaces now expose a first group-chat path through the same embedded chat
+drawer. The People view shows a Shared chat row when the active space is joined
+to a shared space. Opening it creates a `shared-space` chat session, sends text
+messages through `/sync/events` with `shared_space_id`, polls by cursor while the
+space is active, shows unread state through the People button/row, and caches
+the conversation locally. This is still text-only for group chat; direct-chat
+stickers and reactions remain DM-scoped in this slice.
 
 ## Safety Boundary
 
@@ -81,7 +88,8 @@ The cloud boundary is intentionally conservative:
 ## Next Work
 
 - Add encrypted export/import for browser-local client-state snapshots.
-- Add shared-space chat history polling and conflict cursors over `/sync/events`.
+- Add shared-space chat history conflict handling and richer group-chat
+  affordances over `/sync/events`.
 - Add websocket or server-sent event fanout only after the bounded poll has real
   usage evidence and quota needs.
 - Add provider secret handling that keeps direct provider keys in browser or a

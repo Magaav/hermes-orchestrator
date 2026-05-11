@@ -199,9 +199,13 @@ back button, unread indicators, calm toast/ring feedback, emoji insertion,
 built-in text stickers, and emoji reactions. Direct chat messages, stickers,
 and reactions are client-first and mirrored as bounded `/sync/events` rows for
 the accepted friendship conversation; attachments remain local metadata for
-this foundation pass. The browser caches friends, pending requests, recent
-direct conversations, unread counts, cursors, and the last 500 messages per
-conversation in IndexedDB with an in-memory fallback.
+this foundation pass. Joined shared spaces also show a Shared chat row in the
+People view; opening it creates a group chat session that sends text messages
+through `/sync/events?shared_space_id=...`, polls by cursor while the space is
+active, and uses the same unread/toast cache path. The browser caches friends,
+pending requests, recent direct and shared-space conversations, unread counts,
+cursors, and the last 500 messages per conversation in IndexedDB with an
+in-memory fallback.
 
 The Host Browser widget is deliberately pixel-based, not iframe-based. It asks
 the local `wasm-agent` backend to use host Chromium through CDP, capture a URL,

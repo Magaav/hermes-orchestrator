@@ -2954,6 +2954,7 @@ def ensure_sync_conversation(
     space_id = safe_state_id(str(body.get("space_id") or body.get("space") or ""), "")
     peer_user_id = safe_state_id(str(body.get("peer_user_id") or body.get("peer") or ""), "")
     direct_peer_id = ""
+    shared_record: dict[str, Any] | None = None
     if peer_user_id:
         peer = lookup_user_row(conn, peer_user_id)
         if not peer:
@@ -2973,14 +2974,14 @@ def ensure_sync_conversation(
         kind = "direct"
         title = clipped(str(body.get("title") or f"DM {pair[0]} {pair[1]}"), 120)
     elif shared_space_id:
-        record = read_shared_space_record(server, shared_space_id)
-        if not record:
+        shared_record = read_shared_space_record(server, shared_space_id)
+        if not shared_record:
             raise BrowserError("shared_space_not_found", "That shared space was not found.", status=HTTPStatus.NOT_FOUND)
-        if not user_can_access_shared_space(record, user):
+        if not user_can_access_shared_space(shared_record, user):
             raise BrowserError("shared_space_denied", "You cannot access that shared space.", status=HTTPStatus.FORBIDDEN)
         requested = requested or f"space-{shared_space_id}"
         kind = "shared-space"
-        title = clipped(str(record.get("title") or shared_space_id), 120)
+        title = clipped(str(shared_record.get("title") or shared_space_id), 120)
     else:
         requested = requested or f"local-{uid}"
         kind = clipped(str(body.get("conversation_kind") or "local"), 40)
@@ -2996,7 +2997,9 @@ def ensure_sync_conversation(
             """,
             (requested, kind, space_id, shared_space_id, title, uid, now, now),
         )
-    elif not user_can_access_conversation(conn, requested, user):
+    elif not user_can_access_conversation(conn, requested, user) and not (
+        kind == "shared-space" and shared_record and user_can_access_shared_space(shared_record, user)
+    ):
         raise BrowserError("conversation_denied", "You cannot access that conversation.", status=HTTPStatus.FORBIDDEN)
     conn.execute(
         """

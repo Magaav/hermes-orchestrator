@@ -180,7 +180,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   uses the same composer/send placement as the assistant chat, adds a main-chat
   back control to avoid navigation traps, and keeps emoji, built-in stickers,
   reactions, unread badges, and toast/ring notifications as lightweight
-  client-first affordances over `/sync/events`.
+  client-first affordances over `/sync/events`. Joined shared spaces add a
+  People-panel Shared chat row that opens a `shared-space` chat session in the
+  same drawer; group chat is text-only in this slice, cursor-polled through
+  `/sync/events` by `shared_space_id`, and locally cached like direct chat.
 - When a minimized widget opens outside the visible canvas viewport, it is
   moved to the canvas initial point: the top-left beginning of the board.
 - Opened widgets must stay bounded by the area-sized canvas on mobile. Space
