@@ -11,7 +11,7 @@ Hermes bridge/node power remains admin-only.
   reverse proxy.
 - App process: `plugins/wasm-agent/server/static_server.py` on
   `127.0.0.1:8877`.
-- Bridge target: Hermes Space UI bridge on `127.0.0.1:8790`.
+- Bridge target: wasm-agent-owned Hermes bridge on `127.0.0.1:8790`.
 - Identity: Google OAuth web client whose authorized JavaScript origin matches
   the public HTTPS origin.
 - Access: `ADMIN_EMAIL` for admins, `USER_EMAILS` for the small private beta

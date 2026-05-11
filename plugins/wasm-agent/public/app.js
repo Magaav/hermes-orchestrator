@@ -1,6 +1,7 @@
 import { MODULE_DEFINITIONS } from "./modules/index.js";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
+import { createClientFirstStore } from "./modules/client-state/client-store.js";
 import { createChatComposer } from "./modules/chat-composer/chat-composer.js";
 import { createCommandPalette } from "./modules/chat-composer/chat-commands.js";
 import { renderChatMarkdownTokens } from "./modules/chat-composer/chat-renderer.js";
@@ -59,6 +60,19 @@ const POINTER_MOVE_SAMPLE_MS = 80;
 const WHEEL_TRACE_SAMPLE_MS = 120;
 const SCROLL_TRACE_SAMPLE_MS = 180;
 const SHARED_SPACE_SYNC_POLL_MS = 2500;
+const SOCIAL_SYNC_POLL_MS = 2500;
+const DIRECT_CHAT_MESSAGE_CAP = 500;
+const SOCIAL_TOAST_TTL_MS = 4200;
+const DIRECT_EMOJI_SET = ["😀", "😂", "😍", "🥳", "🙏", "👍", "🔥", "🚀", "👀", "✅", "🧠", "❤️"];
+const DIRECT_REACTION_SET = ["👍", "❤️", "😂", "🔥", "👀", "✅"];
+const DIRECT_STICKERS = [
+  { id: "hello", emoji: "👋", label: "hello" },
+  { id: "ship-it", emoji: "🚀", label: "ship it" },
+  { id: "looking", emoji: "👀", label: "looking" },
+  { id: "done", emoji: "✅", label: "done" },
+  { id: "fire", emoji: "🔥", label: "fire" },
+  { id: "brain", emoji: "🧠", label: "brain" },
+];
 const SHARED_VOICE_SIGNAL_KIND = "voice-signal";
 const SHARED_VOICE_SIGNAL_SCHEMA = "hermes.wasm_agent.shared_space.voice_signal.v1";
 const SHARED_VOICE_POLL_MS = 900;
@@ -162,8 +176,14 @@ const els = {
   addNodeButton: document.querySelector("#addNodeButton"),
   addSpaceButton: document.querySelector("#addSpaceButton"),
   joinSpaceButton: document.querySelector("#joinSpaceButton"),
+  homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
+  fleetModal: document.querySelector("#fleetModal"),
+  closeFleetModalButton: document.querySelector("#closeFleetModalButton"),
+  fleetEnsureMainButton: document.querySelector("#fleetEnsureMainButton"),
+  fleetStatus: document.querySelector("#fleetStatus"),
+  fleetList: document.querySelector("#fleetList"),
   spaceContextMenu: document.querySelector("#spaceContextMenu"),
   nodeContextMenu: document.querySelector("#nodeContextMenu"),
   nodeStatsBalloon: document.querySelector("#nodeStatsBalloon"),
@@ -287,7 +307,10 @@ const els = {
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
   agentPanel: document.querySelector("#agentPanel"),
   agentCloseButton: document.querySelector("#agentCloseButton"),
+  agentPanelTitle: document.querySelector("#agentPanelTitle"),
+  agentMainChatButton: document.querySelector("#agentMainChatButton"),
   agentStatus: document.querySelector("#agentStatus"),
+  agentPeopleButton: document.querySelector("#agentPeopleButton"),
   agentSessionsButton: document.querySelector("#agentSessionsButton"),
   agentSessionsBalloon: document.querySelector("#agentSessionsBalloon"),
   agentSessionList: document.querySelector("#agentSessionList"),
@@ -297,6 +320,12 @@ const els = {
   agentSettingsButton: document.querySelector("#agentSettingsButton"),
   agentSettingsBalloon: document.querySelector("#agentSettingsBalloon"),
   agentMessages: document.querySelector("#agentMessages"),
+  agentPeoplePanel: document.querySelector("#agentPeoplePanel"),
+  agentPeopleSearchForm: document.querySelector("#agentPeopleSearchForm"),
+  agentPeopleSearchInput: document.querySelector("#agentPeopleSearchInput"),
+  agentPeopleSearchButton: document.querySelector("#agentPeopleSearchButton"),
+  agentPeopleStatus: document.querySelector("#agentPeopleStatus"),
+  agentPeopleList: document.querySelector("#agentPeopleList"),
   agentDiagnostics: document.querySelector("#agentDiagnostics"),
   agentContextPreview: document.querySelector("#agentContextPreview"),
   agentForm: document.querySelector("#agentForm"),
@@ -312,6 +341,12 @@ const els = {
   agentInput: document.querySelector("#agentInput"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
   agentSendButton: document.querySelector("#agentSendButton"),
+  agentDirectTools: document.querySelector("#agentDirectTools"),
+  agentEmojiButton: document.querySelector("#agentEmojiButton"),
+  agentStickerButton: document.querySelector("#agentStickerButton"),
+  agentEmojiPicker: document.querySelector("#agentEmojiPicker"),
+  agentStickerPicker: document.querySelector("#agentStickerPicker"),
+  agentToastStack: document.querySelector("#agentToastStack"),
   agentImageInput: document.querySelector("#agentImageInput"),
   agentAttachButton: document.querySelector("#agentAttachButton"),
   agentImagePreview: document.querySelector("#agentImagePreview"),
@@ -354,6 +389,11 @@ const state = {
   deviceSyncBusy: "",
   deviceMainBusy: "",
   devicesLoadedAt: "",
+  userFleetNodes: [],
+  userFleetBusy: false,
+  userFleetEnsureBusy: false,
+  userFleetPolicy: "",
+  userFleetMode: "",
   nodes: [],
   tasks: [],
 	  securityLoop: null,
@@ -415,6 +455,8 @@ const state = {
   userStorage: null,
   sharedSpaceSyncInterval: 0,
   sharedSpaceSyncBusy: false,
+  socialSyncInterval: 0,
+  socialSyncBusy: false,
   lastSharedSpaceSyncAt: "",
   sharedRooms: {},
   sharedVoice: {
@@ -449,6 +491,7 @@ const state = {
   },
   configAreaDragActive: false,
   agentComposer: null,
+  clientFirstStore: createClientFirstStore(),
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
   activeSpaceMenuId: "",
@@ -490,6 +533,22 @@ const state = {
   agentPendingAttachmentSummaries: [],
   agentOpenMessageMenuId: "",
   agentDeferredHmrReload: null,
+  agentView: "chat",
+  agentPeople: {
+    friendships: [],
+    members: [],
+    syncCursor: "",
+    unreadByConversation: {},
+    readCursorByConversation: {},
+    busy: false,
+    searchBusy: false,
+    status: "",
+    loadedAt: "",
+  },
+  socialNotifications: [],
+  socialNotificationKeys: new Set(),
+  socialPulseTimer: 0,
+  agentSocialPicker: "",
   agentSessions: readAgentSessions(),
   activeAgentSessionId: "",
   agentTargetNode: "orchestrator",
@@ -1799,6 +1858,7 @@ async function loadSharedSpaceRoom(options = {}) {
     state.sharedRooms[room.id] = room;
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
+    if (state.agentView === "people") renderAgentPeoplePanel();
     queueSharedVoiceRoomProcessing(room);
   }
   return room;
@@ -3171,13 +3231,18 @@ function defaultAgentMessage() {
   };
 }
 
-function createAgentSession(title = "New session") {
+function createAgentSession(title = "New session", options = {}) {
+  const kind = cleanText(options.kind || "agent", "agent");
   return {
     id: `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    kind,
     title,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    messages: [defaultAgentMessage()],
+    peer: options.peer && typeof options.peer === "object" ? options.peer : null,
+    conversation_id: cleanText(options.conversation_id, ""),
+    applied_reaction_event_ids: [],
+    messages: kind === "direct" ? [] : [defaultAgentMessage()],
     diagnostics: null,
     changed_files: [],
     context_preview: [],
@@ -3232,11 +3297,17 @@ function normalizeStoredMessage(message) {
 
 function normalizeStoredSession(session) {
   const source = session && typeof session === "object" ? session : createAgentSession("Main session");
+  const kind = cleanText(source.kind || "agent", "agent") === "direct" ? "direct" : "agent";
   const messages = Array.isArray(source.messages) && source.messages.length
     ? source.messages.map(normalizeStoredMessage)
-    : [defaultAgentMessage()];
+    : kind === "direct" ? [] : [defaultAgentMessage()];
   return {
     ...source,
+    kind,
+    peer: source.peer && typeof source.peer === "object" ? source.peer : null,
+    conversation_id: cleanText(source.conversation_id, ""),
+    sync_cursor: cleanText(source.sync_cursor, ""),
+    applied_reaction_event_ids: Array.isArray(source.applied_reaction_event_ids) ? source.applied_reaction_event_ids.slice(-DIRECT_CHAT_MESSAGE_CAP) : [],
     messages,
     diagnostics: source.diagnostics || null,
     changed_files: Array.isArray(source.changed_files) ? source.changed_files : [],
@@ -6000,6 +6071,10 @@ async function logout() {
     window.clearInterval(state.securityInterval);
     state.securityInterval = 0;
   }
+  if (state.socialSyncInterval) {
+    window.clearInterval(state.socialSyncInterval);
+    state.socialSyncInterval = 0;
+  }
   if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
   renderAuthGate();
@@ -6361,7 +6436,7 @@ function appendAgentMessage(role, content, extra = {}) {
   };
   session.messages.push(message);
   session.updated_at = new Date().toISOString();
-  if (role === "user") session.title = truncateText(content, 42) || session.title;
+  if (role === "user" && session.kind !== "direct") session.title = truncateText(content, 42) || session.title;
   saveAgentSessions();
   renderAgentSessions();
   els.agentMessages.append(renderAgentMessage(message));
@@ -6370,14 +6445,18 @@ function appendAgentMessage(role, content, extra = {}) {
 }
 
 function renderAgentMessage(message) {
+  const direct = activeAgentSession().kind === "direct";
   const wrap = document.createElement("div");
-  wrap.className = `agent-message ${message.role}`;
+  wrap.className = `agent-message ${message.role}${direct ? " direct-message" : ""}`;
   wrap.dataset.messageId = message.id || "";
+  if (message.pending_state) wrap.dataset.pendingState = message.pending_state;
   if (message.pending) wrap.classList.add("is-thinking");
   const header = message.role === "assistant" && (message.pending || Number.isFinite(message.duration_ms))
     ? agentTurnHeader(message)
     : null;
-  const body = ["assistant", "user"].includes(message.role) && !message.pending
+  const body = direct && message.kind === "sticker"
+    ? renderDirectStickerMessage(message)
+    : ["assistant", "user"].includes(message.role) && !message.pending
     ? renderAgentMarkdown(message.content)
     : document.createElement("div");
   if (!body.classList.contains("agent-message-body")) {
@@ -6401,11 +6480,66 @@ function renderAgentMessage(message) {
   const fileAttachments = renderAgentFileAttachments(message);
   if (fileAttachments) wrap.append(fileAttachments);
   if (header) wrap.append(header);
-  const actions = message.role === "assistant" ? agentActionsChain(message) : null;
+  const actions = !direct && message.role === "assistant" ? agentActionsChain(message) : null;
   if (actions) wrap.append(actions);
   wrap.append(body);
-  const changedFiles = message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
+  if (direct) {
+    const meta = renderDirectMessageMeta(message);
+    if (meta) wrap.append(meta);
+    const reactions = renderDirectReactions(message);
+    if (reactions) wrap.append(reactions);
+  }
+  const changedFiles = !direct && message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
   if (changedFiles) wrap.append(changedFiles);
+  return wrap;
+}
+
+function renderDirectStickerMessage(message) {
+  const body = document.createElement("div");
+  body.className = "agent-message-body agent-direct-sticker";
+  const emoji = document.createElement("span");
+  emoji.textContent = cleanText(message.sticker?.emoji, "◎");
+  const label = document.createElement("strong");
+  label.textContent = cleanText(message.sticker?.label, "sticker");
+  body.append(emoji, label);
+  return body;
+}
+
+function renderDirectMessageMeta(message) {
+  const meta = document.createElement("div");
+  meta.className = "agent-direct-meta";
+  const time = new Date(message.timestamp || Date.now());
+  const status = message.pending_state === "failed" ? "failed" : message.pending_state === "pending" ? "sending" : "sent";
+  meta.textContent = `${Number.isFinite(time.getTime()) ? time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""} / ${status}`;
+  return meta;
+}
+
+function renderDirectReactions(message) {
+  const wrap = document.createElement("div");
+  wrap.className = "agent-direct-reactions";
+  const reactions = message.reactions && typeof message.reactions === "object" ? message.reactions : {};
+  for (const [emoji, users] of Object.entries(reactions)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-reaction-chip";
+    button.textContent = `${emoji} ${Array.isArray(users) ? users.length : 0}`;
+    if (Array.isArray(users) && users.includes(cleanText(state.authUser?.id, ""))) button.classList.add("mine");
+    button.addEventListener("click", () => void sendDirectReaction(message, emoji));
+    wrap.append(button);
+  }
+  const quick = document.createElement("div");
+  quick.className = "agent-reaction-quick";
+  for (const emoji of DIRECT_REACTION_SET.slice(0, 4)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = emoji;
+    button.title = `React ${emoji}`;
+    button.setAttribute("aria-label", `React ${emoji}`);
+    button.disabled = !message.sync_event_id;
+    button.addEventListener("click", () => void sendDirectReaction(message, emoji));
+    quick.append(button);
+  }
+  wrap.append(quick);
   return wrap;
 }
 
@@ -6655,13 +6789,1033 @@ function bindAgentDetailsOpenState(details, key, defaultOpen = false, options = 
 function renderAgentMessages() {
   const session = activeAgentSession();
   const scrollSnapshot = agentChatScrollSnapshot();
+  renderAgentChrome();
   els.agentMessages.replaceChildren();
   for (const message of session.messages) {
     els.agentMessages.append(renderAgentMessage(message));
   }
+  if (session.kind === "direct" && !session.messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "agent-direct-empty";
+    empty.textContent = `No messages yet with ${socialUserLabel(session.peer, "this friend")}`;
+    els.agentMessages.append(empty);
+  }
   renderAgentDiagnostics(session.diagnostics || {});
   renderAgentContextPreview(session.context_preview || []);
   restoreAgentChatScroll(scrollSnapshot);
+}
+
+function socialUserId(user) {
+  return cleanText(user?.id || user?.user_id || "", "");
+}
+
+function socialUserLabel(user, fallback = "Person") {
+  return cleanText(user?.label || user?.name || user?.email || user?.user_label || user?.id || user?.user_id, fallback);
+}
+
+function directConversationId(peerUserId) {
+  const current = cleanText(state.authUser?.id, "");
+  const peer = cleanText(peerUserId, "");
+  if (!current || !peer) return "";
+  return `dm-${[current, peer].sort().join("-")}`;
+}
+
+function mainAgentSession() {
+  let session = state.agentSessions.find((item) => item.kind !== "direct");
+  if (!session) {
+    session = createAgentSession("Main session");
+    state.agentSessions.unshift(session);
+  }
+  return session;
+}
+
+function switchToMainAgentChat() {
+  state.activeAgentSessionId = mainAgentSession().id;
+  state.agentView = "chat";
+  setAgentSocialPicker("");
+  saveAgentSessions();
+  renderAgentSessions();
+  renderAgentMessages();
+  window.setTimeout(() => els.agentInput?.focus(), 0);
+}
+
+function directSessions() {
+  return state.agentSessions.filter((session) => session.kind === "direct" && session.conversation_id);
+}
+
+function unreadTotal() {
+  return Object.values(state.agentPeople.unreadByConversation || {})
+    .reduce((sum, value) => sum + Math.max(0, Number(value || 0)), 0);
+}
+
+function inboundPendingFriendships() {
+  return (state.agentPeople.friendships || []).filter((item) => item.status === "pending" && item.direction === "incoming");
+}
+
+function updatePeopleButtonState() {
+  const unread = unreadTotal();
+  const pending = inboundPendingFriendships().length;
+  const count = unread + pending;
+  if (!els.agentPeopleButton) return;
+  els.agentPeopleButton.dataset.count = count ? String(Math.min(99, count)) : "";
+  els.agentPeopleButton.classList.toggle("has-social-alerts", count > 0);
+}
+
+function setSocialPulse() {
+  els.agentPeopleButton?.classList.add("is-ringing");
+  window.clearTimeout(state.socialPulseTimer);
+  state.socialPulseTimer = window.setTimeout(() => {
+    els.agentPeopleButton?.classList.remove("is-ringing");
+  }, 1200);
+}
+
+function pushSocialToast(kind, title, detail = "", key = "", action = null) {
+  const dedupeKey = key || `${kind}:${title}:${detail}`;
+  if (state.socialNotificationKeys.has(dedupeKey)) return;
+  if (state.socialNotificationKeys.size > 200) state.socialNotificationKeys.clear();
+  state.socialNotificationKeys.add(dedupeKey);
+  const toast = {
+    id: `toast_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+    kind,
+    title,
+    detail,
+    key: dedupeKey,
+    action,
+  };
+  state.socialNotifications.push(toast);
+  state.socialNotifications = state.socialNotifications.slice(-4);
+  setSocialPulse();
+  renderSocialToasts();
+  window.setTimeout(() => dismissSocialToast(toast.id), SOCIAL_TOAST_TTL_MS);
+}
+
+function dismissSocialToast(id) {
+  state.socialNotifications = state.socialNotifications.filter((toast) => toast.id !== id);
+  renderSocialToasts();
+}
+
+function clearSocialToasts(kind, conversationId = "") {
+  const before = state.socialNotifications.length;
+  state.socialNotifications = state.socialNotifications.filter((toast) => {
+    if (toast.kind !== kind) return true;
+    if (conversationId) return toast.action?.conversationId !== conversationId;
+    return false;
+  });
+  if (state.socialNotifications.length !== before) renderSocialToasts();
+}
+
+function renderSocialToasts() {
+  if (!els.agentToastStack) return;
+  els.agentToastStack.replaceChildren(...state.socialNotifications.map((toast) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = `agent-toast ${toast.kind || "info"}`;
+    const title = document.createElement("strong");
+    title.textContent = toast.title;
+    const detail = document.createElement("span");
+    detail.textContent = toast.detail;
+    item.append(title, detail);
+    item.addEventListener("click", () => {
+      dismissSocialToast(toast.id);
+      setAgentOpen(true);
+      if (toast.action?.conversationId) {
+        const session = directSessionForConversation(toast.action.conversationId);
+        if (session?.peer) {
+          openDirectChat(session.peer);
+          return;
+        }
+      }
+      setAgentView("people");
+    });
+    return item;
+  }));
+}
+
+function renderAgentChrome() {
+  const session = activeAgentSession();
+  const peopleOpen = state.agentView === "people";
+  const direct = !peopleOpen && session.kind === "direct";
+  const peerLabel = socialUserLabel(session.peer, "DM");
+  if (els.agentPanelTitle) els.agentPanelTitle.textContent = peopleOpen ? "People" : direct ? peerLabel : "Chat";
+  if (els.agentPeoplePanel) els.agentPeoplePanel.hidden = !peopleOpen;
+  if (els.agentMessages) els.agentMessages.hidden = peopleOpen;
+  if (els.agentForm) els.agentForm.hidden = peopleOpen;
+  if (els.agentMainChatButton) els.agentMainChatButton.hidden = !direct;
+  els.agentPeopleButton?.setAttribute("aria-pressed", peopleOpen ? "true" : "false");
+  const nodePicker = els.agentNodeSelect?.closest?.(".agent-node-picker");
+  if (nodePicker) nodePicker.hidden = peopleOpen || direct;
+  if (els.agentModelSelect) els.agentModelSelect.hidden = direct;
+  if (els.agentTokenUsage) els.agentTokenUsage.hidden = direct;
+  if (els.agentDirectTools) els.agentDirectTools.hidden = !direct;
+  if (els.agentForm) els.agentForm.dataset.chatKind = direct ? "direct" : "agent";
+  if (els.agentInput) {
+    els.agentInput.placeholder = direct ? `Message ${peerLabel}` : "Talk to Hermes";
+    els.agentInput.setAttribute("aria-label", direct ? `Message ${peerLabel}` : "Message Hermes");
+  }
+  if (!direct) setAgentSocialPicker("");
+  updatePeopleButtonState();
+  updateAgentSendButton();
+  renderAgentPeoplePanel();
+}
+
+function setAgentView(view) {
+  const nextView = view === "people" ? "people" : "chat";
+  if (state.agentView === "people" && nextView === "chat") {
+    switchToMainAgentChat();
+    return;
+  }
+  state.agentView = nextView;
+  renderAgentChrome();
+  if (state.agentView === "people") {
+    setAgentOpen(true);
+    clearSocialToasts("friend");
+    void loadAgentPeople("toggle").catch(() => {});
+  } else {
+    window.setTimeout(() => els.agentInput?.focus(), 0);
+  }
+}
+
+function friendshipUser(friendship) {
+  return friendship?.other_user || friendship?.addressee || friendship?.requester || null;
+}
+
+function activeSharedSpaceMembers() {
+  const room = activeSharedRoom();
+  const entries = [
+    ...(Array.isArray(room?.members) ? room.members : []),
+    ...(Array.isArray(room?.presence) ? room.presence : []),
+  ];
+  const seen = new Set();
+  return entries.map((entry) => {
+    const id = socialUserId(entry);
+    if (!id || seen.has(id)) return null;
+    seen.add(id);
+    return {
+      id,
+      user_id: id,
+      label: socialUserLabel(entry, "Member"),
+      source: "shared-space",
+      current: id === cleanText(room?.current_user_id || state.authUser?.id, ""),
+    };
+  }).filter(Boolean);
+}
+
+function friendshipByUserId(userId) {
+  const target = cleanText(userId, "");
+  return (state.agentPeople.friendships || []).find((friendship) => socialUserId(friendshipUser(friendship)) === target) || null;
+}
+
+function peopleSection(titleText, rows, emptyText = "") {
+  const section = document.createElement("section");
+  section.className = "agent-people-section";
+  const title = document.createElement("h3");
+  title.textContent = titleText;
+  section.append(title);
+  if (rows.length) {
+    const list = document.createElement("div");
+    list.className = "agent-people-section-list";
+    list.replaceChildren(...rows);
+    section.append(list);
+  } else if (emptyText) {
+    const empty = document.createElement("p");
+    empty.className = "agent-people-empty";
+    empty.textContent = emptyText;
+    section.append(empty);
+  }
+  return section;
+}
+
+function conversationUnreadCount(userId) {
+  const conversationId = directConversationId(userId);
+  return Math.max(0, Number(state.agentPeople.unreadByConversation?.[conversationId] || 0));
+}
+
+function peopleRow(user, options = {}) {
+  const id = socialUserId(user);
+  const row = document.createElement("article");
+  row.className = `agent-person-row ${options.kind || "person"}`;
+  if (options.unread) row.classList.add("has-unread");
+  const avatar = document.createElement("span");
+  avatar.className = "agent-person-avatar";
+  avatar.textContent = socialUserLabel(user, "P").slice(0, 1).toUpperCase();
+  avatar.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("div");
+  copy.className = "agent-person-copy";
+  const title = document.createElement("strong");
+  title.textContent = socialUserLabel(user, "Person");
+  const meta = document.createElement("span");
+  meta.textContent = options.meta || id;
+  copy.append(title, meta);
+  if (options.unread) {
+    const unread = document.createElement("span");
+    unread.className = "agent-person-unread";
+    unread.textContent = String(Math.min(99, options.unread));
+    copy.append(unread);
+  }
+  row.append(avatar, copy);
+  if (options.action) row.append(options.action);
+  if (options.openDirect && id) {
+    row.tabIndex = 0;
+    row.addEventListener("click", () => openDirectChat(user));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        openDirectChat(user);
+      }
+    });
+  }
+  return row;
+}
+
+function peopleActionButton(label, title, handler) {
+  const button = document.createElement("button");
+  button.className = "icon-button agent-person-action";
+  button.type = "button";
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  const icon = document.createElement("span");
+  icon.className = `agent-icon ${label}`;
+  icon.setAttribute("aria-hidden", "true");
+  button.append(icon);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    handler();
+  });
+  return button;
+}
+
+function peopleActionGroup(...buttons) {
+  const group = document.createElement("div");
+  group.className = "agent-person-actions";
+  group.replaceChildren(...buttons.filter(Boolean));
+  return group;
+}
+
+function renderAgentPeoplePanel() {
+  if (!els.agentPeoplePanel || state.agentView !== "people") return;
+  if (els.agentPeopleSearchButton) els.agentPeopleSearchButton.disabled = !state.authUser || state.agentPeople.searchBusy;
+  if (els.agentPeopleStatus) {
+    const count = (state.agentPeople.friendships || []).length + activeSharedSpaceMembers().length;
+    els.agentPeopleStatus.textContent = state.agentPeople.busy ? "Loading" : state.agentPeople.status || `${count} people`;
+  }
+  if (!els.agentPeopleList) return;
+  if (state.agentPeople.busy && !(state.agentPeople.friendships || []).length) {
+    els.agentPeopleList.replaceChildren(metric("People", "Loading"));
+    return;
+  }
+  const friendships = Array.isArray(state.agentPeople.friendships) ? state.agentPeople.friendships : [];
+  const friends = [];
+  const inbound = [];
+  const outbound = [];
+  for (const friendship of friendships) {
+    const user = friendshipUser(friendship);
+    const status = cleanText(friendship.status, "pending");
+    if (status === "pending" && friendship.direction === "incoming") {
+      inbound.push(peopleRow(user, {
+        kind: "pending inbound",
+        meta: "wants to connect",
+        action: peopleActionGroup(
+          peopleActionButton("agent-icon-plus", `Accept ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "accepted")),
+          peopleActionButton("agent-icon-close", `Decline ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "declined"))
+        ),
+      }));
+      continue;
+    }
+    if (status === "pending" && friendship.direction === "outgoing") {
+      outbound.push(peopleRow(user, {
+        kind: "pending outbound",
+        meta: "request sent",
+        action: peopleActionButton("agent-icon-close", `Cancel request to ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "canceled")),
+      }));
+      continue;
+    }
+    if (status === "accepted") {
+      const unread = conversationUnreadCount(socialUserId(user));
+      friends.push(peopleRow(user, {
+        kind: "friend",
+        meta: unread ? `${unread} unread` : "friend",
+        unread,
+        action: peopleActionButton("agent-icon-close", `Remove ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "removed")),
+        openDirect: true,
+      }));
+    }
+  }
+  const members = [];
+  for (const member of activeSharedSpaceMembers()) {
+    if (member.current) continue;
+    const friendship = friendshipByUserId(member.id);
+    if (friendship?.status === "accepted") continue;
+    const action = peopleActionButton("agent-icon-plus", `Add ${socialUserLabel(member, "member")}`, () => void requestFriendshipByUserId(member.id));
+    members.push(peopleRow(member, { kind: "member", meta: "space member", action }));
+  }
+  const sections = [
+    peopleSection("Friends", friends, state.authUser ? "No friends yet" : "Sign in required"),
+    peopleSection("Pending inbound", inbound, "No incoming requests"),
+    peopleSection("Pending outbound", outbound, "No sent requests"),
+  ];
+  if (members.length) sections.push(peopleSection("In this space", members));
+  els.agentPeopleList.replaceChildren(...sections);
+  updatePeopleButtonState();
+}
+
+function friendshipKeyMap(friendships) {
+  return new Map((friendships || []).map((friendship) => [String(friendship.id || ""), friendship]).filter(([id]) => id));
+}
+
+function acceptedFriendUserIds(friendships = state.agentPeople.friendships) {
+  return new Set((friendships || [])
+    .filter((friendship) => friendship.status === "accepted")
+    .map((friendship) => socialUserId(friendshipUser(friendship)))
+    .filter(Boolean));
+}
+
+function activeDirectFriendshipAccepted(friendships = state.agentPeople.friendships) {
+  const session = activeAgentSession();
+  if (session.kind !== "direct") return true;
+  return acceptedFriendUserIds(friendships).has(socialUserId(session.peer));
+}
+
+function notifyFriendshipChanges(previous, next, origin = "sync") {
+  if (origin === "cache") return;
+  const before = friendshipKeyMap(previous);
+  for (const friendship of next || []) {
+    const old = before.get(String(friendship.id || ""));
+    const user = friendshipUser(friendship);
+    const label = socialUserLabel(user, "Someone");
+    if (!old && friendship.status === "pending" && friendship.direction === "incoming") {
+      pushSocialToast("friend", "Friend request", label, `friend:${friendship.id}:incoming`);
+    } else if (old && old.status !== friendship.status && friendship.status === "accepted") {
+      pushSocialToast("friend", "Friend accepted", label, `friend:${friendship.id}:accepted`);
+    }
+  }
+}
+
+async function persistPeopleCache() {
+  await state.clientFirstStore.put("people", {
+    id: "friendships",
+    updated_at: state.agentPeople.loadedAt || new Date().toISOString(),
+    friendships: state.agentPeople.friendships,
+    members: state.agentPeople.members,
+    unreadByConversation: state.agentPeople.unreadByConversation,
+    readCursorByConversation: state.agentPeople.readCursorByConversation,
+    syncCursor: state.agentPeople.syncCursor,
+  }).catch(() => {});
+}
+
+async function loadAgentPeople(origin = "auto", options = {}) {
+  if (!state.authUser || state.agentPeople.busy) return;
+  const silent = Boolean(options.silent);
+  state.agentPeople.busy = !silent;
+  renderAgentPeoplePanel();
+  try {
+    const payload = await fetchJson("/account/friends", { timeoutMs: 8000 });
+    const previous = state.agentPeople.friendships || [];
+    state.agentPeople.friendships = Array.isArray(payload.friendships) ? payload.friendships : [];
+    state.agentPeople.members = activeSharedSpaceMembers();
+    state.agentPeople.loadedAt = new Date().toISOString();
+    state.agentPeople.status = `${state.agentPeople.friendships.length} friends`;
+    notifyFriendshipChanges(previous, state.agentPeople.friendships, origin);
+    if (!activeDirectFriendshipAccepted(state.agentPeople.friendships)) switchToMainAgentChat();
+    await persistPeopleCache();
+    if (!silent) {
+      recordUserEvent("agent.people_loaded", {
+        target: "agent-people",
+        summary: "Loaded people list",
+        data: { origin, friendships: state.agentPeople.friendships.length, members: state.agentPeople.members.length },
+      });
+    }
+  } catch (error) {
+    if (!silent) state.agentPeople.status = error.message;
+    recordUserEvent("agent.people_error", {
+      target: "agent-people",
+      summary: error.message,
+      data: { origin, error: error.message },
+    });
+  } finally {
+    state.agentPeople.busy = false;
+    renderAgentPeoplePanel();
+  }
+}
+
+async function submitAgentPeopleSearch(event) {
+  event.preventDefault();
+  const query = cleanText(els.agentPeopleSearchInput?.value || "", "");
+  if (!query || state.agentPeople.searchBusy) return;
+  state.agentPeople.searchBusy = true;
+  state.agentPeople.status = "Adding";
+  renderAgentPeoplePanel();
+  try {
+    await fetchJson("/account/friends", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { query },
+    });
+    if (els.agentPeopleSearchInput) els.agentPeopleSearchInput.value = "";
+    state.agentPeople.status = "Added";
+    await loadAgentPeople("add");
+  } catch (error) {
+    state.agentPeople.status = error.message;
+    recordUserEvent("agent.friend_add_error", {
+      target: "agent-people",
+      summary: error.message,
+      data: { query, error: error.message },
+    });
+  } finally {
+    state.agentPeople.searchBusy = false;
+    renderAgentPeoplePanel();
+  }
+}
+
+async function requestFriendshipByUserId(userId) {
+  const target = cleanText(userId, "");
+  if (!target || state.agentPeople.searchBusy) return;
+  state.agentPeople.searchBusy = true;
+  renderAgentPeoplePanel();
+  try {
+    await fetchJson("/account/friends", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { user_id: target },
+    });
+    await loadAgentPeople("member-add");
+  } catch (error) {
+    state.agentPeople.status = error.message;
+  } finally {
+    state.agentPeople.searchBusy = false;
+    renderAgentPeoplePanel();
+  }
+}
+
+async function respondToFriendship(friendship, response) {
+  if (!friendship?.id) return;
+  try {
+    await fetchJson("/account/friends/respond", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: { friendship_id: friendship.id, response },
+    });
+    await loadAgentPeople("respond");
+  } catch (error) {
+    state.agentPeople.status = error.message;
+    renderAgentPeoplePanel();
+  }
+}
+
+function openDirectChat(user) {
+  const peerId = socialUserId(user);
+  if (!peerId) return;
+  const peer = {
+    id: peerId,
+    label: socialUserLabel(user, "Person"),
+    email: cleanText(user?.email, ""),
+  };
+  const conversationId = directConversationId(peerId);
+  let session = state.agentSessions.find((item) => item.kind === "direct" && item.peer?.id === peerId);
+  if (!session) {
+    session = createAgentSession(peer.label, { kind: "direct", peer, conversation_id: conversationId });
+    state.agentSessions.unshift(session);
+  } else {
+    session.peer = { ...session.peer, ...peer };
+    session.conversation_id = session.conversation_id || conversationId;
+  }
+  state.activeAgentSessionId = session.id;
+  markConversationRead(session.conversation_id);
+  clearSocialToasts("message", session.conversation_id);
+  saveAgentSessions();
+  setAgentView("chat");
+  setAgentOpen(true);
+  renderAgentSessions();
+  renderAgentMessages();
+  void loadDirectChatEvents(session).catch(() => {});
+  window.setTimeout(() => els.agentInput?.focus(), 0);
+  recordUserEvent("agent.direct_chat_opened", {
+    target: `user:${peerId}`,
+    summary: `Opened DM with ${peer.label}`,
+    data: { peer_user_id: peerId, conversation_id: session.conversation_id },
+  });
+}
+
+async function loadDirectChatEvents(session = activeAgentSession()) {
+  if (!session || session.kind !== "direct" || !session.conversation_id) return;
+  const after = cleanText(session.sync_cursor || "", "");
+  const query = new URLSearchParams({
+    conversation_id: session.conversation_id,
+    limit: "120",
+  });
+  if (after) query.set("after_id", after);
+  const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  const changed = await mergeDirectSyncEvents(events, { notify: false });
+  if (payload.cursor) session.sync_cursor = String(payload.cursor);
+  if (changed) {
+    session.updated_at = new Date().toISOString();
+    saveAgentSessions();
+    renderAgentMessages();
+  }
+  markConversationRead(session.conversation_id);
+}
+
+function eventTimestamp(event) {
+  return Number.isFinite(Number(event.created_at)) ? new Date(Number(event.created_at) * 1000).toISOString() : new Date().toISOString();
+}
+
+function directMessageFromSyncEvent(event) {
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const sticker = payload.sticker && typeof payload.sticker === "object" ? payload.sticker : null;
+  return {
+    id: `sync_${event.id}`,
+    role: cleanText(event.author_user_id, "") === currentUserId ? "user" : "assistant",
+    content: cleanText(payload.text || (sticker ? `${sticker.emoji || ""} ${sticker.label || ""}` : ""), ""),
+    timestamp: eventTimestamp(event),
+    sync_event_id: cleanText(event.id, ""),
+    author_user_id: cleanText(event.author_user_id, ""),
+    kind: event.kind === "sticker" ? "sticker" : "chat-message",
+    sticker,
+    pending_state: "sent",
+    reactions: {},
+  };
+}
+
+function directSessionForConversation(conversationId) {
+  return state.agentSessions.find((session) => session.kind === "direct" && session.conversation_id === conversationId) || null;
+}
+
+function directSessionForPeer(peerId) {
+  return state.agentSessions.find((session) => session.kind === "direct" && session.peer?.id === peerId) || null;
+}
+
+function ensureDirectSessionForConversation(conversationId, event = null) {
+  let session = directSessionForConversation(conversationId);
+  if (session) return session;
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const participant = (state.agentPeople.friendships || [])
+    .map(friendshipUser)
+    .find((user) => conversationId === directConversationId(socialUserId(user)));
+  const peerId = socialUserId(participant) || cleanText(event?.author_user_id, "") || "unknown";
+  const peer = participant || { id: peerId, label: peerId };
+  session = createAgentSession(socialUserLabel(peer, "DM"), {
+    kind: "direct",
+    peer: { id: peerId, label: socialUserLabel(peer, "DM"), email: cleanText(peer.email, "") },
+    conversation_id: conversationId,
+  });
+  if (peerId === currentUserId) session.title = "Direct chat";
+  state.agentSessions.push(session);
+  return session;
+}
+
+function trimDirectMessages(session) {
+  if (!session?.messages || session.messages.length <= DIRECT_CHAT_MESSAGE_CAP) return;
+  session.messages = session.messages.slice(-DIRECT_CHAT_MESSAGE_CAP);
+}
+
+function applyReactionToMessage(message, event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const emoji = cleanText(payload.emoji, "");
+  const target = cleanText(payload.message_event_id || payload.target_event_id || payload.target_message_id, "");
+  if (!emoji || !target || cleanText(message.sync_event_id, "") !== target) return false;
+  const userIdValue = cleanText(event.author_user_id, "");
+  message.reactions = message.reactions && typeof message.reactions === "object" ? message.reactions : {};
+  const users = new Set(Array.isArray(message.reactions[emoji]) ? message.reactions[emoji] : []);
+  if (users.has(userIdValue)) users.delete(userIdValue);
+  else users.add(userIdValue);
+  if (users.size) message.reactions[emoji] = Array.from(users);
+  else delete message.reactions[emoji];
+  return true;
+}
+
+async function persistDirectSession(session) {
+  if (!session?.conversation_id) return;
+  trimDirectMessages(session);
+  const retainedMessageIds = new Set((session.messages || []).map((message) => `${session.conversation_id}:${message.sync_event_id || message.id}`));
+  await state.clientFirstStore.put("conversations", {
+    id: session.conversation_id,
+    peer: session.peer || null,
+    sync_cursor: session.sync_cursor || "",
+    unread_count: Number(state.agentPeople.unreadByConversation?.[session.conversation_id] || 0),
+    updated_at: session.updated_at || new Date().toISOString(),
+  }).catch(() => {});
+  for (const message of session.messages || []) {
+    await state.clientFirstStore.put("messages", {
+      id: `${session.conversation_id}:${message.sync_event_id || message.id}`,
+      conversation_id: session.conversation_id,
+      message,
+      created_at: message.timestamp || new Date().toISOString(),
+    }).catch(() => {});
+  }
+  const cachedMessages = await state.clientFirstStore.all("messages").catch(() => []);
+  await Promise.all(cachedMessages
+    .filter((item) => item?.conversation_id === session.conversation_id && !retainedMessageIds.has(item.id))
+    .map((item) => state.clientFirstStore.remove("messages", item.id).catch(() => false)));
+}
+
+async function mergeDirectSyncEvents(events = [], options = {}) {
+  let changed = false;
+  const currentUserId = cleanText(state.authUser?.id, "");
+  for (const event of events) {
+    const conversationId = cleanText(event.conversation_id, "");
+    if (!conversationId) continue;
+    const session = ensureDirectSessionForConversation(conversationId, event);
+    session.sync_cursor = String(event.id || session.sync_cursor || "");
+    if (event.kind === "reaction") {
+      const reactionEventId = cleanText(event.id, "");
+      session.applied_reaction_event_ids = Array.isArray(session.applied_reaction_event_ids) ? session.applied_reaction_event_ids : [];
+      if (reactionEventId && session.applied_reaction_event_ids.includes(reactionEventId)) continue;
+      const applied = (session.messages || []).some((message) => applyReactionToMessage(message, event));
+      if (applied && reactionEventId) {
+        session.applied_reaction_event_ids.push(reactionEventId);
+        session.applied_reaction_event_ids = session.applied_reaction_event_ids.slice(-DIRECT_CHAT_MESSAGE_CAP);
+      }
+      changed = changed || applied;
+      continue;
+    }
+    const existingEventIds = new Set((session.messages || []).map((message) => cleanText(message.sync_event_id, "")).filter(Boolean));
+    const localId = cleanText(event.payload?.local_message_id, "");
+    const existingLocal = localId ? session.messages.find((message) => message.id === localId) : null;
+    if (existingLocal) {
+      existingLocal.sync_event_id = cleanText(event.id, "");
+      existingLocal.pending_state = "sent";
+      changed = true;
+      continue;
+    }
+    if (existingEventIds.has(cleanText(event.id, ""))) continue;
+    if (!["chat-message", "message", "sticker"].includes(cleanText(event.kind, ""))) continue;
+    const message = directMessageFromSyncEvent(event);
+    if (!message.content && !message.sticker) continue;
+    session.messages.push(message);
+    session.updated_at = new Date().toISOString();
+    changed = true;
+    const activeDirect = activeAgentSession().kind === "direct" && activeAgentSession().conversation_id === conversationId && state.agentView === "chat";
+    if (message.author_user_id !== currentUserId && !activeDirect) {
+      state.agentPeople.unreadByConversation[conversationId] = Number(state.agentPeople.unreadByConversation[conversationId] || 0) + 1;
+      if (options.notify !== false) {
+        pushSocialToast(
+          "message",
+          socialUserLabel(session.peer, "New message"),
+          message.kind === "sticker" && message.sticker ? `${message.sticker.emoji} ${message.sticker.label}` : truncateText(message.content, 64),
+          `msg:${event.id}`,
+          { conversationId }
+        );
+      }
+    }
+  }
+  if (changed) {
+    state.agentSessions = state.agentSessions.map((session) => {
+      if (session.kind !== "direct") return session;
+      trimDirectMessages(session);
+      return session;
+    });
+    saveAgentSessions();
+    await Promise.all(directSessions().map(persistDirectSession));
+    await persistPeopleCache();
+    renderAgentSessions();
+    renderAgentPeoplePanel();
+    updatePeopleButtonState();
+  }
+  return changed;
+}
+
+function markConversationRead(conversationId) {
+  const id = cleanText(conversationId, "");
+  if (!id) return;
+  state.agentPeople.unreadByConversation[id] = 0;
+  const session = directSessionForConversation(id);
+  if (session?.sync_cursor) state.agentPeople.readCursorByConversation[id] = session.sync_cursor;
+  persistPeopleCache().catch(() => {});
+  renderAgentPeoplePanel();
+  updatePeopleButtonState();
+}
+
+async function syncDirectMessages(origin = "poll") {
+  if (!state.authUser) return;
+  const query = new URLSearchParams({ limit: "120" });
+  if (state.agentPeople.syncCursor) query.set("after_id", state.agentPeople.syncCursor);
+  try {
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
+    const events = Array.isArray(payload.events) ? payload.events : [];
+    if (events.length) {
+      await mergeDirectSyncEvents(events, { notify: origin !== "startup" && origin !== "cache" });
+      state.agentPeople.syncCursor = payload.cursor || events.at(-1)?.id || state.agentPeople.syncCursor;
+      await persistPeopleCache();
+      if (activeAgentSession().kind === "direct" && state.agentView === "chat") {
+        markConversationRead(activeAgentSession().conversation_id);
+        renderAgentMessages();
+      }
+    } else if (payload.cursor) {
+      state.agentPeople.syncCursor = payload.cursor;
+    }
+  } catch (error) {
+    if (origin !== "poll") {
+      recordUserEvent("agent.direct_sync_error", {
+        target: "agent-direct",
+        summary: error.message,
+        data: { origin, error: error.message },
+      });
+    }
+  }
+}
+
+async function syncSocialLayer(origin = "poll") {
+  if (!state.authUser || state.socialSyncBusy) return;
+  state.socialSyncBusy = true;
+  try {
+    await loadAgentPeople(origin, { silent: origin === "poll" || origin === "focus" });
+    await syncDirectMessages(origin);
+  } finally {
+    state.socialSyncBusy = false;
+  }
+}
+
+function startSocialSync() {
+  if (!state.authUser) return;
+  if (!state.socialSyncInterval) {
+    state.socialSyncInterval = window.setInterval(() => void syncSocialLayer("poll"), SOCIAL_SYNC_POLL_MS);
+  }
+  void syncSocialLayer("startup");
+}
+
+async function loadCachedSocialState() {
+  try {
+    const people = await state.clientFirstStore.get("people", "friendships");
+    if (people) {
+      state.agentPeople.friendships = Array.isArray(people.friendships) ? people.friendships : [];
+      state.agentPeople.members = Array.isArray(people.members) ? people.members : [];
+      state.agentPeople.unreadByConversation = people.unreadByConversation && typeof people.unreadByConversation === "object" ? people.unreadByConversation : {};
+      state.agentPeople.readCursorByConversation = people.readCursorByConversation && typeof people.readCursorByConversation === "object" ? people.readCursorByConversation : {};
+      state.agentPeople.syncCursor = cleanText(people.syncCursor, "");
+    }
+    const conversations = await state.clientFirstStore.all("conversations");
+    const messages = await state.clientFirstStore.all("messages");
+    for (const conversation of conversations) {
+      if (!conversation?.id || directSessionForConversation(conversation.id)) continue;
+      const peer = conversation.peer && typeof conversation.peer === "object" ? conversation.peer : null;
+      if (!peer) continue;
+      const session = createAgentSession(socialUserLabel(peer, "DM"), {
+        kind: "direct",
+        peer,
+        conversation_id: conversation.id,
+      });
+      session.sync_cursor = cleanText(conversation.sync_cursor, "");
+      session.messages = messages
+        .filter((item) => item?.conversation_id === conversation.id && item.message)
+        .map((item) => item.message)
+        .sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")))
+        .slice(-DIRECT_CHAT_MESSAGE_CAP);
+      state.agentSessions.push(session);
+    }
+    renderAgentPeoplePanel();
+    renderAgentSessions();
+    updatePeopleButtonState();
+  } catch {
+    // Cache is an acceleration layer; backend sync will rebuild state.
+  }
+}
+
+function setAgentSocialPicker(kind) {
+  state.agentSocialPicker = kind || "";
+  if (els.agentEmojiPicker) els.agentEmojiPicker.hidden = state.agentSocialPicker !== "emoji";
+  if (els.agentStickerPicker) els.agentStickerPicker.hidden = state.agentSocialPicker !== "sticker";
+}
+
+function renderSocialPickers() {
+  if (els.agentEmojiPicker) {
+    els.agentEmojiPicker.replaceChildren(...DIRECT_EMOJI_SET.map((emoji) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = emoji;
+      button.title = `Insert ${emoji}`;
+      button.addEventListener("click", () => insertAgentEmoji(emoji));
+      return button;
+    }));
+  }
+  if (els.agentStickerPicker) {
+    els.agentStickerPicker.replaceChildren(...DIRECT_STICKERS.map((sticker) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "agent-sticker-option";
+      button.innerHTML = `<span>${sticker.emoji}</span><strong>${sticker.label}</strong>`;
+      button.addEventListener("click", () => void sendDirectSticker(sticker));
+      return button;
+    }));
+  }
+}
+
+function insertAgentEmoji(emoji) {
+  if (!els.agentInput) return;
+  const input = els.agentInput;
+  input.focus();
+  if (typeof input.setRangeText === "function") {
+    input.setRangeText(emoji, input.selectionStart, input.selectionEnd, "end");
+  } else {
+    input.value += emoji;
+  }
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  setAgentSocialPicker("");
+}
+
+async function sendDirectChatMessage(session, text) {
+  const content = String(text ?? "").replace(/\r\n?/g, "\n");
+  const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
+  if (!content.trim() && !attachmentCount) return;
+  const messageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
+  const clientEventId = `direct_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  const userImages = state.agentPendingImages.map((image) => ({
+    data_url: image.data_url,
+    name: image.name,
+    type: image.type,
+    size: image.size,
+    width: image.width,
+    height: image.height,
+    image_card: image.image_card,
+    asset: image.asset,
+  }));
+  const userAttachments = state.agentPendingAttachmentSummaries.map((attachment) => ({
+    name: attachment.name,
+    type: attachment.type,
+    size: attachment.size,
+    width: attachment.width,
+    height: attachment.height,
+    image_card: attachment.image_card,
+    asset: attachment.asset,
+  }));
+  state.agentBusy = true;
+  updateAgentSendButton();
+  clearAgentPendingImages();
+  const message = appendAgentMessage("user", messageContent, {
+    images: userImages,
+    attachments: userAttachments,
+    pending_state: "pending",
+    client_event_id: clientEventId,
+  });
+  clearAgentInput();
+  try {
+    await state.clientFirstStore.put("messages", {
+      id: message.id,
+      conversation_id: session.conversation_id,
+      peer_user_id: session.peer?.id || "",
+      content: messageContent,
+      created_at: message.timestamp,
+    }).catch(() => {});
+    const payload = await fetchJson("/sync/events", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        conversation_id: session.conversation_id || directConversationId(session.peer?.id),
+        peer_user_id: session.peer?.id,
+        client_event_id: clientEventId,
+        kind: "chat-message",
+        payload: {
+          text: messageContent,
+          local_message_id: message.id,
+          attachment_count: attachmentCount,
+        },
+      },
+    });
+    message.sync_event_id = payload.event?.id || "";
+    message.pending_state = "sent";
+    session.sync_cursor = payload.event?.id || session.sync_cursor || "";
+    saveAgentSessions();
+    await persistDirectSession(session);
+  } catch (error) {
+    message.pending_state = "failed";
+    message.error = error.message;
+    saveAgentSessions();
+    renderAgentMessages();
+    state.agentPeople.status = error.message;
+    recordUserEvent("agent.direct_message_sync_error", {
+      target: `user:${session.peer?.id || ""}`,
+      summary: error.message,
+      data: { conversation_id: session.conversation_id || "", error: error.message },
+    });
+  } finally {
+    state.agentBusy = false;
+    state.agentStopRequested = false;
+    updateAgentSendButton();
+  }
+}
+
+async function sendDirectSticker(sticker) {
+  const session = activeAgentSession();
+  if (session.kind !== "direct" || !sticker?.id || state.agentBusy) return;
+  const clientEventId = `sticker_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  state.agentBusy = true;
+  updateAgentSendButton();
+  setAgentSocialPicker("");
+  const message = appendAgentMessage("user", `${sticker.emoji} ${sticker.label}`, {
+    kind: "sticker",
+    sticker,
+    pending_state: "pending",
+    client_event_id: clientEventId,
+  });
+  try {
+    const payload = await fetchJson("/sync/events", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        conversation_id: session.conversation_id,
+        peer_user_id: session.peer?.id,
+        client_event_id: clientEventId,
+        kind: "sticker",
+        payload: {
+          text: `${sticker.emoji} ${sticker.label}`,
+          sticker,
+          local_message_id: message.id,
+        },
+      },
+    });
+    message.sync_event_id = payload.event?.id || "";
+    message.pending_state = "sent";
+    session.sync_cursor = payload.event?.id || session.sync_cursor || "";
+    saveAgentSessions();
+    await persistDirectSession(session);
+    renderAgentMessages();
+  } catch (error) {
+    message.pending_state = "failed";
+    message.error = error.message;
+    saveAgentSessions();
+    renderAgentMessages();
+  } finally {
+    state.agentBusy = false;
+    updateAgentSendButton();
+  }
+}
+
+async function sendDirectReaction(message, emoji) {
+  const session = activeAgentSession();
+  const targetEventId = cleanText(message?.sync_event_id, "");
+  if (session.kind !== "direct" || !targetEventId || !emoji) return;
+  const clientEventId = `react_${targetEventId}_${emoji}_${Date.now().toString(36)}`;
+  try {
+    const payload = await fetchJson("/sync/events", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        conversation_id: session.conversation_id,
+        peer_user_id: session.peer?.id,
+        client_event_id: clientEventId,
+        kind: "reaction",
+        payload: {
+          message_event_id: targetEventId,
+          emoji,
+        },
+      },
+    });
+    if (payload.event) {
+      applyReactionToMessage(message, payload.event);
+      const reactionEventId = cleanText(payload.event.id, "");
+      session.applied_reaction_event_ids = Array.isArray(session.applied_reaction_event_ids) ? session.applied_reaction_event_ids : [];
+      if (reactionEventId && !session.applied_reaction_event_ids.includes(reactionEventId)) {
+        session.applied_reaction_event_ids.push(reactionEventId);
+        session.applied_reaction_event_ids = session.applied_reaction_event_ids.slice(-DIRECT_CHAT_MESSAGE_CAP);
+      }
+      session.sync_cursor = payload.event.id || session.sync_cursor || "";
+      saveAgentSessions();
+      await persistDirectSession(session);
+      renderAgentMessages();
+    }
+  } catch (error) {
+    pushSocialToast("error", "Reaction failed", error.message, `reaction-error:${targetEventId}:${emoji}`);
+  }
 }
 
 function renderAgentSessions() {
@@ -6676,7 +7830,7 @@ function renderAgentSessions() {
       const title = document.createElement("strong");
       const meta = document.createElement("span");
       title.textContent = session.title || "Session";
-      meta.textContent = `${session.messages?.length || 0} turns`;
+      meta.textContent = session.kind === "direct" ? "DM" : `${session.messages?.length || 0} turns`;
       button.append(title, meta);
       button.addEventListener("click", () => {
         switchAgentSession(session.id);
@@ -6689,6 +7843,9 @@ function renderAgentSessions() {
 
 function switchAgentSession(sessionId) {
   state.activeAgentSessionId = sessionId;
+  state.agentView = "chat";
+  const session = activeAgentSession();
+  if (session.kind === "direct") markConversationRead(session.conversation_id);
   renderAgentSessions();
   renderAgentMessages();
 }
@@ -6697,6 +7854,7 @@ function newAgentSession() {
   const session = createAgentSession(`Session ${state.agentSessions.length + 1}`);
   state.agentSessions.unshift(session);
   state.activeAgentSessionId = session.id;
+  state.agentView = "chat";
   saveAgentSessions();
   renderAgentSessions();
   renderAgentMessages();
@@ -8815,9 +9973,11 @@ async function storeAgentAttachmentAssets(images, attachments, pendingMessage) {
 
 function updateAgentSendButton() {
   if (!els.agentSendButton) return;
+  const direct = activeAgentSession().kind === "direct";
   els.agentSendButton.classList.toggle("is-busy", state.agentBusy);
-  els.agentSendButton.setAttribute("aria-label", state.agentBusy ? "Stop response" : "Send message");
-  els.agentSendButton.title = state.agentBusy ? "Stop" : "Send";
+  els.agentSendButton.disabled = direct && state.agentBusy;
+  els.agentSendButton.setAttribute("aria-label", state.agentBusy ? (direct ? "Syncing message" : "Stop response") : "Send message");
+  els.agentSendButton.title = state.agentBusy ? (direct ? "Syncing" : "Stop") : "Send";
 }
 
 function updateAgentTurnTimer() {
@@ -9218,6 +10378,11 @@ function installAgentPanelDragging() {
 async function sendAgentMessage(text) {
   if (state.agentBusy) {
     stopAgentMessage();
+    return;
+  }
+  const activeSession = activeAgentSession();
+  if (activeSession.kind === "direct") {
+    await sendDirectChatMessage(activeSession, text);
     return;
   }
   const content = String(text ?? "").replace(/\r\n?/g, "\n");
@@ -11961,6 +13126,123 @@ function closeDevicesModal(options = {}) {
   }
 }
 
+function openFleetModal(options = {}) {
+  setPanel("home", { updateUrl: false });
+  renderUserFleet();
+  if (els.fleetModal) els.fleetModal.hidden = false;
+  if (!options.skipHistory) {
+    pushUiNavigationLayer("fleet-modal", () => closeFleetModal({ skipHistory: true, skipStack: true }));
+  }
+  if (!state.userFleetBusy) void loadUserFleet(options.origin || "home-fleet").catch(() => {});
+  recordUserEvent("home.fleet_opened", {
+    target: "home:fleet",
+    summary: "Opened account fleet",
+  });
+}
+
+function closeFleetModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("fleet-modal")) return;
+  if (els.fleetModal) els.fleetModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("fleet-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+async function loadUserFleet(origin = "auto") {
+  if (!state.authUser || state.userFleetBusy) return;
+  state.userFleetBusy = true;
+  renderUserFleet();
+  try {
+    const payload = await fetchJson("/fleet", { timeoutMs: 8000 });
+    state.userFleetNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    state.userFleetPolicy = cleanText(payload.server_policy, "");
+    state.userFleetMode = cleanText(payload.deployment_mode, "");
+    renderUserFleet();
+    recordUserEvent("account.fleet_loaded", {
+      target: "fleet",
+      summary: `Loaded ${state.userFleetNodes.length} account fleet nodes`,
+      data: { origin, count: state.userFleetNodes.length, deployment_mode: state.userFleetMode },
+    });
+  } catch (error) {
+    if (els.fleetStatus) {
+      els.fleetStatus.textContent = "offline";
+      els.fleetStatus.className = "widget-chip err";
+    }
+    recordUserEvent("account.fleet_load_error", {
+      target: "fleet",
+      summary: error.message,
+      data: { origin, error: error.message },
+    });
+  } finally {
+    state.userFleetBusy = false;
+    renderUserFleet();
+  }
+}
+
+function renderUserFleet() {
+  if (!els.fleetList || !els.fleetStatus) return;
+  if (els.fleetEnsureMainButton) {
+    els.fleetEnsureMainButton.disabled = !state.authUser || Boolean(state.userFleetEnsureBusy);
+    els.fleetEnsureMainButton.classList.toggle("is-busy", Boolean(state.userFleetEnsureBusy));
+  }
+  if (state.userFleetBusy && !state.userFleetNodes.length) {
+    els.fleetStatus.textContent = "loading";
+    els.fleetStatus.className = "widget-chip";
+    els.fleetList.replaceChildren(metric("Fleet", "Loading"));
+    return;
+  }
+  els.fleetStatus.textContent = state.userFleetMode || "local";
+  els.fleetStatus.className = `widget-chip ${state.userFleetNodes.length ? "ok" : ""}`;
+  const rows = [];
+  for (const node of state.userFleetNodes) {
+    const card = document.createElement("article");
+    card.className = `fleet-card${node.main ? " main" : ""}`;
+    const icon = document.createElement("span");
+    icon.className = "fleet-node-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("div");
+    copy.className = "fleet-card-copy";
+    const title = document.createElement("strong");
+    title.textContent = cleanText(node.node_id, "node");
+    const meta = document.createElement("span");
+    meta.textContent = [node.main ? "main" : "", cleanText(node.backend, ""), cleanText(node.role, "")].filter(Boolean).join(" / ");
+    const detail = document.createElement("p");
+    detail.textContent = state.userFleetPolicy || "browser-local provider settings";
+    copy.append(title, meta, detail);
+    card.append(icon, copy);
+    rows.push(card);
+  }
+  if (!rows.length) rows.push(metric("Fleet", state.authUser ? "No reserved nodes" : "Sign in required"));
+  els.fleetList.replaceChildren(...rows);
+}
+
+async function ensureMainFleetNode() {
+  if (!state.authUser || state.userFleetEnsureBusy) return;
+  state.userFleetEnsureBusy = true;
+  renderUserFleet();
+  try {
+    await fetchJson("/fleet/nodes/ensure-main", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {},
+    });
+    await loadUserFleet("ensure-main");
+  } catch (error) {
+    if (els.fleetStatus) {
+      els.fleetStatus.textContent = "error";
+      els.fleetStatus.className = "widget-chip err";
+    }
+    recordUserEvent("account.fleet_ensure_error", {
+      target: "fleet",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  } finally {
+    state.userFleetEnsureBusy = false;
+    renderUserFleet();
+  }
+}
+
 function openArtifactsModal() {
   renderArtifacts();
   if (els.artifactsModal) els.artifactsModal.hidden = false;
@@ -14242,6 +15524,7 @@ function installModalBackdropDismiss(modal, close) {
 
 function wireEvents() {
   syncVisualViewportSize();
+  renderSocialPickers();
   installWisAutomationHook();
   installInteractionTrace();
   els.app.addEventListener("click", (event) => {
@@ -14390,6 +15673,7 @@ function wireEvents() {
   els.joinSpaceButton?.addEventListener("click", () => openJoinSpaceModal());
   els.sharedVoiceButton?.addEventListener("click", toggleSharedVoice);
   els.sharedVoiceMuteButton?.addEventListener("click", toggleSharedVoiceMute);
+  els.homeFleetButton?.addEventListener("click", openFleetModal);
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
@@ -14437,6 +15721,9 @@ function wireEvents() {
   installModalBackdropDismiss(els.artifactsModal, closeArtifactsModal);
   els.closeDevicesModalButton?.addEventListener("click", closeDevicesModal);
   installModalBackdropDismiss(els.devicesModal, closeDevicesModal);
+  els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
+  els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
+  installModalBackdropDismiss(els.fleetModal, closeFleetModal);
   els.appEditForm?.addEventListener("submit", (event) => void saveAppEdit(event));
   els.resetAppEditButton?.addEventListener("click", resetAppEdit);
   els.closeAppEditModalButton?.addEventListener("click", closeAppEditModal);
@@ -14469,6 +15756,23 @@ function wireEvents() {
     }
   });
   els.agentCloseButton.addEventListener("click", closeAgentChat);
+  els.agentMainChatButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    switchToMainAgentChat();
+  });
+  els.agentPeopleButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAgentView(state.agentView === "people" ? "chat" : "people");
+  });
+  els.agentPeopleSearchForm?.addEventListener("submit", (event) => void submitAgentPeopleSearch(event));
+  els.agentEmojiButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAgentSocialPicker(state.agentSocialPicker === "emoji" ? "" : "emoji");
+  });
+  els.agentStickerButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setAgentSocialPicker(state.agentSocialPicker === "sticker" ? "" : "sticker");
+  });
   els.agentSessionsButton.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleAgentBalloon("sessions");
@@ -14484,6 +15788,7 @@ function wireEvents() {
   els.agentPanel.addEventListener("click", (event) => {
     if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select")) return;
     setAgentBalloon("");
+    if (!event.target.closest?.(".agent-social-picker, .agent-emoji-button, .agent-sticker-button")) setAgentSocialPicker("");
   });
   els.agentNewSessionButton.addEventListener("click", newAgentSession);
   els.agentNodeSelect?.addEventListener("change", () => setAgentTargetNode(els.agentNodeSelect.value));
@@ -14569,7 +15874,10 @@ function wireEvents() {
     saveAgentLayout();
   };
   window.addEventListener("resize", resetAgentAfterViewportChange);
-  window.addEventListener("focus", () => void syncUserSpacesForOpenClient("focus"));
+  window.addEventListener("focus", () => {
+    void syncUserSpacesForOpenClient("focus");
+    void syncSocialLayer("focus");
+  });
   window.visualViewport?.addEventListener("resize", resetAgentAfterViewportChange);
   window.visualViewport?.addEventListener("scroll", () => {
     state.agentLayout = clampAgentLayout(state.agentLayout);
@@ -14613,6 +15921,7 @@ async function bootstrapAuthenticatedApp() {
   await loadUserSpaces();
   await loadLocalStorageEstimate();
   await loadAgentModels();
+  await loadCachedSocialState();
   await loadWasm();
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   updateAgentSendButton();
@@ -14624,6 +15933,7 @@ async function bootstrapAuthenticatedApp() {
   maybeOpenJoinSpaceFromUrl();
   drawCanvas();
   renderAuthGate();
+  startSocialSync();
   await refresh("startup");
   if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
 }

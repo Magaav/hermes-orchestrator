@@ -13,6 +13,7 @@ shadow_ui:
   public_root: public/
   state_root: state/
   backend_bridge_default: http://127.0.0.1:8790
+  bridge_entrypoint: server/bridge.py
 runtime:
   wasm_core: embedded
   browser_proof: host_chromium_cdp_screencast
@@ -35,12 +36,9 @@ firmware_modules:
   - id: embedded-assistant
     path: public/modules/assistant/
 integration:
-  compare_with:
-    hermes_space_ui_pwa: http://127.0.0.1:8787
-    hermes_space_ui_bridge: http://127.0.0.1:8790
+  bridge_owner: wasm-agent
   agent_core_patches: false
   space_agent_patches: false
-  hermes_space_ui_patches: false
 safe_actions:
   - inspect_nodes
   - submit_task

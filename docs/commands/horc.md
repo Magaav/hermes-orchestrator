@@ -40,8 +40,17 @@ horc logs clean [name|all]
 horc backup all
 horc backup node <name>
 horc backup <name>
+horc space backup
 horc restore <path>
 ```
+
+`horc space backup` is the current wasm-agent-cloud proof-of-concept backup. It
+archives the active wasm-agent state root into `/local/backups` with a manifest
+under `wasm-agent-cloud/<instance>/backup-manifest.json`. In cloud mode it reads
+`<HERMES_WASM_AGENT_CLOUD_STATE_ROOT>/state` when that directory exists; then it
+falls back to `HERMES_WASM_AGENT_STATE_DIR`, and finally to the local
+development root `/local/plugins/wasm-agent/state`. Browser caches, logs, pid
+files, symlinks, and other noisy runtime files are excluded.
 
 ## Update Commands
 
@@ -51,25 +60,24 @@ horc update all [--force]
 horc update node <name> [--force]
 ```
 
-## Space Agent UI Commands
+## wasm-agent Space Commands
 
 ```bash
 horc space start
 horc space stop
 horc space status
+horc space backup
 ```
 
-`horc space start` starts the generated Space Agent checkout on
-`http://127.0.0.1:8787` and the Hermes Space UI bridge on
-`http://127.0.0.1:8790`. It refuses to run if legacy
-`/local/plugins/private/hermes-space-ui` state is present; use
-`/local/plugins/hermes-space-ui/state` instead.
+`horc space start` starts the wasm-agent PWA on `http://127.0.0.1:8877` and
+the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 
 ## Notes
 
 - `horc restart` with no node restarts all nodes in orchestrator-first order.
 - `hord` and `clone.sh` are compatibility aliases for `horc`.
 - `horc backup` produces lean archives and includes a shared runtime seed for reseeding nodes during restore.
+- `horc space backup` produces a client-first wasm-agent state archive and does not include public repo source.
 - `horc restore` stops included running nodes, restores payloads, and restarts nodes that were running.
 - Every update refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch before reseeding nodes.
 - `horc update all` reseeds every node and reconciles `/local/agents/registry.json`.
@@ -85,7 +93,12 @@ horc space status
 - `HERMES_CLONE_MANAGER_SCRIPT`: override path for `clone_manager.py`.
 - `HERMES_CLONE_PYTHON_BIN`: override Python runtime for the wrapper.
 - `HERMES_HORC_ASSUME_YES=1`: skip interactive `delete` confirmation.
-- `HERMES_SPACE_UI_STATE_DIR`: override Space UI state root for `horc space`.
+- `HERMES_WASM_AGENT_STATE_DIR`: local wasm-agent state root for `horc space`
+  runtime state and backup fallback.
+- `HERMES_WASM_AGENT_BRIDGE_STATE_DIR`: optional bridge state root, default
+  `<HERMES_WASM_AGENT_STATE_DIR>/bridge`.
+- `HERMES_WASM_AGENT_CLOUD_STATE_ROOT`: private wasm-agent-cloud instance state root used by `horc space backup`.
+- `HERMES_WASM_AGENT_CLOUD_INSTANCE_ID`: optional stable id used in wasm-agent-cloud backup archive paths.
 
 ## Governance
 

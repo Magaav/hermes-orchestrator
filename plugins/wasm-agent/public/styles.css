@@ -27,6 +27,17 @@
   display: none !important;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 html,
 body {
   min-width: 320px;
@@ -923,7 +934,7 @@ h2 {
   display: none;
   width: min(586px, calc(100% - 22px));
   max-width: calc(100% - 22px);
-  grid-template-columns: minmax(0, 1.25fr) repeat(4, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.25fr) repeat(5, minmax(0, 1fr));
   align-items: start;
   gap: 7px;
   padding: 6px;
@@ -1038,6 +1049,14 @@ h2 {
   border-left: 0;
   border-radius: 0 7px 7px 0;
   box-shadow: -7px 0 0 -2px currentColor;
+}
+
+.home-actions .home-action-button.fleet::after {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  box-shadow: -7px 7px 0 -4px currentColor, 7px 7px 0 -4px currentColor;
 }
 
 .home-actions .home-action-button.artifacts::after {
@@ -2541,6 +2560,19 @@ body.is-agent-dragging {
   max-height: min(520px, calc(100vh - 160px));
 }
 
+.fleet-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.modal-fleet-list {
+  max-height: min(520px, calc(100vh - 160px));
+}
+
 .device-card {
   min-width: 0;
   display: grid;
@@ -2551,6 +2583,75 @@ body.is-agent-dragging {
   border: 1px solid rgba(147, 170, 203, 0.14);
   border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.035);
+}
+
+.fleet-card {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(147, 170, 203, 0.14);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.fleet-card.main {
+  border-color: rgba(124, 228, 176, 0.32);
+}
+
+.fleet-main-button,
+.fleet-node-icon {
+  position: relative;
+}
+
+.fleet-main-button::before {
+  content: "";
+  position: absolute;
+  inset: 8px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.fleet-main-button::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 8px;
+  width: 2px;
+  height: 18px;
+  background: currentColor;
+  box-shadow: -6px 6px 0 currentColor, 6px 6px 0 currentColor;
+  opacity: 0.72;
+}
+
+.fleet-node-icon {
+  width: 28px;
+  height: 28px;
+  border: 1px solid rgba(125, 220, 255, 0.28);
+  border-radius: var(--radius);
+  background: rgba(8, 14, 25, 0.78);
+}
+
+.fleet-node-icon::before {
+  content: "";
+  position: absolute;
+  inset: 7px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.fleet-node-icon::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  top: 3px;
+  width: 2px;
+  height: 20px;
+  background: currentColor;
+  box-shadow: -7px 7px 0 currentColor, 7px 7px 0 currentColor;
+  opacity: 0.68;
 }
 
 .device-sync-button {
@@ -2685,6 +2786,7 @@ body.is-agent-dragging {
   color: var(--gold);
 }
 
+.fleet-card-copy,
 .device-card-copy {
   min-width: 0;
   display: grid;
@@ -2696,11 +2798,14 @@ body.is-agent-dragging {
   background: rgba(124, 228, 176, 0.08);
 }
 
+.fleet-card strong,
 .device-card strong {
   color: var(--text);
   font-size: 13px;
 }
 
+.fleet-card span,
+.fleet-card p,
 .device-card span,
 .device-card p {
   margin: 0;
@@ -3915,12 +4020,78 @@ textarea:focus {
   gap: 5px;
 }
 
+.agent-title-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, max-content) 34px;
+  align-items: center;
+  gap: 6px;
+}
+
 .agent-panel-title {
   color: var(--text);
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.agent-people-button {
+  position: relative;
+  color: var(--muted);
+}
+
+.agent-people-button[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: rgba(125, 220, 255, 0.44);
+  background: rgba(125, 220, 255, 0.12);
+}
+
+.agent-main-chat-button {
+  color: var(--muted);
+}
+
+.agent-main-chat-button:hover {
+  color: var(--text);
+}
+
+.agent-people-button.has-social-alerts::after {
+  content: attr(data-count);
+  position: absolute;
+  right: -5px;
+  top: -5px;
+  min-width: 16px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(8, 14, 24, 0.9);
+  border-radius: 999px;
+  background: #ff6b8a;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  padding: 0 3px;
+}
+
+.agent-people-button.has-social-alerts[data-count=""]::after {
+  content: "";
+  min-width: 9px;
+  width: 9px;
+  height: 9px;
+  right: 1px;
+  top: 1px;
+  padding: 0;
+}
+
+.agent-people-button.is-ringing {
+  animation: agent-social-ring 0.36s ease-in-out 3;
+}
+
+@keyframes agent-social-ring {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-9deg); }
+  75% { transform: rotate(9deg); }
 }
 
 .agent-node-picker {
@@ -4080,6 +4251,55 @@ textarea:focus {
   height: 24px;
   box-shadow: 7px 3px 0 currentColor, -7px -3px 0 currentColor;
   transform: translateX(-50%) rotate(45deg);
+}
+
+.agent-icon-back::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-left: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.agent-icon-back::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 2px;
+  top: 50%;
+  height: 2px;
+  border-radius: 999px;
+  background: currentColor;
+  transform: translateY(-50%);
+}
+
+.agent-icon-people::before,
+.agent-icon-people::after {
+  content: "";
+  position: absolute;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.agent-icon-people::before {
+  left: 1px;
+  top: 4px;
+  width: 8px;
+  height: 8px;
+  box-shadow: 8px 0 0 -2px currentColor;
+}
+
+.agent-icon-people::after {
+  left: 0;
+  right: 0;
+  bottom: 2px;
+  height: 7px;
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
 }
 
 .agent-balloon {
@@ -4268,6 +4488,174 @@ textarea:focus {
   align-content: start;
   overflow: auto;
   padding: 12px;
+}
+
+.agent-people-panel {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
+  padding: 12px;
+}
+
+.agent-people-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 6px;
+}
+
+.agent-people-search input {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid rgba(147, 170, 203, 0.2);
+  border-radius: var(--radius);
+  background: rgba(5, 12, 22, 0.84);
+  color: var(--text);
+  padding: 0 9px;
+  outline: none;
+}
+
+.agent-people-search input:focus {
+  border-color: rgba(125, 220, 255, 0.44);
+  box-shadow: 0 0 0 1px rgba(125, 220, 255, 0.12);
+}
+
+.agent-people-status {
+  min-height: 18px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-people-list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+}
+
+.agent-people-section {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-people-section h3 {
+  margin: 0;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.agent-people-section-list {
+  display: grid;
+  gap: 6px;
+}
+
+.agent-people-empty {
+  margin: 0;
+  border: 1px dashed rgba(147, 170, 203, 0.18);
+  border-radius: var(--radius);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.025);
+  padding: 9px;
+  font-size: 11px;
+}
+
+.agent-person-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid rgba(147, 170, 203, 0.14);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.agent-person-row[tabindex] {
+  cursor: pointer;
+}
+
+.agent-person-row[tabindex]:hover,
+.agent-person-row[tabindex]:focus-visible {
+  border-color: rgba(125, 220, 255, 0.42);
+  background: rgba(125, 220, 255, 0.08);
+  outline: none;
+}
+
+.agent-person-row.has-unread {
+  border-color: rgba(255, 107, 138, 0.4);
+  background: rgba(255, 107, 138, 0.07);
+}
+
+.agent-person-avatar {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(125, 220, 255, 0.24);
+  border-radius: 50%;
+  background: rgba(125, 220, 255, 0.08);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.agent-person-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-person-copy strong,
+.agent-person-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-person-copy strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.agent-person-copy span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.agent-person-unread {
+  justify-self: start;
+  min-width: 17px;
+  height: 17px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #ff6b8a;
+  color: #fff !important;
+  font-size: 9px !important;
+  font-weight: 900;
+  padding: 0 5px;
+}
+
+.agent-person-action {
+  justify-self: end;
+}
+
+.agent-person-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
 }
 
 .agent-diagnostics {
@@ -5049,6 +5437,98 @@ details.agent-action-row .agent-action-row-summary {
   border-color: rgba(125, 220, 255, 0.22);
 }
 
+.agent-message.direct-message {
+  max-width: min(86%, 320px);
+  padding: 8px 10px;
+}
+
+.agent-message.direct-message.assistant {
+  justify-self: start;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.agent-message.direct-message.user {
+  justify-self: end;
+  background: rgba(125, 220, 255, 0.13);
+}
+
+.agent-message.direct-message[data-pending-state="failed"] {
+  border-color: rgba(255, 116, 116, 0.48);
+}
+
+.agent-direct-empty {
+  justify-self: center;
+  max-width: 280px;
+  margin: 16px 0;
+  border: 1px dashed rgba(147, 170, 203, 0.22);
+  border-radius: var(--radius);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.03);
+  padding: 12px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.agent-direct-meta {
+  margin-top: 6px;
+  color: var(--dim);
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.agent-direct-sticker {
+  display: inline-grid;
+  justify-items: center;
+  gap: 2px;
+  min-width: 72px;
+  text-align: center;
+}
+
+.agent-direct-sticker span {
+  font-size: 34px;
+  line-height: 1;
+}
+
+.agent-direct-sticker strong {
+  color: var(--text);
+  font-size: 11px;
+}
+
+.agent-direct-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 7px;
+}
+
+.agent-reaction-chip,
+.agent-reaction-quick button {
+  min-height: 24px;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 7px;
+}
+
+.agent-reaction-chip.mine {
+  border-color: rgba(125, 220, 255, 0.44);
+  background: rgba(125, 220, 255, 0.12);
+}
+
+.agent-reaction-quick {
+  display: none;
+  gap: 4px;
+}
+
+.agent-message.direct-message:hover .agent-reaction-quick,
+.agent-message.direct-message:focus-within .agent-reaction-quick {
+  display: flex;
+}
+
 .agent-form {
   position: relative;
   display: flex;
@@ -5065,6 +5545,92 @@ details.agent-action-row .agent-action-row-summary {
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.agent-form[data-chat-kind="direct"] .agent-form-row {
+  grid-template-columns: 34px auto minmax(0, 1fr) 34px;
+}
+
+.agent-direct-tools {
+  display: flex;
+  gap: 4px;
+}
+
+.agent-direct-tools[hidden] {
+  display: none;
+}
+
+.agent-emoji-button,
+.agent-sticker-button {
+  width: 30px;
+  min-width: 30px;
+  height: 34px;
+  min-height: 34px;
+  font-size: 16px;
+}
+
+.agent-social-picker {
+  position: absolute;
+  left: 52px;
+  bottom: 58px;
+  z-index: 5;
+  width: min(260px, calc(100% - 64px));
+  max-height: 182px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(34px, 1fr));
+  gap: 5px;
+  overflow: auto;
+  border: 1px solid rgba(147, 170, 203, 0.24);
+  border-radius: var(--radius);
+  background: rgba(9, 15, 26, 0.98);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.4);
+  padding: 7px;
+}
+
+.agent-social-picker[hidden] {
+  display: none;
+}
+
+.agent-social-picker button {
+  min-width: 0;
+  min-height: 34px;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.agent-social-picker button:hover {
+  border-color: rgba(125, 220, 255, 0.42);
+  background: rgba(125, 220, 255, 0.1);
+}
+
+.agent-sticker-picker {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(300px, calc(100% - 64px));
+}
+
+.agent-sticker-option {
+  display: grid;
+  gap: 2px;
+  place-items: center;
+  padding: 7px;
+}
+
+.agent-sticker-option span {
+  font-size: 20px;
+}
+
+.agent-sticker-option strong {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 800;
 }
 
 .agent-mode {
@@ -5130,6 +5696,17 @@ details.agent-action-row .agent-action-row-summary {
 #agentInput:focus {
   border-color: rgba(125, 220, 255, 0.44);
   box-shadow: 0 0 0 1px rgba(125, 220, 255, 0.12);
+}
+
+#agentInput.chat-composer-textarea {
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+}
+
+#agentInputOverlay.chat-composer-overlay {
+  background: transparent;
+  color: #ffffff;
 }
 
 .agent-send-button {
@@ -5529,6 +6106,56 @@ details.agent-action-row .agent-action-row-summary {
 
 .agent-send-button.is-busy .agent-send-stop {
   display: block;
+}
+
+.agent-toast-stack {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 80;
+  display: grid;
+  gap: 8px;
+  width: min(280px, calc(100vw - 36px));
+  pointer-events: none;
+}
+
+.agent-toast {
+  pointer-events: auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  border: 1px solid rgba(147, 170, 203, 0.24);
+  border-radius: var(--radius);
+  background: rgba(9, 15, 26, 0.98);
+  color: var(--text);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.agent-toast strong,
+.agent-toast span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-toast strong {
+  font-size: 12px;
+}
+
+.agent-toast span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-toast.message {
+  border-color: rgba(255, 107, 138, 0.36);
+}
+
+.agent-toast.friend {
+  border-color: rgba(125, 220, 255, 0.34);
 }
 
 .observation-stats .metric {

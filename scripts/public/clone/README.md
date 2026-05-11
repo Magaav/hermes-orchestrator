@@ -9,7 +9,8 @@ CLI wrappers.
 - `hord.sh`: compatibility alias for `horc`.
 - `clone.sh`: compatibility alias for `horc`.
 - `clone_manager.py`: lifecycle engine for start, stop, status, logs, backup,
-  restore, update, governance prompt generation, and Space UI helper commands.
+  restore, update, governance prompt generation, and wasm-agent helper
+  commands.
 - `tests/`: focused tests for governance prompt and gateway-state behavior.
 
 ## Wrapper Behavior
@@ -18,7 +19,7 @@ CLI wrappers.
   set.
 - `hord.sh` and `clone.sh` are compatibility aliases that exec `horc.sh`.
 - `horc space start|stop|status` is implemented in the wrapper and delegates to
-  `/local/plugins/hermes-space-ui/scripts/*`.
+  `/local/plugins/wasm-agent/scripts/*`.
 - `delete` prompts interactively unless `--yes` or `HERMES_HORC_ASSUME_YES=1`
   is used.
 - `purge-node` is intentionally two-step: request first, then confirm with the
@@ -27,7 +28,7 @@ CLI wrappers.
 ## Documentation Sync
 
 When CLI behavior, node lifecycle semantics, env handling, plugin bootstrap, or
-Space UI helper commands change, update `/local/docs/commands/horc.md`, the
+wasm-agent helper commands change, update `/local/docs/commands/horc.md`, the
 root README, and nearby plugin/feature docs as needed.
 
 `horc` remains the canonical operational control plane. UI and plugin surfaces

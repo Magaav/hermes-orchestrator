@@ -38,6 +38,8 @@ except Exception:  # pragma: no cover - optional runtime guard
 
 PLUGIN_NAME = "wasm-agent"
 PLUGIN_VERSION = "0.1.0"
+DEPLOYMENT_MODE_LOCAL = "local"
+DEPLOYMENT_MODE_CLOUD = "cloud"
 IMAGE_CARD_ANALYZER_REVISION = "image-card-text-v2"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DEFAULT_BROWSER_STREAM_FPS = 4.0
@@ -90,6 +92,16 @@ SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
 SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
 SHARED_SPACE_SIGNAL_TEXT_LIMIT = 131072
+SYNC_EVENT_SCHEMA = "hermes.wasm_agent.sync.event.v1"
+SYNC_EVENT_LIST_SCHEMA = "hermes.wasm_agent.sync.events.v1"
+FRIENDSHIP_SCHEMA = "hermes.wasm_agent.friendship.v1"
+FRIENDSHIP_LIST_SCHEMA = "hermes.wasm_agent.friendships.v1"
+USER_FLEET_SCHEMA = "hermes.wasm_agent.user_fleet.v1"
+USER_FLEET_NODE_SCHEMA = "hermes.wasm_agent.user_fleet.node.v1"
+SYNC_EVENT_PAYLOAD_LIMIT = 24 * 1024
+SYNC_EVENT_PAGE_LIMIT = 120
+FRIENDSHIP_VISIBLE_STATUSES = {"pending", "accepted"}
+FRIENDSHIP_TERMINAL_STATUSES = {"declined", "canceled", "removed"}
 VOICE_LAB_ROOM_SCHEMA = "hermes.wasm_agent.voice_lab.room.v1"
 VOICE_LAB_ROOM_EVENT_SCHEMA = "hermes.wasm_agent.voice_lab.room_event.v1"
 VOICE_LAB_PRESENCE_SCHEMA = "hermes.wasm_agent.voice_lab.presence.v1"
@@ -244,6 +256,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                         "required": True,
                         "userTable": "user_tb",
                     },
+                    "deployment": {
+                        "mode": wasm_agent_deployment_mode(),
+                        "instanceId": cloud_instance_id(),
+                        "clientFirst": True,
+                        "serverRole": "auth-sync-relay-backup-fleet",
+                    },
                     "features": {
                         "hostBrowser": {
                             "enabled": browser_feature_enabled(self),
@@ -256,9 +274,9 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                             "signalingPollMs": 900,
                         },
                     },
-                    "compareWith": {
-                        "hermesSpaceUiPwa": "http://127.0.0.1:8787",
-                        "hermesSpaceUiBridge": "http://127.0.0.1:8790",
+                    "bridge": {
+                        "owner": "wasm-agent",
+                        "url": self.server.bridge_url,
                     },
                 },
             )
@@ -330,6 +348,33 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/account/devices":
             try:
                 self._json(HTTPStatus.OK, list_account_devices(self.server, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/users/lookup":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                value = str((query.get("q") or query.get("query") or [""])[0] or "")
+                self._json(HTTPStatus.OK, account_user_lookup(value, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/friends":
+            try:
+                self._json(HTTPStatus.OK, list_friendships(user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/sync/events":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                self._json(HTTPStatus.OK, list_sync_events(self.server, user, query))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/fleet":
+            try:
+                self._json(HTTPStatus.OK, list_user_fleet(user))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -451,6 +496,34 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=32 * 1024)
                 self._json(HTTPStatus.OK, set_main_account_device(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/friends":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, request_friendship(user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/friends/respond":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, respond_friendship(user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/sync/events":
+            try:
+                body = self._read_json(max_bytes=128 * 1024)
+                self._json(HTTPStatus.OK, append_sync_event(self.server, user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/fleet/nodes/ensure-main":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, ensure_main_fleet_node(user, body))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -790,8 +863,91 @@ class AgentModelSetupError(BrowserError):
         self.steps = steps
 
 
+def wasm_agent_deployment_mode() -> str:
+    raw = os.getenv("HERMES_WASM_AGENT_DEPLOYMENT_MODE", DEPLOYMENT_MODE_LOCAL).strip().lower()
+    if raw in {DEPLOYMENT_MODE_LOCAL, DEPLOYMENT_MODE_CLOUD}:
+        return raw
+    raise RuntimeError("HERMES_WASM_AGENT_DEPLOYMENT_MODE must be 'local' or 'cloud'.")
+
+
+def path_is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def cloud_state_root(*, required: bool = False) -> Path | None:
+    raw = os.getenv("HERMES_WASM_AGENT_CLOUD_STATE_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    if required:
+        raise RuntimeError("Cloud mode requires HERMES_WASM_AGENT_CLOUD_STATE_ROOT.")
+    return None
+
+
+def default_private_state_dir(plugin_root: Path | None = None) -> Path:
+    root = cloud_state_root()
+    if wasm_agent_deployment_mode() == DEPLOYMENT_MODE_CLOUD:
+        if root is None:
+            root = cloud_state_root(required=True)
+        assert root is not None
+        return root / "state"
+    return (plugin_root or Path(__file__).resolve().parents[1]) / "state"
+
+
+def ensure_cloud_private_paths(plugin_root: Path, *paths: Path) -> None:
+    if wasm_agent_deployment_mode() != DEPLOYMENT_MODE_CLOUD:
+        return
+    root = cloud_state_root(required=True)
+    assert root is not None
+    unsafe_roots = (
+        plugin_root / "state",
+        plugin_root / "public",
+        plugin_root / "server",
+        plugin_root / "tests",
+        plugin_root / "conf",
+    )
+    for path in (root, *paths):
+        resolved = path.resolve()
+        if path is root:
+            if path_is_under(resolved, plugin_root):
+                raise RuntimeError(
+                    "HERMES_WASM_AGENT_CLOUD_STATE_ROOT must not live inside the public wasm-agent plugin tree."
+                )
+            continue
+        if not path_is_under(resolved, root):
+            raise RuntimeError(f"Cloud path must live under HERMES_WASM_AGENT_CLOUD_STATE_ROOT: {resolved}")
+        if any(path_is_under(resolved, unsafe) for unsafe in unsafe_roots):
+            raise RuntimeError(f"Cloud path must not use repo-local wasm-agent state/source paths: {resolved}")
+
+
+def resolve_wasm_agent_state_dir(plugin_root: Path) -> Path:
+    raw = os.getenv("HERMES_WASM_AGENT_STATE_DIR", "").strip()
+    path = Path(raw).expanduser().resolve() if raw else default_private_state_dir(plugin_root).resolve()
+    ensure_cloud_private_paths(plugin_root, path)
+    return path
+
+
+def cloud_instance_id() -> str:
+    raw = os.getenv("HERMES_WASM_AGENT_CLOUD_INSTANCE_ID", "").strip()
+    if raw:
+        return safe_state_id(raw, "wasm-agent-cloud")
+    root = cloud_state_root()
+    if root is not None:
+        return safe_state_id(root.name, "wasm-agent-cloud")
+    return "local-dev"
+
+
 def wa_env_path() -> Path:
-    return Path(os.getenv("HERMES_WASM_AGENT_ENV_PATH", str(DEFAULT_WA_ENV_PATH))).resolve()
+    raw = os.getenv("HERMES_WASM_AGENT_ENV_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    root = cloud_state_root()
+    if wasm_agent_deployment_mode() == DEPLOYMENT_MODE_CLOUD and root is not None:
+        return (root / "conf" / "wa.env").resolve()
+    return DEFAULT_WA_ENV_PATH.resolve()
 
 
 def env_file_value(name: str, *, path: Path | None = None) -> str:
@@ -960,11 +1116,21 @@ def is_allowed_account_email(email: str) -> bool:
 
 
 def auth_db_path() -> Path:
-    return Path(os.getenv("HERMES_WASM_AGENT_DB_PATH", str(DEFAULT_AUTH_DB_PATH))).resolve()
+    raw = os.getenv("HERMES_WASM_AGENT_DB_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    if wasm_agent_deployment_mode() == DEPLOYMENT_MODE_CLOUD:
+        return (default_private_state_dir() / "db" / "sqlite" / "wa_db.sqlite3").resolve()
+    return DEFAULT_AUTH_DB_PATH.resolve()
 
 
 def auth_secret_path() -> Path:
-    return Path(os.getenv("HERMES_WASM_AGENT_AUTH_SECRET_PATH", str(DEFAULT_AUTH_SECRET_PATH))).resolve()
+    raw = os.getenv("HERMES_WASM_AGENT_AUTH_SECRET_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    if wasm_agent_deployment_mode() == DEPLOYMENT_MODE_CLOUD:
+        return (default_private_state_dir() / "db" / "sqlite" / "wa_auth_secret").resolve()
+    return DEFAULT_AUTH_SECRET_PATH.resolve()
 
 
 def auth_secret() -> bytes:
@@ -1016,12 +1182,11 @@ def next_snowflake_id() -> int:
         return (now_ms << 22) | (machine << 12) | _SNOWFLAKE_SEQUENCE
 
 
-def auth_connect() -> sqlite3.Connection:
-    path = auth_db_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, timeout=5)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
+def ensure_account_schema(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.DatabaseError:
+        pass
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS user_tb (
@@ -1039,6 +1204,132 @@ def auth_connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS friendship_tb (
+          id TEXT PRIMARY KEY,
+          requester_user_id TEXT NOT NULL,
+          addressee_user_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(requester_user_id, addressee_user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_tb (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          space_id TEXT NOT NULL DEFAULT '',
+          shared_space_id TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL DEFAULT '',
+          created_by TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          client_owned INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS conversation_member_tb (
+          conversation_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'member',
+          joined_at INTEGER NOT NULL,
+          last_read_event_id TEXT NOT NULL DEFAULT '',
+          PRIMARY KEY(conversation_id, user_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_event_tb (
+          id TEXT PRIMARY KEY,
+          client_event_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL DEFAULT '',
+          space_id TEXT NOT NULL DEFAULT '',
+          shared_space_id TEXT NOT NULL DEFAULT '',
+          author_user_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(author_user_id, client_event_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_fleet_tb (
+          user_id TEXT NOT NULL,
+          node_id TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'owner',
+          is_main INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(user_id, node_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS brain_profile_tb (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          label TEXT NOT NULL DEFAULT '',
+          provider TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          node_id TEXT NOT NULL DEFAULT '',
+          storage_scope TEXT NOT NULL DEFAULT 'browser',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS backup_manifest_tb (
+          id TEXT PRIMARY KEY,
+          instance_id TEXT NOT NULL,
+          archive_path TEXT NOT NULL,
+          manifest_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS instance_audit_tb (
+          id TEXT PRIMARY KEY,
+          actor_user_id TEXT NOT NULL DEFAULT '',
+          action TEXT NOT NULL,
+          target TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS friendship_user_idx ON friendship_tb(requester_user_id, addressee_user_id, status)",
+        "CREATE INDEX IF NOT EXISTS conversation_member_user_idx ON conversation_member_tb(user_id, conversation_id)",
+        "CREATE INDEX IF NOT EXISTS sync_event_conversation_idx ON sync_event_tb(conversation_id, id)",
+        "CREATE INDEX IF NOT EXISTS sync_event_space_idx ON sync_event_tb(shared_space_id, id)",
+        "CREATE INDEX IF NOT EXISTS user_fleet_user_idx ON user_fleet_tb(user_id, is_main)",
+    ):
+        conn.execute(statement)
+
+
+def auth_connect() -> sqlite3.Connection:
+    path = auth_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    ensure_account_schema(conn)
     return conn
 
 
@@ -1071,6 +1362,174 @@ def public_user_label(user: dict[str, Any] | None) -> str:
     if not user:
         return "Guest"
     return clipped(str(user.get("email") or user.get("name") or user_id(user) or "User"), 120)
+
+
+def public_social_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    user = public_user(row)
+    if not user:
+        return None
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "name": user["name"],
+        "picture_url": user["picture_url"],
+        "role": user["role"],
+    }
+
+
+def lookup_user_row(conn: sqlite3.Connection, query: str) -> sqlite3.Row | None:
+    value = str(query or "").strip().lower()
+    if not value:
+        return None
+    if value.isdigit():
+        return conn.execute("SELECT * FROM user_tb WHERE id = ?", (int(value),)).fetchone()
+    if "@" in value:
+        return conn.execute("SELECT * FROM user_tb WHERE lower(email) = ?", (value,)).fetchone()
+    return None
+
+
+def account_user_lookup(query: str, user: dict[str, Any] | None) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    with auth_connect() as conn:
+        found = public_social_user(lookup_user_row(conn, query))
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.account_user_lookup.v1",
+        "query": clipped(str(query or ""), 160),
+        "user": found,
+    }
+
+
+def friendship_public_payload(conn: sqlite3.Connection, row: sqlite3.Row, current_user_id: str) -> dict[str, Any]:
+    requester = public_social_user(lookup_user_row(conn, str(row["requester_user_id"])))
+    addressee = public_social_user(lookup_user_row(conn, str(row["addressee_user_id"])))
+    other_id = str(row["addressee_user_id"] if str(row["requester_user_id"]) == current_user_id else row["requester_user_id"])
+    other = public_social_user(lookup_user_row(conn, other_id))
+    return {
+        "schema": FRIENDSHIP_SCHEMA,
+        "id": str(row["id"]),
+        "requester_user_id": str(row["requester_user_id"]),
+        "addressee_user_id": str(row["addressee_user_id"]),
+        "status": str(row["status"]),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]),
+        "requester": requester,
+        "addressee": addressee,
+        "other_user": other,
+        "direction": "outgoing" if str(row["requester_user_id"]) == current_user_id else "incoming",
+    }
+
+
+def list_friendships(user: dict[str, Any] | None) -> dict[str, Any]:
+    uid = user_id(user)
+    with auth_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM friendship_tb
+             WHERE (requester_user_id = ? OR addressee_user_id = ?)
+               AND status IN ('pending', 'accepted')
+             ORDER BY updated_at DESC
+            """,
+            (uid, uid),
+        ).fetchall()
+        friends = [friendship_public_payload(conn, row, uid) for row in rows]
+    return {"ok": True, "schema": FRIENDSHIP_LIST_SCHEMA, "friendships": friends}
+
+
+def existing_friendship(conn: sqlite3.Connection, user_a: str, user_b: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM friendship_tb
+         WHERE (requester_user_id = ? AND addressee_user_id = ?)
+            OR (requester_user_id = ? AND addressee_user_id = ?)
+         ORDER BY updated_at DESC
+         LIMIT 1
+        """,
+        (user_a, user_b, user_b, user_a),
+    ).fetchone()
+
+
+def request_friendship(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    uid = user_id(user)
+    target = str(body.get("target_user_id") or body.get("user_id") or body.get("email") or body.get("query") or "").strip()
+    if not target:
+        raise BrowserError("missing_friend_target", "Friend target id or email is required.")
+    now = int(time.time())
+    with auth_connect() as conn:
+        target_row = lookup_user_row(conn, target)
+        if not target_row:
+            raise BrowserError("friend_target_not_found", "That user was not found.", status=HTTPStatus.NOT_FOUND)
+        target_id = str(target_row["id"])
+        if target_id == uid:
+            raise BrowserError("friend_target_self", "You cannot send a friend request to yourself.")
+        row = existing_friendship(conn, uid, target_id)
+        if row:
+            if str(row["status"]) in FRIENDSHIP_TERMINAL_STATUSES:
+                conn.execute(
+                    """
+                    UPDATE friendship_tb
+                       SET requester_user_id = ?, addressee_user_id = ?, status = 'pending', updated_at = ?
+                     WHERE id = ?
+                    """,
+                    (uid, target_id, now, str(row["id"])),
+                )
+                row = conn.execute("SELECT * FROM friendship_tb WHERE id = ?", (str(row["id"]),)).fetchone()
+            friendship = friendship_public_payload(conn, row, uid) if row else {}
+        else:
+            friendship_id = f"fr_{next_snowflake_id():x}"
+            conn.execute(
+                """
+                INSERT INTO friendship_tb (
+                  id, requester_user_id, addressee_user_id, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?)
+                """,
+                (friendship_id, uid, target_id, now, now),
+            )
+            row = conn.execute("SELECT * FROM friendship_tb WHERE id = ?", (friendship_id,)).fetchone()
+            friendship = friendship_public_payload(conn, row, uid) if row else {}
+    return {"ok": True, "friendship": friendship}
+
+
+def respond_friendship(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    uid = user_id(user)
+    response = str(body.get("response") or body.get("status") or "").strip().lower()
+    if response == "cancelled":
+        response = "canceled"
+    if response not in {"accepted", "declined", "blocked", "canceled", "removed"}:
+        raise BrowserError("invalid_friend_response", "Friend response must be accepted, declined, blocked, canceled, or removed.")
+    friendship_id = str(body.get("friendship_id") or body.get("id") or "").strip()
+    requester_id = str(body.get("requester_user_id") or body.get("user_id") or "").strip()
+    now = int(time.time())
+    with auth_connect() as conn:
+        row = None
+        if friendship_id:
+            row = conn.execute("SELECT * FROM friendship_tb WHERE id = ?", (friendship_id,)).fetchone()
+        elif requester_id:
+            row = existing_friendship(conn, uid, requester_id)
+        if not row:
+            return {"ok": True, "friendship": None, "status": response, "missing": True}
+        if uid not in {str(row["requester_user_id"]), str(row["addressee_user_id"])}:
+            raise BrowserError("friendship_response_denied", "You are not part of this friendship.", status=HTTPStatus.FORBIDDEN)
+        current = str(row["status"])
+        requester = str(row["requester_user_id"])
+        addressee = str(row["addressee_user_id"])
+        if str(row["addressee_user_id"]) != uid and response in {"accepted", "declined"} and current != response:
+            raise BrowserError("friendship_response_denied", "Only the addressee can accept or decline this request.", status=HTTPStatus.FORBIDDEN)
+        if requester != uid and response == "canceled" and current != response:
+            raise BrowserError("friendship_response_denied", "Only the requester can cancel this friend request.", status=HTTPStatus.FORBIDDEN)
+        if response in {"accepted", "declined"} and current not in {"pending", response}:
+            friendship = friendship_public_payload(conn, row, uid)
+            return {"ok": True, "friendship": friendship, "status": current, "unchanged": True}
+        if response == "canceled" and current not in {"pending", "canceled"}:
+            friendship = friendship_public_payload(conn, row, uid)
+            return {"ok": True, "friendship": friendship, "status": current, "unchanged": True}
+        if response == "removed" and current not in {"accepted", "removed"}:
+            raise BrowserError("friendship_response_denied", "Only accepted friends can be removed.", status=HTTPStatus.FORBIDDEN)
+        conn.execute("UPDATE friendship_tb SET status = ?, updated_at = ? WHERE id = ?", (response, now, str(row["id"])))
+        updated = conn.execute("SELECT * FROM friendship_tb WHERE id = ?", (str(row["id"]),)).fetchone()
+        friendship = friendship_public_payload(conn, updated, uid) if updated else {}
+    return {"ok": True, "friendship": friendship}
 
 
 def safe_state_id(raw: str, fallback: str = "space") -> str:
@@ -2328,6 +2787,22 @@ def public_shared_space_presence_entries(presence: dict[str, Any], now: int | No
     return visible
 
 
+def public_shared_space_member_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
+    member_ids = {str(record.get("owner_user_id") or "")}
+    member_ids.update(shared_space_member_ids(record))
+    member_ids = {safe_state_id(item, "") for item in member_ids if safe_state_id(item, "")}
+    if not member_ids:
+        return []
+    with auth_connect() as conn:
+        members = []
+        for member_id in sorted(member_ids):
+            user = public_social_user(lookup_user_row(conn, member_id))
+            if user:
+                user["owner"] = member_id == str(record.get("owner_user_id") or "")
+                members.append(user)
+    return members
+
+
 def read_shared_space_events(server: WasmAgentServer, shared_space_id: str) -> list[dict[str, Any]]:
     payload = read_json_file(shared_space_events_path(server, shared_space_id), {})
     events = payload.get("events") if isinstance(payload, dict) and isinstance(payload.get("events"), list) else []
@@ -2383,6 +2858,7 @@ def public_shared_space_room(
         "updated_at": str(record.get("updated_at") or ""),
         "presence_ttl_sec": SHARED_SPACE_PRESENCE_TTL_SEC,
         "presence": public_shared_space_presence_entries(current_presence, now),
+        "members": public_shared_space_member_entries(record),
         "current_user_id": user_id(user),
         "current_device_id": safe_state_id(current_device_id, ""),
         "events": read_shared_space_events(server, sid)[-SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT:],
@@ -2416,6 +2892,306 @@ def shared_space_room(
     elif action != "read":
         raise BrowserError("invalid_space_room_action", "Unsupported shared-space room action.")
     return {"ok": True, "room": public_shared_space_room(server, record, user, presence, current_device_id)}
+
+
+def sync_event_payload(raw: Any) -> str:
+    payload = raw if isinstance(raw, dict) else {}
+    text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    if len(text.encode("utf-8")) > SYNC_EVENT_PAYLOAD_LIMIT:
+        raise BrowserError("sync_payload_too_large", "Sync event payload is too large.")
+    return text
+
+
+def user_can_access_conversation(conn: sqlite3.Connection, conversation_id: str, user: dict[str, Any] | None) -> bool:
+    if user_is_admin(user):
+        return True
+    row = conn.execute(
+        "SELECT 1 FROM conversation_member_tb WHERE conversation_id = ? AND user_id = ?",
+        (conversation_id, user_id(user)),
+    ).fetchone()
+    return bool(row)
+
+
+def direct_conversation_peer_id(conn: sqlite3.Connection, conversation_id: str, user: dict[str, Any] | None) -> str:
+    row = conn.execute("SELECT kind FROM conversation_tb WHERE id = ?", (conversation_id,)).fetchone()
+    if not row or str(row["kind"]) != "direct":
+        return ""
+    uid = user_id(user)
+    peer = conn.execute(
+        """
+        SELECT user_id FROM conversation_member_tb
+         WHERE conversation_id = ? AND user_id != ?
+         ORDER BY user_id ASC
+         LIMIT 1
+        """,
+        (conversation_id, uid),
+    ).fetchone()
+    return str(peer["user_id"]) if peer else ""
+
+
+def ensure_direct_conversation_send_allowed(conn: sqlite3.Connection, conversation_id: str, user: dict[str, Any] | None) -> None:
+    peer_id = direct_conversation_peer_id(conn, conversation_id, user)
+    if not peer_id:
+        return
+    friendship = existing_friendship(conn, user_id(user), peer_id)
+    if not friendship or str(friendship["status"]) != "accepted":
+        raise BrowserError(
+            "direct_peer_not_friend",
+            "Direct chat requires an accepted friendship.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+
+
+def ensure_sync_conversation(
+    server: WasmAgentServer,
+    conn: sqlite3.Connection,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> str:
+    uid = user_id(user)
+    requested = safe_state_id(str(body.get("conversation_id") or body.get("conversation") or ""), "")
+    shared_space_id = safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), "")
+    space_id = safe_state_id(str(body.get("space_id") or body.get("space") or ""), "")
+    peer_user_id = safe_state_id(str(body.get("peer_user_id") or body.get("peer") or ""), "")
+    direct_peer_id = ""
+    if peer_user_id:
+        peer = lookup_user_row(conn, peer_user_id)
+        if not peer:
+            raise BrowserError("direct_peer_not_found", "That direct-chat user was not found.", status=HTTPStatus.NOT_FOUND)
+        direct_peer_id = str(peer["id"])
+        if direct_peer_id == uid:
+            raise BrowserError("direct_peer_self", "Direct chat requires another user.")
+        friendship = existing_friendship(conn, uid, direct_peer_id)
+        if not friendship or str(friendship["status"]) != "accepted":
+            raise BrowserError(
+                "direct_peer_not_friend",
+                "Direct chat requires an accepted friendship.",
+                status=HTTPStatus.FORBIDDEN,
+            )
+        pair = sorted([uid, direct_peer_id])
+        requested = requested or f"dm-{pair[0]}-{pair[1]}"
+        kind = "direct"
+        title = clipped(str(body.get("title") or f"DM {pair[0]} {pair[1]}"), 120)
+    elif shared_space_id:
+        record = read_shared_space_record(server, shared_space_id)
+        if not record:
+            raise BrowserError("shared_space_not_found", "That shared space was not found.", status=HTTPStatus.NOT_FOUND)
+        if not user_can_access_shared_space(record, user):
+            raise BrowserError("shared_space_denied", "You cannot access that shared space.", status=HTTPStatus.FORBIDDEN)
+        requested = requested or f"space-{shared_space_id}"
+        kind = "shared-space"
+        title = clipped(str(record.get("title") or shared_space_id), 120)
+    else:
+        requested = requested or f"local-{uid}"
+        kind = clipped(str(body.get("conversation_kind") or "local"), 40)
+        title = clipped(str(body.get("title") or requested), 120)
+    now = int(time.time())
+    row = conn.execute("SELECT * FROM conversation_tb WHERE id = ?", (requested,)).fetchone()
+    if not row:
+        conn.execute(
+            """
+            INSERT INTO conversation_tb (
+              id, kind, space_id, shared_space_id, title, created_by, created_at, updated_at, client_owned
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (requested, kind, space_id, shared_space_id, title, uid, now, now),
+        )
+    elif not user_can_access_conversation(conn, requested, user):
+        raise BrowserError("conversation_denied", "You cannot access that conversation.", status=HTTPStatus.FORBIDDEN)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO conversation_member_tb (conversation_id, user_id, role, joined_at)
+        VALUES (?, ?, 'member', ?)
+        """,
+        (requested, uid, now),
+    )
+    if direct_peer_id:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO conversation_member_tb (conversation_id, user_id, role, joined_at)
+            VALUES (?, ?, 'member', ?)
+            """,
+            (requested, direct_peer_id, now),
+        )
+    return requested
+
+
+def public_sync_event(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "schema": SYNC_EVENT_SCHEMA,
+        "id": str(row["id"]),
+        "client_event_id": str(row["client_event_id"]),
+        "conversation_id": str(row["conversation_id"]),
+        "space_id": str(row["space_id"]),
+        "shared_space_id": str(row["shared_space_id"]),
+        "author_user_id": str(row["author_user_id"]),
+        "kind": str(row["kind"]),
+        "payload": payload,
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]),
+    }
+
+
+def list_sync_events(server: WasmAgentServer, user: dict[str, Any] | None, query: dict[str, list[str]]) -> dict[str, Any]:
+    conversation_id = safe_state_id(str((query.get("conversation_id") or query.get("conversation") or [""])[0] or ""), "")
+    shared_space_id = safe_state_id(str((query.get("shared_space_id") or query.get("shared_space") or [""])[0] or ""), "")
+    after_id = str((query.get("after_id") or query.get("after") or [""])[0] or "").strip()
+    try:
+        limit = int(str((query.get("limit") or [SYNC_EVENT_PAGE_LIMIT])[0] or SYNC_EVENT_PAGE_LIMIT))
+    except ValueError:
+        limit = SYNC_EVENT_PAGE_LIMIT
+    limit = max(1, min(limit, SYNC_EVENT_PAGE_LIMIT))
+    with auth_connect() as conn:
+        params: list[Any] = []
+        where = []
+        if conversation_id:
+            if not user_can_access_conversation(conn, conversation_id, user):
+                raise BrowserError("conversation_denied", "You cannot access that conversation.", status=HTTPStatus.FORBIDDEN)
+            where.append("conversation_id = ?")
+            params.append(conversation_id)
+        elif shared_space_id:
+            record = read_shared_space_record(server, shared_space_id)
+            if not record or not user_can_access_shared_space(record, user):
+                raise BrowserError("shared_space_denied", "You cannot access that shared space.", status=HTTPStatus.FORBIDDEN)
+            where.append("shared_space_id = ?")
+            params.append(shared_space_id)
+        else:
+            where.append(
+                "conversation_id IN (SELECT conversation_id FROM conversation_member_tb WHERE user_id = ?)"
+            )
+            params.append(user_id(user))
+        if after_id:
+            where.append("CAST(id AS INTEGER) > CAST(? AS INTEGER)")
+            params.append(after_id)
+        sql = "SELECT * FROM sync_event_tb WHERE " + " AND ".join(where) + " ORDER BY CAST(id AS INTEGER) ASC LIMIT ?"
+        rows = conn.execute(sql, (*params, limit)).fetchall()
+    events = [public_sync_event(row) for row in rows]
+    return {
+        "ok": True,
+        "schema": SYNC_EVENT_LIST_SCHEMA,
+        "events": events,
+        "cursor": events[-1]["id"] if events else after_id,
+    }
+
+
+def append_sync_event(server: WasmAgentServer, user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    uid = user_id(user)
+    client_event_id = safe_state_id(str(body.get("client_event_id") or ""), "")
+    if not client_event_id:
+        client_event_id = f"client-{next_snowflake_id():x}"
+    kind = safe_state_id(str(body.get("kind") or "message"), "message")
+    now = int(time.time())
+    with auth_connect() as conn:
+        conversation_id = ensure_sync_conversation(server, conn, user, body)
+        ensure_direct_conversation_send_allowed(conn, conversation_id, user)
+        row = conn.execute(
+            "SELECT * FROM sync_event_tb WHERE author_user_id = ? AND client_event_id = ?",
+            (uid, client_event_id),
+        ).fetchone()
+        if not row:
+            event_id = str(next_snowflake_id())
+            conn.execute(
+                """
+                INSERT INTO sync_event_tb (
+                  id, client_event_id, conversation_id, space_id, shared_space_id,
+                  author_user_id, kind, payload_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    client_event_id,
+                    conversation_id,
+                    safe_state_id(str(body.get("space_id") or body.get("space") or ""), ""),
+                    safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), ""),
+                    uid,
+                    kind,
+                    sync_event_payload(body.get("payload")),
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute("SELECT * FROM sync_event_tb WHERE id = ?", (event_id,)).fetchone()
+        event = public_sync_event(row) if row else {}
+    return {"ok": True, "event": event}
+
+
+def base36_int(value: str) -> str:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if number <= 0:
+        return "0"
+    chars = []
+    while number:
+        number, rem = divmod(number, 36)
+        chars.append(alphabet[rem])
+    return "".join(reversed(chars))
+
+
+def account_main_node_id(user: dict[str, Any] | None) -> str:
+    return safe_state_id(f"u{base36_int(user_id(user))}-main", "account-main")
+
+
+def public_fleet_node(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "schema": USER_FLEET_NODE_SCHEMA,
+        "node_id": str(row["node_id"]),
+        "role": str(row["role"]),
+        "main": bool(row["is_main"]),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]),
+        "backend": "hermes-node",
+    }
+
+
+def list_user_fleet(user: dict[str, Any] | None) -> dict[str, Any]:
+    uid = user_id(user)
+    with auth_connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM user_fleet_tb WHERE user_id = ? ORDER BY is_main DESC, created_at ASC",
+            (uid,),
+        ).fetchall()
+    return {
+        "ok": True,
+        "schema": USER_FLEET_SCHEMA,
+        "deployment_mode": wasm_agent_deployment_mode(),
+        "nodes": [public_fleet_node(row) for row in rows],
+        "direct_provider_scope": "browser-local",
+        "server_policy": "server stores ownership metadata only until backend execution is explicitly requested",
+    }
+
+
+def ensure_main_fleet_node(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    uid = user_id(user)
+    requested = safe_state_id(str(body.get("node_id") or ""), "")
+    node_id = requested or account_main_node_id(user)
+    now = int(time.time())
+    with auth_connect() as conn:
+        conn.execute("UPDATE user_fleet_tb SET is_main = 0, updated_at = ? WHERE user_id = ?", (now, uid))
+        conn.execute(
+            """
+            INSERT INTO user_fleet_tb (user_id, node_id, role, is_main, created_at, updated_at)
+            VALUES (?, ?, 'owner', 1, ?, ?)
+            ON CONFLICT(user_id, node_id) DO UPDATE SET is_main = 1, updated_at = excluded.updated_at
+            """,
+            (uid, node_id, now, now),
+        )
+        row = conn.execute("SELECT * FROM user_fleet_tb WHERE user_id = ? AND node_id = ?", (uid, node_id)).fetchone()
+        node = public_fleet_node(row) if row else {}
+    return {
+        "ok": True,
+        "node": node,
+        "provisioned": False,
+        "note": "Reserved owned Hermes node metadata; backend provisioning is an explicit premium/heavy action.",
+    }
 
 
 def voice_lab_root(server: WasmAgentServer) -> Path:
@@ -5487,7 +6263,7 @@ def agent_search(server: WasmAgentServer, query: str) -> dict[str, Any]:
         raise BrowserError("agent_missing_query", "Search query is required.")
     root = repo_root(server)
     proc = subprocess.run(
-        ["rg", "-n", "--glob", "!plugins/hermes-space-ui/state/**", "--glob", "!logs/**", pattern, str(root)],
+        ["rg", "-n", "--glob", "!plugins/wasm-agent/state/**", "--glob", "!logs/**", pattern, str(root)],
         text=True,
         capture_output=True,
         timeout=8,
@@ -6450,8 +7226,8 @@ def _node_reports_model(server: WasmAgentServer, node_id: str, model: dict[str, 
 
 
 def _node_api_base_url(server: WasmAgentServer, node_id: str) -> str:
-    env_key = f"HERMES_SPACE_UI_API_SERVER_{node_id.upper().replace('-', '_')}_URL"
-    explicit = str(os.getenv(env_key) or os.getenv("HERMES_SPACE_UI_API_SERVER_URL") or "").strip()
+    env_key = f"HERMES_WASM_AGENT_BRIDGE_API_SERVER_{node_id.upper().replace('-', '_')}_URL"
+    explicit = str(os.getenv(env_key) or os.getenv("HERMES_WASM_AGENT_BRIDGE_API_SERVER_URL") or "").strip()
     if explicit:
         return explicit.rstrip("/")
     env = _parse_env_text(_node_env_path(server, node_id).read_text(encoding="utf-8"))
@@ -6467,8 +7243,8 @@ def _node_api_base_url(server: WasmAgentServer, node_id: str) -> str:
 
 
 def _node_api_key(server: WasmAgentServer, node_id: str) -> str:
-    env_key = f"HERMES_SPACE_UI_API_SERVER_{node_id.upper().replace('-', '_')}_KEY"
-    explicit = str(os.getenv(env_key) or os.getenv("HERMES_SPACE_UI_API_SERVER_KEY") or "").strip()
+    env_key = f"HERMES_WASM_AGENT_BRIDGE_API_SERVER_{node_id.upper().replace('-', '_')}_KEY"
+    explicit = str(os.getenv(env_key) or os.getenv("HERMES_WASM_AGENT_BRIDGE_API_SERVER_KEY") or "").strip()
     if explicit:
         return explicit
     env = _parse_env_text(_node_env_path(server, node_id).read_text(encoding="utf-8"))
@@ -8957,9 +9733,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     plugin_root = Path(__file__).resolve().parents[1]
     public_root = plugin_root / "public"
-    state_dir = Path(
-        os.getenv("HERMES_WASM_AGENT_STATE_DIR", str(plugin_root / "state"))
-    ).resolve()
+    state_dir = resolve_wasm_agent_state_dir(plugin_root)
+    ensure_cloud_private_paths(plugin_root, state_dir, auth_db_path(), auth_secret_path(), wa_env_path())
     state_dir.mkdir(parents=True, exist_ok=True)
     mimetypes.add_type("application/manifest+json", ".webmanifest")
     mimetypes.add_type("application/wasm", ".wasm")

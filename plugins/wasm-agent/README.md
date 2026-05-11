@@ -2,35 +2,27 @@
 
 `wasm-agent` is the shadow WASM-first UI plugin for Hermes Orchestrator.
 
-It exists so the team can build a new Hermes Agent UI runtime in parallel with
-`hermes-space-ui` without changing the current Space Agent integration. The
-first milestone is visual and behavioral parity with the useful Hermes UI
-surfaces; after parity, this plugin can become the runtime substrate for
-Space OS work that needs GPU-oriented rendering, agent-readable state, and a
-cleaner app shell.
+It exists so the team can build the Hermes Agent UI/runtime shell without
+depending on the old Space Agent integration. Its first milestone is visual and
+behavioral parity with the useful Hermes UI surfaces; after parity, this plugin
+can become the runtime substrate for Space OS work that needs GPU-oriented
+rendering, agent-readable state, and a cleaner app shell.
 
 ## Current Behavior
 
 - Serves a local installable PWA shell on `http://127.0.0.1:8877`.
-- Keeps the existing Hermes bridge/API contract as the backend boundary,
-  defaulting to `http://127.0.0.1:8790`.
+- Owns the local Hermes bridge/API contract as the backend boundary, defaulting
+  to `http://127.0.0.1:8790`.
+- Keeps chat, workspace layout, provider/model preferences, and WIS artifacts
+  client-first by default. The Python server is used only for centralized
+  account auth, presence/relay, lightweight sync events, optional backup, and
+  explicit fleet metadata/provisioning handshakes.
+- Supports an open-core cloud state boundary: local development uses
+  `state/`, while `HERMES_WASM_AGENT_DEPLOYMENT_MODE=cloud` requires a private
+  `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside this public repo.
 - Loads an embedded WebAssembly core in the browser and uses it as the first
   rendering/runtime handshake for the parity shell.
 - Does not start, stop, copy, or patch Space Agent.
-- Does not modify `/local/plugins/hermes-space-ui`.
-
-## Legacy Boundary
-
-For `wasm-agent` work, `/local/plugins/hermes-space-ui` is legacy comparison
-infrastructure. It remains useful for side-by-side parity checks and for the
-older Space Agent integration, but it is not the implementation surface for
-fixing wasm-agent behavior. New wasm-agent features, security-loop automation,
-auth hardening, browser-stream policy, and account-space behavior should live
-under `/local/plugins/wasm-agent` or orchestrator-owned shared scripts/docs.
-
-Do not patch `hermes-space-ui` to make a wasm-agent flow pass unless there is an
-explicit migration or compatibility task that names both plugins and documents
-the cross-plugin reason.
 
 ## Architecture Vision
 
@@ -41,9 +33,10 @@ described as modules wherever possible so all wasm-agent instances can share
 core evolution without forcing every instance into the same workspace shape.
 
 Core modules are the non-removable platform layer. Today that includes
-`spaces`, `devices`, `artifacts`, `config`, and `module-manager`. They define
-how users enter, inspect, configure, and extend the workspace. Core modules may
-be visible in the module inventory, but they should not be user-disabled.
+`spaces`, `devices`, `artifacts`, `config`, `module-manager`, and
+`client-state`. They define how users enter, inspect, configure, sync, back up,
+and extend the workspace. Core modules may be visible in the module inventory,
+but they should not be user-disabled.
 
 Modules are hierarchical. The `spaces` module owns Home, Admin, and user space
 identity. A space can expose child modules as pages, actions, apps, widgets,
@@ -56,8 +49,7 @@ instead of patching unrelated core code. That keeps the shared mainframe small
 and performance-conscious while leaving each wasm-agent instance free to evolve
 its own module tree.
 
-The current app is an early browser-view parity surface, not a full replacement
-for `hermes-space-ui`. It now presents a workspace shell with a left launcher
+The current app is an early browser-view parity surface. It now presents a workspace shell with a left launcher
 rail by default, a visible `space-home` Home space, a hardcoded `space-admin` Admin space
 with a crown icon, and account-owned user spaces. The old header/status chrome,
 canvas label, summary panel, and dock have been removed from the shell. Each
@@ -159,8 +151,8 @@ entities become portable `wasm-artifacts`, while device layout remains local.
 Admin is the standard operational space for `wasm-agent`, not a custom user
 space. `/admin` opens the app-icon workspace for the resource monitor,
 topology, Host Browser, Drop to Copy, workspace studio, Observation inspector,
-and module-management surfaces using the same documented bridge endpoints used
-by Hermes Space UI. Timeline is not an app icon; it is opened from the fixed
+and module-management surfaces using the documented wasm-agent bridge endpoints.
+Timeline is not an app icon; it is opened from the fixed
 space config button for the current space. Legacy `/space` links land on the
 same Admin workspace. Topology reads live nodes through the same-origin
 `/bridge/nodes` proxy and exposes only start/stop/restart/update actions per
@@ -188,6 +180,28 @@ planned tunnel and state-sync capabilities; it does not claim a tunnel is live
 yet. On mobile, Home config can switch the launcher from the default left rail
 to a top bar so the Home button and account control stay pinned while the space
 list scrolls between them.
+
+Home also exposes a Fleet core module for account-owned agent brain metadata.
+Opening it reads `/fleet`, shows the account's reserved Hermes node records, and
+can explicitly reserve a main node through `/fleet/nodes/ensure-main`. That
+reservation does not provision a backend worker by itself; it stores ownership
+metadata so premium/heavy provisioning can stay an intentional later action.
+Model/provider choices in the embedded chat remain browser-local unless the
+user explicitly uses the backend model setup flow for a selected Hermes node.
+
+The embedded chat drawer now has a People toggle beside the `Chat` title.
+People reads `/account/friends`, combines it with current shared-space members
+from `/spaces/room`, and can send friend requests by account id or email.
+Pending inbound and outbound requests update through a bounded social sync
+poll, and the UI supports accept, decline, cancel, and remove-friend actions.
+Accepted friends open a direct chat session in the same drawer with a main-chat
+back button, unread indicators, calm toast/ring feedback, emoji insertion,
+built-in text stickers, and emoji reactions. Direct chat messages, stickers,
+and reactions are client-first and mirrored as bounded `/sync/events` rows for
+the accepted friendship conversation; attachments remain local metadata for
+this foundation pass. The browser caches friends, pending requests, recent
+direct conversations, unread counts, cursors, and the last 500 messages per
+conversation in IndexedDB with an in-memory fallback.
 
 The Host Browser widget is deliberately pixel-based, not iframe-based. It asks
 the local `wasm-agent` backend to use host Chromium through CDP, capture a URL,
@@ -730,28 +744,20 @@ request or resend oversized conversation payloads.
 wasm-agent PWA :8877
   -> WebAssembly runtime handshake
   -> same-origin /bridge/* proxy
-  -> Hermes bridge contract :8790
+  -> wasm-agent-owned Hermes bridge contract :8790
   -> Hermes Orchestrator CLI/API boundary
   -> Hermes Agent nodes
 ```
 
-`hermes-space-ui` remains available separately:
-
-```text
-Space Agent PWA      http://127.0.0.1:8787
-Hermes bridge        http://127.0.0.1:8790
-wasm-agent shadow UI http://127.0.0.1:8877
-```
-
 ## Setup
 
-Start the current Space UI/bridge when you want live fleet data:
+Start the workspace and bridge:
 
 ```bash
 horc space start
 ```
 
-Start the shadow WASM UI:
+Start only the PWA script directly:
 
 ```bash
 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
@@ -786,10 +792,11 @@ Run checks:
 /local/plugins/wasm-agent/scripts/doctor.sh
 ```
 
-The doctor runs the source smoke test, image-card golden coverage,
-security-loop policy/runner tests, and the UI navigation history regression
-that keeps chat minimize from navigating back to an older space after the user
-changes spaces with chat open.
+The doctor runs the source smoke test, wasm-agent bridge route coverage,
+image-card golden coverage, client-first cloud contracts, client-state storage
+coverage, security-loop policy/runner tests, and the UI
+navigation history regression that keeps chat minimize from navigating back to
+an older space after the user changes spaces with chat open.
 
 Run the public-launch security gate before exposing the app outside a trusted
 local network:
@@ -885,8 +892,20 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
 - `HERMES_WASM_AGENT_PORT`: app port, default `8877`.
 - `HERMES_WASM_AGENT_STATE_DIR`: state/log root, default
   `/local/plugins/wasm-agent/state`.
+- `HERMES_WASM_AGENT_DEPLOYMENT_MODE`: `local` by default. Set to `cloud` for a
+  private wasm-agent-cloud instance; cloud mode rejects public-repo state paths.
+- `HERMES_WASM_AGENT_CLOUD_STATE_ROOT`: required in cloud mode. This private
+  root owns `state/`, `conf/wa.env`, SQLite metadata, sync events, secrets, and
+  user data outside the public repo.
+- `HERMES_WASM_AGENT_CLOUD_INSTANCE_ID`: optional stable id used in public config
+  and `horc space backup` manifests.
 - `HERMES_WASM_AGENT_BRIDGE_URL`: Hermes bridge URL used by the PWA, default
   `http://127.0.0.1:8790`.
+- `HERMES_WASM_AGENT_START_BRIDGE`: set to `0` to start only the PWA process.
+- `HERMES_WASM_AGENT_BRIDGE_HOST`: bridge bind host, default `127.0.0.1`.
+- `HERMES_WASM_AGENT_BRIDGE_PORT`: bridge port, default `8790`.
+- `HERMES_WASM_AGENT_BRIDGE_STATE_DIR`: bridge pid/log/task state root, default
+  `<HERMES_WASM_AGENT_STATE_DIR>/bridge`.
 - `HERMES_WASM_AGENT_PID_FILE`: optional pid file override.
 - `HERMES_WASM_AGENT_LOG_FILE`: optional server log override.
 - `GOOGLE_LOGIN_CLIENT_ID`: required Google Identity Services client id in
@@ -898,11 +917,14 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
   `conf/wa.env`. Standard users receive isolated state under
   `state/users/<acc_id>/` and a 1 GB account storage quota.
 - `HERMES_WASM_AGENT_ENV_PATH`: optional path override for the private
-  wasm-agent env file, default `plugins/wasm-agent/conf/wa.env`.
+  wasm-agent env file, default `plugins/wasm-agent/conf/wa.env` in local mode
+  and `<cloud-root>/conf/wa.env` in cloud mode.
 - `HERMES_WASM_AGENT_DB_PATH`: optional account SQLite path override, default
-  `plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3`.
+  `plugins/wasm-agent/state/db/sqlite/wa_db.sqlite3` in local mode and
+  `<cloud-root>/state/db/sqlite/wa_db.sqlite3` in cloud mode.
 - `HERMES_WASM_AGENT_AUTH_SECRET_PATH`: optional signed-cookie secret path
-  override, default `plugins/wasm-agent/state/db/sqlite/wa_auth_secret`.
+  override, default `plugins/wasm-agent/state/db/sqlite/wa_auth_secret` in local
+  mode and `<cloud-root>/state/db/sqlite/wa_auth_secret` in cloud mode.
 - `HERMES_WASM_AGENT_CHAT_TIMEOUT_SEC`: embedded assistant bridge/model turn
   timeout, default `1800`, clamped between 30 seconds and 6 hours. The browser
   treats this as a stream-inactivity budget, not a total wall-clock limit.
@@ -958,6 +980,7 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
     styles.css
     manifest.webmanifest
     sw.js
+    modules/client-state/     # IndexedDB-first browser storage helpers
   scripts/
     start_wasm_agent.sh
     stop_wasm_agent.sh
@@ -967,7 +990,7 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
   state/
     README.md
     .gitignore
-    db/sqlite/                # local account database and auth secret
+    db/sqlite/                # local account/friend/sync/fleet database and auth secret
     users/<acc_id>/
       spaces/<space_id>/      # account-owned space metadata
       device-settings.json    # account main-device pointer
@@ -997,16 +1020,16 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
    pixel work behind WASM only after the Canvas analyzer has proven useful
    enough to optimize.
 6. Add GPU-oriented surfaces only after the parity shell is stable.
-7. When parity is proven, document the migration plan for placing `wasm-agent`
-   above or in front of `hermes-space-ui`.
+7. When parity is proven, document the migration plan for retiring remaining
+   historical legacy UI notes and compatibility artifacts.
 8. Use the Observation inspector as the foundation for embedded agent chat and
    suggest-only action proposals.
 
 ## Documentation Boundary
 
-Docs must describe `wasm-agent` as a shadow parity plugin until it has verified
-parity with the current Hermes Space UI workflow. Future Space OS, cloud domain,
-GPU runtime, browser, or replacement claims belong in
+Docs must describe `wasm-agent` as the active parity/runtime plugin while
+remaining honest about incomplete surfaces. Future Space OS, cloud domain, GPU
+runtime, browser, or replacement claims belong in
 `/local/docs/roadmap/space-os/wasm-agent-parity-spike.md` until implemented.
 
 Any code change in this plugin must update this README or the roadmap when it

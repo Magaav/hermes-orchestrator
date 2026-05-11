@@ -14,7 +14,7 @@ to connect the Space OS product surface.
 - Decide whether the public edge terminates directly on Space Agent or on a
   reverse proxy that routes:
   - PWA/static app traffic
-  - Hermes Space UI bridge traffic
+  - wasm-agent bridge traffic
   - future remote browser streaming/control traffic
 - Keep VM-local bridge endpoints private by default. Public routes should go
   through explicit authenticated proxy rules, not expose `127.0.0.1:8790`

@@ -23,7 +23,7 @@ optimize for performance, efficiency, and simplicity.
   and boring operational paths over clever hidden coupling.
 
 This philosophy applies equally to terminal Codex work, Hermes Agent nodes,
-Space UI integration, and the `wasm-agent` embedded agent. A powerful system
+the `wasm-agent` workspace/bridge integration, and the embedded agent. A powerful system
 should feel calm: idle when nothing changed, precise when context is needed,
 and explicit about what it is spending or doing.
 
@@ -37,11 +37,9 @@ Use these rules before evolving this project:
 - Preserve compatibility with Hermes Agent mainline and Space Agent upstream. Future-proofing and version-update survivability are hard engineering goals.
 - Prefer extension layers before core edits: Hermes Agent changes should use plugins, skills, tools, hooks, or components; Space Agent changes should use modules, customware bundles, extension points, or components.
 - If a goal cannot be achieved through extension layers, pause implementation and design the smallest upstreamable Hermes Agent or Space Agent PR/seam before patching core. Do not let local product work drift into an unmaintainable fork by default.
-- Treat `/local/plugins/hermes-space-ui` as a Hermes Orchestrator plugin that may ship Space Agent modules, not as permission to patch Space Agent internals directly.
-- For `wasm-agent` work, treat `/local/plugins/hermes-space-ui` as the legacy
-  Space Agent UI path and comparison surface. Do not patch it to fix wasm-agent
-  behavior unless a task explicitly names a cross-plugin migration or
-  compatibility change.
+- Treat `/local/plugins/wasm-agent` as the active product UI and bridge owner.
+  New workspace, account, browser, topology, resources, and bridge work belongs
+  there unless a task explicitly names a separate plugin.
 - Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
 - For long Space OS evolution runs, keep resumability as a first-class deliverable:
   update the active roadmap before or during each major direction change, commit
@@ -68,7 +66,7 @@ Documentation is part of the runtime contract. It must describe the current soft
 
 When codeflow/runtime behavior and documentation disagree, inspect the current implementation and update the docs to match reality. If code is changed to match intended behavior, update the docs in the same change so they describe the new actual state. Any code CRUD change must include a docs-sync check before it is complete.
 
-Before major Hermes Space UI, WASM browser, Space OS, or cloud-client evolution, treat documentation sync as a gate: prune or relabel stale claims, record partial or broken capabilities honestly, and make sure the roadmap can answer "what should we do now?"
+Before major wasm-agent, WASM browser, Space OS, or cloud-client evolution, treat documentation sync as a gate: prune or relabel stale claims, record partial or broken capabilities honestly, and make sure the roadmap can answer "what should we do now?"
 
 A control plane for managing fleets of Hermes agents across infrastructure.
 
@@ -216,8 +214,7 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   ├── discord-slash-commands/ # canonical host plugin root for Discord slash UX/runtime ownership
 │   ├── exhaust/                # canonical host plugin root for exhaust-mode behavior
 │   ├── final-response-changed-files/ # canonical host plugin root for final response file summaries
-│   ├── hermes-space-ui/        # canonical host plugin root; local Space UI state lives under ./state/ (gitignored)
-│   └── wasm-agent/             # shadow WASM-first UI parity plugin; local state lives under ./state/ (gitignored)
+│   └── wasm-agent/             # active WASM workspace/PWA and bridge plugin; local state lives under ./state/ (gitignored)
 ├── skills/       # canonical shared mutable skills pool
 ├── wiki/         # canonical shared mutable wiki root (gitignored)
 ├── datas/        # centralized private node data root (/local/datas/<node> mounted as /local/data)
@@ -272,8 +269,7 @@ runtime data, generated checkouts, logs, caches, and secrets.
 - `/local/scripts/private` contains local-only script state and entrypoints.
 - `/local/plugins/discord-slash-commands` is a canonical git-tracked host plugin root that now owns Discord slash/governance runtime code.
 - `/local/plugins/exhaust` and `/local/plugins/final-response-changed-files` are canonical git-tracked standalone plugin roots.
-- `/local/plugins/hermes-space-ui/state` is the canonical gitignored local state root for Space Agent checkout, customware, bridge logs, and task state. Do not use `/local/plugins/private/hermes-space-ui`.
-- `/local/plugins/wasm-agent/state` is the canonical gitignored local state root for the shadow WASM Agent PWA pid/log state, Timeline metadata, observation debug snapshots, and embedded assistant attachment assets.
+- `/local/plugins/wasm-agent/state` is the canonical gitignored local-development state root for the WASM Agent PWA pid/log state, wasm-agent-owned bridge state, account metadata, Timeline metadata, observation debug snapshots, and embedded assistant attachment assets. Cloud deployments must use a private `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside this public repo.
 - Mutable plugin state should prefer node-local cache roots under `/local/agents/nodes/<node>/workspace/plugins/<plugin>/cache` and, from inside the node runtime, `/local/workspace/plugins/<plugin>/cache`.
 - `discord-slash-commands` no longer uses shared mutable state under `/local/plugins/private/discord`; its active runtime state is node-local and mirrored per shared Discord app+guild when needed.
 - `/local/wiki` is the canonical shared mutable wiki root; legacy `/local/plugins/private/wiki` is migrated away when found.
@@ -375,7 +371,7 @@ Operational tip:
 - Run `horc backup all` before a fleet-wide update if you want fresh rollback artifacts.
 ## Versioning Hygiene
 Runtime and secret files are intentionally excluded:
-- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/hermes-space-ui/state/` (except `.gitignore` and parent `README.md`), `plugins/wasm-agent/state/` (except `.gitignore` and parent `README.md`), `wiki/`, `memory/`, `skills/`, `datas/`, `backups/` (except docs/examples)
+- `.hermes/`, `agents/nodes/`, `crons/*` (except `README.md` and baseline orchestrator backup cron files), `logs/`, `plugins/private/`, `plugins/wasm-agent/state/` (except `.gitignore` and parent `README.md`), `wiki/`, `memory/`, `skills/`, `datas/`, `backups/` (except docs/examples)
 - Real env files: `agents/envs/*.env`, `docker/.env`, `hermes-agent/.env`, root `.env`
 - Orchestrator prestart patching runs against `agents/nodes/orchestrator/hermes-agent` (node-local runtime copy); the host `/local/hermes-agent` checkout stays on disk but out of git except `.gitkeep`.
 Commit only templates/examples:
@@ -445,6 +441,13 @@ Support helps accelerate:
 - documentation, demos, and pilot deployments
 
 Commercial hosted services, managed deployments, premium cloud resources, Flux Credits, and wasm-agent-cloud infrastructure may live outside this public repository.
+The public repo should remain the open-core factory; per-instance wasm-agent-cloud databases, secrets, and user state belong to private deployment roots and can be archived with `horc space backup`.
+
+The public `wasm-agent` plugin now includes the client-first People/direct-chat
+foundation for that boundary: account friendship lifecycle metadata and
+accepted-friend sync events are centralized only where identity/relay requires
+it, while chat cache, unread state, emoji/sticker/reaction UI state, and recent
+conversation history stay browser-local by default.
 
 See:
 

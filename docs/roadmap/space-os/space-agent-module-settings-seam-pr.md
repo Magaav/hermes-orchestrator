@@ -88,8 +88,8 @@ After the upstream seam exists:
 - remove selector-based Admin Modules toggle attachment from
   `hermes-performance-hud`
 - declare the HUD `enabled` field in a module settings manifest
-- keep all Hermes UI source under
-  `/local/plugins/hermes-space-ui/plugin-interface/plugins/hermes-performance-hud`
+- keep all Hermes UI source under the current plugin-owned interface rather
+  than patching Space Agent core
 
 ## Verification
 

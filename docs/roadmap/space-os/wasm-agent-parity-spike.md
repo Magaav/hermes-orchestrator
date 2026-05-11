@@ -4,25 +4,25 @@ Date: 2026-05-04
 
 ## Question
 
-Can Hermes Orchestrator build a shadow WASM-first Hermes Agent UI that matches
-the useful output of the current JavaScript/Space UI path before making it the
+Can Hermes Orchestrator build a WASM-first Hermes Agent UI that matches
+the useful output of the current JavaScript workspace path before making it the
 primary Space OS surface?
 
 ## Decision
 
-Proceed with a shadow plugin named `wasm-agent`.
+Proceed with the plugin named `wasm-agent`.
 
 The goal is not to build an arbitrary browser engine first. The goal is to
-reproduce the current Hermes Agent UI output through a WASM-first PWA shell,
-served from a separate port, while keeping the existing `hermes-space-ui`
-implementation running unchanged for comparison.
+reproduce the current Hermes Agent UI output through a WASM-first PWA shell
+served from a separate port, then let that plugin own the bridge/runtime path
+once parity is strong enough.
 
 ## Current Scaffold
 
 `/local/plugins/wasm-agent` now owns the shadow implementation:
 
 - local PWA shell: `http://127.0.0.1:8877`
-- existing Hermes bridge dependency: `http://127.0.0.1:8790`
+- wasm-agent-owned Hermes bridge: `http://127.0.0.1:8790`
 - local state root: `/local/plugins/wasm-agent/state`
 - startup: `/local/plugins/wasm-agent/scripts/start_wasm_agent.sh`
 - verification: `/local/plugins/wasm-agent/scripts/doctor.sh`
@@ -31,7 +31,7 @@ The first scaffold includes an embedded WebAssembly core loaded by the browser,
 a WASM-rendered runtime canvas, bridge health probing, node listing, task
 submission, task polling, PWA manifest, and service worker.
 
-The second browser-view pass moved the shell closer to Hermes Space UI from a
+The second browser-view pass moved the shell closer to the desired Hermes workspace from a
 user viewpoint: launcher rail, visible `space-home` and `space-admin` titles,
 a hardcoded Admin space, account-owned spaces, scrollable/pannable space boards
 with config-controlled space density, app-layer buttons that toggle widgets,
@@ -114,7 +114,7 @@ This spike is narrower and more reachable:
 
 ## Non-Goals
 
-- Do not modify `/local/plugins/hermes-space-ui`.
+- Do not reintroduce a separate legacy UI dependency for wasm-agent flows.
 - Do not patch Space Agent core.
 - Do not patch Hermes Agent core.
 - Do not claim arbitrary website browsing inside WASM.
@@ -151,8 +151,7 @@ The first parity target is the smallest useful Hermes control surface:
 - visible WASM runtime indicator
 
 After this works, expand parity toward logs, node actions, activity timelines,
-Guard state, and the Hermes workspace output currently handled by
-`hermes-space-ui`.
+Guard state, and the Hermes workspace output now handled by wasm-agent.
 
 ## Runtime Contract Direction
 
@@ -169,12 +168,10 @@ bridge remains the boundary until a documented replacement exists.
 
 ## Stop/Go Criteria
 
-Proceed only while the shadow UI can be run beside the old UI and compared:
+Proceed while the wasm-agent UI and bridge stay directly runnable:
 
-- old Space Agent PWA stays available at `http://127.0.0.1:8787`
-- old Hermes bridge stays available at `http://127.0.0.1:8790`
-- new WASM Agent PWA stays available at `http://127.0.0.1:8877`
-- `hermes-space-ui` source remains untouched by the spike
+- wasm-agent bridge stays available at `http://127.0.0.1:8790`
+- WASM Agent PWA stays available at `http://127.0.0.1:8877`
 - docs identify which surfaces are parity, partial, or future work
 
 Stop and update this file if the WASM shell requires backend or Space Agent

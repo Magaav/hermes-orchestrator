@@ -115,6 +115,13 @@ def test_purge_node_confirm_contract(tmp_path: Path) -> None:
     assert payload["argv"] == ["purge-node-confirm", "--run-id", "purge-colmeio-123", "--token", "deadbeef"]
 
 
+def test_space_backup_contract(tmp_path: Path) -> None:
+    proc = _run_horc(tmp_path, ["space", "backup"])
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == ["space-backup"]
+
+
 def test_delete_requires_confirmation_in_cli(tmp_path: Path) -> None:
     proc = _run_horc(tmp_path, ["delete", "colmeio"])
     assert proc.returncode != 0

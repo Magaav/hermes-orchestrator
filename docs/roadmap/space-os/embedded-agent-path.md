@@ -44,7 +44,7 @@ have explicit state contracts.
 Already available in this repo:
 
 - Hermes Orchestrator node lifecycle and logs through `horc`.
-- Hermes Space UI bridge endpoints on `http://127.0.0.1:8790`.
+- wasm-agent bridge endpoints on `http://127.0.0.1:8790`.
 - `wasm-agent` shadow PWA on `http://127.0.0.1:8877`.
 - Host Browser widget pixels and input forwarding through `wasm-agent`.
 - Bridge payload contracts for nodes, logs, tasks, resources, and actions.

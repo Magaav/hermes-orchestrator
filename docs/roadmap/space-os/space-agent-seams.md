@@ -2,9 +2,10 @@
 
 Date: 2026-05-04
 
-This note records the current read-only inspection of the generated Space Agent
-checkout at `/local/plugins/hermes-space-ui/state/space-agent`. Do not edit that
-checkout directly for Hermes product work.
+This historical note records the 2026-05-04 read-only inspection of the
+generated Space Agent checkout that existed before the wasm-agent bridge
+migration. Do not recreate or edit a generated Space Agent checkout for current
+Hermes product work.
 
 ## Current Module APIs
 
@@ -43,7 +44,7 @@ Space Agent customware modules can use documented extension surfaces:
 - layered `/mod/<author>/<repo>/...` asset resolution through `L0`, `L1`, and
   `L2`
 
-Hermes Space UI already uses these seams for:
+The retired Space Agent integration used these seams for:
 
 - `hermes/space-agent-brand`
 - `hermes/fleet`
@@ -51,7 +52,7 @@ Hermes Space UI already uses these seams for:
 - `space/component-context-menu`
 
 `space/component-context-menu` was adopted into launcher sync after the audit,
-so the generated runtime copy is now intentional Space UI behavior.
+so the generated runtime copy was intentional behavior in that retired path.
 
 ## Current Admin Modules UI
 
@@ -103,6 +104,5 @@ draft the smallest upstreamable Space Agent PR shape for:
 - widget runtime registration
 - performance telemetry preference/state exposure
 
-Hermes product code should consume those generic seams from
-`/local/plugins/hermes-space-ui/plugin-interface/plugins`, not patch Space
-Agent core locally.
+Hermes product code should consume generic seams from a current plugin-owned
+interface, not patch Space Agent core locally.

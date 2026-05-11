@@ -1,21 +1,14 @@
 # Space OS Roadmap
 
-This track is the continuity point for evolving Hermes Orchestrator, Hermes Space UI, and Space Agent into a cloud/progressive OS.
+This track is the continuity point for evolving Hermes Orchestrator and `wasm-agent` into a cloud/progressive OS.
 
 ## Current State
 
 - Hermes Orchestrator is the host-level control plane. `horc` and the clone manager remain the operational source of truth for node lifecycle, logs, backups, updates, and Guard integration.
-- `/local/plugins/hermes-space-ui` is the legacy Space Agent UI integration for
-  this track. It starts a local Space Agent PWA on port `8787`, starts a Hermes
-  bridge on port `8790`, and translates Space Agent UI actions into safe Hermes
-  Orchestrator operations. Treat it as comparison and compatibility
-  infrastructure while evolving `wasm-agent`; do not patch it to make
-  wasm-agent-specific flows work unless an explicit cross-plugin migration task
-  says so.
-- `/local/plugins/wasm-agent` is a new shadow Hermes Orchestrator plugin. It
-  serves a WASM-first installable PWA shell on port `8877`, proxies the existing
-  Hermes bridge on port `8790` through same-origin `/bridge/*`, and lets the
-  team compare the old Space UI path and new WASM UI path side by side. Its
+- `/local/plugins/wasm-agent` is the active Hermes Orchestrator workspace
+  plugin. It serves a WASM-first installable PWA shell on port `8877`, owns the
+  Hermes bridge process on port `8790`, and proxies that bridge through
+  same-origin `/bridge/*`. Its
   current spaces model has a default left launcher with an optional mobile top
   placement, visible `space-home` and
   `space-admin` titles, a hardcoded crown-icon Admin space, account-owned user
@@ -31,14 +24,15 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
   main-device pointer, a quick main-device switch action, device-sync installer
   manifests, and browser-local device layouts that are not retained server-side
   unless a future premium sync/backup mode is enabled.
-- The standalone app/client surface has been pruned from this repo. Product UI and client work must stay under `/local/plugins`, with `/local/plugins/hermes-space-ui` as the current Space Agent UI path and `/local/plugins/wasm-agent` as the shadow WASM parity path.
-- Hermes Space UI currently seeds Space Agent customware/module content into the generated customware root under `/local/plugins/hermes-space-ui/state/space-customware`. The launcher syncs `space-agent-brand` to `L1/_all/mod/hermes/space-agent-brand`, syncs `hermes-fleet` to `L1/_all/mod/hermes/fleet`, writes the Hermes Space UI skill under `L1/_all/mod/hermes/space_ui`, and seeds the `hermes-os` space, widgets, and LLM config under `L2/user`.
-- Hermes Space UI now also syncs `hermes-performance-hud` to `L1/_all/mod/hermes/performance-hud`. This plugin-owned bundle adds the current FPS/memory overlay without editing Space Agent core. It exposes browser toggle helpers now; the final Admin > Modules toggle requires a generic Space Agent module-settings seam because Admin Mode clamps module resolution to `maxLayer=0`.
-- `plugin-interface/plugins/component-context-menu` is source-owned and upstreamable. Hermes Space UI now syncs it to `L1/_all/mod/space/component-context-menu` so the right-click widget context menu is intentional runtime behavior instead of generated residue.
+- The standalone app/client surface has been pruned from this repo. Product UI,
+  client work, and the local bridge now belong under `/local/plugins/wasm-agent`.
+- The old Space Agent customware path is retired from the active runtime path.
+  Historical Space Agent seam notes remain in this roadmap for upstream-design
+  evidence, but `horc space start|stop|status` now manages wasm-agent directly.
 - Space Agent already has a layered module/customware model (`L0`, `L1`, `L2`) and an Admin > Modules surface. The current local evidence shows module list/remove/info/install APIs exist, while richer Hermes-specific module settings and enable/disable behavior still need generic seams before relying on that UI as a full management surface.
 - Space Agent includes a browser surface module with `<x-browser>`. The current PWA/browser path is not a completed arbitrary browser-inside-browser engine without iframe. Native/Electron paths are more capable, and the PWA path must not be described as full browser parity today.
 - The browser-engine feasibility spike in `browser-engine-feasibility-spike.md` marks PWA-only local WASM arbitrary browsing as no-go for v1. That result still applies to arbitrary external websites, but the active product wedge is now narrower: prove a WASM-first Hermes UI parity shell before revisiting browser infrastructure.
-- `wasm-agent-parity-spike.md` records the new implementation direction: copy the useful Hermes UI output first, keep `hermes-space-ui` unchanged, serve the shadow PWA on a separate port, and move toward GPU-oriented/agent-readable WASM runtime contracts only after visible parity exists. `wasm-agent` module firmware now lives under `/local/plugins/wasm-agent/public/modules`, while account and runtime data stays under `/local/plugins/wasm-agent/state/users/<acc_id>`.
+- `wasm-agent-parity-spike.md` records the implementation direction: copy the useful Hermes UI output first, serve the PWA on a separate port, and move toward GPU-oriented/agent-readable WASM runtime contracts only after visible parity exists. `wasm-agent` module firmware now lives under `/local/plugins/wasm-agent/public/modules`, while account and runtime data stays under `/local/plugins/wasm-agent/state/users/<acc_id>`.
 - `embedded-agent-path.md` records the new parallel path: place a configurable embedded agent inside the visual workspace so it can talk with the user from there and observe user-visible actions through explicit observation/action contracts. Phase 1 now exists as the `wasm-agent` Observation inspector with app-local, session-only semantic analytics. Phase 2 now includes the global embedded assistant, compact tool context, account/space-local Timeline recovery points, and browser-built image cards stored per account for text-only provider compatibility.
 - `wasm-agent` now includes a host-owned security-loop runner at
   `/local/plugins/wasm-agent/scripts/security_loop_run.py`. It performs cheap
@@ -47,7 +41,17 @@ This track is the continuity point for evolving Hermes Orchestrator, Hermes Spac
   Runs API, and asks `hermes-defense` for mitigation plans without silently
   applying fixes. Bridge delivery is retained only as a legacy compatibility
   path.
-- Current Hermes Space UI limitations are documented in `/local/plugins/hermes-space-ui/README.md`: no websocket/SSE log streaming yet, task submission requires a reachable Hermes API server, auth is a single shared token, bridge policy is a fixed allowlist, and rollback-aware planning is future work.
+- `wasm-agent-cloud.md` records the new client-first cloud foundation. Local
+  development still uses `/local/plugins/wasm-agent/state`, while
+  `HERMES_WASM_AGENT_DEPLOYMENT_MODE=cloud` requires a private
+  `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside the public repo. The current
+  backend scope is narrow: account friend lifecycle, shared-space
+  members/presence, bounded sync events for accepted-friend direct messages,
+  stickers, and reactions, metadata-only account fleet records, and
+  `horc space backup`.
+- The bridge code that formerly lived under the Space Agent integration has
+  moved into `wasm-agent`; bridge route behavior is now tested from
+  `/local/plugins/wasm-agent/tests/bridge_routes.test.py`.
 
 ## Active Resume Branch
 
@@ -66,6 +70,9 @@ extend this harness before reopening broad browser-engine or cloud-domain work.
 
 - Serve an installable client from `https://space.colmeio.com`.
 - Add Colmeio account login and cloud-backed user spaces so users can install/open the PWA from many devices and regain their spaces.
+- Keep wasm-agent-cloud client-first: browser/device state is the default owner,
+  while cloud services centralize only auth, identity, presence/relay, optional
+  sync/backup, explicit fleet provisioning, and future marketplace publication.
 - Keep Hermes Agent and Space Agent future-proof by using extension systems first:
   - Hermes Agent: plugins, skills, tools, hooks, and components.
   - Space Agent: modules, customware bundles, extension points, widget runtimes, and components.
@@ -76,7 +83,7 @@ extend this harness before reopening broad browser-engine or cloud-domain work.
 
 ## Pre-Evolution Gate
 
-Do not start major Hermes Space UI, WASM browser runtime, Space OS cloud client, or product-surface implementation until docs match the current software.
+Do not start major wasm-agent, WASM browser runtime, Space OS cloud client, or product-surface implementation until docs match the current software.
 
 Gate status on 2026-05-04: frozen for the current repo snapshot. Future code
 CRUD must keep this gate true by updating docs in the same change.
@@ -91,21 +98,25 @@ The gate stays complete only when:
 
 ## Next Actions
 
-1. Keep the product-surface rule frozen in every new change: no standalone app/client tree and no script-owned UI gateway. Product UI belongs under `/local/plugins`, currently through Hermes Space UI and the shadow `wasm-agent` parity plugin.
-2. Evolve `wasm-agent` as the active harness: run it on port `8877`, keep `hermes-space-ui` on port `8787`, reuse the bridge on port `8790`, and document which surfaces have parity.
+1. Keep the product-surface rule frozen in every new change: no standalone app/client tree and no script-owned UI gateway. Product UI belongs under `/local/plugins/wasm-agent`.
+2. Evolve `wasm-agent` as the active harness: run it on port `8877`, keep its owned bridge on port `8790`, and document which surfaces have parity.
 3. Treat `wasm-agent` Admin as the standard operational space. Keep topology/resources parity wired through same-origin bridge proxy calls and keep node actions limited to start, stop, restart, update, and explicit Add Node creation.
 4. Harden the account-space model: verify `USER_EMAILS` standard accounts, per-user 1 GB quota enforcement, account-local observations/attachments, `state/users/<acc_id>/spaces/<space_id>/`, and `state/users/<acc_id>/timelines/<space_id>/` across real sessions.
-5. Design the orchestrator-owned user-agent lifecycle: each account may create one or more agents, but exactly one main agent should mount `wasm-agent/state/users/<acc_id>/` so it can help evolve that account's spaces, widgets, workflows, and automations.
-6. Harden the embedded assistant path around compact context: keep image cards, observation snapshots, transcript clipping, and Timeline recovery visible in the action chain before adding mutation tools.
-7. Continue hardening the remote-cloud-browser-harness inside `wasm-agent`: domain changes, CPU throttling, frame health, and browser action reliability. The request/response CDP path now has bounded stale target cleanup through an idle session TTL.
-8. Continue evolving the local module management surface in `wasm-agent`: the UI can switch Dev HMR, Observation, Host Browser, Timeline, Embedded Assistant, and image-card analyzer modules in browser local storage. Module firmware lives under `public/modules`; later work should connect these descriptors to explicit module contracts before they control backend lifecycle.
-9. Validate lazy image-card analyzer evidence with real images, then move hot pixel work into small WASM modules only after the browser Canvas analyzer proves useful and stable.
-10. Add remaining activity/Guard state parity to `wasm-agent` before moving cloud/PWA domain work forward.
-11. Define the first WASM state/action/observation ABI only after the basic fleet/task/UI harness is visibly usable.
-12. Use `space-agent-module-settings-seam-pr.md` as the upstreamable Space Agent PR plan when Space Agent module settings are needed again.
-13. Keep generated-app WASM sandbox work separate from arbitrary external web browsing.
-14. Revisit the remote browser proof after the WASM UI parity shell is proven or rejected. If remote browser work fails, stop Space OS browser product work again and revisit architecture before cloud/PWA rollout.
-15. Use `operator-actions.md` as the human-side checklist for domain routing, TLS, auth, space sync, and remote browser infrastructure.
+5. Continue the client-first wasm-agent-cloud foundation in
+   `wasm-agent-cloud.md`: run the two-real-session People/DM acceptance flow
+   against a private cloud root, add shared-space chat cursors, and keep private
+   cloud state outside the public repo while testing `horc space backup`.
+6. Design the orchestrator-owned user-agent lifecycle: each account may create one or more agents, but exactly one main agent should mount `wasm-agent/state/users/<acc_id>/` so it can help evolve that account's spaces, widgets, workflows, and automations.
+7. Harden the embedded assistant path around compact context: keep image cards, observation snapshots, transcript clipping, and Timeline recovery visible in the action chain before adding mutation tools.
+8. Continue hardening the remote-cloud-browser-harness inside `wasm-agent`: domain changes, CPU throttling, frame health, and browser action reliability. The request/response CDP path now has bounded stale target cleanup through an idle session TTL.
+9. Continue evolving the local module management surface in `wasm-agent`: the UI can switch Dev HMR, Observation, Host Browser, Timeline, Embedded Assistant, Client State, and image-card analyzer modules in browser local storage. Module firmware lives under `public/modules`; later work should connect these descriptors to explicit module contracts before they control backend lifecycle.
+10. Validate lazy image-card analyzer evidence with real images, then move hot pixel work into small WASM modules only after the browser Canvas analyzer proves useful and stable.
+11. Add remaining activity/Guard state parity to `wasm-agent` before moving cloud/PWA domain work forward.
+12. Define the first WASM state/action/observation ABI only after the basic fleet/task/UI harness is visibly usable.
+13. Use `space-agent-module-settings-seam-pr.md` as the upstreamable Space Agent PR plan when Space Agent module settings are needed again.
+14. Keep generated-app WASM sandbox work separate from arbitrary external web browsing.
+15. Revisit the remote browser proof after the WASM UI parity shell is proven or rejected. If remote browser work fails, stop Space OS browser product work again and revisit architecture before cloud/PWA rollout.
+16. Use `operator-actions.md` as the human-side checklist for domain routing, TLS, auth, space sync, and remote browser infrastructure.
 
 ## Stop/Go Criteria
 
@@ -192,15 +203,12 @@ When context is lost, read these in order:
 4. `/local/plugins/wasm-agent/README.md`.
 5. `/local/plugins/wasm-agent/DESIGN.md`.
 6. `/local/docs/roadmap/space-os/wasm-agent-parity-spike.md`.
-7. `/local/docs/roadmap/space-os/embedded-agent-path.md`.
-8. `/local/docs/roadmap/space-os/browser-engine-feasibility-spike.md`.
-9. `/local/docs/roadmap/space-os/space-agent-seams.md`.
-10. `/local/docs/roadmap/space-os/space-agent-module-settings-seam-pr.md`.
-11. `/local/docs/roadmap/space-os/operator-actions.md`.
-12. `/local/plugins/hermes-space-ui/README.md`.
-13. `/local/plugins/hermes-space-ui/plugin-interface/README.md`.
-14. `/local/plugins/hermes-space-ui/plugin-interface/plugins/README.md`.
-15. `/local/plugins/hermes-space-ui/state/README.md`.
+7. `/local/docs/roadmap/space-os/wasm-agent-cloud.md`.
+8. `/local/docs/roadmap/space-os/embedded-agent-path.md`.
+9. `/local/docs/roadmap/space-os/browser-engine-feasibility-spike.md`.
+10. `/local/docs/roadmap/space-os/space-agent-seams.md`.
+11. `/local/docs/roadmap/space-os/space-agent-module-settings-seam-pr.md`.
+12. `/local/docs/roadmap/space-os/operator-actions.md`.
 
 Then inspect current code before changing docs or implementation. Runtime/codeflow truth wins over stale documentation.
 
@@ -208,10 +216,7 @@ Then inspect current code before changing docs or implementation. Runtime/codefl
 
 - Do not let Space OS work become a private fork by default.
 - Do not patch Hermes Agent or Space Agent core for product-specific behavior when a plugin/module/component seam can do the job.
-- Do not reintroduce standalone product UI outside `/local/plugins`; Hermes Space UI is the current product client path.
-- Do not mutate `hermes-space-ui` while developing the `wasm-agent` parity spike.
-  It is the legacy Space Agent path for this workstream; compare the two
-  surfaces side by side until a migration plan is documented.
+- Do not reintroduce standalone product UI outside `/local/plugins`; `wasm-agent` is the current product client path.
 - Do not let the embedded agent path bypass the browser harness or bridge safety model; it must receive structured observations and request bounded actions through explicit contracts.
 - Do not describe future PWA, cloud login, or WASM browser behavior as shipped until it exists in code and has been verified.
 - Keep the roadmap honest enough that a future agent can recover direction without re-litigating old assumptions.

@@ -86,30 +86,15 @@ def test_ensure_dirs_migrates_legacy_wiki_out_of_private_plugins(cm, tmp_path: P
     assert not legacy_wiki_root.exists()
 
 
-def test_sanitize_space_ui_env_map_rewrites_legacy_private_paths(cm, tmp_path: Path, monkeypatch) -> None:
-    plugins_root = tmp_path / "plugins"
-
-    monkeypatch.setattr(cm, "PLUGINS_ROOT", plugins_root)
-    monkeypatch.setattr(cm, "PRIVATE_PLUGINS_ROOT", plugins_root / "private")
-
+def test_sanitize_space_ui_env_map_is_noop_after_wasm_agent_migration(cm) -> None:
     env = {
-        "HERMES_SPACE_UI_STATE_DIR": str(plugins_root / "private" / "hermes-space-ui"),
-        "SPACE_AGENT_DIR": str(plugins_root / "private" / "hermes-space-ui" / "space-agent"),
-        "SPACE_AGENT_CUSTOMWARE_PATH": str(plugins_root / "private" / "hermes-space-ui" / "space-customware"),
-        "HERMES_SPACE_NODE_ROOT": str(plugins_root / "private" / "hermes-space-ui" / "node"),
-        "HERMES_SPACE_AGENT_LOG_FILE": str(plugins_root / "private" / "hermes-space-ui" / "space-agent.log"),
+        "HERMES_WASM_AGENT_STATE_DIR": "/tmp/wasm-agent-state",
+        "HERMES_WASM_AGENT_BRIDGE_STATE_DIR": "/tmp/wasm-agent-state/bridge",
         "UNCHANGED": "keep-me",
     }
 
     sanitized = cm._sanitize_space_ui_env_map(env)
 
-    assert sanitized["HERMES_SPACE_UI_STATE_DIR"] == str(plugins_root / "hermes-space-ui" / "state")
-    assert sanitized["SPACE_AGENT_DIR"] == str(plugins_root / "hermes-space-ui" / "state" / "space-agent")
-    assert sanitized["SPACE_AGENT_CUSTOMWARE_PATH"] == str(
-        plugins_root / "hermes-space-ui" / "state" / "space-customware"
-    )
-    assert sanitized["HERMES_SPACE_NODE_ROOT"] == str(plugins_root / "hermes-space-ui" / "state" / "node")
-    assert sanitized["HERMES_SPACE_AGENT_LOG_FILE"] == str(
-        plugins_root / "hermes-space-ui" / "state" / "space-agent.log"
-    )
+    assert sanitized == env
+    assert sanitized is not env
     assert sanitized["UNCHANGED"] == "keep-me"

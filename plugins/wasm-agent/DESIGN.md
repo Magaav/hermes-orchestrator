@@ -12,9 +12,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   loading, and stable browser/bridge contracts. Feature behavior should be
   expressed through modules whenever possible.
 - Core modules are the non-removable platform layer. `spaces`, `devices`,
-  `artifacts`, `config`, and `module-manager` are core because they define how
-  users enter, inspect, configure, and extend the workspace. Core modules may be
-  listed for visibility, but user controls must not disable them.
+  `artifacts`, `config`, `module-manager`, and `client-state` are core because
+  they define how users enter, inspect, configure, sync, back up, and extend the
+  workspace. Core modules may be listed for visibility, but user controls must
+  not disable them.
 - Modules may be hierarchical. The `spaces` module owns Home/Admin/user space
   identity and space routing. A space can expose child modules as pages,
   actions, apps, widgets, or widget-internal capabilities. Admin maps the
@@ -85,8 +86,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Home is the account entrance and must show the `space-home` title. It shows
   home-level controls, account storage, modal launch actions, and the
   account-global Timeline access through the fixed config button. Home also
-  exposes Artifacts, a local inventory of spaces, mapped apps/widgets, and
-  browser-local layouts that previews the `wasm-artifact` direction.
+  exposes Fleet, Connected Devices, and Artifacts as core module pages. Fleet is
+  account brain metadata and explicit main-node reservation; it must not spawn a
+  backend worker implicitly. Artifacts remains a local inventory of spaces,
+  mapped apps/widgets, and browser-local layouts that previews the
+  `wasm-artifact` direction.
 - The space title sits on the same top edge as the fixed config button and its
   left edge aligns with the inner icon edge used by app buttons. The title-row
   organize control and fixed config control use the same `34px` square
@@ -168,6 +172,15 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   canvas-area recomputation. Organized positions are authoritative until a
   user manually drags an app again. App icons and widgets remain draggable on
   mobile; widgets remain free-positioned.
+- The embedded chat header may switch between Chat and People. The People view
+  is part of chat, not a separate global page: it lists friends and current
+  shared-space members, lets users accept/decline/cancel/remove friendships,
+  lets accepted friends open direct chat sessions, and hides assistant
+  node/model controls while a direct chat is active. The direct chat surface
+  uses the same composer/send placement as the assistant chat, adds a main-chat
+  back control to avoid navigation traps, and keeps emoji, built-in stickers,
+  reactions, unread badges, and toast/ring notifications as lightweight
+  client-first affordances over `/sync/events`.
 - When a minimized widget opens outside the visible canvas viewport, it is
   moved to the canvas initial point: the top-left beginning of the board.
 - Opened widgets must stay bounded by the area-sized canvas on mobile. Space
@@ -277,8 +290,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   drive browser history back to Space-home.
 - The initial artifact-space should remain local and portable. It must export a
   `hermes.wasm_agent.wis.space.v1` definition with explicit no-backend and
-  no-iframe guarantees, and it must not add server endpoints or patch
-  `hermes-space-ui`.
+  no-iframe guarantees, and it must not add server endpoints without an
+  explicit wasm-agent bridge/API contract.
 
 ## Button Icons
 

@@ -93,6 +93,7 @@ function renderOverlayToken(token) {
   if (!token || typeof token !== "object") return "";
   if (token.type === "text" || token.type === "newline") return escapeHtml(token.raw || token.value || "");
   if (token.type === "inline_code") {
+    if (!token.value) return overlaySpan("chat-md-empty-inline-code", "``");
     return [
       overlaySpan("chat-md-marker", "`"),
       overlaySpan("chat-md-inline-code", token.value),

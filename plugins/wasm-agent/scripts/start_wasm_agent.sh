@@ -12,6 +12,10 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 mkdir -p "$(dirname "${PID_FILE}")" "$(dirname "${LOG_FILE}")"
 
+if [[ "${HERMES_WASM_AGENT_START_BRIDGE:-1}" != "0" ]]; then
+  "${PLUGIN_DIR}/scripts/start_wasm_bridge.sh"
+fi
+
 if [[ -s "${PID_FILE}" ]]; then
   old_pid="$(cat "${PID_FILE}")"
   if [[ -n "${old_pid}" ]] && kill -0 "${old_pid}" 2>/dev/null; then

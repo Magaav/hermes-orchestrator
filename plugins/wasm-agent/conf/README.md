@@ -37,3 +37,14 @@ The server also accepts process environment overrides for deployment systems:
 `HERMES_WASM_AGENT_GOOGLE_CLIENT_ID` for emergency client-id override. The
 normal source of truth for admins, standard users, and Google client id is
 `wa.env`.
+
+Bridge lifecycle uses process environment rather than `wa.env` by default:
+`HERMES_WASM_AGENT_BRIDGE_HOST`, `HERMES_WASM_AGENT_BRIDGE_PORT`,
+`HERMES_WASM_AGENT_BRIDGE_STATE_DIR`, and
+`HERMES_WASM_AGENT_BRIDGE_TOKEN`.
+
+For wasm-agent-cloud/private instances, set
+`HERMES_WASM_AGENT_DEPLOYMENT_MODE=cloud` and point
+`HERMES_WASM_AGENT_CLOUD_STATE_ROOT` at a private deployment root outside the
+public repo. In that mode the default env path becomes `<cloud-root>/conf/wa.env`
+and the server refuses public plugin state paths for secrets or user data.

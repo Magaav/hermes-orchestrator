@@ -25,6 +25,7 @@ done
 if command -v node >/dev/null 2>&1; then
   node --input-type=module --check < "${PLUGIN_DIR}/public/modules/spaces/shared-voice-room.js"
   node "${PLUGIN_DIR}/tests/wasm_agent_smoke.test.js"
+  node "${PLUGIN_DIR}/tests/client_state_store.test.mjs"
   node "${PLUGIN_DIR}/tests/shared_voice_room.test.mjs"
   node "${PLUGIN_DIR}/tests/ui_navigation_history.test.js"
   node "${PLUGIN_DIR}/tests/wis_engine.test.js"
@@ -33,7 +34,9 @@ else
 fi
 
 python3 "${PLUGIN_DIR}/tests/agent_input_editor.test.py"
+python3 "${PLUGIN_DIR}/tests/bridge_routes.test.py"
 python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
+python3 "${PLUGIN_DIR}/tests/client_first_cloud.test.py"
 python3 "${PLUGIN_DIR}/tests/wis_shared_space.test.py"
 python3 "${PLUGIN_DIR}/tests/security_loop_policy.test.py"
 python3 "${PLUGIN_DIR}/tests/security_loop_runner.test.py"

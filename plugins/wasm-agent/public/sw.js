@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v46";
+const CACHE_NAME = "wasm-agent-v47";
 const ASSETS = [
   "/",
   "/index.html",
@@ -26,6 +26,8 @@ const ASSETS = [
   "/modules/browser/module.js",
   "/modules/wis/module.js",
   "/modules/wis/engine.js",
+  "/modules/client-state/module.js",
+  "/modules/client-state/client-store.js",
   "/modules/observation/module.js",
   "/modules/devices/module.js",
   "/modules/artifacts/module.js",
@@ -63,6 +65,10 @@ self.addEventListener("fetch", (event) => {
   if (
     url.pathname === "/config.json" ||
     url.pathname === "/auth/session" ||
+    url.pathname === "/account/friends" ||
+    url.pathname === "/account/users/lookup" ||
+    url.pathname === "/sync/events" ||
+    url.pathname === "/fleet" ||
     url.pathname === "/health" ||
     url.pathname === "/observation/latest" ||
     url.pathname === "/voice-lab/room" ||

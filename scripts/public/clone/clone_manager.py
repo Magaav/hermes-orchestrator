@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import hashlib
+import io
 import json
 import os
 import re
@@ -144,17 +146,7 @@ SHARED_NODE_DATA_ROOT = Path(
         or "/local/datas"
     )
 )
-SPACE_UI_LEGACY_ENV_KEYS = (
-    "HERMES_SPACE_UI_STATE_DIR",
-    "SPACE_AGENT_DIR",
-    "SPACE_AGENT_CUSTOMWARE_PATH",
-    "HERMES_SPACE_NODE_ROOT",
-    "HERMES_SPACE_AGENT_PID_FILE",
-    "HERMES_SPACE_UI_PID_FILE",
-    "HERMES_SPACE_UI_BRIDGE_PID_FILE",
-    "HERMES_SPACE_AGENT_LOG_FILE",
-    "HERMES_SPACE_UI_LOG_FILE",
-)
+SPACE_UI_LEGACY_ENV_KEYS: tuple[str, ...] = ()
 BACKUPS_ROOT = Path(os.getenv("HERMES_BACKUPS_ROOT", "/local/backups"))
 HERMES_SOURCE_ROOT = Path(os.getenv("HERMES_SOURCE_ROOT", "/local/hermes-agent"))
 HERMES_AGENT_UPSTREAM_REPO = str(
@@ -319,37 +311,8 @@ def _tree_has_content(path: Path, *, ignored_names: set[str] | None = None) -> b
     return False
 
 
-def _legacy_space_ui_state_root() -> Path:
-    return PRIVATE_PLUGINS_ROOT / "hermes-space-ui"
-
-
-def _canonical_space_ui_state_root() -> Path:
-    return PLUGINS_ROOT / "hermes-space-ui" / "state"
-
-
-def _rewrite_legacy_space_ui_path(raw: str) -> str:
-    value = str(raw or "").strip()
-    if not value:
-        return value
-
-    legacy = os.path.normpath(str(_legacy_space_ui_state_root()))
-    canonical = os.path.normpath(str(_canonical_space_ui_state_root()))
-    normalized = os.path.normpath(value)
-
-    if normalized == legacy:
-        return canonical
-    if normalized.startswith(f"{legacy}{os.sep}"):
-        return f"{canonical}{normalized[len(legacy):]}"
-    return value
-
-
 def _sanitize_space_ui_env_map(env: Dict[str, str]) -> Dict[str, str]:
-    sanitized = dict(env)
-    for key in SPACE_UI_LEGACY_ENV_KEYS:
-        if key not in sanitized:
-            continue
-        sanitized[key] = _rewrite_legacy_space_ui_path(str(sanitized.get(key, "") or ""))
-    return sanitized
+    return dict(env)
 
 
 def _legacy_public_plugins_present() -> bool:
@@ -359,7 +322,7 @@ def _legacy_public_plugins_present() -> bool:
 def _legacy_private_plugins_present() -> bool:
     return _tree_has_content(
         PRIVATE_PLUGINS_ROOT,
-        ignored_names={"discord", "hermes-space-ui", "memory", "wiki"},
+        ignored_names={"discord", "memory", "wiki"},
     )
 
 
@@ -6021,6 +5984,149 @@ def _action_backup(clone_name: str | None, *, backup_all: bool) -> Dict[str, Any
     }
 
 
+SPACE_BACKUP_EXCLUDED_NAMES = {
+    "__pycache__",
+    ".pytest_cache",
+    "node_modules",
+    "browser",
+    "node-source-backups",
+}
+SPACE_BACKUP_EXCLUDED_SUFFIXES = (
+    ".pid",
+    ".log",
+    ".pyc",
+    ".pyo",
+)
+
+
+def _space_backup_state_root() -> Path:
+    cloud_raw = os.getenv("HERMES_WASM_AGENT_CLOUD_STATE_ROOT", "").strip()
+    if cloud_raw:
+        cloud_root = Path(cloud_raw).expanduser().resolve()
+        state_child = cloud_root / "state"
+        return state_child if state_child.exists() else cloud_root
+    raw = os.getenv("HERMES_WASM_AGENT_STATE_DIR", "").strip() or str(PLUGINS_ROOT / "wasm-agent" / "state")
+    return Path(raw).expanduser().resolve()
+
+
+def _space_backup_instance_id(root: Path) -> str:
+    raw = os.getenv("HERMES_WASM_AGENT_CLOUD_INSTANCE_ID", "").strip()
+    source = raw or (root.parent.name if root.name == "state" else root.name) or "wasm-agent"
+    cleaned = re.sub(r"[^a-zA-Z0-9_.-]+", "-", source.strip()).strip("-_.").lower()
+    return cleaned[:72] or "wasm-agent"
+
+
+def _space_backup_excluded(path: Path, root: Path) -> bool:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return True
+    parts = rel.parts
+    if any(part in SPACE_BACKUP_EXCLUDED_NAMES for part in parts):
+        return True
+    name = path.name
+    if name in {"wasm-agent.pid", "space-agent.pid", "bridge.pid"}:
+        return True
+    return name.endswith(SPACE_BACKUP_EXCLUDED_SUFFIXES)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _space_backup_files(root: Path) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    if not root.exists():
+        raise CloneManagerError(f"wasm-agent space state root not found: {root}")
+    for path in sorted(root.rglob("*")):
+        if _space_backup_excluded(path, root):
+            continue
+        if path.is_symlink():
+            continue
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        stat = path.stat()
+        files.append({
+            "path": rel,
+            "bytes": int(stat.st_size),
+            "sha256": _sha256_file(path),
+        })
+    return files
+
+
+def _tar_add_bytes(tf: tarfile.TarFile, arcname: str, payload: bytes) -> None:
+    info = tarfile.TarInfo(arcname)
+    info.size = len(payload)
+    info.mtime = int(time.time())
+    info.mode = 0o600
+    tf.addfile(info, io.BytesIO(payload))
+
+
+def _action_space_backup() -> Dict[str, Any]:
+    root = _space_backup_state_root()
+    instance_id = _space_backup_instance_id(root)
+    files = _space_backup_files(root)
+    BACKUPS_ROOT.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive_path = BACKUPS_ROOT / f"horc-space-backup-{instance_id}-{stamp}.tar.gz"
+    archive_root = f"wasm-agent-cloud/{instance_id}"
+    manifest = {
+        "schema": "hermes.wasm_agent.space_backup_manifest.v1",
+        "instance_id": instance_id,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source_root": str(root),
+        "source_kind": (
+            "cloud-root"
+            if os.getenv("HERMES_WASM_AGENT_CLOUD_STATE_ROOT", "").strip()
+            else "state-root"
+        ),
+        "client_first": True,
+        "server_role": "auth-sync-relay-backup-fleet",
+        "excluded": {
+            "names": sorted(SPACE_BACKUP_EXCLUDED_NAMES),
+            "suffixes": list(SPACE_BACKUP_EXCLUDED_SUFFIXES),
+            "symlinks": True,
+        },
+        "files": files,
+        "total_bytes": sum(int(item.get("bytes") or 0) for item in files),
+    }
+    manifest_bytes = json.dumps(manifest, ensure_ascii=True, indent=2, sort_keys=True).encode("utf-8")
+    included_paths: list[str] = []
+    with tarfile.open(archive_path, "w:gz") as tf:
+        manifest_arc = f"{archive_root}/backup-manifest.json"
+        _tar_add_bytes(tf, manifest_arc, manifest_bytes)
+        included_paths.append(manifest_arc)
+        for item in files:
+            rel = str(item["path"])
+            source = root / rel
+            arcname = f"{archive_root}/state/{rel}"
+            tf.add(str(source), arcname=arcname, recursive=False)
+            included_paths.append(arcname)
+    archive_sha = _sha256_file(archive_path)
+    size_bytes = archive_path.stat().st_size
+    return {
+        "ok": True,
+        "action": "space-backup",
+        "schema": "hermes.wasm_agent.space_backup_result.v1",
+        "instance_id": instance_id,
+        "source_root": str(root),
+        "archive": str(archive_path),
+        "archive_sha256": archive_sha,
+        "size_bytes": int(size_bytes),
+        "file_count": len(files),
+        "included_paths": included_paths,
+        "manifest": manifest,
+    }
+
+
 def _action_profile_clone(source_name: str, target_name: str, *, force: bool) -> Dict[str, Any]:
     if source_name == target_name:
         raise CloneManagerError("source and target node names must be different")
@@ -6859,6 +6965,8 @@ def _dispatch(
         return _action_logs(clone_name, lines=lines)
     if action == "backup":
         return _action_backup(clone_name, backup_all=backup_all)
+    if action == "space-backup":
+        return _action_space_backup()
     if action == "restore":
         return _action_restore(restore_path)
     raise CloneManagerError(f"unsupported action: {action}")
@@ -6877,6 +6985,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "purge-node-confirm",
             "logs",
             "backup",
+            "space-backup",
             "restore",
             "profile-clone",
             "update-all",
@@ -6978,7 +7087,7 @@ def main() -> int:
             if not raw_name:
                 raise CloneManagerError("update node requires clone name")
             clone_name = _normalize_clone_name(raw_name)
-        elif args.action in {"update-all", "purge-node-confirm"}:
+        elif args.action in {"update-all", "purge-node-confirm", "space-backup"}:
             clone_name = None
         elif args.action in {"backup"}:
             raw_name = args.name_flag or args.name_positional

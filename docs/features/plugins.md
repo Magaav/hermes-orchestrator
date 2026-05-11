@@ -8,9 +8,7 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
   `/local/plugins/discord-slash-commands`,
   `/local/plugins/exhaust`,
   `/local/plugins/final-response-changed-files`,
-  `/local/plugins/hermes-space-ui`,
   `/local/plugins/wasm-agent`
-- `hermes-space-ui` local runtime state: `/local/plugins/hermes-space-ui/state`
 - `wasm-agent` local runtime state: `/local/plugins/wasm-agent/state`
 - `wasm-agent` versioned runtime modules:
   `/local/plugins/wasm-agent/public/modules`
@@ -27,8 +25,7 @@ The plugins feature is the extensibility and runtime integration layer of Hermes
 
 - Canonical Discord slash runtime ownership now lives in `/local/plugins/discord-slash-commands`.
 - Mutable Discord slash/governance state for that plugin now lives per node under `/local/workspace/plugins/discord-slash-commands/cache`.
-- `hermes-space-ui` keeps its local Space Agent checkout, customware, logs, and task state under `/local/plugins/hermes-space-ui/state` instead of `/local/plugins/private/hermes-space-ui`.
-- `wasm-agent` serves a shadow WASM-first PWA from `/local/plugins/wasm-agent`, keeps module firmware under `/local/plugins/wasm-agent/public/modules`, and keeps pid/log/per-user runtime state under `/local/plugins/wasm-agent/state`.
+- `wasm-agent` serves the WASM-first PWA and owns the local Hermes bridge from `/local/plugins/wasm-agent`, keeps module firmware under `/local/plugins/wasm-agent/public/modules`, and keeps pid/log/per-user runtime state under `/local/plugins/wasm-agent/state`.
 - `wasm-agent` also keeps embedded assistant image-card attachment assets under
   `/local/plugins/wasm-agent/state/attachments`; these are gitignored runtime
   media artifacts, not versioned plugin firmware.

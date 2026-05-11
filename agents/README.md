@@ -22,7 +22,7 @@ Canonical shared roots now live outside `agents/`:
 - `/local/plugins/discord-slash-commands`
 - `/local/plugins/exhaust`
 - `/local/plugins/final-response-changed-files`
-- `/local/plugins/hermes-space-ui`
+- `/local/plugins/wasm-agent`
 - `/local/wiki`
 - `/local/skills`
 - `/local/datas`

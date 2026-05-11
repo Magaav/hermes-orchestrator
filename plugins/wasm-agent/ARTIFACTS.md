@@ -135,11 +135,10 @@ direct patches for user artifacts:
 - marketplace adapter: publish, fetch, verify, and hydrate server-hosted
   artifacts.
 
-The existing Hermes Space customware interface under
-`/local/plugins/hermes-space-ui/plugin-interface` remains the reference shape:
+The historical Hermes Space customware interface remains useful prior art:
 bundle-owned source, documented seams, and no private runtime patching by
-default. `wasm-agent` should mirror that philosophy with a WASM-first artifact
-interface.
+default. `wasm-agent` should carry that philosophy forward with a WASM-first
+artifact interface.
 
 ## Iteration Loop
 

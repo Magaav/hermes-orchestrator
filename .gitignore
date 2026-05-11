@@ -9,6 +9,8 @@ logs/
 wiki/
 memory/
 server/
+!plugins/wasm-agent/server/
+!plugins/wasm-agent/server/**
 plugins/private/**
 !plugins/private/.gitignore
 !plugins/private/**/*.md

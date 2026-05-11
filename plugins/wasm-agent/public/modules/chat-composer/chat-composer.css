@@ -36,7 +36,7 @@
   position: relative;
   z-index: 2;
   color: transparent;
-  caret-color: var(--text, #eef6ff);
+  caret-color: #ffffff;
   background: transparent;
   -webkit-text-fill-color: transparent;
 }
@@ -47,9 +47,9 @@
 }
 
 .chat-composer-textarea::placeholder {
-  color: var(--text, #eef6ff);
-  opacity: 0.48;
-  -webkit-text-fill-color: var(--text, #eef6ff);
+  color: rgba(238, 246, 255, 0.78);
+  opacity: 1;
+  -webkit-text-fill-color: rgba(238, 246, 255, 0.78);
 }
 
 .chat-composer-overlay {
@@ -58,7 +58,7 @@
   z-index: 1;
   pointer-events: none;
   overflow: hidden;
-  color: var(--text, #eef6ff);
+  color: #ffffff;
   background: transparent;
 }
 
@@ -76,28 +76,36 @@
 .chat-md-marker,
 .chat-md-fence,
 .chat-md-quote-marker {
-  color: rgba(148, 163, 184, 0.76);
+  color: rgba(188, 201, 222, 0.9);
 }
 
 .chat-md-inline-code {
   border-radius: 4px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #f8d97b;
-  box-shadow: 0 0 0 1px rgba(248, 217, 123, 0.16);
+  background: rgba(15, 23, 42, 0.58);
+  color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.18);
+}
+
+.chat-md-empty-inline-code {
+  color: rgba(188, 201, 222, 0.82);
 }
 
 .chat-md-code-block {
   display: inline;
-  color: #f8d97b;
-  background: rgba(15, 23, 42, 0.72);
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(15, 23, 42, 0.5);
 }
 
 .chat-md-bold {
-  font-weight: 800;
+  color: #ffffff;
+  text-shadow: 0 0 0 currentColor;
 }
 
 .chat-md-italic {
-  font-style: italic;
+  color: rgba(221, 232, 248, 0.98);
+  text-decoration: underline;
+  text-decoration-color: rgba(125, 220, 255, 0.26);
+  text-underline-offset: 2px;
 }
 
 .chat-md-strike {
@@ -113,8 +121,9 @@
 
 .chat-md-quote {
   color: #c8d4e8;
-  box-shadow: inset 3px 0 0 rgba(125, 220, 255, 0.34);
-  padding-left: 8px;
+  text-decoration: underline;
+  text-decoration-color: rgba(125, 220, 255, 0.26);
+  text-underline-offset: 2px;
 }
 
 .chat-command-palette {
@@ -190,7 +199,7 @@
 .chat-rendered-markdown code {
   border-radius: 4px;
   background: rgba(15, 23, 42, 0.9);
-  color: #f8d97b;
+  color: rgba(255, 255, 255, 0.9);
   padding: 0 0.28em;
   font: 0.94em/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
