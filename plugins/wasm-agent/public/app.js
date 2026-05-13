@@ -371,7 +371,6 @@ const els = {
   agentOverlay: document.querySelector("#agentOverlay"),
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
   agentPanel: document.querySelector("#agentPanel"),
-  agentPanelResizeHandle: document.querySelector("#agentPanelResizeHandle"),
   agentCloseButton: document.querySelector("#agentCloseButton"),
   agentPanelTitle: document.querySelector("#agentPanelTitle"),
   agentMainChatButton: document.querySelector("#agentMainChatButton"),
@@ -381,7 +380,6 @@ const els = {
   agentSessionsBalloon: document.querySelector("#agentSessionsBalloon"),
   agentSessionList: document.querySelector("#agentSessionList"),
   agentNewSessionButton: document.querySelector("#agentNewSessionButton"),
-  agentContextButton: document.querySelector("#agentContextButton"),
   agentContextBalloon: document.querySelector("#agentContextBalloon"),
   agentSettingsButton: document.querySelector("#agentSettingsButton"),
   agentSettingsBalloon: document.querySelector("#agentSettingsBalloon"),
@@ -1033,6 +1031,7 @@ function buildObservationSnapshot() {
   const snapshot = {
     schema: "hermes.space_os.observation.v1",
     timestamp: new Date().toISOString(),
+    cap: compactAgentCapabilityMap(),
     workspace: {
       active_panel: state.activePanel,
       active_widget: state.activeWidgetId || "",
@@ -3575,6 +3574,64 @@ function applyAgentPanelSize() {
   return size;
 }
 
+function compactAgentCapabilityMap() {
+  const size = clampAgentPanelSize(state.agentLayout);
+  return {
+    p: "wa1",
+    s: [Math.round(size.width), Math.round(size.height)],
+    op: "ar W H",
+  };
+}
+
+function agentCapabilitySystemHint(cap = compactAgentCapabilityMap()) {
+  try {
+    return ` Cap:${JSON.stringify(cap)}; resize with hidden block \`\`\`wa1\nar W H\n\`\`\`.`;
+  } catch {
+    return "";
+  }
+}
+
+function resizeAgentPanelByCapability(width, height) {
+  const next = clampAgentPanelSize({ width, height });
+  state.agentLayout.panelWidth = next.width;
+  state.agentLayout.panelHeight = next.height;
+  applyAgentPanelSize();
+  placeAgentPanel();
+  saveAgentLayout();
+  recordUserEvent("agent.client_resize", {
+    target: "agent-panel",
+    summary: "Resized wasm-agent-chat from client capability",
+    data: { width: next.width, height: next.height },
+  });
+  return next;
+}
+
+function applyAgentClientOpBlock(body = "") {
+  const applied = [];
+  for (const line of String(body || "").split(/\r?\n/)) {
+    const match = line.trim().match(/^ar\s+(\d{2,4})\s+(\d{2,4})$/i);
+    if (!match) continue;
+    const size = resizeAgentPanelByCapability(Number(match[1]), Number(match[2]));
+    applied.push({ op: "ar", s: [Math.round(size.width), Math.round(size.height)] });
+  }
+  return applied;
+}
+
+function applyAgentClientOpsFromReply(reply = "") {
+  const source = String(reply || "");
+  const ops = [];
+  const cleaned = source.replace(/```wa1\s*([\s\S]*?)```/gi, (block, body) => {
+    const applied = applyAgentClientOpBlock(body);
+    if (!applied.length) return block;
+    ops.push(...applied);
+    return "";
+  }).trim();
+  return {
+    reply: cleaned || (ops.length ? "Done." : source),
+    result: ops.length ? { p: "wa1", ok: true, ops } : null,
+  };
+}
+
 function readAgentModelSettings() {
   try {
     const raw = JSON.parse(localStorage.getItem(AGENT_MODELS_STORAGE_KEY) || "{}");
@@ -4213,7 +4270,7 @@ function providerRequestMessages(message, transcript = [], imageEntries = []) {
   return [
     {
       role: "system",
-      content: "You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend tools, workspace mutation, and source changes are unavailable on this path.",
+      content: `You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend tools, workspace mutation, and source changes are unavailable on this path.${agentCapabilitySystemHint()}`,
     },
     ...transcript.slice(-8).map((item) => ({
       role: item.role === "assistant" ? "assistant" : "user",
@@ -8476,6 +8533,19 @@ function switchToMainAgentChat() {
   window.setTimeout(() => els.agentInput?.focus(), 0);
 }
 
+function returnFromSocialAgentChat() {
+  const session = activeAgentSession();
+  if (session.kind === "direct") {
+    state.agentView = "people";
+    setAgentSocialPicker("");
+    renderAgentChrome();
+    void loadAgentPeople("main-chat-button").catch(() => {});
+    saveActiveAgentSessionPreference();
+    return;
+  }
+  switchToMainAgentChat();
+}
+
 function renderAgentConfiguredModelList() {
   if (!els.agentConfiguredModelList) return;
   const entries = configuredAgentTargetOptions();
@@ -9089,6 +9159,9 @@ function ownedAgentPrompt(message, transcript = [], observation = {}) {
   }
   if (observation?.workspace) {
     lines.push("", `Workspace: ${compactJsonForPrompt(observation.workspace, 1200)}`);
+  }
+  if (observation?.cap) {
+    lines.push("", agentCapabilitySystemHint(observation.cap).trim());
   }
   return lines.filter((line) => line !== "").join("\n");
 }
@@ -13014,7 +13087,7 @@ function setAgentBalloon(kind) {
     renderAgentModelSetupBalloon();
   }
   els.agentSessionsButton?.setAttribute("aria-expanded", sessionsOpen ? "true" : "false");
-  els.agentContextButton?.setAttribute("aria-expanded", contextOpen ? "true" : "false");
+  els.agentTokenUsage?.setAttribute("aria-expanded", contextOpen ? "true" : "false");
   els.agentSettingsButton?.setAttribute("aria-expanded", settingsOpen ? "true" : "false");
 }
 
@@ -13284,58 +13357,6 @@ function installAgentPanelDragging() {
   });
 }
 
-function installAgentPanelResizing() {
-  const handle = els.agentPanelResizeHandle;
-  if (!handle || !els.agentPanel) return;
-  handle.addEventListener("pointerdown", (event) => {
-    if (!isPrimaryPointer(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const startSize = clampAgentPanelSize(state.agentLayout);
-    const startX = event.clientX;
-    const startY = event.clientY;
-    els.agentPanel.classList.add("is-resizing");
-    document.body.classList.add("is-agent-resizing");
-    try {
-      handle.setPointerCapture(event.pointerId);
-    } catch {
-      // Window listeners below keep resizing responsive if capture is dropped.
-    }
-    const move = (moveEvent) => {
-      moveEvent.preventDefault();
-      const next = clampAgentPanelSize({
-        width: startSize.width + moveEvent.clientX - startX,
-        height: startSize.height + moveEvent.clientY - startY,
-      });
-      state.agentLayout.panelWidth = next.width;
-      state.agentLayout.panelHeight = next.height;
-      applyAgentPanelSize();
-      placeAgentPanel();
-    };
-    const end = () => {
-      els.agentPanel.classList.remove("is-resizing");
-      document.body.classList.remove("is-agent-resizing");
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      try {
-        handle.releasePointerCapture(event.pointerId);
-      } catch {
-        // The browser may already have released capture.
-      }
-      saveAgentLayout();
-      recordUserEvent("agent.resized", {
-        target: "agent-panel",
-        summary: "Resized wasm-agent-chat",
-        data: { width: state.agentLayout.panelWidth, height: state.agentLayout.panelHeight },
-      });
-    };
-    window.addEventListener("pointermove", move, { passive: false });
-    window.addEventListener("pointerup", end, { once: true });
-    window.addEventListener("pointercancel", end, { once: true });
-  });
-}
-
 function installAgentOnboardingDragging() {
   const panel = els.agentOnboardingPanel;
   const handle = panel?.querySelector(".agent-onboarding-head");
@@ -13502,6 +13523,7 @@ async function sendAgentMessage(text) {
     const observation = buildObservationSnapshot();
     const compactObservation = {
       timestamp: observation.timestamp,
+      cap: observation.cap,
       workspace: observation.workspace,
       browser: observation.browser,
       fleet: {
@@ -13682,7 +13704,8 @@ async function sendAgentMessage(text) {
             meta: "manifest",
           });
         }
-        pendingMessage.content = direct.reply;
+        const clientOps = applyAgentClientOpsFromReply(direct.reply);
+        pendingMessage.content = clientOps.reply;
         pendingMessage.pending = false;
         pendingMessage.phase = "";
         pendingMessage.duration_ms = Date.now() - turnStartedAt;
@@ -13712,6 +13735,7 @@ async function sendAgentMessage(text) {
           },
           backend_tools_enabled: false,
           source_mutations_enabled: false,
+          client_ops: clientOps.result,
         };
         const session = activeAgentSession();
         session.diagnostics = pendingMessage.diagnostics;
@@ -13764,7 +13788,8 @@ async function sendAgentMessage(text) {
       });
       try {
         const owned = await callOwnedAgentBridge(userMessageContent, transcript, compactObservation);
-        pendingMessage.content = owned.reply;
+        const clientOps = applyAgentClientOpsFromReply(owned.reply);
+        pendingMessage.content = clientOps.reply;
         pendingMessage.pending = false;
         pendingMessage.phase = "";
         pendingMessage.duration_ms = Date.now() - turnStartedAt;
@@ -13791,6 +13816,7 @@ async function sendAgentMessage(text) {
           },
           backend_tools_enabled: true,
           source_mutations_enabled: false,
+          client_ops: clientOps.result,
         };
         const session = activeAgentSession();
         session.diagnostics = pendingMessage.diagnostics;
@@ -13869,29 +13895,33 @@ async function sendAgentMessage(text) {
       idleTimeoutMs: state.agentTurnTimeoutMs + 5000,
       signal: state.agentAbortController.signal,
     });
-    const reply = payload.agent?.reply || "I did not receive a response from the embedded agent adapter.";
+    const rawReply = payload.agent?.reply || "I did not receive a response from the embedded agent adapter.";
+    const clientOps = applyAgentClientOpsFromReply(rawReply);
+    const reply = clientOps.reply;
     const session = activeAgentSession();
     const changedFiles = payload.agent?.changed_files || [];
+    const diagnostics = { ...(payload.agent?.diagnostics || {}) };
+    if (clientOps.result) diagnostics.client_ops = clientOps.result;
     pendingMessage.content = reply;
     pendingMessage.pending = false;
     pendingMessage.phase = "";
     pendingMessage.duration_ms = payload.agent?.duration_ms || Date.now() - turnStartedAt;
     pendingMessage.changed_files = changedFiles;
-    pendingMessage.diagnostics = payload.agent?.diagnostics || {};
+    pendingMessage.diagnostics = diagnostics;
     pendingMessage.space_id = activeSpaceStorageId();
     pendingMessage.actions = agentActionRowsFromPayload(payload.agent, initialActions);
-    session.diagnostics = payload.agent?.diagnostics || {};
-    updateAgentTokenUsage(payload.agent?.diagnostics?.token_usage || null);
+    session.diagnostics = diagnostics;
+    updateAgentTokenUsage(diagnostics.token_usage || null);
     session.changed_files = changedFiles;
     session.context_preview = payload.agent?.context_preview || [];
     saveAgentSessions();
-    renderAgentDiagnostics(payload.agent?.diagnostics || {});
+    renderAgentDiagnostics(diagnostics);
     renderAgentContextPreview(payload.agent?.context_preview || []);
     renderAgentMessages();
     recordUserEvent("agent.message_finished", {
       target: "agent-overlay",
       summary: "Embedded assistant replied",
-      data: { reply_length: reply.length, diagnostics: payload.agent?.diagnostics || {} },
+      data: { reply_length: reply.length, diagnostics },
     });
   } catch (error) {
     const timeoutSeconds = Math.round(state.agentTurnTimeoutMs / 1000);
@@ -19123,7 +19153,7 @@ function wireEvents() {
   els.agentCloseButton.addEventListener("click", closeAgentChat);
   els.agentMainChatButton?.addEventListener("click", (event) => {
     event.stopPropagation();
-    switchToMainAgentChat();
+    returnFromSocialAgentChat();
   });
   els.agentPeopleButton?.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -19160,7 +19190,7 @@ function wireEvents() {
     event.stopPropagation();
     toggleAgentBalloon("sessions");
   });
-  els.agentContextButton.addEventListener("click", (event) => {
+  els.agentTokenUsage?.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleAgentBalloon("context");
   });
@@ -19169,7 +19199,7 @@ function wireEvents() {
     toggleAgentBalloon("settings");
   });
 	  els.agentPanel.addEventListener("click", (event) => {
-	    if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select")) return;
+	    if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select, .agent-token-usage")) return;
 	    setAgentBalloon("");
 	    if (!event.target.closest?.("#agentImagePreview")) {
 	      closeAgentImageScanInfo();
@@ -19314,7 +19344,6 @@ function wireEvents() {
   installSpacePanning();
   installAgentDragging();
   installAgentPanelDragging();
-  installAgentPanelResizing();
   installAgentOnboardingDragging();
 }
 

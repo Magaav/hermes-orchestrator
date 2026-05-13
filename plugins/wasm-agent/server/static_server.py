@@ -9113,6 +9113,7 @@ def call_agent_bridge(
         "There is no vision_analyze tool in this adapter; never offer or name fake vision tools. "
         "When the user asks about the last clicked UI button, use observation.requested_click_context.last_non_agent_click "
         "instead of assistant open/send events. "
+        "Client cap p=wa1 can be invoked by appending a hidden fenced block ```wa1\nar W H\n``` for wasm-agent-chat resize. "
         "When the user asks to evolve the app, produce a concrete, small implementation brief: "
         "files, behavior, verification, and whether it needs adapter-applied mutation."
     )
@@ -9520,6 +9521,7 @@ def embedded_agent_message(
         current_observation_tool = {
             "tool": "current_turn_observation",
             "timestamp": observation.get("timestamp", ""),
+            "cap": observation.get("cap", {}),
             "workspace": observation.get("workspace", {}),
             "requested_click_context": observation.get("requested_click_context", {}),
             "recent_events": observation.get("recent_events", [])[:6],

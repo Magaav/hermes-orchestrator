@@ -351,8 +351,9 @@ app panel, including Home, OS Space, Fleet, Logs, and Observation. Opening the
 avatar reveals a chat panel that sends the user's message plus the current
 bounded observation snapshot through the existing Hermes bridge
 `/v1/chat/completions` endpoint. The panel keeps the same default footprint but
-has a bottom-corner resize grip so the user can enlarge or shrink
-`wasm-agent-chat` without changing the rest of the workspace. The chat header
+exposes a compact `wa1` client capability map in agent context; model replies
+can append a hidden `ar W H` op to resize `wasm-agent-chat` without changing the
+rest of the workspace. The chat header
 includes the combined target/model selector under the `Chat` title;
 bridge-backed turns include that resolved `target_node`, so operators can switch
 between orchestrator, worker, and saved node/model targets without leaving the panel.

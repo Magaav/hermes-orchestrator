@@ -653,9 +653,6 @@
             <button id="agentSessionsButton" class="icon-button agent-tool-button" type="button" title="Sessions, timeline, history" aria-label="Sessions, timeline, history" aria-expanded="false">
               <span class="agent-icon agent-icon-sessions" aria-hidden="true"></span>
             </button>
-            <button id="agentContextButton" class="icon-button agent-tool-button" type="button" title="Context used" aria-label="Context used" aria-expanded="false">
-              <span class="agent-icon agent-icon-context" aria-hidden="true"></span>
-            </button>
             <button id="agentSettingsButton" class="icon-button agent-tool-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">
               <span class="agent-icon agent-icon-settings" aria-hidden="true"></span>
             </button>
@@ -757,7 +754,7 @@
               <button id="agentStickerButton" class="icon-button agent-sticker-button" type="button" aria-label="Sticker" title="Sticker">◎</button>
             </div>
             <select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" hidden></select>
-            <span id="agentTokenUsage" class="agent-token-usage" title="Exact model token usage for the last turn">Tokens -</span>
+            <button id="agentTokenUsage" class="agent-token-usage" type="button" title="Exact model token usage for the last turn" aria-expanded="false">Tokens -</button>
             <button id="agentSendButton" class="agent-send-button" type="submit" aria-label="Send message" title="Send">
               <svg class="agent-send-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
                 <path d="M4 10h10.5m0 0-4.25-4.25M14.5 10l-4.25 4.25"></path>
@@ -766,7 +763,6 @@
             </button>
           </div>
         </form>
-        <div id="agentPanelResizeHandle" class="agent-panel-resize-handle" title="Resize wasm-agent-chat" aria-hidden="true"></div>
       </aside>
       <section id="agentOnboardingPanel" class="agent-onboarding-panel" aria-label="Agent setup" hidden>
         <div class="agent-onboarding-head">
