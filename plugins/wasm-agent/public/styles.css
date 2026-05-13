@@ -4051,24 +4051,27 @@ textarea:focus {
 
 .agent-panel-head {
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 34px 34px;
   align-items: center;
-  justify-content: space-between;
+  gap: 5px 8px;
   cursor: grab;
   user-select: none;
 }
 
 .agent-title-block {
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-  display: grid;
-  gap: 5px;
+  display: contents;
 }
 
 .agent-title-row {
+  grid-column: 1;
+  grid-row: 1;
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, max-content) 34px;
+  grid-template-columns: minmax(0, max-content);
+  grid-auto-flow: column;
+  grid-auto-columns: 34px;
   align-items: center;
   gap: 6px;
 }
@@ -4194,6 +4197,8 @@ textarea:focus {
 }
 
 .agent-node-picker {
+  grid-column: 1 / -1;
+  grid-row: 2;
   width: 100%;
   min-width: 0;
   display: grid;
@@ -4214,9 +4219,9 @@ textarea:focus {
   border: 1px solid rgba(147, 170, 203, 0.18);
   border-radius: var(--radius);
   background: rgba(8, 14, 24, 0.96);
-  color: var(--text);
-  padding: 0 12px 0 5px;
-  font-size: 11px;
+  color: var(--muted);
+  padding: 0 0 0 12px;
+  font-size: 12px;
   font-family: inherit;
   line-height: 32px;
   text-transform: none;
@@ -4226,6 +4231,8 @@ textarea:focus {
 }
 
 .agent-head-tools {
+  grid-column: 2;
+  grid-row: 1;
   display: flex;
   flex: 0 0 auto;
   gap: 8px;
@@ -4392,7 +4399,7 @@ textarea:focus {
 
 .agent-balloon {
   position: absolute;
-  top: 48px;
+  top: calc(100% - 1px);
   z-index: 3;
   width: min(330px, calc(100% - 24px));
   max-height: min(360px, calc(var(--agent-app-height, 100vh) - 94px));
@@ -4408,7 +4415,12 @@ textarea:focus {
 }
 
 .agent-context-balloon {
-  right: 12px;
+  top: auto;
+  right: 40px;
+  bottom: 42px;
+  z-index: 8;
+  width: min(300px, calc(100% - 46px));
+  max-height: min(260px, calc(var(--agent-app-height, 100vh) - 140px));
 }
 
 .agent-settings-balloon {
@@ -4572,10 +4584,10 @@ textarea:focus {
 .agent-messages {
   min-height: 0;
   display: grid;
-  gap: 10px;
+  gap: 5px;
   align-content: start;
   overflow: auto;
-  padding: 12px;
+  padding: 5px;
 }
 
 .agent-scroll-bottom-button {
@@ -5073,11 +5085,10 @@ textarea:focus {
 
 .agent-diagnostics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
   margin: 0;
-  padding: 8px 12px;
-  border-bottom: 1px solid rgba(147, 170, 203, 0.12);
+  padding: 8px;
   color: var(--muted);
   font-size: 10px;
 }
@@ -5095,9 +5106,10 @@ textarea:focus {
 
 .agent-diagnostics dd {
   margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  max-height: 92px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .agent-changed-details {
@@ -5969,6 +5981,7 @@ details.agent-action-row .agent-action-row-summary {
 }
 
 .agent-form-row {
+  position: relative;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 34px;
   align-items: center;

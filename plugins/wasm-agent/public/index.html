@@ -669,21 +669,6 @@
             </div>
             <div id="agentSessionList" class="agent-session-list"></div>
           </section>
-          <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Context used" hidden>
-            <div class="agent-balloon-head">
-              <strong>Context used</strong>
-            </div>
-            <dl id="agentDiagnostics" class="agent-diagnostics" aria-label="Last agent turn diagnostics">
-              <div><dt>Mode</dt><dd>-</dd></div>
-              <div><dt>Node</dt><dd>orchestrator</dd></div>
-              <div><dt>Source</dt><dd>-</dd></div>
-              <div><dt>Tools</dt><dd>-</dd></div>
-              <div><dt>Context</dt><dd>-</dd></div>
-              <div><dt>Turns</dt><dd>-</dd></div>
-              <div><dt>Time</dt><dd>-</dd></div>
-            </dl>
-            <div id="agentContextPreview" class="agent-context-preview"></div>
-          </section>
           <section id="agentSettingsBalloon" class="agent-balloon agent-settings-balloon" aria-label="Assistant settings" hidden>
             <div class="agent-balloon-head">
               <strong>Settings</strong>
@@ -755,6 +740,17 @@
             </div>
             <select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" hidden></select>
             <button id="agentTokenUsage" class="agent-token-usage" type="button" title="Exact model token usage for the last turn" aria-expanded="false">Tokens -</button>
+            <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Context used" hidden>
+              <div class="agent-balloon-head">
+                <strong>Context used</strong>
+              </div>
+              <dl id="agentDiagnostics" class="agent-diagnostics" aria-label="Last agent turn diagnostics">
+                <div><dt>Tokens</dt><dd>-</dd></div>
+                <div><dt>Turns</dt><dd>-</dd></div>
+                <div><dt>Context</dt><dd>-</dd></div>
+              </dl>
+              <div id="agentContextPreview" class="agent-context-preview" hidden></div>
+            </section>
             <button id="agentSendButton" class="agent-send-button" type="submit" aria-label="Send message" title="Send">
               <svg class="agent-send-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
                 <path d="M4 10h10.5m0 0-4.25-4.25M14.5 10l-4.25 4.25"></path>

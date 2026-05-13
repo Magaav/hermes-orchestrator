@@ -608,6 +608,7 @@ const state = {
   agentThinkingMessageId: "",
   agentTurnTimeoutMs: DEFAULT_AGENT_TURN_TIMEOUT_MS,
   agentTokenUsage: null,
+  agentContextString: "",
   agentDetailsOpenOverrides: {},
   agentAvailableModels: [],
   agentModelSettings: readAgentModelSettings(),
@@ -8889,7 +8890,7 @@ function renderAgentOnboardingPanel() {
       ? "Add agent"
       : mode === "agent"
       ? "Set agent"
-      : providerProbe?.ok ? "Provider ready" : directProviderConfigured() ? "Provider needs attention" : "Set provider";
+      : providerProbe?.ok ? "Provider ready" : directProviderConfigured() ? "Node Configuration" : "Set provider";
   }
   if (els.agentOnboardingCopy) {
     els.agentOnboardingCopy.textContent = state.agentSetupMessage || (mode === "agent"
@@ -10617,14 +10618,17 @@ function newAgentSession() {
 function renderAgentDiagnostics(diagnostics = {}) {
   if (!els.agentDiagnostics) return;
   updateAgentTokenUsage(diagnostics.token_usage || null);
+  const usage = normalizeAgentTokenUsage(diagnostics.token_usage || state.agentTokenUsage);
+  const tokenText = usage
+    ? `input ${usage.prompt_tokens || 0} output ${usage.completion_tokens || 0} total ${usage.total_tokens || 0}`
+    : "-";
+  const contextText = state.agentContextString
+    || (diagnostics.tools?.length ? diagnostics.tools.join(" ") : "")
+    || (diagnostics.context_estimated_tokens ? `~${diagnostics.context_estimated_tokens} tokens` : "-");
   const rows = [
-    ["Mode", diagnostics.mode || els.agentModeSelect?.value || "-"],
-    ["Node", agentNodeDisplayLabel(diagnostics.target_node || agentTargetNode())],
-    ["Source", diagnostics.source || "-"],
-    ["Tools", diagnostics.tools?.join(", ") || "-"],
-    ["Context", diagnostics.context_estimated_tokens ? `~${diagnostics.context_estimated_tokens} tokens` : "-"],
+    ["Tokens", tokenText],
     ["Turns", Number.isFinite(diagnostics.transcript_turns) ? String(diagnostics.transcript_turns) : "-"],
-    ["Time", Number.isFinite(diagnostics.duration_ms) ? `${diagnostics.duration_ms} ms` : "-"],
+    ["Context", contextText],
   ];
   els.agentDiagnostics.replaceChildren(
     ...rows.map(([label, value]) => {
@@ -13050,28 +13054,27 @@ function shouldStartDevHmr() {
   return !window.__WASM_AGENT_DISABLE_HMR__ && (window.__WASM_AGENT_DISABLE_SW__ || isModuleEnabled("dev-hmr"));
 }
 
+function agentContextDialectString(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => [
+      item.tool || "",
+      item.path || "",
+      item.query ? `query=${item.query}` : "",
+      Number.isFinite(item.bytes) ? `${item.bytes}b` : "",
+      item.preview || "",
+    ].filter(Boolean).join(" "))
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" | ");
+}
+
 function renderAgentContextPreview(items = []) {
-  if (!els.agentContextPreview) return;
-  if (!items.length) {
-    els.agentContextPreview.textContent = "No context tools used yet.";
-    return;
+  state.agentContextString = agentContextDialectString(items);
+  if (els.agentContextPreview) {
+    els.agentContextPreview.textContent = state.agentContextString;
+    els.agentContextPreview.hidden = true;
   }
-  els.agentContextPreview.replaceChildren(
-    ...items.map((item) => {
-      const block = document.createElement("article");
-      const title = document.createElement("strong");
-      const meta = document.createElement("div");
-      const preview = document.createElement("pre");
-      title.textContent = item.tool || "tool";
-      meta.className = "agent-context-meta";
-      meta.textContent = [item.path, item.query ? `query: ${item.query}` : "", Number.isFinite(item.bytes) ? `${item.bytes} bytes` : ""]
-        .filter(Boolean)
-        .join(" / ");
-      preview.textContent = item.preview || "";
-      block.append(title, meta, preview);
-      return block;
-    })
-  );
+  renderAgentDiagnostics(activeAgentSession().diagnostics || {});
 }
 
 function setAgentBalloon(kind) {

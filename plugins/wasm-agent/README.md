@@ -353,10 +353,13 @@ bounded observation snapshot through the existing Hermes bridge
 `/v1/chat/completions` endpoint. The panel keeps the same default footprint but
 exposes a compact `wa1` client capability map in agent context; model replies
 can append a hidden `ar W H` op to resize `wasm-agent-chat` without changing the
-rest of the workspace. The chat header
-includes the combined target/model selector under the `Chat` title;
+rest of the workspace. The chat header uses two stacked lines: title/actions
+first, then the full-width combined target/model selector and status chip;
 bridge-backed turns include that resolved `target_node`, so operators can switch
 between orchestrator, worker, and saved node/model targets without leaving the panel.
+The token badge in the composer opens the context balloon beside itself. That
+balloon shows only exact tokens, transcript turns, and a concatenated context
+string so model-context dialect can be inspected without the old diagnostic grid.
 Choosing `> New...` or `> Edit...` opens the draggable onboarding modal at the
 screen center of the chat layer, outside the resizable `wasm-agent-chat` frame. Choosing a
 saved provider/model or agent/model entry uses it from the same selector; adding
