@@ -21,8 +21,9 @@ Expected local files include:
   bridge process state for `127.0.0.1:8790`.
 - `db/sqlite/wa_db.sqlite3`, the local account database containing `user_tb`,
   friendship lifecycle metadata, lightweight sync event rows for accepted direct
-  chats and shared-space collaboration cursors, and account fleet ownership
-  metadata.
+  chats and shared-space collaboration cursors, account fleet ownership
+  metadata, Flux credit ledger rows, and instance audit records for grants and
+  provisioning attempts.
 - `db/sqlite/wa_auth_secret`, the local signed-cookie secret. Keep this file
   private; rotating it signs out existing browser sessions.
 - `browser/`, runtime Host Browser captures and profile data

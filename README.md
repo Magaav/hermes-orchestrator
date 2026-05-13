@@ -118,6 +118,7 @@ The orchestrator allows Hermes agents to operate as a coordinated distributed sy
 - **Observability & logs:** centralized metrics, logs, and health monitoring for all agents.
 - **Policy enforcement:** enforce operational rules and guardrails across the fleet.
 - **Secrets management:** securely manage environment variables, credentials, and per-node secrets.
+- **Diff-synchronized checkpoints:** commit each agent-made code diff to the Hermes Orchestrator repository so every iteration stays durable and available for parallel model review.
 
 ## Install
 Install the orchestrator:

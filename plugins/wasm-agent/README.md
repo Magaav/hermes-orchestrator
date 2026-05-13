@@ -188,6 +188,59 @@ reservation does not provision a backend worker by itself; it stores ownership
 metadata so premium/heavy provisioning can stay an intentional later action.
 Model/provider choices in the embedded chat remain browser-local unless the
 user explicitly uses the backend model setup flow for a selected Hermes node.
+Embedded chat readiness is now explicit through `/agent/readiness`: the drawer
+shows Agent ready, Agent backend unavailable, Agent not set, or
+WASM runtime blocked/unavailable before a turn becomes an opaque bridge error.
+For admin-selected nodes, readiness checks both the wasm-agent bridge and the
+selected node card so a stopped orchestrator does not appear ready just because
+the bridge process is alive. A browser mini-WASM failure remains a local runtime
+warning, but it no longer masks a live agent backend in the chat status chip.
+Standard-user chat resolves the internal account-owned agent alias to the
+user's deterministic main node and preflights the same readiness helper before
+bridge dispatch. If the main agent is missing, the drawer offers either an explicit
+OpenAI-compatible provider profile stored in client state, or Flux-credit
+provisioning of one bounded main node. The provider path is standard-user
+provider mode: saved providers appear as selectable chat nodes, the node
+dropdown can open `Set provider...` or `Set agent...`, and a main-chat send is
+blocked with the setup balloon until the user has selected a provider they own
+or provisioned their agent. The same normalized Base URL, model, API key,
+provider metadata, and transport plan feeds the setup form, readiness chip,
+connectivity probe, and final chat dispatch. Readiness no longer becomes
+"ready" just because the three fields exist; `providerTransportPlan()` first chooses browser-direct or
+backend-proxy. Known hosted providers such as OpenRouter/OpenAI-compatible
+cloud endpoints, plus compact/mobile public endpoints, go through
+`/agent/provider/chat` first so mobile turns do not spend a failed browser CORS
+probe before answering. Local, private, single-label, or explicitly
+browser-direct endpoints still probe the browser first. If that browser request
+is blocked by CORS, the origin is remembered for the session and wasm-agent
+falls back to `/agent/provider/chat`, where the backend makes the same
+non-streaming OpenAI-compatible request without logging the key. OpenRouter image
+turns use the same proxy path when CORS requires it, preserving `image_url`
+content parts instead of flattening them into text.
+Admin/orchestrator chat ignores standard-user provider
+state so a saved mobile key cannot hijack Hermes-orchestrator turns. The
+provider form keeps saved provider state separate from clean "new provider"
+drafts, masks a saved API key on mobile, and can infer common base URLs from
+the model id or key prefix when the Base URL field is left empty. The visible
+chat target selector is now the single provider/agent model selector: with no
+configured target it lists `None` and `> New...`; once provider or agent models
+exist it lists those configured `provider:model` / `agent:provider:model`
+targets plus `> Edit...`. The edit path opens the centered onboarding modal,
+which lists configured providers and can use, edit, add, or delete saved
+provider entries. The modal also exposes an optional Agent field:
+Add Agent opens a topic form with Name, Role/Instructions, Type, and optional
+Bridge URL. A saved bridge URL is treated as the user's own agent bridge; when
+no bridge is supplied, the Hermes service path uses orchestrator provisioning
+for the account's main agent. Hermes is the only hosted service agent type
+currently enabled. Hermes nodes still keep per-node model overrides
+through the backend setup flow. Flux credits are an append-only integer ledger exposed by
+`/account/credits`; admins can grant credits through
+`POST /admin/users/{user_id}/credits/grant`, and users can spend the fixed
+DeepSeek v4 Flash profile through `/fleet/nodes/provision-main`. The current
+Flux balance is shown in the account popover and the agent setup path warns
+when the balance is below the provisioning cost. Paid provisioning is
+idempotent around an already verified main node and always uses the
+authenticated user's deterministic node id.
 
 The embedded chat drawer now has a People toggle beside the `Chat` title.
 People reads `/account/friends`, combines it with current shared-space members
@@ -297,21 +350,22 @@ The embedded assistant now has a global avatar overlay that sits above every
 app panel, including Home, OS Space, Fleet, Logs, and Observation. Opening the
 avatar reveals a chat panel that sends the user's message plus the current
 bounded observation snapshot through the existing Hermes bridge
-`/v1/chat/completions` endpoint. The chat header includes a node selector under
-the `Chat` title; bridge-backed turns include that `target_node`, so operators
-can switch between orchestrator and worker nodes without leaving the panel. The
-composer row also includes a compact model selector immediately left of token
-usage. It renders at half of its composer track so token usage and send controls
-stay visible while still listing bridge-advertised models plus locally saved
-chat models without duplicating the node default. Choosing a saved model or
-adding a typed model id
-opens an in-chat setup balloon instead of a native browser prompt; the backend
+`/v1/chat/completions` endpoint. The panel keeps the same default footprint but
+has a bottom-corner resize grip so the user can enlarge or shrink
+`wasm-agent-chat` without changing the rest of the workspace. The chat header
+includes the combined target/model selector under the `Chat` title;
+bridge-backed turns include that resolved `target_node`, so operators can switch
+between orchestrator, worker, and saved node/model targets without leaving the panel.
+Choosing `> New...` or `> Edit...` opens the draggable onboarding modal at the
+screen center of the chat layer, outside the resizable `wasm-agent-chat` frame. Choosing a
+saved provider/model or agent/model entry uses it from the same selector; adding
+or editing a typed model id opens the modal's model setup form
+instead of a native browser prompt; the backend
 validates the provider/model id, writes it into the target node env and
 `.hermes/config.yaml`, updates `API_SERVER_MODEL_NAME`, restarts the node, waits
 for the runtime to report the model, and probes `/v1/chat/completions` before
 the model is saved in the selector. Failed setup rolls the node env/config back.
-The same selector can remove the currently selected saved model through the
-balloon, leaving the node default intact. Chat model choices are stored in a
+The modal can remove the currently selected saved model, leaving the node default intact. Chat model choices are stored in a
 small assistant-specific local storage record, separate from topology widget
 layout, so adding a model from Home or any user space remains visible after
 validation.
@@ -376,8 +430,10 @@ same topmost-layer navigation path for chat, modals, menus, and popovers before
 normal route history is consumed. Each UI layer remembers the route where it was
 opened, so manual chat minimize closes in place after space changes instead of
 using browser Back and returning to an older space. Transcripts, diagnostics,
-and context previews are persisted in browser storage for quick development continuity. This is
-local convenience state, not a durable multi-user account store.
+context previews, and the selected chat/session are persisted in browser storage
+for quick development continuity and are scoped by signed-in user plus browser
+device id. This is local convenience state, not a durable multi-user account
+store.
 
 The composer uses a compact 34px send button with a restrained arrow icon.
 While an embedded assistant turn is running, the button switches to a
@@ -397,6 +453,20 @@ adapter request or transcript cache. The composer also enforces an aggregate raw
 attachment budget; extra images stay as attachment summaries instead of making
 the local adapter request too large. The backend repeats that budgeting before
 calling the Hermes bridge and sends an `attachment_manifest` action to the model.
+Dropped files reserve square preview slots immediately while the browser reads,
+compresses, and analyzes them, so a slow OCR/runtime path no longer leaves the
+composer visually empty. The `Image scan` toggle now lives inside the attachment
+preview strip and appears only while pending image attachments can use local
+image-card analysis. Its `i` button opens an inline explanation balloon that
+closes on outside interaction. Turning
+the scan off affects new image drops while keeping resize/compression and basic
+metadata intact. Direct-provider turns do not call the local attachment store;
+they mark the browser media prep complete, append the local media manifest, and,
+for OpenRouter provider configs, try OpenAI-compatible `image_url` content parts
+with local image data and `video_url` parts for small local MP4/video files
+before falling back to the manifest-only request. This
+keeps vision-capable OpenRouter models testable without leaving a `run-wasm` row running
+forever.
 Raw OpenAI-style `image_url` message parts are disabled by default because some
 configured node providers, including DeepSeek-compatible text endpoints, reject
 multimodal content variants. Operators can opt in with
@@ -502,9 +572,15 @@ Long bridge waits keep updating the running action row with a `Hermes bridge
 active` heartbeat that names the latest completed step rather than reducing the
 turn to a generic waiting state.
 Streaming updates only auto-scroll the transcript when the user is already at
-the bottom. If the user scrolls upward to inspect an earlier topic, new action
-events still render but the viewport stays on the inspected content until the
-user returns to the bottom.
+the bottom. When the user has scrolled away from the latest message, a small
+sticky down-arrow appears and scrolls the drawer fully back to the latest
+message. Opening or creating a session renders the transcript at the bottom, and
+message action menus are available on assistant and user bubbles. Copy uses the
+original message markdown source, so inline code spans such as
+`` `agentStatus` `` remain intact.
+If the user scrolls upward to inspect an earlier topic, new action events still
+render but the viewport stays on the inspected content until the user returns to
+the bottom.
 
 Admin orchestrator source mutations use the `hermes.wasm_agent.mutation.v1`
 block. `replace` operations require exact `find`/`replace` text. `append`
@@ -666,14 +742,16 @@ between them.
 
 The launcher's lower corner is reserved for account state. The compact account
 button opens a Google Identity login popover when `GOOGLE_LOGIN_CLIENT_ID` is
-available in `conf/wa.env`. wasm-agent is account-gated: unauthenticated
+available in `conf/wa.env`. Google sign-in uses same-window redirect mode and
+posts the credential to `/auth/google/callback`, which keeps installed PWA
+windows from spawning messy popup/tab chrome. wasm-agent is account-gated: unauthenticated
 requests can load only the login shell/static assets and auth endpoints, while
 bridge, browser, timeline, agent, attachment, health, observation, and user
 space services require an authenticated session. Admin accounts must be listed
 with `ADMIN_EMAIL`; standard accounts must be listed with `USER_EMAILS`, or
 `USER_EMAILS` must stay empty for an admin-only deployment. Non-admin sessions
 must never route embedded chat turns to the global orchestrator target; they are
-kept on an account-sandbox target and core/source changes must be delegated to
+kept on the account-owned agent target and core/source changes must be delegated to
 admin. If both lists are empty, every Google account is rejected. Other verified Google
 accounts are rejected before a row is created. The local backend verifies Google
 ID tokens through Google's token verification endpoint and stores allowed
@@ -692,7 +770,8 @@ must fail closed:
   explicitly with `USER_EMAILS=<account>,<account>`; do not use a broad
   Google-login policy until tenant isolation is reviewed.
 - Keep `GOOGLE_LOGIN_CLIENT_ID` configured in `conf/wa.env` for the same Google OAuth client
-  whose authorized JavaScript origins include the production origin.
+  whose authorized JavaScript origins include the production origin and whose
+  authorized redirect URIs include `<origin>/auth/google/callback`.
 - Do not expose the app port directly; public traffic should terminate at the
   HTTPS reverse proxy and reach wasm-agent on `127.0.0.1`.
 - Protected routes must continue returning `401 auth_required` until a signed

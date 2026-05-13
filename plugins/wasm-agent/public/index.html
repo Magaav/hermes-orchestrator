@@ -33,6 +33,7 @@
               <strong id="loginTitle">Sign in</strong>
               <span id="loginMeta">Google</span>
             </div>
+            <div id="loginFluxBalance" class="login-flux-balance" hidden></div>
             <div id="googleSignInButton" class="google-signin-slot"></div>
             <p id="loginMessage" class="login-message"></p>
             <button id="logoutButton" class="login-secondary-button" type="button" hidden>Sign out</button>
@@ -278,6 +279,33 @@
         </article>
       </section>
 
+      <section id="creditGrantModal" class="modal-backdrop" aria-label="Add Flux credits" hidden>
+        <article class="modal-card edit-modal-card" role="dialog" aria-modal="true" aria-labelledby="creditGrantTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="creditGrantTitle">Add Flux credits</h2>
+              <p id="creditGrantTarget">user</p>
+            </div>
+            <button id="closeCreditGrantButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <form id="creditGrantForm" class="edit-form">
+            <label class="edit-field">
+              <span>Amount</span>
+              <input id="creditGrantAmountInput" type="number" min="1" step="1" inputmode="numeric" autocomplete="off">
+            </label>
+            <label class="edit-field">
+              <span>Reason</span>
+              <input id="creditGrantReasonInput" type="text" maxlength="180" autocomplete="off" spellcheck="true">
+            </label>
+            <p id="creditGrantStatus" class="modal-message"></p>
+            <div class="modal-actions">
+              <button id="cancelCreditGrantButton" type="button">Cancel</button>
+              <button class="primary" type="submit">Add</button>
+            </div>
+          </form>
+        </article>
+      </section>
+
       <section id="securityEvidenceModal" class="modal-backdrop" aria-label="Security finding evidence" hidden>
         <article class="modal-card wide security-evidence-modal-card" role="dialog" aria-modal="true" aria-labelledby="securityEvidenceTitle">
           <header class="modal-head">
@@ -328,6 +356,7 @@
                 <button id="homeFleetButton" class="home-action-button fleet" type="button" title="Fleet" aria-label="Fleet"><span>Fleet</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
+                <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
               </div>
               <div class="space-title">
@@ -614,10 +643,10 @@
               </button>
             </div>
             <label class="agent-node-picker">
-              <span>Node</span>
               <select id="agentNodeSelect" aria-label="Chat target node">
                 <option value="orchestrator">orchestrator</option>
               </select>
+              <span id="agentStatus" hidden></span>
             </label>
           </div>
           <div class="agent-head-tools">
@@ -634,7 +663,6 @@
               <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
             </button>
           </div>
-          <span id="agentStatus" hidden></span>
           <section id="agentSessionsBalloon" class="agent-balloon agent-session-balloon" aria-label="Assistant sessions" hidden>
             <div class="agent-balloon-head">
               <strong>Sessions</strong>
@@ -681,6 +709,7 @@
         <div id="agentMessages" class="agent-messages" aria-live="polite">
           <div class="agent-message assistant">I can see this workspace snapshot and help evolve the app from here.</div>
         </div>
+        <button id="agentScrollBottomButton" class="agent-scroll-bottom-button" type="button" title="Scroll to latest" aria-label="Scroll to latest" hidden></button>
         <section id="agentPeoplePanel" class="agent-people-panel" aria-label="People and shared-space members" hidden>
           <form id="agentPeopleSearchForm" class="agent-people-search" autocomplete="off">
             <label class="sr-only" for="agentPeopleSearchInput">Add by id or email</label>
@@ -692,29 +721,26 @@
           <div id="agentPeopleStatus" class="agent-people-status">Local-first people view</div>
           <div id="agentPeopleList" class="agent-people-list"></div>
         </section>
-        <section id="agentModelBalloon" class="agent-balloon agent-model-balloon" aria-label="Model setup" hidden>
-          <div class="agent-balloon-head">
-            <strong id="agentModelTitle">Set model</strong>
-            <button id="agentModelCancelButton" class="icon-button" type="button" title="Cancel" aria-label="Cancel model setup">
-              <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
-            </button>
-          </div>
-          <form id="agentModelForm" class="agent-model-form" autocomplete="off">
-            <label class="agent-model-field">
-              <span>Model</span>
-              <input id="agentModelInput" type="text" placeholder="opencode-go/kimi-k2.6" spellcheck="false" autocapitalize="off">
-            </label>
-            <div id="agentModelProgress" class="agent-model-progress" aria-live="polite"></div>
-          </form>
-        </section>
         <form id="agentForm" class="agent-form" autocomplete="off">
-          <div id="agentImagePreview" class="agent-image-preview" hidden></div>
+          <div id="agentImagePreview" class="agent-image-preview" hidden>
+            <div id="agentImagePreviewControls" class="agent-image-preview-controls" hidden>
+              <label class="agent-image-processing-toggle" title="Toggle local image analysis for new image drops">
+                <input id="agentImageProcessingToggle" type="checkbox" checked>
+                <span>Image scan</span>
+              </label>
+              <button id="agentImageScanInfoButton" class="agent-image-scan-info-button" type="button" title="About image scan" aria-label="About image scan" aria-expanded="false">i</button>
+              <div id="agentImageScanInfoBalloon" class="agent-image-scan-info-balloon" role="dialog" aria-label="Image scan information" hidden>
+                Image scan runs local browser analysis for image cards before send. It helps text-only paths reason from compact metadata without forwarding raw image bytes.
+              </div>
+            </div>
+            <div id="agentImagePreviewList" class="agent-image-preview-list"></div>
+          </div>
           <input type="file" id="agentImageInput" accept="image/*,video/mp4,.mp4" multiple hidden>
           <div id="agentComposer" class="chat-composer agent-composer">
-            <label class="sr-only" for="agentInput">Message Hermes</label>
+            <label class="sr-only" for="agentInput">Message agent</label>
             <div class="chat-composer-input-wrap">
               <div id="agentInputOverlay" class="chat-composer-overlay" aria-hidden="true"></div>
-              <textarea id="agentInput" class="agent-input-editor" rows="4" aria-label="Message Hermes" placeholder="Talk to Hermes" spellcheck="true" autocapitalize="sentences"></textarea>
+              <textarea id="agentInput" class="agent-input-editor" rows="4" aria-label="Message agent" placeholder="Talk to agent" spellcheck="true" autocapitalize="sentences"></textarea>
             </div>
             <div id="agentCommandPalette" class="chat-command-palette" hidden></div>
           </div>
@@ -730,8 +756,7 @@
               <button id="agentEmojiButton" class="icon-button agent-emoji-button" type="button" aria-label="Emoji" title="Emoji">🙂</button>
               <button id="agentStickerButton" class="icon-button agent-sticker-button" type="button" aria-label="Sticker" title="Sticker">◎</button>
             </div>
-            <select id="agentModelSelect" class="agent-model-select" aria-label="Chat model">
-            </select>
+            <select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" hidden></select>
             <span id="agentTokenUsage" class="agent-token-usage" title="Exact model token usage for the last turn">Tokens -</span>
             <button id="agentSendButton" class="agent-send-button" type="submit" aria-label="Send message" title="Send">
               <svg class="agent-send-arrow" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
@@ -741,7 +766,87 @@
             </button>
           </div>
         </form>
+        <div id="agentPanelResizeHandle" class="agent-panel-resize-handle" title="Resize wasm-agent-chat" aria-hidden="true"></div>
       </aside>
+      <section id="agentOnboardingPanel" class="agent-onboarding-panel" aria-label="Agent setup" hidden>
+        <div class="agent-onboarding-head">
+          <strong id="agentOnboardingTitle">Set provider or agent</strong>
+          <button id="agentOnboardingCloseButton" class="icon-button agent-onboarding-close-button" type="button" title="Close setup" aria-label="Close setup">
+            <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
+          </button>
+        </div>
+        <p id="agentOnboardingCopy" class="agent-onboarding-copy">Set one provider or agent before sending chat messages.</p>
+        <span id="agentOnboardingStatus" class="agent-onboarding-status" hidden></span>
+        <div id="agentConfiguredModelList" class="agent-configured-model-list"></div>
+        <label class="agent-owned-agent-field">
+          <span>Agent</span>
+          <div class="agent-owned-agent-row">
+            <input id="agentOwnedAgentInput" type="text" placeholder="optional agent name or bridge" spellcheck="false" autocapitalize="off">
+            <button id="agentAddAgentButton" type="button">Add Agent</button>
+          </div>
+        </label>
+        <form id="agentTopicForm" class="agent-topic-form" autocomplete="off" hidden>
+          <label>
+            <span>Name</span>
+            <input id="agentTopicNameInput" type="text" placeholder="My agent" spellcheck="true" autocapitalize="words">
+          </label>
+          <label>
+            <span>Role/Instructions</span>
+            <textarea id="agentTopicRoleInput" rows="3" placeholder="What this agent should do" spellcheck="true"></textarea>
+          </label>
+          <label>
+            <span>Type</span>
+            <select id="agentTopicTypeSelect">
+              <option value="hermes">Hermes</option>
+              <option value="claude" disabled>Claude</option>
+              <option value="other" disabled>Other agent</option>
+            </select>
+          </label>
+          <label>
+            <span>Bridge URL</span>
+            <input id="agentTopicBridgeUrlInput" type="url" placeholder="optional own bridge URL" spellcheck="false" autocapitalize="off">
+          </label>
+          <button class="primary" type="submit">Save agent</button>
+          <div id="agentTopicStatus" class="agent-direct-provider-footer"></div>
+        </form>
+        <form id="agentDirectProviderForm" class="agent-direct-provider-form" autocomplete="off" hidden>
+          <label>
+            <span><span class="field-required">*</span> Base URL</span>
+            <input id="agentDirectBaseUrlInput" type="url" placeholder="auto from model/key" spellcheck="false" autocapitalize="off">
+          </label>
+          <label>
+            <span><span class="field-required">*</span> Model</span>
+            <input id="agentDirectModelInput" type="text" placeholder="gpt-5.4-mini" spellcheck="false" autocapitalize="off">
+          </label>
+          <label>
+            <span><span class="field-required">*</span> API key</span>
+            <input id="agentDirectApiKeyInput" type="password" autocomplete="off" spellcheck="false" autocapitalize="off">
+          </label>
+          <button class="primary" type="submit">Save provider</button>
+          <div class="agent-direct-provider-footer">
+            <svg id="agentProviderLoadingIcon" class="agent-provider-loading-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
+              <circle cx="12" cy="12" r="9"></circle>
+              <path d="M21 12a9 9 0 0 1-9 9"></path>
+            </svg>
+            <span id="agentDirectProviderStatus"></span>
+          </div>
+        </form>
+        <section id="agentModelBalloon" class="agent-balloon agent-model-balloon" aria-label="Model setup" hidden>
+          <div class="agent-balloon-head">
+            <strong id="agentModelTitle">Set model</strong>
+            <button id="agentModelCancelButton" class="icon-button" type="button" title="Cancel" aria-label="Cancel model setup">
+              <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
+            </button>
+          </div>
+          <form id="agentModelForm" class="agent-model-form" autocomplete="off">
+            <label class="agent-model-field">
+              <span><span class="field-required">*</span> Model</span>
+              <input id="agentModelInput" type="text" placeholder="opencode-go/kimi-k2.6" spellcheck="false" autocapitalize="off">
+            </label>
+            <div id="agentModelProgress" class="agent-model-progress" aria-live="polite"></div>
+          </form>
+        </section>
+      </section>
       <div id="agentToastStack" class="agent-toast-stack" aria-live="polite"></div>
     </section>
     <script type="module" src="/app.js"></script>

@@ -54,6 +54,7 @@ DEFAULT_AGENT_BRIDGE_IMAGE_SINGLE_BYTES = 640 * 1024
 DEFAULT_AGENT_BRIDGE_REQUEST_BYTES = 1536 * 1024
 DEFAULT_AGENT_BRIDGE_FORWARD_IMAGE_URLS = False
 DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC = 6 * 60
+DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC = 45
 DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
@@ -98,6 +99,10 @@ FRIENDSHIP_SCHEMA = "hermes.wasm_agent.friendship.v1"
 FRIENDSHIP_LIST_SCHEMA = "hermes.wasm_agent.friendships.v1"
 USER_FLEET_SCHEMA = "hermes.wasm_agent.user_fleet.v1"
 USER_FLEET_NODE_SCHEMA = "hermes.wasm_agent.user_fleet.node.v1"
+AGENT_READINESS_SCHEMA = "hermes.wasm_agent.agent_readiness.v1"
+ACCOUNT_CREDITS_SCHEMA = "hermes.wasm_agent.account_credits.v1"
+FLUX_LEDGER_ROW_SCHEMA = "hermes.wasm_agent.flux_ledger.row.v1"
+FLUX_PROVISION_SCHEMA = "hermes.wasm_agent.fleet.provision_main.v1"
 SYNC_EVENT_PAYLOAD_LIMIT = 24 * 1024
 SYNC_EVENT_PAGE_LIMIT = 120
 FRIENDSHIP_VISIBLE_STATUSES = {"pending", "accepted"}
@@ -110,6 +115,12 @@ VOICE_LAB_EVENT_LIMIT = 240
 VOICE_LAB_ROOM_PUBLIC_EVENT_LIMIT = 120
 GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
 AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
+AGENT_READINESS_READY = "ready"
+AGENT_READINESS_BACKEND_UNAVAILABLE = "backend_unavailable"
+AGENT_READINESS_SANDBOX_NOT_PROVISIONED = "sandbox_not_provisioned"
+FLUX_MAIN_NODE_PROVISION_COST = 100
+FLUX_MAIN_NODE_PROVIDER = "opencode-go"
+FLUX_MAIN_NODE_MODEL = "deepseek-v4-flash"
 AGENT_MUTATION_ALLOWED_EXTENSIONS = {
     ".css",
     ".html",
@@ -365,10 +376,24 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/account/credits":
+            try:
+                self._json(HTTPStatus.OK, account_credits(user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/sync/events":
             try:
                 query = parse_qs(urlparse(self.path).query)
                 self._json(HTTPStatus.OK, list_sync_events(self.server, user, query))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/agent/readiness":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                target_node = str((query.get("target_node") or query.get("node_id") or [""])[0] or "")
+                self._json(HTTPStatus.OK, agent_readiness(self.server, user, target_node=target_node))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -527,6 +552,21 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/fleet/nodes/provision-main":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, provision_main_fleet_node(self.server, user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        grant_match = re.fullmatch(r"/admin/users/([0-9]+)/credits/grant", path)
+        if grant_match:
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, grant_flux_credits(user, grant_match.group(1), body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/storage/import":
             try:
                 body = self._read_json(max_bytes=4 * 1024 * 1024)
@@ -607,6 +647,39 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "model_setup_error", "message": str(exc)}},
+                )
+            return
+        if path in {"/agent/provider/probe", "/agent/provider/chat"}:
+            try:
+                body = self._read_json(max_bytes=8 * 1024 * 1024)
+                provider = provider_proxy_completion(self.server, body, user=user, probe=path.endswith("/probe"))
+                payload = {
+                    "ok": True,
+                    "provider": provider,
+                    "reply": provider.get("reply", ""),
+                    "usage": provider.get("usage"),
+                    "model": provider.get("model", ""),
+                    "mode": "backend-proxy",
+                }
+                self._json(HTTPStatus.OK, payload)
+            except ProviderProxyError as exc:
+                self._json(
+                    exc.status,
+                    {
+                        "ok": False,
+                        "error": {"code": exc.code, "message": exc.message},
+                        "provider": {"diagnostic": exc.diagnostic},
+                    },
+                )
+            except Exception as exc:
+                diagnostic = provider_diagnostic("unreachable", "backend-proxy-error", str(exc), HTTPStatus.BAD_GATEWAY)
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {
+                        "ok": False,
+                        "error": {"code": "provider_proxy_error", "message": diagnostic["message"]},
+                        "provider": {"diagnostic": diagnostic},
+                    },
                 )
             return
         if path == "/agent/session/message":
@@ -863,6 +936,364 @@ class AgentModelSetupError(BrowserError):
         self.steps = steps
 
 
+class ProviderProxyError(BrowserError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        diagnostic: dict[str, Any] | None = None,
+        status: HTTPStatus = HTTPStatus.BAD_GATEWAY,
+    ) -> None:
+        super().__init__(code, message, status=status)
+        self.diagnostic = diagnostic or provider_diagnostic("unreachable", code, message, status)
+
+
+def provider_diagnostic(
+    mode: str,
+    category: str,
+    message: str,
+    status: int | HTTPStatus | None = None,
+    *,
+    endpoint: str = "",
+    model: str = "",
+) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "mode": mode,
+        "category": category,
+        "message": clipped(str(message or category), 600),
+    }
+    if status is not None:
+        diagnostic["http_status"] = int(status)
+    if endpoint:
+        diagnostic["endpoint"] = endpoint
+    if model:
+        diagnostic["model"] = clipped(model, 180)
+    return diagnostic
+
+
+def provider_name_from_base_url(base_url: str) -> str:
+    base = base_url.strip().lower()
+    if "perplexity.ai" in base:
+        return "perplexity"
+    if "openrouter.ai" in base:
+        return "openrouter"
+    if "api.groq.com" in base:
+        return "groq"
+    if "moonshot.ai" in base:
+        return "moonshot"
+    if "deepseek.com" in base:
+        return "deepseek"
+    if "dashscope.aliyuncs.com" in base:
+        return "dashscope"
+    if "generativelanguage.googleapis.com" in base:
+        return "google"
+    if "api.x.ai" in base:
+        return "xai"
+    if "api.mistral.ai" in base:
+        return "mistral"
+    if "api.openai.com" in base:
+        return "openai"
+    if "opencode.ai/zen/go" in base:
+        return "opencode-go"
+    if "opencode.ai/zen" in base:
+        return "opencode-zen"
+    return ""
+
+
+def normalize_provider_base_url(value: Any) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    if not re.match(r"^https?://", raw, flags=re.IGNORECASE):
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or any(char.isspace() for char in raw):
+        raise ProviderProxyError(
+            "malformed-base-url",
+            "Base URL must be a valid HTTP or HTTPS URL.",
+            diagnostic=provider_diagnostic("config-missing", "malformed-base-url", "Base URL must be a valid HTTP or HTTPS URL.", HTTPStatus.BAD_REQUEST),
+            status=HTTPStatus.BAD_REQUEST,
+        )
+    return parsed._replace(query="", fragment="").geturl().rstrip("/")
+
+
+def provider_endpoint_for_base_url(base_url: str, provider: str = "") -> str:
+    clean_base = normalize_provider_base_url(base_url)
+    parsed = urlparse(clean_base)
+    normalized_path = parsed.path.rstrip("/")
+    parsed = parsed._replace(path=normalized_path)
+    base = parsed.geturl().rstrip("/")
+    if normalized_path.endswith("/chat/completions"):
+        return base
+    provider_name = (provider or provider_name_from_base_url(base)).strip().lower()
+    if provider_name == "perplexity":
+        return f"{base}/chat/completions"
+    if normalized_path.endswith("/openai") or normalized_path.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def normalize_provider_model(model: str, base_url: str = "", provider: str = "") -> str:
+    clean = clipped(str(model or "").strip(), 180)
+    provider_name = (provider or provider_name_from_base_url(base_url)).strip().lower()
+    if provider_name in {"opencode-go", "opencode-zen"} and "/" in clean:
+        prefix, _, rest = clean.partition("/")
+        if prefix == provider_name and rest:
+            return clipped(rest, 180)
+    return clean
+
+
+def provider_http_diagnostic(status: int, message: str = "", *, endpoint: str = "", model: str = "") -> dict[str, Any]:
+    lower_message = message.lower()
+    if status == 403 and (
+        "cloudflare" in lower_message
+        or "browser_signature" in lower_message
+        or "site owner has blocked" in lower_message
+    ):
+        return provider_diagnostic("unreachable", "provider-access-denied", message or "Provider edge rejected the request.", status, endpoint=endpoint, model=model)
+    if status in {401, 403}:
+        return provider_diagnostic("auth-failed", "auth-failed", message or "Provider rejected the API key.", status, endpoint=endpoint, model=model)
+    if status == 404:
+        return provider_diagnostic("model-failed", "model-not-found", message or "Provider could not find that model or endpoint.", status, endpoint=endpoint, model=model)
+    if status in {400, 422}:
+        return provider_diagnostic("unreachable", "request-shape-error", message or "Provider rejected the request shape.", status, endpoint=endpoint, model=model)
+    if status >= 500:
+        return provider_diagnostic("unreachable", "provider-unavailable", message or f"Provider returned HTTP {status}.", status, endpoint=endpoint, model=model)
+    return provider_diagnostic("unreachable", "http-error", message or f"Provider returned HTTP {status}.", status, endpoint=endpoint, model=model)
+
+
+def provider_config_from_body(body: dict[str, Any]) -> dict[str, str]:
+    raw = body.get("provider_config") if isinstance(body.get("provider_config"), dict) else body
+    base_url_raw = raw.get("base_url") or raw.get("baseUrl") or ""
+    raw_model = str(raw.get("model") or "").strip()
+    api_key = str(raw.get("api_key") or raw.get("apiKey") or "").strip()
+    provider = clipped(str(raw.get("provider") or "").strip().lower(), 64)
+    if not str(base_url_raw or "").strip():
+        diagnostic = provider_diagnostic("config-missing", "missing-base-url", "Missing Base URL.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-base-url", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    base_url = normalize_provider_base_url(base_url_raw)
+    if not api_key:
+        diagnostic = provider_diagnostic("config-missing", "missing-api-key", "Missing API key.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-api-key", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    endpoint = provider_endpoint_for_base_url(base_url, provider)
+    model = normalize_provider_model(raw_model, base_url, provider)
+    if not model:
+        diagnostic = provider_diagnostic("config-missing", "missing-model", "Missing model.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-model", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    return {
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "model": model,
+        "api_key": api_key,
+        "provider": provider or provider_name_from_base_url(base_url),
+    }
+
+
+def provider_proxy_message_content(value: Any) -> str | list[dict[str, Any]]:
+    if isinstance(value, str):
+        return clipped(value.strip(), 12000)
+    if not isinstance(value, list):
+        return ""
+    parts: list[dict[str, Any]] = []
+    for item in value[:16]:
+        if not isinstance(item, dict):
+            continue
+        part_type = str(item.get("type") or "").strip().lower()
+        if part_type == "text":
+            text = clipped(str(item.get("text") or "").strip(), 12000)
+            if text:
+                parts.append({"type": "text", "text": text})
+            continue
+        if part_type == "image_url":
+            image_source = item.get("image_url")
+            if not isinstance(image_source, dict):
+                image_source = item.get("imageUrl")
+            url = ""
+            detail = ""
+            if isinstance(image_source, dict):
+                url = str(image_source.get("url") or "").strip()
+                detail = str(image_source.get("detail") or "").strip()
+            else:
+                url = str(image_source or "").strip()
+            if not url or len(url) > 2_000_000:
+                continue
+            if not (url.startswith("data:image/") or url.startswith("https://") or url.startswith("http://")):
+                continue
+            image_part: dict[str, Any] = {"type": "image_url", "image_url": {"url": url}}
+            if detail in {"low", "high", "auto"}:
+                image_part["image_url"]["detail"] = detail
+            parts.append(image_part)
+            continue
+        if part_type == "video_url":
+            video_source = item.get("videoUrl")
+            if not isinstance(video_source, dict):
+                video_source = item.get("video_url")
+            url = ""
+            if isinstance(video_source, dict):
+                url = str(video_source.get("url") or "").strip()
+            else:
+                url = str(video_source or "").strip()
+            if not url or len(url) > 7_500_000:
+                continue
+            if not (url.startswith("data:video/") or url.startswith("https://") or url.startswith("http://")):
+                continue
+            parts.append({"type": "video_url", "videoUrl": {"url": url}})
+    return parts
+
+
+def provider_proxy_messages(body: dict[str, Any], *, probe: bool = False) -> list[dict[str, Any]]:
+    raw_messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    messages: list[dict[str, Any]] = []
+    allowed_roles = {"system", "developer", "user", "assistant"}
+    for item in raw_messages[:24]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        content = provider_proxy_message_content(item.get("content"))
+        if role not in allowed_roles or not content:
+            continue
+        messages.append({"role": role, "content": content})
+    if probe and not messages:
+        return [
+            {"role": "system", "content": "Reply with exactly: wasm-agent-provider-ok"},
+            {"role": "user", "content": "Reply with exactly: wasm-agent-provider-ok"},
+        ]
+    if not messages:
+        diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider proxy request needs at least one message.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("request-shape-error", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    return messages
+
+
+def provider_error_message(payload: Any, fallback: str = "") -> str:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, str):
+            return clipped(error, 600)
+        if isinstance(error, dict):
+            return clipped(str(error.get("message") or error.get("code") or fallback), 600)
+        if payload.get("detail") or payload.get("title"):
+            return clipped(str(payload.get("detail") or payload.get("title")), 600)
+        if payload.get("message"):
+            return clipped(str(payload.get("message")), 600)
+    return clipped(fallback, 600)
+
+
+def provider_payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                parts.append(str(item.get("text") or item.get("content") or ""))
+        return "".join(parts)
+    return ""
+
+
+def provider_reply_from_payload(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices") if isinstance(payload.get("choices"), list) else []
+    choice = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    content = provider_payload_text(message.get("content"))
+    if not content:
+        content = provider_payload_text(choice.get("text"))
+    if not content:
+        content = provider_payload_text(choice.get("delta", {}).get("content") if isinstance(choice.get("delta"), dict) else "")
+    return clipped(content.strip(), 120000)
+
+
+def provider_proxy_completion(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+    probe: bool = False,
+) -> dict[str, Any]:
+    if not user:
+        diagnostic = provider_diagnostic("config-missing", "auth-required", "Account sign-in is required.", HTTPStatus.UNAUTHORIZED)
+        raise ProviderProxyError("auth_required", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.UNAUTHORIZED)
+    config = provider_config_from_body(body)
+    messages = provider_proxy_messages(body, probe=probe)
+    endpoint = config["endpoint"]
+    model = config["model"]
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": messages,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    request = Request(
+        endpoint,
+        data=data,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config['api_key']}",
+            "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} provider-proxy",
+        },
+        method="POST",
+    )
+    started = time.monotonic()
+    try:
+        with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+            raw = response.read().decode("utf-8", "replace")
+            status = int(response.status)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:2000]
+        parsed_error: Any = {}
+        try:
+            parsed_error = json.loads(detail) if detail else {}
+        except json.JSONDecodeError:
+            parsed_error = {}
+        diagnostic = provider_http_diagnostic(
+            int(exc.code),
+            provider_error_message(parsed_error, detail[:600]),
+            endpoint=endpoint,
+            model=model,
+        )
+        raise ProviderProxyError(diagnostic["category"], diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    except TimeoutError as exc:
+        diagnostic = provider_diagnostic("unreachable", "network-timeout", "Provider request timed out.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+        raise ProviderProxyError("network-timeout", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        reason = str(getattr(exc, "reason", exc))
+        category = "network-offline" if "Name or service not known" in reason or "Temporary failure" in reason else "network-failed"
+        diagnostic = provider_diagnostic("unreachable", category, reason or "Provider request failed.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+        raise ProviderProxyError(category, diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    try:
+        response_payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider returned non-JSON content.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+        raise ProviderProxyError("provider-non-json", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    if not isinstance(response_payload, dict):
+        diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider returned an unsupported response.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+        raise ProviderProxyError("provider-response-shape", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+    if status < 200 or status >= 300:
+        diagnostic = provider_http_diagnostic(status, provider_error_message(response_payload, raw[:600]), endpoint=endpoint, model=model)
+        raise ProviderProxyError(diagnostic["category"], diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+    reply = provider_reply_from_payload(response_payload)
+    if not reply:
+        diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider returned no message content.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+        raise ProviderProxyError("provider-empty-response", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+    duration_ms = round((time.monotonic() - started) * 1000)
+    return {
+        "schema": "hermes.wasm_agent.provider_proxy.v1",
+        "mode": "backend-proxy",
+        "category": "ready",
+        "base_url": config["base_url"],
+        "endpoint": endpoint,
+        "provider": config["provider"],
+        "model": clipped(str(response_payload.get("model") or model), 180),
+        "reply": reply,
+        "usage": response_payload.get("usage") if isinstance(response_payload.get("usage"), dict) else None,
+        "duration_ms": duration_ms,
+        "diagnostic": provider_diagnostic("backend-proxy", "ready", "Backend proxy provider request succeeded.", HTTPStatus.OK, endpoint=endpoint, model=model),
+    }
+
+
 def wasm_agent_deployment_mode() -> str:
     raw = os.getenv("HERMES_WASM_AGENT_DEPLOYMENT_MODE", DEPLOYMENT_MODE_LOCAL).strip().lower()
     if raw in {DEPLOYMENT_MODE_LOCAL, DEPLOYMENT_MODE_CLOUD}:
@@ -1073,9 +1504,9 @@ def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> st
     if not public_deployment(handler):
         img_src = "'self' data: blob: https:"
         connect_src = "'self' ws: wss: http://127.0.0.1:* http://localhost:* stun: turn: turns:"
-    script_src = "'self' https://accounts.google.com https://cdn.jsdelivr.net"
+    script_src = "'self' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net"
     if not public_deployment(handler):
-        script_src = "'self' 'unsafe-inline' https://accounts.google.com https://cdn.jsdelivr.net"
+        script_src = "'self' 'unsafe-inline' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net"
     return (
         "default-src 'self'; "
         f"script-src {script_src}; "
@@ -1276,6 +1707,22 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS flux_credit_ledger_tb (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          actor_user_id TEXT NOT NULL DEFAULT '',
+          amount INTEGER NOT NULL,
+          kind TEXT NOT NULL,
+          reason TEXT NOT NULL DEFAULT '',
+          idempotency_key TEXT NOT NULL DEFAULT '',
+          target TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS brain_profile_tb (
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL,
@@ -1319,6 +1766,8 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS sync_event_conversation_idx ON sync_event_tb(conversation_id, id)",
         "CREATE INDEX IF NOT EXISTS sync_event_space_idx ON sync_event_tb(shared_space_id, id)",
         "CREATE INDEX IF NOT EXISTS user_fleet_user_idx ON user_fleet_tb(user_id, is_main)",
+        "CREATE INDEX IF NOT EXISTS flux_credit_user_idx ON flux_credit_ledger_tb(user_id, created_at)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS flux_credit_idempotency_idx ON flux_credit_ledger_tb(kind, idempotency_key) WHERE idempotency_key != ''",
     ):
         conn.execute(statement)
 
@@ -1655,10 +2104,18 @@ def default_agent_target_node(user: dict[str, Any] | None) -> str:
 def ensure_agent_target_allowed(user: dict[str, Any] | None, target_node: str) -> None:
     if user_is_admin(user):
         return
-    if str(target_node or "").strip().lower() in GLOBAL_AGENT_NODE_IDS:
+    node = str(target_node or "").strip().lower()
+    if node in GLOBAL_AGENT_NODE_IDS:
         raise BrowserError(
             "agent_target_denied",
             "Only an admin can route embedded chat turns to the global orchestrator. Select an account-owned sandbox node.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+    allowed = {AGENT_DEFAULT_SANDBOX_NODE_ID, account_main_node_id(user)}
+    if node not in allowed:
+        raise BrowserError(
+            "agent_target_denied",
+            "Standard-user embedded chat can only route to the account main sandbox.",
             status=HTTPStatus.FORBIDDEN,
         )
 
@@ -3143,6 +3600,519 @@ def account_main_node_id(user: dict[str, Any] | None) -> str:
     return safe_state_id(f"u{base36_int(user_id(user))}-main", "account-main")
 
 
+def flux_main_node_provision_cost() -> int:
+    raw = os.getenv("HERMES_WASM_AGENT_MAIN_NODE_FLUX_COST", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return FLUX_MAIN_NODE_PROVISION_COST
+
+
+def append_instance_audit(
+    conn: sqlite3.Connection | None,
+    *,
+    actor_user_id: str,
+    action: str,
+    target: str = "",
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    row = {
+        "id": f"audit_{next_snowflake_id():x}",
+        "actor_user_id": str(actor_user_id or ""),
+        "action": clipped(str(action or ""), 160),
+        "target": clipped(str(target or ""), 240),
+        "created_at": int(time.time()),
+        "metadata_json": json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+    }
+    if conn is not None:
+        conn.execute(
+            """
+            INSERT INTO instance_audit_tb (id, actor_user_id, action, target, created_at, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["id"],
+                row["actor_user_id"],
+                row["action"],
+                row["target"],
+                row["created_at"],
+                row["metadata_json"],
+            ),
+        )
+        return row
+    with auth_connect() as audit_conn:
+        append_instance_audit(
+            audit_conn,
+            actor_user_id=row["actor_user_id"],
+            action=row["action"],
+            target=row["target"],
+            metadata=json.loads(row["metadata_json"]),
+        )
+    return row
+
+
+def flux_balance(conn: sqlite3.Connection, uid: str) -> int:
+    row = conn.execute(
+        "SELECT COALESCE(SUM(amount), 0) AS balance FROM flux_credit_ledger_tb WHERE user_id = ?",
+        (str(uid),),
+    ).fetchone()
+    return int(row["balance"] or 0) if row else 0
+
+
+def public_flux_ledger_row(row: sqlite3.Row) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    try:
+        parsed = json.loads(str(row["metadata_json"] or "{}"))
+        metadata = parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        metadata = {}
+    return {
+        "schema": FLUX_LEDGER_ROW_SCHEMA,
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "actor_user_id": str(row["actor_user_id"]),
+        "amount": int(row["amount"]),
+        "kind": str(row["kind"]),
+        "reason": str(row["reason"]),
+        "target": str(row["target"]),
+        "created_at": int(row["created_at"]),
+        "metadata": metadata,
+    }
+
+
+def account_credits(user: dict[str, Any] | None, *, limit: int = 25) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    uid = user_id(user)
+    with auth_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM flux_credit_ledger_tb
+             WHERE user_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?
+            """,
+            (uid, max(1, min(int(limit), 100))),
+        ).fetchall()
+        balance = flux_balance(conn, uid)
+    return {
+        "ok": True,
+        "schema": ACCOUNT_CREDITS_SCHEMA,
+        "currency": "flux",
+        "balance": balance,
+        "provision_main_cost": flux_main_node_provision_cost(),
+        "ledger": [public_flux_ledger_row(row) for row in rows],
+    }
+
+
+def parse_positive_credit_amount(value: Any) -> int:
+    if isinstance(value, bool):
+        raise BrowserError("invalid_credit_amount", "Credit amount must be a positive integer.")
+    try:
+        amount = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise BrowserError("invalid_credit_amount", "Credit amount must be a positive integer.") from exc
+    if amount <= 0:
+        raise BrowserError("invalid_credit_amount", "Credit amount must be greater than zero.")
+    return amount
+
+
+def grant_flux_credits(
+    actor: dict[str, Any] | None,
+    target_user_id: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    actor_id = user_id(actor)
+    target_id = str(target_user_id or "").strip()
+    if not actor or not user_is_admin(actor):
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": "non_admin"},
+        )
+        raise BrowserError("admin_required", "Admin access is required.", status=HTTPStatus.FORBIDDEN)
+    if not target_id.isdigit():
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": "invalid_target"},
+        )
+        raise BrowserError("invalid_credit_target", "Credit target user id is invalid.")
+    if target_id == actor_id:
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": "self_grant"},
+        )
+        raise BrowserError("credit_self_grant_denied", "Admins cannot grant Flux credits to themselves.", status=HTTPStatus.FORBIDDEN)
+    try:
+        amount = parse_positive_credit_amount(body.get("amount"))
+    except BrowserError as exc:
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": exc.code, "amount": body.get("amount")},
+        )
+        raise
+    reason = clipped(str(body.get("reason") or "").strip(), 300)
+    if not reason:
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": "missing_credit_reason", "amount": amount},
+        )
+        raise BrowserError("missing_credit_reason", "Credit grant reason is required.")
+    idempotency_key = clipped(str(body.get("idempotency_key") or body.get("idempotencyKey") or "").strip(), 160)
+    if not idempotency_key:
+        append_instance_audit(
+            None,
+            actor_user_id=actor_id,
+            action="credits.grant.denied",
+            target=f"user:{target_id}",
+            metadata={"reason": "missing_idempotency_key", "amount": amount},
+        )
+        raise BrowserError("missing_idempotency_key", "Credit grants require an idempotency key.")
+    now = int(time.time())
+    with auth_connect() as conn:
+        target_row = lookup_user_row(conn, target_id)
+        if not target_row:
+            append_instance_audit(
+                conn,
+                actor_user_id=actor_id,
+                action="credits.grant.denied",
+                target=f"user:{target_id}",
+                metadata={"reason": "target_missing", "amount": amount},
+            )
+            conn.commit()
+            raise BrowserError("credit_target_not_found", "Credit target user was not found.", status=HTTPStatus.NOT_FOUND)
+        if is_admin_email(str(target_row["email"])):
+            append_instance_audit(
+                conn,
+                actor_user_id=actor_id,
+                action="credits.grant.denied",
+                target=f"user:{target_id}",
+                metadata={"reason": "admin_target", "amount": amount},
+            )
+            conn.commit()
+            raise BrowserError("credit_admin_target_denied", "Flux credits cannot be granted to admin accounts.", status=HTTPStatus.FORBIDDEN)
+        duplicate = conn.execute(
+            "SELECT * FROM flux_credit_ledger_tb WHERE kind = 'grant' AND idempotency_key = ?",
+            (idempotency_key,),
+        ).fetchone()
+        if duplicate:
+            append_instance_audit(
+                conn,
+                actor_user_id=actor_id,
+                action="credits.grant.denied",
+                target=f"user:{target_id}",
+                metadata={"reason": "duplicate_idempotency_key", "amount": amount, "idempotency_key": idempotency_key},
+            )
+            conn.commit()
+            raise BrowserError("duplicate_idempotency_key", "That Flux credit grant idempotency key was already used.", status=HTTPStatus.CONFLICT)
+        ledger_id = f"flux_{next_snowflake_id():x}"
+        conn.execute(
+            """
+            INSERT INTO flux_credit_ledger_tb (
+              id, user_id, actor_user_id, amount, kind, reason, idempotency_key, target, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, 'grant', ?, ?, ?, ?, ?)
+            """,
+            (
+                ledger_id,
+                target_id,
+                actor_id,
+                amount,
+                reason,
+                idempotency_key,
+                f"user:{target_id}",
+                now,
+                json.dumps({"granted_by_email": actor.get("email") or ""}, ensure_ascii=True, sort_keys=True),
+            ),
+        )
+        append_instance_audit(
+            conn,
+            actor_user_id=actor_id,
+            action="credits.grant",
+            target=f"user:{target_id}",
+            metadata={"amount": amount, "reason": reason, "idempotency_key": idempotency_key},
+        )
+        row = conn.execute("SELECT * FROM flux_credit_ledger_tb WHERE id = ?", (ledger_id,)).fetchone()
+        balance = flux_balance(conn, target_id)
+    return {
+        "ok": True,
+        "schema": ACCOUNT_CREDITS_SCHEMA,
+        "currency": "flux",
+        "balance": balance,
+        "ledger_row": public_flux_ledger_row(row) if row else None,
+    }
+
+
+def parse_node_env_file(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                value = value[1:-1]
+        values[key] = str(value)
+    return values
+
+
+def agents_root(server: WasmAgentServer) -> Path:
+    raw = os.getenv("HERMES_AGENTS_ROOT", "").strip()
+    return Path(raw).expanduser().resolve() if raw else (repo_root(server) / "agents").resolve()
+
+
+def account_node_runtime_url_source(server: WasmAgentServer, node_id: str) -> tuple[str, str]:
+    node = safe_state_id(node_id, "")
+    if not node:
+        return "", "missing_account_sandbox_url"
+    env_node = node.upper().replace("-", "_")
+    explicit_key = f"HERMES_WASM_AGENT_BRIDGE_API_SERVER_{env_node}_URL"
+    explicit = os.getenv(explicit_key, "").strip()
+    if explicit:
+        return explicit.rstrip("/"), explicit_key
+    env_path = agents_root(server) / "envs" / f"{node}.env"
+    env = parse_node_env_file(env_path)
+    port = str(env.get("API_SERVER_PORT") or "").strip()
+    if port:
+        host = str(env.get("API_SERVER_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+        return f"http://{host}:{port}".rstrip("/"), str(env_path)
+    return "", "missing_account_sandbox_url"
+
+
+def onboarding_options_for_readiness(user: dict[str, Any] | None, status: str) -> list[dict[str, Any]]:
+    if user_is_admin(user) or status == AGENT_READINESS_READY:
+        return []
+    return [
+        {
+            "id": "direct_provider_key",
+            "label": "Use my API key",
+            "scope": "browser-only",
+            "stores": "client_state",
+            "backend_tools": False,
+        },
+        {
+            "id": "flux_credits",
+            "label": "Use Flux credits",
+            "endpoint": "/fleet/nodes/provision-main",
+            "cost": flux_main_node_provision_cost(),
+            "provider": FLUX_MAIN_NODE_PROVIDER,
+            "model": FLUX_MAIN_NODE_MODEL,
+        },
+    ]
+
+
+def readiness_payload(
+    *,
+    user: dict[str, Any] | None,
+    requested_target_node: str,
+    target_node: str,
+    resolved_account_node: str,
+    status: str,
+    bridge_url_source: str,
+    message: str,
+    missing_dependency: str = "",
+    bridge_url: str = "",
+    account_sandbox_url: str = "",
+    backend: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "schema": AGENT_READINESS_SCHEMA,
+        "status": status,
+        "ready": status == AGENT_READINESS_READY,
+        "target_node": target_node,
+        "requested_target_node": requested_target_node,
+        "resolved_account_node": resolved_account_node,
+        "bridge_url_source": bridge_url_source,
+        "bridge_url": bridge_url,
+        "account_sandbox_url": account_sandbox_url,
+        "message": message,
+        "missing_dependency": missing_dependency,
+        "backend": backend or {},
+        "onboarding_options": onboarding_options_for_readiness(user, status),
+    }
+
+
+def bridge_health_probe(server: WasmAgentServer) -> dict[str, Any]:
+    payload = bridge_proxy(server, "GET", "/health", None)
+    health = payload.get("health") if isinstance(payload.get("health"), dict) else payload
+    return health if isinstance(health, dict) else {}
+
+
+def bridge_node_probe(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
+    payload = bridge_proxy(server, "GET", f"/nodes/{quote(node_id, safe='')}", None)
+    node = payload.get("node") if isinstance(payload.get("node"), dict) else payload.get("result")
+    return node if isinstance(node, dict) else {}
+
+
+def readiness_node_running(node: dict[str, Any]) -> bool:
+    return bool(node.get("running")) or str(node.get("status") or "").lower() in {"running", "ok", "ready"}
+
+
+def agent_readiness(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    *,
+    target_node: str = "",
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    requested = safe_state_id(str(target_node or default_agent_target_node(user)), default_agent_target_node(user))
+    ensure_agent_target_allowed(user, requested)
+    if user_is_admin(user):
+        try:
+            health = bridge_health_probe(server)
+        except BrowserError as exc:
+            return readiness_payload(
+                user=user,
+                requested_target_node=requested,
+                target_node=requested,
+                resolved_account_node="",
+                status=AGENT_READINESS_BACKEND_UNAVAILABLE,
+                bridge_url_source="global_bridge_url",
+                bridge_url=server.bridge_url,
+                message=f"Agent backend unavailable: {exc.message}",
+                missing_dependency="wasm_agent_bridge",
+                backend={"error": exc.code, "detail": exc.message},
+            )
+        try:
+            node = bridge_node_probe(server, requested)
+        except BrowserError as exc:
+            return readiness_payload(
+                user=user,
+                requested_target_node=requested,
+                target_node=requested,
+                resolved_account_node="",
+                status=AGENT_READINESS_BACKEND_UNAVAILABLE,
+                bridge_url_source="global_bridge_url",
+                bridge_url=server.bridge_url,
+                message=f"Agent backend unavailable: selected node `{requested}` could not be inspected.",
+                missing_dependency="selected_node",
+                backend={"bridge": health, "error": exc.code, "detail": exc.message},
+            )
+        if not readiness_node_running(node):
+            return readiness_payload(
+                user=user,
+                requested_target_node=requested,
+                target_node=requested,
+                resolved_account_node="",
+                status=AGENT_READINESS_BACKEND_UNAVAILABLE,
+                bridge_url_source="global_bridge_url",
+                bridge_url=server.bridge_url,
+                message=f"Agent backend unavailable: selected node `{requested}` is not running.",
+                missing_dependency="selected_node_not_running",
+                backend={"bridge": health, "node": node},
+            )
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=requested,
+            resolved_account_node="",
+            status=AGENT_READINESS_READY,
+            bridge_url_source="global_bridge_url",
+            bridge_url=server.bridge_url,
+            message="Agent ready",
+            backend={"bridge": health, "node": node},
+        )
+
+    account_node = account_main_node_id(user)
+    runtime_url, runtime_source = account_node_runtime_url_source(server, account_node)
+    if not runtime_url:
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=account_node,
+            resolved_account_node=account_node,
+            status=AGENT_READINESS_SANDBOX_NOT_PROVISIONED,
+            bridge_url_source=runtime_source,
+            bridge_url=server.bridge_url,
+            message="Agent not set",
+            missing_dependency="account_sandbox_api_url",
+        )
+    try:
+        health = bridge_health_probe(server)
+    except BrowserError as exc:
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=account_node,
+            resolved_account_node=account_node,
+            status=AGENT_READINESS_BACKEND_UNAVAILABLE,
+            bridge_url_source=runtime_source,
+            bridge_url=server.bridge_url,
+            account_sandbox_url=runtime_url,
+            message=f"Agent backend unavailable: {exc.message}",
+            missing_dependency="wasm_agent_bridge",
+            backend={"error": exc.code, "detail": exc.message},
+        )
+    try:
+        node = bridge_node_probe(server, account_node)
+    except BrowserError as exc:
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=account_node,
+            resolved_account_node=account_node,
+            status=AGENT_READINESS_SANDBOX_NOT_PROVISIONED,
+            bridge_url_source=runtime_source,
+            bridge_url=server.bridge_url,
+            account_sandbox_url=runtime_url,
+            message=f"Agent not set: {exc.message}",
+            missing_dependency="account_sandbox_node",
+            backend={"bridge": health, "error": exc.code, "detail": exc.message},
+        )
+    if not readiness_node_running(node):
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=account_node,
+            resolved_account_node=account_node,
+            status=AGENT_READINESS_SANDBOX_NOT_PROVISIONED,
+            bridge_url_source=runtime_source,
+            bridge_url=server.bridge_url,
+            account_sandbox_url=runtime_url,
+            message="Agent not set",
+            missing_dependency="account_sandbox_node_running",
+            backend={"bridge": health, "node": node},
+        )
+    return readiness_payload(
+        user=user,
+        requested_target_node=requested,
+        target_node=account_node,
+        resolved_account_node=account_node,
+        status=AGENT_READINESS_READY,
+        bridge_url_source=runtime_source,
+        bridge_url=server.bridge_url,
+        account_sandbox_url=runtime_url,
+        message="Agent ready",
+        backend={"bridge": health, "node": node},
+    )
+
+
 def public_fleet_node(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "schema": USER_FLEET_NODE_SCHEMA,
@@ -3194,6 +4164,251 @@ def ensure_main_fleet_node(user: dict[str, Any] | None, body: dict[str, Any]) ->
         "node": node,
         "provisioned": False,
         "note": "Reserved owned Hermes node metadata; backend provisioning is an explicit premium/heavy action.",
+    }
+
+
+def ensure_main_fleet_node_in_conn(conn: sqlite3.Connection, user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
+    uid = user_id(user)
+    now = int(time.time())
+    conn.execute("UPDATE user_fleet_tb SET is_main = 0, updated_at = ? WHERE user_id = ?", (now, uid))
+    conn.execute(
+        """
+        INSERT INTO user_fleet_tb (user_id, node_id, role, is_main, created_at, updated_at)
+        VALUES (?, ?, 'owner', 1, ?, ?)
+        ON CONFLICT(user_id, node_id) DO UPDATE SET is_main = 1, updated_at = excluded.updated_at
+        """,
+        (uid, node_id, now, now),
+    )
+    row = conn.execute("SELECT * FROM user_fleet_tb WHERE user_id = ? AND node_id = ?", (uid, node_id)).fetchone()
+    return public_fleet_node(row) if row else {}
+
+
+def validate_provision_main_body(user: dict[str, Any] | None, body: dict[str, Any], node_id: str) -> None:
+    denied_node = str(body.get("node_id") or body.get("node") or body.get("name") or body.get("target_node") or "").strip()
+    if denied_node and safe_state_id(denied_node, "") != node_id:
+        raise BrowserError("provision_node_denied", "Provisioning only supports the authenticated user's deterministic main node.", status=HTTPStatus.FORBIDDEN)
+    denied_provider = str(body.get("provider") or body.get("default_model_provider") or "").strip()
+    if denied_provider and denied_provider != FLUX_MAIN_NODE_PROVIDER:
+        raise BrowserError("provision_provider_denied", "Provisioning uses the fixed DeepSeek v4 Flash premium provider.", status=HTTPStatus.FORBIDDEN)
+    denied_model = str(body.get("model") or body.get("default_model") or "").strip()
+    if denied_model and denied_model != FLUX_MAIN_NODE_MODEL:
+        raise BrowserError("provision_model_denied", "Provisioning uses the fixed DeepSeek v4 Flash premium model.", status=HTTPStatus.FORBIDDEN)
+    agent_type = str(body.get("agent_type") or body.get("type") or "hermes").strip().lower()
+    if agent_type and agent_type != "hermes":
+        raise BrowserError("provision_agent_type_denied", "Only Hermes service agents are available right now.", status=HTTPStatus.FORBIDDEN)
+
+
+def provision_main_bridge_payload(node_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    body = body if isinstance(body, dict) else {}
+    agent_name = str(body.get("agent_name") or body.get("agentName") or "My agent").strip()[:80] or "My agent"
+    agent_role = str(body.get("agent_role") or body.get("instructions") or body.get("role") or "").strip()[:2000]
+    role_suffix = f"\n\nAgent name: {agent_name}."
+    if agent_role:
+        role_suffix += f"\nRole/Instructions: {agent_role}"
+    return {
+        "node_id": node_id,
+        "node_state": "4",
+        "default_model_provider": FLUX_MAIN_NODE_PROVIDER,
+        "default_model": FLUX_MAIN_NODE_MODEL,
+        "start_immediately": True,
+        "personality": (
+            "You are this account's bounded Hermes sandbox. Stay inside the authenticated user's "
+            "workspace and do not mutate wasm-agent core firmware unless an admin-orchestrator path explicitly delegates it."
+            f"{role_suffix}"
+        ),
+    }
+
+
+def provision_main_fleet_node(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    if not user:
+        append_instance_audit(
+            None,
+            actor_user_id="",
+            action="fleet.provision_main.denied",
+            target="node:",
+            metadata={"reason": "auth_required"},
+        )
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    if user_is_admin(user):
+        append_instance_audit(
+            None,
+            actor_user_id=user_id(user),
+            action="fleet.provision_main.denied",
+            target="node:",
+            metadata={"reason": "admin_self_provision"},
+        )
+        raise BrowserError("admin_provision_denied", "Admin accounts do not self-provision paid account sandboxes.", status=HTTPStatus.FORBIDDEN)
+    uid = user_id(user)
+    node_id = account_main_node_id(user)
+    try:
+        validate_provision_main_body(user, body, node_id)
+    except BrowserError as exc:
+        append_instance_audit(
+            None,
+            actor_user_id=uid,
+            action="fleet.provision_main.denied",
+            target=f"node:{node_id}",
+            metadata={
+                "reason": exc.code,
+                "requested_node": str(body.get("node_id") or body.get("node") or body.get("name") or body.get("target_node") or ""),
+                "requested_provider": str(body.get("provider") or body.get("default_model_provider") or ""),
+                "requested_model": str(body.get("model") or body.get("default_model") or ""),
+            },
+        )
+        raise
+    idempotency_key = clipped(str(body.get("idempotency_key") or body.get("idempotencyKey") or "").strip(), 160)
+
+    readiness = agent_readiness(server, user, target_node=node_id)
+    if readiness.get("status") == AGENT_READINESS_READY:
+        with auth_connect() as conn:
+            node = ensure_main_fleet_node_in_conn(conn, user, node_id)
+            append_instance_audit(
+                conn,
+                actor_user_id=uid,
+                action="fleet.provision_main.existing",
+                target=f"node:{node_id}",
+                metadata={"debited": False, "readiness": readiness},
+            )
+            credits = {
+                "balance": flux_balance(conn, uid),
+                "provision_main_cost": flux_main_node_provision_cost(),
+            }
+        return {
+            "ok": True,
+            "schema": FLUX_PROVISION_SCHEMA,
+            "node": node,
+            "node_id": node_id,
+            "provisioned": False,
+            "already_provisioned": True,
+            "debited": False,
+            "credits": credits,
+            "readiness": readiness,
+        }
+
+    cost = flux_main_node_provision_cost()
+    bridge_payload = provision_main_bridge_payload(node_id, body)
+    conn = auth_connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if idempotency_key:
+            duplicate = conn.execute(
+                "SELECT * FROM flux_credit_ledger_tb WHERE kind = 'provision' AND idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if duplicate:
+                append_instance_audit(
+                    conn,
+                    actor_user_id=uid,
+                    action="fleet.provision_main.denied",
+                    target=f"node:{node_id}",
+                    metadata={"reason": "duplicate_idempotency_key", "idempotency_key": idempotency_key},
+                )
+                raise BrowserError("duplicate_idempotency_key", "That provisioning idempotency key was already used.", status=HTTPStatus.CONFLICT)
+        balance = flux_balance(conn, uid)
+        if balance < cost:
+            append_instance_audit(
+                conn,
+                actor_user_id=uid,
+                action="fleet.provision_main.denied",
+                target=f"node:{node_id}",
+                metadata={"reason": "insufficient_credits", "balance": balance, "cost": cost},
+            )
+            raise BrowserError("insufficient_flux_credits", "Not enough Flux credits to provision the account sandbox.", status=HTTPStatus.PAYMENT_REQUIRED)
+        ledger_id = f"flux_{next_snowflake_id():x}"
+        conn.execute(
+            """
+            INSERT INTO flux_credit_ledger_tb (
+              id, user_id, actor_user_id, amount, kind, reason, idempotency_key, target, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, 'provision', ?, ?, ?, ?, ?)
+            """,
+            (
+                ledger_id,
+                uid,
+                uid,
+                -cost,
+                f"Provision main sandbox {node_id}",
+                idempotency_key,
+                f"node:{node_id}",
+                int(time.time()),
+                json.dumps(
+                    {
+                        "provider": FLUX_MAIN_NODE_PROVIDER,
+                        "model": FLUX_MAIN_NODE_MODEL,
+                        "node_state": "4",
+                        "agent_name": str(body.get("agent_name") or body.get("agentName") or "My agent").strip()[:80] or "My agent",
+                        "agent_type": str(body.get("agent_type") or "hermes").strip().lower() or "hermes",
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            ),
+        )
+        node = ensure_main_fleet_node_in_conn(conn, user, node_id)
+        bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload)
+        append_instance_audit(
+            conn,
+            actor_user_id=uid,
+            action="fleet.provision_main",
+            target=f"node:{node_id}",
+            metadata={
+                "cost": cost,
+                "ledger_id": ledger_id,
+                "provider": FLUX_MAIN_NODE_PROVIDER,
+                "model": FLUX_MAIN_NODE_MODEL,
+                "bridge_result": compact_json(bridge_result, 1200),
+            },
+        )
+        row = conn.execute("SELECT * FROM flux_credit_ledger_tb WHERE id = ?", (ledger_id,)).fetchone()
+        credits = {
+            "balance": flux_balance(conn, uid),
+            "provision_main_cost": cost,
+            "ledger_row": public_flux_ledger_row(row) if row else None,
+        }
+        conn.execute("COMMIT")
+    except Exception as exc:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.DatabaseError:
+            pass
+        if isinstance(exc, BrowserError):
+            append_instance_audit(
+                None,
+                actor_user_id=uid,
+                action="fleet.provision_main.denied",
+                target=f"node:{node_id}",
+                metadata={"error": exc.code, "message": exc.message, "cost": cost},
+            )
+            raise
+        append_instance_audit(
+            None,
+            actor_user_id=uid,
+            action="fleet.provision_main.failed",
+            target=f"node:{node_id}",
+            metadata={"error": str(exc), "cost": cost},
+        )
+        raise
+    finally:
+        conn.close()
+
+    next_readiness = agent_readiness(server, user, target_node=node_id)
+    return {
+        "ok": True,
+        "schema": FLUX_PROVISION_SCHEMA,
+        "node": node,
+        "node_id": node_id,
+        "provisioned": True,
+        "already_provisioned": False,
+        "debited": True,
+        "cost": cost,
+        "provider": FLUX_MAIN_NODE_PROVIDER,
+        "model": FLUX_MAIN_NODE_MODEL,
+        "bridge": bridge_result,
+        "credits": credits,
+        "readiness": next_readiness,
     }
 
 
@@ -6132,6 +7347,7 @@ def agent_action_events(
     before_checkpoint: dict[str, Any] | None,
     changed: list[dict[str, Any]],
     bridge_trace: dict[str, Any] | None,
+    readiness: dict[str, Any] | None,
     mutation_policy: dict[str, Any] | None,
     wis_patch_result: dict[str, Any] | None,
     mutation_result: dict[str, Any] | None,
@@ -6157,6 +7373,18 @@ def agent_action_events(
             "detail": str(mutation_policy.get("scope") or "scope"),
             "meta": "write boundary",
             "preview": compact_json(mutation_policy, 900),
+        })
+    if readiness:
+        ready = bool(readiness.get("ready"))
+        actions.append({
+            "id": "agent_readiness",
+            "topic": "run-hermes",
+            "kind": "model",
+            "label": "Agent readiness",
+            "status": "done" if ready else "error",
+            "detail": str(readiness.get("missing_dependency") or readiness.get("status") or ""),
+            "meta": str(readiness.get("message") or ""),
+            "preview": compact_json(readiness, 1200),
         })
     for index, tool in enumerate(tools, 1):
         actions.append(tool_action_event(tool, index))
@@ -8189,6 +9417,22 @@ def deterministic_agent_reply(message: str, tools: list[dict[str, Any]], reason:
     )
 
 
+def readiness_blocked_agent_reply(message: str, tools: list[dict[str, Any]], readiness: dict[str, Any]) -> str:
+    missing = str(readiness.get("missing_dependency") or readiness.get("status") or "agent_readiness").strip()
+    status = str(readiness.get("status") or AGENT_READINESS_BACKEND_UNAVAILABLE)
+    readable = str(readiness.get("message") or "Agent is not ready.").strip()
+    local = deterministic_agent_reply(
+        message,
+        tools,
+        f"Answered locally because `{missing}` is not available",
+    )
+    return (
+        f"{readable}\n\n"
+        f"Missing dependency: `{missing}`. Readiness status: `{status}`.\n\n"
+        f"{local}"
+    ).strip()
+
+
 def embedded_agent_message(
     server: WasmAgentServer,
     body: dict[str, Any],
@@ -8202,9 +9446,15 @@ def embedded_agent_message(
     mode = str(body.get("mode") or "auto").strip().lower()
     if mode not in {"auto", "local", "bridge"}:
         raise BrowserError("agent_invalid_mode", "Agent mode must be auto, local, or bridge.")
-    target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or default_agent_target_node(user))
-    ensure_agent_target_allowed(user, target_node)
+    requested_target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or default_agent_target_node(user))
+    ensure_agent_target_allowed(user, requested_target_node)
+    target_node = (
+        account_main_node_id(user)
+        if not user_is_admin(user) and requested_target_node == AGENT_DEFAULT_SANDBOX_NODE_ID
+        else requested_target_node
+    )
     selected_model = requested_agent_model(body)
+    readiness_result: dict[str, Any] | None = None
     mutation_policy = agent_mutation_policy(server, user, target_node)
     def emit_step(
         action_id: str,
@@ -8228,6 +9478,26 @@ def embedded_agent_message(
                 "meta": meta,
                 "preview": preview,
             })
+
+    def ensure_bridge_readiness() -> dict[str, Any]:
+        nonlocal target_node, readiness_result, mutation_policy
+        if readiness_result is None:
+            readiness_result = agent_readiness(server, user, target_node=requested_target_node)
+            resolved = str(readiness_result.get("target_node") or target_node)
+            if resolved and resolved != target_node:
+                target_node = resolved
+                mutation_policy = agent_mutation_policy(server, user, target_node)
+            emit_step(
+                "agent_readiness",
+                "Agent readiness",
+                "done" if readiness_result.get("ready") else "error",
+                str(readiness_result.get("missing_dependency") or readiness_result.get("status") or ""),
+                topic="run-hermes",
+                kind="model",
+                meta=str(readiness_result.get("message") or ""),
+                preview=compact_json(readiness_result, 1200),
+            )
+        return readiness_result
 
     emit_step("turn_intake", "Receive chat turn", "done", f"{target_node} / {mode}", kind="turn")
     emit_step(
@@ -8298,19 +9568,30 @@ def embedded_agent_message(
                 "meta": (selected_model or {}).get("id") or "waiting",
             })
         focus_tools = redact_image_card_focus_tools([attachment_manifest] if attachment_manifest else tools)
-        reply, source, token_usage, bridge_trace = call_agent_bridge(
-            server,
-            message,
-            focus_tools,
-            transcript,
-            target_node,
-            selected_model=selected_model,
-            images=None,
-            image_card_focus=True,
-            mutation_policy=mutation_policy,
-            action_callback=action_callback,
-        )
-        if source.startswith("local_"):
+        readiness = ensure_bridge_readiness()
+        if not readiness.get("ready"):
+            reply = readiness_blocked_agent_reply(message, tools, readiness)
+            source = "local_readiness_fallback"
+            token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "source": "local_readiness_fallback",
+            }
+        else:
+            reply, source, token_usage, bridge_trace = call_agent_bridge(
+                server,
+                message,
+                focus_tools,
+                transcript,
+                target_node,
+                selected_model=selected_model,
+                images=None,
+                image_card_focus=True,
+                mutation_policy=mutation_policy,
+                action_callback=action_callback,
+            )
+        if source.startswith("local_") and source != "local_readiness_fallback":
             reply = deterministic_agent_reply(
                 message,
                 tools,
@@ -8348,17 +9629,28 @@ def embedded_agent_message(
                 "detail": f"{target_node} / {mode}",
                 "meta": (selected_model or {}).get("id") or "waiting",
             })
-        reply, source, token_usage, bridge_trace = call_agent_bridge(
-            server,
-            message,
-            tools,
-            transcript,
-            target_node,
-            selected_model=selected_model,
-            images=bridge_images,
-            mutation_policy=mutation_policy,
-            action_callback=action_callback,
-        )
+        readiness = ensure_bridge_readiness()
+        if not readiness.get("ready"):
+            reply = readiness_blocked_agent_reply(message, tools, readiness)
+            source = "local_readiness_fallback"
+            token_usage = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "source": "local_readiness_fallback",
+            }
+        else:
+            reply, source, token_usage, bridge_trace = call_agent_bridge(
+                server,
+                message,
+                tools,
+                transcript,
+                target_node,
+                selected_model=selected_model,
+                images=bridge_images,
+                mutation_policy=mutation_policy,
+                action_callback=action_callback,
+            )
     reply = correct_negative_symbol_reply(server, message, reply)
     emit_step("decode_hermes_response", "Decode Hermes response", "done", source, topic="run-hermes", kind="trace")
     space_id = safe_state_id(str(body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home")
@@ -8472,6 +9764,7 @@ def embedded_agent_message(
             before_checkpoint=before_checkpoint,
             changed=files,
             bridge_trace=bridge_trace,
+            readiness=readiness_result,
             mutation_policy=mutation_policy,
             wis_patch_result=wis_patch_result,
             mutation_result=mutation_result,
@@ -8490,6 +9783,8 @@ def embedded_agent_message(
             "selected_model": selected_model,
             "model_tokens_avoided": source.startswith("local_"),
             "bridge_trace": bridge_trace,
+            "readiness": readiness_result,
+            "missing_dependency": (readiness_result or {}).get("missing_dependency") or "",
             "mutation_policy": mutation_policy,
             "wis_patch_result": wis_patch_result,
             "mutation_result": mutation_result,

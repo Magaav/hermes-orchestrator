@@ -424,6 +424,15 @@ class PeopleChatBrowserAcceptanceTest(unittest.TestCase):
         self.pages.append(page)
         return page
 
+    def _set_mobile_viewport(self, page: BrowserPage, *, width: int = 360, height: int = 740) -> None:
+        page.page.call("Emulation.setDeviceMetricsOverride", {
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": 2,
+            "mobile": True,
+        })
+        page.reload()
+
     def _open_people(self, page: BrowserPage) -> None:
         page.evaluate(
             """(() => {
@@ -653,6 +662,20 @@ class PeopleChatBrowserAcceptanceTest(unittest.TestCase):
         bob.wait("!Array.from(document.querySelectorAll('.agent-person-row.friend')).some((row) => row.textContent.includes('Alice'))", timeout=12)
         self.assertNotIn("request sent", self._people_has_no_pending(alice))
         self.assertNotIn("wants to connect", self._people_has_no_pending(bob))
+
+    def test_mobile_shared_space_agent_requires_setup_without_target(self) -> None:
+        bob = self._new_browser_page("bob-mobile", self.bob, f"/spaces/{self.bob_space_id}")
+        self._set_mobile_viewport(bob, width=360, height=740)
+        bob.wait(f"document.querySelector('#app')?.dataset.activeSpace === {json.dumps(self.bob_space_id)}", timeout=15)
+        self._open_agent(bob)
+        bob.wait("document.querySelector('#agentStatus')?.textContent.includes('No model')", timeout=12)
+        self._send_agent_text(bob, "Hello")
+        bob.wait("!document.querySelector('#agentOnboardingPanel')?.hidden", timeout=12)
+        messages = str(bob.evaluate("document.querySelector('#agentMessages')?.textContent || ''") or "")
+        setup = str(bob.evaluate("document.querySelector('#agentOnboardingPanel')?.textContent || ''") or "")
+        self.assertIn("Set one provider or agent", setup)
+        self.assertNotIn("Sandbox agent not " + "provisioned", messages + setup)
+        self.assertNotIn("503", messages)
 
 
 if __name__ == "__main__":

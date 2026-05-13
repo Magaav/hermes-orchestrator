@@ -24,8 +24,13 @@ const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABag
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
 const SPACE_WIDGET_LAYOUTS_STORAGE_KEY = "wasmAgent.spaceWidgetLayouts.v2";
 const AGENT_SESSIONS_STORAGE_KEY = "wasmAgent.agentSessions.v1";
+const AGENT_ACTIVE_SESSION_STORAGE_KEY = "wasmAgent.activeSession.v1";
 const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
 const AGENT_MODELS_STORAGE_KEY = "wasmAgent.agentModels.v1";
+const AGENT_IMAGE_PROCESSING_STORAGE_KEY = "wasmAgent.imageProcessing.v1";
+const AGENT_DIRECT_PROVIDER_STORAGE_KEY = "wasmAgent.directProvider.v1";
+const AGENT_OWNED_AGENT_STORAGE_KEY = "wasmAgent.ownedAgent.v1";
+const AGENT_DIRECT_PROVIDER_KEY_MASK = "saved-key";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
@@ -87,10 +92,61 @@ const NODE_ACTIVITY_FRESH_GRACE_SEC = 5;
 const BRIDGE_TASK_ACTIVE_MAX_AGE_MS = 45 * 60 * 1000;
 const DEFAULT_AGENT_TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const AGENT_CHAT_BOTTOM_EPSILON_PX = 8;
+const AGENT_PROVIDER_PROBE_TTL_MS = 5 * 60 * 1000;
+const AGENT_PROVIDER_TRANSPORTS = Object.freeze({
+  AUTO: "auto",
+  BROWSER_DIRECT: "browser-direct",
+  BACKEND_PROXY: "backend-proxy",
+});
+const AGENT_PROVIDER_TARGET_ID = "__provider:direct__";
+const AGENT_SET_PROVIDER_TARGET_ID = "__set_provider__";
+const AGENT_SET_HERMES_TARGET_ID = "__set_hermes__";
+const AGENT_NONE_TARGET_ID = "__target:none__";
+const AGENT_NEW_CONFIG_TARGET_ID = "__target:new__";
+const AGENT_EDIT_CONFIG_TARGET_ID = "__target:edit__";
+const AGENT_OWNED_AGENT_TARGET_ID = "__agent:owned__";
+const AGENT_MODEL_TARGET_PREFIX = "__target:model:";
+const AGENT_MESSAGE_MENU_WIDTH_PX = 156;
+const AGENT_MESSAGE_MENU_HEIGHT_PX = 44;
+const AGENT_PROVIDER_IMAGE_PART_MAX_CHARS = 1024 * 1024;
+const AGENT_PROVIDER_IMAGE_PART_TOTAL_MAX_CHARS = 6 * 1024 * 1024;
+const AGENT_PROVIDER_VIDEO_PART_MAX_CHARS = 6 * 1024 * 1024;
+const AGENT_PROVIDER_PROXY_FIRST_PROVIDERS = new Set([
+  "dashscope",
+  "deepseek",
+  "google",
+  "groq",
+  "mistral",
+  "moonshot",
+  "openai",
+  "opencode-go",
+  "opencode-zen",
+  "openrouter",
+  "perplexity",
+  "xai",
+]);
+const AGENT_PROVIDER_PROXY_FIRST_HOSTS = new Set([
+  "api.deepseek.com",
+  "api.groq.com",
+  "api.mistral.ai",
+  "api.moonshot.ai",
+  "api.openai.com",
+  "api.perplexity.ai",
+  "api.x.ai",
+  "dashscope.aliyuncs.com",
+  "generativelanguage.googleapis.com",
+  "openrouter.ai",
+  "opencode.ai",
+]);
+const AGENT_MESSAGE_LONG_PRESS_MS = 520;
 const AGENT_MAX_IMAGES = 8;
 const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
 const AGENT_PANEL_VIEWPORT_GAP_PX = 0;
 const AGENT_PANEL_AVATAR_GAP_PX = AGENT_AVATAR_VIEWPORT_GAP_PX;
+const AGENT_PANEL_DEFAULT_WIDTH_PX = 430;
+const AGENT_PANEL_DEFAULT_HEIGHT_PX = 620;
+const AGENT_PANEL_MIN_WIDTH_PX = 320;
+const AGENT_PANEL_MIN_HEIGHT_PX = 420;
 const AGENT_IMAGE_MAX_EDGE = 1280;
 const AGENT_IMAGE_MAX_BYTES = 384 * 1024;
 const AGENT_IMAGE_TOTAL_MAX_BYTES = 1400 * 1024;
@@ -178,6 +234,7 @@ const els = {
   joinSpaceButton: document.querySelector("#joinSpaceButton"),
   homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
+  homeMarketButton: document.querySelector("#homeMarketButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
   fleetModal: document.querySelector("#fleetModal"),
   closeFleetModalButton: document.querySelector("#closeFleetModalButton"),
@@ -248,6 +305,14 @@ const els = {
   resetNodeEditButton: document.querySelector("#resetNodeEditButton"),
   saveNodeEditButton: document.querySelector("#saveNodeEditButton"),
   closeNodeEditModalButton: document.querySelector("#closeNodeEditModalButton"),
+  creditGrantModal: document.querySelector("#creditGrantModal"),
+  creditGrantForm: document.querySelector("#creditGrantForm"),
+  creditGrantTarget: document.querySelector("#creditGrantTarget"),
+  creditGrantAmountInput: document.querySelector("#creditGrantAmountInput"),
+  creditGrantReasonInput: document.querySelector("#creditGrantReasonInput"),
+  creditGrantStatus: document.querySelector("#creditGrantStatus"),
+  closeCreditGrantButton: document.querySelector("#closeCreditGrantButton"),
+  cancelCreditGrantButton: document.querySelector("#cancelCreditGrantButton"),
   securityEvidenceModal: document.querySelector("#securityEvidenceModal"),
   securityEvidenceTitle: document.querySelector("#securityEvidenceTitle"),
   securityEvidenceMeta: document.querySelector("#securityEvidenceMeta"),
@@ -306,6 +371,7 @@ const els = {
   agentOverlay: document.querySelector("#agentOverlay"),
   agentAvatarButton: document.querySelector("#agentAvatarButton"),
   agentPanel: document.querySelector("#agentPanel"),
+  agentPanelResizeHandle: document.querySelector("#agentPanelResizeHandle"),
   agentCloseButton: document.querySelector("#agentCloseButton"),
   agentPanelTitle: document.querySelector("#agentPanelTitle"),
   agentMainChatButton: document.querySelector("#agentMainChatButton"),
@@ -319,7 +385,28 @@ const els = {
   agentContextBalloon: document.querySelector("#agentContextBalloon"),
   agentSettingsButton: document.querySelector("#agentSettingsButton"),
   agentSettingsBalloon: document.querySelector("#agentSettingsBalloon"),
+  agentOnboardingPanel: document.querySelector("#agentOnboardingPanel"),
+  agentOnboardingTitle: document.querySelector("#agentOnboardingTitle"),
+  agentOnboardingCopy: document.querySelector("#agentOnboardingCopy"),
+  agentOnboardingCloseButton: document.querySelector("#agentOnboardingCloseButton"),
+  agentOwnedAgentInput: document.querySelector("#agentOwnedAgentInput"),
+  agentAddAgentButton: document.querySelector("#agentAddAgentButton"),
+  agentTopicForm: document.querySelector("#agentTopicForm"),
+  agentTopicNameInput: document.querySelector("#agentTopicNameInput"),
+  agentTopicRoleInput: document.querySelector("#agentTopicRoleInput"),
+  agentTopicTypeSelect: document.querySelector("#agentTopicTypeSelect"),
+  agentTopicBridgeUrlInput: document.querySelector("#agentTopicBridgeUrlInput"),
+  agentTopicStatus: document.querySelector("#agentTopicStatus"),
+  agentDirectProviderForm: document.querySelector("#agentDirectProviderForm"),
+  agentDirectBaseUrlInput: document.querySelector("#agentDirectBaseUrlInput"),
+  agentDirectModelInput: document.querySelector("#agentDirectModelInput"),
+  agentDirectApiKeyInput: document.querySelector("#agentDirectApiKeyInput"),
+  agentProviderLoadingIcon: document.querySelector("#agentProviderLoadingIcon"),
+  agentDirectProviderStatus: document.querySelector("#agentDirectProviderStatus"),
+  agentOnboardingStatus: document.querySelector("#agentOnboardingStatus"),
+  agentConfiguredModelList: document.querySelector("#agentConfiguredModelList"),
   agentMessages: document.querySelector("#agentMessages"),
+  agentScrollBottomButton: document.querySelector("#agentScrollBottomButton"),
   agentPeoplePanel: document.querySelector("#agentPeoplePanel"),
   agentPeopleSearchForm: document.querySelector("#agentPeopleSearchForm"),
   agentPeopleSearchInput: document.querySelector("#agentPeopleSearchInput"),
@@ -349,13 +436,19 @@ const els = {
   agentToastStack: document.querySelector("#agentToastStack"),
   agentImageInput: document.querySelector("#agentImageInput"),
   agentAttachButton: document.querySelector("#agentAttachButton"),
+  agentImageProcessingToggle: document.querySelector("#agentImageProcessingToggle"),
   agentImagePreview: document.querySelector("#agentImagePreview"),
+  agentImagePreviewControls: document.querySelector("#agentImagePreviewControls"),
+  agentImagePreviewList: document.querySelector("#agentImagePreviewList"),
+  agentImageScanInfoButton: document.querySelector("#agentImageScanInfoButton"),
+  agentImageScanInfoBalloon: document.querySelector("#agentImageScanInfoBalloon"),
   launcherLogin: document.querySelector("#launcherLogin"),
   loginButton: document.querySelector("#loginButton"),
   loginAvatar: document.querySelector("#loginAvatar"),
   loginPopover: document.querySelector("#loginPopover"),
   loginTitle: document.querySelector("#loginTitle"),
   loginMeta: document.querySelector("#loginMeta"),
+  loginFluxBalance: document.querySelector("#loginFluxBalance"),
   googleSignInButton: document.querySelector("#googleSignInButton"),
   loginMessage: document.querySelector("#loginMessage"),
   logoutButton: document.querySelector("#logoutButton"),
@@ -529,9 +622,37 @@ const state = {
     steps: [],
   },
   agentModelSetupTimer: 0,
+  agentReadiness: null,
+  agentReadinessBusy: false,
+  agentCredits: null,
+  agentProvisionBusy: false,
+  agentDirectProvider: null,
+  agentOwnedAgent: null,
+  agentProviderProbe: null,
+  agentProviderProbeBusy: false,
+  agentProviderProxyOrigins: new Set(),
+  agentDirectProviderFormOpen: false,
+  agentDirectProviderDraft: null,
+  agentDirectProviderFormMode: "new",
+  agentTopicFormOpen: false,
+  agentTopicBusy: false,
+  agentTopicDraft: null,
+  agentSetupBalloonOpen: false,
+  agentSetupMode: "provider",
+  agentSetupMessage: "",
+  agentOnboardingStatus: "",
+  agentOnboardingPosition: null,
+  agentImageScanInfoOpen: false,
+  creditGrantTargetUser: null,
+  creditGrantBusy: false,
   agentPendingImages: [],
   agentPendingAttachmentSummaries: [],
+  agentPendingFileJobs: [],
+  agentImageProcessingEnabled: readAgentImageProcessingPreference(),
   agentOpenMessageMenuId: "",
+  agentMessageMenuPosition: null,
+  agentMessageLongPressTimer: 0,
+  agentChatPinned: true,
   agentDeferredHmrReload: null,
   agentView: "chat",
   agentPeople: {
@@ -3337,6 +3458,64 @@ function saveAgentSessions() {
   }
 }
 
+function agentActiveSessionStorageKey(user = state.authUser) {
+  const userId = cleanText(user?.id, "anonymous");
+  return `${AGENT_ACTIVE_SESSION_STORAGE_KEY}.${userId}.${clientDeviceId()}`;
+}
+
+function activeSessionPreference(session = activeAgentSession()) {
+  return {
+    schema: "hermes.wasm_agent.active_session.v1",
+    session_id: cleanText(session?.id, ""),
+    kind: cleanText(session?.kind, "agent"),
+    conversation_id: cleanText(session?.conversation_id, ""),
+    shared_space_id: cleanText(session?.shared_space_id, ""),
+    view: state.agentView === "people" ? "people" : "chat",
+    saved_at: new Date().toISOString(),
+  };
+}
+
+function saveActiveAgentSessionPreference() {
+  try {
+    localStorage.setItem(agentActiveSessionStorageKey(), JSON.stringify(activeSessionPreference()));
+  } catch {
+    // Active-session restore is best effort and per browser device.
+  }
+}
+
+function findPreferredAgentSession(preference = {}) {
+  const sessionId = cleanText(preference.session_id, "");
+  if (sessionId) {
+    const match = state.agentSessions.find((session) => session.id === sessionId);
+    if (match) return match;
+  }
+  const conversationId = cleanText(preference.conversation_id, "");
+  if (conversationId) {
+    const match = state.agentSessions.find((session) => session.conversation_id === conversationId);
+    if (match) return match;
+  }
+  const sharedSpaceId = cleanText(preference.shared_space_id, "");
+  if (sharedSpaceId) {
+    const match = state.agentSessions.find((session) => session.shared_space_id === sharedSpaceId);
+    if (match) return match;
+  }
+  return null;
+}
+
+function restoreActiveAgentSessionPreference() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(agentActiveSessionStorageKey()) || "{}");
+    if (!raw || typeof raw !== "object") return false;
+    const preferred = findPreferredAgentSession(raw);
+    if (!preferred) return false;
+    state.activeAgentSessionId = preferred.id;
+    state.agentView = raw.view === "people" ? "people" : "chat";
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function agentTranscriptForRequest() {
   return activeAgentSession().messages
     .filter((message) => !message.pending && message.content !== AGENT_DEFAULT_MESSAGE_CONTENT)
@@ -3362,6 +3541,38 @@ function saveAgentLayout() {
   } catch {
     // Layout persistence is best effort.
   }
+}
+
+function defaultAgentPanelSize() {
+  const appRect = appViewportRect();
+  const maxWidth = Math.max(AGENT_PANEL_MIN_WIDTH_PX, appRect.width - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
+  const maxHeight = Math.max(AGENT_PANEL_MIN_HEIGHT_PX, appRect.height - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
+  return {
+    width: Math.min(AGENT_PANEL_DEFAULT_WIDTH_PX, maxWidth),
+    height: Math.min(AGENT_PANEL_DEFAULT_HEIGHT_PX, maxHeight),
+  };
+}
+
+function clampAgentPanelSize(size = {}) {
+  const fallback = defaultAgentPanelSize();
+  const appRect = appViewportRect();
+  const maxWidth = Math.max(AGENT_PANEL_MIN_WIDTH_PX, appRect.width - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
+  const maxHeight = Math.max(AGENT_PANEL_MIN_HEIGHT_PX, appRect.height - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
+  return {
+    width: clamp(Number(size.width || size.panelWidth || fallback.width), AGENT_PANEL_MIN_WIDTH_PX, maxWidth),
+    height: clamp(Number(size.height || size.panelHeight || fallback.height), AGENT_PANEL_MIN_HEIGHT_PX, maxHeight),
+  };
+}
+
+function applyAgentPanelSize() {
+  if (!els.agentPanel) return clampAgentPanelSize(state.agentLayout);
+  const size = clampAgentPanelSize(state.agentLayout);
+  state.agentLayout.panelWidth = size.width;
+  state.agentLayout.panelHeight = size.height;
+  els.agentPanel.style.width = `${size.width}px`;
+  els.agentPanel.style.height = `${size.height}px`;
+  els.agentPanel.style.maxHeight = `${size.height}px`;
+  return size;
 }
 
 function readAgentModelSettings() {
@@ -3391,6 +3602,906 @@ function saveAgentModelSettings() {
   }
 }
 
+function readAgentImageProcessingPreference() {
+  try {
+    return localStorage.getItem(AGENT_IMAGE_PROCESSING_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function saveAgentImageProcessingPreference() {
+  try {
+    localStorage.setItem(AGENT_IMAGE_PROCESSING_STORAGE_KEY, state.agentImageProcessingEnabled ? "1" : "0");
+  } catch {
+    // Image analysis can always fall back to the default runtime preference.
+  }
+}
+
+function agentDirectProviderStorageKey(user = state.authUser) {
+  const id = cleanText(user?.id, "");
+  return id ? `${AGENT_DIRECT_PROVIDER_STORAGE_KEY}.${id}` : "";
+}
+
+function readAgentDirectProviderConfig(user = state.authUser) {
+  const scopedKey = agentDirectProviderStorageKey(user);
+  if (!scopedKey) return null;
+  try {
+    const scoped = normalizeAgentDirectProviderConfig(JSON.parse(localStorage.getItem(scopedKey) || "{}"));
+    if (scoped) return scoped;
+    if (!isAdminUser(user)) {
+      const legacy = normalizeAgentDirectProviderConfig(JSON.parse(localStorage.getItem(AGENT_DIRECT_PROVIDER_STORAGE_KEY) || "{}"));
+      if (legacy) {
+        localStorage.setItem(scopedKey, JSON.stringify(legacy));
+        localStorage.removeItem(AGENT_DIRECT_PROVIDER_STORAGE_KEY);
+        return legacy;
+      }
+    }
+  } catch {
+    // Browser-only provider state is optional; ignore unreadable local storage.
+  }
+  return null;
+}
+
+function loadAgentDirectProviderForUser(user = state.authUser) {
+  state.agentDirectProvider = readAgentDirectProviderConfig(user);
+  state.agentDirectProviderFormOpen = false;
+  state.agentDirectProviderDraft = null;
+  state.agentDirectProviderFormMode = "new";
+  if (!directProviderConfigured() && state.agentTargetNode === AGENT_PROVIDER_TARGET_ID) {
+    state.agentTargetNode = defaultAgentTargetNode();
+  }
+  renderAgentNodeSelect();
+  renderAgentModelSelect();
+  renderAgentReadinessStatus();
+}
+
+function normalizeAgentDirectProviderConfig(config = {}) {
+  if (!config || typeof config !== "object") return null;
+  const baseUrl = normalizeDirectProviderBaseUrl(config.baseUrl || config.base_url || "");
+  const provider = cleanText(config.provider || "", "") || directProviderNameFromBaseUrl(baseUrl);
+  const model = normalizeDirectProviderModel(config.model || "", baseUrl, provider);
+  const apiKey = String(config.apiKey || config.api_key || "");
+  const transport = normalizeProviderTransport(config.transport || config.provider_transport || config.transportMode || "");
+  const next = {};
+  if (baseUrl) next.baseUrl = baseUrl;
+  const endpoint = directProviderEndpointForBaseUrl(baseUrl, provider);
+  if (endpoint) next.endpoint = endpoint;
+  if (model) next.model = model;
+  if (apiKey) next.apiKey = apiKey;
+  if (provider) next.provider = provider;
+  if (transport !== AGENT_PROVIDER_TRANSPORTS.AUTO) next.transport = transport;
+  if (config.baseUrlInferred) next.baseUrlInferred = true;
+  return Object.keys(next).length ? next : null;
+}
+
+function saveAgentDirectProviderConfig(config, user = state.authUser) {
+  const scopedKey = agentDirectProviderStorageKey(user);
+  const previousFingerprint = directProviderConfigFingerprint(state.agentDirectProvider);
+  state.agentDirectProvider = normalizeAgentDirectProviderConfig(config);
+  if (previousFingerprint !== directProviderConfigFingerprint(state.agentDirectProvider)) {
+    state.agentProviderProbe = null;
+  }
+  try {
+    if (!scopedKey) {
+      return;
+    }
+    if (state.agentDirectProvider && !isAdminUser(user)) {
+      localStorage.setItem(scopedKey, JSON.stringify(state.agentDirectProvider));
+    } else {
+      localStorage.removeItem(scopedKey);
+    }
+  } catch {
+    // Direct provider keys are browser-only convenience state.
+  }
+}
+
+function agentOwnedAgentStorageKey(user = state.authUser) {
+  const id = cleanText(user?.id, "");
+  return id ? `${AGENT_OWNED_AGENT_STORAGE_KEY}.${id}` : "";
+}
+
+function normalizeOwnedAgentBridgeUrl(value = "") {
+  const raw = cleanText(value, "").replace(/\/+$/, "");
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (!["http:", "https:"].includes(url.protocol) || !url.hostname) return "";
+    return url.href.replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function normalizeAgentOwnedAgentConfig(config = {}) {
+  if (!config || typeof config !== "object") return null;
+  const name = cleanText(config.name || config.agentName || "", "").slice(0, 80);
+  const role = cleanText(config.role || config.instructions || "", "").slice(0, 2000);
+  const type = cleanText(config.type || "hermes", "hermes").toLowerCase();
+  const bridgeUrl = normalizeOwnedAgentBridgeUrl(config.bridgeUrl || config.bridge_url || "");
+  const hasInput = Boolean(name || role || bridgeUrl);
+  if (!hasInput) return null;
+  const next = {
+    name: name || "My agent",
+    role,
+    type: type === "hermes" ? "hermes" : "hermes",
+    bridgeUrl,
+    service: bridgeUrl ? "own-bridge" : "hermes-orchestrator",
+  };
+  return next;
+}
+
+function readAgentOwnedAgentConfig(user = state.authUser) {
+  const scopedKey = agentOwnedAgentStorageKey(user);
+  if (!scopedKey) return null;
+  try {
+    return normalizeAgentOwnedAgentConfig(JSON.parse(localStorage.getItem(scopedKey) || "{}"));
+  } catch {
+    return null;
+  }
+}
+
+function saveAgentOwnedAgentConfig(config, user = state.authUser) {
+  const scopedKey = agentOwnedAgentStorageKey(user);
+  state.agentOwnedAgent = normalizeAgentOwnedAgentConfig(config);
+  try {
+    if (!scopedKey) return;
+    if (state.agentOwnedAgent && !isAdminUser(user)) {
+      localStorage.setItem(scopedKey, JSON.stringify(state.agentOwnedAgent));
+    } else {
+      localStorage.removeItem(scopedKey);
+    }
+  } catch {
+    // Owned agent setup is browser-local unless provisioning is submitted.
+  }
+}
+
+function loadAgentOwnedAgentForUser(user = state.authUser) {
+  state.agentOwnedAgent = readAgentOwnedAgentConfig(user);
+  state.agentTopicFormOpen = false;
+  state.agentTopicDraft = null;
+  if (!ownedAgentConfigured() && state.agentTargetNode === AGENT_OWNED_AGENT_TARGET_ID) {
+    state.agentTargetNode = defaultAgentTargetNode();
+  }
+  renderAgentNodeSelect();
+  renderAgentModelSelect();
+  renderAgentReadinessStatus();
+}
+
+function directProviderConfigured() {
+  return Boolean(state.agentDirectProvider?.baseUrl && state.agentDirectProvider?.model && state.agentDirectProvider?.apiKey);
+}
+
+function ownedAgentConfigured() {
+  return Boolean(state.agentOwnedAgent?.name || state.agentOwnedAgent?.bridgeUrl || state.agentOwnedAgent?.role);
+}
+
+function agentTargetIsDirectProvider(value = state.agentTargetNode) {
+  return cleanText(value, "") === AGENT_PROVIDER_TARGET_ID && directProviderConfigured();
+}
+
+function agentTargetIsOwnedAgent(value = state.agentTargetNode) {
+  return cleanText(value, "") === AGENT_OWNED_AGENT_TARGET_ID && ownedAgentConfigured();
+}
+
+function agentTargetIsNone(value = state.agentTargetNode) {
+  return cleanText(value, "") === AGENT_NONE_TARGET_ID;
+}
+
+function agentTargetIsAgentModel(value = state.agentTargetNode) {
+  return cleanText(value, "").startsWith(AGENT_MODEL_TARGET_PREFIX);
+}
+
+function providerModelDisplayLabel(model) {
+  const normalized = normalizeAgentModelEntry(model);
+  if (!normalized) return "";
+  if (normalized.provider && normalized.name) return `${normalized.provider}:${normalized.name}`;
+  return cleanText(normalized.label || normalized.id, "").replace("/", ":");
+}
+
+function agentModelTargetValue(model) {
+  const key = agentModelKey(model);
+  return key ? `${AGENT_MODEL_TARGET_PREFIX}${encodeURIComponent(key)}` : "";
+}
+
+function agentModelFromTargetValue(value) {
+  const raw = cleanText(value, "");
+  if (!raw.startsWith(AGENT_MODEL_TARGET_PREFIX)) return null;
+  let key = raw.slice(AGENT_MODEL_TARGET_PREFIX.length);
+  try {
+    key = decodeURIComponent(key);
+  } catch {
+    key = "";
+  }
+  key = cleanText(key, "").toLowerCase();
+  if (!key) return null;
+  return availableAgentModels().find((model) => agentModelKeys(model).includes(key)) || null;
+}
+
+function agentProviderNodeLabel() {
+  const provider = cleanText(state.agentDirectProvider?.provider, "provider");
+  const model = cleanText(state.agentDirectProvider?.model, "");
+  return model ? `${provider}:${model}` : provider;
+}
+
+function agentNodeDisplayLabel(nodeId) {
+  const id = cleanText(nodeId, "");
+  if (id === AGENT_SANDBOX_NODE_ID) return "My agent";
+  return id;
+}
+
+function agentModelTargetKey() {
+  return agentTargetIsDirectProvider() ? AGENT_PROVIDER_TARGET_ID : agentTargetNode();
+}
+
+function shouldUseDirectAgentProvider(session = activeAgentSession()) {
+  const socialChat = session?.kind === "direct" || session?.kind === "shared-space";
+  return Boolean(state.authUser && !isAdminUser() && !socialChat && agentTargetIsDirectProvider());
+}
+
+function shouldUseOwnedAgentBridge(session = activeAgentSession()) {
+  const socialChat = session?.kind === "direct" || session?.kind === "shared-space";
+  return Boolean(state.authUser && !socialChat && agentTargetIsOwnedAgent() && state.agentOwnedAgent?.bridgeUrl);
+}
+
+function ownedAgentBridgeUrl(config = state.agentOwnedAgent) {
+  return normalizeOwnedAgentBridgeUrl(config?.bridgeUrl || "");
+}
+
+function directProviderConfigFingerprint(config = state.agentDirectProvider) {
+  if (!config) return "";
+  const key = String(config.apiKey || "");
+  return [
+    normalizeDirectProviderBaseUrl(config.baseUrl || ""),
+    cleanText(config.model, ""),
+    cleanText(config.provider, ""),
+    normalizeProviderTransport(config.transport || ""),
+    key.length,
+    key.slice(0, 4),
+    key.slice(-4),
+  ].join("|");
+}
+
+function directProviderNameFromBaseUrl(baseUrl) {
+  const base = cleanText(baseUrl, "").toLowerCase();
+  if (!base) return "";
+  if (base.includes("perplexity.ai")) return "perplexity";
+  if (base.includes("openrouter.ai")) return "openrouter";
+  if (base.includes("api.groq.com")) return "groq";
+  if (base.includes("moonshot.ai")) return "moonshot";
+  if (base.includes("deepseek.com")) return "deepseek";
+  if (base.includes("dashscope.aliyuncs.com")) return "dashscope";
+  if (base.includes("generativelanguage.googleapis.com")) return "google";
+  if (base.includes("api.x.ai")) return "xai";
+  if (base.includes("api.mistral.ai")) return "mistral";
+  if (base.includes("api.openai.com")) return "openai";
+  if (base.includes("opencode.ai/zen/go")) return "opencode-go";
+  if (base.includes("opencode.ai/zen")) return "opencode-zen";
+  return "";
+}
+
+function normalizeDirectProviderBaseUrl(value) {
+  const raw = cleanText(value, "").replace(/\/+$/, "");
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return `https://${raw}`;
+}
+
+function normalizeDirectProviderModel(model, baseUrl = "", provider = "") {
+  const raw = cleanText(model, "");
+  if (!raw) return "";
+  const providerName = cleanText(provider || directProviderNameFromBaseUrl(baseUrl), "").toLowerCase();
+  if ((providerName === "opencode-go" || providerName === "opencode-zen") && raw.includes("/")) {
+    const [prefix, rest] = raw.split("/", 2);
+    if (prefix === providerName && rest) return raw.slice(prefix.length + 1);
+  }
+  return raw;
+}
+
+function directProviderEndpointForBaseUrl(baseUrl, provider = "") {
+  const base = normalizeDirectProviderBaseUrl(baseUrl);
+  if (!base) return "";
+  let parsed;
+  try {
+    parsed = new URL(base);
+  } catch {
+    return "";
+  }
+  const normalizedPath = parsed.pathname.replace(/\/+$/, "");
+  parsed.pathname = normalizedPath || "";
+  parsed.search = "";
+  parsed.hash = "";
+  const cleanBase = parsed.toString().replace(/\/+$/, "");
+  if (normalizedPath.endsWith("/chat/completions")) return cleanBase;
+  const providerName = cleanText(provider || directProviderNameFromBaseUrl(cleanBase), "");
+  if (providerName === "perplexity") return `${cleanBase}/chat/completions`;
+  if (normalizedPath.endsWith("/openai") || normalizedPath.endsWith("/v1")) return `${cleanBase}/chat/completions`;
+  return `${cleanBase}/v1/chat/completions`;
+}
+
+function normalizeProviderTransport(value) {
+  const mode = cleanText(value, "").toLowerCase().replace(/_/g, "-");
+  if (["direct", "browser", "browser-direct", "client", "client-direct"].includes(mode)) {
+    return AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT;
+  }
+  if (["proxy", "server", "backend", "backend-proxy", "server-proxy"].includes(mode)) {
+    return AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY;
+  }
+  return AGENT_PROVIDER_TRANSPORTS.AUTO;
+}
+
+function providerTransportPreference(config = {}) {
+  return normalizeProviderTransport(config?.transport || config?.provider_transport || config?.transportMode || "");
+}
+
+function providerEndpointUrl(config = {}) {
+  const endpoint = cleanText(config?.endpoint || directProviderEndpointForBaseUrl(config?.baseUrl || config?.base_url || "", config?.provider || ""), "");
+  if (!endpoint) return null;
+  try {
+    return new URL(endpoint);
+  } catch {
+    return null;
+  }
+}
+
+function providerOriginKey(config = {}) {
+  return providerEndpointUrl(config)?.origin || "";
+}
+
+function rememberProviderProxyOrigin(config = {}) {
+  const origin = providerOriginKey(config);
+  if (origin) state.agentProviderProxyOrigins.add(origin);
+}
+
+function hasProviderProxyOrigin(config = {}) {
+  const origin = providerOriginKey(config);
+  return Boolean(origin && state.agentProviderProxyOrigins.has(origin));
+}
+
+function isPrivateProviderHostname(hostname = "") {
+  const host = cleanText(hostname, "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!host) return false;
+  if (host === "localhost" || host === "::1" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".lan")) return true;
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
+  const match172 = host.match(/^172\.(\d+)\./);
+  if (match172) {
+    const second = Number(match172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return /^[a-z0-9-]+$/i.test(host);
+}
+
+function providerEndpointIsPrivate(config = {}) {
+  const url = providerEndpointUrl(config);
+  return Boolean(url && isPrivateProviderHostname(url.hostname));
+}
+
+function providerHostPrefersProxy(config = {}) {
+  const host = providerEndpointUrl(config)?.hostname.toLowerCase() || "";
+  if (!host) return false;
+  return Array.from(AGENT_PROVIDER_PROXY_FIRST_HOSTS).some((candidate) => host === candidate || host.endsWith(`.${candidate}`));
+}
+
+function providerNamePrefersProxy(config = {}) {
+  const provider = cleanText(config?.provider || directProviderNameFromBaseUrl(config?.baseUrl || config?.endpoint || ""), "").toLowerCase();
+  return AGENT_PROVIDER_PROXY_FIRST_PROVIDERS.has(provider);
+}
+
+function providerTransportPlan(config = {}) {
+  const preference = providerTransportPreference(config);
+  if (preference === AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT, reason: "explicit-browser-direct" };
+  }
+  if (preference === AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY, reason: "explicit-backend-proxy" };
+  }
+  if (hasProviderProxyOrigin(config)) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY, reason: "remembered-cors-origin" };
+  }
+  if (providerEndpointIsPrivate(config)) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT, reason: "private-or-local-endpoint" };
+  }
+  if (providerNamePrefersProxy(config) || providerHostPrefersProxy(config)) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY, reason: "known-remote-provider" };
+  }
+  if (isCompactViewport()) {
+    return { mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY, reason: "compact-viewport" };
+  }
+  return { mode: AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT, reason: "public-endpoint-probe" };
+}
+
+function validateDirectProviderConfig(config = state.agentDirectProvider) {
+  const normalized = normalizeAgentDirectProviderConfig(config);
+  if (!normalized?.baseUrl) return { ok: false, mode: "config-missing", category: "missing-base-url", message: "Missing Base URL." };
+  let parsed;
+  try {
+    parsed = new URL(normalized.baseUrl);
+  } catch {
+    return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Base URL is not a valid URL." };
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || /\s/.test(normalized.baseUrl)) {
+    return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Base URL must be an HTTP or HTTPS URL." };
+  }
+  if (!normalized.model) return { ok: false, mode: "config-missing", category: "missing-model", message: "Missing model." };
+  if (!normalized.apiKey) return { ok: false, mode: "config-missing", category: "missing-api-key", message: "Missing API key." };
+  const endpoint = directProviderEndpointForBaseUrl(normalized.baseUrl, normalized.provider);
+  if (!endpoint) return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Provider endpoint could not be built from the Base URL." };
+  return { ok: true, config: { ...normalized, endpoint }, fingerprint: directProviderConfigFingerprint(normalized) };
+}
+
+function directProviderGuessFromModel(model) {
+  const id = cleanText(model, "").toLowerCase();
+  if (!id) return null;
+  if (id.startsWith("opencode-go/")) return { baseUrl: "https://opencode.ai/zen/go/v1", provider: "opencode-go" };
+  if (id.startsWith("opencode-zen/")) return { baseUrl: "https://opencode.ai/zen/v1", provider: "opencode-zen" };
+  if (id.includes("deepseek")) return { baseUrl: "https://api.deepseek.com/v1", provider: "deepseek" };
+  if (id.includes("kimi") || id.includes("moonshot")) return { baseUrl: "https://api.moonshot.ai/v1", provider: "moonshot" };
+  if (id.includes("qwen") || id.includes("dashscope")) return { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", provider: "dashscope" };
+  if (id.includes("gemini")) return { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", provider: "google" };
+  if (id.includes("grok") || id.startsWith("x-ai/")) return { baseUrl: "https://api.x.ai/v1", provider: "xai" };
+  if (id.includes("mistral") || id.includes("mixtral")) return { baseUrl: "https://api.mistral.ai/v1", provider: "mistral" };
+  if (id.includes("sonar") || id.includes("perplexity")) return { baseUrl: "https://api.perplexity.ai", provider: "perplexity" };
+  if (id.includes("llama") || id.includes("meta-llama")) return { baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter" };
+  if (id.includes("/") && !id.startsWith("openai/")) return { baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter" };
+  if (id.startsWith("gpt-") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4") || id.startsWith("openai/")) {
+    return { baseUrl: "https://api.openai.com/v1", provider: "openai" };
+  }
+  return null;
+}
+
+function directProviderGuessFromKey(apiKey) {
+  const key = String(apiKey || "").trim();
+  if (!key) return null;
+  if (key.startsWith("sk-or-")) return { baseUrl: "https://openrouter.ai/api/v1", provider: "openrouter" };
+  if (key.startsWith("gsk_")) return { baseUrl: "https://api.groq.com/openai/v1", provider: "groq" };
+  if (key.startsWith("AIza")) return { baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", provider: "google" };
+  if (key.startsWith("xai-")) return { baseUrl: "https://api.x.ai/v1", provider: "xai" };
+  return null;
+}
+
+function inferDirectProviderBaseUrl(model, apiKey) {
+  return directProviderGuessFromKey(apiKey) || directProviderGuessFromModel(model);
+}
+
+function directProviderStatusText(configSource = state.agentDirectProvider) {
+  const validation = validateDirectProviderConfig(configSource);
+  const probe = currentAgentProviderProbe();
+  if (probe && configSource === state.agentDirectProvider) {
+    return `${probe.mode} / ${probe.category}`;
+  }
+  if (validation.ok) {
+    const config = validation.config;
+    const plan = providerTransportPlan(config);
+    const transport = plan.mode === AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY ? "server proxy" : "browser direct";
+    return config.baseUrlInferred ? `Check provider / ${transport} / inferred ${config.provider || "provider"}` : `Check provider / ${transport}`;
+  }
+  const config = configSource || {};
+  const parts = [];
+  if (config.model) parts.push("model");
+  if (config.apiKey) parts.push("key");
+  if (config.baseUrl) parts.push("base URL");
+  return parts.length ? `Saved ${parts.join(" + ")} / ${validation.category}` : validation.mode;
+}
+
+function providerFormConfigSource() {
+  if (state.agentDirectProviderFormOpen) {
+    return state.agentDirectProviderDraft || {};
+  }
+  return state.agentDirectProvider || {};
+}
+
+function openAgentProviderForm(mode = "new") {
+  const editing = mode === "edit" && directProviderConfigured();
+  state.agentDirectProviderFormMode = editing ? "edit" : "new";
+  state.agentDirectProviderDraft = editing ? { ...(state.agentDirectProvider || {}) } : {};
+  state.agentDirectProviderFormOpen = true;
+  state.agentTopicFormOpen = false;
+  state.agentTopicDraft = null;
+}
+
+function closeAgentProviderForm() {
+  state.agentDirectProviderFormOpen = false;
+  state.agentDirectProviderDraft = null;
+  state.agentDirectProviderFormMode = "new";
+}
+
+function syncAgentDirectProviderDraftFromInputs({ inferBaseUrl = true, render = false } = {}) {
+  const current = state.agentDirectProviderDraft || (state.agentDirectProviderFormMode === "edit" ? state.agentDirectProvider || {} : {});
+  const model = cleanText(els.agentDirectModelInput ? els.agentDirectModelInput.value : current.model || "", "");
+  const rawKey = String(els.agentDirectApiKeyInput?.value || "").trim();
+  const apiKey = rawKey && rawKey !== AGENT_DIRECT_PROVIDER_KEY_MASK ? rawKey : String(current.apiKey || "");
+  const baseUrlInputValue = els.agentDirectBaseUrlInput ? els.agentDirectBaseUrlInput.value : current.baseUrl || "";
+  let baseUrl = normalizeDirectProviderBaseUrl(baseUrlInputValue);
+  let provider = cleanText(directProviderNameFromBaseUrl(baseUrl) || current.provider || "", "");
+  let baseUrlInferred = Boolean(current.baseUrlInferred);
+  const editingBaseUrl = document.activeElement === els.agentDirectBaseUrlInput;
+  if (editingBaseUrl) baseUrlInferred = false;
+  if (inferBaseUrl && !editingBaseUrl) {
+    const guess = inferDirectProviderBaseUrl(model, apiKey);
+    if (guess?.baseUrl && (!baseUrl || baseUrlInferred)) {
+      baseUrl = guess.baseUrl;
+      provider = guess.provider || provider;
+      baseUrlInferred = true;
+      if (els.agentDirectBaseUrlInput && document.activeElement !== els.agentDirectBaseUrlInput) {
+        els.agentDirectBaseUrlInput.value = baseUrl;
+      }
+    }
+  }
+  state.agentDirectProviderDraft = normalizeAgentDirectProviderConfig({ baseUrl, model, apiKey, provider, baseUrlInferred, transport: current.transport || "" }) || {};
+  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = directProviderStatusText(state.agentDirectProviderDraft);
+  if (render) renderAgentOnboardingPanel();
+  return state.agentDirectProviderDraft;
+}
+
+function currentAgentProviderProbe() {
+  const probe = state.agentProviderProbe;
+  if (!probe || probe.fingerprint !== directProviderConfigFingerprint(state.agentDirectProvider)) return null;
+  return probe;
+}
+
+function setAgentProviderProbe(probe) {
+  state.agentProviderProbe = probe;
+  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = directProviderStatusText();
+  renderAgentReadinessStatus();
+}
+
+function providerSupportsImageContentParts(config = state.agentDirectProvider) {
+  const provider = cleanText(config?.provider || "", "").toLowerCase();
+  const endpointProvider = directProviderNameFromBaseUrl(config?.endpoint || config?.baseUrl || "");
+  const hostProvider = directProviderNameFromBaseUrl(config?.baseUrl || config?.endpoint || "");
+  return provider === "openrouter" || endpointProvider === "openrouter" || hostProvider === "openrouter";
+}
+
+function providerImageContentParts(entries = []) {
+  const parts = [];
+  let totalChars = 0;
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const url = String(entry?.data_url || "").trim();
+    if (!/^data:image\/(png|jpe?g|webp|gif);base64,/i.test(url)) continue;
+    if (url.length > AGENT_PROVIDER_IMAGE_PART_MAX_CHARS) continue;
+    if (totalChars + url.length > AGENT_PROVIDER_IMAGE_PART_TOTAL_MAX_CHARS) break;
+    totalChars += url.length;
+    parts.push({
+      type: "image_url",
+      image_url: { url },
+    });
+    if (parts.length >= AGENT_MAX_IMAGES) break;
+  }
+  return parts;
+}
+
+function providerVideoContentParts(entries = []) {
+  const parts = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const url = String(entry?.data_url || "").trim();
+    if (!/^data:video\/(mp4|mpeg|quicktime|webm);base64,/i.test(url)) continue;
+    if (url.length > AGENT_PROVIDER_VIDEO_PART_MAX_CHARS) continue;
+    parts.push({
+      type: "video_url",
+      videoUrl: { url },
+    });
+    break;
+  }
+  return parts;
+}
+
+function providerMessagesHaveImageContent(messages = []) {
+  return (Array.isArray(messages) ? messages : []).some((message) => (
+    Array.isArray(message?.content)
+    && message.content.some((part) => part?.type === "image_url" || part?.type === "video_url")
+  ));
+}
+
+function providerShouldRetryWithoutImage(error) {
+  const diagnostic = providerDiagnosticFromError(error);
+  const category = cleanText(diagnostic?.category, "");
+  const message = cleanText(diagnostic?.message || error?.message, "");
+  return category === "request-shape-error" || /image|video|vision|multimodal|content\s*part|image_url|video_url/i.test(message);
+}
+
+function providerRequestMessages(message, transcript = [], imageEntries = []) {
+  const mediaParts = [
+    ...providerImageContentParts(imageEntries),
+    ...providerVideoContentParts(imageEntries),
+  ];
+  const text = mediaParts.length
+    ? `${message}\n\nRaw media parts are attached in this same user message. If the selected model supports vision/video input, analyze those raw parts directly and use the manifest only as supplemental metadata.`
+    : message;
+  const userContent = mediaParts.length
+    ? [{ type: "text", text }, ...mediaParts]
+    : message;
+  return [
+    {
+      role: "system",
+      content: "You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend tools, workspace mutation, and source changes are unavailable on this path.",
+    },
+    ...transcript.slice(-8).map((item) => ({
+      role: item.role === "assistant" ? "assistant" : "user",
+      content: cleanText(item.content, ""),
+    })).filter((item) => item.content),
+    { role: "user", content: userContent },
+  ];
+}
+
+function providerRequestBody(config, messages) {
+  return {
+    model: cleanText(config?.model, ""),
+    stream: false,
+    messages: Array.isArray(messages) ? messages : [],
+  };
+}
+
+function directProviderProbeMessages() {
+  return [
+    { role: "system", content: "Reply with exactly: wasm-agent-provider-ok" },
+    { role: "user", content: "Reply with exactly: wasm-agent-provider-ok" },
+  ];
+}
+
+function providerDiagnosticFromHttp(status, message = "") {
+  if (status === 403 && /cloudflare|browser_signature|site owner has blocked/i.test(message)) {
+    return { mode: "unreachable", category: "provider-access-denied", message: message || "Provider edge rejected the request." };
+  }
+  if (status === 401 || status === 403) return { mode: "auth-failed", category: "auth-failed", message: message || "Provider rejected the API key." };
+  if (status === 404) return { mode: "model-failed", category: "model-not-found", message: message || "Provider could not find that model or endpoint." };
+  if (status === 400 || status === 422) return { mode: "unreachable", category: "request-shape-error", message: message || "Provider rejected the request shape." };
+  if (status >= 500) return { mode: "unreachable", category: "provider-unavailable", message: message || `Provider returned HTTP ${status}.` };
+  return { mode: "unreachable", category: "http-error", message: message || `Provider returned HTTP ${status}.` };
+}
+
+function providerErrorMessage(payload, fallback = "") {
+  const error = payload?.error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") return cleanText(error.message || error.code || fallback, fallback);
+  return fallback;
+}
+
+function classifyBrowserProviderError(error) {
+  if (error?.diagnostic) return error.diagnostic;
+  const message = cleanText(error?.message, "Provider request failed.");
+  if (error?.status) return providerDiagnosticFromHttp(Number(error.status), message);
+  if (error?.name === "AbortError") {
+    return { mode: "unreachable", category: navigator.onLine === false ? "network-offline" : "network-timeout", message: "Provider request timed out." };
+  }
+  if (/failed to fetch|networkerror|load failed|fetch failed/i.test(message)) {
+    if (navigator.onLine === false) {
+      return { mode: "unreachable", category: "network-offline", message: "This browser appears offline." };
+    }
+    return {
+      mode: "cors-blocked",
+      category: "cors-blocked",
+      message: "This provider is reachable only through a server/proxy because the browser is blocked by CORS.",
+    };
+  }
+  return { mode: "unreachable", category: "network-failed", message };
+}
+
+function providerDiagnosticFromError(error) {
+  if (error?.diagnostic) return error.diagnostic;
+  const providerPayload = error?.payload?.provider || error?.payload || null;
+  if (providerPayload?.diagnostic) return providerPayload.diagnostic;
+  return classifyBrowserProviderError(error);
+}
+
+function parseProviderChatPayload(payload, config, mode) {
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
+  const content = choice?.message?.content || choice?.delta?.content || choice?.text || "";
+  return {
+    reply: cleanText(content, "The provider returned an empty response."),
+    usage: payload?.usage || null,
+    model: payload?.model || config?.model || "",
+    mode,
+    raw: payload,
+  };
+}
+
+async function requestBrowserDirectProvider(config, messages, options = {}) {
+  const endpoint = directProviderEndpointForBaseUrl(config.baseUrl, config.provider);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify(providerRequestBody(config, messages)),
+    signal: options.signal,
+  });
+  const text = await response.text();
+  let payload = {};
+  try {
+    payload = text ? JSON.parse(text) : {};
+  } catch {
+    payload = {};
+  }
+  if (!response.ok) {
+    const diagnostic = providerDiagnosticFromHttp(response.status, providerErrorMessage(payload, text.slice(0, 240)));
+    const error = new Error(diagnostic.message);
+    error.status = response.status;
+    error.payload = payload;
+    error.diagnostic = diagnostic;
+    throw error;
+  }
+  return parseProviderChatPayload(payload, config, "browser-direct");
+}
+
+async function requestBackendProvider(config, messages, { probe = false } = {}) {
+  const payload = await fetchJson(probe ? "/agent/provider/probe" : "/agent/provider/chat", {
+    method: "POST",
+    timeoutMs: probe ? 45000 : state.agentTurnTimeoutMs,
+    body: {
+      provider_config: {
+        base_url: config.baseUrl,
+        model: config.model,
+        api_key: config.apiKey,
+        provider: config.provider || "",
+      },
+      messages,
+    },
+  });
+  if (probe) return payload.provider || payload;
+  return {
+    reply: payload.reply || payload.provider?.reply || "The backend provider proxy returned an empty response.",
+    usage: payload.usage || payload.provider?.usage || null,
+    model: payload.model || payload.provider?.model || config.model,
+    mode: "backend-proxy",
+    raw: payload.provider || payload,
+  };
+}
+
+function debugProviderLog(label, detail = {}) {
+  try {
+    if (localStorage.getItem("wasmAgent.debugProvider") !== "1") return;
+    const safe = { ...detail };
+    if (safe.apiKey) delete safe.apiKey;
+    console.groupCollapsed(`[wasm-agent provider] ${label}`);
+    console.log(safe);
+    console.groupEnd();
+  } catch {
+    // Debug logging is optional.
+  }
+}
+
+async function probeAgentProviderConnectivity({ allowProxy = true, force = false } = {}) {
+  const validation = validateDirectProviderConfig();
+  if (!validation.ok) {
+    const probe = {
+      ok: false,
+      fingerprint: directProviderConfigFingerprint(state.agentDirectProvider),
+      mode: validation.mode,
+      category: validation.category,
+      message: validation.message,
+      checked_at: Date.now(),
+    };
+    setAgentProviderProbe(probe);
+    return probe;
+  }
+  const current = currentAgentProviderProbe();
+  if (!force && current && Date.now() - Number(current.checked_at || 0) < AGENT_PROVIDER_PROBE_TTL_MS) return current;
+  const config = validation.config;
+  const fingerprint = validation.fingerprint;
+  state.agentProviderProbeBusy = true;
+  setAgentProviderProbe({
+    ok: false,
+    fingerprint,
+    mode: "checking",
+    category: "checking",
+    message: "Checking provider connectivity.",
+    checked_at: Date.now(),
+  });
+  const messages = directProviderProbeMessages();
+  const transportPlan = providerTransportPlan(config);
+  debugProviderLog("probe", { endpoint: config.endpoint, model: config.model, provider: config.provider || "", transport: transportPlan.mode, reason: transportPlan.reason });
+  if (transportPlan.mode === AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY) {
+    try {
+      const backend = await requestBackendProvider(config, messages, { probe: true });
+      const probe = {
+        ok: true,
+        fingerprint,
+        mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY,
+        category: "ready",
+        message: "Backend proxy provider request succeeded.",
+        endpoint: backend.endpoint || config.endpoint,
+        model: backend.model || config.model,
+        transport_reason: transportPlan.reason,
+        checked_at: Date.now(),
+      };
+      setAgentProviderProbe(probe);
+      return probe;
+    } catch (proxyError) {
+      const proxyPayload = proxyError?.payload?.provider || proxyError?.payload;
+      const proxyDiagnostic = proxyPayload?.diagnostic || providerDiagnosticFromError(proxyError);
+      const probe = {
+        ok: false,
+        fingerprint,
+        mode: proxyDiagnostic.mode || "unreachable",
+        category: proxyDiagnostic.category || "backend-proxy-failed",
+        message: proxyDiagnostic.message || proxyError.message,
+        endpoint: config.endpoint,
+        model: config.model,
+        transport_reason: transportPlan.reason,
+        checked_at: Date.now(),
+      };
+      setAgentProviderProbe(probe);
+      return probe;
+    } finally {
+      state.agentProviderProbeBusy = false;
+      renderAgentReadinessStatus();
+    }
+  }
+  try {
+    await requestBrowserDirectProvider(config, messages);
+    const probe = {
+      ok: true,
+      fingerprint,
+      mode: AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT,
+      category: "ready",
+      message: "Browser direct provider request succeeded.",
+      endpoint: config.endpoint,
+      model: config.model,
+      transport_reason: transportPlan.reason,
+      checked_at: Date.now(),
+    };
+    setAgentProviderProbe(probe);
+    return probe;
+  } catch (error) {
+    const directDiagnostic = classifyBrowserProviderError(error);
+    if (!allowProxy || directDiagnostic.mode !== "cors-blocked") {
+      const probe = { ok: false, fingerprint, ...directDiagnostic, endpoint: config.endpoint, model: config.model, transport_reason: transportPlan.reason, checked_at: Date.now() };
+      setAgentProviderProbe(probe);
+      return probe;
+    }
+    rememberProviderProxyOrigin(config);
+    try {
+      const backend = await requestBackendProvider(config, messages, { probe: true });
+      const probe = {
+        ok: true,
+        fingerprint,
+        mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY,
+        category: "ready",
+        message: "Browser direct was blocked by CORS; backend proxy provider request succeeded.",
+        endpoint: backend.endpoint || config.endpoint,
+        model: backend.model || config.model,
+        direct_error: directDiagnostic,
+        transport_reason: "cors-fallback",
+        checked_at: Date.now(),
+      };
+      setAgentProviderProbe(probe);
+      return probe;
+    } catch (proxyError) {
+      const proxyPayload = proxyError?.payload?.provider || proxyError?.payload;
+      const proxyDiagnostic = proxyPayload?.diagnostic || providerDiagnosticFromError(proxyError);
+      const probe = {
+        ok: false,
+        fingerprint,
+        mode: proxyDiagnostic.mode || "unreachable",
+        category: proxyDiagnostic.category || "backend-proxy-failed",
+        message: proxyDiagnostic.message || proxyError.message,
+        endpoint: config.endpoint,
+        model: config.model,
+        direct_error: directDiagnostic,
+        transport_reason: "cors-fallback",
+        checked_at: Date.now(),
+      };
+      setAgentProviderProbe(probe);
+      return probe;
+    }
+  } finally {
+    state.agentProviderProbeBusy = false;
+    renderAgentReadinessStatus();
+  }
+}
+
+async function ensureAgentProviderConnection() {
+  const probe = await probeAgentProviderConnectivity({ allowProxy: true });
+  if (!probe.ok) {
+    const error = new Error(probe.message || "Provider is not reachable.");
+    error.diagnostic = probe;
+    throw error;
+  }
+  return probe;
+}
+
 function activeAgentSession() {
   let session = state.agentSessions.find((item) => item.id === state.activeAgentSessionId);
   if (!session) {
@@ -3412,6 +4523,16 @@ function defaultAgentTargetNode() {
 function agentTargetNode() {
   const fallback = defaultAgentTargetNode();
   const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
+  if (
+    target === AGENT_PROVIDER_TARGET_ID
+    || target === AGENT_SET_PROVIDER_TARGET_ID
+    || target === AGENT_SET_HERMES_TARGET_ID
+    || target === AGENT_NONE_TARGET_ID
+    || target === AGENT_NEW_CONFIG_TARGET_ID
+    || target === AGENT_EDIT_CONFIG_TARGET_ID
+    || target === AGENT_OWNED_AGENT_TARGET_ID
+    || agentTargetIsAgentModel(target)
+  ) return fallback;
   return !isAdminUser() && isGlobalAgentNodeId(target) ? AGENT_SANDBOX_NODE_ID : target;
 }
 
@@ -3424,36 +4545,248 @@ function availableAgentNodes() {
   return Array.from(ids);
 }
 
+function agentModelForNodeOption(nodeId) {
+  const selected = normalizeAgentModelEntry(state.agentModelSettings.selectedByNode?.[nodeId]);
+  return selected || agentDefaultModelForNode(nodeId);
+}
+
+function configuredAgentTargetOptions() {
+  const options = [];
+  const listedModelKeys = new Set();
+  const pushOption = (option) => {
+    if (!option?.value || options.some((item) => item.value === option.value)) return;
+    options.push(option);
+    agentModelKeys(option.model).forEach((key) => listedModelKeys.add(key));
+  };
+  if (!isAdminUser() && directProviderConfigured()) {
+    pushOption({
+      value: AGENT_PROVIDER_TARGET_ID,
+      kind: "provider",
+      label: agentProviderNodeLabel(),
+      detail: "browser provider",
+      model: normalizeAgentModelEntry({
+        id: state.agentDirectProvider?.model || "",
+        provider: state.agentDirectProvider?.provider || "",
+      }),
+    });
+  }
+  if (!isAdminUser() && ownedAgentConfigured()) {
+    pushOption({
+      value: AGENT_OWNED_AGENT_TARGET_ID,
+      kind: "owned-agent",
+      label: `agent:${state.agentOwnedAgent?.name || "My agent"}`,
+      detail: state.agentOwnedAgent?.bridgeUrl ? "own bridge" : "Hermes service",
+      model: normalizeAgentModelEntry({
+        id: state.agentOwnedAgent?.type || "hermes",
+        provider: state.agentOwnedAgent?.service || "hermes-orchestrator",
+        label: state.agentOwnedAgent?.name || "My agent",
+      }),
+    });
+  }
+  const readinessReady = Boolean(state.agentReadiness?.ready || state.agentReadiness?.status === "ready");
+  const agentSelectable = isAdminUser() || readinessReady;
+  availableAgentNodes().forEach((nodeId) => {
+    if (!agentSelectable) return;
+    const model = agentModelForNodeOption(nodeId);
+    const modelLabel = providerModelDisplayLabel(model);
+    pushOption({
+      value: nodeId,
+      kind: "agent",
+      label: modelLabel ? `agent:${modelLabel}` : `agent:${agentNodeDisplayLabel(nodeId)}`,
+      detail: agentNodeDisplayLabel(nodeId),
+      model,
+      nodeId,
+    });
+  });
+  if (!agentSelectable) return options;
+  const modelTargetNode = agentTargetNode();
+  agentModelCatalog().forEach((model) => {
+    const normalized = normalizeAgentModelEntry(model);
+    const keys = agentModelKeys(normalized);
+    if (!keys.length || keys.some((key) => listedModelKeys.has(key))) return;
+    const value = agentModelTargetValue(normalized);
+    const label = providerModelDisplayLabel(normalized) || normalized?.label || normalized?.id;
+    if (!value || !label) return;
+    pushOption({
+      value,
+      kind: "agent-model",
+      label: `agent:${label}`,
+      detail: `model for ${agentNodeDisplayLabel(modelTargetNode)}`,
+      model: normalized,
+      nodeId: modelTargetNode,
+    });
+  });
+  return options;
+}
+
+function agentNodeSelectOptions() {
+  const configured = configuredAgentTargetOptions();
+  const options = [...configured];
+  if (!configured.length && !isAdminUser()) options.push({ value: AGENT_NONE_TARGET_ID, label: "None", kind: "empty" });
+  options.push({
+    value: configured.length ? AGENT_EDIT_CONFIG_TARGET_ID : AGENT_NEW_CONFIG_TARGET_ID,
+    label: configured.length ? "> Edit..." : "> New...",
+    kind: "setup",
+  });
+  return options;
+}
+
+function preferredAgentNodeSelectValue(options = agentNodeSelectOptions()) {
+  const values = new Set(options.map((option) => option.value));
+  const raw = cleanText(state.agentTargetNode, "");
+  if (
+    raw
+    && values.has(raw)
+    && raw !== AGENT_SET_PROVIDER_TARGET_ID
+    && raw !== AGENT_SET_HERMES_TARGET_ID
+    && raw !== AGENT_NEW_CONFIG_TARGET_ID
+    && raw !== AGENT_EDIT_CONFIG_TARGET_ID
+  ) return raw;
+  if (values.has(AGENT_NONE_TARGET_ID)) return AGENT_NONE_TARGET_ID;
+  if (!isAdminUser() && directProviderConfigured() && state.agentReadiness?.status !== "ready") return AGENT_PROVIDER_TARGET_ID;
+  return values.has(agentTargetNode()) ? agentTargetNode() : options[0]?.value || defaultAgentTargetNode();
+}
+
 function renderAgentNodeSelect() {
   if (!els.agentNodeSelect) return;
-  const nodes = availableAgentNodes();
-  const current = nodes.includes(agentTargetNode()) ? agentTargetNode() : nodes[0];
+  const options = agentNodeSelectOptions();
+  const current = preferredAgentNodeSelectValue(options);
   state.agentTargetNode = current;
   els.agentNodeSelect.replaceChildren(
-    ...nodes.map((nodeId) => {
+    ...options.map((item) => {
       const option = document.createElement("option");
-      option.value = nodeId;
-      option.textContent = nodeId;
+      option.value = item.value;
+      option.textContent = item.label;
       return option;
     })
   );
   els.agentNodeSelect.value = current;
+  els.agentNodeSelect.title = options.find((item) => item.value === current)?.label || current;
 }
 
 function setAgentTargetNode(nodeId) {
   const requested = cleanText(nodeId, defaultAgentTargetNode());
-  const next = !isAdminUser() && isGlobalAgentNodeId(requested) ? AGENT_SANDBOX_NODE_ID : requested;
+  if (requested === AGENT_NONE_TARGET_ID) {
+    const previous = state.agentTargetNode;
+    state.agentTargetNode = AGENT_NONE_TARGET_ID;
+    closeAgentProviderForm();
+    closeAgentModelSetup();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    if (previous !== AGENT_NONE_TARGET_ID) {
+      recordUserEvent("agent.target_node_selected", {
+        target: "agent-setup",
+        summary: "Chat target changed to None",
+        data: { node_id: AGENT_NONE_TARGET_ID, previous_node_id: previous || "" },
+      });
+    }
+    return;
+  }
+  if (requested === AGENT_NEW_CONFIG_TARGET_ID) {
+    openAgentSetupBalloon({
+      mode: "provider",
+      message: "Add a provider model or set your owned agent.",
+      openProviderForm: true,
+      providerFormMode: "new",
+    });
+    renderAgentNodeSelect();
+    return;
+  }
+  if (requested === AGENT_EDIT_CONFIG_TARGET_ID) {
+    openAgentSetupBalloon({
+      mode: directProviderConfigured() ? "provider" : "agent",
+      message: "Edit, add, or delete configured providers.",
+      openProviderForm: false,
+      providerFormMode: "edit",
+    });
+    renderAgentNodeSelect();
+    return;
+  }
+  if (requested === AGENT_OWNED_AGENT_TARGET_ID && ownedAgentConfigured()) {
+    const previous = state.agentTargetNode;
+    state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+    closeAgentProviderForm();
+    closeAgentModelSetup();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    if (previous !== AGENT_OWNED_AGENT_TARGET_ID) {
+      recordUserEvent("agent.target_node_selected", {
+        target: "owned-agent",
+        summary: `Chat target changed to ${state.agentOwnedAgent?.name || "owned agent"}`,
+        data: { node_id: AGENT_OWNED_AGENT_TARGET_ID, previous_node_id: previous || "" },
+      });
+    }
+    return;
+  }
+  if (agentTargetIsAgentModel(requested)) {
+    const model = agentModelFromTargetValue(requested);
+    if (!model) {
+      renderAgentNodeSelect();
+      return;
+    }
+    const previous = state.agentTargetNode;
+    const targetNode = agentTargetNode();
+    state.agentTargetNode = targetNode;
+    applyAgentModelToTarget(model);
+    persistAgentModelSelection();
+    state.agentTargetNode = agentModelTargetValue(model) || targetNode;
+    closeAgentProviderForm();
+    closeAgentModelSetup();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    if (previous !== state.agentTargetNode) {
+      recordUserEvent("agent.target_node_selected", {
+        target: `node:${targetNode}`,
+        summary: `Chat model changed to ${model.label || model.id}`,
+        data: { node_id: targetNode, model: model.id, previous_node_id: previous || "" },
+      });
+    }
+    state.agentReadiness = null;
+    void loadAgentReadiness("target-model");
+    return;
+  }
+  if (requested === AGENT_SET_PROVIDER_TARGET_ID) {
+    openAgentSetupBalloon({
+      mode: "provider",
+      message: "Set or pick an OpenAI-compatible provider before sending chat messages.",
+      openProviderForm: true,
+      providerFormMode: "new",
+    });
+    renderAgentNodeSelect();
+    return;
+  }
+  if (requested === AGENT_SET_HERMES_TARGET_ID) {
+    state.agentTargetNode = defaultAgentTargetNode();
+    openAgentSetupBalloon({
+      mode: "agent",
+      message: "Set or pick your owned agent before sending chat messages.",
+    });
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    return;
+  }
+  const next = requested === AGENT_PROVIDER_TARGET_ID && directProviderConfigured()
+    ? AGENT_PROVIDER_TARGET_ID
+    : !isAdminUser() && isGlobalAgentNodeId(requested) ? AGENT_SANDBOX_NODE_ID : requested;
   const previous = state.agentTargetNode;
   state.agentTargetNode = next;
   renderAgentNodeSelect();
   renderAgentModelSelect();
+  renderAgentReadinessStatus();
   if (previous !== next) {
     recordUserEvent("agent.target_node_selected", {
-      target: `node:${next}`,
-      summary: `Chat target node changed to ${next}`,
+      target: next === AGENT_PROVIDER_TARGET_ID ? "provider-api" : `node:${next}`,
+      summary: next === AGENT_PROVIDER_TARGET_ID ? "Chat target changed to saved provider" : `Chat target node changed to ${next}`,
       data: { node_id: next, previous_node_id: previous || "" },
     });
   }
+  if (next === AGENT_PROVIDER_TARGET_ID) return;
+  state.agentReadiness = null;
+  void loadAgentReadiness("target-node");
 }
 
 function normalizeAgentModelEntry(raw) {
@@ -3536,7 +4869,6 @@ function addAgentModelToCatalog(model) {
   } else {
     catalog.push(normalized);
   }
-  catalog.sort((a, b) => a.label.localeCompare(b.label));
   return normalized;
 }
 
@@ -3550,6 +4882,13 @@ function removeAgentModelFromCatalog(model) {
 }
 
 function agentDefaultModelForNode(nodeId = agentTargetNode()) {
+  if (nodeId === AGENT_PROVIDER_TARGET_ID || agentTargetIsDirectProvider()) {
+    return normalizeAgentModelEntry({
+      id: state.agentDirectProvider?.model || "",
+      name: state.agentDirectProvider?.model || "",
+      provider: state.agentDirectProvider?.provider || "",
+    });
+  }
   const node = Array.isArray(state.nodes) ? state.nodes.find((n) => n.id === nodeId) : null;
   return normalizeAgentModelEntry({
     id: node?.model || formatNodeModel(node?.modelName, node?.modelProvider),
@@ -3583,7 +4922,8 @@ function availableAgentModels() {
 }
 
 function selectedAgentModel() {
-  const selected = state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+  if (agentTargetIsDirectProvider()) return null;
+  const selected = state.agentModelSettings.selectedByNode?.[agentModelTargetKey()];
   return normalizeAgentModelEntry(selected) || null;
 }
 
@@ -3591,7 +4931,7 @@ function applyAgentModelToTarget(model) {
   const normalized = normalizeAgentModelEntry(model);
   if (!normalized) return null;
   state.agentModelSettings.selectedByNode = state.agentModelSettings.selectedByNode || {};
-  state.agentModelSettings.selectedByNode[agentTargetNode()] = {
+  state.agentModelSettings.selectedByNode[agentModelTargetKey()] = {
     id: normalized.id,
     name: normalized.name,
     provider: normalized.provider,
@@ -3606,12 +4946,29 @@ function persistAgentModelSelection() {
   renderAgentModelSelect();
 }
 
+function applyAgentProviderModel(model) {
+  const normalized = normalizeAgentModelEntry(model);
+  if (!normalized || !state.agentDirectProvider) return null;
+  saveAgentDirectProviderConfig({
+    ...state.agentDirectProvider,
+    model: normalized.id,
+    provider: normalized.provider || state.agentDirectProvider.provider || "",
+  });
+  state.agentProviderProbe = null;
+  state.agentOnboardingStatus = "Provider model set";
+  addAgentModelToCatalog(normalized);
+  renderAgentNodeSelect();
+  renderAgentModelSelect();
+  renderAgentReadinessStatus();
+  return normalized;
+}
+
 function renderAgentModelSelect() {
   if (!els.agentModelSelect) return;
   const defaultModel = agentDefaultModelForNode();
   let activeModel = selectedAgentModel();
   if (activeModel && defaultModel && sameAgentModel(activeModel, defaultModel)) {
-    delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+    delete state.agentModelSettings.selectedByNode?.[agentModelTargetKey()];
     activeModel = null;
     saveAgentModelSettings();
   }
@@ -3634,7 +4991,7 @@ function renderAgentModelSelect() {
   fragment.append(separator);
   const addOption = document.createElement("option");
   addOption.value = "__add__";
-  addOption.textContent = "+ Add model...";
+  addOption.textContent = agentTargetIsDirectProvider() ? "Edit provider..." : "+ Add model...";
   fragment.append(addOption);
   if (activeModel) {
     const removeOption = document.createElement("option");
@@ -3744,6 +5101,9 @@ function openAgentModelSetup(mode = "add", model = null, options = {}) {
   clearAgentModelSetupTimer();
   const normalized = normalizeAgentModelEntry(model);
   const current = normalized || selectedAgentModel() || agentDefaultModelForNode();
+  state.agentSetupBalloonOpen = true;
+  state.agentSetupMode = "agent";
+  state.agentSetupMessage = "Add, edit, or delete a saved agent model.";
   setAgentBalloon("model");
   setAgentModelSetup({
     open: true,
@@ -3755,6 +5115,8 @@ function openAgentModelSetup(mode = "add", model = null, options = {}) {
       ? [{ label: `Remove ${current?.label || "selected model"}`, status: "running", detail: agentTargetNode() }]
       : [],
   });
+  renderAgentOnboardingPanel();
+  renderAgentNodeSelect();
   window.requestAnimationFrame(() => {
     els.agentModelInput?.focus();
     if (mode !== "remove") els.agentModelInput?.select();
@@ -3767,6 +5129,7 @@ function closeAgentModelSetup() {
   clearAgentModelSetupTimer();
   setAgentModelSetup({ open: false, status: "idle", steps: [] });
   renderAgentModelSelect();
+  renderAgentOnboardingPanel();
 }
 
 function startAgentModelSetupProgress() {
@@ -3790,8 +5153,10 @@ function completeAgentModelRemove() {
     return;
   }
   removeAgentModelFromCatalog(selected);
-  delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+  delete state.agentModelSettings.selectedByNode?.[agentModelTargetKey()];
   persistAgentModelSelection();
+  renderAgentNodeSelect();
+  renderAgentOnboardingPanel();
   setAgentModelSetup({
     busy: false,
     status: "done",
@@ -3864,6 +5229,8 @@ async function submitAgentModelSetup(event) {
       saveAgentModelSettings();
     }
     renderAgentModelSelect();
+    renderAgentNodeSelect();
+    renderAgentOnboardingPanel();
     recordUserEvent("agent.model_setup_finished", {
       target: `node:${targetNode}`,
       summary: `Set ${normalized?.label || rawModel}`,
@@ -5872,6 +7239,12 @@ function renderLogin() {
   }
   if (els.loginTitle) els.loginTitle.textContent = user ? publicUserLabel(user) : "Sign in";
   if (els.loginMeta) els.loginMeta.textContent = user ? cleanText(user.email, "Google account") : "Google";
+  if (els.loginFluxBalance) {
+    const balance = Number(state.agentCredits?.balance || 0);
+    els.loginFluxBalance.hidden = !user || isAdminUser();
+    els.loginFluxBalance.textContent = `${balance} Flux`;
+    els.loginFluxBalance.title = state.agentCredits ? "Available Flux balance" : "Flux balance not loaded yet";
+  }
   if (els.googleSignInButton) {
     els.googleSignInButton.hidden = Boolean(user);
     if (user) els.googleSignInButton.replaceChildren();
@@ -5984,10 +7357,12 @@ async function renderGoogleSignInButton() {
   renderLogin();
   try {
     await loadGoogleIdentityScript();
+    const loginUri = new URL("/auth/google/callback", window.location.origin).href;
     window.google.accounts.id.initialize({
       client_id: state.googleClientId,
       callback: handleGoogleCredential,
-      ux_mode: "popup",
+      ux_mode: "redirect",
+      login_uri: loginUri,
     });
     slots.forEach((slot) => {
       const clickLayer = renderGoogleLoginFace(slot);
@@ -6021,6 +7396,8 @@ async function loadAuthSession() {
     state.authUser = null;
     state.loginMessage = error.message;
   }
+  loadAgentDirectProviderForUser();
+  loadAgentOwnedAgentForUser();
   state.authChecked = true;
   renderLogin();
 }
@@ -6037,6 +7414,8 @@ async function handleGoogleCredential(response) {
       timeoutMs: 15000,
     });
     state.authUser = payload.user || null;
+    loadAgentDirectProviderForUser();
+    loadAgentOwnedAgentForUser();
     state.loginMessage = "";
     setLoginOpen(false);
     await bootstrapAuthenticatedApp();
@@ -6059,6 +7438,10 @@ async function logout() {
     // Clearing local session state keeps the UI honest even if the server is restarting.
   }
   state.authUser = null;
+  state.agentDirectProvider = null;
+  state.agentOwnedAgent = null;
+  state.agentDirectProviderFormOpen = false;
+  state.agentTopicFormOpen = false;
   state.loginMessage = "";
   state.googleButtonRenderedFor = "";
   renderLogin();
@@ -6155,6 +7538,120 @@ async function fetchJson(path, options = {}) {
 
 async function bridgeJson(path, options = {}) {
   return fetchJson(`/bridge${path}`, options);
+}
+
+function agentReadinessLabel(readiness = state.agentReadiness) {
+  if (agentTargetIsNone()) return "No model";
+  if (shouldUseOwnedAgentBridge()) return "Own bridge";
+  if (shouldUseDirectAgentProvider()) {
+    const validation = validateDirectProviderConfig();
+    if (!validation.ok) return validation.mode;
+    const probe = currentAgentProviderProbe();
+    if (state.agentProviderProbeBusy || probe?.mode === "checking") return "checking provider";
+    if (!probe) return "provider untested";
+    if (probe.ok) return probe.mode;
+    return probe.mode || probe.category || "unreachable";
+  }
+  const status = cleanText(readiness?.status, "");
+  if (status === "ready") return "Agent ready";
+  if (status === "backend_unavailable") return "Agent backend unavailable";
+  if (status === "sandbox_not_provisioned") return "Agent not set";
+  if (!state.wasmReady) return "WASM runtime blocked or unavailable";
+  return state.agentReadinessBusy ? "Checking agent" : "Agent ready";
+}
+
+function agentReadinessStatusKey(readiness = state.agentReadiness) {
+  if (agentTargetIsNone()) return "config-missing";
+  if (shouldUseOwnedAgentBridge()) return "ready";
+  if (shouldUseDirectAgentProvider()) {
+    const validation = validateDirectProviderConfig();
+    if (!validation.ok) return validation.mode;
+    const probe = currentAgentProviderProbe();
+    if (!probe || state.agentProviderProbeBusy || probe.mode === "checking") return "checking";
+    return probe.mode || "unreachable";
+  }
+  const status = cleanText(readiness?.status, "");
+  if (status) return status;
+  if (!state.wasmReady) return "wasm_unavailable";
+  return state.agentReadinessBusy ? "checking" : "ready";
+}
+
+function renderAgentReadinessStatus() {
+  if (!els.agentStatus) return;
+  const label = agentReadinessLabel();
+  els.agentStatus.hidden = false;
+  els.agentStatus.textContent = label;
+  els.agentStatus.dataset.status = agentReadinessStatusKey();
+  const wasmNote = state.wasmReady ? "" : cleanText(state.lastError, "Browser WASM runtime unavailable");
+  els.agentStatus.title = wasmNote && label !== "WASM runtime blocked or unavailable" ? `${label}; ${wasmNote}` : wasmNote;
+  renderAgentOnboardingPanel();
+}
+
+async function loadAgentReadiness(origin = "auto") {
+  if (!state.authUser || state.agentReadinessBusy || agentTargetIsNone() || shouldUseOwnedAgentBridge()) return state.agentReadiness;
+  state.agentReadinessBusy = true;
+  renderAgentReadinessStatus();
+  try {
+    const query = new URLSearchParams({ target_node: agentTargetNode() });
+    const payload = await fetchJson(`/agent/readiness?${query.toString()}`, { timeoutMs: 8000 });
+    state.agentReadiness = payload;
+    state.agentOnboardingStatus = payload.message || "";
+    renderAgentNodeSelect();
+    if (origin !== "poll") {
+      recordUserEvent("agent.readiness_loaded", {
+        target: `node:${payload.target_node || agentTargetNode()}`,
+        summary: payload.message || payload.status || "Agent readiness loaded",
+        data: { status: payload.status, missing_dependency: payload.missing_dependency || "" },
+      });
+    }
+    return payload;
+  } catch (error) {
+    state.agentReadiness = {
+      ok: true,
+      schema: "hermes.wasm_agent.agent_readiness.v1",
+      status: "backend_unavailable",
+      ready: false,
+      target_node: agentTargetNode(),
+      message: error.message,
+      missing_dependency: "agent_readiness_endpoint",
+    };
+    state.agentOnboardingStatus = error.message;
+    renderAgentNodeSelect();
+    return state.agentReadiness;
+  } finally {
+    state.agentReadinessBusy = false;
+    renderAgentReadinessStatus();
+  }
+}
+
+async function ensureAgentReadiness(origin = "send") {
+  if (!state.agentReadiness || state.agentReadiness.target_node !== agentTargetNode()) {
+    return loadAgentReadiness(origin);
+  }
+  return state.agentReadiness;
+}
+
+async function loadAccountCredits(origin = "auto") {
+  if (!state.authUser) return null;
+  try {
+    const payload = await fetchJson("/account/credits", { timeoutMs: 8000 });
+    state.agentCredits = payload;
+    if (origin !== "poll") {
+      recordUserEvent("account.credits_loaded", {
+        target: "account:credits",
+        summary: `Flux balance ${payload.balance || 0}`,
+        data: { balance: payload.balance || 0 },
+      });
+    }
+    renderAgentOnboardingPanel();
+    renderLogin();
+    return payload;
+  } catch (error) {
+    state.agentOnboardingStatus = error.message;
+    renderAgentOnboardingPanel();
+    renderLogin();
+    return null;
+  }
 }
 
 async function postAgentMessage(body, pendingMessage, options = {}) {
@@ -6265,6 +7762,7 @@ function setAgentOpen(open, options = {}) {
     placeAgentPanel();
     window.setTimeout(() => {
       placeAgentPanel();
+      queueAgentScrollToBottom();
       els.agentInput.focus();
     }, 0);
   } else {
@@ -6407,6 +7905,43 @@ function closeAgentChat() {
   if (!closeUiNavigationLayer("agent-chat")) setAgentOpen(false);
 }
 
+function agentChatDistanceFromBottom() {
+  const scroller = els.agentMessages;
+  if (!scroller) return 0;
+  return Math.max(0, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
+}
+
+function updateAgentScrollBottomButton() {
+  const scroller = els.agentMessages;
+  if (els.agentPanel && els.agentForm) {
+    els.agentPanel.style.setProperty("--agent-form-height", `${Math.max(0, Math.round(els.agentForm.getBoundingClientRect().height || 82))}px`);
+  }
+  const pinned = !scroller || scroller.hidden || agentChatDistanceFromBottom() <= AGENT_CHAT_BOTTOM_EPSILON_PX;
+  state.agentChatPinned = pinned;
+  if (els.agentScrollBottomButton) {
+    els.agentScrollBottomButton.hidden = pinned || !state.agentOpen || state.agentView !== "chat" || state.agentSetupBalloonOpen;
+  }
+}
+
+function scrollAgentChatToBottom({ smooth = false } = {}) {
+  const scroller = els.agentMessages;
+  if (!scroller) return;
+  const top = scroller.scrollHeight;
+  if (smooth && scroller.scrollTo) {
+    scroller.scrollTo({ top, behavior: "smooth" });
+  } else {
+    scroller.scrollTop = top;
+  }
+  window.setTimeout(updateAgentScrollBottomButton, smooth ? 180 : 0);
+}
+
+function queueAgentScrollToBottom(options = {}) {
+  window.requestAnimationFrame(() => {
+    scrollAgentChatToBottom(options);
+    window.requestAnimationFrame(() => scrollAgentChatToBottom(options));
+  });
+}
+
 function agentChatScrollSnapshot() {
   const scroller = els.agentMessages;
   if (!scroller) return { pinned: true, top: 0 };
@@ -6417,15 +7952,16 @@ function agentChatScrollSnapshot() {
   };
 }
 
-function restoreAgentChatScroll(snapshot = {}) {
+function restoreAgentChatScroll(snapshot = {}, options = {}) {
   const scroller = els.agentMessages;
   if (!scroller) return;
-  if (snapshot.pinned) {
-    scroller.scrollTop = scroller.scrollHeight;
+  if (options.forceBottom || snapshot.pinned) {
+    scrollAgentChatToBottom();
     return;
   }
   const maxTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   scroller.scrollTop = clamp(Number(snapshot.top || 0), 0, maxTop);
+  updateAgentScrollBottomButton();
 }
 
 function appendAgentMessage(role, content, extra = {}) {
@@ -6446,6 +7982,52 @@ function appendAgentMessage(role, content, extra = {}) {
   els.agentMessages.append(renderAgentMessage(message));
   restoreAgentChatScroll(scrollSnapshot);
   return message;
+}
+
+function agentMessageMenuPositionFromEvent(event) {
+  if (!event) return null;
+  const x = Number(event.clientX);
+  const y = Number(event.clientY);
+  if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+  const rect = event.currentTarget?.getBoundingClientRect?.() || event.target?.getBoundingClientRect?.();
+  if (!rect) return null;
+  return { x: rect.left, y: rect.bottom };
+}
+
+function closeAgentMessageMenu() {
+  state.agentOpenMessageMenuId = "";
+  state.agentMessageMenuPosition = null;
+}
+
+function openAgentMessageMenu(message, event = null) {
+  state.agentOpenMessageMenuId = message?.id || "";
+  state.agentMessageMenuPosition = message?.id ? agentMessageMenuPositionFromEvent(event) : null;
+  renderAgentMessages();
+}
+
+function installAgentMessageMenuInteractions(wrap, message) {
+  if (!wrap || !message?.id) return;
+  wrap.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openAgentMessageMenu(message, event);
+  });
+  wrap.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "mouse" || event.button !== 0) return;
+    const pointerEvent = event;
+    window.clearTimeout(state.agentMessageLongPressTimer);
+    state.agentMessageLongPressTimer = window.setTimeout(() => {
+      openAgentMessageMenu(message, pointerEvent);
+    }, AGENT_MESSAGE_LONG_PRESS_MS);
+  });
+  const clearLongPress = () => {
+    window.clearTimeout(state.agentMessageLongPressTimer);
+    state.agentMessageLongPressTimer = 0;
+  };
+  wrap.addEventListener("pointerup", clearLongPress);
+  wrap.addEventListener("pointercancel", clearLongPress);
+  wrap.addEventListener("pointerleave", clearLongPress);
+  wrap.addEventListener("lostpointercapture", clearLongPress);
 }
 
 function renderAgentMessage(message) {
@@ -6497,6 +8079,8 @@ function renderAgentMessage(message) {
   }
   const changedFiles = !socialChat && message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
   if (changedFiles) wrap.append(changedFiles);
+  if (state.agentOpenMessageMenuId === message.id && !header) wrap.append(agentMessageMenu(message));
+  installAgentMessageMenuInteractions(wrap, message);
   return wrap;
 }
 
@@ -6590,8 +8174,10 @@ function initializeAgentComposer() {
     createCommandPalette,
     canSubmit: (raw) => (
       state.agentBusy
-      || Boolean(String(raw || "").trim())
-      || Boolean(state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length)
+      || (!agentPendingFileJobCount() && (
+        Boolean(String(raw || "").trim())
+        || Boolean(state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length)
+      ))
     ),
     onSend: (raw) => {
       void sendAgentMessage(raw);
@@ -6608,6 +8194,9 @@ function renderAgentImageCards(message) {
   if (!entries.length) return null;
   const details = document.createElement("details");
   details.className = "agent-image-card";
+  bindAgentDetailsOpenState(details, message?.id ? `image-card:${message.id}` : "", false, {
+    status: message?.pending ? "running" : "done",
+  });
   const summary = document.createElement("summary");
   summary.className = "agent-image-card-summary";
   const first = imageCardSummary(entries[0]);
@@ -6720,8 +8309,12 @@ function agentTurnHeader(message) {
   menuButton.dataset.messageId = message.id || "";
   menuButton.addEventListener("click", (event) => {
     event.stopPropagation();
-    state.agentOpenMessageMenuId = state.agentOpenMessageMenuId === message.id ? "" : message.id;
-    renderAgentMessages();
+    if (state.agentOpenMessageMenuId === message.id) {
+      closeAgentMessageMenu();
+      renderAgentMessages();
+      return;
+    }
+    openAgentMessageMenu(message, event);
   });
   const arrow = document.createElement("span");
   arrow.className = "agent-menu-arrow";
@@ -6735,13 +8328,22 @@ function agentTurnHeader(message) {
 function agentMessageMenu(message) {
   const menu = document.createElement("div");
   menu.className = "agent-message-menu";
+  if (state.agentOpenMessageMenuId === message.id && state.agentMessageMenuPosition) {
+    const x = Number(state.agentMessageMenuPosition.x);
+    const y = Number(state.agentMessageMenuPosition.y);
+    const left = clamp(x, 8, Math.max(8, window.innerWidth - AGENT_MESSAGE_MENU_WIDTH_PX - 8));
+    const top = clamp(y, 8, Math.max(8, window.innerHeight - AGENT_MESSAGE_MENU_HEIGHT_PX - 8));
+    menu.classList.add("is-positioned");
+    menu.style.setProperty("--agent-message-menu-left", `${left}px`);
+    menu.style.setProperty("--agent-message-menu-top", `${top}px`);
+  }
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "agent-message-menu-item";
   copy.addEventListener("click", (event) => {
     event.stopPropagation();
     copyAgentMessageText(message);
-    state.agentOpenMessageMenuId = "";
+    closeAgentMessageMenu();
     renderAgentMessages();
   });
   const icon = document.createElement("span");
@@ -6755,15 +8357,25 @@ function agentMessageMenu(message) {
 }
 
 function copyAgentMessageText(message) {
-  const text = message.content || "";
+  const text = agentMessageSourceText(message);
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text).catch(() => {});
   }
   recordUserEvent("agent.message_copied", {
     target: `message:${message.id || "unknown"}`,
-    summary: "Copied assistant message text",
+    summary: "Copied message text",
     data: { message_id: message.id || "", text_length: text.length },
   });
+}
+
+function agentMessageSourceText(message = {}) {
+  return String(
+    message.source_content
+    || message.markdown_source
+    || message.raw_content
+    || message.content
+    || ""
+  );
 }
 
 function bindAgentDetailsOpenState(details, key, defaultOpen = false, options = {}) {
@@ -6777,24 +8389,29 @@ function bindAgentDetailsOpenState(details, key, defaultOpen = false, options = 
     ? Boolean(existing.open)
     : Boolean(existing);
   const overrideStatus = existing && typeof existing === "object" ? cleanText(existing.status, "") : "";
-  if (options.autoCloseOnDone && status === "done" && overrideOpen && overrideStatus !== "done") {
+  const userInteracted = existing && typeof existing === "object" ? Boolean(existing.user) : false;
+  if (options.autoCloseOnDone && status === "done" && overrideOpen && overrideStatus !== "done" && !userInteracted) {
     delete overrides[key];
   }
   details.open = Object.prototype.hasOwnProperty.call(overrides, key)
     ? (overrides[key] && typeof overrides[key] === "object" ? Boolean(overrides[key].open) : Boolean(overrides[key]))
     : Boolean(defaultOpen);
+  const rememberInteraction = (event = null) => {
+    if (event?.target?.closest?.("summary")) return;
+    overrides[key] = { open: Boolean(details.open), status, user: true };
+  };
   details.addEventListener("click", (event) => {
     if (!event.target?.closest?.("summary")) return;
     window.setTimeout(() => {
-      overrides[key] = { open: Boolean(details.open), status };
+      overrides[key] = { open: Boolean(details.open), status, user: true };
     }, 0);
   });
-  details.addEventListener("toggle", (event) => {
-    if (event.isTrusted) overrides[key] = { open: Boolean(details.open), status };
-  });
+  details.addEventListener("pointerdown", rememberInteraction, { capture: true });
+  details.addEventListener("focusin", rememberInteraction);
+  details.addEventListener("wheel", rememberInteraction, { passive: true });
 }
 
-function renderAgentMessages() {
+function renderAgentMessages(options = {}) {
   const session = activeAgentSession();
   const scrollSnapshot = agentChatScrollSnapshot();
   renderAgentChrome();
@@ -6812,7 +8429,7 @@ function renderAgentMessages() {
   }
   renderAgentDiagnostics(session.diagnostics || {});
   renderAgentContextPreview(session.context_preview || []);
-  restoreAgentChatScroll(scrollSnapshot);
+  restoreAgentChatScroll(scrollSnapshot, { forceBottom: Boolean(options.forceBottom) });
 }
 
 function socialUserId(user) {
@@ -6853,9 +8470,137 @@ function switchToMainAgentChat() {
   state.agentView = "chat";
   setAgentSocialPicker("");
   saveAgentSessions();
+  saveActiveAgentSessionPreference();
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
   window.setTimeout(() => els.agentInput?.focus(), 0);
+}
+
+function renderAgentConfiguredModelList() {
+  if (!els.agentConfiguredModelList) return;
+  const entries = configuredAgentTargetOptions();
+  if (!entries.length) {
+    const empty = document.createElement("div");
+    empty.className = "agent-configured-model-empty";
+    empty.textContent = "None";
+    els.agentConfiguredModelList.replaceChildren(empty);
+    return;
+  }
+  els.agentConfiguredModelList.replaceChildren(...entries.map((entry) => {
+    const row = document.createElement("div");
+    row.className = `agent-configured-model-row kind-${entry.kind || "agent"}`;
+    row.dataset.targetValue = entry.value || "";
+    row.dataset.targetKind = entry.kind || "";
+    const text = document.createElement("div");
+    text.className = "agent-configured-model-text";
+    const title = document.createElement("strong");
+    title.textContent = entry.label || entry.value || "model";
+    const detail = document.createElement("span");
+    detail.textContent = entry.detail || "";
+    text.append(title);
+    if (detail.textContent) text.append(detail);
+    const actions = document.createElement("div");
+    actions.className = "agent-configured-model-actions";
+    const use = document.createElement("button");
+    use.type = "button";
+    use.dataset.action = "use";
+    use.textContent = "Use";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.dataset.action = "edit";
+    edit.textContent = "Edit";
+    const del = document.createElement("button");
+    del.type = "button";
+    del.dataset.action = "delete";
+    del.textContent = "Delete";
+    const nodeHasSavedModel = entry.kind === "agent" && Boolean(state.agentModelSettings.selectedByNode?.[entry.nodeId || entry.value]);
+    del.disabled = entry.kind === "agent" && !nodeHasSavedModel;
+    del.title = del.disabled
+      ? "This agent is using its current default model"
+      : entry.kind === "owned-agent" ? "Delete this agent" : "Delete this listed model";
+    actions.append(use, edit, del);
+    row.append(text, actions);
+    return row;
+  }));
+}
+
+function deleteAgentConfiguredTarget(row) {
+  const kind = cleanText(row?.dataset?.targetKind, "");
+  const value = cleanText(row?.dataset?.targetValue, "");
+  if (kind === "provider") {
+    saveAgentDirectProviderConfig(null);
+    state.agentProviderProbe = null;
+    if (state.agentTargetNode === AGENT_PROVIDER_TARGET_ID) state.agentTargetNode = AGENT_NONE_TARGET_ID;
+    state.agentOnboardingStatus = "Provider deleted";
+  } else if (kind === "agent-model") {
+    const model = agentModelFromTargetValue(value);
+    if (model) {
+      removeAgentModelFromCatalog(model);
+      state.agentModelSettings.selectedByNode = state.agentModelSettings.selectedByNode || {};
+      Object.entries(state.agentModelSettings.selectedByNode || {}).forEach(([nodeId, selected]) => {
+        if (sameAgentModel(selected, model)) delete state.agentModelSettings.selectedByNode[nodeId];
+      });
+      saveAgentModelSettings();
+    }
+    if (state.agentTargetNode === value) state.agentTargetNode = defaultAgentTargetNode();
+    state.agentOnboardingStatus = "Agent model deleted";
+  } else if (kind === "agent") {
+    const selected = normalizeAgentModelEntry(state.agentModelSettings.selectedByNode?.[value]);
+    if (selected) removeAgentModelFromCatalog(selected);
+    delete state.agentModelSettings.selectedByNode?.[value];
+    saveAgentModelSettings();
+    state.agentOnboardingStatus = "Agent model deleted";
+  } else if (kind === "owned-agent") {
+    saveAgentOwnedAgentConfig(null);
+    if (state.agentTargetNode === AGENT_OWNED_AGENT_TARGET_ID) state.agentTargetNode = AGENT_NONE_TARGET_ID;
+    state.agentOnboardingStatus = "Agent deleted";
+  }
+  renderAgentNodeSelect();
+  renderAgentModelSelect();
+  renderAgentReadinessStatus();
+  renderAgentOnboardingPanel();
+}
+
+function handleAgentConfiguredModelAction(event) {
+  const button = event.target?.closest?.("button[data-action]");
+  const row = button?.closest?.(".agent-configured-model-row");
+  if (!button || !row) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const action = button.dataset.action || "";
+  const kind = cleanText(row.dataset.targetKind, "");
+  const value = cleanText(row.dataset.targetValue, "");
+  if (action === "use") {
+    setAgentTargetNode(value || defaultAgentTargetNode());
+    closeAgentSetupBalloon();
+    return;
+  }
+  if (action === "edit") {
+    if (kind === "provider") {
+      state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
+      openAgentProviderForm("edit");
+      state.agentSetupMode = "provider";
+      state.agentSetupBalloonOpen = true;
+      renderAgentOnboardingPanel();
+      window.setTimeout(() => els.agentDirectBaseUrlInput?.focus(), 0);
+      return;
+    }
+    if (kind === "agent") {
+      state.agentTargetNode = value || defaultAgentTargetNode();
+      openAgentModelSetup("set", agentModelForNodeOption(state.agentTargetNode));
+      return;
+    }
+    if (kind === "agent-model") {
+      state.agentTargetNode = value || defaultAgentTargetNode();
+      openAgentModelSetup("set", agentModelFromTargetValue(value));
+      return;
+    }
+    if (kind === "owned-agent") {
+      openAgentTopicForm();
+      return;
+    }
+  }
+  if (action === "delete" && !button.disabled) deleteAgentConfiguredTarget(row);
 }
 
 function directSessions() {
@@ -6958,6 +8703,527 @@ function renderSocialToasts() {
   }));
 }
 
+function agentTopicConfigFromInputs() {
+  const first = cleanText(els.agentOwnedAgentInput?.value || "", "");
+  const firstIsUrl = Boolean(normalizeOwnedAgentBridgeUrl(first));
+  return normalizeAgentOwnedAgentConfig({
+    name: cleanText(els.agentTopicNameInput?.value || (firstIsUrl ? "" : first), "My agent"),
+    role: cleanText(els.agentTopicRoleInput?.value || "", ""),
+    type: cleanText(els.agentTopicTypeSelect?.value || "hermes", "hermes"),
+    bridgeUrl: cleanText(els.agentTopicBridgeUrlInput?.value || (firstIsUrl ? first : ""), ""),
+  }) || {
+    name: "My agent",
+    role: "",
+    type: "hermes",
+    bridgeUrl: "",
+    service: "hermes-orchestrator",
+  };
+}
+
+function openAgentTopicForm() {
+  state.agentSetupBalloonOpen = true;
+  state.agentSetupMode = "agent";
+  state.agentSetupMessage = "Add an agent bridge or configure a Hermes agent.";
+  state.agentTopicFormOpen = true;
+  closeAgentProviderForm();
+  const first = cleanText(els.agentOwnedAgentInput?.value || "", "");
+  const firstIsUrl = Boolean(normalizeOwnedAgentBridgeUrl(first));
+  state.agentTopicDraft = normalizeAgentOwnedAgentConfig({
+    ...(state.agentOwnedAgent || {}),
+    name: state.agentOwnedAgent?.name || (firstIsUrl ? "" : first),
+    bridgeUrl: state.agentOwnedAgent?.bridgeUrl || (firstIsUrl ? first : ""),
+  });
+  renderAgentOnboardingPanel();
+  renderAgentNodeSelect();
+  window.setTimeout(() => els.agentTopicNameInput?.focus(), 0);
+}
+
+function closeAgentTopicForm() {
+  if (state.agentTopicBusy) return;
+  state.agentTopicFormOpen = false;
+  state.agentTopicDraft = null;
+  renderAgentOnboardingPanel();
+}
+
+async function submitAgentTopicForm(event) {
+  event?.preventDefault();
+  if (state.agentTopicBusy || state.agentProvisionBusy) return;
+  const config = agentTopicConfigFromInputs();
+  saveAgentOwnedAgentConfig(config);
+  state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+  if (config.bridgeUrl) {
+    state.agentTopicFormOpen = false;
+    state.agentSetupBalloonOpen = false;
+    state.agentOnboardingStatus = "Agent saved";
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    renderAgentOnboardingPanel();
+    recordUserEvent("agent.owned_agent_saved", {
+      target: "owned-agent",
+      summary: `Saved ${config.name}`,
+      data: { type: config.type, bridge_url_configured: true },
+    });
+    return;
+  }
+  if (config.type !== "hermes") {
+    state.agentOnboardingStatus = "Only Hermes service agents are available right now";
+    renderAgentOnboardingPanel();
+    return;
+  }
+  const balance = Number(state.agentCredits?.balance || 0);
+  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
+  if (balance < cost) {
+    state.agentSetupMessage = "Not enough credits to set an agent yet. Your balance is in the account popover.";
+    state.agentOnboardingStatus = "";
+    renderAgentOnboardingPanel();
+    return;
+  }
+  state.agentTopicBusy = true;
+  try {
+    await provisionMainWithFlux({
+      agent_name: config.name,
+      agent_role: config.role,
+      agent_type: config.type,
+    });
+    state.agentTopicFormOpen = false;
+    recordUserEvent("agent.service_agent_requested", {
+      target: "owned-agent",
+      summary: `Requested Hermes agent ${config.name}`,
+      data: { type: config.type },
+    });
+  } finally {
+    state.agentTopicBusy = false;
+    renderAgentOnboardingPanel();
+  }
+}
+
+function renderAgentOnboardingPanel() {
+  if (!els.agentOnboardingPanel) return;
+  const session = activeAgentSession();
+  const socialChat = session.kind === "direct" || session.kind === "shared-space";
+  const show = Boolean(state.authUser && !socialChat && state.agentView !== "people" && (state.agentSetupBalloonOpen || state.agentModelSetup.open));
+  els.agentOnboardingPanel.hidden = !show;
+  placeAgentOnboardingPanel();
+  updateAgentScrollBottomButton();
+  if (!show) return;
+  renderAgentConfiguredModelList();
+  const mode = state.agentSetupMode === "agent" ? "agent" : "provider";
+  const balance = Number(state.agentCredits?.balance || 0);
+  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
+  const missingFlux = Math.max(0, cost - balance);
+  const providerProbe = currentAgentProviderProbe();
+  const agentReady = Boolean(state.agentReadiness?.ready || state.agentReadiness?.status === "ready");
+  if (els.agentOnboardingTitle) {
+    els.agentOnboardingTitle.textContent = state.agentTopicFormOpen
+      ? "Add agent"
+      : mode === "agent"
+      ? "Set agent"
+      : providerProbe?.ok ? "Provider ready" : directProviderConfigured() ? "Provider needs attention" : "Set provider";
+  }
+  if (els.agentOnboardingCopy) {
+    els.agentOnboardingCopy.textContent = state.agentSetupMessage || (mode === "agent"
+      ? "Pick your owned agent or set one up before sending chat messages."
+      : "Set, pick, or edit an OpenAI-compatible provider you own.");
+  }
+  if (els.agentOnboardingStatus) {
+    const statusText = state.agentProvisionBusy ? "Setting agent" : state.agentOnboardingStatus || "";
+    els.agentOnboardingStatus.textContent = statusText;
+    els.agentOnboardingStatus.hidden = !statusText;
+  }
+  if (els.agentOwnedAgentInput && document.activeElement !== els.agentOwnedAgentInput) {
+    els.agentOwnedAgentInput.value = state.agentOwnedAgent?.bridgeUrl || state.agentOwnedAgent?.name || "";
+  }
+  if (els.agentAddAgentButton) {
+    els.agentAddAgentButton.disabled = state.agentProvisionBusy || state.agentTopicBusy;
+    els.agentAddAgentButton.title = missingFlux > 0 && !agentReady && !state.agentOwnedAgent?.bridgeUrl
+      ? "Not enough credits to set a hosted Hermes agent yet"
+      : "Add an owned agent";
+  }
+  if (els.agentTopicForm) {
+    els.agentTopicForm.hidden = !state.agentTopicFormOpen;
+  }
+  const topicConfig = state.agentTopicDraft || state.agentOwnedAgent || {};
+  if (els.agentTopicNameInput && document.activeElement !== els.agentTopicNameInput) {
+    els.agentTopicNameInput.value = topicConfig.name || "";
+  }
+  if (els.agentTopicRoleInput && document.activeElement !== els.agentTopicRoleInput) {
+    els.agentTopicRoleInput.value = topicConfig.role || "";
+  }
+  if (els.agentTopicTypeSelect) {
+    els.agentTopicTypeSelect.value = topicConfig.type || "hermes";
+  }
+  if (els.agentTopicBridgeUrlInput && document.activeElement !== els.agentTopicBridgeUrlInput) {
+    els.agentTopicBridgeUrlInput.value = topicConfig.bridgeUrl || "";
+  }
+  if (els.agentTopicStatus) {
+    els.agentTopicStatus.textContent = state.agentTopicBusy || state.agentProvisionBusy
+      ? "Setting agent"
+      : state.agentOwnedAgent?.bridgeUrl
+        ? "Own bridge saved"
+        : ownedAgentConfigured() ? "Hermes service agent configured" : "";
+  }
+  if (els.agentDirectProviderForm) {
+    els.agentDirectProviderForm.hidden = !state.agentDirectProviderFormOpen;
+  }
+  const formConfig = providerFormConfigSource();
+  if (els.agentDirectBaseUrlInput && document.activeElement !== els.agentDirectBaseUrlInput) {
+    els.agentDirectBaseUrlInput.value = formConfig?.baseUrl || "";
+  }
+  if (els.agentDirectModelInput && document.activeElement !== els.agentDirectModelInput) {
+    els.agentDirectModelInput.value = formConfig?.model || "";
+  }
+  if (els.agentDirectApiKeyInput && document.activeElement !== els.agentDirectApiKeyInput) {
+    els.agentDirectApiKeyInput.value = formConfig?.apiKey ? AGENT_DIRECT_PROVIDER_KEY_MASK : "";
+    els.agentDirectApiKeyInput.placeholder = formConfig?.apiKey ? "Saved key" : "";
+  }
+  if (els.agentProviderLoadingIcon) {
+    els.agentProviderLoadingIcon.hidden = !state.agentProviderProbeBusy;
+  }
+  if (els.agentDirectProviderStatus) {
+    els.agentDirectProviderStatus.textContent = directProviderStatusText(providerFormConfigSource());
+  }
+}
+
+function placeAgentOnboardingPanel() {
+  if (!els.agentOnboardingPanel) return;
+  const position = state.agentOnboardingPosition;
+  if (!position) {
+    els.agentOnboardingPanel.style.removeProperty("--agent-onboarding-left");
+    els.agentOnboardingPanel.style.removeProperty("--agent-onboarding-top");
+    return;
+  }
+  const appRect = appViewportRect();
+  const panelRect = els.agentOnboardingPanel.getBoundingClientRect();
+  const halfWidth = Math.max(160, panelRect.width || 460) / 2;
+  const halfHeight = Math.max(120, panelRect.height || 260) / 2;
+  const left = clamp(Number(position.left || appRect.left + appRect.width / 2), appRect.left + halfWidth + 8, appRect.right - halfWidth - 8);
+  const top = clamp(Number(position.top || appRect.top + appRect.height / 2), appRect.top + halfHeight + 8, appRect.bottom - halfHeight - 8);
+  state.agentOnboardingPosition = { left, top };
+  els.agentOnboardingPanel.style.setProperty("--agent-onboarding-left", `${left}px`);
+  els.agentOnboardingPanel.style.setProperty("--agent-onboarding-top", `${top}px`);
+}
+
+function openAgentSetupBalloon({ mode = "provider", message = "", openProviderForm = false, providerFormMode = "new" } = {}) {
+  state.agentSetupBalloonOpen = true;
+  state.agentSetupMode = mode === "agent" ? "agent" : "provider";
+  state.agentSetupMessage = cleanText(message, "");
+  if (openProviderForm) openAgentProviderForm(providerFormMode);
+  setAgentView("chat", { keepActiveSession: true });
+  setAgentOpen(true);
+  renderAgentOnboardingPanel();
+  renderAgentNodeSelect();
+  window.setTimeout(() => {
+    if (openProviderForm) els.agentDirectBaseUrlInput?.focus();
+    else if (mode === "agent") els.agentAddAgentButton?.focus();
+    else els.agentConfiguredModelList?.querySelector?.("button")?.focus();
+  }, 0);
+}
+
+function closeAgentSetupBalloon() {
+  if (state.agentModelSetup.busy || state.agentTopicBusy || state.agentProvisionBusy) return;
+  state.agentSetupBalloonOpen = false;
+  state.agentSetupMessage = "";
+  closeAgentProviderForm();
+  closeAgentTopicForm();
+  closeAgentModelSetup();
+  renderAgentOnboardingPanel();
+}
+
+function handleAgentProviderSetupAction() {
+  state.agentSetupBalloonOpen = true;
+  state.agentSetupMode = "provider";
+  state.agentSetupMessage = "Set, pick, or edit an OpenAI-compatible provider you own.";
+  if (directProviderConfigured() && !agentTargetIsDirectProvider() && !state.agentDirectProviderFormOpen) {
+    state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
+    closeAgentSetupBalloon();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    return;
+  }
+  if (state.agentDirectProviderFormOpen) {
+    closeAgentProviderForm();
+  } else {
+    openAgentProviderForm(directProviderConfigured() ? "edit" : "new");
+  }
+  renderAgentOnboardingPanel();
+  if (state.agentDirectProviderFormOpen) window.setTimeout(() => els.agentDirectBaseUrlInput?.focus(), 0);
+}
+
+function handleAgentSetAgentAction() {
+  if (isAdminUser()) {
+    state.agentSetupBalloonOpen = true;
+    state.agentSetupMode = "agent";
+    openAgentModelSetup("add");
+    return;
+  }
+  state.agentSetupBalloonOpen = true;
+  state.agentSetupMode = "agent";
+  if (state.agentReadiness?.ready || state.agentReadiness?.status === "ready") {
+    state.agentTargetNode = defaultAgentTargetNode();
+    closeAgentSetupBalloon();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    return;
+  }
+  const balance = Number(state.agentCredits?.balance || 0);
+  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
+  if (balance < cost) {
+    state.agentSetupMessage = "Not enough credits to set an agent yet. Your balance is in the account popover.";
+    state.agentOnboardingStatus = "";
+    renderAgentOnboardingPanel();
+    return;
+  }
+  void provisionMainWithFlux();
+}
+
+async function submitAgentDirectProvider(event) {
+  event.preventDefault();
+  const config = syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: true });
+  const validation = validateDirectProviderConfig(config);
+  if (!validation.ok) {
+    if (els.agentDirectProviderStatus) {
+      els.agentDirectProviderStatus.textContent = validation.message;
+    }
+    renderAgentOnboardingPanel();
+    return;
+  }
+  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = "Checking provider";
+  saveAgentDirectProviderConfig(validation.config);
+  const probe = await probeAgentProviderConnectivity({ allowProxy: true, force: true });
+  closeAgentProviderForm();
+  state.agentOnboardingStatus = probe.ok ? `${probe.mode} ready` : `${probe.mode} / ${probe.category}`;
+  if (directProviderConfigured()) state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
+  state.agentSetupBalloonOpen = !probe.ok;
+  renderAgentNodeSelect();
+  renderAgentModelSelect();
+  renderAgentReadinessStatus();
+  renderAgentOnboardingPanel();
+}
+
+function directProviderChatUrl(config) {
+  return directProviderEndpointForBaseUrl(config?.baseUrl || "", config?.provider || "");
+}
+
+async function callDirectAgentProvider(message, transcript = [], imageEntries = []) {
+  const validation = validateDirectProviderConfig();
+  if (!validation.ok) {
+    const error = new Error(validation.message);
+    error.diagnostic = validation;
+    throw error;
+  }
+  const config = validation.config;
+  const probe = await ensureAgentProviderConnection();
+  const shouldForwardImages = providerSupportsImageContentParts(config);
+  const messages = providerRequestMessages(message, transcript, shouldForwardImages ? imageEntries : []);
+  const fallbackMessages = providerMessagesHaveImageContent(messages)
+    ? providerRequestMessages(message, transcript, [])
+    : null;
+  if (probe.mode === AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY) {
+    try {
+      return await requestBackendProvider(config, messages);
+    } catch (error) {
+      if (fallbackMessages && providerShouldRetryWithoutImage(error)) {
+        const fallback = await requestBackendProvider(config, fallbackMessages);
+        return { ...fallback, image_fallback: providerDiagnosticFromError(error) };
+      }
+      throw error;
+    }
+  }
+  try {
+    return await requestBrowserDirectProvider(config, messages);
+  } catch (error) {
+    const diagnostic = classifyBrowserProviderError(error);
+    if (diagnostic.mode === "cors-blocked") {
+      rememberProviderProxyOrigin(config);
+      let backend;
+      try {
+        backend = await requestBackendProvider(config, messages);
+      } catch (proxyError) {
+        if (fallbackMessages && providerShouldRetryWithoutImage(proxyError)) {
+          backend = await requestBackendProvider(config, fallbackMessages);
+          backend.image_fallback = providerDiagnosticFromError(proxyError);
+        } else {
+          throw proxyError;
+        }
+      }
+      setAgentProviderProbe({
+        ok: true,
+        fingerprint: validation.fingerprint,
+        mode: AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY,
+        category: "ready",
+        message: "Browser direct was blocked by CORS; backend proxy provider request succeeded.",
+        endpoint: config.endpoint,
+        model: config.model,
+        direct_error: diagnostic,
+        transport_reason: "cors-fallback",
+        checked_at: Date.now(),
+      });
+      return backend;
+    }
+    if (fallbackMessages && providerShouldRetryWithoutImage(error)) {
+      const fallback = await requestBrowserDirectProvider(config, fallbackMessages);
+      return { ...fallback, image_fallback: providerDiagnosticFromError(error) };
+    }
+    error.diagnostic = diagnostic;
+    throw error;
+  }
+}
+
+function ownedAgentPrompt(message, transcript = [], observation = {}) {
+  const config = state.agentOwnedAgent || {};
+  const lines = [
+    config.role ? `Role/Instructions:\n${config.role}` : "",
+    "User message:",
+    message,
+  ];
+  const recent = Array.isArray(transcript) ? transcript.slice(-8) : [];
+  if (recent.length) {
+    lines.push(
+      "",
+      "Recent transcript:",
+      ...recent.map((turn) => `${cleanText(turn.role || "user", "user")}: ${cleanText(turn.content || "", "")}`)
+    );
+  }
+  if (observation?.workspace) {
+    lines.push("", `Workspace: ${compactJsonForPrompt(observation.workspace, 1200)}`);
+  }
+  return lines.filter((line) => line !== "").join("\n");
+}
+
+function compactJsonForPrompt(value, max = 1200) {
+  try {
+    return truncateText(JSON.stringify(value), max);
+  } catch {
+    return "";
+  }
+}
+
+function ownedAgentReplyFromTask(task = {}) {
+  const result = task.result && typeof task.result === "object" ? task.result : {};
+  return cleanText(result.response || result.reply || result.message || taskPreview(task), "");
+}
+
+async function callOwnedAgentBridge(message, transcript = [], observation = {}) {
+  const baseUrl = ownedAgentBridgeUrl();
+  if (!baseUrl) throw new Error("Missing owned agent bridge URL.");
+  const prompt = ownedAgentPrompt(message, transcript, observation);
+  const payload = await fetchJson(`${baseUrl}/tasks`, {
+    method: "POST",
+    timeoutMs: Math.min(state.agentTurnTimeoutMs, 120000),
+    body: {
+      prompt,
+      target_node: "orchestrator",
+      timeout_sec: Math.max(60, Math.round(state.agentTurnTimeoutMs / 1000)),
+    },
+  });
+  let task = payload.task || payload;
+  const started = Date.now();
+  while (task?.task_id && ["running", "queued", "pending", "submitted"].includes(cleanText(task.status, "").toLowerCase())) {
+    if (Date.now() - started > state.agentTurnTimeoutMs) throw new Error("Owned agent bridge timed out.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    const latest = await fetchJson(`${baseUrl}/tasks/${encodeURIComponent(task.task_id)}`, { timeoutMs: 10000 });
+    task = latest.task || latest;
+  }
+  if (task?.error) throw new Error(task.error.message || "Owned agent bridge returned an error.");
+  const reply = ownedAgentReplyFromTask(task);
+  if (!reply) throw new Error("Owned agent bridge did not return a reply.");
+  return { reply, task };
+}
+
+async function provisionMainWithFlux(agentConfig = {}) {
+  if (state.agentProvisionBusy) return;
+  state.agentProvisionBusy = true;
+  state.agentOnboardingStatus = "Setting agent";
+  renderAgentOnboardingPanel();
+  try {
+    const payload = await fetchJson("/fleet/nodes/provision-main", {
+      method: "POST",
+      timeoutMs: 120000,
+      body: {
+        idempotency_key: `provision_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+        ...agentConfig,
+      },
+    });
+    state.agentOnboardingStatus = payload.already_provisioned ? "Already ready" : "Provisioned";
+    state.agentSetupBalloonOpen = false;
+    state.agentSetupMessage = "";
+    state.agentTargetNode = defaultAgentTargetNode();
+    await loadAccountCredits("provision");
+    await loadAgentReadiness("provision");
+    await loadUserFleet("provision").catch(() => {});
+    renderAgentNodeSelect();
+  } catch (error) {
+    state.agentOnboardingStatus = error.message;
+    recordUserEvent("account.fleet_provision_error", {
+      target: "fleet",
+      summary: error.message,
+      data: { error: error.message },
+    });
+  } finally {
+    state.agentProvisionBusy = false;
+    renderAgentOnboardingPanel();
+  }
+}
+
+async function agentChatSetupBlock(session = activeAgentSession()) {
+  const socialChat = session.kind === "direct" || session.kind === "shared-space";
+  if (!state.authUser || isAdminUser() || socialChat) return null;
+  if (agentTargetIsNone()) {
+    return {
+      mode: "provider",
+      openProviderForm: true,
+      message: "Set one provider or agent before sending chat messages.",
+    };
+  }
+  if (agentTargetIsDirectProvider()) {
+    const validation = validateDirectProviderConfig();
+    if (validation.ok) return null;
+    return {
+      mode: "provider",
+      openProviderForm: true,
+      message: "Set one provider you own before sending chat messages.",
+    };
+  }
+  if (agentTargetIsOwnedAgent() && state.agentOwnedAgent?.bridgeUrl) return null;
+  const readiness = await ensureAgentReadiness("send-preflight").catch((error) => ({
+    status: "backend_unavailable",
+    ready: false,
+    message: error.message,
+  }));
+  if (readiness?.ready || readiness?.status === "ready") return null;
+  if (directProviderConfigured()) {
+    return {
+      mode: "agent",
+      message: "Pick your saved provider, or set an agent before sending chat messages.",
+    };
+  }
+  return {
+    mode: "provider",
+    openProviderForm: true,
+    message: "Set one provider or agent before sending chat messages.",
+  };
+}
+
+async function warnAgentChatNeedsSetup(session = activeAgentSession()) {
+  const block = await agentChatSetupBlock(session);
+  if (!block) return false;
+  openAgentSetupBalloon(block);
+  recordUserEvent("agent.message_blocked_setup_required", {
+    target: "agent-setup",
+    summary: "Message blocked until provider or agent is set",
+    data: {
+      mode: block.mode || "",
+      target_node: agentTargetNode(),
+      provider_configured: directProviderConfigured(),
+      readiness_status: state.agentReadiness?.status || "",
+    },
+  });
+  return true;
+}
+
 function renderAgentChrome() {
   const session = activeAgentSession();
   const peopleOpen = state.agentView === "people";
@@ -6973,18 +9239,20 @@ function renderAgentChrome() {
   els.agentPeopleButton?.setAttribute("aria-pressed", peopleOpen ? "true" : "false");
   const nodePicker = els.agentNodeSelect?.closest?.(".agent-node-picker");
   if (nodePicker) nodePicker.hidden = peopleOpen || socialChat;
-  if (els.agentModelSelect) els.agentModelSelect.hidden = socialChat;
+  if (els.agentModelSelect) els.agentModelSelect.hidden = true;
   if (els.agentTokenUsage) els.agentTokenUsage.hidden = socialChat;
   if (els.agentDirectTools) els.agentDirectTools.hidden = !direct;
   if (els.agentForm) els.agentForm.dataset.chatKind = direct ? "direct" : sharedChat ? "shared-space" : "agent";
   if (els.agentInput) {
-    els.agentInput.placeholder = direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Talk to Hermes";
-    els.agentInput.setAttribute("aria-label", direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Message Hermes");
+    els.agentInput.placeholder = direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Talk to agent";
+    els.agentInput.setAttribute("aria-label", direct ? `Message ${peerLabel}` : sharedChat ? "Message this space" : "Message agent");
   }
   if (!direct) setAgentSocialPicker("");
   updatePeopleButtonState();
   updateAgentSendButton();
+  renderAgentReadinessStatus();
   renderAgentPeoplePanel();
+  updateAgentScrollBottomButton();
 }
 
 function setAgentView(view, options = {}) {
@@ -7000,8 +9268,10 @@ function setAgentView(view, options = {}) {
     clearSocialToasts("friend");
     void loadAgentPeople("toggle").catch(() => {});
   } else {
+    queueAgentScrollToBottom();
     window.setTimeout(() => els.agentInput?.focus(), 0);
   }
+  saveActiveAgentSessionPreference();
 }
 
 function friendshipUser(friendship) {
@@ -7064,6 +9334,58 @@ function sharedSpaceUnreadCount(sharedSpaceId) {
   return Math.max(0, Number(state.agentPeople.unreadByConversation?.[conversationId] || 0));
 }
 
+function openCreditGrantModal(user) {
+  if (!isAdminUser() || !user || socialUserId(user) === cleanText(state.authUser?.id, "")) return;
+  state.creditGrantTargetUser = user;
+  if (els.creditGrantTarget) els.creditGrantTarget.textContent = `${socialUserLabel(user, "User")} / ${socialUserId(user)}`;
+  if (els.creditGrantAmountInput) els.creditGrantAmountInput.value = "100";
+  if (els.creditGrantReasonInput) els.creditGrantReasonInput.value = "";
+  if (els.creditGrantStatus) els.creditGrantStatus.textContent = "";
+  if (els.creditGrantModal) els.creditGrantModal.hidden = false;
+  window.setTimeout(() => els.creditGrantAmountInput?.focus(), 0);
+  pushUiNavigationLayer("credit-grant-modal", () => closeCreditGrantModal({ skipHistory: true, skipStack: true }));
+}
+
+function closeCreditGrantModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("credit-grant-modal")) return;
+  if (els.creditGrantModal) els.creditGrantModal.hidden = true;
+  state.creditGrantTargetUser = null;
+  state.creditGrantBusy = false;
+  if (!options.skipStack) closeUiNavigationLayer("credit-grant-modal", { skipHistory: true, replaceHistory: true });
+}
+
+async function submitCreditGrant(event) {
+  event.preventDefault();
+  if (state.creditGrantBusy || !state.creditGrantTargetUser) return;
+  const targetId = socialUserId(state.creditGrantTargetUser);
+  const amount = Number(els.creditGrantAmountInput?.value || 0);
+  const reason = cleanText(els.creditGrantReasonInput?.value || "", "");
+  state.creditGrantBusy = true;
+  if (els.creditGrantStatus) els.creditGrantStatus.textContent = "Adding";
+  try {
+    await fetchJson(`/admin/users/${encodeURIComponent(targetId)}/credits/grant`, {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        amount,
+        reason,
+        idempotency_key: `grant_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+      },
+    });
+    if (els.creditGrantStatus) els.creditGrantStatus.textContent = "Added";
+    recordUserEvent("account.credits_granted", {
+      target: `user:${targetId}`,
+      summary: `Granted ${amount} Flux credits`,
+      data: { user_id: targetId, amount },
+    });
+    window.setTimeout(() => closeCreditGrantModal(), 250);
+  } catch (error) {
+    if (els.creditGrantStatus) els.creditGrantStatus.textContent = error.message;
+  } finally {
+    state.creditGrantBusy = false;
+  }
+}
+
 function peopleRow(user, options = {}) {
   const id = socialUserId(user);
   const row = document.createElement("article");
@@ -7105,6 +9427,13 @@ function peopleRow(user, options = {}) {
         event.preventDefault();
         openDirectChat(user);
       }
+    });
+  }
+  if (isAdminUser() && id && id !== cleanText(state.authUser?.id, "") && cleanText(user?.role, "user") !== "admin") {
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openCreditGrantModal(user);
     });
   }
   return row;
@@ -7381,10 +9710,11 @@ function openDirectChat(user) {
   markConversationRead(session.conversation_id);
   clearSocialToasts("message", session.conversation_id);
   saveAgentSessions();
+  saveActiveAgentSessionPreference();
   setAgentView("chat", { keepActiveSession: true });
   setAgentOpen(true);
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
   void loadDirectChatEvents(session).catch(() => {});
   window.setTimeout(() => els.agentInput?.focus(), 0);
   recordUserEvent("agent.direct_chat_opened", {
@@ -7434,10 +9764,11 @@ function openSharedSpaceChat(sharedSpaceId = sharedUserSpaceForPanel()?.shared_s
   markConversationRead(session.conversation_id);
   clearSocialToasts("message", session.conversation_id);
   saveAgentSessions();
+  saveActiveAgentSessionPreference();
   setAgentView("chat", { keepActiveSession: true });
   setAgentOpen(true);
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
   void syncSharedSpaceChatEvents(id, "open").catch(() => {});
   window.setTimeout(() => els.agentInput?.focus(), 0);
   recordUserEvent("agent.shared_space_chat_opened", {
@@ -7937,6 +10268,7 @@ function insertAgentEmoji(emoji) {
 
 async function sendDirectChatMessage(session, text) {
   const content = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (blockSendWhileAttachmentsProcess()) return;
   const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
   if (!content.trim() && !attachmentCount) return;
   const messageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
@@ -8018,6 +10350,7 @@ async function sendDirectChatMessage(session, text) {
 
 async function sendSharedSpaceChatMessage(session, text) {
   const content = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (blockSendWhileAttachmentsProcess()) return;
   const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
   if (!content.trim() && !attachmentCount) return;
   const messageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
@@ -8185,8 +10518,9 @@ function switchAgentSession(sessionId) {
   const session = activeAgentSession();
   if (session.kind === "direct") markConversationRead(session.conversation_id);
   if (session.kind === "shared-space") markConversationRead(session.conversation_id);
+  saveActiveAgentSessionPreference();
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
 }
 
 function newAgentSession() {
@@ -8195,8 +10529,9 @@ function newAgentSession() {
   state.activeAgentSessionId = session.id;
   state.agentView = "chat";
   saveAgentSessions();
+  saveActiveAgentSessionPreference();
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
   setAgentOpen(true);
   window.setTimeout(() => els.agentInput.focus(), 0);
   recordUserEvent("agent.session_created", {
@@ -8211,7 +10546,7 @@ function renderAgentDiagnostics(diagnostics = {}) {
   updateAgentTokenUsage(diagnostics.token_usage || null);
   const rows = [
     ["Mode", diagnostics.mode || els.agentModeSelect?.value || "-"],
-    ["Node", diagnostics.target_node || agentTargetNode()],
+    ["Node", agentNodeDisplayLabel(diagnostics.target_node || agentTargetNode())],
     ["Source", diagnostics.source || "-"],
     ["Tools", diagnostics.tools?.join(", ") || "-"],
     ["Context", diagnostics.context_estimated_tokens ? `~${diagnostics.context_estimated_tokens} tokens` : "-"],
@@ -8450,7 +10785,10 @@ function agentActionsChain(message) {
   const topics = groupAgentActions(actions);
   const details = document.createElement("details");
   details.className = "agent-actions-chain";
-  bindAgentDetailsOpenState(details, message?.id ? `actions:${message.id}` : "", Boolean(message.pending));
+  bindAgentDetailsOpenState(details, message?.id ? `actions:${message.id}` : "", Boolean(message.pending), {
+    autoCloseOnDone: true,
+    status: message.pending ? "running" : "done",
+  });
   const summary = document.createElement("summary");
   summary.className = "agent-actions-summary";
   const running = actions.find((action) => action.status === "running");
@@ -8474,7 +10812,7 @@ function agentActionsChain(message) {
 }
 
 function groupAgentActions(actions) {
-  const order = ["run-wasm", "run-hermes"];
+  const order = ["run-wasm", "run-api", "run-hermes"];
   const groups = new Map(order.map((topic) => [topic, { topic, actions: [] }]));
   for (const action of actions) {
     const topic = agentActionTopic(action);
@@ -8486,9 +10824,10 @@ function groupAgentActions(actions) {
 
 function agentActionTopic(action) {
   const topic = cleanText(action.topic, "");
-  if (topic === "run-wasm" || topic === "run-hermes") return topic;
+  if (topic === "run-wasm" || topic === "run-api" || topic === "run-hermes") return topic;
   const kind = cleanText(action.kind, "");
   const id = cleanText(action.id, "");
+  if (kind === "run-api" || kind === "api" || id === "client_call_api" || id === "client_call_provider" || id === "client_probe_provider") return "run-api";
   if (
     kind === "run-hermes"
     || kind === "model"
@@ -8504,11 +10843,12 @@ function agentActionTopic(action) {
 
 function agentActionInnerKind(action) {
   const kind = cleanText(action.kind, "step");
-  if (kind !== "run-wasm" && kind !== "run-hermes") return kind;
+  if (kind !== "run-wasm" && kind !== "run-api" && kind !== "run-hermes") return kind;
   const id = cleanText(action.id, "");
   const label = cleanText(action.label, "").toLowerCase();
   if (id === "turn_intake") return "turn";
   if (id === "mutation_policy") return "policy";
+  if (id === "client_call_api" || id === "client_call_provider" || id === "client_probe_provider") return "api";
   if (id === "node_reply" || id.startsWith("client_ask_")) return "model";
   if (id === "bridge_steps" || id === "bridge_reasoning_summary") return "trace";
   if (id.startsWith("bridge_tool_") || id.startsWith("tool_")) return "tool";
@@ -8533,6 +10873,7 @@ function agentActionIconText(action, kind = "") {
   if (kind === "policy") return "🛡️";
   if (kind === "context" || label.includes("context")) return "🧭";
   if (kind === "media") return "🖼️";
+  if (kind === "api") return "↗";
   if (kind === "model") return "🧠";
   if (kind === "tool") return "🔧";
   if (kind === "trace") return "🔎";
@@ -8544,6 +10885,7 @@ function agentActionIconText(action, kind = "") {
 function agentTopicIconText(topic, status = "") {
   if (status === "error") return "⚠️";
   if (status === "running") return "⏳";
+  if (topic === "run-api") return "↗";
   return topic === "run-hermes" ? "🪽" : "🧩";
 }
 
@@ -8729,6 +11071,21 @@ function agentPendingImageBytes() {
   return state.agentPendingImages.reduce((sum, image) => sum + agentImagePayloadBytes(image), 0);
 }
 
+function agentPendingFileJobCount() {
+  return state.agentPendingFileJobs.length;
+}
+
+function blockSendWhileAttachmentsProcess() {
+  const count = agentPendingFileJobCount();
+  if (!count) return false;
+  if (els.agentStatus) {
+    els.agentStatus.textContent = count === 1 ? "Processing attachment" : `Processing ${count} attachments`;
+  }
+  renderPendingPreviews();
+  updateAgentSendButton();
+  return true;
+}
+
 function agentAttachmentSummary(image, reason) {
   return {
     data_url: image?.data_url,
@@ -8742,6 +11099,36 @@ function agentAttachmentSummary(image, reason) {
     image_card: image?.image_card,
     asset: image?.asset,
     reason,
+  };
+}
+
+function agentImageProcessingSkippedCard(file, rawBytes, width, height) {
+  const evidence = imageAnalyzerEvidence(
+    "image-card-core",
+    "disabled",
+    "Local image analysis was skipped for this attachment.",
+    {
+      facts: ["Image processing was disabled in the chat composer."],
+      values: {
+        original_type: cleanText(file?.type, ""),
+        original_size: Number(file?.size || rawBytes || 0),
+      },
+      confidence: 0,
+    }
+  );
+  return {
+    schema: "hermes.wasm_agent.image_card.v1",
+    analyzer_revision: IMAGE_CARD_ANALYZER_REVISION,
+    name: cleanText(file?.name, "image"),
+    size: rawBytes,
+    dimensions: `${width}x${height}`,
+    width,
+    height,
+    palette: [],
+    visual_notes: ["image processing disabled"],
+    analyzer_modules: imageAnalyzerModuleStates(),
+    evidence: [evidence],
+    module_results: { "image-card-core": evidence },
   };
 }
 
@@ -8777,8 +11164,13 @@ function readFileAsDataUrl(file) {
   });
 }
 
-function readVideoFileSummary(file) {
-  return new Promise((resolve) => {
+async function readVideoFileSummary(file) {
+  const shouldReadRaw = Number(file?.size || 0) > 0
+    && Number(file.size || 0) <= Math.floor(AGENT_PROVIDER_VIDEO_PART_MAX_CHARS * 0.72);
+  const rawDataUrlPromise = shouldReadRaw
+    ? readFileAsDataUrl(file).catch(() => "")
+    : Promise.resolve("");
+  const summary = await new Promise((resolve) => {
     const objectUrl = URL.createObjectURL(file);
     const video = document.createElement("video");
     let settled = false;
@@ -8816,6 +11208,13 @@ function readVideoFileSummary(file) {
     window.setTimeout(finish, 2500);
     video.src = objectUrl;
   });
+  const rawDataUrl = await rawDataUrlPromise;
+  if (/^data:video\/(mp4|mpeg|quicktime|webm);base64,/i.test(rawDataUrl) && rawDataUrl.length <= AGENT_PROVIDER_VIDEO_PART_MAX_CHARS) {
+    summary.data_url = rawDataUrl;
+    summary.reason = "video_raw_available";
+    if (summary.video_card) summary.video_card.raw_available = true;
+  }
+  return summary;
 }
 
 function loadDataUrlImage(dataUrl, name) {
@@ -10013,7 +12412,8 @@ async function analyzeImageElement(image, file, rawBytes, dataUrl) {
   }
 }
 
-async function readFileDataUrl(file) {
+async function readFileDataUrl(file, options = {}) {
+  const processImage = options.processImage !== false;
   const rawDataUrl = await readFileAsDataUrl(file);
   const rawBytes = dataUrlByteLength(rawDataUrl);
   const base = {
@@ -10024,7 +12424,9 @@ async function readFileDataUrl(file) {
   const image = await loadDataUrlImage(rawDataUrl, file.name || "image");
   const sourceWidth = Math.max(1, image.naturalWidth || image.width || AGENT_IMAGE_MAX_EDGE);
   const sourceHeight = Math.max(1, image.naturalHeight || image.height || AGENT_IMAGE_MAX_EDGE);
-  const imageCard = await analyzeImageElement(image, file, rawBytes, rawDataUrl);
+  const imageCard = processImage
+    ? await analyzeImageElement(image, file, rawBytes, rawDataUrl)
+    : agentImageProcessingSkippedCard(file, rawBytes, sourceWidth, sourceHeight);
   if (rawBytes <= AGENT_IMAGE_MAX_BYTES && file.type !== "image/svg+xml") {
     return {
       ...base,
@@ -10086,74 +12488,218 @@ async function readFileDataUrl(file) {
 function handleAgentFiles(fileList) {
   const files = Array.from(fileList).filter(isAgentAttachmentFile);
   if (!files.length) return;
-  const pendingCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
+  const pendingCount = state.agentPendingImages.length
+    + state.agentPendingAttachmentSummaries.length
+    + state.agentPendingFileJobs.length;
   const slots = Math.max(0, AGENT_MAX_IMAGES - pendingCount);
   const selected = files.slice(0, slots);
   if (!selected.length) return;
-  Promise.allSettled(selected.map((file) => isAgentVideoFile(file) ? readVideoFileSummary(file) : readFileDataUrl(file))).then((results) => {
-    const entries = results.filter((item) => item.status === "fulfilled").map((item) => item.value);
-    let nextBytes = agentPendingImageBytes();
-    const accepted = [];
-    const summarized = [];
-    for (const entry of entries) {
-      if (String(entry?.media_kind || "").toLowerCase() === "video" || String(entry?.type || "").startsWith("video/")) {
-        summarized.push(entry);
-        continue;
-      }
-      const bytes = agentImagePayloadBytes(entry);
-      if (bytes > AGENT_IMAGE_MAX_BYTES || nextBytes + bytes > AGENT_IMAGE_TOTAL_MAX_BYTES) {
-        summarized.push(agentAttachmentSummary(entry, "summarized_to_fit_request_budget"));
-        continue;
-      }
-      nextBytes += bytes;
-      accepted.push(entry);
+  if (selected.length < files.length && els.agentStatus) {
+    els.agentStatus.textContent = "Attachment limit reached";
+  }
+  const processingEnabled = state.agentImageProcessingEnabled;
+  const jobs = selected.map((file) => createAgentPendingFileJob(file, processingEnabled));
+  state.agentPendingFileJobs.push(...jobs);
+  renderPendingPreviews();
+  updateAgentSendButton();
+  selected.forEach((file, index) => {
+    void processAgentPendingFile(file, jobs[index]);
+  });
+}
+
+function createAgentPendingFileJob(file, processingEnabled) {
+  let previewUrl = "";
+  if (isAgentImageFile(file) && typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+    try {
+      previewUrl = URL.createObjectURL(file);
+    } catch {
+      previewUrl = "";
     }
-    state.agentPendingImages.push(...accepted);
-    state.agentPendingAttachmentSummaries.push(...summarized);
+  }
+  return {
+    id: `file_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    name: cleanText(file?.name, "Attachment"),
+    type: cleanText(file?.type, ""),
+    size: Number(file?.size || 0),
+    media_kind: isAgentVideoFile(file) ? "video" : "image",
+    preview_url: previewUrl,
+    processing_enabled: Boolean(processingEnabled),
+  };
+}
+
+function revokeAgentPendingFileJob(job) {
+  if (!job?.preview_url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+  try {
+    URL.revokeObjectURL(job.preview_url);
+  } catch {
+    // Object URL revocation is best-effort cleanup.
+  }
+}
+
+function removePendingFileJob(index) {
+  const [job] = state.agentPendingFileJobs.splice(index, 1);
+  revokeAgentPendingFileJob(job);
+  renderPendingPreviews();
+  updateAgentSendButton();
+}
+
+function finishPendingFileJob(job) {
+  const index = state.agentPendingFileJobs.findIndex((item) => item.id === job?.id);
+  if (index < 0) return false;
+  const [removed] = state.agentPendingFileJobs.splice(index, 1);
+  revokeAgentPendingFileJob(removed);
+  return true;
+}
+
+function acceptAgentAttachmentEntry(entry) {
+  if (String(entry?.media_kind || "").toLowerCase() === "video" || String(entry?.type || "").startsWith("video/")) {
+    state.agentPendingAttachmentSummaries.push(entry);
+    return "summarized";
+  }
+  const bytes = agentImagePayloadBytes(entry);
+  const nextBytes = agentPendingImageBytes();
+  if (bytes > AGENT_IMAGE_MAX_BYTES || nextBytes + bytes > AGENT_IMAGE_TOTAL_MAX_BYTES) {
+    state.agentPendingAttachmentSummaries.push(agentAttachmentSummary(entry, "summarized_to_fit_request_budget"));
+    return "summarized";
+  }
+  state.agentPendingImages.push(entry);
+  return "raw";
+}
+
+async function processAgentPendingFile(file, job) {
+  try {
+    const entry = isAgentVideoFile(file)
+      ? await readVideoFileSummary(file)
+      : await readFileDataUrl(file, { processImage: job.processing_enabled });
+    if (!finishPendingFileJob(job)) return;
+    const acceptedAs = acceptAgentAttachmentEntry(entry);
     renderPendingPreviews();
-    const rejected = results.filter((item) => item.status === "rejected");
-    if (rejected.length || summarized.length) {
-      const skippedCount = rejected.length + summarized.length;
-      els.agentStatus.textContent = summarized.length ? "Attachments summarized" : "Attachment failed";
+    updateAgentSendButton();
+    if (acceptedAs === "summarized" && els.agentStatus) {
+      els.agentStatus.textContent = "Attachments summarized";
       recordUserEvent("agent.image_attach_error", {
         target: "agent-form",
-        summary: `Could not attach ${skippedCount} file${skippedCount === 1 ? "" : "s"} as raw payload`,
+        summary: `${entry.name || "Attachment"} was summarized for the request budget`,
         data: {
-          error: rejected[0]?.reason?.message || "",
-          summarized_count: summarized.length,
+          summarized_count: 1,
           raw_budget_bytes: AGENT_IMAGE_TOTAL_MAX_BYTES,
         },
       });
     }
-  });
+  } catch (error) {
+    if (!finishPendingFileJob(job)) return;
+    renderPendingPreviews();
+    updateAgentSendButton();
+    if (els.agentStatus) els.agentStatus.textContent = "Attachment failed";
+    recordUserEvent("agent.image_attach_error", {
+      target: "agent-form",
+      summary: `Could not attach ${file?.name || "file"} as raw payload`,
+      data: { error: error.message || String(error || "") },
+    });
+  }
 }
 
 function removePendingImage(index) {
   state.agentPendingImages.splice(index, 1);
   renderPendingPreviews();
+  updateAgentSendButton();
 }
 
 function removePendingAttachmentSummary(index) {
   state.agentPendingAttachmentSummaries.splice(index, 1);
   renderPendingPreviews();
+  updateAgentSendButton();
 }
 
 function clearAgentPendingImages() {
+  state.agentPendingFileJobs.forEach(revokeAgentPendingFileJob);
+  state.agentPendingFileJobs = [];
   state.agentPendingImages = [];
   state.agentPendingAttachmentSummaries = [];
   renderPendingPreviews();
+  updateAgentSendButton();
+}
+
+function renderAgentImageProcessingToggle() {
+  if (!els.agentImageProcessingToggle) return;
+  els.agentImageProcessingToggle.checked = Boolean(state.agentImageProcessingEnabled);
+  if (els.agentImageScanInfoButton) {
+    els.agentImageScanInfoButton.setAttribute("aria-expanded", state.agentImageScanInfoOpen ? "true" : "false");
+  }
+  if (els.agentImageScanInfoBalloon) {
+    els.agentImageScanInfoBalloon.hidden = !state.agentImageScanInfoOpen;
+  }
+}
+
+function closeAgentImageScanInfo() {
+  if (!state.agentImageScanInfoOpen) return;
+  state.agentImageScanInfoOpen = false;
+  renderAgentImageProcessingToggle();
+}
+
+function attachmentUsesImageScan(entry) {
+  if (!entry) return false;
+  if (String(entry.media_kind || "").toLowerCase() === "image") return true;
+  const type = String(entry.type || entry.original_type || "").toLowerCase();
+  return type.startsWith("image/") || Boolean(entry.image_card);
+}
+
+function pendingAttachmentsUseImageScan() {
+  return state.agentPendingFileJobs.some((job) => job.media_kind === "image")
+    || state.agentPendingImages.some(attachmentUsesImageScan)
+    || state.agentPendingAttachmentSummaries.some(attachmentUsesImageScan);
 }
 
 function renderPendingPreviews() {
   const preview = els.agentImagePreview;
-  if (!preview) return;
+  renderAgentImageProcessingToggle();
+  const previewList = els.agentImagePreviewList || preview;
+  if (!preview || !previewList) return;
   const summaryEntries = state.agentPendingAttachmentSummaries;
-  if (!state.agentPendingImages.length && !summaryEntries.length) {
-    preview.replaceChildren();
+  const processingJobs = state.agentPendingFileJobs;
+  if (!state.agentPendingImages.length && !summaryEntries.length && !processingJobs.length) {
+    previewList.replaceChildren();
     preview.hidden = true;
+    closeAgentImageScanInfo();
+    if (els.agentImagePreviewControls) els.agentImagePreviewControls.hidden = true;
+    renderAgentImageProcessingToggle();
     return;
   }
   preview.hidden = false;
+  const scanRelevant = pendingAttachmentsUseImageScan();
+  if (!scanRelevant) closeAgentImageScanInfo();
+  if (els.agentImagePreviewControls) els.agentImagePreviewControls.hidden = !scanRelevant;
+  renderAgentImageProcessingToggle();
+  const processingItems = processingJobs.map((job, i) => {
+    const item = document.createElement("div");
+    item.className = "agent-image-preview-item is-processing";
+    if (job.preview_url) {
+      const img = document.createElement("img");
+      img.src = job.preview_url;
+      img.alt = job.name;
+      item.append(img);
+    } else {
+      const file = document.createElement("span");
+      file.className = "agent-image-preview-file";
+      file.textContent = job.media_kind === "video" ? "MP4" : "IMG";
+      item.append(file);
+    }
+    const status = document.createElement("span");
+    status.className = "agent-image-preview-status";
+    status.textContent = job.processing_enabled ? "Processing" : "Preparing";
+    const remove = document.createElement("button");
+    remove.className = "agent-image-preview-remove";
+    remove.type = "button";
+    remove.setAttribute("aria-label", `Remove ${job.name}`);
+    remove.innerHTML = '<svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg>';
+    remove.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      removePendingFileJob(i);
+    });
+    item.append(status, remove);
+    return item;
+  });
   const rawItems = state.agentPendingImages.map((entry, i) => {
     const item = document.createElement("div");
     item.className = "agent-image-preview-item";
@@ -10197,7 +12743,7 @@ function renderPendingPreviews() {
     item.append(label, meta, remove);
     return item;
   });
-  preview.replaceChildren(...rawItems, ...summaryItems);
+  previewList.replaceChildren(...processingItems, ...rawItems, ...summaryItems);
 }
 
 function imageCardSummary(image) {
@@ -10220,6 +12766,26 @@ function imageCardSummary(image) {
     local_url: String(card.local_url || image?.asset?.local_url || "").trim(),
     hash: String(card.hash || image?.asset?.hash || card.perceptual_hash || "").trim(),
   };
+}
+
+function providerAttachmentManifestText(imageCards) {
+  const cards = (Array.isArray(imageCards) ? imageCards : []).map((card, index) => ({
+    index: index + 1,
+    name: cleanText(card.name, `attachment-${index + 1}`),
+    dimensions: cleanText(card.dimensions, ""),
+    size: Number.isFinite(card.size) ? card.size : undefined,
+    palette: Array.isArray(card.palette) ? card.palette.slice(0, 4) : [],
+    visual_notes: Array.isArray(card.visual_notes) ? card.visual_notes.slice(0, 8) : [],
+    text_like_score: Number.isFinite(card.analysis?.text_like_score) ? card.analysis.text_like_score : undefined,
+    modules: Object.values(card.module_results || {}).map((result) => ({
+      module: cleanText(result.module, ""),
+      status: cleanText(result.status, ""),
+      summary: cleanText(result.summary, ""),
+      facts: Array.isArray(result.facts) ? result.facts.slice(0, 4) : [],
+    })).slice(0, 6),
+  }));
+  if (!cards.length) return "";
+  return `\n\nAttached media manifest (local browser analysis; OpenRouter provider turns also try image_url content parts when local image data is available):\n${JSON.stringify(cards, null, 2)}`;
 }
 
 function agentImageCardPreview(images, attachments) {
@@ -10313,10 +12879,11 @@ async function storeAgentAttachmentAssets(images, attachments, pendingMessage) {
 function updateAgentSendButton() {
   if (!els.agentSendButton) return;
   const socialChat = socialChatSession(activeAgentSession());
+  const processingAttachments = !state.agentBusy && agentPendingFileJobCount() > 0;
   els.agentSendButton.classList.toggle("is-busy", state.agentBusy);
-  els.agentSendButton.disabled = socialChat && state.agentBusy;
+  els.agentSendButton.disabled = processingAttachments || (socialChat && state.agentBusy);
   els.agentSendButton.setAttribute("aria-label", state.agentBusy ? (socialChat ? "Syncing message" : "Stop response") : "Send message");
-  els.agentSendButton.title = state.agentBusy ? (socialChat ? "Syncing" : "Stop") : "Send";
+  els.agentSendButton.title = processingAttachments ? "Processing attachments" : state.agentBusy ? (socialChat ? "Syncing" : "Stop") : "Send";
 }
 
 function updateAgentTurnTimer() {
@@ -10463,6 +13030,7 @@ function toggleAgentBalloon(kind) {
 }
 
 function applyAgentLayout() {
+  applyAgentPanelSize();
   state.agentLayout = clampAgentLayout(state.agentLayout);
   const { left, top } = state.agentLayout;
   if (Number.isFinite(left) && Number.isFinite(top)) {
@@ -10533,7 +13101,8 @@ function clampAgentLayout(layout) {
 }
 
 function resetAgentToViewportCorner() {
-  state.agentLayout = clampAgentLayout(defaultAgentLayout());
+  const size = clampAgentPanelSize(state.agentLayout);
+  state.agentLayout = { ...clampAgentLayout(defaultAgentLayout()), panelWidth: size.width, panelHeight: size.height };
   els.agentOverlay.style.left = `${state.agentLayout.left}px`;
   els.agentOverlay.style.top = `${state.agentLayout.top}px`;
   els.agentOverlay.style.right = "auto";
@@ -10553,6 +13122,7 @@ function placeAgentPanel() {
   const panel = els.agentPanel;
   if (!overlay || !panel) return;
   syncAgentAppBounds();
+  applyAgentPanelSize();
   if (!state.agentOpen) return;
   const gap = AGENT_PANEL_VIEWPORT_GAP_PX;
   const avatarGap = AGENT_PANEL_AVATAR_GAP_PX;
@@ -10610,7 +13180,7 @@ function moveAgentGroupFromPanelRect(panelLeft, panelTop, panelWidth, panelHeigh
 
 function installAgentDragging() {
   els.agentAvatarButton.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (!isPrimaryPointer(event)) return;
     event.preventDefault();
     const start = els.agentOverlay.getBoundingClientRect();
     const offsetX = event.clientX - start.left;
@@ -10669,7 +13239,7 @@ function installAgentPanelDragging() {
   const handle = els.agentPanel?.querySelector(".agent-panel-head");
   if (!handle) return;
   handle.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (!isPrimaryPointer(event)) return;
     if (event.target.closest("button,input,textarea,select,a")) return;
     event.preventDefault();
     const panelRect = els.agentPanel.getBoundingClientRect();
@@ -10714,6 +13284,110 @@ function installAgentPanelDragging() {
   });
 }
 
+function installAgentPanelResizing() {
+  const handle = els.agentPanelResizeHandle;
+  if (!handle || !els.agentPanel) return;
+  handle.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startSize = clampAgentPanelSize(state.agentLayout);
+    const startX = event.clientX;
+    const startY = event.clientY;
+    els.agentPanel.classList.add("is-resizing");
+    document.body.classList.add("is-agent-resizing");
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners below keep resizing responsive if capture is dropped.
+    }
+    const move = (moveEvent) => {
+      moveEvent.preventDefault();
+      const next = clampAgentPanelSize({
+        width: startSize.width + moveEvent.clientX - startX,
+        height: startSize.height + moveEvent.clientY - startY,
+      });
+      state.agentLayout.panelWidth = next.width;
+      state.agentLayout.panelHeight = next.height;
+      applyAgentPanelSize();
+      placeAgentPanel();
+    };
+    const end = () => {
+      els.agentPanel.classList.remove("is-resizing");
+      document.body.classList.remove("is-agent-resizing");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      try {
+        handle.releasePointerCapture(event.pointerId);
+      } catch {
+        // The browser may already have released capture.
+      }
+      saveAgentLayout();
+      recordUserEvent("agent.resized", {
+        target: "agent-panel",
+        summary: "Resized wasm-agent-chat",
+        data: { width: state.agentLayout.panelWidth, height: state.agentLayout.panelHeight },
+      });
+    };
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
+function installAgentOnboardingDragging() {
+  const panel = els.agentOnboardingPanel;
+  const handle = panel?.querySelector(".agent-onboarding-head");
+  if (!panel || !handle) return;
+  handle.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    if (event.target.closest("button,input,textarea,select,a")) return;
+    event.preventDefault();
+    const startRect = panel.getBoundingClientRect();
+    const startCenter = {
+      left: startRect.left + startRect.width / 2,
+      top: startRect.top + startRect.height / 2,
+    };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    panel.classList.add("is-dragging");
+    document.body.classList.add("is-agent-onboarding-dragging");
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Window listeners keep the modal draggable if capture is interrupted.
+    }
+    const move = (moveEvent) => {
+      state.agentOnboardingPosition = {
+        left: startCenter.left + moveEvent.clientX - startX,
+        top: startCenter.top + moveEvent.clientY - startY,
+      };
+      placeAgentOnboardingPanel();
+    };
+    const end = () => {
+      panel.classList.remove("is-dragging");
+      document.body.classList.remove("is-agent-onboarding-dragging");
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      try {
+        handle.releasePointerCapture(event.pointerId);
+      } catch {
+        // The browser may already have released capture.
+      }
+      recordUserEvent("agent.onboarding_dragged", {
+        target: "agent-onboarding",
+        summary: "Moved agent setup modal",
+        data: state.agentOnboardingPosition || {},
+      });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
+  });
+}
+
 async function sendAgentMessage(text) {
   if (state.agentBusy) {
     stopAgentMessage();
@@ -10729,8 +13403,10 @@ async function sendAgentMessage(text) {
     return;
   }
   const content = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (blockSendWhileAttachmentsProcess()) return;
   const attachmentCount = state.agentPendingImages.length + state.agentPendingAttachmentSummaries.length;
   if (!content.trim() && !attachmentCount) return;
+  if (await warnAgentChatNeedsSetup(activeSession)) return;
   const userMessageContent = content.trim() ? content : `Attached ${attachmentCount} file${attachmentCount === 1 ? "" : "s"}.`;
   state.agentBusy = true;
   state.agentStopRequested = false;
@@ -10743,13 +13419,18 @@ async function sendAgentMessage(text) {
   const turnStartedAt = Date.now();
   const runHintId = `chat_${turnStartedAt}_${Math.random().toString(36).slice(2, 7)}`;
   const mode = els.agentModeSelect.value;
-  setNodeRunHint(targetNode, {
-    id: runHintId,
-    source: "embedded chat",
-    status: "running",
-    started_at: new Date(turnStartedAt).toISOString(),
-    preview: truncateText(userMessageContent, 120),
-  });
+  const useDirectApi = shouldUseDirectAgentProvider(activeSession);
+  const useOwnedBridge = shouldUseOwnedAgentBridge(activeSession);
+  const runHintTarget = useDirectApi || useOwnedBridge ? "" : targetNode;
+  if (runHintTarget) {
+    setNodeRunHint(runHintTarget, {
+      id: runHintId,
+      source: "embedded chat",
+      status: "running",
+      started_at: new Date(turnStartedAt).toISOString(),
+      preview: truncateText(userMessageContent, 120),
+    });
+  }
   const userImages = state.agentPendingImages.map((image) => ({
     data_url: image.data_url,
     name: image.name,
@@ -10800,8 +13481,10 @@ async function sendAgentMessage(text) {
   });
   clearAgentInput();
   recordUserEvent("agent.message_submitted", {
-    target: `node:${targetNode}`,
-    summary: `Submitted embedded assistant message to ${targetNode}`,
+    target: useDirectApi ? "provider-api" : useOwnedBridge ? "owned-agent" : `node:${targetNode}`,
+    summary: useDirectApi
+      ? "Submitted embedded assistant message to provider"
+      : useOwnedBridge ? "Submitted embedded assistant message to owned agent" : `Submitted embedded assistant message to ${targetNode}`,
     data: {
       message_length: userMessageContent.length,
       image_count: userImages.length,
@@ -10810,6 +13493,8 @@ async function sendAgentMessage(text) {
       image_bytes: userImages.reduce((sum, image) => sum + (Number.isFinite(image.size) ? image.size : 0), 0),
       panel: state.activePanel,
       target_node: targetNode,
+      direct_api: useDirectApi,
+      owned_bridge: useOwnedBridge,
     },
     redacted: true,
   });
@@ -10848,6 +13533,9 @@ async function sendAgentMessage(text) {
     const imageBytes = userImages.reduce((sum, image) => sum + (Number.isFinite(image.size) ? image.size : 0), 0);
     const summarizedCount = userAttachments.length;
     const imageCards = [...userImages, ...userAttachments].map(imageCardSummary);
+    const providerMessageContent = useDirectApi && imageCards.length
+      ? `${userMessageContent}${providerAttachmentManifestText(imageCards)}`
+      : userMessageContent;
     const analyzerModules = Object.values(Object.fromEntries(
       imageCards
         .flatMap((card) => Array.isArray(card.analyzer_modules) ? card.analyzer_modules : [])
@@ -10873,12 +13561,15 @@ async function sendAgentMessage(text) {
     ];
     if (attachmentCount) {
       initialActions.push(
-        agentAction("Prepare attachments", "running", `${attachmentCount} queued`, {
+        agentAction("Prepare attachments", useDirectApi ? "done" : "running", useDirectApi ? `${attachmentCount} ready for provider` : `${attachmentCount} queued`, {
         id: "client_store_image_assets",
         topic: "run-wasm",
         kind: "media",
-        meta: "local store",
-        arguments: { endpoint: "/agent/attachments", count: attachmentCount },
+        meta: useDirectApi ? "provider metadata" : "local store",
+        arguments: useDirectApi
+          ? { count: attachmentCount, storage: "skipped-direct-provider" }
+          : { endpoint: "/agent/attachments", count: attachmentCount },
+        preview: useDirectApi ? agentImageCardPreview(userImages, userAttachments) : undefined,
       }),
         agentAction("Decode pixels", "done", `${imageCards.filter((card) => card.dimensions).length}/${attachmentCount} decoded`, {
         id: "client_decode_pixels",
@@ -10908,25 +13599,238 @@ async function sendAgentMessage(text) {
       })
       );
     }
+    const providerProbeActionId = "client_probe_provider";
+    const askActionId = useDirectApi ? "client_call_provider" : useOwnedBridge ? "client_call_owned_agent" : "client_ask_orchestrator";
+    if (useDirectApi) {
+      initialActions.push(
+        agentAction("Probe provider", "running", directProviderChatUrl(state.agentDirectProvider), {
+          id: providerProbeActionId,
+          topic: "run-api",
+          kind: "api",
+          meta: "checking",
+          arguments: {
+            endpoint: directProviderChatUrl(state.agentDirectProvider),
+            model: state.agentDirectProvider?.model || "",
+            provider: state.agentDirectProvider?.provider || "",
+          },
+        })
+      );
+    }
     initialActions.push(
-      agentAction(`Ask ${targetNode}`, "running", "POST /agent/session/message", {
-        id: "client_ask_orchestrator",
-        topic: "run-hermes",
-        kind: "model",
-        meta: chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
-        arguments: { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
+      agentAction(
+        useDirectApi ? "Call provider" : useOwnedBridge ? `Call ${state.agentOwnedAgent?.name || "owned agent"}` : `Ask ${targetNode}`,
+        "running",
+        useDirectApi ? directProviderChatUrl(state.agentDirectProvider) : useOwnedBridge ? ownedAgentBridgeUrl() : "POST /agent/session/message",
+        {
+        id: askActionId,
+        topic: useDirectApi || useOwnedBridge ? "run-api" : "run-hermes",
+        kind: useDirectApi || useOwnedBridge ? "api" : "model",
+        meta: useDirectApi
+          ? state.agentDirectProvider?.model || "provider"
+          : useOwnedBridge
+            ? state.agentOwnedAgent?.type || "hermes"
+          : chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
+        arguments: useDirectApi
+          ? { endpoint: directProviderChatUrl(state.agentDirectProvider), model: state.agentDirectProvider?.model || "", provider: state.agentDirectProvider?.provider || "" }
+          : useOwnedBridge
+            ? { endpoint: ownedAgentBridgeUrl(), type: state.agentOwnedAgent?.type || "hermes", name: state.agentOwnedAgent?.name || "" }
+          : { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
       })
     );
-    const pendingMessage = appendAgentMessage("assistant", `Waiting for ${targetNode}...`, {
+    const pendingMessage = appendAgentMessage("assistant", useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
       pending: true,
-      phase: "Inspecting context",
+      phase: useDirectApi ? "Provider" : useOwnedBridge ? "Owned agent" : "Inspecting context",
       target_node: targetNode,
-      mode,
+      mode: useDirectApi ? "direct_api" : useOwnedBridge ? "owned_bridge" : mode,
       turn_started_at: turnStartedAt,
       space_id: activeSpaceStorageId(),
       actions: initialActions,
     });
     startAgentTurnTimer(pendingMessage);
+    if (useDirectApi) {
+      els.agentStatus.textContent = "Calling API";
+      updateAgentPendingMessage(pendingMessage, {
+        phase: "Provider probe",
+        content: "Checking provider connectivity...",
+      });
+      try {
+        const providerProbe = await ensureAgentProviderConnection();
+        mergeAgentAction(pendingMessage, {
+          id: providerProbeActionId,
+          topic: "run-api",
+          kind: "api",
+          label: "Probe provider",
+          status: "done",
+          detail: providerProbe.mode,
+          meta: providerProbe.category,
+        });
+        updateAgentPendingMessage(pendingMessage, {
+          phase: providerProbe.mode,
+          content: providerProbe.mode === "backend-proxy" ? "Calling provider through backend proxy..." : "Calling browser-direct provider...",
+        });
+        const direct = await callDirectAgentProvider(providerMessageContent, transcript, [...userImages, ...userAttachments]);
+        const directUsage = direct.usage && typeof direct.usage === "object" ? direct.usage : {};
+        const providerMode = direct.mode || currentAgentProviderProbe()?.mode || "browser-direct";
+        if (direct.image_fallback) {
+          mergeAgentAction(pendingMessage, {
+            id: "client_provider_image_fallback",
+            topic: "run-api",
+            kind: "api",
+            label: "Image request fallback",
+            status: "done",
+            detail: direct.image_fallback.category || direct.image_fallback.mode || "text fallback",
+            meta: "manifest",
+          });
+        }
+        pendingMessage.content = direct.reply;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.changed_files = [];
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId
+            ? { ...action, label: providerMode, status: "done", detail: direct.model || state.agentDirectProvider?.model || "direct", meta: providerMode }
+            : action
+        ));
+        pendingMessage.diagnostics = {
+          source: providerMode === AGENT_PROVIDER_TRANSPORTS.BACKEND_PROXY ? "provider_backend_proxy" : "browser_direct_provider",
+          mode: providerMode,
+          target_node: targetNode,
+          duration_ms: pendingMessage.duration_ms,
+          tool_count: 0,
+          tools: [],
+          transcript_turns: transcript.length,
+          token_usage: directUsage,
+          direct_provider: {
+            provider: state.agentDirectProvider?.provider || "",
+            model: direct.model || state.agentDirectProvider?.model || "",
+            base_url: state.agentDirectProvider?.baseUrl || "",
+            endpoint: directProviderChatUrl(state.agentDirectProvider),
+            mode: providerMode,
+            probe: currentAgentProviderProbe(),
+            transport_reason: currentAgentProviderProbe()?.transport_reason || "",
+          },
+          backend_tools_enabled: false,
+          source_mutations_enabled: false,
+        };
+        const session = activeAgentSession();
+        session.diagnostics = pendingMessage.diagnostics;
+        session.context_preview = [];
+        updateAgentTokenUsage(directUsage);
+        saveAgentSessions();
+        renderAgentDiagnostics(pendingMessage.diagnostics);
+        renderAgentContextPreview([]);
+        renderAgentMessages();
+        recordUserEvent("agent.direct_api_finished", {
+          target: providerMode,
+          summary: "Provider replied",
+          data: { model: direct.model || state.agentDirectProvider?.model || "", usage: directUsage, mode: providerMode },
+        });
+        return;
+      } catch (directError) {
+        const diagnostic = providerDiagnosticFromError(directError) || currentAgentProviderProbe();
+        const reason = diagnostic.message || directError.message;
+        pendingMessage.content = `The provider could not answer (${diagnostic.mode || "unreachable"} / ${diagnostic.category || "error"}): ${reason}`;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "Provider error";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId || action.id === providerProbeActionId
+            ? { ...action, label: action.id === providerProbeActionId ? "Probe provider" : "Provider call", status: "error", detail: reason, meta: diagnostic.category || diagnostic.mode || "error" }
+            : action
+        ));
+        pendingMessage.diagnostics = {
+          source: "provider_error",
+          mode: diagnostic.mode || "unreachable",
+          provider_error: diagnostic,
+          direct_provider: {
+            provider: state.agentDirectProvider?.provider || "",
+            model: state.agentDirectProvider?.model || "",
+            base_url: state.agentDirectProvider?.baseUrl || "",
+            endpoint: directProviderChatUrl(state.agentDirectProvider),
+          },
+        };
+        saveAgentSessions();
+        renderAgentMessages();
+        renderAgentOnboardingPanel();
+        return;
+      }
+    }
+    if (useOwnedBridge) {
+      els.agentStatus.textContent = "Calling agent";
+      updateAgentPendingMessage(pendingMessage, {
+        phase: "Owned agent",
+        content: `Calling ${state.agentOwnedAgent?.name || "owned agent"}...`,
+      });
+      try {
+        const owned = await callOwnedAgentBridge(userMessageContent, transcript, compactObservation);
+        pendingMessage.content = owned.reply;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.changed_files = [];
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId
+            ? { ...action, label: "Owned bridge", status: "done", detail: owned.task?.task_id || state.agentOwnedAgent?.name || "agent", meta: state.agentOwnedAgent?.type || "hermes" }
+            : action
+        ));
+        pendingMessage.diagnostics = {
+          source: "owned_agent_bridge",
+          mode: "owned_bridge",
+          target_node: targetNode,
+          duration_ms: pendingMessage.duration_ms,
+          tool_count: 0,
+          tools: [],
+          transcript_turns: transcript.length,
+          owned_agent: {
+            name: state.agentOwnedAgent?.name || "",
+            type: state.agentOwnedAgent?.type || "hermes",
+            bridge_url: ownedAgentBridgeUrl(),
+            task_id: owned.task?.task_id || "",
+            status: owned.task?.status || "",
+          },
+          backend_tools_enabled: true,
+          source_mutations_enabled: false,
+        };
+        const session = activeAgentSession();
+        session.diagnostics = pendingMessage.diagnostics;
+        session.context_preview = [];
+        saveAgentSessions();
+        renderAgentDiagnostics(pendingMessage.diagnostics);
+        renderAgentContextPreview([]);
+        renderAgentMessages();
+        recordUserEvent("agent.owned_bridge_finished", {
+          target: "owned-agent",
+          summary: "Owned agent replied",
+          data: { task_id: owned.task?.task_id || "", status: owned.task?.status || "" },
+        });
+        return;
+      } catch (ownedError) {
+        pendingMessage.content = `The owned agent bridge could not answer: ${ownedError.message}`;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "Owned agent error";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId
+            ? { ...action, label: "Owned bridge", status: "error", detail: ownedError.message, meta: "error" }
+            : action
+        ));
+        pendingMessage.diagnostics = {
+          source: "owned_agent_bridge_error",
+          mode: "owned_bridge",
+          owned_agent: {
+            name: state.agentOwnedAgent?.name || "",
+            type: state.agentOwnedAgent?.type || "hermes",
+            bridge_url: ownedAgentBridgeUrl(),
+          },
+        };
+        saveAgentSessions();
+        renderAgentMessages();
+        renderAgentOnboardingPanel();
+        return;
+      }
+    }
+    await ensureAgentReadiness("send");
     await storeAgentAttachmentAssets(userImages, userAttachments, pendingMessage);
     els.agentStatus.textContent = "Inspecting context";
     updateAgentPendingMessage(pendingMessage, {
@@ -11024,13 +13928,13 @@ async function sendAgentMessage(text) {
       data: { error: error.message },
     });
   } finally {
-    clearNodeRunHint(targetNode, runHintId);
+    if (runHintTarget) clearNodeRunHint(runHintTarget, runHintId);
     state.agentBusy = false;
     state.agentAbortController = null;
     state.agentStopRequested = false;
     stopAgentTurnTimer();
     updateAgentSendButton();
-    els.agentStatus.textContent = "Ready";
+    renderAgentReadinessStatus();
     flushDeferredHmrReload();
   }
 }
@@ -11574,13 +14478,17 @@ function installTopologyNodeDragging(button, node) {
   const surface = els.topologyNodes;
   if (!surface) return;
   button.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0) return;
+    if (!isPrimaryPointer(event)) return;
     event.preventDefault();
     const surfaceRect = surface.getBoundingClientRect();
     const startX = event.clientX;
     const startY = event.clientY;
     let moved = false;
-    button.setPointerCapture(event.pointerId);
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can be unavailable during touch handoff.
+    }
     const move = (moveEvent) => {
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
       const left = clamp(moveEvent.clientX - surfaceRect.left, button.offsetWidth / 2, surfaceRect.width - button.offsetWidth / 2);
@@ -13370,6 +16278,7 @@ function renderAll() {
   renderSecurityLoop();
   renderAgentNodeSelect();
   renderAgentModelSelect();
+  renderAgentReadinessStatus();
   renderSharedVoice();
   renderLogin();
   renderRoleVisibility();
@@ -14691,6 +17600,21 @@ function areaMapViewportPixelRect(stageWidth, stageHeight) {
   };
 }
 
+function areaMapContentRect(map, fixedRect = null) {
+  const rect = fixedRect || map.getBoundingClientRect();
+  const styles = window.getComputedStyle ? window.getComputedStyle(map) : null;
+  const borderLeft = parseFloat(styles?.borderLeftWidth || "0") || 0;
+  const borderTop = parseFloat(styles?.borderTopWidth || "0") || 0;
+  const borderRight = parseFloat(styles?.borderRightWidth || "0") || 0;
+  const borderBottom = parseFloat(styles?.borderBottomWidth || "0") || 0;
+  return {
+    left: rect.left + borderLeft,
+    top: rect.top + borderTop,
+    width: Math.max(1, Math.round(map.clientWidth || rect.width - borderLeft - borderRight || 1)),
+    height: Math.max(1, Math.round(map.clientHeight || rect.height - borderTop - borderBottom || 1)),
+  };
+}
+
 function applyAreaMapPixelRect(element, rect) {
   element.style.left = `${rect.left}px`;
   element.style.top = `${rect.top}px`;
@@ -14712,9 +17636,9 @@ function updateAreaMap(control = null) {
   const board = wrap.querySelector(".config-area-map-board");
   const viewport = wrap.querySelector(".config-area-map-viewport");
   if (map && board && viewport) {
-    const rect = map.getBoundingClientRect();
-    const stageWidth = Math.max(1, Math.round(rect.width || map.clientWidth || 1));
-    const stageHeight = Math.max(1, Math.round(rect.height || map.clientHeight || stageWidth));
+    const rect = areaMapContentRect(map);
+    const stageWidth = rect.width;
+    const stageHeight = rect.height;
     const boardWidth = clamp(Math.round((area.width / CANVAS_AREA_MAX_PX) * stageWidth), 1, stageWidth);
     const boardHeight = clamp(Math.round((area.height / CANVAS_AREA_MAX_PX) * stageHeight), 1, stageHeight);
     board.style.width = `${boardWidth}px`;
@@ -14739,7 +17663,7 @@ function updateAreaMap(control = null) {
 }
 
 function areaFromMapPointer(map, event, fixedRect = null) {
-  const rect = fixedRect || map.getBoundingClientRect();
+  const rect = fixedRect || areaMapContentRect(map);
   const x = clamp(event.clientX - rect.left, 0, Math.max(1, rect.width));
   const y = clamp(event.clientY - rect.top, 0, Math.max(1, rect.height));
   return normalizedCanvasAreaSize({
@@ -14818,7 +17742,7 @@ function installAreaMap(wrap, map) {
     dragging = true;
     changed = false;
     state.configAreaDragActive = true;
-    dragRect = map.getBoundingClientRect();
+    dragRect = areaMapContentRect(map);
     map.classList.add("is-dragging");
     wrap.classList.add("is-area-dragging");
     try {
@@ -15971,9 +18895,19 @@ function wireEvents() {
 	    if (!event.target.closest?.("#spaceContextMenu")) hideSpaceContextMenu({ skipHistory: true, replaceHistory: true });
 	    if (!event.target.closest?.("#nodeContextMenu")) hideNodeContextMenu();
 	    if (!insideNodeStats) hideNodeStatsBalloon({ passive: true });
-	    if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
+      if (!event.target.closest?.("#appContextMenu")) hideAppContextMenu();
+      if (state.agentOpenMessageMenuId && !event.target.closest?.(".agent-message-menu, .agent-message-menu-button")) {
+        closeAgentMessageMenu();
+        renderAgentMessages();
+      }
 	    if (!event.target.closest?.("#launcherLogin")) setLoginOpen(false);
 	  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!state.agentImageScanInfoOpen) return;
+    const target = event.target;
+    if (target.closest?.("#agentImageScanInfoButton, #agentImageScanInfoBalloon")) return;
+    closeAgentImageScanInfo();
+  }, { capture: true, passive: true });
   installNodeStatsBalloonInteractions();
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
@@ -15997,8 +18931,9 @@ function wireEvents() {
       renderMiniMap: options.renderMiniMap,
       updateNavigation: options.updateNavigation,
     });
-    applyWidgetLayout();
-  };
+	    applyWidgetLayout();
+    placeAgentOnboardingPanel();
+	  };
   window.addEventListener("resize", refreshViewportLayout);
   window.visualViewport?.addEventListener("resize", refreshViewportLayout);
   window.visualViewport?.addEventListener("scroll", refreshViewportLayout);
@@ -16158,6 +19093,10 @@ function wireEvents() {
   els.resetNodeEditButton?.addEventListener("click", resetNodeEdit);
   els.closeNodeEditModalButton?.addEventListener("click", closeNodeEditModal);
   installModalBackdropDismiss(els.nodeEditModal, closeNodeEditModal);
+  els.creditGrantForm?.addEventListener("submit", (event) => void submitCreditGrant(event));
+  els.closeCreditGrantButton?.addEventListener("click", closeCreditGrantModal);
+  els.cancelCreditGrantButton?.addEventListener("click", closeCreditGrantModal);
+  installModalBackdropDismiss(els.creditGrantModal, closeCreditGrantModal);
   els.securityRefreshButton?.addEventListener("click", () => void loadSecurityLoop("manual"));
   els.closeSecurityEvidenceButton?.addEventListener("click", closeSecurityEvidenceModal);
   installModalBackdropDismiss(els.securityEvidenceModal, closeSecurityEvidenceModal);
@@ -16191,6 +19130,24 @@ function wireEvents() {
     setAgentView(state.agentView === "people" ? "chat" : "people");
   });
   els.agentPeopleSearchForm?.addEventListener("submit", (event) => void submitAgentPeopleSearch(event));
+  els.agentOnboardingCloseButton?.addEventListener("click", closeAgentSetupBalloon);
+  els.agentAddAgentButton?.addEventListener("click", openAgentTopicForm);
+  els.agentTopicForm?.addEventListener("submit", (event) => void submitAgentTopicForm(event));
+  els.agentConfiguredModelList?.addEventListener("click", handleAgentConfiguredModelAction);
+  els.agentDirectProviderForm?.addEventListener("submit", submitAgentDirectProvider);
+  els.agentMessages?.addEventListener("scroll", updateAgentScrollBottomButton, { passive: true });
+  els.agentScrollBottomButton?.addEventListener("click", () => scrollAgentChatToBottom({ smooth: true }));
+  [els.agentDirectBaseUrlInput, els.agentDirectModelInput, els.agentDirectApiKeyInput].forEach((input) => {
+    input?.addEventListener("focus", () => {
+      if (input === els.agentDirectApiKeyInput && input.value === AGENT_DIRECT_PROVIDER_KEY_MASK) input.value = "";
+    });
+    input?.addEventListener("input", () => {
+      syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: input !== els.agentDirectBaseUrlInput });
+    });
+    input?.addEventListener("blur", () => {
+      syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: true, render: true });
+    });
+  });
   els.agentEmojiButton?.addEventListener("click", (event) => {
     event.stopPropagation();
     setAgentSocialPicker(state.agentSocialPicker === "emoji" ? "" : "emoji");
@@ -16211,17 +19168,32 @@ function wireEvents() {
     event.stopPropagation();
     toggleAgentBalloon("settings");
   });
-  els.agentPanel.addEventListener("click", (event) => {
-    if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select")) return;
-    setAgentBalloon("");
-    if (!event.target.closest?.(".agent-social-picker, .agent-emoji-button, .agent-sticker-button")) setAgentSocialPicker("");
-  });
+	  els.agentPanel.addEventListener("click", (event) => {
+	    if (event.target.closest?.(".agent-balloon, .agent-tool-button, .agent-model-select")) return;
+	    setAgentBalloon("");
+	    if (!event.target.closest?.("#agentImagePreview")) {
+	      closeAgentImageScanInfo();
+	    }
+	    if (!event.target.closest?.(".agent-social-picker, .agent-emoji-button, .agent-sticker-button")) setAgentSocialPicker("");
+	  });
   els.agentNewSessionButton.addEventListener("click", newAgentSession);
-  els.agentNodeSelect?.addEventListener("change", () => setAgentTargetNode(els.agentNodeSelect.value));
+  els.agentNodeSelect?.addEventListener("change", () => {
+    setAgentTargetNode(els.agentNodeSelect.value);
+  });
   els.agentModelSelect?.addEventListener("change", function() {
     const value = this.value;
     let selectedModel = null;
     if (value === "__add__") {
+      if (agentTargetIsDirectProvider()) {
+        openAgentSetupBalloon({
+          mode: "provider",
+          message: "Edit the saved provider or type a new provider model.",
+          openProviderForm: true,
+          providerFormMode: "edit",
+        });
+        renderAgentModelSelect();
+        return;
+      }
       openAgentModelSetup("add");
       renderAgentModelSelect();
       return;
@@ -16233,11 +19205,19 @@ function wireEvents() {
       return;
     }
     if (value === "__default__") {
-      delete state.agentModelSettings.selectedByNode?.[agentTargetNode()];
+      delete state.agentModelSettings.selectedByNode?.[agentModelTargetKey()];
     } else if (value.startsWith("model:")) {
       const modelId = value.slice("model:".length);
       selectedModel = availableAgentModels().find((model) => model.id === modelId || agentModelKeys(model).includes(modelId.toLowerCase())) || null;
       if (selectedModel) {
+        if (agentTargetIsDirectProvider()) {
+          applyAgentProviderModel(selectedModel);
+          recordUserEvent("agent.provider_model_selected", {
+            target: "provider-api",
+            data: { model: selectedModel.label || selectedModel.id },
+          });
+          return;
+        }
         openAgentModelSetup("set", selectedModel, { auto: true });
         renderAgentModelSelect();
         return;
@@ -16245,14 +19225,31 @@ function wireEvents() {
     }
     persistAgentModelSelection();
     recordUserEvent("agent.model_selected", {
-      target: `node:${agentTargetNode()}`,
+      target: agentTargetIsDirectProvider() ? "provider-api" : `node:${agentTargetNode()}`,
       data: { value, model: selectedModel?.label || "" },
     });
   });
   els.agentModelForm?.addEventListener("submit", (event) => void submitAgentModelSetup(event));
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   initializeAgentComposer();
+  renderAgentImageProcessingToggle();
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
+  els.agentImageScanInfoButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    state.agentImageScanInfoOpen = !state.agentImageScanInfoOpen;
+    renderAgentImageProcessingToggle();
+  });
+  els.agentImageProcessingToggle?.addEventListener("change", () => {
+    state.agentImageProcessingEnabled = Boolean(els.agentImageProcessingToggle.checked);
+    saveAgentImageProcessingPreference();
+    renderPendingPreviews();
+    recordUserEvent("agent.image_processing_toggled", {
+      target: "agent-form",
+      summary: state.agentImageProcessingEnabled ? "Image scan enabled" : "Image scan disabled",
+      data: { enabled: state.agentImageProcessingEnabled },
+    });
+  });
   els.agentImageInput?.addEventListener("change", () => {
     handleAgentFiles(els.agentImageInput.files);
     els.agentImageInput.value = "";
@@ -16317,6 +19314,8 @@ function wireEvents() {
   installSpacePanning();
   installAgentDragging();
   installAgentPanelDragging();
+  installAgentPanelResizing();
+  installAgentOnboardingDragging();
 }
 
 async function bootstrapAuthenticatedApp() {
@@ -16349,10 +19348,13 @@ async function bootstrapAuthenticatedApp() {
   await loadAgentModels();
   await loadCachedSocialState();
   await loadWasm();
+  await loadAgentReadiness("bootstrap");
+  await loadAccountCredits("bootstrap");
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
+  restoreActiveAgentSessionPreference();
   updateAgentSendButton();
   renderAgentSessions();
-  renderAgentMessages();
+  renderAgentMessages({ forceBottom: true });
   applyAgentLayout();
   setPanel(panelFromPath(), { updateUrl: false });
   initializeUiNavigationFromUrl();
