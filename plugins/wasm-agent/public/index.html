@@ -643,9 +643,9 @@
               </button>
             </div>
             <label class="agent-node-picker">
-              <select id="agentNodeSelect" aria-label="Chat target node">
+              <s-select id="agentNodeSelect" aria-label="Chat target node">
                 <option value="orchestrator">orchestrator</option>
-              </select>
+              </s-select>
               <span id="agentStatus" hidden></span>
             </label>
           </div>
@@ -675,11 +675,11 @@
             </div>
             <label class="agent-mode">
               <span>Mode</span>
-              <select id="agentModeSelect" aria-label="Embedded agent mode">
+              <s-select id="agentModeSelect" aria-label="Embedded agent mode">
                 <option value="auto">Auto</option>
                 <option value="local">Local</option>
                 <option value="bridge">Bridge</option>
-              </select>
+              </s-select>
             </label>
             <div class="agent-mode-help">
               <p><strong>Auto</strong> answers cheap resume/inspect turns locally and uses the selected node for other messages.</p>
@@ -738,7 +738,7 @@
               <button id="agentEmojiButton" class="icon-button agent-emoji-button" type="button" aria-label="Emoji" title="Emoji">🙂</button>
               <button id="agentStickerButton" class="icon-button agent-sticker-button" type="button" aria-label="Sticker" title="Sticker">◎</button>
             </div>
-            <select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" hidden></select>
+            <s-select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" search-placeholder="Search models" hidden></s-select>
             <button id="agentTokenUsage" class="agent-token-usage" type="button" title="Exact model token usage for the last turn" aria-expanded="false">Tokens -</button>
             <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Context used" hidden>
               <div class="agent-balloon-head">
@@ -782,13 +782,13 @@
           </label>
           <label>
             <span>Agent</span>
-            <select id="agentTopicTypeSelect">
+            <s-select id="agentTopicTypeSelect">
               <option value="hermes" selected>Hermes</option>
               <option value="openclaw" disabled>OpenClaw - Not available yet</option>
               <option value="kilocode" disabled>KiloCode - Not available yet</option>
               <option value="claude_code" disabled>Claude Code - Not available yet</option>
               <option value="pi" disabled>Pi - Not available yet</option>
-            </select>
+            </s-select>
           </label>
           <label>
             <span>Bridge URL</span>
@@ -800,11 +800,11 @@
         <form id="nodeForm" class="node-form" autocomplete="off" hidden>
           <label class="node-provider-field">
             <span><span class="field-required">*</span> Provider</span>
-            <select id="agentDirectProviderSelect" required>
+            <s-select id="agentDirectProviderSelect" required>
               <option value="">Choose provider</option>
               <option value="openrouter">OpenRouter</option>
               <option value="opencode-go">OpenCode-Go</option>
-            </select>
+            </s-select>
           </label>
           <label id="agentDirectModelField" class="node-provider-field node-model-field" hidden>
             <span><span class="field-required">*</span> Model</span>
@@ -831,20 +831,20 @@
               </label>
               <label>
                 <span><span class="field-required">*</span> Agent</span>
-                <select id="nodeWrapperTypeSelect" required>
+                <s-select id="nodeWrapperTypeSelect" required>
                   <option value="hermes" selected>Hermes</option>
                   <option value="openclaw" disabled>OpenClaw - Not available yet</option>
                   <option value="kilocode" disabled>KiloCode - Not available yet</option>
                   <option value="claude_code" disabled>Claude Code - Not available yet</option>
                   <option value="pi" disabled>Pi - Not available yet</option>
-                </select>
+                </s-select>
               </label>
               <label>
                 <span>Infrastructure</span>
-                <select id="nodeHarnessInfraSelect">
+                <s-select id="nodeHarnessInfraSelect">
                   <option value="hermes_backend">Wasm-Agent-Cloud based (10◇)</option>
                   <option value="custom_bridge">Private bridge URL</option>
-                </select>
+                </s-select>
               </label>
               <label id="nodeHarnessBridgeUrlField" class="node-harness-bridge-url-field" hidden>
                 <span>Private bridge URL</span>

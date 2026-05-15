@@ -208,7 +208,7 @@ const FIXED_WIDGET_LAYOUT = {
 
 class SSelect extends HTMLElement {
   static formAssociated = true;
-  static observedAttributes = ["disabled", "required", "placeholder", "search-placeholder"];
+  static observedAttributes = ["aria-label", "disabled", "required", "placeholder", "search-placeholder", "search-threshold", "searchable", "show-value"];
 
   constructor() {
     super();
@@ -219,7 +219,11 @@ class SSelect extends HTMLElement {
     this._query = "";
     this._activeIndex = -1;
     this._onDocumentPointerDown = (event) => {
-      if (!this.contains(event.target) && !event.composedPath?.().includes(this)) this.close();
+      const path = event.composedPath?.() || [];
+      if (!this.contains(event.target) && !path.includes(this) && !path.includes(this._popup)) this.close();
+    };
+    this._onWindowLayout = () => {
+      if (this._open) this._positionPopup();
     };
     this._observer = new MutationObserver(() => {
       this._readOptions();
@@ -235,24 +239,32 @@ class SSelect extends HTMLElement {
           color: var(--text, #e5edf7);
           font-size: 12px;
           text-transform: none;
+          box-sizing: border-box;
         }
         :host([hidden]) { display: none; }
         .trigger {
           width: 100%;
           min-width: 0;
-          height: 32px;
+          height: var(--s-select-height, 32px);
+          min-height: var(--s-select-height, 32px);
           display: grid;
           grid-template-columns: minmax(0, 1fr) auto;
           align-items: center;
           gap: 8px;
-          padding: 0 9px;
-          border: 1px solid rgba(147, 170, 203, 0.2);
+          padding: var(--s-select-padding, 0 2px 0 2px);
+          border: 1px solid var(--s-select-border-color, rgba(147, 170, 203, 0.2));
           border-radius: var(--radius, 8px);
-          background: rgba(5, 12, 22, 0.84);
-          color: inherit;
+          background: var(--s-select-bg, rgba(5, 12, 22, 0.84));
+          color: var(--s-select-color, inherit);
           font: inherit;
+          font-size: var(--s-select-font-size, inherit);
           text-align: left;
           cursor: pointer;
+          box-sizing: border-box;
+        }
+        :host(:hover) .trigger:not(:disabled) {
+          border-color: var(--s-select-hover-border-color, rgba(125, 220, 255, 0.42));
+          background: var(--s-select-hover-bg, var(--s-select-bg, rgba(5, 12, 22, 0.9)));
         }
         .trigger:disabled {
           cursor: not-allowed;
@@ -290,12 +302,26 @@ class SSelect extends HTMLElement {
           z-index: 40;
           max-height: min(380px, 60vh);
           overflow-y: auto;
+          overflow-x: hidden;
           border: 1px solid rgba(125, 220, 255, 0.25);
           border-radius: var(--radius, 8px);
           background: rgba(5, 12, 22, 0.98);
           box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+          box-sizing: border-box;
           scrollbar-color: rgba(147, 170, 203, 0.42) transparent;
           scrollbar-width: thin;
+        }
+        .popup[popover] {
+          inset: auto;
+          margin: 0;
+        }
+        :host([data-top-layer]) .popup {
+          position: fixed;
+          left: var(--s-select-popup-left, 0px);
+          top: var(--s-select-popup-top, 0px);
+          right: auto;
+          width: var(--s-select-popup-width, 220px);
+          max-height: var(--s-select-popup-max-height, min(380px, 60vh));
         }
         .popup::-webkit-scrollbar {
           width: 9px;
@@ -309,6 +335,13 @@ class SSelect extends HTMLElement {
           background: rgba(147, 170, 203, 0.42);
           background-clip: content-box;
         }
+        .popup::-webkit-scrollbar-thumb:hover {
+          background: rgba(125, 220, 255, 0.52);
+          background-clip: content-box;
+        }
+        .popup::-webkit-scrollbar-corner {
+          background: transparent;
+        }
         .search-wrap {
           position: sticky;
           top: 0;
@@ -317,6 +350,9 @@ class SSelect extends HTMLElement {
           border-bottom: 1px solid rgba(147, 170, 203, 0.16);
           background: rgba(5, 12, 22, 0.99);
           backdrop-filter: blur(10px);
+        }
+        .search-wrap[hidden] {
+          display: none;
         }
         .search {
           width: 100%;
@@ -328,6 +364,7 @@ class SSelect extends HTMLElement {
           color: inherit;
           font: inherit;
           outline: none;
+          box-sizing: border-box;
         }
         .search:focus {
           border-color: rgba(125, 220, 255, 0.58);
@@ -335,6 +372,7 @@ class SSelect extends HTMLElement {
         }
         .list {
           display: grid;
+          min-width: 0;
           padding: 4px;
         }
         .option,
@@ -348,6 +386,7 @@ class SSelect extends HTMLElement {
           color: inherit;
           font: inherit;
           text-align: left;
+          box-sizing: border-box;
         }
         .option {
           display: grid;
@@ -392,7 +431,7 @@ class SSelect extends HTMLElement {
         <span class="value"></span>
         <span class="chevron" aria-hidden="true"></span>
       </button>
-      <div class="popup" hidden>
+      <div class="popup" popover="manual" hidden>
         <div class="search-wrap">
           <input class="search" type="search" autocomplete="off" spellcheck="false" autocapitalize="off">
         </div>
@@ -403,6 +442,7 @@ class SSelect extends HTMLElement {
     this._valueLabel = root.querySelector(".value");
     this._popup = root.querySelector(".popup");
     this._search = root.querySelector(".search");
+    this._searchWrap = root.querySelector(".search-wrap");
     this._list = root.querySelector(".list");
   }
 
@@ -413,19 +453,23 @@ class SSelect extends HTMLElement {
     this._search.addEventListener("keydown", (event) => this._handleKeydown(event));
     this._search.addEventListener("input", (event) => {
       event.stopPropagation();
+      if (!this._shouldShowSearch()) return;
       this._query = this._search.value || "";
       this._activeIndex = 0;
       this._renderOptions();
+      this._positionPopup();
     });
     document.addEventListener("pointerdown", this._onDocumentPointerDown);
     this._readOptions();
-    if (!this._value && this.getAttribute("value")) this._value = this.getAttribute("value") || "";
+    if (!this._value && this.hasAttribute("value")) this._value = this.getAttribute("value") || "";
     this._render();
   }
 
   disconnectedCallback() {
     this._observer.disconnect();
     document.removeEventListener("pointerdown", this._onDocumentPointerDown);
+    this._removeLayoutListeners();
+    this._hidePopup();
   }
 
   attributeChangedCallback() {
@@ -472,32 +516,63 @@ class SSelect extends HTMLElement {
   open() {
     if (this.disabled) return;
     this._open = true;
-    this._query = "";
+    if (!this._shouldShowSearch()) this._query = "";
     this._activeIndex = Math.max(0, this._filteredOptions().findIndex((option) => option.value === this.value));
     this._render();
-    window.requestAnimationFrame(() => this._search?.focus());
+    this._addLayoutListeners();
+    this._positionPopup();
+    window.requestAnimationFrame(() => {
+      if (this._shouldShowSearch()) this._search?.focus();
+      else this.focus();
+    });
   }
 
   close() {
     if (!this._open) return;
     this._open = false;
     this._query = "";
+    this._removeLayoutListeners();
     this._render();
   }
 
   _readOptions() {
-    this._options = Array.from(this.querySelectorAll("option")).map((option) => ({
-      value: option.value || option.textContent || "",
-      label: option.textContent || option.value || "",
-      disabled: option.disabled,
-    })).filter((option) => option.value);
+    const optionElements = Array.from(this.querySelectorAll("option"));
+    this._options = optionElements.map((option) => {
+      const value = option.getAttribute("value");
+      const cleanValue = value !== null ? value : option.textContent || "";
+      return {
+        value: cleanValue,
+        label: option.textContent || cleanValue,
+        disabled: option.disabled,
+      };
+    });
+    if (!this._value && !this._options.some((option) => option.value === "")) {
+      const defaultOption = optionElements.find((option) => option.selected && !option.disabled) || optionElements.find((option) => !option.disabled);
+      const defaultValue = defaultOption?.getAttribute("value");
+      this._value = defaultValue !== null && defaultValue !== undefined ? defaultValue : defaultOption?.textContent || "";
+    }
     if (this._value && !this._options.some((option) => option.value === this._value)) {
       this._options.unshift({ value: this._value, label: this._value, disabled: false });
     }
     this._updateFormValue();
   }
 
+  _searchThreshold() {
+    if (!this.hasAttribute("search-threshold")) return 24;
+    const configured = Number(this.getAttribute("search-threshold"));
+    return Number.isFinite(configured) && configured >= 0 ? configured : 24;
+  }
+
+  _shouldShowSearch() {
+    return this.hasAttribute("searchable") || this._options.length >= this._searchThreshold();
+  }
+
+  _shouldShowMeta() {
+    return this.hasAttribute("show-value") || this._shouldShowSearch();
+  }
+
   _filteredOptions() {
+    if (!this._shouldShowSearch()) return this._options;
     const terms = String(this._query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return this._options;
     return this._options.filter((option) => {
@@ -507,7 +582,7 @@ class SSelect extends HTMLElement {
   }
 
   _select(value) {
-    if (!value || this.value === value) {
+    if (this.value === value) {
       this.close();
       return;
     }
@@ -554,15 +629,92 @@ class SSelect extends HTMLElement {
       this._internals.setValidity(missing ? { valueMissing: true } : {}, missing ? "Select a value." : "", this._trigger);
     }
   }
+  _canUseTopLayer() {
+    return typeof this._popup?.showPopover === "function" && typeof this._popup?.hidePopover === "function";
+  }
+
+  _addLayoutListeners() {
+    window.addEventListener("resize", this._onWindowLayout);
+    window.addEventListener("scroll", this._onWindowLayout, true);
+  }
+
+  _removeLayoutListeners() {
+    window.removeEventListener("resize", this._onWindowLayout);
+    window.removeEventListener("scroll", this._onWindowLayout, true);
+  }
+
+  _showPopup() {
+    if (!this._popup) return;
+    this._popup.hidden = false;
+    if (!this._canUseTopLayer()) {
+      this.toggleAttribute("data-top-layer", false);
+      return;
+    }
+    this.toggleAttribute("data-top-layer", true);
+    try {
+      if (!this._popup.matches(":popover-open")) this._popup.showPopover();
+    } catch {
+      this.toggleAttribute("data-top-layer", false);
+    }
+  }
+
+  _hidePopup() {
+    if (!this._popup) return;
+    if (this._canUseTopLayer()) {
+      try {
+        if (this._popup.matches(":popover-open")) this._popup.hidePopover();
+      } catch {
+        // The browser may already have closed the manual popover.
+      }
+    }
+    this.toggleAttribute("data-top-layer", false);
+    this._popup.hidden = true;
+  }
+
+  _positionPopup() {
+    if (!this._open || !this._popup || !this._canUseTopLayer() || !this.hasAttribute("data-top-layer")) return;
+    const rect = this.getBoundingClientRect();
+    const visualViewport = window.visualViewport;
+    const viewportLeft = visualViewport?.offsetLeft || 0;
+    const viewportTop = visualViewport?.offsetTop || 0;
+    const viewportWidth = visualViewport?.width || window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0;
+    const viewportRight = viewportLeft + viewportWidth;
+    const viewportBottom = viewportTop + viewportHeight;
+    const gap = 4;
+    const edge = Math.min(8, Math.max(4, viewportWidth * 0.03));
+    const availableWidth = Math.max(0, viewportWidth - edge * 2);
+    const minReadableWidth = Math.min(180, availableWidth);
+    const width = Math.min(availableWidth, Math.max(minReadableWidth, rect.width));
+    const leftMax = viewportRight - edge - width;
+    const left = Math.max(viewportLeft + edge, Math.min(rect.left, leftMax));
+    const belowSpace = Math.max(0, viewportBottom - edge - rect.bottom - gap);
+    const aboveSpace = Math.max(0, rect.top - gap - viewportTop - edge);
+    const openAbove = aboveSpace > belowSpace;
+    const availableHeight = openAbove ? aboveSpace : belowSpace;
+    const naturalHeight = Math.max(0, this._popup.scrollHeight || 0);
+    const maxHeight = Math.max(0, Math.min(380, availableHeight));
+    const targetHeight = Math.min(maxHeight, naturalHeight || maxHeight);
+    const top = openAbove
+      ? Math.max(viewportTop + edge, rect.top - gap - targetHeight)
+      : Math.min(viewportBottom - edge - targetHeight, rect.bottom + gap);
+    this._popup.style.setProperty("--s-select-popup-left", `${left}px`);
+    this._popup.style.setProperty("--s-select-popup-top", `${top}px`);
+    this._popup.style.setProperty("--s-select-popup-width", `${width}px`);
+    this._popup.style.setProperty("--s-select-popup-max-height", `${maxHeight}px`);
+    this._popup.dataset.placement = openAbove ? "above" : "below";
+  }
 
   _renderOptions() {
     if (!this._list) return;
     const options = this._filteredOptions();
+    const showMeta = this._shouldShowMeta();
     if (!options.length) {
       const empty = document.createElement("div");
       empty.className = "empty";
-      empty.textContent = this._query ? "No matching models" : "No models";
+      empty.textContent = this._query ? "No matching options" : "No options";
       this._list.replaceChildren(empty);
+      this._positionPopup();
       return;
     }
     this._activeIndex = Math.max(0, Math.min(this._activeIndex, options.length - 1));
@@ -579,7 +731,7 @@ class SSelect extends HTMLElement {
       label.className = "option-label";
       label.textContent = option.label || option.value;
       button.append(label);
-      if (option.value && option.value !== option.label) {
+      if (showMeta && option.value && option.value !== option.label) {
         const meta = document.createElement("span");
         meta.className = "option-meta";
         meta.textContent = option.value;
@@ -589,6 +741,7 @@ class SSelect extends HTMLElement {
       button.addEventListener("click", () => this._select(option.value));
       return button;
     }));
+    this._positionPopup();
   }
 
   _render() {
@@ -596,16 +749,25 @@ class SSelect extends HTMLElement {
     this._readOptions();
     this._trigger.disabled = this.disabled;
     this._trigger.setAttribute("aria-expanded", this._open ? "true" : "false");
+    const ariaLabel = this.getAttribute("aria-label");
+    if (ariaLabel) this._trigger.setAttribute("aria-label", ariaLabel);
+    else this._trigger.removeAttribute("aria-label");
     const selected = this._options.find((option) => option.value === this.value);
     this._valueLabel.textContent = selected?.label || this.getAttribute("placeholder") || "Select";
     this._valueLabel.style.color = selected ? "inherit" : "var(--muted, #90a0b0)";
     this._trigger.title = selected
       ? selected.value === selected.label ? selected.value : `${selected.label} (${selected.value})`
       : this.getAttribute("placeholder") || "Select";
-    this._popup.hidden = !this._open;
+    if (this._open) this._showPopup();
+    else this._hidePopup();
     this._search.placeholder = this.getAttribute("search-placeholder") || "Search";
+    const showSearch = this._shouldShowSearch();
+    if (this._searchWrap) this._searchWrap.hidden = !showSearch;
+    this._search.disabled = !showSearch;
+    if (!showSearch) this._query = "";
     if (!this._open) this._search.value = "";
     this._renderOptions();
+    this._positionPopup();
     this._updateFormValue();
   }
 }
@@ -1191,7 +1353,7 @@ function redactValue(value) {
 
 function summarizeEventTarget(target) {
   if (!target) return "unknown";
-  const element = target.closest?.("button,input,textarea,select,a,[data-panel],[data-widget-id],[data-widget-app]");
+  const element = target.closest?.("button,input,textarea,select,s-select,a,[data-panel],[data-widget-id],[data-widget-app]");
   if (!element) return target.tagName ? target.tagName.toLowerCase() : "unknown";
   if (element.dataset?.widgetId) return `widget:${element.dataset.widgetId}`;
   if (element.dataset?.widgetApp) return `app:${element.dataset.widgetApp}`;
@@ -7964,7 +8126,7 @@ function installWidgetDragging() {
 
     handle.addEventListener("pointerdown", (event) => {
       if (!isPrimaryPointer(event)) return;
-      if (event.target.closest("button,input,textarea,select,a")) return;
+      if (event.target.closest("button,input,textarea,select,s-select,a")) return;
       if (widget.classList.contains("is-maximized")) return;
       event.preventDefault();
 
@@ -8351,31 +8513,6 @@ function installGoogleStyleOverrides() {
   document.head.append(style);
 }
 
-function renderGoogleLoginFace(slot) {
-  const shell = document.createElement("div");
-  shell.className = "google-login-shell";
-
-  const face = document.createElement("div");
-  face.className = "google-login-face";
-  face.setAttribute("aria-hidden", "true");
-
-  const logo = document.createElement("img");
-  logo.className = "google-login-face-logo";
-  logo.src = "/icons/google-logo.svg";
-  logo.alt = "";
-
-  const label = document.createElement("span");
-  label.textContent = "Google Login";
-
-  const clickLayer = document.createElement("div");
-  clickLayer.className = "google-login-click-layer";
-
-  face.append(logo, label);
-  shell.append(face, clickLayer);
-  slot.replaceChildren(shell);
-  return clickLayer;
-}
-
 function googleLoginUri() {
   const fallback = new URL("/auth/google/callback", window.location.origin).href;
   try {
@@ -8436,15 +8573,15 @@ async function renderGoogleSignInButton() {
       login_uri: loginUri,
     });
     slots.forEach((slot) => {
-      const clickLayer = renderGoogleLoginFace(slot);
-      window.google.accounts.id.renderButton(clickLayer, {
+      slot.replaceChildren();
+      window.google.accounts.id.renderButton(slot, {
         type: "standard",
         theme: "filled_black",
         size: "large",
         text: "signin_with",
         shape: "rectangular",
         logo_alignment: "left",
-        width: 500,
+        width: Math.max(220, Math.min(320, Math.round(slot.getBoundingClientRect().width || 260))),
       });
     });
     installGoogleStyleOverrides();
@@ -14572,7 +14709,7 @@ function installAgentPanelDragging() {
   if (!handle) return;
   handle.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
-    if (event.target.closest("button,input,textarea,select,a")) return;
+    if (event.target.closest("button,input,textarea,select,s-select,a")) return;
     event.preventDefault();
     const panelRect = els.agentPanel.getBoundingClientRect();
     const offsetX = event.clientX - panelRect.left;
@@ -14622,7 +14759,7 @@ function installNodesPanelDragging() {
   if (!panel || !handle) return;
   handle.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
-    if (event.target.closest("button,input,textarea,select,a")) return;
+    if (event.target.closest("button,input,textarea,select,s-select,a")) return;
     event.preventDefault();
     const startRect = panel.getBoundingClientRect();
     const startCenter = {
@@ -16253,7 +16390,7 @@ function renderNodeStatsEvents(events) {
 function beginNodeStatsDrag(event, handle) {
   if (!handle || !els.nodeStatsBalloon) return;
   if (!isPrimaryPointer(event)) return;
-  if (event.target.closest("button,input,textarea,select,a")) return;
+  if (event.target.closest("button,input,textarea,select,s-select,a")) return;
   event.preventDefault();
   event.stopPropagation();
   suppressNodeStatsDismiss(400);

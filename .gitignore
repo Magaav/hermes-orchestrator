@@ -75,6 +75,7 @@ hermes-agent/venv/
 
 # Local upstream contribution workspace
 dummy/
+simulation/
 .worktrees/
 .worktrees/
 

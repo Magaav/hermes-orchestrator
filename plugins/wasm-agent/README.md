@@ -226,10 +226,17 @@ existing OpenRouter/OpenCode/etc. nodes, saved API keys are masked on mobile, an
 the form starts with a required Provider dropdown. OpenRouter and OpenCode-Go are
 the two exposed providers today; selecting one lazily loads the bundled provider
 model snapshot without blocking the auth shell, then refreshes it through
-`/agent/provider/models` when the live provider API is reachable. The model field uses a form-associated
-`s-select` web component whose dropdown keeps search sticky at the top and shows
-both display names and exact model ids, so large provider catalogs such as
-OpenRouter can be filtered before selecting a model.
+`/agent/provider/models` when the live provider API is reachable. The model
+field uses a form-associated `s-select` web component whose dropdown keeps
+search sticky at the top and shows both display names and exact model ids. The
+dropdown uses the browser top layer when available, opens toward the side of the
+viewport with more room, and clamps its width and height to the viewport so
+scrollable setup panels and narrow mobile screens do not clip the menu. Large
+provider catalogs such as OpenRouter can be filtered before selecting a model.
+All shell select controls now use the same `s-select` component, but the
+in-menu search only appears for large catalogs or explicitly searchable selects.
+The component keeps a small horizontal trigger inset so the selected value and
+chevron breathe together.
 The app generates the OpenAI-compatible endpoint URL internally.
 Existing saved custom model ids are preserved as dropdown options when editing.
 The visible
@@ -600,7 +607,9 @@ turn to a generic waiting state.
 Streaming updates only auto-scroll the transcript when the user is already at
 the bottom. When the user has scrolled away from the latest message, a small
 sticky down-arrow appears and scrolls the drawer fully back to the latest
-message. Opening or creating a session renders the transcript at the bottom, and
+message. Scrollable wasm-agent surfaces share the same thin dark scrollbar
+styling as `s-select` instead of browser-default scrollbars. Opening or creating
+a session renders the transcript at the bottom, and
 message action menus are available on assistant and user bubbles. Copy uses the
 original message markdown source, so inline code spans such as
 `` `agentStatus` `` remain intact.
@@ -773,7 +782,8 @@ posts the credential to the server-reported Google login URI, normally
 `<origin>/auth/google/callback`. `HERMES_WASM_AGENT_PUBLIC_ORIGIN` is honored
 from either the process environment or `conf/wa.env`, so deployments behind an
 HTTPS reverse proxy can publish the exact redirect URI registered in Google
-Cloud even if the Python process is bound to loopback. Callback failures are
+Cloud even if the Python process is bound to loopback. The login card renders
+Google's own button as the visible clickable target, and callback failures are
 reported in the login card after redirect. wasm-agent is account-gated: unauthenticated
 requests can load only the login shell/static assets and auth endpoints, while
 bridge, browser, timeline, agent, attachment, health, observation, and user
