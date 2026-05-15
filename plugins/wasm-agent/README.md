@@ -189,7 +189,8 @@ metadata so premium/heavy provisioning can stay an intentional later action.
 Model/provider choices in the embedded chat remain browser-local unless the
 user explicitly uses the backend model setup flow for a selected Hermes node.
 Embedded chat readiness is now explicit through `/agent/readiness`: the drawer
-shows Agent ready, Agent backend unavailable, Agent not set, or
+shows Agent ready, Agent backend unavailable, sandbox lifecycle labels such as
+Provisioning sandbox, Sandbox ready, or Provisioning failed, and
 WASM runtime blocked/unavailable before a turn becomes an opaque bridge error.
 For admin-selected nodes, readiness checks both the wasm-agent bridge and the
 selected node card so a stopped orchestrator does not appear ready just because
@@ -198,14 +199,14 @@ warning, but it no longer masks a live agent backend in the chat status chip.
 Standard-user chat resolves the internal account-owned agent alias to the
 user's deterministic main node and preflights the same readiness helper before
 bridge dispatch. If the main agent is missing, the drawer offers either an explicit
-OpenAI-compatible provider profile stored in client state, or Flux-credit
+OpenAI-compatible node profile stored in client state, or Flux-credit
 provisioning of one bounded main node. The provider path is standard-user
-provider mode: saved providers appear as selectable chat nodes, the node
-dropdown can open `Set provider...` or `Set agent...`, and a main-chat send is
-blocked with the setup balloon until the user has selected a provider they own
-or provisioned their agent. The same normalized Base URL, model, API key,
-provider metadata, and transport plan feeds the setup form, readiness chip,
-connectivity probe, and final chat dispatch. Readiness no longer becomes
+node mode: saved provider-backed nodes appear as selectable chat nodes, the node
+dropdown can open `> New...` or `> Edit...`, and a main-chat send is blocked
+with the setup balloon until the user has selected a configured node. The same
+normalized provider, generated provider endpoint, model, API key, optional node
+name, optional agent harness, provider metadata, and transport plan feeds the
+node form, readiness chip, connectivity probe, and final chat dispatch. Readiness no longer becomes
 "ready" just because the three fields exist; `providerTransportPlan()` first chooses browser-direct or
 backend-proxy. Known hosted providers such as OpenRouter/OpenAI-compatible
 cloud endpoints, plus compact/mobile public endpoints, go through
@@ -219,26 +220,44 @@ turns use the same proxy path when CORS requires it, preserving `image_url`
 content parts instead of flattening them into text.
 Admin/orchestrator chat ignores standard-user provider
 state so a saved mobile key cannot hijack Hermes-orchestrator turns. The
-provider form keeps saved provider state separate from clean "new provider"
-drafts, masks a saved API key on mobile, and can infer common base URLs from
-the model id or key prefix when the Base URL field is left empty. The visible
+node form keeps saved provider-backed nodes as a multi-node list rather than a
+single replace-in-place provider slot. Clean "new node" drafts do not overwrite
+existing OpenRouter/OpenCode/etc. nodes, saved API keys are masked on mobile, and
+the form starts with a required Provider dropdown. OpenRouter and OpenCode-Go are
+the two exposed providers today; selecting one lazily loads the bundled provider
+model snapshot without blocking the auth shell, then refreshes it through
+`/agent/provider/models` when the live provider API is reachable. The model field uses a form-associated
+`s-select` web component whose dropdown keeps search sticky at the top and shows
+both display names and exact model ids, so large provider catalogs such as
+OpenRouter can be filtered before selecting a model.
+The app generates the OpenAI-compatible endpoint URL internally.
+Existing saved custom model ids are preserved as dropdown options when editing.
+The visible
 chat target selector is now the single provider/agent model selector: with no
-configured target it lists `None` and `> New...`; once provider or agent models
+configured target it lists `None` and `> New...`; once provider-backed nodes or agent models
 exist it lists those configured `provider:model` / `agent:provider:model`
-targets plus `> Edit...`. The edit path opens the centered onboarding modal,
-which lists configured providers and can use, edit, add, or delete saved
-provider entries. The modal also exposes an optional Agent field:
-Add Agent opens a topic form with Name, Role/Instructions, Type, and optional
-Bridge URL. A saved bridge URL is treated as the user's own agent bridge; when
-no bridge is supplied, the Hermes service path uses orchestrator provisioning
-for the account's main agent. Hermes is the only hosted service agent type
-currently enabled. Hermes nodes still keep per-node model overrides
-through the backend setup flow. Flux credits are an append-only integer ledger exposed by
+targets plus `> Edit...`. The edit path opens the centered `nodesPanel`, which
+lists configured nodes and can use, edit, add, or delete saved node entries. Its
+`nodeForm` can create a direct browser-provider node, or its optional Agent
+harness subform can create a Hermes agent through `Wasm-Agent-Cloud based (10◇)`
+infra or a Private bridge URL. Harness Name, Agent, and Infrastructure are
+required when enabled; Hermes is the only available agent today, while OpenClaw,
+KiloCode, Claude Code, and Pi are listed as unavailable. Existing saved bridge
+URLs are still treated as the user's private agent bridge, and the
+Wasm-Agent-Cloud path uses orchestrator provisioning for the authenticated user's
+deterministic main Hermes sandbox at the 10◇ per-harness Flux cost. That cloud
+harness path still requires Provider, model, and API key because the spawned
+Hermes sandbox receives the generated endpoint plus model/provider values as its runtime
+configuration. Direct provider node creation and Wasm-Agent-Cloud harness
+creation both probe the draft provider config first; the form only closes after
+the provider is reachable and, for harnesses, after provisioning is ready.
+Hermes nodes still keep per-node model overrides through the
+backend setup flow. Flux credits are an append-only integer ledger exposed by
 `/account/credits`; admins can grant credits through
 `POST /admin/users/{user_id}/credits/grant`, and users can spend the fixed
 DeepSeek v4 Flash profile through `/fleet/nodes/provision-main`. The current
-Flux balance is shown in the account popover and the agent setup path warns
-when the balance is below the provisioning cost. Paid provisioning is
+Flux balance is shown in the account popover as `<balance>◇ Flux`, and the agent
+setup path warns when the balance is below the provisioning cost. Paid provisioning is
 idempotent around an already verified main node and always uses the
 authenticated user's deterministic node id.
 
@@ -350,8 +369,10 @@ The embedded assistant now has a global avatar overlay that sits above every
 app panel, including Home, OS Space, Fleet, Logs, and Observation. Opening the
 avatar reveals a chat panel that sends the user's message plus the current
 bounded observation snapshot through the existing Hermes bridge
-`/v1/chat/completions` endpoint. The panel keeps the same default footprint but
-exposes a compact `wa1` client capability map in agent context; model replies
+`/v1/chat/completions` endpoint. The panel keeps the same default desktop
+footprint, while compact/mobile viewports open `wasm-agent-chat` at the current
+visual viewport so the drawer fills the screen normally and shrinks above the
+mobile keyboard; it exposes a compact `wa1` client capability map in agent context. Model replies
 can append a hidden `ar W H` op to resize `wasm-agent-chat` without changing the
 rest of the workspace. The chat header uses two stacked lines: title/actions
 first, then the full-width combined target/model selector and status chip;
@@ -360,9 +381,10 @@ between orchestrator, worker, and saved node/model targets without leaving the p
 The token badge in the composer opens the context balloon beside itself. That
 balloon shows only exact tokens, transcript turns, and a concatenated context
 string so model-context dialect can be inspected without the old diagnostic grid.
-Choosing `> New...` or `> Edit...` opens the draggable onboarding modal at the
-screen center of the chat layer, outside the resizable `wasm-agent-chat` frame. Choosing a
-saved provider/model or agent/model entry uses it from the same selector; adding
+Choosing `> New...` or `> Edit...` opens the draggable `nodesPanel` at the
+screen center of the chat layer, outside the resizable `wasm-agent-chat` frame.
+Its header stays sticky while the setup content scrolls, keeping the drag handle available. Choosing a
+saved node/model or agent/model entry uses it from the same selector; adding
 or editing a typed model id opens the modal's model setup form
 instead of a native browser prompt; the backend
 validates the provider/model id, writes it into the target node env and
@@ -747,8 +769,12 @@ between them.
 The launcher's lower corner is reserved for account state. The compact account
 button opens a Google Identity login popover when `GOOGLE_LOGIN_CLIENT_ID` is
 available in `conf/wa.env`. Google sign-in uses same-window redirect mode and
-posts the credential to `/auth/google/callback`, which keeps installed PWA
-windows from spawning messy popup/tab chrome. wasm-agent is account-gated: unauthenticated
+posts the credential to the server-reported Google login URI, normally
+`<origin>/auth/google/callback`. `HERMES_WASM_AGENT_PUBLIC_ORIGIN` is honored
+from either the process environment or `conf/wa.env`, so deployments behind an
+HTTPS reverse proxy can publish the exact redirect URI registered in Google
+Cloud even if the Python process is bound to loopback. Callback failures are
+reported in the login card after redirect. wasm-agent is account-gated: unauthenticated
 requests can load only the login shell/static assets and auth endpoints, while
 bridge, browser, timeline, agent, attachment, health, observation, and user
 space services require an authenticated session. Admin accounts must be listed
@@ -889,10 +915,19 @@ Run checks:
 ```
 
 The doctor runs the source smoke test, wasm-agent bridge route coverage,
-image-card golden coverage, client-first cloud contracts, client-state storage
+the auth-shell boot regression that keeps optional root assets from freezing
+login, image-card golden coverage, client-first cloud contracts, client-state storage
 coverage, security-loop policy/runner tests, and the UI
 navigation history regression that keeps chat minimize from navigating back to
 an older space after the user changes spaces with chat open.
+
+Every wasm-agent code commit must add or update a fast regression test that
+would fail if that commit's smallest user-visible behavior regressed. Put the
+check in `wasm_agent_smoke.test.js` or another focused test under `tests/`, wire
+it into `scripts/doctor.sh` when it belongs in the default gate, and keep it
+fast enough to run before every local checkpoint. The auth/login shell is guarded
+by `tests/auth_shell_boot_regression.test.js`; any auth-shell or top-level module
+change must keep that test green.
 
 The heavier private-cloud People/DM/shared-chat acceptance pass is
 `python3 plugins/wasm-agent/tests/people_chat_browser_acceptance.test.py`. It

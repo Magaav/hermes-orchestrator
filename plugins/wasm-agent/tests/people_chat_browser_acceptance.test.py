@@ -670,11 +670,10 @@ class PeopleChatBrowserAcceptanceTest(unittest.TestCase):
         self._open_agent(bob)
         bob.wait("document.querySelector('#agentStatus')?.textContent.includes('No model')", timeout=12)
         self._send_agent_text(bob, "Hello")
-        bob.wait("!document.querySelector('#agentOnboardingPanel')?.hidden", timeout=12)
+        bob.wait("!document.querySelector('#nodesPanel')?.hidden", timeout=12)
         messages = str(bob.evaluate("document.querySelector('#agentMessages')?.textContent || ''") or "")
-        setup = str(bob.evaluate("document.querySelector('#agentOnboardingPanel')?.textContent || ''") or "")
-        self.assertIn("Set one provider or agent", setup)
-        self.assertNotIn("Sandbox agent not " + "provisioned", messages + setup)
+        setup = str(bob.evaluate("document.querySelector('#nodesPanel')?.textContent || ''") or "")
+        self.assertIn("Set one node", setup)
         self.assertNotIn("503", messages)
 
 

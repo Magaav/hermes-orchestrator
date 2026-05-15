@@ -24,6 +24,7 @@ done
 
 if command -v node >/dev/null 2>&1; then
   node --input-type=module --check < "${PLUGIN_DIR}/public/modules/spaces/shared-voice-room.js"
+  node "${PLUGIN_DIR}/tests/auth_shell_boot_regression.test.js"
   node "${PLUGIN_DIR}/tests/wasm_agent_smoke.test.js"
   node "${PLUGIN_DIR}/tests/client_state_store.test.mjs"
   node "${PLUGIN_DIR}/tests/shared_voice_room.test.mjs"

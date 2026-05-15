@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v55";
+const CACHE_NAME = "wasm-agent-v56";
 const ASSETS = [
   "/",
   "/index.html",
@@ -11,6 +11,7 @@ const ASSETS = [
   "/voice-lab.js",
   "/styles.css",
   "/app.js",
+  "/provider-model-catalog.js",
   "/modules/chat-composer/chat-composer.css",
   "/modules/chat-composer/chat-composer.js",
   "/modules/chat-composer/chat-commands.js",
@@ -70,6 +71,7 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/sync/events" ||
     url.pathname === "/fleet" ||
     url.pathname === "/health" ||
+    url.pathname === "/agent/provider/models" ||
     url.pathname === "/observation/latest" ||
     url.pathname === "/voice-lab/room" ||
     url.pathname.startsWith("/security-loop/") ||

@@ -29,8 +29,12 @@ const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
 const AGENT_MODELS_STORAGE_KEY = "wasmAgent.agentModels.v1";
 const AGENT_IMAGE_PROCESSING_STORAGE_KEY = "wasmAgent.imageProcessing.v1";
 const AGENT_DIRECT_PROVIDER_STORAGE_KEY = "wasmAgent.directProvider.v1";
+const AGENT_DIRECT_PROVIDERS_STORAGE_KEY = "wasmAgent.directProviders.v1";
 const AGENT_OWNED_AGENT_STORAGE_KEY = "wasmAgent.ownedAgent.v1";
 const AGENT_DIRECT_PROVIDER_KEY_MASK = "saved-key";
+const AGENT_HARNESS_DEFAULT_TYPE = "hermes";
+const AGENT_HARNESS_DEFAULT_INFRA_MODE = "hermes_backend";
+const AGENT_HARNESS_OWN_INFRA_MODE = "custom_bridge";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
@@ -99,6 +103,7 @@ const AGENT_PROVIDER_TRANSPORTS = Object.freeze({
   BACKEND_PROXY: "backend-proxy",
 });
 const AGENT_PROVIDER_TARGET_ID = "__provider:direct__";
+const AGENT_PROVIDER_TARGET_PREFIX = `${AGENT_PROVIDER_TARGET_ID}:`;
 const AGENT_SET_PROVIDER_TARGET_ID = "__set_provider__";
 const AGENT_SET_HERMES_TARGET_ID = "__set_hermes__";
 const AGENT_NONE_TARGET_ID = "__target:none__";
@@ -138,6 +143,23 @@ const AGENT_PROVIDER_PROXY_FIRST_HOSTS = new Set([
   "openrouter.ai",
   "opencode.ai",
 ]);
+const AGENT_DIRECT_PROVIDER_DEFINITIONS = Object.freeze({
+  openrouter: {
+    label: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    modelsPath: "/agent/provider/models?provider=openrouter",
+    models: [],
+  },
+  "opencode-go": {
+    label: "OpenCode-Go",
+    baseUrl: "https://opencode.ai/zen/go/v1",
+    modelsPath: "/agent/provider/models?provider=opencode-go",
+    models: [],
+  },
+});
+const AGENT_DIRECT_PROVIDER_MODEL_SNAPSHOT_PATH = "./provider-model-catalog.js";
+const AGENT_DIRECT_PROVIDER_MODEL_REQUESTS = new Map();
+let agentDirectProviderModelSnapshotPromise = null;
 const AGENT_MESSAGE_LONG_PRESS_MS = 520;
 const AGENT_MAX_IMAGES = 8;
 const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
@@ -183,6 +205,414 @@ const SPACE_APP_MAPPINGS = {
 const FIXED_WIDGET_LAYOUT = {
   timeline: { minimized: true },
 };
+
+class SSelect extends HTMLElement {
+  static formAssociated = true;
+  static observedAttributes = ["disabled", "required", "placeholder", "search-placeholder"];
+
+  constructor() {
+    super();
+    this._internals = this.attachInternals?.() || null;
+    this._options = [];
+    this._value = "";
+    this._open = false;
+    this._query = "";
+    this._activeIndex = -1;
+    this._onDocumentPointerDown = (event) => {
+      if (!this.contains(event.target) && !event.composedPath?.().includes(this)) this.close();
+    };
+    this._observer = new MutationObserver(() => {
+      this._readOptions();
+      this._render();
+    });
+    const root = this.attachShadow({ mode: "open", delegatesFocus: true });
+    root.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          min-width: 0;
+          position: relative;
+          color: var(--text, #e5edf7);
+          font-size: 12px;
+          text-transform: none;
+        }
+        :host([hidden]) { display: none; }
+        .trigger {
+          width: 100%;
+          min-width: 0;
+          height: 32px;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          padding: 0 9px;
+          border: 1px solid rgba(147, 170, 203, 0.2);
+          border-radius: var(--radius, 8px);
+          background: rgba(5, 12, 22, 0.84);
+          color: inherit;
+          font: inherit;
+          text-align: left;
+          cursor: pointer;
+        }
+        .trigger:disabled {
+          cursor: not-allowed;
+          opacity: 0.58;
+        }
+        .trigger:focus-visible {
+          border-color: rgba(125, 220, 255, 0.58);
+          outline: none;
+          box-shadow: 0 0 0 2px rgba(125, 220, 255, 0.12);
+        }
+        .value {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .chevron {
+          width: 7px;
+          height: 7px;
+          margin-right: 2px;
+          border-right: 1.5px solid currentColor;
+          border-bottom: 1.5px solid currentColor;
+          color: var(--dim, #789);
+          transform: rotate(45deg);
+          transition: transform 0.14s ease;
+        }
+        .trigger[aria-expanded="true"] .chevron {
+          transform: translateY(2px) rotate(225deg);
+        }
+        .popup {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: calc(100% + 4px);
+          z-index: 40;
+          max-height: min(380px, 60vh);
+          overflow-y: auto;
+          border: 1px solid rgba(125, 220, 255, 0.25);
+          border-radius: var(--radius, 8px);
+          background: rgba(5, 12, 22, 0.98);
+          box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+          scrollbar-color: rgba(147, 170, 203, 0.42) transparent;
+          scrollbar-width: thin;
+        }
+        .popup::-webkit-scrollbar {
+          width: 9px;
+        }
+        .popup::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        .popup::-webkit-scrollbar-thumb {
+          border: 2px solid transparent;
+          border-radius: 999px;
+          background: rgba(147, 170, 203, 0.42);
+          background-clip: content-box;
+        }
+        .search-wrap {
+          position: sticky;
+          top: 0;
+          z-index: 2;
+          padding: 7px;
+          border-bottom: 1px solid rgba(147, 170, 203, 0.16);
+          background: rgba(5, 12, 22, 0.99);
+          backdrop-filter: blur(10px);
+        }
+        .search {
+          width: 100%;
+          height: 32px;
+          padding: 0 9px;
+          border: 1px solid rgba(125, 220, 255, 0.28);
+          border-radius: var(--radius, 8px);
+          background: rgba(7, 18, 30, 0.98);
+          color: inherit;
+          font: inherit;
+          outline: none;
+        }
+        .search:focus {
+          border-color: rgba(125, 220, 255, 0.58);
+          box-shadow: 0 0 0 2px rgba(125, 220, 255, 0.12);
+        }
+        .list {
+          display: grid;
+          padding: 4px;
+        }
+        .option,
+        .empty {
+          min-width: 0;
+          min-height: 34px;
+          padding: 7px 8px;
+          border: 0;
+          border-radius: calc(var(--radius, 8px) - 2px);
+          background: transparent;
+          color: inherit;
+          font: inherit;
+          text-align: left;
+        }
+        .option {
+          display: grid;
+          gap: 2px;
+          cursor: pointer;
+          overflow: hidden;
+        }
+        .option-label,
+        .option-meta {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .option-label {
+          font-weight: 800;
+          line-height: 1.25;
+        }
+        .option-meta {
+          color: var(--muted, #90a0b0);
+          font-size: 10.5px;
+          font-weight: 650;
+          line-height: 1.25;
+        }
+        .option:hover,
+        .option.is-active {
+          background: rgba(125, 220, 255, 0.12);
+        }
+        .option[aria-selected="true"] {
+          color: var(--accent, #7ddcff);
+          font-weight: 800;
+        }
+        .option:disabled {
+          cursor: not-allowed;
+          opacity: 0.5;
+        }
+        .empty {
+          color: var(--muted, #90a0b0);
+        }
+      </style>
+      <button class="trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+        <span class="value"></span>
+        <span class="chevron" aria-hidden="true"></span>
+      </button>
+      <div class="popup" hidden>
+        <div class="search-wrap">
+          <input class="search" type="search" autocomplete="off" spellcheck="false" autocapitalize="off">
+        </div>
+        <div class="list" role="listbox"></div>
+      </div>
+    `;
+    this._trigger = root.querySelector(".trigger");
+    this._valueLabel = root.querySelector(".value");
+    this._popup = root.querySelector(".popup");
+    this._search = root.querySelector(".search");
+    this._list = root.querySelector(".list");
+  }
+
+  connectedCallback() {
+    this._observer.observe(this, { childList: true, subtree: true, attributes: true, attributeFilter: ["value", "disabled"] });
+    this._trigger.addEventListener("click", () => this.toggle());
+    this._trigger.addEventListener("keydown", (event) => this._handleKeydown(event));
+    this._search.addEventListener("keydown", (event) => this._handleKeydown(event));
+    this._search.addEventListener("input", (event) => {
+      event.stopPropagation();
+      this._query = this._search.value || "";
+      this._activeIndex = 0;
+      this._renderOptions();
+    });
+    document.addEventListener("pointerdown", this._onDocumentPointerDown);
+    this._readOptions();
+    if (!this._value && this.getAttribute("value")) this._value = this.getAttribute("value") || "";
+    this._render();
+  }
+
+  disconnectedCallback() {
+    this._observer.disconnect();
+    document.removeEventListener("pointerdown", this._onDocumentPointerDown);
+  }
+
+  attributeChangedCallback() {
+    this._render();
+  }
+
+  get value() {
+    return this._value || "";
+  }
+
+  set value(nextValue) {
+    const cleanValue = String(nextValue || "");
+    if (this._value === cleanValue) return;
+    this._value = cleanValue;
+    this._updateFormValue();
+    this._render();
+  }
+
+  get disabled() {
+    return this.hasAttribute("disabled");
+  }
+
+  set disabled(value) {
+    this.toggleAttribute("disabled", Boolean(value));
+  }
+
+  get required() {
+    return this.hasAttribute("required");
+  }
+
+  set required(value) {
+    this.toggleAttribute("required", Boolean(value));
+  }
+
+  focus(options) {
+    this._trigger?.focus(options);
+  }
+
+  toggle() {
+    if (this.disabled) return;
+    this._open ? this.close() : this.open();
+  }
+
+  open() {
+    if (this.disabled) return;
+    this._open = true;
+    this._query = "";
+    this._activeIndex = Math.max(0, this._filteredOptions().findIndex((option) => option.value === this.value));
+    this._render();
+    window.requestAnimationFrame(() => this._search?.focus());
+  }
+
+  close() {
+    if (!this._open) return;
+    this._open = false;
+    this._query = "";
+    this._render();
+  }
+
+  _readOptions() {
+    this._options = Array.from(this.querySelectorAll("option")).map((option) => ({
+      value: option.value || option.textContent || "",
+      label: option.textContent || option.value || "",
+      disabled: option.disabled,
+    })).filter((option) => option.value);
+    if (this._value && !this._options.some((option) => option.value === this._value)) {
+      this._options.unshift({ value: this._value, label: this._value, disabled: false });
+    }
+    this._updateFormValue();
+  }
+
+  _filteredOptions() {
+    const terms = String(this._query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return this._options;
+    return this._options.filter((option) => {
+      const text = `${option.value} ${option.label}`.toLowerCase();
+      return terms.every((term) => text.includes(term));
+    });
+  }
+
+  _select(value) {
+    if (!value || this.value === value) {
+      this.close();
+      return;
+    }
+    this._value = value;
+    this._updateFormValue();
+    this.dispatchEvent(new Event("input", { bubbles: true }));
+    this.dispatchEvent(new Event("change", { bubbles: true }));
+    this.close();
+  }
+
+  _handleKeydown(event) {
+    const options = this._filteredOptions().filter((option) => !option.disabled);
+    if (event.key === "Escape") {
+      event.preventDefault();
+      this.close();
+      this.focus();
+      return;
+    }
+    if (!this._open && ["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      this.open();
+      return;
+    }
+    if (!this._open) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      const count = Math.max(1, options.length);
+      this._activeIndex = (this._activeIndex + delta + count) % count;
+      this._renderOptions();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const option = options[this._activeIndex] || options[0];
+      if (option) this._select(option.value);
+    }
+  }
+
+  _updateFormValue() {
+    this._internals?.setFormValue(this.value);
+    if (this._internals?.setValidity) {
+      const missing = this.required && !this.disabled && !this.value;
+      this._internals.setValidity(missing ? { valueMissing: true } : {}, missing ? "Select a value." : "", this._trigger);
+    }
+  }
+
+  _renderOptions() {
+    if (!this._list) return;
+    const options = this._filteredOptions();
+    if (!options.length) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = this._query ? "No matching models" : "No models";
+      this._list.replaceChildren(empty);
+      return;
+    }
+    this._activeIndex = Math.max(0, Math.min(this._activeIndex, options.length - 1));
+    this._list.replaceChildren(...options.map((option, index) => {
+      const button = document.createElement("button");
+      button.className = "option";
+      button.type = "button";
+      button.role = "option";
+      button.disabled = Boolean(option.disabled);
+      button.dataset.value = option.value;
+      button.setAttribute("aria-selected", option.value === this.value ? "true" : "false");
+      button.classList.toggle("is-active", index === this._activeIndex);
+      const label = document.createElement("span");
+      label.className = "option-label";
+      label.textContent = option.label || option.value;
+      button.append(label);
+      if (option.value && option.value !== option.label) {
+        const meta = document.createElement("span");
+        meta.className = "option-meta";
+        meta.textContent = option.value;
+        button.append(meta);
+      }
+      button.title = option.value === option.label ? option.value : `${option.label} (${option.value})`;
+      button.addEventListener("click", () => this._select(option.value));
+      return button;
+    }));
+  }
+
+  _render() {
+    if (!this._trigger) return;
+    this._readOptions();
+    this._trigger.disabled = this.disabled;
+    this._trigger.setAttribute("aria-expanded", this._open ? "true" : "false");
+    const selected = this._options.find((option) => option.value === this.value);
+    this._valueLabel.textContent = selected?.label || this.getAttribute("placeholder") || "Select";
+    this._valueLabel.style.color = selected ? "inherit" : "var(--muted, #90a0b0)";
+    this._trigger.title = selected
+      ? selected.value === selected.label ? selected.value : `${selected.label} (${selected.value})`
+      : this.getAttribute("placeholder") || "Select";
+    this._popup.hidden = !this._open;
+    this._search.placeholder = this.getAttribute("search-placeholder") || "Search";
+    if (!this._open) this._search.value = "";
+    this._renderOptions();
+    this._updateFormValue();
+  }
+}
+
+if (!customElements.get("s-select")) {
+  customElements.define("s-select", SSelect);
+}
 
 const els = {
   app: document.querySelector("#app"),
@@ -383,25 +813,36 @@ const els = {
   agentContextBalloon: document.querySelector("#agentContextBalloon"),
   agentSettingsButton: document.querySelector("#agentSettingsButton"),
   agentSettingsBalloon: document.querySelector("#agentSettingsBalloon"),
-  agentOnboardingPanel: document.querySelector("#agentOnboardingPanel"),
-  agentOnboardingTitle: document.querySelector("#agentOnboardingTitle"),
-  agentOnboardingCopy: document.querySelector("#agentOnboardingCopy"),
-  agentOnboardingCloseButton: document.querySelector("#agentOnboardingCloseButton"),
-  agentOwnedAgentInput: document.querySelector("#agentOwnedAgentInput"),
-  agentAddAgentButton: document.querySelector("#agentAddAgentButton"),
+  nodesPanel: document.querySelector("#nodesPanel"),
+  nodesPanelTitle: document.querySelector("#nodesPanelTitle"),
+  nodesPanelCopy: document.querySelector("#nodesPanelCopy"),
+  nodesPanelCloseButton: document.querySelector("#nodesPanelCloseButton"),
+  nodeNameInput: document.querySelector("#nodeNameInput"),
+  newNodeButton: document.querySelector("#newNodeButton"),
   agentTopicForm: document.querySelector("#agentTopicForm"),
   agentTopicNameInput: document.querySelector("#agentTopicNameInput"),
   agentTopicRoleInput: document.querySelector("#agentTopicRoleInput"),
   agentTopicTypeSelect: document.querySelector("#agentTopicTypeSelect"),
   agentTopicBridgeUrlInput: document.querySelector("#agentTopicBridgeUrlInput"),
   agentTopicStatus: document.querySelector("#agentTopicStatus"),
-  agentDirectProviderForm: document.querySelector("#agentDirectProviderForm"),
-  agentDirectBaseUrlInput: document.querySelector("#agentDirectBaseUrlInput"),
+  nodeForm: document.querySelector("#nodeForm"),
+  agentDirectProviderSelect: document.querySelector("#agentDirectProviderSelect"),
+  agentDirectModelField: document.querySelector("#agentDirectModelField"),
   agentDirectModelInput: document.querySelector("#agentDirectModelInput"),
   agentDirectApiKeyInput: document.querySelector("#agentDirectApiKeyInput"),
+  nodeAgentWrapperToggle: document.querySelector("#nodeAgentWrapperToggle"),
+  nodeAgentWrapperFields: document.querySelector("#nodeAgentWrapperFields"),
+  nodeWrapperNameInput: document.querySelector("#nodeWrapperNameInput"),
+  nodeWrapperTypeSelect: document.querySelector("#nodeWrapperTypeSelect"),
+  nodeHarnessInfraSelect: document.querySelector("#nodeHarnessInfraSelect"),
+  nodeHarnessBridgeUrlField: document.querySelector("#nodeHarnessBridgeUrlField"),
+  nodeHarnessBridgeUrlInput: document.querySelector("#nodeHarnessBridgeUrlInput"),
+  nodeHarnessBridgeInfoButton: document.querySelector("#nodeHarnessBridgeInfoButton"),
+  nodeHarnessBridgeInfoBalloon: document.querySelector("#nodeHarnessBridgeInfoBalloon"),
+  nodeWrapperRoleInput: document.querySelector("#nodeWrapperRoleInput"),
   agentProviderLoadingIcon: document.querySelector("#agentProviderLoadingIcon"),
-  agentDirectProviderStatus: document.querySelector("#agentDirectProviderStatus"),
-  agentOnboardingStatus: document.querySelector("#agentOnboardingStatus"),
+  nodeFormStatus: document.querySelector("#nodeFormStatus"),
+  nodesPanelStatus: document.querySelector("#nodesPanelStatus"),
   agentConfiguredModelList: document.querySelector("#agentConfiguredModelList"),
   agentMessages: document.querySelector("#agentMessages"),
   agentScrollBottomButton: document.querySelector("#agentScrollBottomButton"),
@@ -461,6 +902,8 @@ const state = {
   bridgeUrl: "http://127.0.0.1:8790",
   config: null,
   googleClientId: "",
+  googleLoginUri: "",
+  authRedirectMessage: "",
   adminEmail: "",
   googleButtonRenderedFor: "",
   authUser: null,
@@ -481,6 +924,7 @@ const state = {
   deviceMainBusy: "",
   devicesLoadedAt: "",
   userFleetNodes: [],
+  userFleetHarnesses: [],
   userFleetBusy: false,
   userFleetEnsureBusy: false,
   userFleetPolicy: "",
@@ -623,24 +1067,30 @@ const state = {
   agentModelSetupTimer: 0,
   agentReadiness: null,
   agentReadinessBusy: false,
+  agentBridgeModelsDiagnostic: null,
   agentCredits: null,
   agentProvisionBusy: false,
+  agentDirectProviders: [],
   agentDirectProvider: null,
   agentOwnedAgent: null,
+  agentDirectProviderModels: {},
+  agentDirectProviderModelStatus: {},
   agentProviderProbe: null,
   agentProviderProbeBusy: false,
   agentProviderProxyOrigins: new Set(),
-  agentDirectProviderFormOpen: false,
-  agentDirectProviderDraft: null,
-  agentDirectProviderFormMode: "new",
+  nodeFormOpen: false,
+  nodeFormDraft: null,
+  nodeFormMode: "new",
   agentTopicFormOpen: false,
   agentTopicBusy: false,
   agentTopicDraft: null,
   agentSetupBalloonOpen: false,
   agentSetupMode: "provider",
   agentSetupMessage: "",
-  agentOnboardingStatus: "",
-  agentOnboardingPosition: null,
+  nodesPanelStatus: "",
+  nodeFormStatus: "",
+  nodeFormStatusAttention: false,
+  nodesPanelPosition: null,
   agentImageScanInfoOpen: false,
   creditGrantTargetUser: null,
   creditGrantBusy: false,
@@ -3545,6 +3995,12 @@ function saveAgentLayout() {
 
 function defaultAgentPanelSize() {
   const appRect = appViewportRect();
+  if (isCompactViewport()) {
+    return {
+      width: Math.max(1, Math.round(appRect.width)),
+      height: Math.max(1, Math.round(appRect.height)),
+    };
+  }
   const maxWidth = Math.max(AGENT_PANEL_MIN_WIDTH_PX, appRect.width - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
   const maxHeight = Math.max(AGENT_PANEL_MIN_HEIGHT_PX, appRect.height - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
   return {
@@ -3556,6 +4012,12 @@ function defaultAgentPanelSize() {
 function clampAgentPanelSize(size = {}) {
   const fallback = defaultAgentPanelSize();
   const appRect = appViewportRect();
+  if (isCompactViewport()) {
+    return {
+      width: Math.max(1, Math.round(appRect.width)),
+      height: Math.max(1, Math.round(appRect.height)),
+    };
+  }
   const maxWidth = Math.max(AGENT_PANEL_MIN_WIDTH_PX, appRect.width - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
   const maxHeight = Math.max(AGENT_PANEL_MIN_HEIGHT_PX, appRect.height - AGENT_PANEL_VIEWPORT_GAP_PX * 2);
   return {
@@ -3681,16 +4143,64 @@ function agentDirectProviderStorageKey(user = state.authUser) {
   return id ? `${AGENT_DIRECT_PROVIDER_STORAGE_KEY}.${id}` : "";
 }
 
-function readAgentDirectProviderConfig(user = state.authUser) {
-  const scopedKey = agentDirectProviderStorageKey(user);
-  if (!scopedKey) return null;
+function agentDirectProvidersStorageKey(user = state.authUser) {
+  const id = cleanText(user?.id, "");
+  return id ? `${AGENT_DIRECT_PROVIDERS_STORAGE_KEY}.${id}` : "";
+}
+
+function normalizeAgentProviderNodeId(value = "") {
+  const id = cleanText(value, "").toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+  return /^[a-z0-9][a-z0-9_-]{5,95}$/.test(id) ? id : "";
+}
+
+function createAgentProviderNodeId() {
+  return `provider_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+}
+
+function directProviderTargetValue(config = state.agentDirectProvider) {
+  const id = normalizeAgentProviderNodeId(config?.id || config?.providerId || "");
+  return id ? `${AGENT_PROVIDER_TARGET_PREFIX}${encodeURIComponent(id)}` : AGENT_PROVIDER_TARGET_ID;
+}
+
+function providerIdFromTargetValue(value = state.agentTargetNode) {
+  const raw = cleanText(value, "");
+  if (raw === AGENT_PROVIDER_TARGET_ID) return normalizeAgentProviderNodeId(state.agentDirectProvider?.id || "");
+  if (!raw.startsWith(AGENT_PROVIDER_TARGET_PREFIX)) return "";
   try {
-    const scoped = normalizeAgentDirectProviderConfig(JSON.parse(localStorage.getItem(scopedKey) || "{}"));
-    if (scoped) return scoped;
+    return normalizeAgentProviderNodeId(decodeURIComponent(raw.slice(AGENT_PROVIDER_TARGET_PREFIX.length)));
+  } catch {
+    return "";
+  }
+}
+
+function normalizeAgentDirectProviderConfigs(raw) {
+  const source = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.providers) ? raw.providers : Array.isArray(raw?.nodes) ? raw.nodes : raw ? [raw] : [];
+  const seen = new Set();
+  return source.map((item) => {
+    const normalized = normalizeAgentDirectProviderConfig(item);
+    if (!normalized?.baseUrl || !normalized?.model || !normalized?.apiKey) return null;
+    const id = normalizeAgentProviderNodeId(normalized.id || normalized.providerId || "") || createAgentProviderNodeId();
+    const next = { ...normalized, id };
+    if (seen.has(id)) return null;
+    seen.add(id);
+    return next;
+  }).filter(Boolean);
+}
+
+function readAgentDirectProviderConfigs(user = state.authUser) {
+  const listKey = agentDirectProvidersStorageKey(user);
+  const scopedKey = agentDirectProviderStorageKey(user);
+  if (!listKey) return [];
+  try {
+    const stored = normalizeAgentDirectProviderConfigs(JSON.parse(localStorage.getItem(listKey) || "[]"));
+    if (stored.length) return stored;
     if (!isAdminUser(user)) {
-      const legacy = normalizeAgentDirectProviderConfig(JSON.parse(localStorage.getItem(AGENT_DIRECT_PROVIDER_STORAGE_KEY) || "{}"));
-      if (legacy) {
-        localStorage.setItem(scopedKey, JSON.stringify(legacy));
+      const scoped = normalizeAgentDirectProviderConfigs(JSON.parse(localStorage.getItem(scopedKey) || "{}"));
+      const legacy = scoped.length ? scoped : normalizeAgentDirectProviderConfigs(JSON.parse(localStorage.getItem(AGENT_DIRECT_PROVIDER_STORAGE_KEY) || "{}"));
+      if (legacy.length) {
+        localStorage.setItem(listKey, JSON.stringify(legacy));
         localStorage.removeItem(AGENT_DIRECT_PROVIDER_STORAGE_KEY);
         return legacy;
       }
@@ -3698,15 +4208,53 @@ function readAgentDirectProviderConfig(user = state.authUser) {
   } catch {
     // Browser-only provider state is optional; ignore unreadable local storage.
   }
-  return null;
+  return [];
+}
+
+function readAgentDirectProviderConfig(user = state.authUser) {
+  return readAgentDirectProviderConfigs(user)[0] || null;
+}
+
+function activeAgentDirectProviderConfig(value = state.agentTargetNode) {
+  const targetId = providerIdFromTargetValue(value);
+  if (targetId) {
+    return state.agentDirectProviders.find((config) => normalizeAgentProviderNodeId(config?.id || "") === targetId)
+      || (normalizeAgentProviderNodeId(state.agentDirectProvider?.id || "") === targetId ? state.agentDirectProvider : null);
+  }
+  if (cleanText(value, "") === AGENT_PROVIDER_TARGET_ID) return state.agentDirectProvider || state.agentDirectProviders[0] || null;
+  return state.agentDirectProvider || state.agentDirectProviders[0] || null;
+}
+
+function hasDirectProviderConfigured() {
+  return state.agentDirectProviders.some((config) => directProviderConfigured(config));
+}
+
+function saveAgentDirectProviderConfigs(configs, user = state.authUser) {
+  const listKey = agentDirectProvidersStorageKey(user);
+  state.agentDirectProviders = normalizeAgentDirectProviderConfigs(configs);
+  const activeId = providerIdFromTargetValue(state.agentTargetNode);
+  state.agentDirectProvider = state.agentDirectProviders.find((config) => config.id === activeId)
+    || state.agentDirectProviders[0]
+    || null;
+  try {
+    if (!listKey) return;
+    if (state.agentDirectProviders.length && !isAdminUser(user)) {
+      localStorage.setItem(listKey, JSON.stringify(state.agentDirectProviders));
+    } else {
+      localStorage.removeItem(listKey);
+    }
+  } catch {
+    // Direct provider keys are browser-only convenience state.
+  }
 }
 
 function loadAgentDirectProviderForUser(user = state.authUser) {
-  state.agentDirectProvider = readAgentDirectProviderConfig(user);
-  state.agentDirectProviderFormOpen = false;
-  state.agentDirectProviderDraft = null;
-  state.agentDirectProviderFormMode = "new";
-  if (!directProviderConfigured() && state.agentTargetNode === AGENT_PROVIDER_TARGET_ID) {
+  state.agentDirectProviders = readAgentDirectProviderConfigs(user);
+  state.agentDirectProvider = activeAgentDirectProviderConfig() || state.agentDirectProviders[0] || null;
+  state.nodeFormOpen = false;
+  state.nodeFormDraft = null;
+  state.nodeFormMode = "new";
+  if (!hasDirectProviderConfigured() && (state.agentTargetNode === AGENT_PROVIDER_TARGET_ID || state.agentTargetNode.startsWith?.(AGENT_PROVIDER_TARGET_PREFIX))) {
     state.agentTargetNode = defaultAgentTargetNode();
   }
   renderAgentNodeSelect();
@@ -3714,13 +4262,185 @@ function loadAgentDirectProviderForUser(user = state.authUser) {
   renderAgentReadinessStatus();
 }
 
+function normalizeAgentHarnessType(value = AGENT_HARNESS_DEFAULT_TYPE) {
+  const raw = cleanText(value || AGENT_HARNESS_DEFAULT_TYPE, AGENT_HARNESS_DEFAULT_TYPE).toLowerCase().replace(/[-\s]+/g, "_");
+  if (!raw || raw === "agent" || raw === AGENT_HARNESS_DEFAULT_TYPE) return AGENT_HARNESS_DEFAULT_TYPE;
+  return raw;
+}
+
+function agentHarnessTypeLabel(value = AGENT_HARNESS_DEFAULT_TYPE) {
+  const type = normalizeAgentHarnessType(value);
+  if (type === "openclaw") return "OpenClaw";
+  if (type === "kilocode") return "KiloCode";
+  if (type === "claude_code") return "Claude Code";
+  if (type === "pi") return "Pi";
+  return "Hermes";
+}
+
+function normalizeAgentHarnessInfraMode(value = AGENT_HARNESS_DEFAULT_INFRA_MODE) {
+  const raw = cleanText(value || AGENT_HARNESS_DEFAULT_INFRA_MODE, AGENT_HARNESS_DEFAULT_INFRA_MODE).toLowerCase().replace(/[-\s]+/g, "_");
+  if (["custom", "custom_bridge", "bridge", "own", "own_bridge", "own_infra"].includes(raw)) return AGENT_HARNESS_OWN_INFRA_MODE;
+  if (["hermes", "hermes_backend", "hermes_infra", "backend", "backend_infra", "our", "our_infra"].includes(raw)) return AGENT_HARNESS_DEFAULT_INFRA_MODE;
+  return raw;
+}
+
+function normalizeDirectProviderName(value = "") {
+  const raw = cleanText(value, "").toLowerCase().replace(/[\s_]+/g, "-");
+  if (raw === "openrouter" || raw === "open-router") return "openrouter";
+  if (raw === "opencode-go" || raw === "opencode" || raw === "open-code-go") return "opencode-go";
+  return "";
+}
+
+function directProviderDefinition(provider = "") {
+  return AGENT_DIRECT_PROVIDER_DEFINITIONS[normalizeDirectProviderName(provider)] || null;
+}
+
+function directProviderBaseUrlForProvider(provider = "") {
+  return directProviderDefinition(provider)?.baseUrl || "";
+}
+
+function normalizeDirectProviderModelList(models = []) {
+  const seen = new Set();
+  return (Array.isArray(models) ? models : []).map((model) => {
+    if (typeof model === "string") {
+      return { id: cleanText(model, ""), label: cleanText(model, "") };
+    }
+    return {
+      id: cleanText(model?.id, ""),
+      label: cleanText(model?.label || model?.name || model?.id, ""),
+    };
+  }).filter((model) => {
+    if (!model.id || seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
+}
+
+function directProviderLiveModelOptions(provider = "") {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  return normalizeDirectProviderModelList(state.agentDirectProviderModels?.[cleanProvider] || []);
+}
+
+function directProviderCachedModelOptions(provider = "") {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  const liveModels = directProviderLiveModelOptions(cleanProvider);
+  if (liveModels.length) return liveModels;
+  const definition = directProviderDefinition(cleanProvider);
+  if (definition && !definition.models?.length) void loadDirectProviderModelSnapshot();
+  return normalizeDirectProviderModelList(definition?.models || []);
+}
+
+function directProviderModelStatus(provider = "") {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  return state.agentDirectProviderModelStatus?.[cleanProvider] || { status: "idle", message: "" };
+}
+
+function setDirectProviderModelStatus(provider = "", status = {}) {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  if (!cleanProvider) return;
+  state.agentDirectProviderModelStatus = {
+    ...(state.agentDirectProviderModelStatus || {}),
+    [cleanProvider]: { status: status.status || "idle", message: cleanText(status.message || "", "") },
+  };
+}
+
+function applyDirectProviderModelSnapshot(snapshot = {}) {
+  Object.entries(snapshot && typeof snapshot === "object" ? snapshot : {}).forEach(([provider, models]) => {
+    const cleanProvider = normalizeDirectProviderName(provider);
+    const definition = directProviderDefinition(cleanProvider);
+    if (!definition || definition.models?.length) return;
+    definition.models = normalizeDirectProviderModelList(models);
+  });
+}
+
+function loadDirectProviderModelSnapshot() {
+  if (agentDirectProviderModelSnapshotPromise) return agentDirectProviderModelSnapshotPromise;
+  agentDirectProviderModelSnapshotPromise = import(AGENT_DIRECT_PROVIDER_MODEL_SNAPSHOT_PATH)
+    .then((module) => {
+      applyDirectProviderModelSnapshot(module?.PROVIDER_MODEL_SNAPSHOT || {});
+      renderNodesPanel();
+      return true;
+    })
+    .catch(() => false);
+  return agentDirectProviderModelSnapshotPromise;
+}
+
+async function loadDirectProviderModels(provider = "", options = {}) {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  const definition = directProviderDefinition(cleanProvider);
+  if (!cleanProvider || !definition?.modelsPath) return directProviderModelOptions(cleanProvider);
+  const liveModels = directProviderLiveModelOptions(cleanProvider);
+  if (liveModels.length && !options.force) return liveModels;
+  if (AGENT_DIRECT_PROVIDER_MODEL_REQUESTS.has(cleanProvider)) {
+    return AGENT_DIRECT_PROVIDER_MODEL_REQUESTS.get(cleanProvider);
+  }
+  setDirectProviderModelStatus(cleanProvider, { status: "loading", message: `Loading ${definition.label} models` });
+  const request = fetchJson(definition.modelsPath, { timeoutMs: 25000 })
+    .then((payload) => {
+      const models = normalizeDirectProviderModelList(payload?.models || payload?.data || []);
+      if (!models.length) throw new Error("No models returned.");
+      state.agentDirectProviderModels = { ...(state.agentDirectProviderModels || {}), [cleanProvider]: models };
+      setDirectProviderModelStatus(cleanProvider, { status: "ready", message: `${models.length} models loaded` });
+      if (state.nodeFormOpen && normalizeDirectProviderName(state.nodeFormDraft?.provider || "") === cleanProvider) {
+        syncNodeFormDraftFromInputs({ render: false });
+      }
+      renderNodesPanel();
+      return models;
+    })
+    .catch((error) => {
+      const fallback = directProviderCachedModelOptions(cleanProvider);
+      setDirectProviderModelStatus(cleanProvider, fallback.length
+        ? { status: "snapshot", message: `Using bundled ${definition.label} models` }
+        : { status: "error", message: error?.message || "Model list unavailable" });
+      renderNodesPanel();
+      return fallback;
+    })
+    .finally(() => {
+      AGENT_DIRECT_PROVIDER_MODEL_REQUESTS.delete(cleanProvider);
+    });
+  AGENT_DIRECT_PROVIDER_MODEL_REQUESTS.set(cleanProvider, request);
+  renderNodesPanel();
+  return request;
+}
+
+function directProviderModelOptions(provider = "", currentModel = "") {
+  const cleanProvider = normalizeDirectProviderName(provider);
+  const definition = directProviderDefinition(cleanProvider);
+  const options = directProviderCachedModelOptions(cleanProvider);
+  const normalizedCurrent = normalizeDirectProviderModel(currentModel, definition?.baseUrl || "", cleanProvider);
+  if (normalizedCurrent && !options.some((model) => model.id === normalizedCurrent)) {
+    options.push({ id: normalizedCurrent, label: normalizedCurrent });
+  }
+  return options;
+}
+
 function normalizeAgentDirectProviderConfig(config = {}) {
   if (!config || typeof config !== "object") return null;
-  const baseUrl = normalizeDirectProviderBaseUrl(config.baseUrl || config.base_url || "");
-  const provider = cleanText(config.provider || "", "") || directProviderNameFromBaseUrl(baseUrl);
+  let baseUrl = normalizeDirectProviderBaseUrl(config.baseUrl || config.base_url || "");
+  let provider = normalizeDirectProviderName(config.provider || "") || normalizeDirectProviderName(directProviderNameFromBaseUrl(baseUrl));
+  const modelGuess = !provider && config.model ? directProviderGuessFromModel(config.model) : null;
+  if (!provider && modelGuess?.provider) provider = normalizeDirectProviderName(modelGuess.provider);
+  if (!baseUrl && provider) baseUrl = directProviderBaseUrlForProvider(provider);
   const model = normalizeDirectProviderModel(config.model || "", baseUrl, provider);
   const apiKey = String(config.apiKey || config.api_key || "");
   const transport = normalizeProviderTransport(config.transport || config.provider_transport || config.transportMode || "");
+  const providerId = normalizeAgentProviderNodeId(config.id || config.providerId || config.provider_id || "");
+  const nodeName = cleanText(config.nodeName || config.node_name || "", "").slice(0, 80);
+  const harnessSource = config.agentHarness && typeof config.agentHarness === "object"
+    ? config.agentHarness
+    : config.agentWrapper && typeof config.agentWrapper === "object" ? config.agentWrapper : {};
+  const harnessType = normalizeAgentHarnessType(harnessSource.type || config.harnessType || config.wrapperType || config.agentWrapperType || AGENT_HARNESS_DEFAULT_TYPE);
+  const harnessInfraMode = normalizeAgentHarnessInfraMode(harnessSource.infraMode || harnessSource.infra_mode || config.harnessInfraMode || AGENT_HARNESS_DEFAULT_INFRA_MODE);
+  const harnessName = cleanText(harnessSource.name || config.harnessName || config.wrapperName || config.agentWrapperName || "", "").slice(0, 80);
+  const harnessInstructions = cleanText(
+    harnessSource.instructions || harnessSource.role || config.harnessInstructions || config.wrapperRole || config.agentWrapperRole || config.topic || config.agentTopic || config.agent_topic || "",
+    ""
+  ).slice(0, 2000);
+  const harnessBridgeUrl = normalizeOwnedAgentBridgeUrl(harnessSource.bridgeUrl || harnessSource.bridge_url || config.harnessBridgeUrl || "");
+  const hasHarnessEnabled = Object.prototype.hasOwnProperty.call(config, "agentHarnessEnabled")
+    || Object.prototype.hasOwnProperty.call(config, "agentWrapperEnabled")
+    || Object.prototype.hasOwnProperty.call(harnessSource, "enabled");
+  const harnessEnabled = hasHarnessEnabled ? Boolean(config.agentHarnessEnabled || config.agentWrapperEnabled || harnessSource.enabled) : Boolean(harnessName || harnessInstructions || harnessBridgeUrl);
   const next = {};
   if (baseUrl) next.baseUrl = baseUrl;
   const endpoint = directProviderEndpointForBaseUrl(baseUrl, provider);
@@ -3728,30 +4448,49 @@ function normalizeAgentDirectProviderConfig(config = {}) {
   if (model) next.model = model;
   if (apiKey) next.apiKey = apiKey;
   if (provider) next.provider = provider;
+  if (providerId) next.id = providerId;
+  if (nodeName) next.nodeName = nodeName;
+  if (harnessEnabled) {
+    next.agentHarness = {
+      enabled: true,
+      name: harnessName,
+      type: harnessType,
+      infraMode: harnessInfraMode,
+      bridgeUrl: harnessBridgeUrl,
+      instructions: harnessInstructions,
+    };
+  }
   if (transport !== AGENT_PROVIDER_TRANSPORTS.AUTO) next.transport = transport;
   if (config.baseUrlInferred) next.baseUrlInferred = true;
   return Object.keys(next).length ? next : null;
 }
 
 function saveAgentDirectProviderConfig(config, user = state.authUser) {
-  const scopedKey = agentDirectProviderStorageKey(user);
-  const previousFingerprint = directProviderConfigFingerprint(state.agentDirectProvider);
-  state.agentDirectProvider = normalizeAgentDirectProviderConfig(config);
-  if (previousFingerprint !== directProviderConfigFingerprint(state.agentDirectProvider)) {
+  const previousFingerprint = directProviderConfigFingerprint(activeAgentDirectProviderConfig());
+  const normalized = normalizeAgentDirectProviderConfig(config);
+  if (!normalized) {
+    const deleteId = providerIdFromTargetValue(state.agentTargetNode) || normalizeAgentProviderNodeId(state.agentDirectProvider?.id || "");
+    const next = deleteId
+      ? state.agentDirectProviders.filter((item) => normalizeAgentProviderNodeId(item?.id || "") !== deleteId)
+      : [];
+    saveAgentDirectProviderConfigs(next, user);
+    if (!state.agentDirectProviders.length) state.agentTargetNode = AGENT_NONE_TARGET_ID;
     state.agentProviderProbe = null;
+    return null;
   }
-  try {
-    if (!scopedKey) {
-      return;
-    }
-    if (state.agentDirectProvider && !isAdminUser(user)) {
-      localStorage.setItem(scopedKey, JSON.stringify(state.agentDirectProvider));
-    } else {
-      localStorage.removeItem(scopedKey);
-    }
-  } catch {
-    // Direct provider keys are browser-only convenience state.
-  }
+  const id = normalizeAgentProviderNodeId(normalized.id || normalized.providerId || "")
+    || normalizeAgentProviderNodeId(state.nodeFormDraft?.id || state.nodeFormDraft?.providerId || "")
+    || (state.nodeFormMode === "edit" ? providerIdFromTargetValue(state.agentTargetNode) : "")
+    || createAgentProviderNodeId();
+  const saved = { ...normalized, id };
+  const next = state.agentDirectProviders.filter((item) => normalizeAgentProviderNodeId(item?.id || "") !== id);
+  next.push(saved);
+  state.agentTargetNode = directProviderTargetValue(saved);
+  saveAgentDirectProviderConfigs(next, user);
+  state.agentDirectProvider = saved;
+  const savedFingerprint = directProviderConfigFingerprint(saved);
+  if (previousFingerprint !== savedFingerprint && state.agentProviderProbe?.fingerprint !== savedFingerprint) state.agentProviderProbe = null;
+  return saved;
 }
 
 function agentOwnedAgentStorageKey(user = state.authUser) {
@@ -3826,8 +4565,8 @@ function loadAgentOwnedAgentForUser(user = state.authUser) {
   renderAgentReadinessStatus();
 }
 
-function directProviderConfigured() {
-  return Boolean(state.agentDirectProvider?.baseUrl && state.agentDirectProvider?.model && state.agentDirectProvider?.apiKey);
+function directProviderConfigured(config = activeAgentDirectProviderConfig()) {
+  return Boolean(config?.baseUrl && config?.model && config?.apiKey);
 }
 
 function ownedAgentConfigured() {
@@ -3835,7 +4574,7 @@ function ownedAgentConfigured() {
 }
 
 function agentTargetIsDirectProvider(value = state.agentTargetNode) {
-  return cleanText(value, "") === AGENT_PROVIDER_TARGET_ID && directProviderConfigured();
+  return Boolean(providerIdFromTargetValue(value) || cleanText(value, "") === AGENT_PROVIDER_TARGET_ID) && directProviderConfigured(activeAgentDirectProviderConfig(value));
 }
 
 function agentTargetIsOwnedAgent(value = state.agentTargetNode) {
@@ -3876,9 +4615,11 @@ function agentModelFromTargetValue(value) {
   return availableAgentModels().find((model) => agentModelKeys(model).includes(key)) || null;
 }
 
-function agentProviderNodeLabel() {
-  const provider = cleanText(state.agentDirectProvider?.provider, "provider");
-  const model = cleanText(state.agentDirectProvider?.model, "");
+function agentProviderNodeLabel(config = state.agentDirectProvider) {
+  const nodeName = cleanText(config?.nodeName, "");
+  if (nodeName) return nodeName;
+  const provider = cleanText(config?.provider, "provider");
+  const model = cleanText(config?.model, "");
   return model ? `${provider}:${model}` : provider;
 }
 
@@ -3906,7 +4647,7 @@ function ownedAgentBridgeUrl(config = state.agentOwnedAgent) {
   return normalizeOwnedAgentBridgeUrl(config?.bridgeUrl || "");
 }
 
-function directProviderConfigFingerprint(config = state.agentDirectProvider) {
+function directProviderConfigFingerprint(config = activeAgentDirectProviderConfig()) {
   if (!config) return "";
   const key = String(config.apiKey || "");
   return [
@@ -4068,23 +4809,80 @@ function providerTransportPlan(config = {}) {
   return { mode: AGENT_PROVIDER_TRANSPORTS.BROWSER_DIRECT, reason: "public-endpoint-probe" };
 }
 
-function validateDirectProviderConfig(config = state.agentDirectProvider) {
+function validateDirectProviderConfig(config = activeAgentDirectProviderConfig()) {
   const normalized = normalizeAgentDirectProviderConfig(config);
-  if (!normalized?.baseUrl) return { ok: false, mode: "config-missing", category: "missing-base-url", message: "Missing Base URL." };
+  if (!normalized?.provider) return { ok: false, mode: "config-missing", category: "missing-provider", message: "Missing provider." };
+  if (!normalized?.baseUrl) return { ok: false, mode: "config-missing", category: "missing-provider-endpoint", message: "Provider endpoint is not configured." };
   let parsed;
   try {
     parsed = new URL(normalized.baseUrl);
   } catch {
-    return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Base URL is not a valid URL." };
+    return { ok: false, mode: "config-missing", category: "malformed-provider-endpoint", message: "Provider endpoint is not valid." };
   }
   if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || /\s/.test(normalized.baseUrl)) {
-    return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Base URL must be an HTTP or HTTPS URL." };
+    return { ok: false, mode: "config-missing", category: "malformed-provider-endpoint", message: "Provider endpoint must be HTTP or HTTPS." };
   }
   if (!normalized.model) return { ok: false, mode: "config-missing", category: "missing-model", message: "Missing model." };
   if (!normalized.apiKey) return { ok: false, mode: "config-missing", category: "missing-api-key", message: "Missing API key." };
   const endpoint = directProviderEndpointForBaseUrl(normalized.baseUrl, normalized.provider);
-  if (!endpoint) return { ok: false, mode: "config-missing", category: "malformed-base-url", message: "Provider endpoint could not be built from the Base URL." };
+  if (!endpoint) return { ok: false, mode: "config-missing", category: "malformed-provider-endpoint", message: "Provider endpoint could not be built." };
   return { ok: true, config: { ...normalized, endpoint }, fingerprint: directProviderConfigFingerprint(normalized) };
+}
+
+function validateAgentHarnessConfig(config = state.nodeFormDraft) {
+  const normalized = normalizeAgentDirectProviderConfig(config) || {};
+  const harness = normalized.agentHarness && typeof normalized.agentHarness === "object" ? normalized.agentHarness : null;
+  if (!harness?.enabled) return { ok: true, harness: null };
+  if (!cleanText(harness.name || "", "")) return { ok: false, category: "missing-harness-name", message: "Agent harness name is required." };
+  if (normalizeAgentHarnessType(harness.type) !== AGENT_HARNESS_DEFAULT_TYPE) {
+    return { ok: false, category: "agent-not-available", message: `${agentHarnessTypeLabel(harness.type)} is not available yet.` };
+  }
+  const infraMode = normalizeAgentHarnessInfraMode(harness.infraMode);
+  if (![AGENT_HARNESS_DEFAULT_INFRA_MODE, AGENT_HARNESS_OWN_INFRA_MODE].includes(infraMode)) {
+    return { ok: false, category: "infra-not-available", message: "Infrastructure option not available yet." };
+  }
+  if (infraMode === AGENT_HARNESS_OWN_INFRA_MODE && !normalizeOwnedAgentBridgeUrl(harness.bridgeUrl || "")) {
+    return { ok: false, category: "missing-bridge-url", message: "Private bridge URL is required." };
+  }
+  return { ok: true, harness: { ...harness, type: AGENT_HARNESS_DEFAULT_TYPE, infraMode } };
+}
+
+function nodeFormNeedsDirectProvider(config = state.nodeFormDraft) {
+  const harness = config?.agentHarness && typeof config.agentHarness === "object" ? config.agentHarness : null;
+  return !harness?.enabled || normalizeAgentHarnessInfraMode(harness.infraMode) === AGENT_HARNESS_DEFAULT_INFRA_MODE;
+}
+
+function nodeFormStatusText(config = nodeFormConfigSource()) {
+  const harnessValidation = validateAgentHarnessConfig(config);
+  if (!harnessValidation.ok) return harnessValidation.message;
+  const harness = harnessValidation.harness;
+  if (harness?.enabled && harness.infraMode === "hermes_backend") {
+    const cost = Number(state.agentCredits?.agent_harness_cost || 10);
+    return `Wasm-Agent-Cloud based (${cost}◇)`;
+  }
+  if (harness?.enabled && harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE) {
+    return harness.bridgeUrl ? "Private bridge / probe on create" : "Private bridge URL required";
+  }
+  return directProviderStatusText(config);
+}
+
+function agentHarnessProvisionPayload(config = state.nodeFormDraft) {
+  const harness = config?.agentHarness || {};
+  return {
+    idempotency_key: `harness_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`,
+    node_name: config?.nodeName || "",
+    harness_name: harness.name || "",
+    harness_type: normalizeAgentHarnessType(harness.type || AGENT_HARNESS_DEFAULT_TYPE),
+    infra_mode: normalizeAgentHarnessInfraMode(harness.infraMode || AGENT_HARNESS_DEFAULT_INFRA_MODE),
+    bridge_url: harness.bridgeUrl || "",
+    instructions: harness.instructions || "",
+    provider_config: {
+      base_url: config?.baseUrl || "",
+      provider: config?.provider || "",
+      model: config?.model || "",
+      api_key: config?.apiKey || "",
+    },
+  };
 }
 
 function directProviderGuessFromModel(model) {
@@ -4092,6 +4890,7 @@ function directProviderGuessFromModel(model) {
   if (!id) return null;
   if (id.startsWith("opencode-go/")) return { baseUrl: "https://opencode.ai/zen/go/v1", provider: "opencode-go" };
   if (id.startsWith("opencode-zen/")) return { baseUrl: "https://opencode.ai/zen/v1", provider: "opencode-zen" };
+  if (id === "deepseek-v4-flash") return { baseUrl: "https://opencode.ai/zen/go/v1", provider: "opencode-go" };
   if (id.includes("deepseek")) return { baseUrl: "https://api.deepseek.com/v1", provider: "deepseek" };
   if (id.includes("kimi") || id.includes("moonshot")) return { baseUrl: "https://api.moonshot.ai/v1", provider: "moonshot" };
   if (id.includes("qwen") || id.includes("dashscope")) return { baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", provider: "dashscope" };
@@ -4118,13 +4917,29 @@ function directProviderGuessFromKey(apiKey) {
 }
 
 function inferDirectProviderBaseUrl(model, apiKey) {
-  return directProviderGuessFromKey(apiKey) || directProviderGuessFromModel(model);
+  const modelGuess = directProviderGuessFromModel(model);
+  const modelId = cleanText(model, "").toLowerCase();
+  if (
+    modelGuess
+    && (
+      modelId === "deepseek-v4-flash"
+      || (modelGuess.provider && modelId.startsWith(`${modelGuess.provider}/`))
+    )
+  ) return modelGuess;
+  return directProviderGuessFromKey(apiKey) || modelGuess;
 }
 
-function directProviderStatusText(configSource = state.agentDirectProvider) {
+function directProviderStatusText(configSource = activeAgentDirectProviderConfig()) {
   const validation = validateDirectProviderConfig(configSource);
-  const probe = currentAgentProviderProbe();
-  if (probe && configSource === state.agentDirectProvider) {
+  const probe = currentAgentProviderProbe(configSource);
+  const providerName = normalizeDirectProviderName(configSource?.provider || directProviderNameFromBaseUrl(configSource?.baseUrl || ""));
+  const modelStatus = directProviderModelStatus(providerName);
+  const providerDefinition = directProviderDefinition(providerName);
+  if (providerName && modelStatus.status === "loading") return modelStatus.message || `Loading ${providerDefinition?.label || "provider"} models`;
+  if (providerName && modelStatus.status === "error" && !directProviderModelOptions(providerName, configSource?.model || "").length) {
+    return modelStatus.message || "Model list unavailable";
+  }
+  if (probe && directProviderConfigFingerprint(configSource) === directProviderConfigFingerprint(activeAgentDirectProviderConfig())) {
     return `${probe.mode} / ${probe.category}`;
   }
   if (validation.ok) {
@@ -4137,73 +4952,112 @@ function directProviderStatusText(configSource = state.agentDirectProvider) {
   const parts = [];
   if (config.model) parts.push("model");
   if (config.apiKey) parts.push("key");
-  if (config.baseUrl) parts.push("base URL");
+  if (config.provider) parts.push("provider");
   return parts.length ? `Saved ${parts.join(" + ")} / ${validation.category}` : validation.mode;
 }
 
-function providerFormConfigSource() {
-  if (state.agentDirectProviderFormOpen) {
-    return state.agentDirectProviderDraft || {};
+function nodeFormConfigSource() {
+  if (state.nodeFormOpen) {
+    return state.nodeFormDraft || {};
   }
-  return state.agentDirectProvider || {};
+  return activeAgentDirectProviderConfig() || {};
 }
 
-function openAgentProviderForm(mode = "new") {
-  const editing = mode === "edit" && directProviderConfigured();
-  state.agentDirectProviderFormMode = editing ? "edit" : "new";
-  state.agentDirectProviderDraft = editing ? { ...(state.agentDirectProvider || {}) } : {};
-  state.agentDirectProviderFormOpen = true;
+function openNodeForm(mode = "new", providerId = "") {
+  const editTarget = providerId
+    ? `${AGENT_PROVIDER_TARGET_PREFIX}${encodeURIComponent(providerId)}`
+    : state.agentTargetNode;
+  const editConfig = activeAgentDirectProviderConfig(editTarget);
+  const editing = mode === "edit" && directProviderConfigured(editConfig);
+  state.nodeFormMode = editing ? "edit" : "new";
+  state.nodeFormDraft = editing ? { ...(editConfig || {}) } : {};
+  if (editing && editConfig) state.agentTargetNode = directProviderTargetValue(editConfig);
+  state.nodeFormOpen = true;
+  state.nodeFormStatus = "";
+  state.nodeFormStatusAttention = false;
   state.agentTopicFormOpen = false;
   state.agentTopicDraft = null;
 }
 
-function closeAgentProviderForm() {
-  state.agentDirectProviderFormOpen = false;
-  state.agentDirectProviderDraft = null;
-  state.agentDirectProviderFormMode = "new";
+function closeNodeForm() {
+  state.nodeFormOpen = false;
+  state.nodeFormDraft = null;
+  state.nodeFormMode = "new";
+  state.nodeFormStatus = "";
+  state.nodeFormStatusAttention = false;
 }
 
-function syncAgentDirectProviderDraftFromInputs({ inferBaseUrl = true, render = false } = {}) {
-  const current = state.agentDirectProviderDraft || (state.agentDirectProviderFormMode === "edit" ? state.agentDirectProvider || {} : {});
-  const model = cleanText(els.agentDirectModelInput ? els.agentDirectModelInput.value : current.model || "", "");
-  const rawKey = String(els.agentDirectApiKeyInput?.value || "").trim();
-  const apiKey = rawKey && rawKey !== AGENT_DIRECT_PROVIDER_KEY_MASK ? rawKey : String(current.apiKey || "");
-  const baseUrlInputValue = els.agentDirectBaseUrlInput ? els.agentDirectBaseUrlInput.value : current.baseUrl || "";
-  let baseUrl = normalizeDirectProviderBaseUrl(baseUrlInputValue);
-  let provider = cleanText(directProviderNameFromBaseUrl(baseUrl) || current.provider || "", "");
-  let baseUrlInferred = Boolean(current.baseUrlInferred);
-  const editingBaseUrl = document.activeElement === els.agentDirectBaseUrlInput;
-  if (editingBaseUrl) baseUrlInferred = false;
-  if (inferBaseUrl && !editingBaseUrl) {
-    const guess = inferDirectProviderBaseUrl(model, apiKey);
-    if (guess?.baseUrl && (!baseUrl || baseUrlInferred)) {
-      baseUrl = guess.baseUrl;
-      provider = guess.provider || provider;
-      baseUrlInferred = true;
-      if (els.agentDirectBaseUrlInput && document.activeElement !== els.agentDirectBaseUrlInput) {
-        els.agentDirectBaseUrlInput.value = baseUrl;
-      }
+function setNodeFormStatus(message = "", options = {}) {
+  state.nodeFormStatus = cleanText(message, "");
+  state.nodeFormStatusAttention = Boolean(options.attention && state.nodeFormStatus);
+  if (!els.nodeFormStatus) return;
+  els.nodeFormStatus.textContent = state.nodeFormStatus;
+  const footer = els.nodeFormStatus.closest?.(".node-form-footer");
+  if (footer) {
+    footer.classList.toggle("is-attention", state.nodeFormStatusAttention);
+    if (state.nodeFormStatusAttention) {
+      footer.classList.remove("is-shaking");
+      void footer.offsetWidth;
+      footer.classList.add("is-shaking");
+    } else {
+      footer.classList.remove("is-shaking");
     }
   }
-  state.agentDirectProviderDraft = normalizeAgentDirectProviderConfig({ baseUrl, model, apiKey, provider, baseUrlInferred, transport: current.transport || "" }) || {};
-  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = directProviderStatusText(state.agentDirectProviderDraft);
-  if (render) renderAgentOnboardingPanel();
-  return state.agentDirectProviderDraft;
 }
 
-function currentAgentProviderProbe() {
+function syncNodeFormDraftFromInputs({ inferBaseUrl = true, render = false } = {}) {
+  if (state.nodeFormStatusAttention) setNodeFormStatus("");
+  const current = state.nodeFormDraft || (state.nodeFormMode === "edit" ? activeAgentDirectProviderConfig() || {} : {});
+  const currentProvider = normalizeDirectProviderName(current.provider || directProviderNameFromBaseUrl(current.baseUrl || ""));
+  const provider = normalizeDirectProviderName(els.agentDirectProviderSelect ? els.agentDirectProviderSelect.value : currentProvider) || currentProvider;
+  const providerChanged = Boolean(provider && currentProvider && provider !== currentProvider);
+  let model = cleanText(els.agentDirectModelInput ? els.agentDirectModelInput.value : current.model || "", "");
+  const modelOptions = directProviderModelOptions(provider, providerChanged ? "" : (model || current.model || ""));
+  if (providerChanged || !model || !modelOptions.some((option) => option.id === model)) {
+    model = modelOptions[0]?.id || "";
+  }
+  const nodeName = cleanText(els.nodeNameInput ? els.nodeNameInput.value : current.nodeName || "", "");
+  const currentHarness = current.agentHarness && typeof current.agentHarness === "object" ? current.agentHarness : {};
+  const harnessEnabled = Boolean(els.nodeAgentWrapperToggle?.checked);
+  const harnessName = cleanText(els.nodeWrapperNameInput ? els.nodeWrapperNameInput.value : currentHarness.name || "", "");
+  const harnessType = normalizeAgentHarnessType(els.nodeWrapperTypeSelect ? els.nodeWrapperTypeSelect.value : currentHarness.type || AGENT_HARNESS_DEFAULT_TYPE);
+  const harnessInfraMode = normalizeAgentHarnessInfraMode(els.nodeHarnessInfraSelect ? els.nodeHarnessInfraSelect.value : currentHarness.infraMode || AGENT_HARNESS_DEFAULT_INFRA_MODE);
+  const harnessBridgeUrl = cleanText(els.nodeHarnessBridgeUrlInput ? els.nodeHarnessBridgeUrlInput.value : currentHarness.bridgeUrl || "", "");
+  const harnessInstructions = cleanText(els.nodeWrapperRoleInput ? els.nodeWrapperRoleInput.value : currentHarness.instructions || "", "");
+  const rawKey = String(els.agentDirectApiKeyInput?.value || "").trim();
+  const apiKey = rawKey && rawKey !== AGENT_DIRECT_PROVIDER_KEY_MASK ? rawKey : String(current.apiKey || "");
+  const baseUrl = directProviderBaseUrlForProvider(provider) || normalizeDirectProviderBaseUrl(current.baseUrl || "");
+  const baseUrlInferred = Boolean(provider && baseUrl);
+  state.nodeFormDraft = normalizeAgentDirectProviderConfig({
+    baseUrl,
+    model,
+    apiKey,
+    provider,
+    id: current.id || "",
+    nodeName,
+    agentHarnessEnabled: harnessEnabled,
+    agentHarness: { enabled: harnessEnabled, name: harnessName, type: harnessType, infraMode: harnessInfraMode, bridgeUrl: harnessBridgeUrl, instructions: harnessInstructions },
+    baseUrlInferred,
+    transport: current.transport || "",
+  }) || {};
+  if (!state.nodeFormStatus && els.nodeFormStatus) els.nodeFormStatus.textContent = nodeFormStatusText(state.nodeFormDraft);
+  if (render) renderNodesPanel();
+  return state.nodeFormDraft;
+}
+
+function currentAgentProviderProbe(config = activeAgentDirectProviderConfig()) {
   const probe = state.agentProviderProbe;
-  if (!probe || probe.fingerprint !== directProviderConfigFingerprint(state.agentDirectProvider)) return null;
+  if (!probe || probe.fingerprint !== directProviderConfigFingerprint(config)) return null;
   return probe;
 }
 
 function setAgentProviderProbe(probe) {
   state.agentProviderProbe = probe;
-  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = directProviderStatusText();
+  if (!state.nodeFormStatus && els.nodeFormStatus) els.nodeFormStatus.textContent = directProviderStatusText();
   renderAgentReadinessStatus();
 }
 
-function providerSupportsImageContentParts(config = state.agentDirectProvider) {
+function providerSupportsImageContentParts(config = activeAgentDirectProviderConfig()) {
   const provider = cleanText(config?.provider || "", "").toLowerCase();
   const endpointProvider = directProviderNameFromBaseUrl(config?.endpoint || config?.baseUrl || "");
   const hostProvider = directProviderNameFromBaseUrl(config?.baseUrl || config?.endpoint || "");
@@ -4258,6 +5112,15 @@ function providerShouldRetryWithoutImage(error) {
 }
 
 function providerRequestMessages(message, transcript = [], imageEntries = []) {
+  const providerConfig = activeAgentDirectProviderConfig();
+  const harness = providerConfig?.agentHarness && typeof providerConfig.agentHarness === "object"
+    ? providerConfig.agentHarness
+    : null;
+  const harnessLines = harness?.enabled ? [
+    `Agent harness: ${agentHarnessTypeLabel(harness.type)}`,
+    cleanText(harness.name || "", "") ? `Name: ${cleanText(harness.name, "")}` : "",
+    cleanText(harness.instructions || "", "") ? `Instructions:\n${cleanText(harness.instructions, "")}` : "",
+  ].filter(Boolean) : [];
   const mediaParts = [
     ...providerImageContentParts(imageEntries),
     ...providerVideoContentParts(imageEntries),
@@ -4271,7 +5134,11 @@ function providerRequestMessages(message, transcript = [], imageEntries = []) {
   return [
     {
       role: "system",
-      content: `You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend tools, workspace mutation, and source changes are unavailable on this path.${agentCapabilitySystemHint()}`,
+      content: [
+        "You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend tools, workspace mutation, and source changes are unavailable on this path.",
+        harnessLines.length ? `Act through this optional node agent harness:\n${harnessLines.join("\n")}` : "",
+        agentCapabilitySystemHint(),
+      ].filter(Boolean).join("\n"),
     },
     ...transcript.slice(-8).map((item) => ({
       role: item.role === "assistant" ? "assistant" : "user",
@@ -4420,12 +5287,12 @@ function debugProviderLog(label, detail = {}) {
   }
 }
 
-async function probeAgentProviderConnectivity({ allowProxy = true, force = false } = {}) {
-  const validation = validateDirectProviderConfig();
+async function probeAgentProviderConnectivity({ allowProxy = true, force = false, config: configSource = activeAgentDirectProviderConfig() } = {}) {
+  const validation = validateDirectProviderConfig(configSource);
   if (!validation.ok) {
     const probe = {
       ok: false,
-      fingerprint: directProviderConfigFingerprint(state.agentDirectProvider),
+      fingerprint: directProviderConfigFingerprint(configSource),
       mode: validation.mode,
       category: validation.category,
       message: validation.message,
@@ -4434,7 +5301,7 @@ async function probeAgentProviderConnectivity({ allowProxy = true, force = false
     setAgentProviderProbe(probe);
     return probe;
   }
-  const current = currentAgentProviderProbe();
+  const current = currentAgentProviderProbe(configSource);
   if (!force && current && Date.now() - Number(current.checked_at || 0) < AGENT_PROVIDER_PROBE_TTL_MS) return current;
   const config = validation.config;
   const fingerprint = validation.fingerprint;
@@ -4583,6 +5450,7 @@ function agentTargetNode() {
   const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
   if (
     target === AGENT_PROVIDER_TARGET_ID
+    || target.startsWith(AGENT_PROVIDER_TARGET_PREFIX)
     || target === AGENT_SET_PROVIDER_TARGET_ID
     || target === AGENT_SET_HERMES_TARGET_ID
     || target === AGENT_NONE_TARGET_ID
@@ -4616,16 +5484,37 @@ function configuredAgentTargetOptions() {
     options.push(option);
     agentModelKeys(option.model).forEach((key) => listedModelKeys.add(key));
   };
-  if (!isAdminUser() && directProviderConfigured()) {
-    pushOption({
-      value: AGENT_PROVIDER_TARGET_ID,
-      kind: "provider",
-      label: agentProviderNodeLabel(),
-      detail: "browser provider",
-      model: normalizeAgentModelEntry({
-        id: state.agentDirectProvider?.model || "",
-        provider: state.agentDirectProvider?.provider || "",
-      }),
+  if (!isAdminUser() && Array.isArray(state.agentDirectProviders)) {
+    state.agentDirectProviders.filter((config) => directProviderConfigured(config)).forEach((config) => {
+      const providerModel = providerModelDisplayLabel({
+        id: config?.model || "",
+        provider: config?.provider || "",
+      });
+      pushOption({
+        value: directProviderTargetValue(config),
+        kind: "node",
+        label: `node:${agentProviderNodeLabel(config)}`,
+        detail: providerModel || "browser provider",
+        model: normalizeAgentModelEntry({
+          id: config?.model || "",
+          provider: config?.provider || "",
+        }),
+      });
+    });
+  }
+  if (!isAdminUser() && Array.isArray(state.userFleetHarnesses)) {
+    state.userFleetHarnesses.forEach((harness) => {
+      const lifecycle = cleanText(harness.lifecycle_state || harness.lifecycleState || "", "");
+      const value = lifecycle === "ready" && cleanText(harness.node_id, "") ? cleanText(harness.node_id, "") : `harness:${cleanText(harness.id, "")}`;
+      if (!value) return;
+      pushOption({
+        value,
+        kind: "harness",
+        label: `harness:${cleanText(harness.harness_name || harness.name, "Agent")}`,
+        detail: lifecycle === "ready" ? "Sandbox ready" : agentReadinessPanelMessage({ status: lifecycle }),
+        nodeId: cleanText(harness.node_id, ""),
+        lifecycle,
+      });
     });
   }
   if (!isAdminUser() && ownedAgentConfigured()) {
@@ -4701,7 +5590,9 @@ function preferredAgentNodeSelectValue(options = agentNodeSelectOptions()) {
     && raw !== AGENT_EDIT_CONFIG_TARGET_ID
   ) return raw;
   if (values.has(AGENT_NONE_TARGET_ID)) return AGENT_NONE_TARGET_ID;
-  if (!isAdminUser() && directProviderConfigured() && state.agentReadiness?.status !== "ready") return AGENT_PROVIDER_TARGET_ID;
+  if (!isAdminUser() && hasDirectProviderConfigured() && state.agentReadiness?.status !== "ready") {
+    return directProviderTargetValue(activeAgentDirectProviderConfig() || state.agentDirectProviders[0]);
+  }
   return values.has(agentTargetNode()) ? agentTargetNode() : options[0]?.value || defaultAgentTargetNode();
 }
 
@@ -4710,6 +5601,9 @@ function renderAgentNodeSelect() {
   const options = agentNodeSelectOptions();
   const current = preferredAgentNodeSelectValue(options);
   state.agentTargetNode = current;
+  if (current === AGENT_PROVIDER_TARGET_ID || current.startsWith(AGENT_PROVIDER_TARGET_PREFIX)) {
+    state.agentDirectProvider = activeAgentDirectProviderConfig(current) || state.agentDirectProvider;
+  }
   els.agentNodeSelect.replaceChildren(
     ...options.map((item) => {
       const option = document.createElement("option");
@@ -4727,7 +5621,7 @@ function setAgentTargetNode(nodeId) {
   if (requested === AGENT_NONE_TARGET_ID) {
     const previous = state.agentTargetNode;
     state.agentTargetNode = AGENT_NONE_TARGET_ID;
-    closeAgentProviderForm();
+    closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
     renderAgentModelSelect();
@@ -4744,7 +5638,7 @@ function setAgentTargetNode(nodeId) {
   if (requested === AGENT_NEW_CONFIG_TARGET_ID) {
     openAgentSetupBalloon({
       mode: "provider",
-      message: "Add a provider model or set your owned agent.",
+      message: "Edit, add, or delete configured nodes.",
       openProviderForm: true,
       providerFormMode: "new",
     });
@@ -4753,18 +5647,47 @@ function setAgentTargetNode(nodeId) {
   }
   if (requested === AGENT_EDIT_CONFIG_TARGET_ID) {
     openAgentSetupBalloon({
-      mode: directProviderConfigured() ? "provider" : "agent",
-      message: "Edit, add, or delete configured providers.",
+      mode: hasDirectProviderConfigured() ? "provider" : "agent",
+      message: "Edit, add, or delete configured nodes.",
       openProviderForm: false,
       providerFormMode: "edit",
     });
     renderAgentNodeSelect();
     return;
   }
+  if (requested.startsWith("harness:")) {
+    const harness = state.userFleetHarnesses.find((item) => `harness:${cleanText(item.id, "")}` === requested);
+    state.agentSetupBalloonOpen = true;
+    state.agentSetupMode = "provider";
+    state.nodesPanelStatus = agentReadinessPanelMessage({ status: harness?.lifecycle_state || "failed" });
+    openNodeForm("new");
+    renderAgentNodeSelect();
+    renderNodesPanel();
+    return;
+  }
+  const requestedProvider = activeAgentDirectProviderConfig(requested);
+  if ((requested === AGENT_PROVIDER_TARGET_ID || requested.startsWith(AGENT_PROVIDER_TARGET_PREFIX)) && directProviderConfigured(requestedProvider)) {
+    const previous = state.agentTargetNode;
+    state.agentDirectProvider = requestedProvider;
+    state.agentTargetNode = directProviderTargetValue(requestedProvider);
+    closeNodeForm();
+    closeAgentModelSetup();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    if (previous !== state.agentTargetNode) {
+      recordUserEvent("agent.target_node_selected", {
+        target: "provider-api",
+        summary: `Chat target changed to ${agentProviderNodeLabel(requestedProvider)}`,
+        data: { node_id: state.agentTargetNode, previous_node_id: previous || "" },
+      });
+    }
+    return;
+  }
   if (requested === AGENT_OWNED_AGENT_TARGET_ID && ownedAgentConfigured()) {
     const previous = state.agentTargetNode;
     state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
-    closeAgentProviderForm();
+    closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
     renderAgentModelSelect();
@@ -4790,7 +5713,7 @@ function setAgentTargetNode(nodeId) {
     applyAgentModelToTarget(model);
     persistAgentModelSelection();
     state.agentTargetNode = agentModelTargetValue(model) || targetNode;
-    closeAgentProviderForm();
+    closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
     renderAgentModelSelect();
@@ -4809,7 +5732,7 @@ function setAgentTargetNode(nodeId) {
   if (requested === AGENT_SET_PROVIDER_TARGET_ID) {
     openAgentSetupBalloon({
       mode: "provider",
-      message: "Set or pick an OpenAI-compatible provider before sending chat messages.",
+      message: "Edit, add, or delete configured nodes.",
       openProviderForm: true,
       providerFormMode: "new",
     });
@@ -4820,7 +5743,7 @@ function setAgentTargetNode(nodeId) {
     state.agentTargetNode = defaultAgentTargetNode();
     openAgentSetupBalloon({
       mode: "agent",
-      message: "Set or pick your owned agent before sending chat messages.",
+      message: "Set or pick a node before sending chat messages.",
     });
     renderAgentNodeSelect();
     renderAgentModelSelect();
@@ -4828,7 +5751,7 @@ function setAgentTargetNode(nodeId) {
     return;
   }
   const next = requested === AGENT_PROVIDER_TARGET_ID && directProviderConfigured()
-    ? AGENT_PROVIDER_TARGET_ID
+    ? directProviderTargetValue(activeAgentDirectProviderConfig())
     : !isAdminUser() && isGlobalAgentNodeId(requested) ? AGENT_SANDBOX_NODE_ID : requested;
   const previous = state.agentTargetNode;
   state.agentTargetNode = next;
@@ -4838,7 +5761,7 @@ function setAgentTargetNode(nodeId) {
   if (previous !== next) {
     recordUserEvent("agent.target_node_selected", {
       target: next === AGENT_PROVIDER_TARGET_ID ? "provider-api" : `node:${next}`,
-      summary: next === AGENT_PROVIDER_TARGET_ID ? "Chat target changed to saved provider" : `Chat target node changed to ${next}`,
+      summary: next === AGENT_PROVIDER_TARGET_ID ? "Chat target changed to saved node" : `Chat target node changed to ${next}`,
       data: { node_id: next, previous_node_id: previous || "" },
     });
   }
@@ -4941,10 +5864,11 @@ function removeAgentModelFromCatalog(model) {
 
 function agentDefaultModelForNode(nodeId = agentTargetNode()) {
   if (nodeId === AGENT_PROVIDER_TARGET_ID || agentTargetIsDirectProvider()) {
+    const providerConfig = activeAgentDirectProviderConfig(nodeId);
     return normalizeAgentModelEntry({
-      id: state.agentDirectProvider?.model || "",
-      name: state.agentDirectProvider?.model || "",
-      provider: state.agentDirectProvider?.provider || "",
+      id: providerConfig?.model || "",
+      name: providerConfig?.model || "",
+      provider: providerConfig?.provider || "",
     });
   }
   const node = Array.isArray(state.nodes) ? state.nodes.find((n) => n.id === nodeId) : null;
@@ -5006,14 +5930,15 @@ function persistAgentModelSelection() {
 
 function applyAgentProviderModel(model) {
   const normalized = normalizeAgentModelEntry(model);
-  if (!normalized || !state.agentDirectProvider) return null;
+  const providerConfig = activeAgentDirectProviderConfig();
+  if (!normalized || !providerConfig) return null;
   saveAgentDirectProviderConfig({
-    ...state.agentDirectProvider,
+    ...providerConfig,
     model: normalized.id,
-    provider: normalized.provider || state.agentDirectProvider.provider || "",
+    provider: normalized.provider || providerConfig.provider || "",
   });
   state.agentProviderProbe = null;
-  state.agentOnboardingStatus = "Provider model set";
+  state.nodesPanelStatus = "Node model set";
   addAgentModelToCatalog(normalized);
   renderAgentNodeSelect();
   renderAgentModelSelect();
@@ -5071,11 +5996,61 @@ async function loadAgentModels() {
       name: item.id,
       label: item.id,
     })).filter(Boolean);
+    state.agentBridgeModelsDiagnostic = null;
     renderAgentModelSelect();
-  } catch {
+  } catch (error) {
     state.agentAvailableModels = [];
+    handleBridgeModelsReadinessError(error);
     renderAgentModelSelect();
   }
+}
+
+function bridgeModelsReadinessMessage(error) {
+  const status = Number(error?.status || 0);
+  if (!state.authUser || status === 401 || error?.payload?.error?.code === "auth_required") {
+    return { status: "auth_required", message: "Sign in to load agent models.", missing_dependency: "account_session" };
+  }
+  const currentStatus = cleanText(state.agentReadiness?.status, "");
+  if (currentStatus === "backend_unavailable") {
+    return { status: "backend_unavailable", message: "Backend bridge unavailable.", missing_dependency: state.agentReadiness?.missing_dependency || "wasm_agent_bridge" };
+  }
+  if (currentStatus === "sandbox_not_provisioned") {
+    const balance = Number(state.agentCredits?.balance || 0);
+    const cost = Number(state.agentCredits?.agent_harness_cost || state.agentCredits?.provision_main_cost || 10);
+    if (balance > 0 && balance < cost) {
+      return { status: "insufficient_flux", message: "Insufficient Flux.", missing_dependency: "flux_credits" };
+    }
+    return { status: "sandbox_not_provisioned", message: "Sandbox not provisioned.", missing_dependency: "account_sandbox" };
+  }
+  if (status === 403 && !isAdminUser()) {
+    return { status: "provider_not_available", message: "Provider not available yet.", missing_dependency: "bridge_models_forbidden" };
+  }
+  return { status: "backend_unavailable", message: "Backend bridge unavailable.", missing_dependency: "bridge_models" };
+}
+
+function handleBridgeModelsReadinessError(error) {
+  const mapped = bridgeModelsReadinessMessage(error);
+  state.agentBridgeModelsDiagnostic = {
+    endpoint: "/bridge/v1/models",
+    http_status: Number(error?.status || 0),
+    code: error?.payload?.error?.code || "",
+    message: error?.message || "",
+    readiness_status: mapped.status,
+  };
+  if (!state.agentReadiness || mapped.status !== "provider_not_available") {
+    state.agentReadiness = {
+      ok: true,
+      schema: "hermes.wasm_agent.agent_readiness.v1",
+      ready: false,
+      target_node: agentTargetNode(),
+      status: mapped.status,
+      message: mapped.message,
+      missing_dependency: mapped.missing_dependency,
+      backend: { diagnostics: state.agentBridgeModelsDiagnostic },
+    };
+  }
+  state.nodesPanelStatus = mapped.message;
+  renderAgentReadinessStatus();
 }
 
 function defaultAgentModelSetupSteps(activeIndex = 0) {
@@ -5173,7 +6148,7 @@ function openAgentModelSetup(mode = "add", model = null, options = {}) {
       ? [{ label: `Remove ${current?.label || "selected model"}`, status: "running", detail: agentTargetNode() }]
       : [],
   });
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
   renderAgentNodeSelect();
   window.requestAnimationFrame(() => {
     els.agentModelInput?.focus();
@@ -5187,7 +6162,7 @@ function closeAgentModelSetup() {
   clearAgentModelSetupTimer();
   setAgentModelSetup({ open: false, status: "idle", steps: [] });
   renderAgentModelSelect();
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
 }
 
 function startAgentModelSetupProgress() {
@@ -5214,7 +6189,7 @@ function completeAgentModelRemove() {
   delete state.agentModelSettings.selectedByNode?.[agentModelTargetKey()];
   persistAgentModelSelection();
   renderAgentNodeSelect();
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
   setAgentModelSetup({
     busy: false,
     status: "done",
@@ -5288,7 +6263,7 @@ async function submitAgentModelSetup(event) {
     }
     renderAgentModelSelect();
     renderAgentNodeSelect();
-    renderAgentOnboardingPanel();
+    renderNodesPanel();
     recordUserEvent("agent.model_setup_finished", {
       target: `node:${targetNode}`,
       summary: `Set ${normalized?.label || rawModel}`,
@@ -7212,6 +8187,7 @@ async function loadConfig() {
       state.config = config;
       if (config.bridgeUrl) state.bridgeUrl = String(config.bridgeUrl).replace(/\/$/, "");
       state.googleClientId = String(config.auth?.googleClientId || "").trim();
+      state.googleLoginUri = String(config.auth?.googleLoginUri || "").trim();
       state.adminEmail = cleanText(config.auth?.adminEmail, state.adminEmail);
       const timeoutSec = Number(config.agentTurnTimeoutSec);
       if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
@@ -7260,7 +8236,7 @@ function setLoginOpen(open) {
 function renderAuthGate() {
   if (!els.app) return;
   const authenticated = Boolean(state.authUser);
-  els.app.dataset.auth = authenticated ? "ready" : state.authChecked && state.googleClientId ? "locked" : "checking";
+  els.app.dataset.auth = authenticated ? "ready" : state.authChecked ? "locked" : "checking";
   if (els.authGateCopy) {
     els.authGateCopy.textContent = state.googleClientId
       ? "Sign in with an allowlisted Google account to open wasm-agent."
@@ -7300,7 +8276,7 @@ function renderLogin() {
   if (els.loginFluxBalance) {
     const balance = Number(state.agentCredits?.balance || 0);
     els.loginFluxBalance.hidden = !user || isAdminUser();
-    els.loginFluxBalance.textContent = `${balance} Flux`;
+    els.loginFluxBalance.textContent = `${balance}◇ Flux`;
     els.loginFluxBalance.title = state.agentCredits ? "Available Flux balance" : "Flux balance not loaded yet";
   }
   if (els.googleSignInButton) {
@@ -7400,6 +8376,42 @@ function renderGoogleLoginFace(slot) {
   return clickLayer;
 }
 
+function googleLoginUri() {
+  const fallback = new URL("/auth/google/callback", window.location.origin).href;
+  try {
+    return new URL(state.googleLoginUri || fallback, window.location.origin).href;
+  } catch {
+    return fallback;
+  }
+}
+
+function authRedirectMessageFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const code = cleanText(params.get("auth_error"), "");
+  if (!code) return "";
+  const message = cleanText(params.get("message"), "");
+  if (message) return message;
+  if (code === "google_account_not_allowed") return "This Google account is not allowed to access wasm-agent.";
+  if (code === "google_login_not_configured") return "Google login is not configured on this server.";
+  if (code === "google_token_rejected") return "Google rejected the sign-in token.";
+  return "Google sign-in failed.";
+}
+
+function consumeAuthRedirectMessage() {
+  const message = authRedirectMessageFromUrl();
+  if (!message) return;
+  state.authRedirectMessage = message;
+  state.loginMessage = message;
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("auth_error");
+    url.searchParams.delete("message");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Leaving the URL untouched is better than hiding the original auth error.
+  }
+}
+
 async function renderGoogleSignInButton() {
   const shouldRender = state.loginOpen || (!state.authUser && els.app?.dataset.auth === "locked");
   const slots = [els.googleSignInButton, els.authGateGoogleSignInButton].filter(Boolean);
@@ -7410,12 +8422,13 @@ async function renderGoogleSignInButton() {
     renderLogin();
     return;
   }
-  if (state.googleButtonRenderedFor === state.googleClientId && slots.every((slot) => slot.childElementCount)) return;
-  state.loginMessage = "";
+  const loginUri = googleLoginUri();
+  const renderKey = `${state.googleClientId}|${loginUri}`;
+  if (state.googleButtonRenderedFor === renderKey && slots.every((slot) => slot.childElementCount)) return;
+  if (!state.authRedirectMessage) state.loginMessage = "";
   renderLogin();
   try {
     await loadGoogleIdentityScript();
-    const loginUri = new URL("/auth/google/callback", window.location.origin).href;
     window.google.accounts.id.initialize({
       client_id: state.googleClientId,
       callback: handleGoogleCredential,
@@ -7435,7 +8448,7 @@ async function renderGoogleSignInButton() {
       });
     });
     installGoogleStyleOverrides();
-    state.googleButtonRenderedFor = state.googleClientId;
+    state.googleButtonRenderedFor = renderKey;
     if (els.authGateLoginButton && els.authGateGoogleSignInButton?.childElementCount) {
       els.authGateLoginButton.hidden = true;
     }
@@ -7449,10 +8462,15 @@ async function loadAuthSession() {
   try {
     const payload = await fetchJson("/auth/session", { timeoutMs: 8000 });
     state.authUser = payload.user || null;
-    state.loginMessage = "";
+    if (state.authUser) {
+      state.loginMessage = "";
+      state.authRedirectMessage = "";
+    } else if (!state.authRedirectMessage) {
+      state.loginMessage = "";
+    }
   } catch (error) {
     state.authUser = null;
-    state.loginMessage = error.message;
+    if (!state.authRedirectMessage) state.loginMessage = error.message;
   }
   loadAgentDirectProviderForUser();
   loadAgentOwnedAgentForUser();
@@ -7475,6 +8493,7 @@ async function handleGoogleCredential(response) {
     loadAgentDirectProviderForUser();
     loadAgentOwnedAgentForUser();
     state.loginMessage = "";
+    state.authRedirectMessage = "";
     setLoginOpen(false);
     await bootstrapAuthenticatedApp();
     recordUserEvent("auth.google_login_finished", {
@@ -7496,11 +8515,13 @@ async function logout() {
     // Clearing local session state keeps the UI honest even if the server is restarting.
   }
   state.authUser = null;
+  state.agentDirectProviders = [];
   state.agentDirectProvider = null;
   state.agentOwnedAgent = null;
-  state.agentDirectProviderFormOpen = false;
+  state.nodeFormOpen = false;
   state.agentTopicFormOpen = false;
   state.loginMessage = "";
+  state.authRedirectMessage = "";
   state.googleButtonRenderedFor = "";
   renderLogin();
   if (state.loginOpen) void renderGoogleSignInButton();
@@ -7600,7 +8621,7 @@ async function bridgeJson(path, options = {}) {
 
 function agentReadinessLabel(readiness = state.agentReadiness) {
   if (agentTargetIsNone()) return "No model";
-  if (shouldUseOwnedAgentBridge()) return "Own bridge";
+  if (shouldUseOwnedAgentBridge()) return "Private bridge";
   if (shouldUseDirectAgentProvider()) {
     const validation = validateDirectProviderConfig();
     if (!validation.ok) return validation.mode;
@@ -7613,7 +8634,14 @@ function agentReadinessLabel(readiness = state.agentReadiness) {
   const status = cleanText(readiness?.status, "");
   if (status === "ready") return "Agent ready";
   if (status === "backend_unavailable") return "Agent backend unavailable";
-  if (status === "sandbox_not_provisioned") return "Agent not set";
+  if (status === "auth_required") return "Sign in required";
+  if (status === "insufficient_flux") return "Insufficient Flux";
+  if (status === "provider_not_available") return "Provider not available yet";
+  if (["requested", "charging", "provisioning"].includes(status)) return "Provisioning sandbox...";
+  if (status === "failed") return "Provisioning failed";
+  if (status === "stopped") return "Sandbox stopped";
+  if (status === "archived") return "Sandbox archived";
+  if (status === "sandbox_not_provisioned") return "Sandbox not provisioned";
   if (!state.wasmReady) return "WASM runtime blocked or unavailable";
   return state.agentReadinessBusy ? "Checking agent" : "Agent ready";
 }
@@ -7642,7 +8670,22 @@ function renderAgentReadinessStatus() {
   els.agentStatus.dataset.status = agentReadinessStatusKey();
   const wasmNote = state.wasmReady ? "" : cleanText(state.lastError, "Browser WASM runtime unavailable");
   els.agentStatus.title = wasmNote && label !== "WASM runtime blocked or unavailable" ? `${label}; ${wasmNote}` : wasmNote;
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
+}
+
+function agentReadinessPanelMessage(readiness = state.agentReadiness) {
+  const status = cleanText(readiness?.status, "");
+  if (["requested", "charging", "provisioning"].includes(status)) return "Provisioning sandbox...";
+  if (status === "ready") return "Sandbox ready";
+  if (status === "failed") return "Provisioning failed";
+  if (status === "stopped") return "Sandbox stopped";
+  if (status === "archived") return "Sandbox archived";
+  if (status === "backend_unavailable") return "Backend bridge unavailable.";
+  if (status === "insufficient_flux") return "Insufficient Flux.";
+  if (status === "provider_not_available") return "Provider not available yet.";
+  if (status === "auth_required") return "Sign in required.";
+  if (status === "sandbox_not_provisioned") return "Sandbox not provisioned.";
+  return cleanText(readiness?.message || "", "");
 }
 
 async function loadAgentReadiness(origin = "auto") {
@@ -7653,7 +8696,7 @@ async function loadAgentReadiness(origin = "auto") {
     const query = new URLSearchParams({ target_node: agentTargetNode() });
     const payload = await fetchJson(`/agent/readiness?${query.toString()}`, { timeoutMs: 8000 });
     state.agentReadiness = payload;
-    state.agentOnboardingStatus = payload.message || "";
+    state.nodesPanelStatus = agentReadinessPanelMessage(payload);
     renderAgentNodeSelect();
     if (origin !== "poll") {
       recordUserEvent("agent.readiness_loaded", {
@@ -7673,7 +8716,7 @@ async function loadAgentReadiness(origin = "auto") {
       message: error.message,
       missing_dependency: "agent_readiness_endpoint",
     };
-    state.agentOnboardingStatus = error.message;
+    state.nodesPanelStatus = error.message;
     renderAgentNodeSelect();
     return state.agentReadiness;
   } finally {
@@ -7701,12 +8744,12 @@ async function loadAccountCredits(origin = "auto") {
         data: { balance: payload.balance || 0 },
       });
     }
-    renderAgentOnboardingPanel();
+    renderNodesPanel();
     renderLogin();
     return payload;
   } catch (error) {
-    state.agentOnboardingStatus = error.message;
-    renderAgentOnboardingPanel();
+    state.nodesPanelStatus = error.message;
+    renderNodesPanel();
     renderLogin();
     return null;
   }
@@ -8576,6 +9619,10 @@ function renderAgentConfiguredModelList() {
     use.type = "button";
     use.dataset.action = "use";
     use.textContent = "Use";
+    if (entry.kind === "harness" && entry.lifecycle !== "ready") {
+      use.disabled = true;
+      use.title = entry.lifecycle === "failed" ? "Provisioning failed; edit and create again" : entry.detail || "Harness is not ready";
+    }
     const edit = document.createElement("button");
     edit.type = "button";
     edit.dataset.action = "edit";
@@ -8585,10 +9632,10 @@ function renderAgentConfiguredModelList() {
     del.dataset.action = "delete";
     del.textContent = "Delete";
     const nodeHasSavedModel = entry.kind === "agent" && Boolean(state.agentModelSettings.selectedByNode?.[entry.nodeId || entry.value]);
-    del.disabled = entry.kind === "agent" && !nodeHasSavedModel;
+    del.disabled = (entry.kind === "agent" && !nodeHasSavedModel) || entry.kind === "harness";
     del.title = del.disabled
       ? "This agent is using its current default model"
-      : entry.kind === "owned-agent" ? "Delete this agent" : "Delete this listed model";
+      : entry.kind === "node" ? "Delete this node" : entry.kind === "owned-agent" ? "Delete this agent" : "Delete this listed model";
     actions.append(use, edit, del);
     row.append(text, actions);
     return row;
@@ -8598,11 +9645,21 @@ function renderAgentConfiguredModelList() {
 function deleteAgentConfiguredTarget(row) {
   const kind = cleanText(row?.dataset?.targetKind, "");
   const value = cleanText(row?.dataset?.targetValue, "");
-  if (kind === "provider") {
-    saveAgentDirectProviderConfig(null);
+  if (kind === "node" || kind === "provider") {
+    const deletedId = providerIdFromTargetValue(value);
+    if (deletedId) {
+      saveAgentDirectProviderConfigs(
+        state.agentDirectProviders.filter((item) => normalizeAgentProviderNodeId(item?.id || "") !== deletedId)
+      );
+    } else {
+      saveAgentDirectProviderConfig(null);
+    }
     state.agentProviderProbe = null;
-    if (state.agentTargetNode === AGENT_PROVIDER_TARGET_ID) state.agentTargetNode = AGENT_NONE_TARGET_ID;
-    state.agentOnboardingStatus = "Provider deleted";
+    if (state.agentTargetNode === value || state.agentTargetNode === AGENT_PROVIDER_TARGET_ID) {
+      state.agentTargetNode = state.agentDirectProviders.length ? directProviderTargetValue(state.agentDirectProviders[0]) : AGENT_NONE_TARGET_ID;
+      state.agentDirectProvider = state.agentDirectProviders[0] || null;
+    }
+    state.nodesPanelStatus = "Node deleted";
   } else if (kind === "agent-model") {
     const model = agentModelFromTargetValue(value);
     if (model) {
@@ -8614,22 +9671,22 @@ function deleteAgentConfiguredTarget(row) {
       saveAgentModelSettings();
     }
     if (state.agentTargetNode === value) state.agentTargetNode = defaultAgentTargetNode();
-    state.agentOnboardingStatus = "Agent model deleted";
+    state.nodesPanelStatus = "Agent model deleted";
   } else if (kind === "agent") {
     const selected = normalizeAgentModelEntry(state.agentModelSettings.selectedByNode?.[value]);
     if (selected) removeAgentModelFromCatalog(selected);
     delete state.agentModelSettings.selectedByNode?.[value];
     saveAgentModelSettings();
-    state.agentOnboardingStatus = "Agent model deleted";
+    state.nodesPanelStatus = "Agent model deleted";
   } else if (kind === "owned-agent") {
     saveAgentOwnedAgentConfig(null);
     if (state.agentTargetNode === AGENT_OWNED_AGENT_TARGET_ID) state.agentTargetNode = AGENT_NONE_TARGET_ID;
-    state.agentOnboardingStatus = "Agent deleted";
+    state.nodesPanelStatus = "Agent deleted";
   }
   renderAgentNodeSelect();
   renderAgentModelSelect();
   renderAgentReadinessStatus();
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
 }
 
 function handleAgentConfiguredModelAction(event) {
@@ -8647,13 +9704,16 @@ function handleAgentConfiguredModelAction(event) {
     return;
   }
   if (action === "edit") {
-    if (kind === "provider") {
-      state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
-      openAgentProviderForm("edit");
+    if (kind === "node" || kind === "provider") {
+      const providerId = providerIdFromTargetValue(value);
+      const providerConfig = activeAgentDirectProviderConfig(value);
+      if (providerConfig) state.agentDirectProvider = providerConfig;
+      state.agentTargetNode = providerConfig ? directProviderTargetValue(providerConfig) : AGENT_PROVIDER_TARGET_ID;
+      openNodeForm("edit", providerId);
       state.agentSetupMode = "provider";
       state.agentSetupBalloonOpen = true;
-      renderAgentOnboardingPanel();
-      window.setTimeout(() => els.agentDirectBaseUrlInput?.focus(), 0);
+      renderNodesPanel();
+      window.setTimeout(() => els.agentDirectModelInput?.focus(), 0);
       return;
     }
     if (kind === "agent") {
@@ -8668,6 +9728,14 @@ function handleAgentConfiguredModelAction(event) {
     }
     if (kind === "owned-agent") {
       openAgentTopicForm();
+      return;
+    }
+    if (kind === "harness") {
+      openNodeForm("new");
+      state.agentSetupMode = "provider";
+      state.agentSetupBalloonOpen = true;
+      renderNodesPanel();
+      window.setTimeout(() => els.nodeNameInput?.focus(), 0);
       return;
     }
   }
@@ -8775,7 +9843,7 @@ function renderSocialToasts() {
 }
 
 function agentTopicConfigFromInputs() {
-  const first = cleanText(els.agentOwnedAgentInput?.value || "", "");
+  const first = cleanText(els.nodeNameInput?.value || "", "");
   const firstIsUrl = Boolean(normalizeOwnedAgentBridgeUrl(first));
   return normalizeAgentOwnedAgentConfig({
     name: cleanText(els.agentTopicNameInput?.value || (firstIsUrl ? "" : first), "My agent"),
@@ -8796,15 +9864,15 @@ function openAgentTopicForm() {
   state.agentSetupMode = "agent";
   state.agentSetupMessage = "Add an agent bridge or configure a Hermes agent.";
   state.agentTopicFormOpen = true;
-  closeAgentProviderForm();
-  const first = cleanText(els.agentOwnedAgentInput?.value || "", "");
+  closeNodeForm();
+  const first = cleanText(els.nodeNameInput?.value || "", "");
   const firstIsUrl = Boolean(normalizeOwnedAgentBridgeUrl(first));
   state.agentTopicDraft = normalizeAgentOwnedAgentConfig({
     ...(state.agentOwnedAgent || {}),
     name: state.agentOwnedAgent?.name || (firstIsUrl ? "" : first),
     bridgeUrl: state.agentOwnedAgent?.bridgeUrl || (firstIsUrl ? first : ""),
   });
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
   renderAgentNodeSelect();
   window.setTimeout(() => els.agentTopicNameInput?.focus(), 0);
 }
@@ -8813,7 +9881,7 @@ function closeAgentTopicForm() {
   if (state.agentTopicBusy) return;
   state.agentTopicFormOpen = false;
   state.agentTopicDraft = null;
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
 }
 
 async function submitAgentTopicForm(event) {
@@ -8825,11 +9893,11 @@ async function submitAgentTopicForm(event) {
   if (config.bridgeUrl) {
     state.agentTopicFormOpen = false;
     state.agentSetupBalloonOpen = false;
-    state.agentOnboardingStatus = "Agent saved";
+    state.nodesPanelStatus = "Agent saved";
     renderAgentNodeSelect();
     renderAgentModelSelect();
     renderAgentReadinessStatus();
-    renderAgentOnboardingPanel();
+    renderNodesPanel();
     recordUserEvent("agent.owned_agent_saved", {
       target: "owned-agent",
       summary: `Saved ${config.name}`,
@@ -8838,16 +9906,16 @@ async function submitAgentTopicForm(event) {
     return;
   }
   if (config.type !== "hermes") {
-    state.agentOnboardingStatus = "Only Hermes service agents are available right now";
-    renderAgentOnboardingPanel();
+    state.nodesPanelStatus = "Only Hermes service agents are available right now";
+    renderNodesPanel();
     return;
   }
   const balance = Number(state.agentCredits?.balance || 0);
-  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
+  const cost = Number(state.agentCredits?.agent_harness_cost || state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 10);
   if (balance < cost) {
     state.agentSetupMessage = "Not enough credits to set an agent yet. Your balance is in the account popover.";
-    state.agentOnboardingStatus = "";
-    renderAgentOnboardingPanel();
+    state.nodesPanelStatus = "";
+    renderNodesPanel();
     return;
   }
   state.agentTopicBusy = true;
@@ -8865,51 +9933,48 @@ async function submitAgentTopicForm(event) {
     });
   } finally {
     state.agentTopicBusy = false;
-    renderAgentOnboardingPanel();
+    renderNodesPanel();
   }
 }
 
-function renderAgentOnboardingPanel() {
-  if (!els.agentOnboardingPanel) return;
+function renderNodesPanel() {
+  if (!els.nodesPanel) return;
   const session = activeAgentSession();
   const socialChat = session.kind === "direct" || session.kind === "shared-space";
   const show = Boolean(state.authUser && !socialChat && state.agentView !== "people" && (state.agentSetupBalloonOpen || state.agentModelSetup.open));
-  els.agentOnboardingPanel.hidden = !show;
-  placeAgentOnboardingPanel();
+  els.nodesPanel.hidden = !show;
+  placeNodesPanel();
   updateAgentScrollBottomButton();
   if (!show) return;
   renderAgentConfiguredModelList();
   const mode = state.agentSetupMode === "agent" ? "agent" : "provider";
-  const balance = Number(state.agentCredits?.balance || 0);
-  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
-  const missingFlux = Math.max(0, cost - balance);
   const providerProbe = currentAgentProviderProbe();
-  const agentReady = Boolean(state.agentReadiness?.ready || state.agentReadiness?.status === "ready");
-  if (els.agentOnboardingTitle) {
-    els.agentOnboardingTitle.textContent = state.agentTopicFormOpen
+  if (els.nodesPanelTitle) {
+    els.nodesPanelTitle.textContent = state.agentTopicFormOpen
       ? "Add agent"
       : mode === "agent"
-      ? "Set agent"
-      : providerProbe?.ok ? "Provider ready" : directProviderConfigured() ? "Node Configuration" : "Set provider";
+      ? "Set node"
+      : providerProbe?.ok ? "Node ready" : directProviderConfigured() ? "Node Configuration" : "Set node";
   }
-  if (els.agentOnboardingCopy) {
-    els.agentOnboardingCopy.textContent = state.agentSetupMessage || (mode === "agent"
-      ? "Pick your owned agent or set one up before sending chat messages."
-      : "Set, pick, or edit an OpenAI-compatible provider you own.");
+  if (els.nodesPanelCopy) {
+    els.nodesPanelCopy.textContent = state.agentSetupMessage || (mode === "agent"
+      ? "Pick a configured node or set one up before sending chat messages."
+      : "Edit, add, or delete configured nodes.");
   }
-  if (els.agentOnboardingStatus) {
-    const statusText = state.agentProvisionBusy ? "Setting agent" : state.agentOnboardingStatus || "";
-    els.agentOnboardingStatus.textContent = statusText;
-    els.agentOnboardingStatus.hidden = !statusText;
+  if (els.nodesPanelStatus) {
+    const statusText = state.agentProvisionBusy ? (state.nodesPanelStatus || "Provisioning sandbox...") : state.nodesPanelStatus || "";
+    els.nodesPanelStatus.textContent = statusText;
+    els.nodesPanelStatus.hidden = !statusText;
   }
-  if (els.agentOwnedAgentInput && document.activeElement !== els.agentOwnedAgentInput) {
-    els.agentOwnedAgentInput.value = state.agentOwnedAgent?.bridgeUrl || state.agentOwnedAgent?.name || "";
+  const formConfig = nodeFormConfigSource();
+  if (els.nodeNameInput && document.activeElement !== els.nodeNameInput) {
+    els.nodeNameInput.value = state.nodeFormOpen
+      ? formConfig?.nodeName || ""
+      : state.nodeFormDraft?.nodeName || state.agentDirectProvider?.nodeName || "";
   }
-  if (els.agentAddAgentButton) {
-    els.agentAddAgentButton.disabled = state.agentProvisionBusy || state.agentTopicBusy;
-    els.agentAddAgentButton.title = missingFlux > 0 && !agentReady && !state.agentOwnedAgent?.bridgeUrl
-      ? "Not enough credits to set a hosted Hermes agent yet"
-      : "Add an owned agent";
+  if (els.newNodeButton) {
+    els.newNodeButton.disabled = state.agentProviderProbeBusy || state.agentProvisionBusy;
+    els.newNodeButton.title = "Edit, add, or delete configured nodes.";
   }
   if (els.agentTopicForm) {
     els.agentTopicForm.hidden = !state.agentTopicFormOpen;
@@ -8929,64 +9994,142 @@ function renderAgentOnboardingPanel() {
   }
   if (els.agentTopicStatus) {
     els.agentTopicStatus.textContent = state.agentTopicBusy || state.agentProvisionBusy
-      ? "Setting agent"
+      ? "Provisioning sandbox..."
       : state.agentOwnedAgent?.bridgeUrl
-        ? "Own bridge saved"
+        ? "Private bridge saved"
         : ownedAgentConfigured() ? "Hermes service agent configured" : "";
   }
-  if (els.agentDirectProviderForm) {
-    els.agentDirectProviderForm.hidden = !state.agentDirectProviderFormOpen;
+  if (els.nodeForm) {
+    els.nodeForm.hidden = !state.nodeFormOpen;
   }
-  const formConfig = providerFormConfigSource();
-  if (els.agentDirectBaseUrlInput && document.activeElement !== els.agentDirectBaseUrlInput) {
-    els.agentDirectBaseUrlInput.value = formConfig?.baseUrl || "";
+  const formProvider = normalizeDirectProviderName(formConfig?.provider || directProviderNameFromBaseUrl(formConfig?.baseUrl || ""));
+  if (els.agentDirectProviderSelect && document.activeElement !== els.agentDirectProviderSelect) {
+    els.agentDirectProviderSelect.value = formProvider || "";
   }
-  if (els.agentDirectModelInput && document.activeElement !== els.agentDirectModelInput) {
-    els.agentDirectModelInput.value = formConfig?.model || "";
+  if (els.agentDirectModelField) {
+    els.agentDirectModelField.hidden = !formProvider;
+  }
+  let formProviderHasModels = false;
+  if (els.agentDirectModelInput) {
+    const modelOptions = directProviderModelOptions(formProvider, formConfig?.model || "");
+    formProviderHasModels = Boolean(modelOptions.length);
+    const liveModelOptions = directProviderLiveModelOptions(formProvider);
+    const modelStatus = directProviderModelStatus(formProvider);
+    if (formProvider && !liveModelOptions.length && modelStatus.status !== "loading" && modelStatus.status !== "snapshot" && modelStatus.status !== "error") {
+      void loadDirectProviderModels(formProvider);
+    }
+    const selectedModel = formConfig?.model && modelOptions.some((model) => model.id === formConfig.model)
+      ? formConfig.model
+      : modelOptions[0]?.id || "";
+    const placeholderText = modelStatus.status === "error"
+      ? "Model list unavailable"
+      : modelStatus.status === "loading" ? "Loading models..." : "Choose model";
+    els.agentDirectModelInput.setAttribute("placeholder", placeholderText);
+    els.agentDirectModelInput.replaceChildren(
+      ...modelOptions.map((model) => {
+        const option = document.createElement("option");
+        option.value = model.id;
+        option.textContent = model.label || model.id;
+        return option;
+      })
+    );
+    els.agentDirectModelInput.disabled = !formProvider || (formProvider && !modelOptions.length);
+    if (document.activeElement !== els.agentDirectModelInput) {
+      els.agentDirectModelInput.value = selectedModel;
+    }
   }
   if (els.agentDirectApiKeyInput && document.activeElement !== els.agentDirectApiKeyInput) {
     els.agentDirectApiKeyInput.value = formConfig?.apiKey ? AGENT_DIRECT_PROVIDER_KEY_MASK : "";
     els.agentDirectApiKeyInput.placeholder = formConfig?.apiKey ? "Saved key" : "";
   }
+  const harnessConfig = formConfig?.agentHarness && typeof formConfig.agentHarness === "object" ? formConfig.agentHarness : {};
+  const wrapperEnabled = Boolean(harnessConfig.enabled);
+  const harnessInfraMode = normalizeAgentHarnessInfraMode(harnessConfig.infraMode || AGENT_HARNESS_DEFAULT_INFRA_MODE);
+  const providerFieldsRequired = nodeFormNeedsDirectProvider(formConfig);
+  document.querySelectorAll(".node-provider-field").forEach((field) => {
+    field.hidden = field === els.agentDirectModelField ? !formProvider : false;
+    field.querySelectorAll("input, select, textarea, s-select").forEach((input) => {
+      input.disabled = input === els.agentDirectModelInput && (!formProvider || !formProviderHasModels);
+      input.required = providerFieldsRequired;
+    });
+  });
+  if (els.nodeAgentWrapperToggle && document.activeElement !== els.nodeAgentWrapperToggle) {
+    els.nodeAgentWrapperToggle.checked = wrapperEnabled;
+  }
+  if (els.nodeAgentWrapperFields) {
+    els.nodeAgentWrapperFields.hidden = !wrapperEnabled;
+  }
+  [els.nodeWrapperNameInput, els.nodeWrapperTypeSelect, els.nodeHarnessInfraSelect, els.nodeHarnessBridgeUrlInput, els.nodeWrapperRoleInput].forEach((input) => {
+    if (input) input.disabled = !wrapperEnabled;
+  });
+  if (els.nodeWrapperNameInput) els.nodeWrapperNameInput.required = wrapperEnabled;
+  if (els.nodeWrapperTypeSelect) els.nodeWrapperTypeSelect.required = wrapperEnabled;
+  if (els.nodeWrapperNameInput && document.activeElement !== els.nodeWrapperNameInput) {
+    els.nodeWrapperNameInput.value = harnessConfig.name || "";
+  }
+  if (els.nodeWrapperTypeSelect) {
+    els.nodeWrapperTypeSelect.value = normalizeAgentHarnessType(harnessConfig.type || AGENT_HARNESS_DEFAULT_TYPE);
+  }
+  if (els.nodeHarnessInfraSelect) {
+    els.nodeHarnessInfraSelect.value = harnessInfraMode;
+  }
+  if (els.nodeHarnessBridgeUrlField) {
+    els.nodeHarnessBridgeUrlField.hidden = !wrapperEnabled || harnessInfraMode !== AGENT_HARNESS_OWN_INFRA_MODE;
+  }
+  if (els.nodeHarnessBridgeUrlInput) {
+    els.nodeHarnessBridgeUrlInput.required = wrapperEnabled && harnessInfraMode === AGENT_HARNESS_OWN_INFRA_MODE;
+    els.nodeHarnessBridgeUrlInput.disabled = !wrapperEnabled || harnessInfraMode !== AGENT_HARNESS_OWN_INFRA_MODE;
+  }
+  if (els.nodeHarnessBridgeInfoBalloon && (!wrapperEnabled || harnessInfraMode !== AGENT_HARNESS_OWN_INFRA_MODE)) {
+    els.nodeHarnessBridgeInfoBalloon.hidden = true;
+  }
+  if (els.nodeHarnessBridgeUrlInput && document.activeElement !== els.nodeHarnessBridgeUrlInput) {
+    els.nodeHarnessBridgeUrlInput.value = harnessConfig.bridgeUrl || "";
+  }
+  if (els.nodeWrapperRoleInput && document.activeElement !== els.nodeWrapperRoleInput) {
+    els.nodeWrapperRoleInput.value = harnessConfig.instructions || "";
+  }
   if (els.agentProviderLoadingIcon) {
     els.agentProviderLoadingIcon.hidden = !state.agentProviderProbeBusy;
   }
-  if (els.agentDirectProviderStatus) {
-    els.agentDirectProviderStatus.textContent = directProviderStatusText(providerFormConfigSource());
+  if (els.nodeFormStatus) {
+    els.nodeFormStatus.textContent = state.nodeFormStatus || nodeFormStatusText(nodeFormConfigSource());
+    const footer = els.nodeFormStatus.closest?.(".node-form-footer");
+    if (footer) footer.classList.toggle("is-attention", state.nodeFormStatusAttention);
   }
 }
 
-function placeAgentOnboardingPanel() {
-  if (!els.agentOnboardingPanel) return;
-  const position = state.agentOnboardingPosition;
+function placeNodesPanel() {
+  if (!els.nodesPanel) return;
+  const position = state.nodesPanelPosition;
   if (!position) {
-    els.agentOnboardingPanel.style.removeProperty("--agent-onboarding-left");
-    els.agentOnboardingPanel.style.removeProperty("--agent-onboarding-top");
+    els.nodesPanel.style.removeProperty("--nodes-panel-left");
+    els.nodesPanel.style.removeProperty("--nodes-panel-top");
     return;
   }
   const appRect = appViewportRect();
-  const panelRect = els.agentOnboardingPanel.getBoundingClientRect();
+  const panelRect = els.nodesPanel.getBoundingClientRect();
   const halfWidth = Math.max(160, panelRect.width || 460) / 2;
   const halfHeight = Math.max(120, panelRect.height || 260) / 2;
   const left = clamp(Number(position.left || appRect.left + appRect.width / 2), appRect.left + halfWidth + 8, appRect.right - halfWidth - 8);
   const top = clamp(Number(position.top || appRect.top + appRect.height / 2), appRect.top + halfHeight + 8, appRect.bottom - halfHeight - 8);
-  state.agentOnboardingPosition = { left, top };
-  els.agentOnboardingPanel.style.setProperty("--agent-onboarding-left", `${left}px`);
-  els.agentOnboardingPanel.style.setProperty("--agent-onboarding-top", `${top}px`);
+  state.nodesPanelPosition = { left, top };
+  els.nodesPanel.style.setProperty("--nodes-panel-left", `${left}px`);
+  els.nodesPanel.style.setProperty("--nodes-panel-top", `${top}px`);
 }
 
 function openAgentSetupBalloon({ mode = "provider", message = "", openProviderForm = false, providerFormMode = "new" } = {}) {
   state.agentSetupBalloonOpen = true;
   state.agentSetupMode = mode === "agent" ? "agent" : "provider";
   state.agentSetupMessage = cleanText(message, "");
-  if (openProviderForm) openAgentProviderForm(providerFormMode);
+  if (openProviderForm) openNodeForm(providerFormMode);
   setAgentView("chat", { keepActiveSession: true });
   setAgentOpen(true);
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
   renderAgentNodeSelect();
   window.setTimeout(() => {
-    if (openProviderForm) els.agentDirectBaseUrlInput?.focus();
-    else if (mode === "agent") els.agentAddAgentButton?.focus();
+    if (openProviderForm) (state.nodeFormMode === "new" ? els.agentDirectProviderSelect : els.agentDirectModelInput)?.focus();
+    else if (mode === "agent") els.newNodeButton?.focus();
     else els.agentConfiguredModelList?.querySelector?.("button")?.focus();
   }, 0);
 }
@@ -8995,31 +10138,31 @@ function closeAgentSetupBalloon() {
   if (state.agentModelSetup.busy || state.agentTopicBusy || state.agentProvisionBusy) return;
   state.agentSetupBalloonOpen = false;
   state.agentSetupMessage = "";
-  closeAgentProviderForm();
+  closeNodeForm();
   closeAgentTopicForm();
   closeAgentModelSetup();
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
 }
 
 function handleAgentProviderSetupAction() {
   state.agentSetupBalloonOpen = true;
   state.agentSetupMode = "provider";
-  state.agentSetupMessage = "Set, pick, or edit an OpenAI-compatible provider you own.";
-  if (directProviderConfigured() && !agentTargetIsDirectProvider() && !state.agentDirectProviderFormOpen) {
-    state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
+  state.agentSetupMessage = "Edit, add, or delete configured nodes.";
+  if (hasDirectProviderConfigured() && !agentTargetIsDirectProvider() && !state.nodeFormOpen) {
+    state.agentTargetNode = directProviderTargetValue(activeAgentDirectProviderConfig() || state.agentDirectProviders[0]);
     closeAgentSetupBalloon();
     renderAgentNodeSelect();
     renderAgentModelSelect();
     renderAgentReadinessStatus();
     return;
   }
-  if (state.agentDirectProviderFormOpen) {
-    closeAgentProviderForm();
+  if (state.nodeFormOpen) {
+    closeNodeForm();
   } else {
-    openAgentProviderForm(directProviderConfigured() ? "edit" : "new");
+    openNodeForm(hasDirectProviderConfigured() ? "edit" : "new");
   }
-  renderAgentOnboardingPanel();
-  if (state.agentDirectProviderFormOpen) window.setTimeout(() => els.agentDirectBaseUrlInput?.focus(), 0);
+  renderNodesPanel();
+  if (state.nodeFormOpen) window.setTimeout(() => (state.nodeFormMode === "new" ? els.agentDirectProviderSelect : els.agentDirectModelInput)?.focus(), 0);
 }
 
 function handleAgentSetAgentAction() {
@@ -9040,38 +10183,142 @@ function handleAgentSetAgentAction() {
     return;
   }
   const balance = Number(state.agentCredits?.balance || 0);
-  const cost = Number(state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 100);
+  const cost = Number(state.agentCredits?.agent_harness_cost || state.agentCredits?.provision_main_cost || state.agentReadiness?.onboarding_options?.find?.((item) => item.id === "flux_credits")?.cost || 10);
   if (balance < cost) {
     state.agentSetupMessage = "Not enough credits to set an agent yet. Your balance is in the account popover.";
-    state.agentOnboardingStatus = "";
-    renderAgentOnboardingPanel();
+    state.nodesPanelStatus = "";
+    renderNodesPanel();
     return;
   }
   void provisionMainWithFlux();
 }
 
-async function submitAgentDirectProvider(event) {
+async function submitNodeForm(event) {
   event.preventDefault();
-  const config = syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: true });
-  const validation = validateDirectProviderConfig(config);
-  if (!validation.ok) {
-    if (els.agentDirectProviderStatus) {
-      els.agentDirectProviderStatus.textContent = validation.message;
-    }
-    renderAgentOnboardingPanel();
+  const config = syncNodeFormDraftFromInputs({ inferBaseUrl: true });
+  const harnessValidation = validateAgentHarnessConfig(config);
+  if (!harnessValidation.ok) {
+    setNodeFormStatus(harnessValidation.message, { attention: true });
+    renderNodesPanel();
     return;
   }
-  if (els.agentDirectProviderStatus) els.agentDirectProviderStatus.textContent = "Checking provider";
-  saveAgentDirectProviderConfig(validation.config);
-  const probe = await probeAgentProviderConnectivity({ allowProxy: true, force: true });
-  closeAgentProviderForm();
-  state.agentOnboardingStatus = probe.ok ? `${probe.mode} ready` : `${probe.mode} / ${probe.category}`;
-  if (directProviderConfigured()) state.agentTargetNode = AGENT_PROVIDER_TARGET_ID;
-  state.agentSetupBalloonOpen = !probe.ok;
+  const harness = harnessValidation.harness;
+  if (harness?.enabled) {
+    if (harness.infraMode === AGENT_HARNESS_DEFAULT_INFRA_MODE) {
+      const cost = Number(state.agentCredits?.agent_harness_cost || 10);
+      const balance = Number(state.agentCredits?.balance || 0);
+      if (balance < cost) {
+        state.nodesPanelStatus = "";
+        setNodeFormStatus(`Required ${cost} Fluxes.`, { attention: true });
+        renderNodesPanel();
+        return;
+      }
+    }
+    const providerValidation = nodeFormNeedsDirectProvider(config) ? validateDirectProviderConfig(config) : null;
+    if (providerValidation && !providerValidation.ok) {
+      setNodeFormStatus(providerValidation.message, { attention: true });
+      renderNodesPanel();
+      return;
+    }
+    if (providerValidation?.ok) {
+      state.agentProviderProbeBusy = true;
+      setNodeFormStatus("Checking provider");
+      renderNodesPanel();
+      const providerProbe = await probeAgentProviderConnectivity({ allowProxy: true, force: true, config: providerValidation.config });
+      if (!providerProbe.ok) {
+        setNodeFormStatus(`${providerProbe.mode} / ${providerProbe.category}: ${providerProbe.message}`, { attention: true });
+        state.agentProviderProbeBusy = false;
+        renderAgentReadinessStatus();
+        renderNodesPanel();
+        return;
+      }
+    }
+    state.agentProvisionBusy = true;
+    state.nodesPanelStatus = harness.infraMode === AGENT_HARNESS_DEFAULT_INFRA_MODE ? "Provisioning sandbox..." : "Checking own bridge";
+    setNodeFormStatus(state.nodesPanelStatus);
+    renderNodesPanel();
+    try {
+      const payload = await fetchJson("/agent/harnesses/provision", {
+        method: "POST",
+        timeoutMs: 120000,
+        body: agentHarnessProvisionPayload(config),
+      });
+      const provisionedHarness = payload.harness || {};
+      if (harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE) {
+        saveAgentOwnedAgentConfig({
+          name: provisionedHarness.harness_name || harness.name,
+          role: harness.instructions || "",
+          type: "hermes",
+          bridgeUrl: provisionedHarness.bridge_url || harness.bridgeUrl,
+        });
+        state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+      } else {
+        state.agentTargetNode = defaultAgentTargetNode();
+      }
+      closeNodeForm();
+      state.agentSetupBalloonOpen = false;
+      state.nodesPanelStatus = payload.lifecycle_state === "ready" ? "Sandbox ready" : agentReadinessPanelMessage(payload.readiness || { status: payload.lifecycle_state });
+      state.agentReadiness = payload.readiness || state.agentReadiness;
+      state.agentCredits = payload.credits || state.agentCredits;
+      await loadAccountCredits("harness").catch(() => null);
+      await loadAgentReadiness("harness").catch(() => null);
+      await loadUserFleet("harness").catch(() => null);
+      renderAgentNodeSelect();
+      renderAgentModelSelect();
+      renderAgentReadinessStatus();
+    } catch (error) {
+      const cost = Number(state.agentCredits?.agent_harness_cost || 10);
+      state.nodesPanelStatus = "";
+      const formMessage = error.payload?.error?.code === "insufficient_flux_credits"
+        ? `Required ${cost} Fluxes.`
+        : error.message || "Provisioning failed";
+      setNodeFormStatus(formMessage, { attention: true });
+      state.agentReadiness = {
+        ok: true,
+        schema: "hermes.wasm_agent.agent_readiness.v1",
+        status: error.payload?.error?.code === "insufficient_flux_credits" ? "insufficient_flux" : "failed",
+        ready: false,
+        target_node: agentTargetNode(),
+        message: formMessage,
+        missing_dependency: error.payload?.error?.code || "harness_provision",
+        backend: { diagnostics: error.payload || {} },
+      };
+      renderAgentReadinessStatus();
+    } finally {
+      state.agentProvisionBusy = false;
+      renderNodesPanel();
+    }
+    return;
+  }
+  const validation = validateDirectProviderConfig(config);
+  if (!validation.ok) {
+    setNodeFormStatus(validation.message, { attention: true });
+    renderNodesPanel();
+    return;
+  }
+  setNodeFormStatus("Checking provider");
+  renderNodesPanel();
+  const probe = await probeAgentProviderConnectivity({ allowProxy: true, force: true, config: validation.config });
+  if (!probe.ok) {
+    setNodeFormStatus(`${probe.mode} / ${probe.category}: ${probe.message}`, { attention: true });
+    state.nodesPanelStatus = "";
+    state.agentSetupBalloonOpen = true;
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    renderNodesPanel();
+    return;
+  }
+  const savedProvider = saveAgentDirectProviderConfig(validation.config);
+  state.agentDirectProvider = savedProvider || state.agentDirectProvider;
+  state.agentTargetNode = savedProvider ? directProviderTargetValue(savedProvider) : state.agentTargetNode;
+  closeNodeForm();
+  state.nodesPanelStatus = `${probe.mode} ready`;
+  state.agentSetupBalloonOpen = false;
   renderAgentNodeSelect();
   renderAgentModelSelect();
   renderAgentReadinessStatus();
-  renderAgentOnboardingPanel();
+  renderNodesPanel();
 }
 
 function directProviderChatUrl(config) {
@@ -9146,7 +10393,7 @@ async function callDirectAgentProvider(message, transcript = [], imageEntries = 
 function ownedAgentPrompt(message, transcript = [], observation = {}) {
   const config = state.agentOwnedAgent || {};
   const lines = [
-    config.role ? `Role/Instructions:\n${config.role}` : "",
+    config.role ? `Instructions:\n${config.role}` : "",
     "User message:",
     message,
   ];
@@ -9210,8 +10457,8 @@ async function callOwnedAgentBridge(message, transcript = [], observation = {}) 
 async function provisionMainWithFlux(agentConfig = {}) {
   if (state.agentProvisionBusy) return;
   state.agentProvisionBusy = true;
-  state.agentOnboardingStatus = "Setting agent";
-  renderAgentOnboardingPanel();
+  state.nodesPanelStatus = "Provisioning sandbox...";
+  renderNodesPanel();
   try {
     const payload = await fetchJson("/fleet/nodes/provision-main", {
       method: "POST",
@@ -9221,7 +10468,7 @@ async function provisionMainWithFlux(agentConfig = {}) {
         ...agentConfig,
       },
     });
-    state.agentOnboardingStatus = payload.already_provisioned ? "Already ready" : "Provisioned";
+    state.nodesPanelStatus = payload.already_provisioned ? "Sandbox ready" : "Sandbox ready";
     state.agentSetupBalloonOpen = false;
     state.agentSetupMessage = "";
     state.agentTargetNode = defaultAgentTargetNode();
@@ -9230,7 +10477,7 @@ async function provisionMainWithFlux(agentConfig = {}) {
     await loadUserFleet("provision").catch(() => {});
     renderAgentNodeSelect();
   } catch (error) {
-    state.agentOnboardingStatus = error.message;
+    state.nodesPanelStatus = error.message;
     recordUserEvent("account.fleet_provision_error", {
       target: "fleet",
       summary: error.message,
@@ -9238,7 +10485,7 @@ async function provisionMainWithFlux(agentConfig = {}) {
     });
   } finally {
     state.agentProvisionBusy = false;
-    renderAgentOnboardingPanel();
+    renderNodesPanel();
   }
 }
 
@@ -9249,7 +10496,7 @@ async function agentChatSetupBlock(session = activeAgentSession()) {
     return {
       mode: "provider",
       openProviderForm: true,
-      message: "Set one provider or agent before sending chat messages.",
+      message: "Set one node before sending chat messages.",
     };
   }
   if (agentTargetIsDirectProvider()) {
@@ -9258,7 +10505,7 @@ async function agentChatSetupBlock(session = activeAgentSession()) {
     return {
       mode: "provider",
       openProviderForm: true,
-      message: "Set one provider you own before sending chat messages.",
+      message: "Set one node before sending chat messages.",
     };
   }
   if (agentTargetIsOwnedAgent() && state.agentOwnedAgent?.bridgeUrl) return null;
@@ -9268,16 +10515,16 @@ async function agentChatSetupBlock(session = activeAgentSession()) {
     message: error.message,
   }));
   if (readiness?.ready || readiness?.status === "ready") return null;
-  if (directProviderConfigured()) {
+  if (hasDirectProviderConfigured()) {
     return {
       mode: "agent",
-      message: "Pick your saved provider, or set an agent before sending chat messages.",
+      message: "Pick your saved node before sending chat messages.",
     };
   }
   return {
     mode: "provider",
     openProviderForm: true,
-    message: "Set one provider or agent before sending chat messages.",
+    message: "Set one node before sending chat messages.",
   };
 }
 
@@ -9287,11 +10534,11 @@ async function warnAgentChatNeedsSetup(session = activeAgentSession()) {
   openAgentSetupBalloon(block);
   recordUserEvent("agent.message_blocked_setup_required", {
     target: "agent-setup",
-    summary: "Message blocked until provider or agent is set",
+    summary: "Message blocked until a node is set",
     data: {
       mode: block.mode || "",
       target_node: agentTargetNode(),
-      provider_configured: directProviderConfigured(),
+      provider_configured: hasDirectProviderConfigured(),
       readiness_status: state.agentReadiness?.status || "",
     },
   });
@@ -13190,7 +14437,7 @@ function resetAgentToViewportCorner() {
 function syncAgentAppBounds() {
   const rect = appViewportRect();
   els.agentOverlay.style.setProperty("--agent-app-width", `${Math.max(320, rect.width)}px`);
-  els.agentOverlay.style.setProperty("--agent-app-height", `${Math.max(320, rect.height)}px`);
+  els.agentOverlay.style.setProperty("--agent-app-height", `${Math.max(1, rect.height)}px`);
 }
 
 function placeAgentPanel() {
@@ -13207,6 +14454,15 @@ function placeAgentPanel() {
   const panelRect = panel.getBoundingClientRect();
   const panelWidth = panelRect.width || 430;
   const panelHeight = panelRect.height || 620;
+  if (isCompactViewport()) {
+    panel.style.left = `${appRect.left - overlayRect.left}px`;
+    panel.style.top = `${appRect.top - overlayRect.top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+    panel.dataset.x = "fullscreen";
+    panel.dataset.y = "fullscreen";
+    return;
+  }
   const minLeft = appRect.left + gap;
   const maxLeft = Math.max(minLeft, appRect.right - panelWidth - gap);
   const minTop = appRect.top + gap;
@@ -13360,9 +14616,9 @@ function installAgentPanelDragging() {
   });
 }
 
-function installAgentOnboardingDragging() {
-  const panel = els.agentOnboardingPanel;
-  const handle = panel?.querySelector(".agent-onboarding-head");
+function installNodesPanelDragging() {
+  const panel = els.nodesPanel;
+  const handle = panel?.querySelector(".nodes-panel-head");
   if (!panel || !handle) return;
   handle.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
@@ -13376,22 +14632,22 @@ function installAgentOnboardingDragging() {
     const startX = event.clientX;
     const startY = event.clientY;
     panel.classList.add("is-dragging");
-    document.body.classList.add("is-agent-onboarding-dragging");
+    document.body.classList.add("is-nodes-panel-dragging");
     try {
       handle.setPointerCapture(event.pointerId);
     } catch {
       // Window listeners keep the modal draggable if capture is interrupted.
     }
     const move = (moveEvent) => {
-      state.agentOnboardingPosition = {
+      state.nodesPanelPosition = {
         left: startCenter.left + moveEvent.clientX - startX,
         top: startCenter.top + moveEvent.clientY - startY,
       };
-      placeAgentOnboardingPanel();
+      placeNodesPanel();
     };
     const end = () => {
       panel.classList.remove("is-dragging");
-      document.body.classList.remove("is-agent-onboarding-dragging");
+      document.body.classList.remove("is-nodes-panel-dragging");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", end);
       window.removeEventListener("pointercancel", end);
@@ -13401,9 +14657,9 @@ function installAgentOnboardingDragging() {
         // The browser may already have released capture.
       }
       recordUserEvent("agent.onboarding_dragged", {
-        target: "agent-onboarding",
-        summary: "Moved agent setup modal",
-        data: state.agentOnboardingPosition || {},
+        target: "nodes-panel",
+        summary: "Moved nodes panel",
+        data: state.nodesPanelPosition || {},
       });
     };
     window.addEventListener("pointermove", move);
@@ -13444,6 +14700,7 @@ async function sendAgentMessage(text) {
   const runHintId = `chat_${turnStartedAt}_${Math.random().toString(36).slice(2, 7)}`;
   const mode = els.agentModeSelect.value;
   const useDirectApi = shouldUseDirectAgentProvider(activeSession);
+  const directProviderConfig = useDirectApi ? activeAgentDirectProviderConfig(state.agentTargetNode) : null;
   const useOwnedBridge = shouldUseOwnedAgentBridge(activeSession);
   const runHintTarget = useDirectApi || useOwnedBridge ? "" : targetNode;
   if (runHintTarget) {
@@ -13628,15 +14885,15 @@ async function sendAgentMessage(text) {
     const askActionId = useDirectApi ? "client_call_provider" : useOwnedBridge ? "client_call_owned_agent" : "client_ask_orchestrator";
     if (useDirectApi) {
       initialActions.push(
-        agentAction("Probe provider", "running", directProviderChatUrl(state.agentDirectProvider), {
+        agentAction("Probe provider", "running", directProviderChatUrl(directProviderConfig), {
           id: providerProbeActionId,
           topic: "run-api",
           kind: "api",
           meta: "checking",
           arguments: {
-            endpoint: directProviderChatUrl(state.agentDirectProvider),
-            model: state.agentDirectProvider?.model || "",
-            provider: state.agentDirectProvider?.provider || "",
+            endpoint: directProviderChatUrl(directProviderConfig),
+            model: directProviderConfig?.model || "",
+            provider: directProviderConfig?.provider || "",
           },
         })
       );
@@ -13645,18 +14902,18 @@ async function sendAgentMessage(text) {
       agentAction(
         useDirectApi ? "Call provider" : useOwnedBridge ? `Call ${state.agentOwnedAgent?.name || "owned agent"}` : `Ask ${targetNode}`,
         "running",
-        useDirectApi ? directProviderChatUrl(state.agentDirectProvider) : useOwnedBridge ? ownedAgentBridgeUrl() : "POST /agent/session/message",
+        useDirectApi ? directProviderChatUrl(directProviderConfig) : useOwnedBridge ? ownedAgentBridgeUrl() : "POST /agent/session/message",
         {
         id: askActionId,
         topic: useDirectApi || useOwnedBridge ? "run-api" : "run-hermes",
         kind: useDirectApi || useOwnedBridge ? "api" : "model",
         meta: useDirectApi
-          ? state.agentDirectProvider?.model || "provider"
+          ? directProviderConfig?.model || "provider"
           : useOwnedBridge
             ? state.agentOwnedAgent?.type || "hermes"
           : chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
         arguments: useDirectApi
-          ? { endpoint: directProviderChatUrl(state.agentDirectProvider), model: state.agentDirectProvider?.model || "", provider: state.agentDirectProvider?.provider || "" }
+          ? { endpoint: directProviderChatUrl(directProviderConfig), model: directProviderConfig?.model || "", provider: directProviderConfig?.provider || "" }
           : useOwnedBridge
             ? { endpoint: ownedAgentBridgeUrl(), type: state.agentOwnedAgent?.type || "hermes", name: state.agentOwnedAgent?.name || "" }
           : { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
@@ -13715,7 +14972,7 @@ async function sendAgentMessage(text) {
         pendingMessage.changed_files = [];
         pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
           action.id === askActionId
-            ? { ...action, label: providerMode, status: "done", detail: direct.model || state.agentDirectProvider?.model || "direct", meta: providerMode }
+            ? { ...action, label: providerMode, status: "done", detail: direct.model || directProviderConfig?.model || "direct", meta: providerMode }
             : action
         ));
         pendingMessage.diagnostics = {
@@ -13728,10 +14985,10 @@ async function sendAgentMessage(text) {
           transcript_turns: transcript.length,
           token_usage: directUsage,
           direct_provider: {
-            provider: state.agentDirectProvider?.provider || "",
-            model: direct.model || state.agentDirectProvider?.model || "",
-            base_url: state.agentDirectProvider?.baseUrl || "",
-            endpoint: directProviderChatUrl(state.agentDirectProvider),
+            provider: directProviderConfig?.provider || "",
+            model: direct.model || directProviderConfig?.model || "",
+            base_url: directProviderConfig?.baseUrl || "",
+            endpoint: directProviderChatUrl(directProviderConfig),
             mode: providerMode,
             probe: currentAgentProviderProbe(),
             transport_reason: currentAgentProviderProbe()?.transport_reason || "",
@@ -13751,7 +15008,7 @@ async function sendAgentMessage(text) {
         recordUserEvent("agent.direct_api_finished", {
           target: providerMode,
           summary: "Provider replied",
-          data: { model: direct.model || state.agentDirectProvider?.model || "", usage: directUsage, mode: providerMode },
+          data: { model: direct.model || directProviderConfig?.model || "", usage: directUsage, mode: providerMode },
         });
         return;
       } catch (directError) {
@@ -13771,15 +15028,15 @@ async function sendAgentMessage(text) {
           mode: diagnostic.mode || "unreachable",
           provider_error: diagnostic,
           direct_provider: {
-            provider: state.agentDirectProvider?.provider || "",
-            model: state.agentDirectProvider?.model || "",
-            base_url: state.agentDirectProvider?.baseUrl || "",
-            endpoint: directProviderChatUrl(state.agentDirectProvider),
+            provider: directProviderConfig?.provider || "",
+            model: directProviderConfig?.model || "",
+            base_url: directProviderConfig?.baseUrl || "",
+            endpoint: directProviderChatUrl(directProviderConfig),
           },
         };
         saveAgentSessions();
         renderAgentMessages();
-        renderAgentOnboardingPanel();
+        renderNodesPanel();
         return;
       }
     }
@@ -13855,7 +15112,7 @@ async function sendAgentMessage(text) {
         };
         saveAgentSessions();
         renderAgentMessages();
-        renderAgentOnboardingPanel();
+        renderNodesPanel();
         return;
       }
     }
@@ -16440,6 +17697,7 @@ async function loadUserFleet(origin = "auto") {
   try {
     const payload = await fetchJson("/fleet", { timeoutMs: 8000 });
     state.userFleetNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    state.userFleetHarnesses = Array.isArray(payload.harnesses) ? payload.harnesses : [];
     state.userFleetPolicy = cleanText(payload.server_policy, "");
     state.userFleetMode = cleanText(payload.deployment_mode, "");
     renderUserFleet();
@@ -16493,6 +17751,24 @@ function renderUserFleet() {
     meta.textContent = [node.main ? "main" : "", cleanText(node.backend, ""), cleanText(node.role, "")].filter(Boolean).join(" / ");
     const detail = document.createElement("p");
     detail.textContent = state.userFleetPolicy || "browser-local provider settings";
+    copy.append(title, meta, detail);
+    card.append(icon, copy);
+    rows.push(card);
+  }
+  for (const harness of state.userFleetHarnesses) {
+    const card = document.createElement("article");
+    card.className = "fleet-card";
+    const icon = document.createElement("span");
+    icon.className = "fleet-node-icon";
+    icon.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("div");
+    copy.className = "fleet-card-copy";
+    const title = document.createElement("strong");
+    title.textContent = cleanText(harness.harness_name, "Agent harness");
+    const meta = document.createElement("span");
+    meta.textContent = [cleanText(harness.infra_mode, ""), agentReadinessPanelMessage({ status: harness.lifecycle_state })].filter(Boolean).join(" / ");
+    const detail = document.createElement("p");
+    detail.textContent = cleanText(harness.node_id || harness.bridge_url || "Recover from Nodes", "Recover from Nodes");
     copy.append(title, meta, detail);
     card.append(icon, copy);
     rows.push(card);
@@ -18965,7 +20241,7 @@ function wireEvents() {
       updateNavigation: options.updateNavigation,
     });
 	    applyWidgetLayout();
-    placeAgentOnboardingPanel();
+    placeNodesPanel();
 	  };
   window.addEventListener("resize", refreshViewportLayout);
   window.visualViewport?.addEventListener("resize", refreshViewportLayout);
@@ -19163,22 +20439,39 @@ function wireEvents() {
     setAgentView(state.agentView === "people" ? "chat" : "people");
   });
   els.agentPeopleSearchForm?.addEventListener("submit", (event) => void submitAgentPeopleSearch(event));
-  els.agentOnboardingCloseButton?.addEventListener("click", closeAgentSetupBalloon);
-  els.agentAddAgentButton?.addEventListener("click", openAgentTopicForm);
+  els.nodesPanelCloseButton?.addEventListener("click", closeAgentSetupBalloon);
+  els.newNodeButton?.addEventListener("click", () => {
+    state.agentSetupBalloonOpen = true;
+    state.agentSetupMode = "provider";
+    state.agentSetupMessage = "Edit, add, or delete configured nodes.";
+    openNodeForm("new");
+    renderNodesPanel();
+    window.setTimeout(() => els.agentDirectProviderSelect?.focus(), 0);
+  });
   els.agentTopicForm?.addEventListener("submit", (event) => void submitAgentTopicForm(event));
   els.agentConfiguredModelList?.addEventListener("click", handleAgentConfiguredModelAction);
-  els.agentDirectProviderForm?.addEventListener("submit", submitAgentDirectProvider);
+  els.nodeForm?.addEventListener("submit", submitNodeForm);
+  els.nodeHarnessBridgeInfoButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (els.nodeHarnessBridgeInfoBalloon) {
+      els.nodeHarnessBridgeInfoBalloon.hidden = !els.nodeHarnessBridgeInfoBalloon.hidden;
+    }
+  });
   els.agentMessages?.addEventListener("scroll", updateAgentScrollBottomButton, { passive: true });
   els.agentScrollBottomButton?.addEventListener("click", () => scrollAgentChatToBottom({ smooth: true }));
-  [els.agentDirectBaseUrlInput, els.agentDirectModelInput, els.agentDirectApiKeyInput].forEach((input) => {
+  [els.agentDirectProviderSelect, els.agentDirectModelInput, els.agentDirectApiKeyInput, els.nodeNameInput, els.nodeAgentWrapperToggle, els.nodeWrapperNameInput, els.nodeWrapperTypeSelect, els.nodeHarnessInfraSelect, els.nodeHarnessBridgeUrlInput, els.nodeWrapperRoleInput].forEach((input) => {
     input?.addEventListener("focus", () => {
       if (input === els.agentDirectApiKeyInput && input.value === AGENT_DIRECT_PROVIDER_KEY_MASK) input.value = "";
     });
     input?.addEventListener("input", () => {
-      syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: input !== els.agentDirectBaseUrlInput });
+      syncNodeFormDraftFromInputs({ render: input === els.agentDirectProviderSelect || input === els.nodeAgentWrapperToggle || input === els.nodeWrapperTypeSelect || input === els.nodeHarnessInfraSelect });
+    });
+    input?.addEventListener("change", () => {
+      syncNodeFormDraftFromInputs({ render: input === els.agentDirectProviderSelect || input === els.nodeAgentWrapperToggle || input === els.nodeWrapperTypeSelect || input === els.nodeHarnessInfraSelect });
     });
     input?.addEventListener("blur", () => {
-      syncAgentDirectProviderDraftFromInputs({ inferBaseUrl: true, render: true });
+      syncNodeFormDraftFromInputs({ inferBaseUrl: true, render: true });
     });
   });
   els.agentEmojiButton?.addEventListener("click", (event) => {
@@ -19220,7 +20513,7 @@ function wireEvents() {
       if (agentTargetIsDirectProvider()) {
         openAgentSetupBalloon({
           mode: "provider",
-          message: "Edit the saved provider or type a new provider model.",
+          message: "Edit the saved node or type a new provider model.",
           openProviderForm: true,
           providerFormMode: "edit",
         });
@@ -19347,7 +20640,7 @@ function wireEvents() {
   installSpacePanning();
   installAgentDragging();
   installAgentPanelDragging();
-  installAgentOnboardingDragging();
+  installNodesPanelDragging();
 }
 
 async function bootstrapAuthenticatedApp() {
@@ -19401,6 +20694,7 @@ async function bootstrapAuthenticatedApp() {
 async function main() {
   applyLauncherPreference();
   wireEvents();
+  consumeAuthRedirectMessage();
   renderAuthGate();
   await loadConfig();
   await loadAuthSession();

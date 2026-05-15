@@ -55,6 +55,8 @@ DEFAULT_AGENT_BRIDGE_REQUEST_BYTES = 1536 * 1024
 DEFAULT_AGENT_BRIDGE_FORWARD_IMAGE_URLS = False
 DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC = 6 * 60
 DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC = 45
+DEFAULT_PROVIDER_MODELS_TIMEOUT_SEC = 15
+PROVIDER_MODELS_CACHE_TTL_SEC = 10 * 60
 DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
@@ -70,6 +72,11 @@ DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "s
 DEFAULT_AUTH_SECRET_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_auth_secret"
 AUTH_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 30
 ACTIVE_BRIDGE_TASK_STATUSES = {"active", "in_progress", "pending", "queued", "running", "started", "stopping", "submitted", "working"}
+PROVIDER_MODELS_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1/models",
+    "opencode-go": "https://opencode.ai/zen/go/v1/models",
+}
+PROVIDER_MODELS_CACHE: dict[str, dict[str, Any]] = {}
 CORE_FIRMWARE_PREFIXES = (
     "docs/roadmap/",
     "plugins/wasm-agent/ARTIFACTS.md",
@@ -118,7 +125,15 @@ AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
 AGENT_READINESS_READY = "ready"
 AGENT_READINESS_BACKEND_UNAVAILABLE = "backend_unavailable"
 AGENT_READINESS_SANDBOX_NOT_PROVISIONED = "sandbox_not_provisioned"
+AGENT_READINESS_INSUFFICIENT_FLUX = "insufficient_flux"
+AGENT_READINESS_PROVIDER_NOT_AVAILABLE = "provider_not_available"
+AGENT_HARNESS_SCHEMA = "hermes.wasm_agent.agent_harness.v1"
+AGENT_HARNESS_PROVISION_SCHEMA = "hermes.wasm_agent.agent_harness.provision.v1"
+AGENT_HARNESS_LIFECYCLE_STATES = {"requested", "charging", "provisioning", "ready", "failed", "stopped", "archived"}
+AGENT_HARNESS_INFRA_MODES = {"hermes_backend", "custom_bridge"}
+AGENT_HARNESS_TYPE = "hermes"
 FLUX_MAIN_NODE_PROVISION_COST = 100
+FLUX_AGENT_HARNESS_COST = 10
 FLUX_MAIN_NODE_PROVIDER = "opencode-go"
 FLUX_MAIN_NODE_MODEL = "deepseek-v4-flash"
 AGENT_MUTATION_ALLOWED_EXTENSIONS = {
@@ -264,6 +279,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     "auth": {
                         "googleClientId": google_client_id(),
                         "googleClientIdConfigured": bool(google_client_id()),
+                        "googleLoginUri": google_login_uri(self),
+                        "publicOrigin": public_origin(),
                         "required": True,
                         "userTable": "user_tb",
                     },
@@ -394,6 +411,14 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 query = parse_qs(urlparse(self.path).query)
                 target_node = str((query.get("target_node") or query.get("node_id") or [""])[0] or "")
                 self._json(HTTPStatus.OK, agent_readiness(self.server, user, target_node=target_node))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/agent/provider/models":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                provider = str((query.get("provider") or [""])[0] or "")
+                self._json(HTTPStatus.OK, provider_models_catalog(provider))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -556,6 +581,13 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=32 * 1024)
                 self._json(HTTPStatus.OK, provision_main_fleet_node(self.server, user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/agent/harnesses/provision":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, provision_agent_harness_node(self.server, user, body))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -1044,6 +1076,104 @@ def normalize_provider_model(model: str, base_url: str = "", provider: str = "")
     return clean
 
 
+def normalize_provider_models_name(value: str) -> str:
+    raw = re.sub(r"[\s_]+", "-", str(value or "").strip().lower())
+    if raw in {"openrouter", "open-router"}:
+        return "openrouter"
+    if raw in {"opencode-go", "open-code-go", "opencode"}:
+        return "opencode-go"
+    return ""
+
+
+def provider_models_from_payload(provider: str, payload: Any) -> list[dict[str, str]]:
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        return []
+    models: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in data:
+        if isinstance(item, str):
+            model_id = item.strip()
+            label = model_id
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or "").strip()
+            label = str(item.get("name") or model_id).strip()
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"id": clipped(model_id, 180), "label": clipped(label or model_id, 220)})
+    return models
+
+
+def provider_models_catalog(provider: str) -> dict[str, Any]:
+    provider_name = normalize_provider_models_name(provider)
+    source_url = PROVIDER_MODELS_URLS.get(provider_name)
+    if not source_url:
+        raise BrowserError(
+            "provider_not_supported",
+            "Model listing is available for OpenRouter and OpenCode-Go.",
+            status=HTTPStatus.BAD_REQUEST,
+        )
+    now = time.time()
+    cached = PROVIDER_MODELS_CACHE.get(provider_name)
+    if cached and now - float(cached.get("fetched_at") or 0) < PROVIDER_MODELS_CACHE_TTL_SEC:
+        return {
+            "ok": True,
+            "provider": provider_name,
+            "source": source_url,
+            "cached": True,
+            "fetched_at": cached.get("fetched_at_iso", ""),
+            "models": cached.get("models", []),
+        }
+    try:
+        req = Request(
+            source_url,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "wasm-agent/0.1 provider-model-list",
+            },
+        )
+        with urlopen(req, timeout=DEFAULT_PROVIDER_MODELS_TIMEOUT_SEC) as response:
+            text = response.read(8 * 1024 * 1024).decode("utf-8", errors="replace")
+        payload = json.loads(text) if text.strip() else {}
+    except HTTPError as exc:
+        raise BrowserError(
+            "provider_models_unavailable",
+            f"{provider_name} model list returned HTTP {exc.code}.",
+            status=HTTPStatus.BAD_GATEWAY,
+        ) from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise BrowserError(
+            "provider_models_unavailable",
+            f"{provider_name} model list is unavailable: {exc}",
+            status=HTTPStatus.BAD_GATEWAY,
+        ) from exc
+    models = provider_models_from_payload(provider_name, payload)
+    if not models:
+        raise BrowserError(
+            "provider_models_empty",
+            f"{provider_name} did not return any models.",
+            status=HTTPStatus.BAD_GATEWAY,
+        )
+    fetched_at = time.time()
+    fetched_at_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(fetched_at))
+    PROVIDER_MODELS_CACHE[provider_name] = {
+        "models": models,
+        "fetched_at": fetched_at,
+        "fetched_at_iso": fetched_at_iso,
+    }
+    return {
+        "ok": True,
+        "provider": provider_name,
+        "source": source_url,
+        "cached": False,
+        "fetched_at": fetched_at_iso,
+        "models": models,
+    }
+
+
 def provider_http_diagnostic(status: int, message: str = "", *, endpoint: str = "", model: str = "") -> dict[str, Any]:
     lower_message = message.lower()
     if status == 403 and (
@@ -1409,7 +1539,11 @@ def google_client_id() -> str:
 
 
 def public_origin() -> str:
-    return os.getenv("HERMES_WASM_AGENT_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    return (
+        os.getenv("HERMES_WASM_AGENT_PUBLIC_ORIGIN", "").strip()
+        or env_file_value("HERMES_WASM_AGENT_PUBLIC_ORIGIN")
+        or env_file_value("PUBLIC_ORIGIN")
+    ).rstrip("/")
 
 
 def env_bool(name: str) -> bool | None:
@@ -1499,7 +1633,7 @@ def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = Non
 
 
 def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> str:
-    img_src = "'self' data: blob: https://accounts.google.com"
+    img_src = "'self' data: blob: https://accounts.google.com https://lh3.googleusercontent.com"
     connect_src = "'self' https://accounts.google.com stun: turn: turns:"
     if not public_deployment(handler):
         img_src = "'self' data: blob: https:"
@@ -1723,6 +1857,28 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS agent_harness_tb (
+          id TEXT PRIMARY KEY,
+          user_id TEXT NOT NULL,
+          node_id TEXT NOT NULL DEFAULT '',
+          node_name TEXT NOT NULL DEFAULT '',
+          harness_name TEXT NOT NULL,
+          harness_type TEXT NOT NULL DEFAULT 'hermes',
+          infra_mode TEXT NOT NULL,
+          lifecycle_state TEXT NOT NULL,
+          bridge_url TEXT NOT NULL DEFAULT '',
+          capabilities_json TEXT NOT NULL DEFAULT '{}',
+          failure_reason TEXT NOT NULL DEFAULT '',
+          quota_json TEXT NOT NULL DEFAULT '{}',
+          cleanup_after_at INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS brain_profile_tb (
           id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL,
@@ -1768,6 +1924,8 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS user_fleet_user_idx ON user_fleet_tb(user_id, is_main)",
         "CREATE INDEX IF NOT EXISTS flux_credit_user_idx ON flux_credit_ledger_tb(user_id, created_at)",
         "CREATE UNIQUE INDEX IF NOT EXISTS flux_credit_idempotency_idx ON flux_credit_ledger_tb(kind, idempotency_key) WHERE idempotency_key != ''",
+        "CREATE INDEX IF NOT EXISTS agent_harness_user_idx ON agent_harness_tb(user_id, lifecycle_state, created_at)",
+        "CREATE INDEX IF NOT EXISTS agent_harness_node_idx ON agent_harness_tb(node_id)",
     ):
         conn.execute(statement)
 
@@ -3610,6 +3768,16 @@ def flux_main_node_provision_cost() -> int:
     return FLUX_MAIN_NODE_PROVISION_COST
 
 
+def flux_agent_harness_cost() -> int:
+    raw = os.getenv("HERMES_WASM_AGENT_HARNESS_FLUX_COST", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return FLUX_AGENT_HARNESS_COST
+
+
 def append_instance_audit(
     conn: sqlite3.Connection | None,
     *,
@@ -3703,6 +3871,7 @@ def account_credits(user: dict[str, Any] | None, *, limit: int = 25) -> dict[str
         "currency": "flux",
         "balance": balance,
         "provision_main_cost": flux_main_node_provision_cost(),
+        "agent_harness_cost": flux_agent_harness_cost(),
         "ledger": [public_flux_ledger_row(row) for row in rows],
     }
 
@@ -3917,8 +4086,8 @@ def onboarding_options_for_readiness(user: dict[str, Any] | None, status: str) -
         {
             "id": "flux_credits",
             "label": "Use Flux credits",
-            "endpoint": "/fleet/nodes/provision-main",
-            "cost": flux_main_node_provision_cost(),
+            "endpoint": "/agent/harnesses/provision",
+            "cost": flux_agent_harness_cost(),
             "provider": FLUX_MAIN_NODE_PROVIDER,
             "model": FLUX_MAIN_NODE_MODEL,
         },
@@ -3971,6 +4140,70 @@ def bridge_node_probe(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
 
 def readiness_node_running(node: dict[str, Any]) -> bool:
     return bool(node.get("running")) or str(node.get("status") or "").lower() in {"running", "ok", "ready"}
+
+
+def latest_user_harness_for_node(user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
+    uid = user_id(user)
+    with auth_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM agent_harness_tb
+             WHERE user_id = ? AND (node_id = ? OR node_id = '')
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+            """,
+            (uid, node_id),
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        capabilities = json.loads(str(row["capabilities_json"] or "{}"))
+        if not isinstance(capabilities, dict):
+            capabilities = {}
+    except Exception:
+        capabilities = {}
+    return {
+        "id": str(row["id"]),
+        "lifecycle_state": str(row["lifecycle_state"]),
+        "failure_reason": str(row["failure_reason"]),
+        "infra_mode": str(row["infra_mode"]),
+        "bridge_url": str(row["bridge_url"]),
+        "capabilities": capabilities,
+    }
+
+
+def readiness_from_harness_lifecycle(
+    *,
+    user: dict[str, Any] | None,
+    requested_target_node: str,
+    target_node: str,
+    bridge_url_source: str,
+    bridge_url: str,
+    harness: dict[str, Any],
+) -> dict[str, Any] | None:
+    state = str(harness.get("lifecycle_state") or "")
+    if state not in AGENT_HARNESS_LIFECYCLE_STATES or state == "ready":
+        return None
+    if state in {"requested", "charging", "provisioning"}:
+        message = "Provisioning sandbox..."
+    elif state == "failed":
+        message = "Provisioning failed"
+    elif state == "stopped":
+        message = "Sandbox stopped"
+    else:
+        message = "Sandbox archived"
+    return readiness_payload(
+        user=user,
+        requested_target_node=requested_target_node,
+        target_node=target_node,
+        resolved_account_node=target_node,
+        status=state,
+        bridge_url_source=bridge_url_source,
+        bridge_url=bridge_url,
+        message=message,
+        missing_dependency=f"account_sandbox_{state}",
+        backend={"harness": harness},
+    )
 
 
 def agent_readiness(
@@ -4040,7 +4273,18 @@ def agent_readiness(
         )
 
     account_node = account_main_node_id(user)
+    lifecycle = latest_user_harness_for_node(user, account_node)
     runtime_url, runtime_source = account_node_runtime_url_source(server, account_node)
+    lifecycle_readiness = readiness_from_harness_lifecycle(
+        user=user,
+        requested_target_node=requested,
+        target_node=account_node,
+        bridge_url_source=runtime_source,
+        bridge_url=server.bridge_url,
+        harness=lifecycle,
+    )
+    if lifecycle_readiness:
+        return lifecycle_readiness
     if not runtime_url:
         return readiness_payload(
             user=user,
@@ -4050,7 +4294,7 @@ def agent_readiness(
             status=AGENT_READINESS_SANDBOX_NOT_PROVISIONED,
             bridge_url_source=runtime_source,
             bridge_url=server.bridge_url,
-            message="Agent not set",
+            message="Sandbox not provisioned.",
             missing_dependency="account_sandbox_api_url",
         )
     try:
@@ -4081,21 +4325,22 @@ def agent_readiness(
             bridge_url_source=runtime_source,
             bridge_url=server.bridge_url,
             account_sandbox_url=runtime_url,
-            message=f"Agent not set: {exc.message}",
+            message="Sandbox not provisioned.",
             missing_dependency="account_sandbox_node",
             backend={"bridge": health, "error": exc.code, "detail": exc.message},
         )
     if not readiness_node_running(node):
+        stopped_status = "stopped" if lifecycle.get("lifecycle_state") == "ready" else AGENT_READINESS_SANDBOX_NOT_PROVISIONED
         return readiness_payload(
             user=user,
             requested_target_node=requested,
             target_node=account_node,
             resolved_account_node=account_node,
-            status=AGENT_READINESS_SANDBOX_NOT_PROVISIONED,
+            status=stopped_status,
             bridge_url_source=runtime_source,
             bridge_url=server.bridge_url,
             account_sandbox_url=runtime_url,
-            message="Agent not set",
+            message="Sandbox stopped" if stopped_status == "stopped" else "Sandbox not provisioned.",
             missing_dependency="account_sandbox_node_running",
             backend={"bridge": health, "node": node},
         )
@@ -4132,11 +4377,20 @@ def list_user_fleet(user: dict[str, Any] | None) -> dict[str, Any]:
             "SELECT * FROM user_fleet_tb WHERE user_id = ? ORDER BY is_main DESC, created_at ASC",
             (uid,),
         ).fetchall()
+        harness_rows = conn.execute(
+            """
+            SELECT * FROM agent_harness_tb
+             WHERE user_id = ? AND lifecycle_state != 'archived'
+             ORDER BY created_at DESC, id DESC
+            """,
+            (uid,),
+        ).fetchall()
     return {
         "ok": True,
         "schema": USER_FLEET_SCHEMA,
         "deployment_mode": wasm_agent_deployment_mode(),
         "nodes": [public_fleet_node(row) for row in rows],
+        "harnesses": [public_agent_harness(row) for row in harness_rows],
         "direct_provider_scope": "browser-local",
         "server_policy": "server stores ownership metadata only until backend execution is explicitly requested",
     }
@@ -4198,24 +4452,466 @@ def validate_provision_main_body(user: dict[str, Any] | None, body: dict[str, An
         raise BrowserError("provision_agent_type_denied", "Only Hermes service agents are available right now.", status=HTTPStatus.FORBIDDEN)
 
 
-def provision_main_bridge_payload(node_id: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+def provider_api_key_env_name(provider: str) -> str:
+    clean = str(provider or "").strip().lower()
+    if clean in {"openrouter", "opencode-go", "opencode-zen"}:
+        return "OPENROUTER_API_KEY"
+    if clean == "nvidia":
+        return "NVIDIA_API_KEY"
+    if clean in {"minimax", "minimax-cn"}:
+        return "MINIMAX_API_KEY"
+    return "OPENAI_API_KEY"
+
+
+def provision_main_bridge_payload(
+    node_id: str,
+    body: dict[str, Any] | None = None,
+    provider_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     body = body if isinstance(body, dict) else {}
+    provider_config = provider_config if isinstance(provider_config, dict) else {}
+    default_provider = str(provider_config.get("provider") or FLUX_MAIN_NODE_PROVIDER).strip() or FLUX_MAIN_NODE_PROVIDER
+    default_model = str(provider_config.get("model") or FLUX_MAIN_NODE_MODEL).strip() or FLUX_MAIN_NODE_MODEL
+    api_key = str(provider_config.get("api_key") or "").strip()
     agent_name = str(body.get("agent_name") or body.get("agentName") or "My agent").strip()[:80] or "My agent"
     agent_role = str(body.get("agent_role") or body.get("instructions") or body.get("role") or "").strip()[:2000]
     role_suffix = f"\n\nAgent name: {agent_name}."
     if agent_role:
-        role_suffix += f"\nRole/Instructions: {agent_role}"
-    return {
+        role_suffix += f"\nInstructions: {agent_role}"
+    payload = {
         "node_id": node_id,
         "node_state": "4",
-        "default_model_provider": FLUX_MAIN_NODE_PROVIDER,
-        "default_model": FLUX_MAIN_NODE_MODEL,
+        "default_model_provider": default_provider,
+        "default_model": default_model,
         "start_immediately": True,
         "personality": (
             "You are this account's bounded Hermes sandbox. Stay inside the authenticated user's "
             "workspace and do not mutate wasm-agent core firmware unless an admin-orchestrator path explicitly delegates it."
             f"{role_suffix}"
         ),
+    }
+    if api_key:
+        payload[provider_api_key_env_name(default_provider)] = api_key
+    base_url = str(provider_config.get("base_url") or "").strip()
+    if base_url:
+        payload["OPENAI_BASE_URL"] = base_url
+    return payload
+
+
+def normalize_harness_infra_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"", "hermes", "hermes_backend", "hermes_infra", "backend", "backend_infra", "our", "our_infra"}:
+        return "hermes_backend"
+    if raw in {"custom", "custom_bridge", "bridge", "own", "own_bridge", "own_infra"}:
+        return "custom_bridge"
+    if raw in {"browser", "browser_direct", "direct", "direct_provider", "provider", "claude", "anthropic", "other"}:
+        raise BrowserError("provider_not_available", "Infrastructure option not available yet.", status=HTTPStatus.BAD_REQUEST)
+    raise BrowserError("invalid_infra_mode", "Node infrastructure mode is not supported.")
+
+
+def normalize_harness_type(value: Any) -> str:
+    raw = str(value or AGENT_HARNESS_TYPE).strip().lower().replace("-", "_").replace(" ", "_")
+    if raw in {"", "agent", "hermes"}:
+        return AGENT_HARNESS_TYPE
+    if raw in {"openclaw", "kilo_code", "kilocode", "claude_code", "pi", "other"}:
+        raise BrowserError("provider_not_available", "Agent not available yet.", status=HTTPStatus.BAD_REQUEST)
+    raise BrowserError("provider_not_available", "Agent not available yet.", status=HTTPStatus.BAD_REQUEST)
+
+
+def normalize_custom_bridge_url(value: Any) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception as exc:
+        raise BrowserError("invalid_bridge_url", "Private bridge URL must be a valid HTTP or HTTPS URL.") from exc
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or any(char.isspace() for char in raw):
+        raise BrowserError("invalid_bridge_url", "Private bridge URL must be a valid HTTP or HTTPS URL.")
+    if parsed.username or parsed.password:
+        raise BrowserError("invalid_bridge_url", "Private bridge URL must not contain credentials.")
+    return parsed._replace(query="", fragment="").geturl().rstrip("/")
+
+
+def bridge_join_url(base_url: str, path: str) -> str:
+    base = normalize_custom_bridge_url(base_url)
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"{base}{suffix}"
+
+
+def custom_bridge_get_json(base_url: str, path: str, *, timeout: float = 8.0) -> dict[str, Any]:
+    request = Request(
+        bridge_join_url(base_url, path),
+        headers={"Accept": "application/json", "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} custom-bridge-probe"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", "replace")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:600]
+        raise BrowserError("custom_bridge_unavailable", detail or f"Custom bridge returned HTTP {int(exc.code)}.", status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        raise BrowserError("custom_bridge_unavailable", str(exc.reason), status=HTTPStatus.BAD_GATEWAY) from exc
+    try:
+        payload = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as exc:
+        raise BrowserError("custom_bridge_unavailable", "Custom bridge returned non-JSON health data.", status=HTTPStatus.BAD_GATEWAY) from exc
+    return payload if isinstance(payload, dict) else {"result": payload}
+
+
+def probe_custom_bridge_url(base_url: str) -> dict[str, Any]:
+    health = custom_bridge_get_json(base_url, "/health")
+    models: dict[str, Any] = {}
+    models_route = ""
+    last_error = ""
+    for route in ("/bridge/v1/models", "/v1/models"):
+        try:
+            models = custom_bridge_get_json(base_url, route)
+            models_route = route
+            break
+        except BrowserError as exc:
+            last_error = exc.message
+    if not models_route:
+        raise BrowserError("custom_bridge_unavailable", last_error or "Custom bridge model route is unavailable.", status=HTTPStatus.BAD_GATEWAY)
+    return {
+        "health": health,
+        "models": compact_json(models, 1200),
+        "routes": {
+            "health": "/health",
+            "models": models_route,
+            "chat": ["/bridge/v1/chat", "/tasks"],
+        },
+    }
+
+
+def validate_agent_harness_body(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    if user_is_admin(user):
+        raise BrowserError("admin_provision_denied", "Admin accounts do not self-provision paid account sandboxes.", status=HTTPStatus.FORBIDDEN)
+    name = clipped(str(body.get("harness_name") or body.get("harnessName") or body.get("agent_name") or body.get("name") or "").strip(), 80)
+    if not name:
+        raise BrowserError("missing_harness_name", "Agent harness name is required.")
+    harness_type = normalize_harness_type(body.get("harness_type") or body.get("harnessType") or body.get("type") or AGENT_HARNESS_TYPE)
+    infra_mode = normalize_harness_infra_mode(body.get("infra_mode") or body.get("infraMode") or body.get("provider") or "")
+    bridge_url = normalize_custom_bridge_url(body.get("bridge_url") or body.get("bridgeUrl") or "")
+    if infra_mode == "custom_bridge" and not bridge_url:
+        raise BrowserError("missing_bridge_url", "Private bridge URL is required.")
+    return {
+        "harness_id": safe_state_id(f"harness-{next_snowflake_id():x}", "harness"),
+        "harness_name": name,
+        "harness_type": harness_type,
+        "infra_mode": infra_mode,
+        "instructions": clipped(str(body.get("instructions") or body.get("harness_instructions") or body.get("role") or "").strip(), 2000),
+        "node_name": clipped(str(body.get("node_name") or body.get("nodeName") or "").strip(), 80),
+        "bridge_url": bridge_url,
+    }
+
+
+def public_agent_harness(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    def parsed_json(key: str) -> dict[str, Any]:
+        try:
+            parsed = json.loads(str(row[key] or "{}"))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {
+        "schema": AGENT_HARNESS_SCHEMA,
+        "id": str(row["id"]),
+        "user_id": str(row["user_id"]),
+        "node_id": str(row["node_id"]),
+        "node_name": str(row["node_name"]),
+        "harness_name": str(row["harness_name"]),
+        "harness_type": str(row["harness_type"]),
+        "infra_mode": str(row["infra_mode"]),
+        "lifecycle_state": str(row["lifecycle_state"]),
+        "bridge_url": str(row["bridge_url"]),
+        "capabilities": parsed_json("capabilities_json"),
+        "failure_reason": str(row["failure_reason"]),
+        "quota": parsed_json("quota_json"),
+        "cleanup_after_at": int(row["cleanup_after_at"] or 0),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]),
+        "metadata": parsed_json("metadata_json"),
+    }
+
+
+def set_agent_harness_state(
+    conn: sqlite3.Connection,
+    harness_id: str,
+    state: str,
+    *,
+    bridge_url: str = "",
+    capabilities: dict[str, Any] | None = None,
+    failure_reason: str = "",
+) -> None:
+    if state not in AGENT_HARNESS_LIFECYCLE_STATES:
+        raise BrowserError("invalid_harness_state", "Harness lifecycle state is invalid.")
+    conn.execute(
+        """
+        UPDATE agent_harness_tb
+           SET lifecycle_state = ?,
+               bridge_url = COALESCE(NULLIF(?, ''), bridge_url),
+               capabilities_json = ?,
+               failure_reason = ?,
+               updated_at = ?
+         WHERE id = ?
+        """,
+        (
+            state,
+            bridge_url,
+            json.dumps(capabilities or {}, ensure_ascii=True, sort_keys=True),
+            clipped(failure_reason, 600),
+            int(time.time()),
+            harness_id,
+        ),
+    )
+
+
+def write_harness_row_in_conn(
+    conn: sqlite3.Connection,
+    user: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    node_id: str,
+    lifecycle_state: str,
+    bridge_url: str = "",
+    capabilities: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    now = int(time.time())
+    cleanup_after = now + 30 * 24 * 60 * 60
+    quota = {"max_flux_debit": flux_agent_harness_cost(), "cleanup_after_days": 30, "recovery_visible": True}
+    conn.execute(
+        """
+        INSERT INTO agent_harness_tb (
+          id, user_id, node_id, node_name, harness_name, harness_type, infra_mode,
+          lifecycle_state, bridge_url, capabilities_json, failure_reason, quota_json,
+          cleanup_after_at, created_at, updated_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          node_id = excluded.node_id,
+          node_name = excluded.node_name,
+          harness_name = excluded.harness_name,
+          harness_type = excluded.harness_type,
+          infra_mode = excluded.infra_mode,
+          lifecycle_state = excluded.lifecycle_state,
+          bridge_url = excluded.bridge_url,
+          capabilities_json = excluded.capabilities_json,
+          failure_reason = '',
+          quota_json = excluded.quota_json,
+          cleanup_after_at = excluded.cleanup_after_at,
+          updated_at = excluded.updated_at,
+          metadata_json = excluded.metadata_json
+        """,
+        (
+            config["harness_id"],
+            user_id(user),
+            node_id,
+            config["node_name"],
+            config["harness_name"],
+            config["harness_type"],
+            config["infra_mode"],
+            lifecycle_state,
+            bridge_url,
+            json.dumps(capabilities or {}, ensure_ascii=True, sort_keys=True),
+            json.dumps(quota, ensure_ascii=True, sort_keys=True),
+            cleanup_after,
+            now,
+            now,
+            json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+        ),
+    )
+    row = conn.execute("SELECT * FROM agent_harness_tb WHERE id = ?", (config["harness_id"],)).fetchone()
+    return public_agent_harness(row)
+
+
+def refund_agent_harness_charge(user: dict[str, Any], harness_id: str, node_id: str, cost: int, reason: str) -> None:
+    uid = user_id(user)
+    with auth_connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM flux_credit_ledger_tb WHERE kind = 'refund' AND idempotency_key = ?",
+            (f"refund:{harness_id}",),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                """
+                INSERT INTO flux_credit_ledger_tb (
+                  id, user_id, actor_user_id, amount, kind, reason, idempotency_key, target, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, 'refund', ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"flux_{next_snowflake_id():x}",
+                    uid,
+                    uid,
+                    cost,
+                    f"Refund failed harness {harness_id}",
+                    f"refund:{harness_id}",
+                    f"node:{node_id}",
+                    int(time.time()),
+                    json.dumps({"failure_reason": clipped(reason, 600), "harness_id": harness_id}, ensure_ascii=True, sort_keys=True),
+                ),
+            )
+        set_agent_harness_state(conn, harness_id, "failed", failure_reason=reason)
+        append_instance_audit(
+            conn,
+            actor_user_id=uid,
+            action="agent_harness.refund",
+            target=f"harness:{harness_id}",
+            metadata={"cost": cost, "node_id": node_id, "reason": clipped(reason, 600)},
+        )
+
+
+def provision_agent_harness_node(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    config = validate_agent_harness_body(user, body)
+    assert user is not None
+    uid = user_id(user)
+    node_id = account_main_node_id(user)
+    if config["infra_mode"] == "custom_bridge":
+        with auth_connect() as conn:
+            harness = write_harness_row_in_conn(
+                conn,
+                user,
+                config,
+                node_id="",
+                lifecycle_state="requested",
+                bridge_url=config["bridge_url"],
+                capabilities={"mode": "custom_bridge"},
+            )
+            append_instance_audit(conn, actor_user_id=uid, action="agent_harness.custom_bridge.requested", target=f"harness:{config['harness_id']}", metadata={"bridge_host": urlparse(config["bridge_url"]).netloc})
+        try:
+            capabilities = probe_custom_bridge_url(config["bridge_url"])
+        except BrowserError as exc:
+            with auth_connect() as conn:
+                set_agent_harness_state(conn, config["harness_id"], "failed", failure_reason=exc.message)
+            raise
+        with auth_connect() as conn:
+            set_agent_harness_state(conn, config["harness_id"], "ready", bridge_url=config["bridge_url"], capabilities=capabilities)
+            row = conn.execute("SELECT * FROM agent_harness_tb WHERE id = ?", (config["harness_id"],)).fetchone()
+            append_instance_audit(conn, actor_user_id=uid, action="agent_harness.custom_bridge.ready", target=f"harness:{config['harness_id']}", metadata={"routes": capabilities.get("routes", {})})
+            harness = public_agent_harness(row)
+        return {
+            "ok": True,
+            "schema": AGENT_HARNESS_PROVISION_SCHEMA,
+            "charged": False,
+            "cost": 0,
+            "lifecycle_state": "ready",
+            "harness": harness,
+            "credits": account_credits(user),
+        }
+
+    cost = flux_agent_harness_cost()
+    idempotency_key = clipped(str(body.get("idempotency_key") or body.get("idempotencyKey") or "").strip(), 160)
+    bridge_body = {
+        **body,
+        "agent_name": config["harness_name"],
+        "agent_role": config["instructions"],
+        "agent_type": "hermes",
+    }
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if idempotency_key:
+            duplicate = conn.execute(
+                "SELECT * FROM flux_credit_ledger_tb WHERE kind = 'harness_provision' AND idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if duplicate:
+                raise BrowserError("duplicate_idempotency_key", "That harness provisioning idempotency key was already used.", status=HTTPStatus.CONFLICT)
+        balance = flux_balance(conn, uid)
+        if balance < cost:
+            append_instance_audit(
+                conn,
+                actor_user_id=uid,
+                action="agent_harness.denied",
+                target=f"harness:{config['harness_id']}",
+                metadata={"reason": "insufficient_flux", "balance": balance, "cost": cost},
+            )
+            raise BrowserError("insufficient_flux_credits", "Insufficient Flux for Wasm-Agent-Cloud based Hermes provisioning.", status=HTTPStatus.PAYMENT_REQUIRED)
+        provider_config = provider_config_from_body({"provider_config": body.get("provider_config") or {}})
+        bridge_payload = provision_main_bridge_payload(node_id, bridge_body, provider_config)
+        ledger_id = f"flux_{next_snowflake_id():x}"
+        harness = write_harness_row_in_conn(
+            conn,
+            user,
+            config,
+            node_id=node_id,
+            lifecycle_state="charging",
+            capabilities={"mode": "hermes_backend"},
+        )
+        conn.execute(
+            """
+            INSERT INTO flux_credit_ledger_tb (
+              id, user_id, actor_user_id, amount, kind, reason, idempotency_key, target, created_at, metadata_json
+            ) VALUES (?, ?, ?, ?, 'harness_provision', ?, ?, ?, ?, ?)
+            """,
+            (
+                ledger_id,
+                uid,
+                uid,
+                -cost,
+                f"Provision Hermes agent harness {config['harness_name']}",
+                idempotency_key,
+                f"harness:{config['harness_id']}",
+                int(time.time()),
+                json.dumps({"harness_id": config["harness_id"], "node_id": node_id, "infra_mode": "hermes_backend"}, ensure_ascii=True, sort_keys=True),
+            ),
+        )
+        set_agent_harness_state(conn, config["harness_id"], "provisioning", capabilities={"mode": "hermes_backend"})
+        append_instance_audit(
+            conn,
+            actor_user_id=uid,
+            action="agent_harness.provisioning",
+            target=f"harness:{config['harness_id']}",
+            metadata={"cost": cost, "node_id": node_id, "ledger_id": ledger_id},
+        )
+        conn.execute("COMMIT")
+
+    try:
+        bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload)
+        runtime_url, runtime_source = account_node_runtime_url_source(server, node_id)
+        capabilities = {
+            "mode": "hermes_backend",
+            "bridge_url_source": runtime_source,
+            "bridge_result": compact_json(sanitize_room_event_payload(bridge_result), 1200),
+            "routes": {"models": "/bridge/v1/models", "chat": "/agent/session/message"},
+        }
+        with auth_connect() as conn:
+            ensure_main_fleet_node_in_conn(conn, user, node_id)
+            set_agent_harness_state(conn, config["harness_id"], "ready", bridge_url=runtime_url or server.bridge_url, capabilities=capabilities)
+            row = conn.execute("SELECT * FROM agent_harness_tb WHERE id = ?", (config["harness_id"],)).fetchone()
+            append_instance_audit(
+                conn,
+                actor_user_id=uid,
+                action="agent_harness.ready",
+                target=f"harness:{config['harness_id']}",
+                metadata={"cost": cost, "node_id": node_id},
+            )
+            harness = public_agent_harness(row)
+    except Exception as exc:
+        reason = exc.message if isinstance(exc, BrowserError) else str(exc)
+        refund_agent_harness_charge(user, config["harness_id"], node_id, cost, reason)
+        if isinstance(exc, BrowserError):
+            raise
+        raise BrowserError("harness_provision_failed", "Provisioning failed.", status=HTTPStatus.BAD_GATEWAY) from exc
+
+    return {
+        "ok": True,
+        "schema": AGENT_HARNESS_PROVISION_SCHEMA,
+        "charged": True,
+        "cost": cost,
+        "lifecycle_state": "ready",
+        "harness": harness,
+        "node_id": node_id,
+        "bridge": bridge_result,
+        "readiness": agent_readiness(server, user, target_node=node_id),
+        "credits": account_credits(user),
     }
 
 
@@ -4359,7 +5055,7 @@ def provision_main_fleet_node(
                 "ledger_id": ledger_id,
                 "provider": FLUX_MAIN_NODE_PROVIDER,
                 "model": FLUX_MAIN_NODE_MODEL,
-                "bridge_result": compact_json(bridge_result, 1200),
+                "bridge_result": compact_json(sanitize_room_event_payload(bridge_result), 1200),
             },
         )
         row = conn.execute("SELECT * FROM flux_credit_ledger_tb WHERE id = ?", (ledger_id,)).fetchone()
@@ -5416,6 +6112,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/styles.css",
             "/boot.js",
             "/app.js",
+            "/provider-model-catalog.js",
             "/manifest.webmanifest",
             "/sw.js",
             "/config.json",
@@ -5454,6 +6151,15 @@ def request_host_origin(handler: WasmAgentHandler) -> str:
         proto = "https" if public_origin().lower().startswith("https://") else "http"
     host = str(handler.headers.get("X-Forwarded-Host") or handler.headers.get("Host") or "").split(",", 1)[0].strip()
     return f"{proto}://{host}".rstrip("/") if host else ""
+
+
+def google_login_origin(handler: WasmAgentHandler) -> str:
+    return public_origin() or request_host_origin(handler)
+
+
+def google_login_uri(handler: WasmAgentHandler) -> str:
+    origin = google_login_origin(handler)
+    return f"{origin}/auth/google/callback" if origin else "/auth/google/callback"
 
 
 def same_origin_post(handler: WasmAgentHandler) -> bool:
@@ -5519,6 +6225,8 @@ def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:1000]
+        if int(exc.code) == 403:
+            raise BrowserError("bridge_forbidden", detail or "Bridge rejected this request.", status=HTTPStatus.FORBIDDEN) from exc
         raise BrowserError("bridge_http_error", detail or str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
     except URLError as exc:
         raise BrowserError("bridge_unavailable", str(exc.reason), status=HTTPStatus.BAD_GATEWAY) from exc
@@ -11030,6 +11738,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def wasm_agent_startup_banner(*, host: str, port: int, state_dir: Path, bridge_url: str) -> str:
+    mode = wasm_agent_deployment_mode()
+    cloud_root = cloud_state_root()
+    private_state = "cloud-private" if mode == DEPLOYMENT_MODE_CLOUD else "local-private"
+    if mode == DEPLOYMENT_MODE_CLOUD and cloud_root:
+        private_state = f"cloud-private:{cloud_root}"
+    parsed_bridge = urlparse(bridge_url)
+    bridge_host = parsed_bridge.hostname or bridge_url.rstrip("/")
+    if parsed_bridge.port:
+        bridge_host = f"{bridge_host}:{parsed_bridge.port}"
+    bridge_mode = "local-bridge" if bridge_host.startswith(("127.0.0.1", "localhost")) else "remote-bridge"
+    return "\n".join(
+        [
+            "   .-=-.  HERMES WASM CONTROL SURFACE  .-=-.",
+            "  /  _  \\     _._    alien uplink online",
+            "  \\_/ \\_/  __/   \\__  node harness bay armed",
+            f"  mode={mode} host={host} port={port}",
+            f"  state_root={state_dir}",
+            f"  bridge={bridge_mode} target={bridge_host}",
+            f"  private_state={private_state}",
+        ]
+    )
+
+
 def main() -> int:
     plugin_root = Path(__file__).resolve().parents[1]
     public_root = plugin_root / "public"
@@ -11056,9 +11788,8 @@ def main() -> int:
         bridge_url=args.bridge_url,
         browser_timeout_sec=args.browser_timeout_sec,
     )
+    print(wasm_agent_startup_banner(host=args.host, port=args.port, state_dir=state_dir, bridge_url=args.bridge_url), flush=True)
     print(f"wasm-agent listening on http://{args.host}:{args.port}", flush=True)
-    print(f"wasm-agent bridge target {args.bridge_url.rstrip('/')}", flush=True)
-    print(f"wasm-agent account db {auth_db_path()}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

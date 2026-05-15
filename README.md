@@ -41,6 +41,11 @@ Use these rules before evolving this project:
   New workspace, account, browser, topology, resources, and bridge work belongs
   there unless a task explicitly names a separate plugin.
 - Keep generated/runtime state out of source changes unless a README or explicit migration note is being added at the parent level.
+- Every code-changing commit must add or update a very fast regression test for
+  the smallest behavior it could break, then run that focused test before the
+  commit. Prefer existing smoke/unit checks that finish in seconds; if a change
+  truly cannot be covered quickly, document the reason and add the smallest
+  slower acceptance check that proves the risk.
 - For long Space OS evolution runs, keep resumability as a first-class deliverable:
   update the active roadmap before or during each major direction change, commit
   stable checkpoints, and leave exact next actions in docs before context gets

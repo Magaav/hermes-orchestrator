@@ -46,6 +46,14 @@ def insert_account(conn, user_id: int, email: str) -> None:
     )
 
 
+HARNESS_PROVIDER_CONFIG = {
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "provider": "opencode-go",
+    "model": "opencode-go/kimi-k2.6",
+    "api_key": "sk-or-harness",
+}
+
+
 class ReadinessCreditsProvisioningTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -217,7 +225,7 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
                     self.assertEqual(body["default_model_provider"], "opencode-go")
                     self.assertEqual(body["default_model"], "deepseek-v4-flash")
                     self.assertIn("Agent name: Research helper", body["personality"])
-                    self.assertIn("Role/Instructions: Focus on workspace research.", body["personality"])
+                    self.assertIn("Instructions: Focus on workspace research.", body["personality"])
                     (self.env_root / f"{node_id}.env").write_text(
                         "API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n",
                         encoding="utf-8",
@@ -285,6 +293,143 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
                         "SELECT COUNT(*) AS total FROM instance_audit_tb WHERE action = 'fleet.provision_main.denied'"
                     ).fetchone()
                 self.assertGreaterEqual(int(provision_denials["total"]), 4)
+
+    def test_agent_harness_hermes_backend_charges_ten_flux_and_binds_node(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            node_id = static_server.account_main_node_id(self.user)
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 10, "reason": "harness", "idempotency_key": "grant-harness"},
+            )
+
+            def fake_bridge(server, method, path, body):
+                if method == "POST" and path == "/nodes":
+                    self.assertEqual(body["node_id"], node_id)
+                    self.assertEqual(body["default_model_provider"], "opencode-go")
+                    self.assertEqual(body["default_model"], "kimi-k2.6")
+                    self.assertEqual(body["OPENROUTER_API_KEY"], "sk-or-harness")
+                    self.assertEqual(body["OPENAI_BASE_URL"], "https://opencode.ai/zen/go/v1")
+                    self.assertIn("Agent name: Research harness", body["personality"])
+                    self.assertIn("Instructions: Work inside the sandbox.", body["personality"])
+                    (self.env_root / f"{node_id}.env").write_text(
+                        "API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n",
+                        encoding="utf-8",
+                    )
+                    return {"ok": True, "node_create": {"node_id": node_id}}
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": True, "status": "running"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=fake_bridge):
+                result = static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {
+                        "idempotency_key": "harness-one",
+                        "harness_name": "Research harness",
+                        "harness_type": "hermes",
+                        "infra_mode": "hermes_backend",
+                        "instructions": "Work inside the sandbox.",
+                        "provider_config": HARNESS_PROVIDER_CONFIG,
+                    },
+                )
+            self.assertTrue(result["charged"])
+            self.assertEqual(result["cost"], 10)
+            self.assertEqual(result["credits"]["balance"], 0)
+            self.assertEqual(result["harness"]["lifecycle_state"], "ready")
+            self.assertEqual(result["harness"]["node_id"], node_id)
+            self.assertEqual(result["harness"]["user_id"], str(self.user["id"]))
+            self.assertEqual(result["harness"]["harness_type"], "hermes")
+
+    def test_agent_harness_custom_bridge_does_not_charge_flux(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            with patch.object(
+                static_server,
+                "probe_custom_bridge_url",
+                return_value={"routes": {"health": "/health", "models": "/bridge/v1/models", "chat": ["/bridge/v1/chat"]}},
+            ) as probe:
+                result = static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {
+                        "harness_name": "Private bridge",
+                        "harness_type": "hermes",
+                        "infra_mode": "custom_bridge",
+                        "bridge_url": "https://your-domain.example/bridge",
+                    },
+                )
+            probe.assert_called_once()
+            self.assertFalse(result["charged"])
+            self.assertEqual(result["credits"]["balance"], 0)
+            self.assertEqual(result["harness"]["infra_mode"], "custom_bridge")
+            self.assertEqual(result["harness"]["harness_type"], "hermes")
+            self.assertEqual(result["harness"]["lifecycle_state"], "ready")
+
+    def test_agent_harness_insufficient_flux_unavailable_provider_and_failure_refund(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            with self.assertRaises(static_server.BrowserError) as insufficient:
+                static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {"harness_name": "No credits", "harness_type": "hermes", "infra_mode": "hermes_backend"},
+                )
+            self.assertEqual(insufficient.exception.code, "insufficient_flux_credits")
+
+            with self.assertRaises(static_server.BrowserError) as unavailable:
+                static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {"harness_name": "Claude", "harness_type": "claude", "infra_mode": "hermes_backend"},
+                )
+            self.assertEqual(unavailable.exception.code, "provider_not_available")
+
+            with self.assertRaises(static_server.BrowserError) as direct_harness:
+                static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {"harness_name": "Browser direct", "harness_type": "hermes", "infra_mode": "browser_direct"},
+                )
+            self.assertEqual(direct_harness.exception.code, "provider_not_available")
+
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 10, "reason": "refund", "idempotency_key": "grant-refund"},
+            )
+            with patch.object(
+                static_server,
+                "bridge_proxy",
+                side_effect=static_server.BrowserError(
+                    "bridge_unavailable",
+                    "orchestrator down",
+                    status=static_server.HTTPStatus.BAD_GATEWAY,
+                ),
+            ):
+                with self.assertRaises(static_server.BrowserError):
+                    static_server.provision_agent_harness_node(
+                        self.server,
+                        self.user,
+                        {
+                            "idempotency_key": "harness-fails",
+                            "harness_name": "Refund me",
+                            "harness_type": "hermes",
+                            "infra_mode": "hermes_backend",
+                            "provider_config": HARNESS_PROVIDER_CONFIG,
+                        },
+                    )
+            self.assertEqual(static_server.account_credits(self.user)["balance"], 10)
+            with static_server.auth_connect() as conn:
+                row = conn.execute(
+                    "SELECT lifecycle_state, failure_reason FROM agent_harness_tb WHERE harness_name = 'Refund me' ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+            self.assertEqual(row["lifecycle_state"], "failed")
+            self.assertIn("orchestrator down", row["failure_reason"])
 
 
 if __name__ == "__main__":

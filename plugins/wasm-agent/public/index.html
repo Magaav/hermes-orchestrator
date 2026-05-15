@@ -760,38 +760,34 @@
           </div>
         </form>
       </aside>
-      <section id="agentOnboardingPanel" class="agent-onboarding-panel" aria-label="Agent setup" hidden>
-        <div class="agent-onboarding-head">
-          <strong id="agentOnboardingTitle">Set provider or agent</strong>
-          <button id="agentOnboardingCloseButton" class="icon-button agent-onboarding-close-button" type="button" title="Close setup" aria-label="Close setup">
+      <section id="nodesPanel" class="nodes-panel" aria-label="Nodes setup" hidden>
+        <div class="nodes-panel-head">
+          <strong id="nodesPanelTitle">Set node</strong>
+          <button id="nodesPanelCloseButton" class="icon-button nodes-panel-close-button" type="button" title="Close setup" aria-label="Close setup">
             <span class="agent-icon agent-icon-close" aria-hidden="true"></span>
           </button>
         </div>
-        <p id="agentOnboardingCopy" class="agent-onboarding-copy">Set one provider or agent before sending chat messages.</p>
-        <span id="agentOnboardingStatus" class="agent-onboarding-status" hidden></span>
+        <p id="nodesPanelCopy" class="nodes-panel-copy">Set one node before sending chat messages.</p>
+        <span id="nodesPanelStatus" class="nodes-panel-status" hidden></span>
         <div id="agentConfiguredModelList" class="agent-configured-model-list"></div>
-        <label class="agent-owned-agent-field">
-          <span>Agent</span>
-          <div class="agent-owned-agent-row">
-            <input id="agentOwnedAgentInput" type="text" placeholder="optional agent name or bridge" spellcheck="false" autocapitalize="off">
-            <button id="agentAddAgentButton" type="button">Add Agent</button>
-          </div>
-        </label>
+        <button id="newNodeButton" class="node-create-button" type="button">Add New Node</button>
         <form id="agentTopicForm" class="agent-topic-form" autocomplete="off" hidden>
           <label>
             <span>Name</span>
             <input id="agentTopicNameInput" type="text" placeholder="My agent" spellcheck="true" autocapitalize="words">
           </label>
           <label>
-            <span>Role/Instructions</span>
-            <textarea id="agentTopicRoleInput" rows="3" placeholder="What this agent should do" spellcheck="true"></textarea>
+            <span>Instructions</span>
+            <textarea id="agentTopicRoleInput" rows="3" placeholder="Who am I" spellcheck="true"></textarea>
           </label>
           <label>
-            <span>Type</span>
+            <span>Agent</span>
             <select id="agentTopicTypeSelect">
-              <option value="hermes">Hermes</option>
-              <option value="claude" disabled>Claude</option>
-              <option value="other" disabled>Other agent</option>
+              <option value="hermes" selected>Hermes</option>
+              <option value="openclaw" disabled>OpenClaw - Not available yet</option>
+              <option value="kilocode" disabled>KiloCode - Not available yet</option>
+              <option value="claude_code" disabled>Claude Code - Not available yet</option>
+              <option value="pi" disabled>Pi - Not available yet</option>
             </select>
           </label>
           <label>
@@ -799,28 +795,83 @@
             <input id="agentTopicBridgeUrlInput" type="url" placeholder="optional own bridge URL" spellcheck="false" autocapitalize="off">
           </label>
           <button class="primary" type="submit">Save agent</button>
-          <div id="agentTopicStatus" class="agent-direct-provider-footer"></div>
+          <div id="agentTopicStatus" class="node-form-footer"></div>
         </form>
-        <form id="agentDirectProviderForm" class="agent-direct-provider-form" autocomplete="off" hidden>
-          <label>
-            <span><span class="field-required">*</span> Base URL</span>
-            <input id="agentDirectBaseUrlInput" type="url" placeholder="auto from model/key" spellcheck="false" autocapitalize="off">
+        <form id="nodeForm" class="node-form" autocomplete="off" hidden>
+          <label class="node-provider-field">
+            <span><span class="field-required">*</span> Provider</span>
+            <select id="agentDirectProviderSelect" required>
+              <option value="">Choose provider</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="opencode-go">OpenCode-Go</option>
+            </select>
           </label>
-          <label>
+          <label id="agentDirectModelField" class="node-provider-field node-model-field" hidden>
             <span><span class="field-required">*</span> Model</span>
-            <input id="agentDirectModelInput" type="text" placeholder="gpt-5.4-mini" spellcheck="false" autocapitalize="off">
+            <s-select id="agentDirectModelInput" required placeholder="Choose model" search-placeholder="Search models"></s-select>
           </label>
-          <label>
+          <label class="node-provider-field">
             <span><span class="field-required">*</span> API key</span>
             <input id="agentDirectApiKeyInput" type="password" autocomplete="off" spellcheck="false" autocapitalize="off">
           </label>
-          <button class="primary" type="submit">Save provider</button>
-          <div class="agent-direct-provider-footer">
+          <label>
+            <span>Name</span>
+            <input id="nodeNameInput" type="text" placeholder="node name" spellcheck="true" autocapitalize="words">
+          </label>
+          <fieldset class="node-agent-wrapper-form">
+            <legend>Agent harness</legend>
+            <label class="node-agent-wrapper-toggle">
+              <input id="nodeAgentWrapperToggle" type="checkbox">
+              <span>Add agent harness</span>
+            </label>
+            <div id="nodeAgentWrapperFields" class="node-agent-wrapper-fields" hidden>
+              <label>
+                <span><span class="field-required">*</span> Name</span>
+                <input id="nodeWrapperNameInput" type="text" placeholder="agent name" spellcheck="true" autocapitalize="words" required>
+              </label>
+              <label>
+                <span><span class="field-required">*</span> Agent</span>
+                <select id="nodeWrapperTypeSelect" required>
+                  <option value="hermes" selected>Hermes</option>
+                  <option value="openclaw" disabled>OpenClaw - Not available yet</option>
+                  <option value="kilocode" disabled>KiloCode - Not available yet</option>
+                  <option value="claude_code" disabled>Claude Code - Not available yet</option>
+                  <option value="pi" disabled>Pi - Not available yet</option>
+                </select>
+              </label>
+              <label>
+                <span>Infrastructure</span>
+                <select id="nodeHarnessInfraSelect">
+                  <option value="hermes_backend">Wasm-Agent-Cloud based (10◇)</option>
+                  <option value="custom_bridge">Private bridge URL</option>
+                </select>
+              </label>
+              <label id="nodeHarnessBridgeUrlField" class="node-harness-bridge-url-field" hidden>
+                <span>Private bridge URL</span>
+                <div class="node-harness-bridge-url-row">
+                  <input id="nodeHarnessBridgeUrlInput" type="url" placeholder="https://your-domain.example/bridge" spellcheck="false" autocapitalize="off">
+                  <button id="nodeHarnessBridgeInfoButton" class="icon-button node-harness-info-button" type="button" title="Bridge URL info" aria-label="Bridge URL info">i</button>
+                </div>
+              </label>
+              <div id="nodeHarnessBridgeInfoBalloon" class="node-harness-info-balloon" hidden>
+                <p>A bridge URL is an HTTP endpoint that lets wasm-agent talk to your own running Hermes-compatible agent.</p>
+                <p>Required routes: GET /health, GET /bridge/v1/models, and POST /bridge/v1/chat or the project's existing canonical chat route.</p>
+                <p>The bridge must allow the wasm-agent origin with CORS when called from this browser.</p>
+                <code>https://your-domain.example/bridge</code>
+              </div>
+              <label>
+                <span>Instructions</span>
+                <textarea id="nodeWrapperRoleInput" rows="3" placeholder="Who am I" spellcheck="true"></textarea>
+              </label>
+            </div>
+          </fieldset>
+          <button class="primary" type="submit">Create node</button>
+          <div class="node-form-footer">
             <svg id="agentProviderLoadingIcon" class="agent-provider-loading-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
               <circle cx="12" cy="12" r="9"></circle>
               <path d="M21 12a9 9 0 0 1-9 9"></path>
             </svg>
-            <span id="agentDirectProviderStatus"></span>
+            <span id="nodeFormStatus"></span>
           </div>
         </form>
         <section id="agentModelBalloon" class="agent-balloon agent-model-balloon" aria-label="Model setup" hidden>

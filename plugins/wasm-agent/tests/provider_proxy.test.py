@@ -111,6 +111,24 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertEqual(config["provider"], "opencode-go")
         self.assertEqual(config["model"], "kimi-k2.6")
 
+    def test_provider_model_catalog_parses_openrouter_and_opencode(self) -> None:
+        self.assertEqual(server_mod.normalize_provider_models_name("OpenCode-Go"), "opencode-go")
+        openrouter_models = server_mod.provider_models_from_payload("openrouter", {
+            "data": [
+                {"id": "anthropic/claude-opus-4.7-fast", "name": "Anthropic: Claude Opus 4.7 (Fast)"},
+                {"id": "openrouter/auto", "name": "Auto Router"},
+            ],
+        })
+        self.assertEqual(openrouter_models[0]["id"], "anthropic/claude-opus-4.7-fast")
+        self.assertEqual(openrouter_models[0]["label"], "Anthropic: Claude Opus 4.7 (Fast)")
+        opencode_models = server_mod.provider_models_from_payload("opencode-go", {
+            "data": [
+                {"id": "minimax-m2.7", "object": "model"},
+                {"id": "kimi-k2.6", "object": "model"},
+            ],
+        })
+        self.assertEqual([model["id"] for model in opencode_models], ["minimax-m2.7", "kimi-k2.6"])
+
     def test_config_validation_categories(self) -> None:
         failures = [
             ({}, "missing-base-url"),
