@@ -17,6 +17,7 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
 
 (async () => {
   let createWisSandbox;
+  let claimMediaWriter;
   let createCameraArtifactController;
   let createWisCameraArtifactState;
   let createWisFocusedCameraArtifact;
@@ -38,6 +39,7 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
   let resolveWisCameraPendingTimelineSeek;
   let shouldLoadWisCameraTimeline;
   let formatWisCameraTimelineRange;
+  let setWisCameraPlaybackBuffering;
   let setWisCameraPlaybackFrame;
   let startWisCameraPlaybackSeek;
   let stopWisCameraPlaybackState;
@@ -46,9 +48,11 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
   let wisCameraPlaybackState;
   let wisCameraRecordedSessionMatches;
   let wisCameraRecordedTimelineTitle;
+  let isMediaWriterCurrent;
   try {
     ({ createWisSandbox } = await import(engineUrl));
     ({
+      claimMediaWriter,
       createCameraArtifactController,
       createWisCameraArtifactState,
       createWisCameraPendingTimelineSeek,
@@ -59,6 +63,7 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
       formatWisCameraTimelineRange,
       isWisFocusedCameraSurface,
       normalizeWisCameraConfigForSlot,
+      setWisCameraPlaybackBuffering,
       setWisCameraPlaybackFrame,
       startWisCameraPlaybackSeek,
       stopWisCameraPlaybackState,
@@ -67,6 +72,7 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
       wisCameraPlaybackState,
       wisCameraRecordedSessionMatches,
       wisCameraRecordedTimelineTitle,
+      isMediaWriterCurrent,
       resolveWisCameraPendingTimelineSeek,
       shouldLoadWisCameraTimeline,
       wisCameraTimelineFrameClosestToTime,
@@ -246,6 +252,27 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
   }, { sessionId: firstPlayback.id, generation: firstPlayback.generation, nowMs: 1500 });
   assert.strictEqual(displayedPlayback.state, "recordedPlaying");
   assert.strictEqual(wisCameraPlaybackClockMs(displayedPlayback, 2500), 75200);
+  setWisCameraPlaybackBuffering(playbackRuntime, "cam-1", {
+    sessionId: firstPlayback.id,
+    generation: firstPlayback.generation,
+    nowMs: 1550,
+  });
+  const streamPlayback = setWisCameraPlaybackFrame(playbackRuntime, "cam-1", {
+    id: "frame-a-stream-next",
+    timestamp_ms: 74600,
+  }, {
+    sessionId: firstPlayback.id,
+    generation: firstPlayback.generation,
+    nowMs: 1600,
+    updateClockAnchor: false,
+  });
+  assert.strictEqual(streamPlayback.lastDisplayedFrameTimeMs, 74600);
+  assert.strictEqual(wisCameraPlaybackClockMs(streamPlayback, 2500), 75200);
+  const mediaImage = { dataset: {} };
+  assert.strictEqual(claimMediaWriter(mediaImage, { kind: "recorded-playback", streamId: "cam-1", generation: 2 }), true);
+  assert.strictEqual(isMediaWriterCurrent(mediaImage, { kind: "recorded-playback", streamId: "cam-1", generation: 2 }), true);
+  assert.strictEqual(claimMediaWriter(mediaImage, { kind: "live", streamId: "cam-1", generation: 1 }), false);
+  assert.strictEqual(isMediaWriterCurrent(mediaImage, { kind: "live", streamId: "cam-1", generation: 1 }), false);
   const secondPlayback = startWisCameraPlaybackSeek(playbackRuntime, "cam-1", {
     id: "frame-b",
     timestamp_ms: 90000,

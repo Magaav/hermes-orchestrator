@@ -16,6 +16,7 @@ export const WIS_CAMERA_PUSH_ENDPOINTS = Object.freeze({
   archiveFrame: "/camera/push-archive-frame",
 });
 const CAMERA_DEBUG = true;
+const mediaWriters = new WeakMap();
 
 function cleanText(value = "", fallback = "") {
   const text = String(value ?? "").trim();
@@ -412,6 +413,83 @@ function defaultAnimationFrameEnv(env = globalThis) {
   return { request, cancel };
 }
 
+export function claimMediaWriter(image, owner = {}) {
+  if (!image) return false;
+  const generation = Math.max(0, Math.round(Number(owner.generation || 0)));
+  const nextOwner = {
+    kind: cleanText(owner.kind, "unknown"),
+    streamId: cleanText(owner.streamId, ""),
+    sessionId: cleanText(owner.sessionId, ""),
+    generation,
+  };
+  const previous = mediaWriters.get(image);
+  if (previous && Number(previous.generation || 0) > nextOwner.generation) return false;
+  mediaWriters.set(image, nextOwner);
+  image.dataset.wisMediaOwner = nextOwner.kind;
+  image.dataset.wisMediaGeneration = String(nextOwner.generation);
+  image.dataset.wisMediaStreamId = nextOwner.streamId;
+  return true;
+}
+
+export function isMediaWriterCurrent(image, owner = {}) {
+  const current = image ? mediaWriters.get(image) : null;
+  const generation = Math.max(0, Math.round(Number(owner.generation || 0)));
+  const kind = cleanText(owner.kind, "unknown");
+  return Boolean(
+    current
+    && current.kind === kind
+    && Number(current.generation || 0) === generation
+    && image?.dataset?.wisMediaOwner === kind
+    && image?.dataset?.wisMediaGeneration === String(generation)
+  );
+}
+
+export function mediaWriterData(image) {
+  return image ? mediaWriters.get(image) || null : null;
+}
+
+function waitForImageLoad(image) {
+  return new Promise((resolve, reject) => {
+    image.addEventListener("load", resolve, { once: true });
+    image.addEventListener("error", reject, { once: true });
+  });
+}
+
+export async function decodeAndSwapImage(image, sourceUrl, owner = {}, options = {}) {
+  const env = options.env || globalThis;
+  const url = cleanText(sourceUrl, "");
+  if (!image || !url) return false;
+  if (!isMediaWriterCurrent(image, owner)) {
+    options.onStale?.();
+    return false;
+  }
+  const ImageCtor = env.Image || globalThis.Image;
+  if (!ImageCtor) return false;
+  const preloader = new ImageCtor();
+  preloader.decoding = "async";
+  preloader.src = url;
+  try {
+    if (typeof preloader.decode === "function") await preloader.decode();
+  } catch {
+    if (!preloader.complete) await waitForImageLoad(preloader);
+  }
+  if (!isMediaWriterCurrent(image, owner)) {
+    options.onStale?.();
+    if (options.revokeOnStale) {
+      try {
+        (env.URL || globalThis.URL)?.revokeObjectURL?.(url);
+      } catch {
+        // Best effort.
+      }
+    }
+    return false;
+  }
+  options.beforeSwap?.();
+  image.src = url;
+  options.onSwap?.();
+  return true;
+}
+
 export function createCameraArtifactController({
   artifactId = WIS_CAMERA_DEFAULT_SLOT,
   documentId = "main",
@@ -451,6 +529,8 @@ export function createCameraArtifactController({
     pointerId: 0,
     target: null,
   };
+  let scrubOwner = null;
+  let pendingTimelineElement = null;
   let suppressClickUntil = 0;
   let lastRealUserCommitAt = 0;
   const recentSeekEvents = [];
@@ -702,6 +782,15 @@ export function createCameraArtifactController({
   }
 
   function syncTimelineFromPlayback(timestampMs) {
+    if (isTimelineScrubActive()) {
+      logCamera("camera.timeline.scrub.programmatic_sync_skipped", {
+        generation: playbackGeneration,
+        timestampMs,
+        source: "playback",
+        elementConnected: currentTimelineElement?.isConnected !== false,
+      }, { sampleMs: 1000, skipRecordEvent: true });
+      return;
+    }
     if (isSyncingTimelineFromPlayback) return;
     isSyncingTimelineFromPlayback = true;
     try {
@@ -861,7 +950,7 @@ export function createCameraArtifactController({
     stopRenderLoop("seek-start");
     abortPreviousLoads("seek-start");
     if (typeof env.AbortController === "function") activeAbortController = new env.AbortController();
-    setPlaybackMode("seeking", { source, reason, timestampMs: target, generation });
+    setPlaybackMode("seeking", { source, reason, timestampMs: target, generation, skipPatch: true });
 
     let segment = null;
     try {
@@ -893,7 +982,7 @@ export function createCameraArtifactController({
       return null;
     }
 
-    setPlaybackMode("buffering", { source, reason, timestampMs: target, generation });
+    setPlaybackMode("buffering", { source, reason, timestampMs: target, generation, skipPatch: true });
     logCamera("camera.segment.load.start", {
       generation,
       source,
@@ -933,16 +1022,8 @@ export function createCameraArtifactController({
     });
     startPlaybackClock(target, 1, { generation, source, reason });
     startRenderLoop({ generation, source, reason });
-    setPlaybackMode("recordedPlaying", { source, reason, timestampMs: target, generation });
+    setPlaybackMode("recordedPlaying", { source, reason, timestampMs: target, generation, skipPatch: true });
     if (activeSeek?.generation === generation) activeSeek.status = "done";
-    if (source === "user" || source === "restore") {
-      dispatchPlaybackPatch("seek-complete", {
-        source,
-        reason,
-        targetTimeMs: target,
-        segmentId: cleanText(currentSegment?.id || segment?.id, ""),
-      });
-    }
     return currentSegment;
   }
 
@@ -964,14 +1045,39 @@ export function createCameraArtifactController({
     };
   }
 
+  function isTimelineScrubActive(event = null) {
+    if (!scrubOwner || !userScrubbing.active) return false;
+    if (!event) return true;
+    return !scrubOwner.pointerId || scrubOwner.pointerId === event.pointerId;
+  }
+
+  function updateTimelinePreviewVisualOnly(target) {
+    const element = currentTimelineElement;
+    if (!element?.style || !target) return;
+    const ratio = clamp(Number(target.ratio), 0, 1);
+    element.style.setProperty("--wis-camera-timeline-preview", `${ratio * 100}%`);
+    element.dataset.wisTimelinePreviewing = "1";
+    previewTimelineTarget?.(target, {
+      generation: playbackGeneration,
+      source: "user-preview",
+      visualOnly: true,
+      noPatch: true,
+      mode: playbackClock.mode,
+    });
+  }
+
+  function clearTimelinePreviewVisualOnly() {
+    const element = currentTimelineElement;
+    if (element?.style) {
+      element.style.removeProperty("--wis-camera-timeline-preview");
+      delete element.dataset.wisTimelinePreviewing;
+    }
+  }
+
   function previewTarget(target) {
     userScrubbing.target = target;
     try {
-      previewTimelineTarget?.(target, {
-        generation: playbackGeneration,
-        source: "user",
-        mode: playbackClock.mode,
-      });
+      updateTimelinePreviewVisualOnly(target);
     } catch (error) {
       logCamera("camera.stale.callback.ignored", {
         reason: "previewTimelineTarget failed",
@@ -1019,40 +1125,79 @@ export function createCameraArtifactController({
   }
 
   function shouldHandleTimelinePointer(event) {
-    return userScrubbing.active && (!userScrubbing.pointerId || event.pointerId === userScrubbing.pointerId);
+    return isTimelineScrubActive(event);
+  }
+
+  function beginTimelineScrub(event, target) {
+    scrubOwner = {
+      kind: "user-scrub",
+      pointerId: event.pointerId || 0,
+      startedAt: wisCameraMonotonicNow(),
+      generation: playbackGeneration,
+    };
+    userScrubbing.active = true;
+    userScrubbing.pointerId = scrubOwner.pointerId;
+    userScrubbing.target = target;
+    currentTimelineElement?.classList?.add("is-scrubbing");
+    logCamera("camera.timeline.scrub.begin", {
+      generation: playbackGeneration,
+      pointerId: scrubOwner.pointerId,
+      timestampMs: target?.timestampMs,
+      ratio: target?.ratio,
+      elementConnected: currentTimelineElement?.isConnected !== false,
+    });
+  }
+
+  function endTimelineScrub(reason = "timeline-scrub-end") {
+    currentTimelineElement?.classList?.remove("is-scrubbing");
+    clearTimelinePreviewVisualOnly();
+    logCamera("camera.timeline.scrub.end", {
+      generation: playbackGeneration,
+      pointerId: scrubOwner?.pointerId || 0,
+      timestampMs: userScrubbing.target?.timestampMs,
+      ratio: userScrubbing.target?.ratio,
+      reason,
+      elementConnected: currentTimelineElement?.isConnected !== false,
+    });
+    scrubOwner = null;
+    userScrubbing.active = false;
+    userScrubbing.pointerId = 0;
+    if (pendingTimelineElement) {
+      const nextElement = pendingTimelineElement;
+      pendingTimelineElement = null;
+      attachTimelineElement(nextElement);
+    }
   }
 
   function moveTimelinePointer(event) {
-    if (!shouldHandleTimelinePointer(event) || isSyncingTimelineFromPlayback) return;
+    if (!isTimelineScrubActive(event)) return;
     event.preventDefault?.();
     event.stopPropagation?.();
     const target = pointerTimelineTarget(event);
-    logCamera("camera.timeline.user.pointermove", {
+    userScrubbing.target = target;
+    updateTimelinePreviewVisualOnly(target);
+    logCamera("camera.timeline.scrub.preview.sample", {
       source: "user",
       reason: "timeline-pointermove",
       timestampMs: target.timestampMs,
       ratio: target.ratio,
-    }, { sampleMs: 250 });
-    previewTarget(target);
+      generation: playbackGeneration,
+    }, { sampleMs: 250, skipRecordEvent: true });
   }
 
   function cancelTimelinePointer(event) {
-    if (!shouldHandleTimelinePointer(event)) return;
-    userScrubbing.active = false;
-    userScrubbing.pointerId = 0;
-    userScrubbing.target = null;
+    if (!isTimelineScrubActive(event)) return;
     stopTimelineWindowCapture();
+    endTimelineScrub("timeline-pointercancel");
     resetTimelinePreview?.();
   }
 
   function endTimelinePointer(event) {
-    if (!shouldHandleTimelinePointer(event) || isSyncingTimelineFromPlayback) return;
+    if (!isTimelineScrubActive(event)) return;
     event.preventDefault?.();
     event.stopPropagation?.();
     const target = event.type === "lostpointercapture" ? userScrubbing.target : pointerTimelineTarget(event);
     if (target) previewTarget(target);
-    userScrubbing.active = false;
-    userScrubbing.pointerId = 0;
     stopTimelineWindowCapture();
     try {
       currentTimelineElement?.releasePointerCapture?.(event.pointerId);
@@ -1060,12 +1205,13 @@ export function createCameraArtifactController({
       // Capture may already be gone.
     }
     suppressClickUntil = Date.now() + 400;
-    logCamera("camera.timeline.user.pointerup", {
+    logCamera("camera.timeline.scrub.commit_seek", {
       source: "user",
       reason: "timeline-pointerup",
       timestampMs: Number(target?.timestampMs || target?.targetTime || 0),
       ratio: target?.ratio,
     });
+    endTimelineScrub("timeline-pointerup");
     commitTimelineTarget(target, "timeline-pointerup");
   }
 
@@ -1087,8 +1233,7 @@ export function createCameraArtifactController({
       requestTimelineLoad(target, "timeline-pointerdown");
       return;
     }
-    userScrubbing.active = true;
-    userScrubbing.pointerId = event.pointerId || 0;
+    beginTimelineScrub(event, target);
     previewTarget(target);
     try {
       currentTimelineElement?.setPointerCapture?.(event.pointerId);
@@ -1101,10 +1246,16 @@ export function createCameraArtifactController({
   }
 
   function clickTimeline(event) {
-    if (isSyncingTimelineFromPlayback) return;
+    if (isTimelineScrubActive(event) || isSyncingTimelineFromPlayback) return;
     event.preventDefault?.();
     event.stopPropagation?.();
-    if (Date.now() < suppressClickUntil) return;
+    if (Date.now() < suppressClickUntil) {
+      logCamera("camera.timeline.click.suppressed_after_drag", {
+        generation: playbackGeneration,
+        pointerId: event.pointerId || 0,
+      }, { skipRecordEvent: true });
+      return;
+    }
     const { frames } = timelineModel();
     const target = pointerTimelineTarget(event);
     if (!frames.length) {
@@ -1173,6 +1324,14 @@ export function createCameraArtifactController({
   function attachTimelineElement(element = currentTimelineElement) {
     if (!element) return null;
     if (element === currentTimelineElement && removeTimelineListeners.length) return element;
+    if (isTimelineScrubActive() && currentTimelineElement?.isConnected) {
+      pendingTimelineElement = element;
+      logCamera("camera.timeline.attach.deferred_during_scrub", {
+        generation: playbackGeneration,
+        elementConnected: currentTimelineElement?.isConnected !== false,
+      }, { sampleMs: 1000, skipRecordEvent: true });
+      return currentTimelineElement;
+    }
     detachTimelineElement();
     currentTimelineElement = element;
     const listeners = [
@@ -1226,6 +1385,8 @@ export function createCameraArtifactController({
     }
     activeSeek = null;
     currentSegment = null;
+    clearTimelinePreviewVisualOnly();
+    scrubOwner = null;
     userScrubbing = { active: false, pointerId: 0, target: null };
     setPlaybackMode("live", { reason, skipPatch: true });
   }
@@ -1238,6 +1399,16 @@ export function createCameraArtifactController({
     startRenderLoop,
     stopRenderLoop,
     syncTimelineFromPlayback,
+    markFirstRecordedFrameDisplayed(frame = null, detail = {}) {
+      const timestampMs = Number(detail.firstFrameTimeMs ?? frame?.timestamp_ms ?? frame?.timestampMs ?? playbackClock.targetTimeMs);
+      dispatchPlaybackPatch("recorded-first-frame-displayed", {
+        source: detail.source || activeSeek?.source || "",
+        reason: detail.reason || activeSeek?.reason || "",
+        targetTimeMs: playbackClock.targetTimeMs,
+        firstFrameTimeMs: Number.isFinite(timestampMs) ? timestampMs : playbackClock.targetTimeMs,
+        segmentId: cleanText(detail.segmentId || currentSegment?.id || frame?.id, ""),
+      });
+    },
     recordTimelineUserEvent(kind = "pointerup", detail = {}) {
       return logCamera(`camera.timeline.user.${cleanText(kind, "pointerup")}`, {
         source: "user",
@@ -1466,15 +1637,19 @@ export function setWisCameraPlaybackFrame(runtimeState = {}, streamId = "", fram
   const timestampMs = wisCameraTimelinePlaybackStartMs(frame || session.frame, session.currentWallTime || session.anchorRecordingTimeMs || Date.now());
   const nowMs = Number.isFinite(Number(options.nowMs)) ? Number(options.nowMs) : wisCameraMonotonicNow();
   const renderedFrame = { ...(session.frame || {}), ...(frame || {}), timestamp_ms: timestampMs };
-  session.frame = renderedFrame;
   session.renderedFrame = renderedFrame;
-  session.anchorWallTimeMs = nowMs;
-  session.anchorRecordingTimeMs = timestampMs;
-  session.recordedStartWallTime = timestampMs;
-  session.playbackStartedAtMonotonic = nowMs;
-  session.currentWallTime = timestampMs;
-  session.rate = Number.isFinite(Number(options.rate)) && Number(options.rate) > 0 ? Number(options.rate) : 1;
-  session.playbackRate = session.rate;
+  session.lastDisplayedFrameTimeMs = timestampMs;
+  session.lastDisplayedAtMonotonic = nowMs;
+  if (options.updateClockAnchor !== false) {
+    session.frame = renderedFrame;
+    session.anchorWallTimeMs = nowMs;
+    session.anchorRecordingTimeMs = timestampMs;
+    session.recordedStartWallTime = timestampMs;
+    session.playbackStartedAtMonotonic = nowMs;
+    session.currentWallTime = timestampMs;
+    session.rate = Number.isFinite(Number(options.rate)) && Number(options.rate) > 0 ? Number(options.rate) : 1;
+    session.playbackRate = session.rate;
+  }
   session.clockPaused = Boolean(options.paused);
   session.state = options.state || "recordedPlaying";
   session.status = options.status || "recordedPlaying";
@@ -1762,6 +1937,52 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
     return;
   }
   if (!wisCameraPlaybackMatches(runtimeState, key, token)) return;
+  const mediaOwner = options.mediaOwner || {
+    kind: "recorded-playback",
+    streamId: key,
+    sessionId: cleanText(options.sessionId, ""),
+    generation: Number(options.generation || 0),
+  };
+  const lastMediaLogAt = new Map();
+  const emitMediaEvent = (event, data = {}, detail = {}) => {
+    const now = wisCameraMonotonicNow();
+    const sampleMs = Number(detail.sampleMs || 0);
+    if (sampleMs > 0) {
+      const lastAt = Number(lastMediaLogAt.get(event) || 0);
+      if (lastAt > 0 && now - lastAt < sampleMs) return;
+      lastMediaLogAt.set(event, now);
+    }
+    const payload = {
+      streamId: key,
+      generation: Number(token.generation || 0),
+      ownerKind: mediaOwner.kind,
+      imageOwner: image?.dataset?.wisMediaOwner,
+      ...data,
+    };
+    try {
+      options.onMediaEvent?.(event, payload);
+      options.recordEvent?.(event, payload);
+    } catch {
+      // Diagnostics should never affect playback.
+    }
+    if (CAMERA_DEBUG && options.diagnostics !== false) {
+      try {
+        const method = event.includes("error") || event.includes("stale") ? "warn" : "debug";
+        env.console?.[method]?.("[camera]", event, payload);
+      } catch {
+        // Console diagnostics are optional.
+      }
+    }
+  };
+  if (!claimMediaWriter(image, mediaOwner)) {
+    emitMediaEvent("camera.media.stale_writer.ignored", {
+      reason: "recorded-owner-claim-rejected",
+    });
+    return;
+  }
+  emitMediaEvent("camera.media.owner.claim", {
+    sessionId: mediaOwner.sessionId,
+  });
   setWisCameraPlaybackBuffering(runtimeState, key, token);
   const controller = new env.AbortController();
   playbackControllerMap(runtimeState).set(key, controller);
@@ -1777,14 +1998,13 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
   const frameQueue = [];
   let displayTimer = 0;
   let displayInProgress = false;
-  let lastDisplayWallMs = 0;
-  let lastDisplayTimestampMs = 0;
   let streamEnded = false;
   let displaySeq = 0;
   const isCurrent = () => (
     !controller.signal.aborted
     && image.isConnected !== false
     && wisCameraPlaybackMatches(runtimeState, key, token)
+    && isMediaWriterCurrent(image, mediaOwner)
   );
   const clearDisplayTimer = () => {
     if (!displayTimer) return;
@@ -1812,52 +2032,63 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
     if (!isCurrent()) return false;
     const seq = ++displaySeq;
     const BlobCtor = env.Blob || globalThis.Blob;
-    const ImageCtor = env.Image || globalThis.Image;
     const URLApi = env.URL || globalThis.URL;
-    if (!BlobCtor || !ImageCtor || !URLApi?.createObjectURL) return false;
+    if (!BlobCtor || !URLApi?.createObjectURL) return false;
     const objectUrl = URLApi.createObjectURL(new BlobCtor([packet.frameBytes], { type: packet.contentType || "image/jpeg" }));
-    const preloader = new ImageCtor();
-    preloader.decoding = "async";
-    preloader.src = objectUrl;
-    try {
-      if (typeof preloader.decode === "function") await preloader.decode();
-    } catch {
-      if (!preloader.complete) {
-        try {
-          await new Promise((resolve, reject) => {
-            preloader.addEventListener("load", resolve, { once: true });
-            preloader.addEventListener("error", reject, { once: true });
-          });
-        } catch {
-          URLApi.revokeObjectURL?.(objectUrl);
-          return false;
-        }
-      }
-    }
-    if (!isCurrent() || seq !== displaySeq) {
-      URLApi.revokeObjectURL?.(objectUrl);
-      return false;
-    }
     const previousUrl = playbackObjectUrlMap(runtimeState).get(key);
-    playbackObjectUrlMap(runtimeState).set(key, objectUrl);
     const displayedFrame = {
       ...(baseFrame || {}),
       id: packet.frameId || cleanText(baseFrame?.id, ""),
       timestamp_ms: Number(packet.timestampMs || wisCameraTimelinePlaybackStartMs(baseFrame)),
     };
-    image.dataset.wisPlaybackStream = "1";
-    image.dataset.wisPlaybackFrameMs = String(displayedFrame.timestamp_ms);
-    image.dataset.wisPlaybackFrameId = displayedFrame.id;
-    image.src = objectUrl;
-    lastDisplayWallMs = wisCameraMonotonicNow();
-    lastDisplayTimestampMs = Number(displayedFrame.timestamp_ms || lastDisplayTimestampMs);
+    delete displayedFrame.seek_target_ms;
+    delete displayedFrame.seekTargetMs;
+    delete displayedFrame.snapped_timestamp_ms;
+    delete displayedFrame.snappedTimestampMs;
+    const clockTimeMs = wisCameraPlaybackClockMs(wisCameraPlaybackState(runtimeState, key));
+    const swapped = await decodeAndSwapImage(image, objectUrl, mediaOwner, {
+      env,
+      revokeOnStale: true,
+      onStale: () => emitMediaEvent("camera.media.stale_writer.ignored", {
+        frameTimestampMs: displayedFrame.timestamp_ms,
+        clockTimeMs,
+      }, { sampleMs: 1000 }),
+      beforeSwap: () => {
+        image.dataset.wisPlaybackStream = "1";
+        image.dataset.wisPlaybackFrameMs = String(displayedFrame.timestamp_ms);
+        image.dataset.wisPlaybackFrameId = displayedFrame.id;
+        playbackObjectUrlMap(runtimeState).set(key, objectUrl);
+      },
+      onSwap: () => emitMediaEvent("camera.media.src.swap", {
+        frameTimestampMs: displayedFrame.timestamp_ms,
+        clockTimeMs,
+        driftMs: Number(displayedFrame.timestamp_ms || 0) - Number(clockTimeMs || 0),
+        queueLength: frameQueue.length,
+      }, { sampleMs: 1000 }),
+    });
+    if (!swapped || !isCurrent() || seq !== displaySeq) {
+      if (playbackObjectUrlMap(runtimeState).get(key) === objectUrl) playbackObjectUrlMap(runtimeState).delete(key);
+      try {
+        URLApi.revokeObjectURL?.(objectUrl);
+      } catch {
+        // Best effort cleanup for stale decoded frames.
+      }
+      return false;
+    }
     const session = setWisCameraPlaybackFrame(runtimeState, key, displayedFrame, {
       ...token,
       status: "recordedPlaying",
       state: "recordedPlaying",
       paused: false,
+      updateClockAnchor: false,
     });
     if (session) options.onFrameDisplayed?.(session, displayedFrame);
+    emitMediaEvent("camera.media.playback_frame.displayed.sample", {
+      frameTimestampMs: displayedFrame.timestamp_ms,
+      clockTimeMs,
+      driftMs: Number(displayedFrame.timestamp_ms || 0) - Number(clockTimeMs || 0),
+      queueLength: frameQueue.length,
+    }, { sampleMs: 1000 });
     if (previousUrl && previousUrl !== objectUrl) {
       env.setTimeout?.(() => {
         try {
@@ -1875,12 +2106,21 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
       finishPlaybackStreamWhenDrained();
       return;
     }
-    const next = frameQueue.shift();
-    const nowMs = wisCameraMonotonicNow();
-    const mediaDelayMs = lastDisplayTimestampMs > 0
-      ? clamp(Number(next.timestampMs || 0) - lastDisplayTimestampMs, targetFrameMs * 0.5, targetFrameMs * 2.5)
+    const clockTimeMs = wisCameraPlaybackClockMs(wisCameraPlaybackState(runtimeState, key));
+    while (frameQueue.length > 1 && Number(frameQueue[0]?.timestampMs || 0) < clockTimeMs - 500) {
+      const dropped = frameQueue.shift();
+      emitMediaEvent("camera.media.playback_frame.dropped_stale.sample", {
+        frameTimestampMs: Number(dropped?.timestampMs || 0),
+        clockTimeMs,
+        driftMs: Number(dropped?.timestampMs || 0) - Number(clockTimeMs || 0),
+        queueLength: frameQueue.length,
+      }, { sampleMs: 1000 });
+    }
+    const next = frameQueue[0];
+    const nextTimestampMs = Number(next?.timestampMs || 0);
+    const delayMs = nextTimestampMs > clockTimeMs + 150
+      ? Math.min(targetFrameMs, Math.max(25, nextTimestampMs - clockTimeMs - 100))
       : 0;
-    const delayMs = lastDisplayWallMs > 0 ? Math.max(0, (lastDisplayWallMs + mediaDelayMs) - nowMs) : 0;
     displayTimer = env.setTimeout?.(() => {
       displayTimer = 0;
       playbackTimerMap(runtimeState).delete(key);
@@ -1889,8 +2129,13 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
         cleanupPlaybackController(false);
         return;
       }
+      const packet = delayMs > 0 ? null : frameQueue.shift();
+      if (!packet) {
+        schedulePlaybackFrame();
+        return;
+      }
       displayInProgress = true;
-      void displayPlaybackFrame(next).finally(() => {
+      void displayPlaybackFrame(packet).finally(() => {
         displayInProgress = false;
         schedulePlaybackFrame();
       });
@@ -1904,6 +2149,9 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
     schedulePlaybackFrame();
   };
   try {
+    emitMediaEvent("camera.media.playback_stream.start", {
+      playbackUrl,
+    });
     const response = await env.fetch(playbackUrl, { cache: "no-store", signal: controller.signal });
     if (!response.ok || !response.body?.getReader) throw new Error(`Playback stream unavailable (${response.status})`);
     const contentType = response.headers.get("Content-Type") || "";
@@ -1920,6 +2168,7 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
     let buffer = new Uint8Array();
     let needBoundary = true;
     let currentHeaders = null;
+    let sawFirstPacket = false;
     while (isCurrent()) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -1949,6 +2198,12 @@ export async function streamWisCameraPushPlaybackFrames(runtimeState = {}, optio
         if (buffer[0] === crlfBytes[0] && buffer[1] === crlfBytes[1]) buffer = buffer.slice(2);
         const timestampMs = Number(currentHeaders["x-frame-timestamp-ms"] || Date.parse(currentHeaders["x-frame-updated-at"] || ""));
         const frameId = cleanText(currentHeaders["x-frame-id"], cleanText(baseFrame?.id, ""));
+        if (!sawFirstPacket) {
+          sawFirstPacket = true;
+          emitMediaEvent("camera.media.playback_stream.first_packet", {
+            frameTimestampMs: Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : wisCameraTimelinePlaybackStartMs(baseFrame),
+          });
+        }
         enqueuePlaybackFrame({
           frameBytes,
           contentType: currentHeaders["content-type"] || "image/jpeg",

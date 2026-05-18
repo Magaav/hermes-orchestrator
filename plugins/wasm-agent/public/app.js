@@ -5,6 +5,7 @@ import {
   WIS_CAMERA_ARTIFACT_SCHEMA,
   WIS_CAMERA_CONTROLLER_SCHEMA,
   cameraSlotFromNode as wisCameraSlotFromNode,
+  claimMediaWriter,
   createCameraArtifactController,
   createWisCameraArtifactState,
   createWisCameraControllerContract,
@@ -17,8 +18,10 @@ import {
   renderWisCameraArtifactHeader,
   formatWisCameraTimelineRange,
   focusedWisCameraSlot as focusedWisCameraSlotFromSurface,
+  decodeAndSwapImage,
   isWisCameraPushConfig,
   isWisFocusedCameraSurface,
+  isMediaWriterCurrent,
   normalizeWisCameraConfigForSlot as normalizeWisCameraConfigForSlotContract,
   normalizeWisCameraSlot,
   readWisCameraConfigs as readWisCameraArtifactConfigs,
@@ -3733,6 +3736,49 @@ function wisCameraSegmentForTarget(streamId, targetTimeMs = 0, options = {}) {
   };
 }
 
+const wisCameraMediaLogAt = new Map();
+
+function logWisCameraMediaEvent(event, data = {}, options = {}) {
+  const sampleMs = Number(options.sampleMs || 0);
+  const now = performance.now();
+  if (sampleMs > 0) {
+    const key = `${event}:${cleanText(data.streamId, "")}`;
+    const lastAt = Number(wisCameraMediaLogAt.get(key) || 0);
+    if (lastAt > 0 && now - lastAt < sampleMs) return;
+    wisCameraMediaLogAt.set(key, now);
+  }
+  const payload = { event, t: now, ...data };
+  try {
+    console.debug("[camera]", event, payload);
+  } catch {
+    // Camera media diagnostics are best effort.
+  }
+}
+
+function wisCameraRecordedMediaOwner(streamId, session = null) {
+  return {
+    kind: "recorded-playback",
+    streamId: cleanText(streamId, ""),
+    sessionId: cleanText(session?.id, ""),
+    generation: Number(session?.generation || 0),
+  };
+}
+
+function wisCameraImageHasRecordedOwner(image) {
+  return image?.dataset?.wisMediaOwner === "recorded-playback";
+}
+
+function blockLiveWisCameraImageWrite(image, streamId, reason = "live-write") {
+  if (!wisCameraImageHasRecordedOwner(image)) return false;
+  logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
+    streamId,
+    generation: Number(image?.dataset?.wisMediaGeneration || 0),
+    imageOwner: image?.dataset?.wisMediaOwner,
+    reason,
+  }, { sampleMs: 1000 });
+  return true;
+}
+
 function wisCameraPlaybackController(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return null;
@@ -3765,7 +3811,7 @@ function wisCameraPlaybackController(streamId) {
         const { visibleStart, visibleEnd } = wisCameraTimelineTimeWindow(timeline, frames, { playbackPosition: timestampMs });
         return visibleEnd > visibleStart ? clamp(((timestampMs - visibleStart) / (visibleEnd - visibleStart)) * 100, 0, 100) : null;
       },
-      previewTimelineTarget: (target = {}) => {
+      previewTimelineTarget: (target = {}, detail = {}) => {
         const footer = widgetById("wis")?.querySelector?.(".wis-camera-timeline");
         const scrubber = footer?.querySelector?.(`.wis-camera-timeline-scrubber[data-stream-id="${CSS.escape(key)}"]`);
         const title = footer?.querySelector?.(".wis-camera-timeline-title");
@@ -3778,7 +3824,8 @@ function wisCameraPlaybackController(streamId) {
         const progress = Number.isFinite(displayTimeMs) && target.visibleEnd > target.visibleStart
           ? clamp(((displayTimeMs - target.visibleStart) / (target.visibleEnd - target.visibleStart)) * 100, 0, 100)
           : (maxIndex > 0 && index >= 0 ? (index / maxIndex) * 100 : 100);
-        scrubber?.style?.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+        scrubber?.style?.setProperty(detail.visualOnly ? "--wis-camera-timeline-preview" : "--wis-camera-timeline-progress", `${progress}%`);
+        if (detail.visualOnly && scrubber?.dataset) scrubber.dataset.wisTimelinePreviewing = "1";
         if (scrubber && index >= 0) scrubber.setAttribute("aria-valuenow", String(index));
         const labelFrame = Number.isFinite(displayTimeMs) ? { ...(frame || {}), timestamp_ms: displayTimeMs } : frame;
         if (scrubber && labelFrame) scrubber.setAttribute("aria-valuetext", cameraTimelineFrameLabel(labelFrame));
@@ -3887,6 +3934,17 @@ function updateWisCameraRecordedPlaybackUi(streamId, options = {}) {
   if (visibleEnd > visibleStart) {
     const progress = clamp(((currentMs - visibleStart) / (visibleEnd - visibleStart)) * 100, 0, 100);
     const scrubber = footer?.querySelector?.(`.wis-camera-timeline-scrubber[data-stream-id="${CSS.escape(key)}"]`);
+    if (scrubber?.classList?.contains("is-scrubbing") || scrubber?.dataset?.wisTimelinePreviewing === "1") {
+      logWisCameraMediaEvent("camera.timeline.scrub.programmatic_sync_skipped", {
+        streamId: key,
+        generation: Number(session.generation || 0),
+        timestampMs: currentMs,
+        playbackProgress: progress,
+        previewProgress: scrubber?.style?.getPropertyValue("--wis-camera-timeline-preview") || "",
+        elementConnected: scrubber?.isConnected !== false,
+      }, { sampleMs: 1000 });
+      return;
+    }
     scrubber?.style?.setProperty("--wis-camera-timeline-progress", `${progress}%`);
     const valueText = cameraTimelineFrameLabel({ timestamp_ms: currentMs });
     if (scrubber?.getAttribute?.("aria-valuetext") !== valueText) {
@@ -3932,6 +3990,7 @@ function syncWisCameraRecordedSessionToDisplayedFrame(streamId, frame = null, st
     status: status === "playing" ? "recordedPlaying" : status,
     state: status === "playing" ? "recordedPlaying" : status,
     paused: false,
+    updateClockAnchor: options.updateClockAnchor !== false,
   });
   if (next) updateWisCameraRecordedPlaybackUi(key);
   return next;
@@ -3952,6 +4011,7 @@ function wisCameraDisplayedFrameFromImage(image, fallbackFrame = null) {
 async function streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, baseFrame = null, fallbackToImageSrc = null) {
   const key = cleanText(streamId, "");
   const session = recordedWisCameraSession(key);
+  const mediaOwner = wisCameraRecordedMediaOwner(key, session);
   return streamWisCameraPushPlaybackFramesContract(state, {
     streamId: key,
     image,
@@ -3959,10 +4019,14 @@ async function streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, b
     baseFrame,
     sessionId: session?.id,
     generation: session?.generation,
+    mediaOwner,
     fallbackToImageSrc,
     onFrameDisplayed: () => updateWisCameraRecordedPlaybackUi(key),
     onEnded: () => updateWisCameraRecordedPlaybackUi(key),
     onError: () => updateWisCameraRecordedPlaybackUi(key),
+    onMediaEvent: (event, payload = {}) => logWisCameraMediaEvent(event, payload, {
+      sampleMs: event.includes(".sample") ? 1000 : 0,
+    }),
   });
 }
 
@@ -4220,6 +4284,7 @@ async function loadWisCameraRelaySnapshot(slot, camera, image, showCameraIssue) 
       showCameraIssue("Camera relay did not return an image.", "snapshot-relay-error");
       return;
     }
+    if (blockLiveWisCameraImageWrite(image, slot, "snapshot-relay")) return;
     image.src = dataUrl;
     if (rememberWisCameraDebugEvent(slot, {
       type: "snapshot-relay-loaded",
@@ -4256,6 +4321,7 @@ async function openWisCameraRtspRelaySession(slot, camera, image, showCameraIssu
       showCameraIssue("Camera RTSP relay did not return a playable stream URL.", "rtsp-relay-error");
       return;
     }
+    if (blockLiveWisCameraImageWrite(image, slot, "rtsp-stream-relay")) return;
     image.src = `${streamUrl}&slot=${encodeURIComponent(slot)}&t=${Date.now()}`;
     if (rememberWisCameraDebugEvent(slot, {
       type: "rtsp-relay-opened",
@@ -4291,6 +4357,7 @@ async function loadWisCameraRtspFrame(element, slot, camera, image, status, show
       showCameraIssue("Camera RTSP frame relay did not return an image.", "rtsp-frame-error");
       return false;
     }
+    if (blockLiveWisCameraImageWrite(image, slot, "rtsp-frame-relay")) return false;
     image.src = dataUrl;
     syncWisCameraAspect(element, image);
     if (status?.isConnected) status.remove();
@@ -4338,6 +4405,7 @@ async function openWisCameraStreamRelaySession(slot, camera, image, showCameraIs
       showCameraIssue("Camera stream relay did not return a playable stream URL.", "stream-relay-error");
       return;
     }
+    if (blockLiveWisCameraImageWrite(image, slot, "mjpeg-stream-relay")) return;
     image.src = `${streamUrl}&slot=${encodeURIComponent(slot)}&t=${Date.now()}`;
     if (rememberWisCameraDebugEvent(slot, {
       type: "stream-relay-opened",
@@ -4566,6 +4634,7 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     loader.alt = image.alt;
     loader.addEventListener("load", () => {
       frameInFlight = false;
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll")) return;
       image.src = loader.src;
       syncWisCameraAspect(element, loader);
       status.remove();
@@ -4656,19 +4725,24 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
     session = startWisCameraRecordedSession(streamId, frame, { explicitSeek: forceSync, restart: forceSync });
   }
   const sessionId = cleanText(session?.id, "");
+  const mediaOwner = wisCameraRecordedMediaOwner(streamId, session);
   const currentSessionMatches = () => wisCameraRecordedSessionMatches(recordedWisCameraSession(streamId), sessionId);
-  const syncDisplayedFrame = (displayedFrame, nextStatus = "playing") => {
+  const syncDisplayedFrame = (displayedFrame, nextStatus = "playing", syncOptions = {}) => {
     const activeSession = recordedWisCameraSession(streamId);
     if (!wisCameraRecordedSessionMatches(activeSession, sessionId)) return null;
     return syncWisCameraRecordedSessionToDisplayedFrame(streamId, displayedFrame, nextStatus, {
       holdUntilNextFrame: image.dataset.wisPlaybackStream === "1",
       sessionId,
+      updateClockAnchor: syncOptions.updateClockAnchor !== false,
     });
   };
   const previousMedia = Array.from(element.querySelectorAll(".wis-camera-image, .wis-camera-video"));
+  previousMedia.forEach((media) => {
+    if (media?.tagName === "IMG") claimMediaWriter(media, mediaOwner);
+  });
   element.querySelectorAll(".wis-camera-message, .wis-camera-fallback").forEach((node) => node.remove());
   const image = document.createElement("img");
-  const keepPreviousUntilReady = previousMedia.length > 0 && !forceSync;
+  const keepPreviousUntilReady = previousMedia.length > 0;
   image.className = `wis-camera-image wis-camera-stream wis-camera-push is-timeline-frame${keepPreviousUntilReady ? " is-buffering" : ""}`;
   image.alt = `${camera.label || slot} playback from ${cameraTimelineFrameLabel(frame)}`;
   image.decoding = "async";
@@ -4678,16 +4752,12 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
     element.dataset.wisRecordedSessionId = session.id;
     image.dataset.wisRecordedSessionId = session.id;
   }
+  claimMediaWriter(image, mediaOwner);
   const status = document.createElement("span");
   status.className = "wis-camera-message warn wis-camera-sync-status";
   status.textContent = `Syncing recording from ${cameraTimelineFrameLabel(frame)}...`;
   element.classList.add("has-camera");
   element.append(image, status);
-  if (forceSync) {
-    previousMedia.forEach((media) => {
-      if (media !== image && media.isConnected) media.remove();
-    });
-  }
   let imageLoaded = false;
   const reveal = () => {
     if (!imageLoaded) return;
@@ -4706,20 +4776,96 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
   }) || archiveFrameUrl);
   let playbackStarted = false;
   let playbackFallbackActive = false;
-  const fallbackToImageSrc = () => {
-    if (!image.isConnected || !currentSessionMatches()) return;
-    playbackFallbackActive = true;
+  let firstFramePatchSent = false;
+  const markFirstRecordedFrameDisplayed = (displayedFrame) => {
+    if (firstFramePatchSent) return;
+    firstFramePatchSent = true;
+    wisCameraPlaybackController(streamId)?.markFirstRecordedFrameDisplayed?.(displayedFrame, {
+      source: forceSync ? "user" : "restore",
+      reason: forceSync ? "timeline-seek-first-frame" : "recorded-restore-first-frame",
+      firstFrameTimeMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, Date.now())),
+      segmentId: cleanText(frame.id, ""),
+    });
+  };
+  const displayArchiveFrame = async (reason = "first-frame", displayOptions = {}) => {
+    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return false;
+    logWisCameraMediaEvent("camera.media.first_frame.fetch.start", {
+      streamId,
+      generation: Number(session?.generation || 0),
+      ownerKind: mediaOwner.kind,
+      imageOwner: image.dataset.wisMediaOwner,
+      frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
+      reason,
+    });
     image.dataset.wisPlaybackStream = "";
     image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
     image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-    image.src = archiveFrameUrl;
+    try {
+      const swapped = await decodeAndSwapImage(image, archiveFrameUrl, mediaOwner, {
+        env: window,
+        onStale: () => logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
+          streamId,
+          generation: Number(session?.generation || 0),
+          ownerKind: mediaOwner.kind,
+          imageOwner: image.dataset.wisMediaOwner,
+          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
+          reason,
+        }, { sampleMs: 1000 }),
+        onSwap: () => logWisCameraMediaEvent("camera.media.src.swap", {
+          streamId,
+          generation: Number(session?.generation || 0),
+          ownerKind: mediaOwner.kind,
+          imageOwner: image.dataset.wisMediaOwner,
+          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
+          reason,
+        }),
+      });
+      if (!swapped || !currentSessionMatches()) return false;
+      imageLoaded = true;
+      const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
+      syncDisplayedFrame(displayedFrame, "playing", {
+        updateClockAnchor: displayOptions.updateClockAnchor !== false,
+      });
+      markFirstRecordedFrameDisplayed(displayedFrame);
+      logWisCameraMediaEvent("camera.media.first_frame.displayed", {
+        streamId,
+        generation: Number(session?.generation || 0),
+        ownerKind: mediaOwner.kind,
+        imageOwner: image.dataset.wisMediaOwner,
+        frameTimestampMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, 0)),
+        reason,
+      });
+      if (revealTimer) window.clearTimeout(revealTimer);
+      window.clearTimeout(assumedPlayingTimer);
+      reveal();
+      syncWisCameraAspect(element, image);
+      status.remove();
+      applyWisCameraZoom(element, streamId);
+      return true;
+    } catch (error) {
+      logWisCameraMediaEvent("camera.media.first_frame.error", {
+        streamId,
+        generation: Number(session?.generation || 0),
+        ownerKind: mediaOwner.kind,
+        imageOwner: image.dataset.wisMediaOwner,
+        reason,
+        error: error?.message || String(error),
+      });
+      return false;
+    }
+  };
+  const fallbackToImageSrc = () => {
+    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return;
+    playbackFallbackActive = true;
+    void displayArchiveFrame("playback-stream-fallback", { updateClockAnchor: false });
   };
   const startPlaybackStream = () => {
     if (playbackStarted || !currentSessionMatches()) return;
     playbackStarted = true;
     void streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, frame, fallbackToImageSrc);
   };
-  const startPlaybackStreamAfterPaint = () => {
+  const startPlaybackStreamAfterPaint = async () => {
+    await displayArchiveFrame("timeline-seek-first-frame", { updateClockAnchor: true });
     startPlaybackStream();
   };
   const assumedPlayingTimer = window.setTimeout(() => {
@@ -4729,7 +4875,7 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
     }
     if (!imageLoaded || !playbackFallbackActive) return;
     const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-    syncDisplayedFrame(displayedFrame);
+    syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
     reveal();
     status.remove();
   }, keepPreviousUntilReady ? 2200 : 1800);
@@ -4744,7 +4890,7 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
     const isStreamFrame = image.dataset.wisPlaybackStream === "1";
     if (!isStreamFrame && playbackFallbackActive) {
       const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-      syncDisplayedFrame(displayedFrame);
+      syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
     }
     if (revealTimer) window.clearTimeout(revealTimer);
     if (isStreamFrame || playbackFallbackActive) window.clearTimeout(assumedPlayingTimer);
@@ -4781,8 +4927,6 @@ function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCamer
   image.dataset.wisPlaybackStream = "";
   image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
   image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-  if (forceSync) image.removeAttribute("src");
-  else image.src = archiveFrameUrl;
   if (typeof window.requestAnimationFrame === "function") {
     window.requestAnimationFrame(startPlaybackStreamAfterPaint);
   } else {
@@ -5038,6 +5182,7 @@ function renderWisCameraNode(element, node) {
         showCameraIssue(text, "snapshot-error");
       }, { once: true });
       const refresh = () => {
+        if (blockLiveWisCameraImageWrite(image, slot, "snapshot-direct")) return;
         image.src = appendCameraCacheBuster(url);
       };
       element.classList.add("has-camera");
@@ -5077,6 +5222,7 @@ function renderWisCameraNode(element, node) {
         }
         showCameraIssue(text, "image-error");
       }, { once: true });
+      if (blockLiveWisCameraImageWrite(image, slot, "image-direct")) return;
       image.src = url;
       element.classList.add("has-camera");
       element.append(image);
@@ -5468,6 +5614,17 @@ function renderWisCameraTimelineFooter(camera = null) {
   const surface = widget.querySelector(".wis-surface");
   if (surface && footer.parentElement !== surface) surface.append(footer);
   syncWisCameraTimelineVisibility(widget);
+  const activeScrubber = streamId
+    ? footer.querySelector?.(`.wis-camera-timeline-scrubber[data-stream-id="${CSS.escape(streamId)}"].is-scrubbing`)
+    : null;
+  if (activeScrubber?.isConnected) {
+    logWisCameraMediaEvent("camera.timeline.attach.deferred_during_scrub", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      elementConnected: true,
+    }, { sampleMs: 1000 });
+    return;
+  }
   const mode = wisCameraTimelineMode(streamId);
   if (wisCameraTimelineWidgetActive(widget)) scheduleWisCameraTimelineLoad(streamId, "footer-render", mode);
   const timeline = state.wisCameraTimeline.streamId === streamId ? state.wisCameraTimeline : {
@@ -5578,7 +5735,9 @@ function renderWisCameraTimelineFooter(camera = null) {
     const frame = frames[previewTimelineIndex] || null;
     const timestampMs = Number(displayTimeMs ?? frame?.timestamp_ms ?? frame?.timestampMs);
     const progress = frame ? progressForTimelineTime(timestampMs, previewTimelineIndex) : 100;
-    scrubber.style.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+    const visualProperty = timelineDragging || options.previewOnly ? "--wis-camera-timeline-preview" : "--wis-camera-timeline-progress";
+    scrubber.style.setProperty(visualProperty, `${progress}%`);
+    if (visualProperty === "--wis-camera-timeline-preview") scrubber.dataset.wisTimelinePreviewing = "1";
     scrubber.setAttribute("aria-valuenow", String(previewTimelineIndex));
     const labelFrame = Number.isFinite(timestampMs) ? { ...(frame || {}), timestamp_ms: timestampMs } : frame;
     scrubber.setAttribute("aria-valuetext", labelFrame ? cameraTimelineFrameLabel(labelFrame) : "No points yet");
@@ -5637,7 +5796,7 @@ function renderWisCameraTimelineFooter(camera = null) {
     const frame = target.snappedFrame;
     const frameIndex = timelineFrameIndex(frame);
     if (frameIndex < 0) return;
-    previewTimelineFrame(frameIndex, target.targetTime);
+    previewTimelineFrame(frameIndex, target.targetTime, { previewOnly: timelineDragging });
   };
   const loadThenSeekTimelinePointer = (event, origin = "scrubber-pointer") => {
     const target = timelineTargetForPointer(event);
@@ -5674,12 +5833,31 @@ function renderWisCameraTimelineFooter(camera = null) {
       reason: "timeline-pointermove",
       timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
     });
+    logWisCameraMediaEvent("camera.timeline.scrub.preview.sample", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      pointerId: event.pointerId || 0,
+      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
+      ratio: Number(previewTimelineTarget?.ratio || 0),
+      previewProgress: scrubber.style.getPropertyValue("--wis-camera-timeline-preview") || "",
+      elementConnected: scrubber.isConnected !== false,
+    }, { sampleMs: 250 });
   };
   const cancelTimelinePointer = (event) => {
     if (!shouldHandleTimelinePointer(event)) return;
     timelineDragging = false;
     timelinePointerId = 0;
     stopTimelineWindowCapture();
+    scrubber.classList.remove("is-scrubbing");
+    scrubber.style.removeProperty("--wis-camera-timeline-preview");
+    delete scrubber.dataset.wisTimelinePreviewing;
+    logWisCameraMediaEvent("camera.timeline.scrub.end", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      pointerId: event.pointerId || 0,
+      reason: "timeline-pointercancel",
+      elementConnected: scrubber.isConnected !== false,
+    });
     resetTimelineTitle();
   };
   const endTimelinePointer = (event) => {
@@ -5687,8 +5865,6 @@ function renderWisCameraTimelineFooter(camera = null) {
     event.preventDefault();
     event.stopPropagation();
     if (event.type !== "lostpointercapture") previewTimelinePointer(event);
-    timelineDragging = false;
-    timelinePointerId = 0;
     stopTimelineWindowCapture();
     try {
       scrubber.releasePointerCapture(event.pointerId);
@@ -5697,11 +5873,32 @@ function renderWisCameraTimelineFooter(camera = null) {
     }
     suppressNextTimelineClick = true;
     suppressTimelineClickForRender();
+    const commitTarget = previewTimelineTarget;
     cameraPlaybackController?.recordTimelineUserEvent?.("pointerup", {
       reason: "timeline-pointerup",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
+      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
     });
-    commitTimelineFrame(previewTimelineTarget);
+    logWisCameraMediaEvent("camera.timeline.scrub.commit_seek", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      pointerId: event.pointerId || 0,
+      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
+      ratio: Number(commitTarget?.ratio || 0),
+    });
+    timelineDragging = false;
+    timelinePointerId = 0;
+    scrubber.classList.remove("is-scrubbing");
+    scrubber.style.removeProperty("--wis-camera-timeline-preview");
+    delete scrubber.dataset.wisTimelinePreviewing;
+    logWisCameraMediaEvent("camera.timeline.scrub.end", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      pointerId: event.pointerId || 0,
+      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
+      ratio: Number(commitTarget?.ratio || 0),
+      elementConnected: scrubber.isConnected !== false,
+    });
+    commitTimelineFrame(commitTarget);
   };
   scrubber.addEventListener("pointerdown", (event) => {
     if (!frames.length) {
@@ -5720,8 +5917,18 @@ function renderWisCameraTimelineFooter(camera = null) {
     event.stopPropagation();
     timelineDragging = true;
     timelinePointerId = event.pointerId || 0;
+    scrubber.classList.add("is-scrubbing");
+    scrubber.dataset.wisTimelinePreviewing = "1";
     scrubber.focus({ preventScroll: true });
     previewTimelinePointer(event);
+    logWisCameraMediaEvent("camera.timeline.scrub.begin", {
+      streamId,
+      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      pointerId: timelinePointerId,
+      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
+      ratio: Number(previewTimelineTarget?.ratio || 0),
+      elementConnected: scrubber.isConnected !== false,
+    });
     cameraPlaybackController?.recordTimelineUserEvent?.("pointerdown", {
       reason: "timeline-pointerdown",
       timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
@@ -5746,6 +5953,10 @@ function renderWisCameraTimelineFooter(camera = null) {
       event.preventDefault();
       event.stopPropagation();
       suppressNextTimelineClick = false;
+      logWisCameraMediaEvent("camera.timeline.click.suppressed_after_drag", {
+        streamId,
+        generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
+      }, { sampleMs: 1000 });
       return;
     }
     if (!frames.length) {
