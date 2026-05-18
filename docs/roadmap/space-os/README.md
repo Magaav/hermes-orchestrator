@@ -41,6 +41,12 @@ This track is the continuity point for evolving Hermes Orchestrator and `wasm-ag
   Runs API, and asks `hermes-defense` for mitigation plans without silently
   applying fixes. Bridge delivery is retained only as a legacy compatibility
   path.
+- WIS camera work has narrowed to one artifact per physical camera. The active
+  CAM 1 artifact renders a single RTMP-push frame in a focused WIS widget and
+  artifact-level push config takes precedence over older browser-local
+  snapshot/RTSP camera settings for that slot. Focused camera widgets now size
+  from the camera aspect ratio, hide WIS location/status chrome, and use a header
+  config button instead of bottom in-surface controls.
 - `wasm-agent-cloud.md` records the new client-first cloud foundation. Local
   development still uses `/local/plugins/wasm-agent/state`, while
   `HERMES_WASM_AGENT_DEPLOYMENT_MODE=cloud` requires a private

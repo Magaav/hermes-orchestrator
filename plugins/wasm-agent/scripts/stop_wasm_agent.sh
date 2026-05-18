@@ -22,7 +22,7 @@ if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
   exit 0
 fi
 
-kill "${pid}"
+kill -- "-${pid}" 2>/dev/null || kill "${pid}"
 for _ in 1 2 3 4 5; do
   if ! kill -0 "${pid}" 2>/dev/null; then
     rm -f "${PID_FILE}"
@@ -35,7 +35,7 @@ for _ in 1 2 3 4 5; do
   sleep 1
 done
 
-kill -9 "${pid}" 2>/dev/null || true
+kill -9 -- "-${pid}" 2>/dev/null || kill -9 "${pid}" 2>/dev/null || true
 rm -f "${PID_FILE}"
 if [[ "${HERMES_WASM_AGENT_STOP_BRIDGE:-1}" != "0" ]]; then
   "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/stop_wasm_bridge.sh"

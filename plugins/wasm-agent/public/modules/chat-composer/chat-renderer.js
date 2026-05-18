@@ -29,12 +29,45 @@ function renderChildrenToHtml(tokens) {
   return renderTokensToHtml(tokens, { fragment: true });
 }
 
+function renderTableCellToHtml(cell, tagName, alignment) {
+  const align = ["left", "center", "right"].includes(alignment) ? alignment : "left";
+  const alignAttribute = align === "left" ? "" : ` style="text-align: ${align}"`;
+  const children = Array.isArray(cell?.children)
+    ? cell.children
+    : [{ type: "text", value: cell?.value || "", raw: cell?.value || "" }];
+  return `<${tagName}${alignAttribute}>${renderChildrenToHtml(children)}</${tagName}>`;
+}
+
+function renderTableToHtml(token) {
+  const headers = Array.isArray(token.headers) ? token.headers : [];
+  const rows = Array.isArray(token.rows) ? token.rows : [];
+  const alignments = Array.isArray(token.alignments) ? token.alignments : [];
+  if (!headers.length) return escapeHtml(token.raw || "");
+  const head = headers
+    .map((cell, index) => renderTableCellToHtml(cell, "th", alignments[index]))
+    .join("");
+  const body = rows
+    .map((row) => `<tr>${row.map((cell, index) => renderTableCellToHtml(cell, "td", alignments[index])).join("")}</tr>`)
+    .join("");
+  const bodyHtml = body ? `<tbody>${body}</tbody>` : "";
+  return `<div class="agent-markdown-table-wrap"><table><thead><tr>${head}</tr></thead>${bodyHtml}</table></div>`;
+}
+
+function isBlockToken(token) {
+  return ["code_block", "heading", "table", "quote_line"].includes(token?.type);
+}
+
 function renderTokenToHtml(token) {
   if (!token || typeof token !== "object") return "";
   if (token.type === "text") return escapeHtml(token.value);
   if (token.type === "newline") return "<br>";
   if (token.type === "inline_code") return `<code>${escapeHtml(token.value)}</code>`;
   if (token.type === "code_block") return `<pre><code>${escapeHtml(token.value)}</code></pre>`;
+  if (token.type === "heading") {
+    const level = Math.max(1, Math.min(6, Number(token.level) || 2));
+    return `<h${level}>${renderChildrenToHtml(token.children)}</h${level}>`;
+  }
+  if (token.type === "table") return renderTableToHtml(token);
   if (token.type === "bold") return `<strong>${renderChildrenToHtml(token.children)}</strong>`;
   if (token.type === "italic") return `<em>${renderChildrenToHtml(token.children)}</em>`;
   if (token.type === "strike") return `<s>${renderChildrenToHtml(token.children)}</s>`;
@@ -76,10 +109,12 @@ export function renderTokensToHtml(tokens, options = {}) {
       const quote = renderQuoteBlock(items, index);
       html += quote.html;
       index = quote.nextIndex;
+      if (items[index]?.type === "newline") index += 1;
       continue;
     }
     html += renderTokenToHtml(token);
     index += 1;
+    if (isBlockToken(token) && items[index]?.type === "newline") index += 1;
   }
   if (options.fragment) return html;
   return `<div class="${RENDER_CLASS}">${html}</div>`;

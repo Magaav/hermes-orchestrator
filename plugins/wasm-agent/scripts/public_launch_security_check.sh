@@ -111,6 +111,8 @@ else
 fi
 
 if have python3; then
+  run_check "camera push ingest test" python3 "${PLUGIN_DIR}/tests/camera_push_ingest.test.py"
+  run_check "client snapshot relay test" python3 "${PLUGIN_DIR}/tests/client_snapshot.test.py"
   run_check "image card golden test" python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
   run_check "WIS shared-space behavior test" python3 "${PLUGIN_DIR}/tests/wis_shared_space.test.py"
   run_check "security loop policy test" python3 "${PLUGIN_DIR}/tests/security_loop_policy.test.py"

@@ -258,10 +258,42 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   render loop, sandbox permissions, and agent-readable surface state are real;
   network loading, HTML/CSS parsing, JavaScript execution, layout engines, and
   security origins are not real browser implementations yet.
+- WIS should run artifact-side deterministic work through its embedded
+  `hermes.wasm_agent.wis.wasm_engine.v1` microkernel when possible. The WASM
+  layer may score trees, plan layout, classify media capabilities, and expose
+  capability flags; the JS shell remains responsible for DOM integration,
+  pointer/input events, and browser media transport.
+- Camera artifacts should prefer no-backend paths: local device cameras use
+  same-origin `getUserMedia`, and HTTP(S) MJPEG/HLS/video URLs render directly
+  when the browser can play them. RTSP must be surfaced as
+  `rtsp-relay-required`; WIS/WASM may classify it, but cannot bypass browser
+  network and codec limits. If the vendor web portal works but its streams are
+  blocked by browser origin, mixed-content, auth, or codec rules, WIS may offer
+  explicit `getDisplayMedia` tab/window capture. That captures pixels the user
+  chooses; it must not read another origin's DOM, cookies, or local storage.
+  If the DVR can push RTMP outward, WIS may use a wasm-agent-owned RTMP ingest
+  listener and same-origin latest-frame endpoint so the DVR itself becomes the
+  always-on bridge. Keep that as an explicit operator-configured push path, not
+  an implicit Intelbras Cloud/P2P bypass.
+- The camera artifact UX should be one WIS artifact per physical camera. A
+  focused camera artifact should carry a single `state.cameras` entry and
+  `camera_focus` marker, hide the WIS inspector side panel plus location/status
+  chrome, and dedicate the widget body to an uncropped live frame whose height
+  follows the camera aspect ratio. Camera setup belongs in the WIS header config
+  button, not an in-surface bottom action row. Artifact-level RTMP push config is
+  durable shared intent and must override stale browser-local snapshot/RTSP
+  credentials for the same slot.
 - WIS automation must use structured state and actions. The supported hook is
   `window.wasmAgentWis.inspect()`, `window.wasmAgentWis.act(...)`, and
   `window.wasmAgentWis.exportSpace()`, and the Observation snapshot should carry
-  the same surface state so embedded agents do not guess from pixels.
+  the same surface state so embedded agents do not guess from pixels. Client
+  snapshot responses must also include WIS surface/camera runtime diagnostics
+  with camera URLs redacted, because camera playback failures are browser-local
+  and often cannot be reproduced from the backend process.
+- WIS should restore the last active artifact for the current space, and may
+  auto-open the matching artifact when browser-local camera config already
+  exists for that artifact. Falling back to the sample counter surface while a
+  configured camera artifact exists is treated as a debuggability failure.
 - Userland WIS evolution must use validated `hermes.wasm_agent.wis.patch.v1`
   payloads, not raw source writes. The server-side patcher may update
   account-owned or joined shared-space WIS artifacts, while core wasm-agent

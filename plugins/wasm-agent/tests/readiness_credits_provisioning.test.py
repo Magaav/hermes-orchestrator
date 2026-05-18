@@ -133,7 +133,20 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
             self.assertEqual(stopped["missing_dependency"], "selected_node_not_running")
 
             node_id = static_server.account_main_node_id(self.user)
-            (self.env_root / f"{node_id}.env").write_text("API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n", encoding="utf-8")
+            (self.env_root / f"{node_id}.env").write_text("NODE_STATE=4\n", encoding="utf-8")
+
+            def unpaid_live_sandbox_bridge(server, method, path, body):
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": True, "status": "running"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=unpaid_live_sandbox_bridge):
+                unpaid = static_server.agent_readiness(self.server, self.user, target_node="account-sandbox")
+            self.assertEqual(unpaid["status"], "sandbox_billing_incomplete")
+            self.assertEqual(unpaid["missing_dependency"], "account_sandbox_billing")
+
             with patch.object(
                 static_server,
                 "bridge_proxy",
@@ -161,6 +174,47 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
             self.assertEqual(result["diagnostics"]["missing_dependency"], "account_sandbox_api_url")
             self.assertIn("Missing dependency: `account_sandbox_api_url`", result["reply"])
             self.assertTrue(any(action["id"] == "agent_readiness" and action["status"] == "error" for action in result["actions"]))
+
+    def test_embedded_agent_receives_current_space_name(self) -> None:
+        body = {
+            "message": "what is the current space name?",
+            "mode": "local",
+            "target_node": "account-sandbox",
+            "space_id": "design_lab",
+            "space_name": "Design Lab",
+            "space_display_name": "Design Lab 2/3",
+            "active_space": {
+                "id": "design_lab",
+                "name": "Design Lab",
+                "display_name": "Design Lab 2/3",
+                "panel": "design_lab",
+                "kind": "user",
+                "shared_space_id": "share_design_lab",
+            },
+            "observation": {
+                "workspace": {
+                    "active_panel": "design_lab",
+                    "active_space": {
+                        "id": "design_lab",
+                        "name": "Design Lab",
+                        "display_name": "Design Lab 2/3",
+                    },
+                },
+                "recent_events": [],
+            },
+            "transcript": [],
+        }
+        with patch.dict(os.environ, self.env, clear=True):
+            result = static_server.embedded_agent_message(self.server, body, user=self.user)
+        self.assertIn("Design Lab 2/3", result["reply"])
+        self.assertEqual(result["diagnostics"]["space_context"]["name"], "Design Lab")
+        self.assertEqual(result["diagnostics"]["space_context"]["display_name"], "Design Lab 2/3")
+        current_space_actions = [action for action in result["actions"] if action["id"] == "space_context"]
+        self.assertTrue(current_space_actions)
+        self.assertIn("Design Lab", current_space_actions[0]["detail"])
+        preview_tools = [item for item in result["context_preview"] if item.get("tool") == "current_turn_observation"]
+        self.assertTrue(preview_tools)
+        self.assertIn("Design Lab", preview_tools[0]["preview"])
 
     def test_credit_grants_are_admin_only_idempotent_and_target_guarded(self) -> None:
         with patch.dict(os.environ, self.env, clear=True):
@@ -217,9 +271,10 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
             node_id = static_server.account_main_node_id(self.user)
             calls: list[tuple[str, str, dict | None]] = []
 
-            def fake_bridge(server, method, path, body):
+            def fake_bridge(server, method, path, body, *, timeout=20):
                 calls.append((method, path, body))
                 if method == "POST" and path == "/nodes":
+                    self.assertGreaterEqual(timeout, 120)
                     self.assertEqual(body["node_id"], node_id)
                     self.assertEqual(body["node_state"], "4")
                     self.assertEqual(body["default_model_provider"], "opencode-go")
@@ -294,6 +349,50 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
                     ).fetchone()
                 self.assertGreaterEqual(int(provision_denials["total"]), 4)
 
+    def test_main_provisioning_keeps_charge_when_timeout_later_recovers_running_node(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            node_id = static_server.account_main_node_id(self.user)
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 100, "reason": "recover-main", "idempotency_key": "grant-recover-main"},
+            )
+            running = False
+
+            def fake_bridge(server, method, path, body, *, timeout=20):
+                nonlocal running
+                if method == "POST" and path == "/nodes":
+                    self.assertGreaterEqual(timeout, 120)
+                    self.assertEqual(body["node_id"], node_id)
+                    running = True
+                    (self.env_root / f"{node_id}.env").write_text(
+                        "API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n",
+                        encoding="utf-8",
+                    )
+                    raise static_server.BrowserError(
+                        "bridge_timeout",
+                        "Bridge request timed out after 120s.",
+                        status=static_server.HTTPStatus.BAD_GATEWAY,
+                    )
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": running, "status": "running" if running else "starting"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=fake_bridge):
+                result = static_server.provision_main_fleet_node(
+                    self.server,
+                    self.user,
+                    {"idempotency_key": "recover-main"},
+                )
+            self.assertTrue(result["provisioned"])
+            self.assertTrue(result["debited"])
+            self.assertEqual(result["credits"]["balance"], 0)
+            self.assertEqual(result["readiness"]["status"], "ready")
+            self.assertEqual(result["bridge"]["node_create"]["source"], "late_account_sandbox_recovery")
+
     def test_agent_harness_hermes_backend_charges_ten_flux_and_binds_node(self) -> None:
         with patch.dict(os.environ, self.env, clear=True):
             self.seed_accounts()
@@ -304,8 +403,9 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
                 {"amount": 10, "reason": "harness", "idempotency_key": "grant-harness"},
             )
 
-            def fake_bridge(server, method, path, body):
+            def fake_bridge(server, method, path, body, *, timeout=20):
                 if method == "POST" and path == "/nodes":
+                    self.assertGreaterEqual(timeout, 120)
                     self.assertEqual(body["node_id"], node_id)
                     self.assertEqual(body["default_model_provider"], "opencode-go")
                     self.assertEqual(body["default_model"], "kimi-k2.6")
@@ -344,6 +444,147 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
             self.assertEqual(result["harness"]["node_id"], node_id)
             self.assertEqual(result["harness"]["user_id"], str(self.user["id"]))
             self.assertEqual(result["harness"]["harness_type"], "hermes")
+            self.assertEqual(result["harness"]["instructions"], "Work inside the sandbox.")
+
+    def test_agent_harness_timeout_keeps_charge_when_late_node_recovers(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            node_id = static_server.account_main_node_id(self.user)
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 10, "reason": "recover-harness", "idempotency_key": "grant-recover-harness"},
+            )
+            running = False
+
+            def fake_bridge(server, method, path, body, *, timeout=20):
+                nonlocal running
+                if method == "POST" and path == "/nodes":
+                    self.assertGreaterEqual(timeout, 120)
+                    self.assertEqual(body["node_id"], node_id)
+                    running = True
+                    (self.env_root / f"{node_id}.env").write_text(
+                        "API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n",
+                        encoding="utf-8",
+                    )
+                    raise static_server.BrowserError(
+                        "bridge_timeout",
+                        "Bridge request timed out after 120s.",
+                        status=static_server.HTTPStatus.BAD_GATEWAY,
+                    )
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": running, "status": "running" if running else "starting"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=fake_bridge):
+                result = static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {
+                        "idempotency_key": "recover-harness",
+                        "harness_name": "Recovered harness",
+                        "harness_type": "hermes",
+                        "infra_mode": "hermes_backend",
+                        "provider_config": HARNESS_PROVIDER_CONFIG,
+                    },
+                )
+            self.assertTrue(result["charged"])
+            self.assertEqual(result["credits"]["balance"], 0)
+            self.assertEqual(result["harness"]["lifecycle_state"], "ready")
+            self.assertEqual(result["readiness"]["status"], "ready")
+            self.assertEqual(result["bridge"]["node_create"]["source"], "late_account_sandbox_recovery")
+
+    def test_failed_refunded_harness_with_live_node_reports_billing_incomplete(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            node_id = static_server.account_main_node_id(self.user)
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 10, "reason": "failed-live", "idempotency_key": "grant-failed-live"},
+            )
+            with patch.object(
+                static_server,
+                "bridge_proxy",
+                side_effect=static_server.BrowserError(
+                    "bridge_unavailable",
+                    "orchestrator down",
+                    status=static_server.HTTPStatus.BAD_GATEWAY,
+                ),
+            ):
+                with self.assertRaises(static_server.BrowserError):
+                    static_server.provision_agent_harness_node(
+                        self.server,
+                        self.user,
+                        {
+                            "idempotency_key": "failed-live",
+                            "harness_name": "Failed then live",
+                            "harness_type": "hermes",
+                            "infra_mode": "hermes_backend",
+                            "provider_config": HARNESS_PROVIDER_CONFIG,
+                        },
+                    )
+            self.assertEqual(static_server.account_credits(self.user)["balance"], 10)
+            (self.env_root / f"{node_id}.env").write_text(
+                "NODE_STATE=4\n",
+                encoding="utf-8",
+            )
+
+            def live_bridge(server, method, path, body, *, timeout=20):
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": True, "status": "running"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=live_bridge):
+                readiness = static_server.agent_readiness(self.server, self.user, target_node="account-sandbox")
+            self.assertEqual(readiness["status"], "sandbox_billing_incomplete")
+            self.assertEqual(readiness["missing_dependency"], "account_sandbox_billing")
+
+    def test_agent_harness_reuses_existing_live_account_sandbox(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+            node_id = static_server.account_main_node_id(self.user)
+            (self.env_root / f"{node_id}.env").write_text(
+                "API_SERVER_HOST=127.0.0.1\nAPI_SERVER_PORT=9876\n",
+                encoding="utf-8",
+            )
+            static_server.grant_flux_credits(
+                self.admin,
+                "101",
+                {"amount": 10, "reason": "harness", "idempotency_key": "grant-reuse-harness"},
+            )
+            calls: list[tuple[str, str]] = []
+
+            def fake_bridge(server, method, path, body, *, timeout=20):
+                calls.append((method, path))
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == f"/nodes/{node_id}":
+                    return {"ok": True, "node": {"id": node_id, "running": True, "status": "running"}}
+                if method == "POST" and path == "/nodes":
+                    raise AssertionError("existing live account sandbox should be reused")
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=fake_bridge):
+                result = static_server.provision_agent_harness_node(
+                    self.server,
+                    self.user,
+                    {
+                        "idempotency_key": "harness-reuse",
+                        "harness_name": "Reuse harness",
+                        "harness_type": "hermes",
+                        "infra_mode": "hermes_backend",
+                        "provider_config": HARNESS_PROVIDER_CONFIG,
+                    },
+                )
+            self.assertTrue(result["charged"])
+            self.assertEqual(result["harness"]["lifecycle_state"], "ready")
+            self.assertEqual(result["harness"]["node_id"], node_id)
+            self.assertNotIn(("POST", "/nodes"), calls)
 
     def test_agent_harness_custom_bridge_does_not_charge_flux(self) -> None:
         with patch.dict(os.environ, self.env, clear=True):

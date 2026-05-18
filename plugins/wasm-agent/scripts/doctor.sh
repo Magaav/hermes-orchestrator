@@ -36,8 +36,11 @@ fi
 
 python3 "${PLUGIN_DIR}/tests/agent_input_editor.test.py"
 python3 "${PLUGIN_DIR}/tests/bridge_routes.test.py"
+python3 "${PLUGIN_DIR}/tests/camera_push_ingest.test.py"
+python3 "${PLUGIN_DIR}/tests/camera_snapshot_proxy.test.py"
 python3 "${PLUGIN_DIR}/tests/image_card_golden.test.py"
 python3 "${PLUGIN_DIR}/tests/client_first_cloud.test.py"
+python3 "${PLUGIN_DIR}/tests/client_snapshot.test.py"
 python3 "${PLUGIN_DIR}/tests/readiness_credits_provisioning.test.py"
 python3 "${PLUGIN_DIR}/tests/provider_proxy.test.py"
 python3 "${PLUGIN_DIR}/tests/wis_shared_space.test.py"

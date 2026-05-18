@@ -2378,6 +2378,54 @@ button.danger:hover,
   border-radius: 3px;
 }
 
+.widget-camera-config-button {
+  order: 2;
+}
+
+.widget-camera-config-button::before {
+  content: "";
+  position: absolute;
+  inset: 6px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+}
+
+.widget-camera-config-button::after {
+  content: "";
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.widget-camera-replay-button {
+  order: 3;
+}
+
+.widget-camera-replay-button::before {
+  content: "";
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 9px solid currentColor;
+}
+
+.widget-camera-replay-button.active::before {
+  left: 6px;
+  width: 4px;
+  height: 12px;
+  border: 0;
+  border-left: 4px solid currentColor;
+  border-right: 4px solid currentColor;
+}
+
 .widget-add-button {
   order: 0;
   min-height: 24px;
@@ -2501,6 +2549,11 @@ body.is-nodes-panel-dragging {
   height: min(650px, 68vh);
   display: grid;
   grid-template-rows: 42px minmax(0, 1fr);
+}
+
+.wis-widget.is-camera-artifact:not(.is-maximized) {
+  height: auto !important;
+  grid-template-rows: 42px auto;
 }
 
 .metric-grid {
@@ -2637,8 +2690,20 @@ body.is-nodes-panel-dragging {
   background: rgba(255, 255, 255, 0.035);
 }
 
+.fleet-section-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .fleet-card.main {
   border-color: rgba(124, 228, 176, 0.32);
+}
+
+.fleet-card.muted {
+  opacity: 0.72;
 }
 
 .fleet-main-button,
@@ -2791,6 +2856,41 @@ body.is-nodes-panel-dragging {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.artifact-open-button {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  border: 1px solid rgba(147, 170, 203, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 8px;
+  text-align: left;
+}
+
+.artifact-open-button:hover,
+.artifact-open-button:focus-visible {
+  border-color: rgba(125, 220, 255, 0.38);
+  background: rgba(125, 220, 255, 0.08);
+}
+
+.artifact-open-button strong,
+.artifact-open-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-open-button strong {
+  font-size: 12px;
+}
+
+.artifact-open-button span {
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .device-os-icon {
@@ -3432,7 +3532,20 @@ textarea:focus {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.42fr);
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.34fr);
+}
+
+.wis-widget.is-camera-artifact .wis-shell {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.wis-widget.is-camera-artifact:not(.is-maximized) .wis-shell {
+  aspect-ratio: var(--wis-camera-aspect, 352 / 240);
+}
+
+.wis-widget.is-camera-artifact .wis-panel {
+  display: none;
 }
 
 .wis-surface {
@@ -3447,8 +3560,19 @@ textarea:focus {
   outline: none;
 }
 
+.wis-widget.is-camera-artifact .wis-surface {
+  grid-template-rows: minmax(0, 1fr) auto;
+  border-right: 0;
+  background: #050912;
+  position: relative;
+}
+
 .wis-surface:focus {
   box-shadow: inset 0 0 0 2px rgba(42, 113, 214, 0.38);
+}
+
+.wis-widget.is-camera-artifact .wis-surface:focus {
+  box-shadow: none;
 }
 
 .wis-surface-bar {
@@ -3469,11 +3593,23 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.wis-widget.is-camera-artifact .wis-surface-bar {
+  display: none;
+}
+
 .wis-viewport {
   min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 18px;
+}
+
+.wis-widget.is-camera-artifact .wis-viewport {
+  display: grid;
+  align-content: start;
+  padding: 0;
+  overflow: hidden;
+  background: #050912;
 }
 
 .wis-node-document {
@@ -3483,10 +3619,231 @@ textarea:focus {
   gap: 14px;
 }
 
+.wis-camera-focus-document {
+  width: 100%;
+  min-height: 0;
+  align-content: start;
+  gap: 0;
+}
+
 .wis-node-section {
   min-width: 0;
   display: grid;
   gap: 10px;
+}
+
+.wis-camera-focus-frame {
+  width: 100%;
+  min-height: 0;
+  grid-template-rows: auto;
+  gap: 0;
+}
+
+.wis-camera-focus-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  border-top: 1px solid rgba(147, 170, 203, 0.18);
+  background: #101828;
+}
+
+.wis-camera-header-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.wis-camera-header-notice {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 680;
+}
+
+.wis-camera-header-notice.success {
+  color: var(--mint);
+}
+
+.wis-camera-header-notice.warn {
+  color: var(--amber);
+}
+
+.wis-camera-tool-button {
+  min-width: 36px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0 7px;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 760;
+  line-height: 1;
+}
+
+.wis-camera-tool-button:hover,
+.wis-camera-tool-button:focus-visible,
+.wis-camera-tool-button.active {
+  color: var(--text);
+  border-color: rgba(125, 220, 255, 0.44);
+  background: rgba(125, 220, 255, 0.1);
+}
+
+.wis-camera-tool-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.wis-widget.is-camera-artifact .wis-camera-focus-actions,
+.wis-widget.is-camera-artifact .wis-camera-fallback .wis-camera-action {
+  display: none;
+}
+
+.wis-camera-timeline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  min-width: 0;
+  width: 100%;
+  margin: 0;
+  padding: 6px 8px 7px;
+  border-top: 1px solid rgba(125, 220, 255, 0.18);
+  background: #07111f;
+  box-shadow: none;
+  pointer-events: auto;
+  touch-action: manipulation;
+}
+
+.wis-widget.is-camera-artifact:not(.is-widget-active) .wis-camera-timeline {
+  display: none;
+}
+
+.wis-camera-timeline-meta {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.wis-camera-timeline-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wis-camera-timeline-meta span + span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.wis-camera-timeline-scrubber {
+  grid-column: 1 / -1;
+  position: relative;
+  width: 100%;
+  height: 24px;
+  min-width: 0;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.wis-camera-timeline-scrubber[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.wis-camera-timeline-scrubber:focus-visible {
+  box-shadow: 0 0 0 2px rgba(125, 220, 255, 0.38);
+}
+
+.wis-camera-timeline-rail,
+.wis-camera-timeline-fill {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 6px;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.wis-camera-timeline-rail {
+  right: 0;
+  background: rgba(147, 170, 203, 0.24);
+}
+
+.wis-camera-timeline-fill {
+  width: var(--wis-camera-timeline-progress, 100%);
+  background: linear-gradient(90deg, rgba(125, 220, 255, 0.4), rgba(124, 228, 176, 0.82));
+}
+
+.wis-camera-timeline-scrubber::after {
+  content: "";
+  position: absolute;
+  left: var(--wis-camera-timeline-progress, 100%);
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(230, 247, 255, 0.94);
+  border-radius: 999px;
+  background: var(--cyan);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.34);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.wis-camera-timeline-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.wis-camera-timeline-actions .wis-camera-tool-button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.wis-node-webcam_placeholder.is-zoom-selecting {
+  cursor: crosshair;
+}
+
+.wis-node-webcam_placeholder.is-zoomed .wis-camera-video,
+.wis-node-webcam_placeholder.is-zoomed .wis-camera-image {
+  transform: scale(var(--wis-camera-zoom-scale, 1));
+  transform-origin: var(--wis-camera-zoom-origin-x, 50%) var(--wis-camera-zoom-origin-y, 50%);
+}
+
+.wis-camera-zoom-box {
+  position: absolute;
+  z-index: 3;
+  border: 2px solid rgba(125, 220, 255, 0.92);
+  background: rgba(125, 220, 255, 0.14);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+}
+
+.wis-layout-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.wis-camera-grid {
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  align-items: start;
 }
 
 .wis-app-hero {
@@ -3505,6 +3862,147 @@ textarea:focus {
   margin: 0;
   color: #42526b;
   font-size: 15px;
+}
+
+.wis-node-paragraph {
+  margin: 0;
+  color: #42526b;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.wis-node-card {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(23, 32, 51, 0.12);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.wis-card-title {
+  color: #172033;
+  font-size: 14px;
+}
+
+.wis-node-divider {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid rgba(23, 32, 51, 0.12);
+}
+
+.wis-node-webcam_placeholder {
+  position: relative;
+  display: grid;
+  min-height: 116px;
+  place-items: center;
+  border: 1px dashed rgba(42, 113, 214, 0.32);
+  border-radius: 7px;
+  background: rgba(42, 113, 214, 0.06);
+  color: #42526b;
+  font-size: 13px;
+  overflow: hidden;
+  text-align: center;
+}
+
+.wis-node-webcam_placeholder.has-camera {
+  border-style: solid;
+  background: #050912;
+}
+
+.wis-camera-focus-frame .wis-node-webcam_placeholder {
+  width: 100%;
+  min-height: 0;
+  height: auto;
+  aspect-ratio: var(--wis-camera-aspect, 352 / 240);
+  place-items: stretch;
+  border: 0;
+  border-radius: 0;
+  background: #050912;
+}
+
+.wis-camera-video,
+.wis-camera-image {
+  display: block;
+  grid-area: 1 / 1;
+  width: 100%;
+  height: 100%;
+  min-height: 116px;
+  object-fit: cover;
+}
+
+.wis-camera-image.is-buffering {
+  opacity: 0;
+}
+
+.wis-camera-focus-frame .wis-camera-video,
+.wis-camera-focus-frame .wis-camera-image {
+  min-height: 0;
+  object-fit: contain;
+  background: #050912;
+}
+
+.wis-camera-message {
+  padding: 10px;
+}
+
+.wis-camera-message.warn {
+  color: #7a4b00;
+}
+
+.wis-camera-sync-status {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 3;
+  max-width: calc(100% - 20px);
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: rgba(5, 9, 18, 0.78);
+  color: #f5f7fb;
+  font-size: 12px;
+  line-height: 1.2;
+  pointer-events: none;
+}
+
+.wis-camera-fallback {
+  display: grid;
+  width: 100%;
+  min-height: 116px;
+  place-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(255, 193, 7, 0.08);
+}
+
+.wis-camera-fallback .wis-camera-message {
+  padding: 0;
+}
+
+.wis-camera-action {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(122, 75, 0, 0.28);
+  border-radius: 7px;
+  background: #ffffff;
+  color: #5e3c00;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.wis-camera-actions,
+.wis-camera-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wis-camera-actions .wis-node-button,
+.wis-camera-access-actions .wis-node-button {
+  min-height: 30px;
+  padding-inline: 9px;
+  font-size: 12px;
 }
 
 .wis-app-controls,
@@ -3562,10 +4060,10 @@ textarea:focus {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto minmax(78px, auto) minmax(78px, auto) minmax(120px, 1fr) minmax(120px, 1fr);
+  grid-template-rows: auto minmax(0, 0.75fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 8px;
   padding: 10px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .wis-facts {
@@ -3582,7 +4080,7 @@ textarea:focus {
   border: 1px solid rgba(147, 170, 203, 0.14);
   border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.035);
-  padding: 8px;
+  padding: 7px;
 }
 
 .wis-facts dt,
@@ -3595,25 +4093,32 @@ textarea:focus {
 
 .wis-facts dd {
   min-width: 0;
-  margin: 3px 0 0;
+  margin: 2px 0 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .wis-panel-section {
   min-width: 0;
+  min-height: 0;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   align-content: start;
   gap: 6px;
+  overflow: hidden;
 }
 
 .wis-panel .wis-node-list,
 .wis-event-list {
+  min-width: 0;
+  min-height: 0;
   display: grid;
+  align-content: start;
   gap: 6px;
+  overflow: auto;
 }
 
 .wis-node-row,
@@ -3654,7 +4159,7 @@ textarea:focus {
 }
 
 .wis-automation-state {
-  min-height: 120px;
+  min-height: 0;
   margin: 0;
   overflow: auto;
   padding: 8px;
@@ -3663,6 +4168,7 @@ textarea:focus {
 
 .wis-export-section {
   grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .wis-export-section header {
@@ -3675,7 +4181,7 @@ textarea:focus {
 
 .wis-export-value {
   grid-column: 1 / -1;
-  min-height: 118px;
+  min-height: 0;
   padding: 8px;
   resize: none;
 }
@@ -4218,7 +4724,7 @@ textarea:focus {
   --s-select-border-color: rgba(147, 170, 203, 0.18);
   --s-select-bg: rgba(8, 14, 24, 0.96);
   --s-select-color: var(--muted);
-  --s-select-padding: 0 2px 0 2px;
+  --s-select-padding: 0 5px 0 5px;
   --s-select-font-size: 12px;
   color: var(--muted);
   font-size: 12px;
@@ -5555,6 +6061,49 @@ details.agent-file-row .agent-file-path {
   white-space: pre-wrap;
 }
 
+.agent-command-choices {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+  margin-top: 8px;
+}
+
+.agent-command-choice {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: 7px;
+  background: rgba(8, 14, 24, 0.78);
+  color: var(--text);
+  padding: 8px 9px;
+  text-align: left;
+}
+
+.agent-command-choice:hover,
+.agent-command-choice:focus-visible {
+  border-color: rgba(125, 220, 255, 0.42);
+  background: rgba(12, 22, 36, 0.96);
+}
+
+.agent-command-choice span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-command-choice.is-sticky {
+  position: sticky;
+  bottom: 0;
+  border-color: rgba(124, 228, 176, 0.32);
+  background: rgba(8, 20, 20, 0.98);
+}
+
 .agent-markdown {
   white-space: normal;
   overflow-wrap: anywhere;
@@ -5687,6 +6236,10 @@ details.agent-file-row .agent-file-path {
   width: 100%;
   border-collapse: collapse;
   font-size: 11px;
+}
+
+.agent-markdown-table-wrap table {
+  margin: 0;
 }
 
 .agent-markdown th,
@@ -6319,8 +6872,14 @@ details.agent-action-row .agent-action-row-summary {
 }
 
 #agentInputOverlay.chat-composer-overlay {
+  overflow: hidden;
+  scrollbar-width: none;
   background: transparent;
   color: #ffffff;
+}
+
+#agentInputOverlay.chat-composer-overlay::-webkit-scrollbar {
+  display: none;
 }
 
 .agent-send-button {
@@ -6385,7 +6944,7 @@ details.agent-action-row .agent-action-row-summary {
   --s-select-bg: rgba(8, 14, 24, 0.96);
   --s-select-color: var(--text);
   --s-select-font-size: 11px;
-  --s-select-padding: 0 2px 0 5px;
+  --s-select-padding: 0 5px 0 5px;
   font-size: 11px;
   font-family: inherit;
   line-height: 32px;
@@ -7182,11 +7741,21 @@ details.agent-action-row .agent-action-row-summary {
 
   .wis-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(220px, 0.95fr) minmax(220px, 1fr);
+    grid-template-rows: minmax(220px, 0.95fr) minmax(180px, 0.78fr);
+  }
+
+  .wis-camera-timeline {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .wis-camera-timeline-actions {
+    justify-content: flex-end;
   }
 
   .wis-panel {
     border-top: 1px solid rgba(147, 170, 203, 0.14);
+    overflow: auto;
   }
 
   .security-summary,

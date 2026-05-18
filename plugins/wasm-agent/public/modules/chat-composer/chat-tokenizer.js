@@ -27,6 +27,166 @@ function lineEndIndex(text, index) {
   return next === -1 ? text.length : next;
 }
 
+function trimClosingHeadingMarkers(value) {
+  const trimmed = String(value ?? "").trim();
+  const closing = trimmed.match(/^(.*?)[ \t]+#+[ \t]*$/);
+  if (closing?.[1]?.trim()) return closing[1].trim();
+  return trimmed;
+}
+
+function headingTokenAt(text, index) {
+  if (!isLineStart(text, index)) return null;
+  const end = lineEndIndex(text, index);
+  const raw = text.slice(index, end);
+  const marker = raw.match(/^(#{1,6})[ \t]+(.+)$/);
+  if (!marker) return null;
+  const prefixLength = marker[1].length + (raw.slice(marker[1].length).match(/^[ \t]+/)?.[0]?.length || 0);
+  const value = trimClosingHeadingMarkers(raw.slice(prefixLength));
+  if (!value) return null;
+  return {
+    type: "heading",
+    level: marker[1].length,
+    marker: marker[1],
+    value,
+    raw,
+    children: tokenizeInline(value, index + prefixLength),
+    start: index,
+    end,
+    contentStart: index + prefixLength,
+    contentEnd: end,
+  };
+}
+
+function isEscapedPipe(line, index) {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && line[cursor] === "\\"; cursor -= 1) slashCount += 1;
+  return slashCount % 2 === 1;
+}
+
+function tableRowBounds(line) {
+  let start = 0;
+  let end = line.length;
+  while (start < end && /\s/.test(line[start])) start += 1;
+  while (end > start && /\s/.test(line[end - 1])) end -= 1;
+  if (line[start] === "|") start += 1;
+  if (end > start && line[end - 1] === "|" && !isEscapedPipe(line, end - 1)) end -= 1;
+  return { start, end };
+}
+
+function tableCellFromRaw(raw, absoluteStart) {
+  const leading = raw.match(/^\s*/)?.[0]?.length || 0;
+  const trailing = raw.match(/\s*$/)?.[0]?.length || 0;
+  const contentRaw = raw.slice(leading, raw.length - trailing);
+  const value = contentRaw.replace(/\\\|/g, "|");
+  return {
+    value,
+    raw,
+    children: tokenizeInline(value, absoluteStart + leading),
+    start: absoluteStart + leading,
+    end: absoluteStart + raw.length - trailing,
+  };
+}
+
+function splitTableRow(line, lineStart = 0) {
+  const { start, end } = tableRowBounds(line);
+  const cells = [];
+  let cellStart = start;
+  for (let index = start; index < end; index += 1) {
+    if (line[index] === "|" && !isEscapedPipe(line, index)) {
+      cells.push(tableCellFromRaw(line.slice(cellStart, index), lineStart + cellStart));
+      cellStart = index + 1;
+    }
+  }
+  cells.push(tableCellFromRaw(line.slice(cellStart, end), lineStart + cellStart));
+  return cells;
+}
+
+function tableAlignmentFromCell(cell) {
+  const value = String(cell?.value ?? "").replace(/\s+/g, "");
+  if (!/^:?-{3,}:?$/.test(value)) return null;
+  if (value.startsWith(":") && value.endsWith(":")) return "center";
+  if (value.endsWith(":")) return "right";
+  return "left";
+}
+
+function tableAlignmentsFromSeparator(line, lineStart = 0) {
+  const cells = splitTableRow(line, lineStart);
+  if (cells.length < 2) return null;
+  const alignments = cells.map(tableAlignmentFromCell);
+  if (alignments.some((alignment) => !alignment)) return null;
+  return alignments;
+}
+
+function normalizeTableCells(cells, columnCount) {
+  const normalized = cells.slice(0, columnCount);
+  while (normalized.length < columnCount) {
+    normalized.push({ type: "table_cell", value: "", raw: "", children: [], start: 0, end: 0 });
+  }
+  return normalized;
+}
+
+function tableTokenAt(text, index) {
+  if (!isLineStart(text, index)) return null;
+  const headerEnd = lineEndIndex(text, index);
+  if (headerEnd >= text.length || text[headerEnd] !== "\n") return null;
+  const headerLine = text.slice(index, headerEnd);
+  if (!headerLine.includes("|")) return null;
+  const separatorStart = headerEnd + 1;
+  const separatorEnd = lineEndIndex(text, separatorStart);
+  const separatorLine = text.slice(separatorStart, separatorEnd);
+  const alignments = tableAlignmentsFromSeparator(separatorLine, separatorStart);
+  if (!alignments) return null;
+  const headerCells = splitTableRow(headerLine, index);
+  if (headerCells.length < 2) return null;
+  const columnCount = Math.max(headerCells.length, alignments.length);
+  const headers = normalizeTableCells(headerCells, columnCount);
+  const columnAlignments = alignments.slice(0, columnCount);
+  while (columnAlignments.length < columnCount) columnAlignments.push("left");
+  const rows = [];
+  let rawEnd = separatorEnd;
+  let cursor = separatorEnd;
+  while (cursor < text.length && text[cursor] === "\n") {
+    const rowStart = cursor + 1;
+    if (rowStart >= text.length) break;
+    const rowEnd = lineEndIndex(text, rowStart);
+    const rowLine = text.slice(rowStart, rowEnd);
+    if (!rowLine.trim() || !rowLine.includes("|")) break;
+    const rowCells = splitTableRow(rowLine, rowStart);
+    if (rowCells.length < 2) break;
+    rows.push(normalizeTableCells(rowCells, columnCount));
+    rawEnd = rowEnd;
+    cursor = rowEnd;
+  }
+  return {
+    type: "table",
+    raw: text.slice(index, rawEnd),
+    headers,
+    alignments: columnAlignments,
+    rows,
+    start: index,
+    end: rawEnd,
+  };
+}
+
+function findNextBlockStart(text, index) {
+  let cursor = index;
+  while (cursor < text.length) {
+    const nextLine = text.indexOf("\n", cursor);
+    if (nextLine < 0 || nextLine + 1 >= text.length) return -1;
+    const candidate = nextLine + 1;
+    if (
+      text.startsWith("```", candidate) ||
+      text[candidate] === ">" ||
+      tableTokenAt(text, candidate) ||
+      headingTokenAt(text, candidate)
+    ) {
+      return candidate;
+    }
+    cursor = candidate;
+  }
+  return -1;
+}
+
 function isBoundaryBeforeLink(text, index) {
   if (index <= 0) return true;
   const previous = text[index - 1] || "";
@@ -294,17 +454,23 @@ function tokenizeTopLevel(text) {
       continue;
     }
 
+    const table = tableTokenAt(text, index);
+    if (table) {
+      tokens.push(table);
+      index = table.end;
+      continue;
+    }
+
+    const heading = headingTokenAt(text, index);
+    if (heading) {
+      tokens.push(heading);
+      index = heading.end;
+      continue;
+    }
+
     const nextFence = text.indexOf("```", index + 1);
-    const nextQuote = (() => {
-      let cursor = index;
-      while (cursor < text.length) {
-        const found = text.indexOf("\n>", cursor);
-        if (found < 0) return -1;
-        return found + 1;
-      }
-      return -1;
-    })();
-    const candidates = [nextFence, nextQuote].filter((item) => item > index);
+    const nextBlock = findNextBlockStart(text, index);
+    const candidates = [nextFence, nextBlock].filter((item) => item > index);
     const nextSpecial = candidates.length ? Math.min(...candidates) : text.length;
     tokens.push(...tokenizeInline(text.slice(index, nextSpecial), index));
     index = nextSpecial;

@@ -153,6 +153,34 @@ export const CHAT_COMPOSER_TEST_CASES = [
     },
   },
   {
+    id: "heading-block-render",
+    name: "Markdown headings render as headings",
+    run() {
+      const html = htmlFor("## Topic\nPlain text");
+      assert(count(tokenizeChatMarkdown("## Topic"), "heading") === 1, "heading token missing");
+      assert(html.includes("<h2>Topic</h2>"), "h2 html missing");
+      assert(!html.includes("## Topic"), "raw heading marker leaked");
+    },
+  },
+  {
+    id: "gfm-table-render",
+    name: "GitHub-style pipe tables render as tables",
+    run() {
+      const raw = "| Name | Status |\n| --- | :---: |\n| **Test1** | ready |";
+      const tokens = tokenizeChatMarkdown(raw);
+      const table = first(tokens, "table");
+      assert(table?.headers?.length === 2, "table headers missing");
+      assert(table?.rows?.length === 1, "table row missing");
+      assert(tokens.map((token) => token.raw).join("") === raw, "table raw source changed");
+      const html = htmlFor(raw);
+      assert(html.includes('<div class="agent-markdown-table-wrap"><table>'), "table wrapper missing");
+      assert(html.includes("<th>Name</th>"), "table header missing");
+      assert(html.includes('style="text-align: center"'), "alignment missing");
+      assert(html.includes("<strong>Test1</strong>"), "inline markdown in table cell missing");
+      assert(!html.includes("| --- |"), "raw separator leaked");
+    },
+  },
+  {
     id: "https-link",
     name: "https linkifies",
     run() {

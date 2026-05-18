@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -405,6 +406,158 @@ Here is the userland patch.
         self.assertEqual(result["operations"], 2)
         self.assertIn("Applied WIS/userland patch", summary)
         self.assertNotIn("hermes.wasm_agent.wis.patch.v1", summary)
+
+    def test_agent_reply_current_space_placeholder_routes_to_active_space(self) -> None:
+        reply = """
+```json
+{
+  "schema": "hermes.wasm_agent.wis.patch.v1",
+  "space_id": "current-space",
+  "artifact_id": "brief",
+  "operations": [
+    {"op": "set_title", "title": "Brief"},
+    {"op": "append_child", "parent_id": "doc", "node": {"id": "summary", "type": "text", "text": "Done"}}
+  ]
+}
+```
+""".strip()
+
+        summary, result = static_server.apply_agent_wis_patches_from_reply(
+            self.server,
+            reply,
+            user=self.member,
+            space_id="playground",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["patches"][0]["space_id"], "playground")
+        self.assertIn("Applied WIS/userland patch", summary)
+
+        root = static_server.user_wis_dir(self.server, self.member, "playground")
+        artifact = static_server.read_json_file(root / "brief.json", {})
+        self.assertEqual(artifact["title"], "Brief")
+        document = artifact["documents"][0]
+        self.assertTrue(any(child.get("id") == "summary" for child in document["tree"]["children"]))
+        placeholder_root = Path(self.tempdir.name) / "state" / "users" / "202" / "spaces" / "current-space"
+        self.assertFalse(placeholder_root.exists())
+
+    def test_agent_reply_raw_wis_patch_add_document_tree_is_applied(self) -> None:
+        payload = {
+            "schema": static_server.WIS_PATCH_SCHEMA,
+            "artifact_id": "camera-dashboard",
+            "operations": [
+                {
+                    "op": "add_document",
+                    "node": {
+                        "id": "doc",
+                        "type": "document",
+                        "children": [
+                            {"id": "title", "type": "heading", "level": 1, "text": "Camera Dashboard"},
+                            {
+                                "id": "cam-grid",
+                                "type": "container",
+                                "layout": "grid",
+                                "style": ["grid-template-columns: repeat(2, 1fr)", "gap: 12px"],
+                                "children": [
+                                    {
+                                        "id": "cam-1",
+                                        "type": "card",
+                                        "props": {"title": "Camera 1"},
+                                        "children": [
+                                            {
+                                                "id": "cam1-preview",
+                                                "type": "webcam_placeholder",
+                                                "props": {"label": "No feed configured", "url": ""},
+                                            },
+                                            {
+                                                "id": "cam1-config",
+                                                "type": "button",
+                                                "props": {"label": "Configure", "action": "configure_camera"},
+                                            },
+                                        ],
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                }
+            ],
+        }
+        reply = f"Here's the patch:\n\njson\n{json.dumps(payload)}\n\nThe adapter will apply this."
+
+        summary, result = static_server.apply_agent_wis_patches_from_reply(
+            self.server,
+            reply,
+            user=self.member,
+            space_id="playground",
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["operations"], 1)
+        self.assertIn("Applied WIS/userland patch", summary)
+        self.assertNotIn(static_server.WIS_PATCH_SCHEMA, summary)
+        self.assertNotIn("\njson\n", summary)
+
+        root = static_server.user_wis_dir(self.server, self.member, "playground")
+        artifact = static_server.read_json_file(root / "camera-dashboard.json", {})
+        self.assertEqual(artifact["title"], "Camera Dashboard")
+        document = artifact["documents"][0]
+        self.assertEqual(document["tree"]["id"], "doc")
+        grid = next(child for child in document["tree"]["children"] if child.get("id") == "cam-grid")
+        self.assertEqual(grid["props"]["layout"], "grid")
+        self.assertIn("grid-template-columns: repeat(2, 1fr)", grid["props"]["style"])
+        card = grid["children"][0]
+        self.assertEqual(card["props"]["title"], "Camera 1")
+        button = card["children"][1]
+        self.assertEqual(button["text"], "Configure")
+
+    def test_agent_reply_defaults_to_shared_wis_scope(self) -> None:
+        self.create_owner_space()
+        shared = static_server.share_user_space(self.server, self.owner, {"space_id": "playground"})["shared_space"]
+        static_server.join_shared_space(
+            self.server,
+            self.member,
+            {"join_code": shared["join_code"]},
+            FakeHandler(device_id="member-device"),
+        )
+        reply = """
+```json
+{
+  "schema": "hermes.wasm_agent.wis.patch.v1",
+  "artifact_id": "camera-dashboard",
+  "operations": [
+    {"op": "set_title", "title": "Camera Dashboard"},
+    {"op": "append_child", "parent_id": "doc", "node": {"id": "slot-one", "type": "text", "text": "Camera slot"}}
+  ]
+}
+```
+""".strip()
+
+        _summary, result = static_server.apply_agent_wis_patches_from_reply(
+            self.server,
+            reply,
+            user=self.member,
+            space_id="playground",
+            shared_space_id=shared["id"],
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["patches"][0]["scope"], f"shared:{shared['id']}")
+        exported = static_server.read_wis_artifact(
+            self.server,
+            self.member,
+            "playground",
+            "camera-dashboard",
+            shared_space_id=shared["id"],
+        )
+        self.assertEqual(exported["artifact"]["title"], "Camera Dashboard")
+        self.assertEqual(exported["shared_space_id"], shared["id"])
 
 
 if __name__ == "__main__":

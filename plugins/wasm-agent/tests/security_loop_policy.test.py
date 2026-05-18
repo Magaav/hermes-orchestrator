@@ -84,9 +84,13 @@ class SecurityLoopPolicyTest(unittest.TestCase):
                 "run_id": "run_1",
                 "thinking_stream": "private reasoning text",
                 "events": [
+                    {"event": "run.started", "status": "running", "source": "run_status"},
+                    {"event": "run.started", "status": "running", "message": "Run started"},
                     {"event": "tool.started", "tool": "read_file", "preview": "/local/README.md"},
                     {"event": "tool.completed", "tool": "read_file", "status": "ok"},
-                    {"event": "run.completed", "status": "completed"},
+                    {"event": "reasoning.available", "text": "private reasoning text"},
+                    {"event": "run.completed", "status": "completed", "message": "Run completed"},
+                    {"event": "run.completed", "status": "completed", "source": "run_status"},
                 ],
             },
         }
@@ -96,6 +100,10 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertGreaterEqual(len(trace["steps"]), 1)
         self.assertEqual(trace["tool_calls"][0]["name"], "read_file")
         self.assertEqual(trace["tool_calls"][0]["status"], "done")
+        kinds = [step["kind"] for step in trace["steps"]]
+        self.assertEqual(kinds.count("backend.run.started"), 1)
+        self.assertEqual(kinds.count("backend.run.completed"), 1)
+        self.assertIn("model.reasoning.available", kinds)
         self.assertIn("Provider returned", trace["reasoning_summary"])
         self.assertNotIn("private reasoning text", trace["reasoning_summary"])
 

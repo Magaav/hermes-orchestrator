@@ -42,6 +42,11 @@ tree and workflow.
   and local enablement controls.
 - `browser/`: Host Browser firmware contract; runtime browser captures and
   profiles live under `state/browser/`.
+- `wis/`: browser-local WIS artifact runtime and embedded WASM microkernel.
+  `wis/artifacts/camera.js` owns the portable focused-camera artifact factory,
+  slot/focus helpers, push-camera config shape, and camera controller contract;
+  the shell imports it for host rendering instead of defining that artifact
+  shape inside `app.js`.
 - `observation/`: Observation firmware contract; the latest debug snapshot
   lives under `state/users/<acc_id>/observation/latest.json`.
 - `timeline/`: Timeline/time-travel firmware contract; checkpoint metadata

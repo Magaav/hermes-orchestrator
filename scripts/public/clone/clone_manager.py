@@ -2237,6 +2237,76 @@ def _fallback_model_name_from_env(env: Dict[str, str]) -> str:
     return _env_first_nonempty(env, "NODE_AGENT_FALLBACK_MODEL", "FALLBACK_MODEL")
 
 
+def _sync_model_config_from_env(env: Dict[str, str], clone_root: Path) -> Dict[str, Any]:
+    config_path = clone_root / ".hermes" / "config.yaml"
+    default_model = _default_model_name_from_env(env)
+    default_provider = _default_model_provider_from_env(env)
+    fallback_model = _fallback_model_name_from_env(env)
+    fallback_provider = _fallback_model_provider_from_env(env)
+    if not any([default_model, default_provider, fallback_model, fallback_provider]):
+        return {"changed": False, "config_path": str(config_path)}
+
+    try:
+        import yaml  # type: ignore
+    except Exception:
+        yaml = None  # type: ignore[assignment]
+
+    config: Dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            raw = config_path.read_text(encoding="utf-8")
+            loaded = yaml.safe_load(raw) if yaml is not None else json.loads(raw)
+            if isinstance(loaded, dict):
+                config = loaded
+        except Exception:
+            config = {}
+
+    before = json.dumps(config, sort_keys=True, default=str)
+    model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
+    model_cfg = dict(model_cfg)
+    if default_model:
+        model_cfg["default"] = default_model
+    if default_provider:
+        model_cfg["provider"] = default_provider
+    default_base_url = str(env.get("DEFAULT_MODEL_BASE_URL", "") or "").strip()
+    default_api_mode = str(env.get("DEFAULT_MODEL_API_MODE", "") or "").strip()
+    if default_base_url:
+        model_cfg["base_url"] = default_base_url
+    if default_api_mode:
+        model_cfg["api_mode"] = default_api_mode
+    if model_cfg:
+        config["model"] = model_cfg
+
+    if fallback_model or fallback_provider:
+        fallback_cfg = config.get("fallback_model") if isinstance(config.get("fallback_model"), dict) else {}
+        fallback_cfg = dict(fallback_cfg)
+        if fallback_model:
+            fallback_cfg["model"] = fallback_model
+        if fallback_provider:
+            fallback_cfg["provider"] = fallback_provider
+        fallback_base_url = str(env.get("FALLBACK_MODEL_BASE_URL", "") or "").strip()
+        fallback_api_mode = str(env.get("FALLBACK_MODEL_API_MODE", "") or "").strip()
+        if fallback_base_url:
+            fallback_cfg["base_url"] = fallback_base_url
+        if fallback_api_mode:
+            fallback_cfg["api_mode"] = fallback_api_mode
+        config["fallback_model"] = fallback_cfg
+
+    changed = before != json.dumps(config, sort_keys=True, default=str)
+    if changed:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        if yaml is not None:
+            rendered = yaml.safe_dump(config, sort_keys=False)
+        else:
+            rendered = json.dumps(config, indent=2) + "\n"
+        config_path.write_text(rendered, encoding="utf-8")
+        try:
+            config_path.chmod(0o600)
+        except OSError:
+            pass
+    return {"changed": changed, "config_path": str(config_path)}
+
+
 def _effective_hermes_yolo_mode(env: Dict[str, str]) -> str:
     """Return the canonical YOLO toggle from profile env (supports legacy alias)."""
     return _env_first_nonempty(
@@ -3830,11 +3900,13 @@ def _bootstrap_openviking_for_clone(clone_name: str, env_path: Path, clone_root:
 
 def _bootstrap_models_for_clone(clone_name: str, env_path: Path, clone_root: Path) -> Dict[str, Any]:
     env = _read_env_file(env_path)
+    config_sync = _sync_model_config_from_env(env, clone_root)
     fallback_payload: Dict[str, Any] = {
         "ok": True,
-        "changed": False,
-        "model_changed": False,
+        "changed": bool(config_sync.get("changed")),
+        "model_changed": bool(config_sync.get("changed")),
         "fallback_changed": False,
+        "config_path": config_sync.get("config_path", ""),
         "effective": {
             "default": {
                 "model": _default_model_name_from_env(env),
@@ -3854,13 +3926,17 @@ def _bootstrap_models_for_clone(clone_name: str, env_path: Path, clone_root: Pat
 
     model_bootstrap_script = _discord_plugin_script("scripts/model_env_bootstrap.py")
     if not model_bootstrap_script.exists():
-        _log(clone_name, "model bootstrap: script not found; skipped")
+        _log(
+            clone_name,
+            "model bootstrap: script not found; "
+            f"synced_config={bool(config_sync.get('changed'))}",
+        )
         return fallback_payload
 
     python_bin = _select_host_python(required_module="yaml") or _select_host_python(required_module="json")
     if python_bin is None:
         _log(clone_name, "model bootstrap: python runtime not found; skipped")
-        fallback_payload["warnings"] = ["python runtime unavailable for model bootstrap"]
+        fallback_payload["warnings"] = ["python runtime unavailable for model bootstrap; used env model config"]
         return fallback_payload
 
     proc = _run(
@@ -3903,7 +3979,7 @@ def _bootstrap_models_for_clone(clone_name: str, env_path: Path, clone_root: Pat
         + (f" stderr={err}" if err else ""),
     )
     fallback_payload["ok"] = False
-    fallback_payload["warnings"] = [f"model bootstrap script failed: {err}" if err else "model bootstrap script failed"]
+    fallback_payload["warnings"] = [f"model bootstrap script failed: {err}" if err else "model bootstrap script failed; used env model config"]
     return fallback_payload
 
 

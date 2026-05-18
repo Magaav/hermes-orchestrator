@@ -3,6 +3,38 @@ export const WIS_SURFACE_STATE_SCHEMA = "hermes.wasm_agent.wis.surface_state.v1"
 export const WIS_ACTION_SCHEMA = "hermes.wasm_agent.wis.action.v1";
 export const WIS_EVENT_SCHEMA = "hermes.wasm_agent.wis.event.v1";
 export const WIS_EXPORT_SCHEMA = "hermes.wasm_agent.wis.export.v1";
+export const WIS_WASM_ENGINE_SCHEMA = "hermes.wasm_agent.wis.wasm_engine.v1";
+
+export const WIS_WASM_ENGINE_BASE64 = "AGFzbQEAAAABEwNgAAF/YAR/f39/AX9gAn9/AX8DBgUAAAECAgdEBQd2ZXJzaW9uAAAMY2FwYWJpbGl0aWVzAAEJbm9kZV9jb3N0AAIObGF5b3V0X2NvbHVtbnMAAwptZWRpYV9tb2RlAAQKZAUEAEEBCwQAQR8LHgAgASACQSBuaiADQQJsaiAAQQhGBH9BCAVBAQtqCyAAIAFBAUgEf0EBBSAAIAFuQQFJBH9BAQUgACABbgsLCxgAIABBAUYEf0EBBSABRQR/QQAFQQILCws=";
+const WIS_WASM_CAPABILITY_FLAGS = {
+  treeMetrics: 1,
+  stateActions: 2,
+  layoutPlanning: 4,
+  mediaPlanning: 8,
+  artifactRuntime: 16,
+};
+const WIS_NODE_TYPE_IDS = new Map([
+  ["document", 1],
+  ["section", 2],
+  ["container", 3],
+  ["heading", 4],
+  ["text", 5],
+  ["paragraph", 5],
+  ["button", 6],
+  ["input", 7],
+  ["webcam_placeholder", 8],
+  ["video", 9],
+  ["card", 10],
+  ["list", 11],
+  ["list-item", 12],
+  ["divider", 13],
+]);
+const WIS_MEDIA_PROTOCOL_IDS = new Map([
+  ["rtsp:", 1],
+  ["http:", 2],
+  ["https:", 2],
+  ["hls:", 3],
+]);
 
 export const WIS_EXAMPLE_SPACE_DEFINITION = {
   schema: WIS_SPACE_SCHEMA,
@@ -103,6 +135,67 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function bytesFromBase64(base64) {
+  if (typeof atob === "function") {
+    return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  }
+  if (typeof Buffer !== "undefined") return Uint8Array.from(Buffer.from(base64, "base64"));
+  throw new Error("base64 decoder unavailable");
+}
+
+function decodeWasmCapabilities(flags = 0) {
+  return Object.fromEntries(
+    Object.entries(WIS_WASM_CAPABILITY_FLAGS).map(([key, bit]) => [key, Boolean(flags & bit)])
+  );
+}
+
+function fallbackWisWasmExports() {
+  return {
+    version: () => 0,
+    capabilities: () => 0,
+    node_cost: (typeId, childCount, textLength, propCount) => (
+      Number(childCount || 0) + Math.floor(Number(textLength || 0) / 32) + (Number(propCount || 0) * 2) + (Number(typeId) === 8 ? 8 : 1)
+    ),
+    layout_columns: (width, minTile) => Math.max(1, Math.floor(Number(width || 0) / Math.max(1, Number(minTile || 1)))),
+    media_mode: (protocolId, browserNative) => (Number(protocolId) === 1 ? 1 : (browserNative ? 2 : 0)),
+  };
+}
+
+function createWisWasmEngine() {
+  try {
+    if (typeof WebAssembly !== "object" || typeof WebAssembly.Module !== "function") {
+      throw new Error("WebAssembly unavailable");
+    }
+    const module = new WebAssembly.Module(bytesFromBase64(WIS_WASM_ENGINE_BASE64));
+    const instance = new WebAssembly.Instance(module, {});
+    const exports = instance.exports || {};
+    if (typeof exports.version !== "function" || typeof exports.node_cost !== "function") {
+      throw new Error("WIS WASM exports unavailable");
+    }
+    const flags = Number(exports.capabilities?.() || 0);
+    return {
+      schema: WIS_WASM_ENGINE_SCHEMA,
+      status: "ready",
+      version: Number(exports.version()),
+      capabilityFlags: flags,
+      capabilities: decodeWasmCapabilities(flags),
+      exports,
+    };
+  } catch (error) {
+    return {
+      schema: WIS_WASM_ENGINE_SCHEMA,
+      status: "fallback-js",
+      version: 0,
+      capabilityFlags: 0,
+      capabilities: decodeWasmCapabilities(0),
+      error: String(error?.message || error),
+      exports: fallbackWisWasmExports(),
+    };
+  }
+}
+
+const WIS_WASM_ENGINE = createWisWasmEngine();
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -134,6 +227,16 @@ function renderTemplate(text, data) {
   });
 }
 
+function artifactSlotFromNode(node = {}, fallback = "slot") {
+  const props = node?.props && typeof node.props === "object" ? node.props : {};
+  const direct = String(props.slot || props.data?.slot || node?.slot || "").trim();
+  if (direct) return direct;
+  const id = String(node?.id || "").trim();
+  const numbered = id.match(/^([A-Za-z]+)-?(\d+)/);
+  if (numbered) return `${numbered[1].toLowerCase()}-${numbered[2]}`;
+  return id.replace(/-(preview|config|button)$/i, "") || fallback;
+}
+
 function documentsById(definition) {
   return new Map((definition.documents || []).map((documentModel) => [documentModel.id, documentModel]));
 }
@@ -151,6 +254,12 @@ function materializeNode(node, data) {
 
   if (node.level) materialized.level = node.level;
   if (props.valueKey) materialized.props.value = valueAt(data, props.valueKey) || "";
+  if (node.type === "webcam_placeholder" || node.type === "video") {
+    const slot = artifactSlotFromNode(node, "camera");
+    const camera = valueAt(data, `cameras.${slot}`);
+    materialized.props.slot = slot;
+    materialized.props.camera = camera && typeof camera === "object" ? clone(camera) : {};
+  }
   if (node.type === "list") {
     const items = Array.isArray(valueAt(data, props.itemsKey)) ? valueAt(data, props.itemsKey) : [];
     materialized.children = items.map((item, index) => ({
@@ -227,6 +336,67 @@ function availableActions(modelNode) {
   };
   visit(modelNode);
   return actions;
+}
+
+function nodeTypeId(node) {
+  return WIS_NODE_TYPE_IDS.get(String(node?.type || "").toLowerCase()) || 0;
+}
+
+function nodePropCount(node) {
+  const props = node?.props;
+  return props && typeof props === "object" ? Object.keys(props).length : 0;
+}
+
+function mediaProtocolId(url = "") {
+  const raw = String(url || "").trim().toLowerCase();
+  if (raw.endsWith(".m3u8")) return 3;
+  const match = raw.match(/^[a-z][a-z0-9+.-]*:/);
+  return WIS_MEDIA_PROTOCOL_IDS.get(match?.[0] || "") || 0;
+}
+
+function browserNativeMedia(protocolId) {
+  return protocolId === 2 || protocolId === 3;
+}
+
+function collectWasmArtifactMetrics(tree, options = {}) {
+  const wasm = WIS_WASM_ENGINE.exports;
+  const sample = [];
+  const media = {
+    relayRequired: 0,
+    browserNative: 0,
+    unsupported: 0,
+  };
+  let nodeCost = 0;
+  const visit = (node) => {
+    if (!node) return;
+    const typeId = nodeTypeId(node);
+    const childCount = Array.isArray(node.children) ? node.children.length : 0;
+    const textLength = String(node.text || "").length;
+    const propCount = nodePropCount(node);
+    const cost = Number(wasm.node_cost(typeId, childCount, textLength, propCount));
+    nodeCost += cost;
+    if (sample.length < 24) sample.push({ id: node.id || "", type: node.type || "", cost });
+    if (typeId === 8 || typeId === 9) {
+      const protocolId = mediaProtocolId(node.props?.url || node.props?.src || "");
+      const mode = Number(wasm.media_mode(protocolId, browserNativeMedia(protocolId) ? 1 : 0));
+      if (mode === 1) media.relayRequired += 1;
+      else if (mode === 2) media.browserNative += 1;
+      else media.unsupported += 1;
+    }
+    for (const child of node.children || []) visit(child);
+  };
+  visit(tree);
+  const viewportWidth = Math.max(1, Number(options.viewportWidth || 640));
+  return {
+    schema: WIS_WASM_ENGINE_SCHEMA,
+    status: WIS_WASM_ENGINE.status,
+    version: WIS_WASM_ENGINE.version,
+    capabilities: clone(WIS_WASM_ENGINE.capabilities),
+    layoutColumns: Number(wasm.layout_columns(viewportWidth, 180)),
+    nodeCost,
+    sample,
+    media,
+  };
 }
 
 export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
@@ -340,6 +510,28 @@ export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
   function act(action = {}) {
     const documentModel = currentDocument();
     if (!documentModel) return { ok: false, error: "no_document" };
+    if (action.type === "configureCamera") {
+      const slot = String(action.slot || action.targetId || "").trim();
+      if (!slot) return { ok: false, error: "camera_slot_required" };
+      const config = action.config && typeof action.config === "object" ? clone(action.config) : {};
+      setValueAt(state.data, `cameras.${slot}`, config);
+      emit("wis.camera_configured", slot, `Configured ${slot}`, {
+        slot,
+        kind: config.kind || "",
+        media_mode: config.mediaMode || "",
+        client_local: Boolean(config.clientLocal),
+      });
+      notify();
+      return { ok: true, changed: true, slot, camera: clone(config) };
+    }
+    if (action.type === "clearCamera") {
+      const slot = String(action.slot || action.targetId || "").trim();
+      if (!slot) return { ok: false, error: "camera_slot_required" };
+      setValueAt(state.data, `cameras.${slot}`, {});
+      emit("wis.camera_cleared", slot, `Cleared ${slot}`, { slot });
+      notify();
+      return { ok: true, changed: true, slot };
+    }
     if (action.type === "load" || action.type === "navigate") return load(action.documentId || action.targetId);
     if (action.type === "input") {
       const modelNode = findNode(documentModel.tree, action.targetId);
@@ -365,6 +557,7 @@ export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
     const tree = documentModel ? materializeNode(documentModel.tree, state.data) : null;
     const nodes = flattenTree(tree);
     const elements = nodes.filter((node) => !["text", "list-item"].includes(node.type));
+    const wasm = collectWasmArtifactMetrics(tree);
     return {
       schema: WIS_SURFACE_STATE_SCHEMA,
       timestamp: nowIso(),
@@ -374,6 +567,12 @@ export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
         permissions: clone(source.sandbox || {}),
         noBackend: true,
         noIframe: true,
+        wasmEngine: {
+          schema: WIS_WASM_ENGINE.schema,
+          status: WIS_WASM_ENGINE.status,
+          version: WIS_WASM_ENGINE.version,
+          capabilities: clone(WIS_WASM_ENGINE.capabilities),
+        },
       },
       navigation: clone(state.navigation),
       document: documentModel ? {
@@ -386,6 +585,7 @@ export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
       elements,
       nodeCount: nodes.length,
       elementCount: elements.length,
+      wasm,
       state: clone(state.data),
       recentEvents: state.events.slice(-10).reverse(),
       automation: {
@@ -410,6 +610,7 @@ export function createWisSandbox(definition = WIS_EXAMPLE_SPACE_DEFINITION) {
         backendDependency: false,
         iframePrimaryArchitecture: false,
         portableArtifactDefinition: true,
+        wasmEngine: WIS_WASM_ENGINE.status === "ready",
       },
     };
   }

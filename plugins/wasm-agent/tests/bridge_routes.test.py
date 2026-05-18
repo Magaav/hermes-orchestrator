@@ -18,6 +18,7 @@ from routes import (
     TaskStore,
     activity_from_running_task,
     compact_run_event,
+    render_node_env,
     rewrite_exhaust_slash_prompt,
 )
 
@@ -139,6 +140,49 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual(stopped["status"], "cancelled")
             self.assertEqual(stopped["result"]["run_status"], "cancelled")
             self.assertEqual(stopped["error"]["code"], "task_cancelled")
+
+    def test_api_server_url_falls_back_to_node_env_and_container_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            settings = _settings(tmp_path)
+            settings = BridgeSettings(
+                **{
+                    **settings.__dict__,
+                    "api_server_url": "",
+                    "agents_root": tmp_path,
+                }
+            )
+            env_dir = tmp_path / "envs"
+            env_dir.mkdir()
+            (env_dir / "worker-one.env").write_text(
+                "API_SERVER_HOST=0.0.0.0\nAPI_SERVER_PORT=8642\nAPI_SERVER_KEY=sk-node\n",
+                encoding="utf-8",
+            )
+            client = OrchestratorClient(settings, TaskStore(tmp_path / "tasks"))
+            import routes
+
+            original = routes.container_ip_for_node
+            routes.container_ip_for_node = lambda node: "172.17.0.8"
+            try:
+                self.assertEqual(client._api_server_url_for_node("worker-one"), "http://172.17.0.8:8642")
+                self.assertEqual(client._api_server_key_for_node("worker-one"), "sk-node")
+            finally:
+                routes.container_ip_for_node = original
+
+    def test_render_node_env_uses_docker_env_file_values(self) -> None:
+        text = render_node_env(
+            "worker-one",
+            {
+                "NODE_STATE": "4",
+                "OPENROUTER_API_KEY": "sk-test",
+                "HERMES_EPHEMERAL_SYSTEM_PROMPT": "line one\nline two",
+            },
+        )
+
+        self.assertIn("NODE_STATE=4\n", text)
+        self.assertIn("OPENROUTER_API_KEY=sk-test\n", text)
+        self.assertIn("HERMES_EPHEMERAL_SYSTEM_PROMPT=line one\\nline two\n", text)
+        self.assertNotIn('OPENROUTER_API_KEY="sk-test"', text)
 
     def test_exhaust_slash_prompt_accepts_newline_after_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

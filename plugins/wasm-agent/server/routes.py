@@ -50,8 +50,13 @@ NODE_ENV_PRIMARY_ORDER = [
     "NODE_STATE_FROM_BACKUP_NODE",
     "NODE_RESEED",
     "NODE_NAME",
+    "API_SERVER_ENABLED",
+    "API_SERVER_HOST",
+    "API_SERVER_PORT",
+    "API_SERVER_MODEL_NAME",
     "NODE_AGENT_DEFAULT_MODEL_PROVIDER",
     "NODE_AGENT_DEFAULT_MODEL",
+    "HERMES_INFERENCE_PROVIDER",
     "NODE_AGENT_FALLBACK_MODEL_PROVIDER",
     "NODE_AGENT_FALLBACK_MODEL",
     "NODE_TIME_ZONE",
@@ -74,8 +79,15 @@ NODE_ENV_FORM_OVERRIDES = [
     "OPENAI_API_KEY",
     "NVIDIA_API_KEY",
     "OPENROUTER_API_KEY",
+    "OPENCODE_GO_API_KEY",
+    "OPENCODE_ZEN_API_KEY",
     "MINIMAX_API_KEY",
     "MINIMAX_GROUP_ID",
+    "API_SERVER_ENABLED",
+    "API_SERVER_HOST",
+    "API_SERVER_PORT",
+    "API_SERVER_KEY",
+    "API_SERVER_MODEL_NAME",
 ]
 NODE_ENV_RUNTIME_COPY_KEYS = list(NODE_ENV_FORM_OVERRIDES)
 NODE_ENV_PLACEHOLDERS = {"", "CHANGEME", "CHANGE_ME", "TODO", "NONE", "NULL"}
@@ -442,7 +454,14 @@ class OrchestratorClient:
         env["NODE_RESEED"] = str(env.get("NODE_RESEED") or "false")
         env["NODE_AGENT_DEFAULT_MODEL_PROVIDER"] = default_provider
         env["NODE_AGENT_DEFAULT_MODEL"] = default_model
+        env["HERMES_INFERENCE_PROVIDER"] = default_provider
         env["NODE_TIME_ZONE"] = time_zone
+        env["API_SERVER_ENABLED"] = optional_text(payload, "api_server_enabled", "API_SERVER_ENABLED") or env.get("API_SERVER_ENABLED") or "true"
+        env["API_SERVER_HOST"] = optional_text(payload, "api_server_host", "API_SERVER_HOST") or env.get("API_SERVER_HOST") or "0.0.0.0"
+        env["API_SERVER_PORT"] = optional_text(payload, "api_server_port", "API_SERVER_PORT") or env.get("API_SERVER_PORT") or "8642"
+        env["API_SERVER_MODEL_NAME"] = optional_text(payload, "api_server_model_name", "API_SERVER_MODEL_NAME") or env.get("API_SERVER_MODEL_NAME") or default_model
+        if not env.get("API_SERVER_KEY"):
+            env["API_SERVER_KEY"] = f"wa-{uuid.uuid4().hex}"
         if state_code == "3":
             env["NODE_STATE_FROM_BACKUP_PATH"] = backup_path
         elif backup_path:
@@ -868,6 +887,8 @@ class OrchestratorClient:
         port = str(env.get("API_SERVER_PORT") or "").strip()
         host = str(env.get("API_SERVER_HOST") or "127.0.0.1").strip() or "127.0.0.1"
         if port:
+            if host in {"0.0.0.0", "::", "127.0.0.1", "localhost"} and node != "orchestrator":
+                host = container_ip_for_node(node) or host
             return f"http://{host}:{port}".rstrip("/")
         if node == "orchestrator":
             return "http://127.0.0.1:8642"
@@ -2380,6 +2401,31 @@ def is_resumable_space_ui_draft(raw_status: dict[str, Any]) -> bool:
     )
 
 
+def container_ip_for_node(node_id: str) -> str:
+    node = validate_node_id(node_id)
+    container_name = f"hermes-node-{node}"
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "inspect",
+                container_name,
+                "--format",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=4,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    ip = str(result.stdout or "").strip()
+    return ip if re.fullmatch(r"[0-9a-fA-F:.]+", ip) else ""
+
+
 def hydrate_node_runtime_values(
     settings: BridgeSettings,
     payload: dict[str, Any],
@@ -2586,6 +2632,8 @@ def missing_node_start_values(env: dict[str, str]) -> list[str]:
 
     provider = str(env.get("NODE_AGENT_DEFAULT_MODEL_PROVIDER") or "").strip().lower()
     provider_requirements = {
+        "opencode-go": ["OPENCODE_GO_API_KEY"],
+        "opencode-zen": ["OPENCODE_ZEN_API_KEY"],
         "minimax": ["MINIMAX_API_KEY", "MINIMAX_GROUP_ID"],
         "openrouter": ["OPENROUTER_API_KEY"],
         "nvidia": ["NVIDIA_API_KEY"],
@@ -2615,8 +2663,12 @@ def ensure_node_env_can_start(node_id: str, env: dict[str, str], source_path: Pa
         )
 
 
-def env_quote(value: str) -> str:
-    return json.dumps(str(value), ensure_ascii=True)
+def docker_env_file_value(value: str) -> str:
+    """Render one Docker --env-file value without shell-style outer quotes."""
+    rendered = json.dumps(str(value), ensure_ascii=True)
+    if len(rendered) >= 2 and rendered.startswith('"') and rendered.endswith('"'):
+        return rendered[1:-1]
+    return rendered
 
 
 def render_node_env(node_id: str, values: dict[str, str]) -> str:
@@ -2629,9 +2681,9 @@ def render_node_env(node_id: str, values: dict[str, str]) -> str:
     ]
     for key in NODE_ENV_PRIMARY_ORDER:
         if key in values:
-            lines.append(f"{key}={env_quote(values[key])}")
+            lines.append(f"{key}={docker_env_file_value(values[key])}")
     for key in sorted(set(values) - set(NODE_ENV_PRIMARY_ORDER)):
-        lines.append(f"{key}={env_quote(values[key])}")
+        lines.append(f"{key}={docker_env_file_value(values[key])}")
     return "\n".join(lines).rstrip() + "\n"
 
 

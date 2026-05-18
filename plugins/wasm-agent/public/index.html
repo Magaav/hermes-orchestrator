@@ -459,17 +459,18 @@
               <div class="widget-resize-handle" data-widget-resize="browser-proof" title="Resize Host Browser" aria-hidden="true"></div>
             </article>
 
-            <article class="widget wis-widget" data-widget-id="wis" data-module-target="wis">
-              <header class="widget-head" title="Drag to move. Double-click to reset.">
-                <span>WIS</span>
+            <article class="widget wis-widget" data-widget-id="wis" data-module-target="wis" data-widget-dblclick-reset="false">
+              <header class="widget-head" title="Drag to move.">
+                <span>Artifacts</span>
                 <span class="widget-head-actions">
-                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize WIS"></button>
-                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize WIS"></button>
+                  <button id="wisCameraConfigButton" class="widget-control-button widget-camera-config-button" type="button" title="Configure camera" aria-label="Configure camera" hidden></button>
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize WIS app"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize WIS app"></button>
                   <span id="wisStatus" class="widget-chip">sandbox</span>
                 </span>
               </header>
               <div class="wis-shell">
-                <section id="wisSurface" class="wis-surface" tabindex="0" role="application" aria-label="WIS surface">
+                <section id="wisSurface" class="wis-surface" tabindex="0" role="application" aria-label="Artifact surface">
                   <div class="wis-surface-bar">
                     <span id="wisLocation">wis://local/counter-app</span>
                   </div>
@@ -798,6 +799,10 @@
           <div id="agentTopicStatus" class="node-form-footer"></div>
         </form>
         <form id="nodeForm" class="node-form" autocomplete="off" hidden>
+          <label>
+            <span>Name</span>
+            <input id="nodeNameInput" type="text" placeholder="node name" spellcheck="true" autocapitalize="words">
+          </label>
           <label class="node-provider-field">
             <span><span class="field-required">*</span> Provider</span>
             <s-select id="agentDirectProviderSelect" required>
@@ -813,10 +818,6 @@
           <label class="node-provider-field">
             <span><span class="field-required">*</span> API key</span>
             <input id="agentDirectApiKeyInput" type="password" autocomplete="off" spellcheck="false" autocapitalize="off">
-          </label>
-          <label>
-            <span>Name</span>
-            <input id="nodeNameInput" type="text" placeholder="node name" spellcheck="true" autocapitalize="words">
           </label>
           <fieldset class="node-agent-wrapper-form">
             <legend>Agent harness</legend>
@@ -865,7 +866,7 @@
               </label>
             </div>
           </fieldset>
-          <button class="primary" type="submit">Create node</button>
+          <button id="nodeFormSubmitButton" class="primary" type="submit">Create node</button>
           <div class="node-form-footer">
             <svg id="agentProviderLoadingIcon" class="agent-provider-loading-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false" hidden>
               <circle cx="12" cy="12" r="9"></circle>

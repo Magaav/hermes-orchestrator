@@ -63,6 +63,26 @@ class GovernancePromptTests(unittest.TestCase):
         )
         self.assertIn("Surgical changes", prompt)
 
+    def test_model_env_sync_writes_gateway_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "node"
+            result = clone_manager._sync_model_config_from_env(
+                {
+                    "NODE_AGENT_DEFAULT_MODEL_PROVIDER": "opencode-go",
+                    "NODE_AGENT_DEFAULT_MODEL": "deepseek-v4-flash",
+                    "NODE_AGENT_FALLBACK_MODEL_PROVIDER": "kimi-coding",
+                    "NODE_AGENT_FALLBACK_MODEL": "moonshotai/kimi-k2.5",
+                },
+                root,
+            )
+            config_path = root / ".hermes" / "config.yaml"
+
+            self.assertTrue(result["changed"])
+            text = config_path.read_text(encoding="utf-8")
+            self.assertIn("deepseek-v4-flash", text)
+            self.assertIn("opencode-go", text)
+            self.assertIn("moonshotai/kimi-k2.5", text)
+
     def test_prestart_script_path_prefers_native_pipeline(self) -> None:
         with tempfile.TemporaryDirectory(prefix="clone-manager-native-prestart-") as tmp:
             root = Path(tmp)

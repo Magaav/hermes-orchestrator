@@ -3,6 +3,8 @@ export const DEFAULT_CHAT_COMMANDS = Object.freeze([
   { name: "/exhaust", insertText: "/exhaust ", description: "Explore alternate paths after failure." },
   { name: "/voice", insertText: "/voice ", description: "Voice room controls." },
   { name: "/share", insertText: "/share ", description: "Share current space." },
+  { name: "/provider", insertText: "/provider", description: "Switch verified provider or open provider config." },
+  { name: "/model", insertText: "/model", description: "Switch model for the current provider." },
   { name: "/spawn", insertText: "/spawn ", description: "Spawn a new space/app/action." },
   { name: "/help", insertText: "/help ", description: "Show available commands." },
 ]);

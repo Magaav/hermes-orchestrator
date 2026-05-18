@@ -25,6 +25,11 @@ const MIRRORED_STYLE_KEYS = [
   "tabSize",
 ];
 
+function cssPixelValue(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function applyMirroredStyles(textarea, overlay) {
   if (!textarea || !overlay || !globalThis.getComputedStyle) return;
   const computed = getComputedStyle(textarea);
@@ -33,8 +38,12 @@ function applyMirroredStyles(textarea, overlay) {
   }
   overlay.style.borderStyle = "solid";
   overlay.style.borderColor = "transparent";
-  overlay.style.width = `${textarea.clientWidth}px`;
-  overlay.style.minHeight = `${textarea.clientHeight}px`;
+  overlay.style.overflow = "hidden";
+  overlay.style.scrollbarWidth = "none";
+  const borderX = cssPixelValue(computed.borderLeftWidth) + cssPixelValue(computed.borderRightWidth);
+  const borderY = cssPixelValue(computed.borderTopWidth) + cssPixelValue(computed.borderBottomWidth);
+  overlay.style.width = `${textarea.clientWidth + borderX}px`;
+  overlay.style.minHeight = `${textarea.clientHeight + borderY}px`;
 }
 
 export function createChatOverlay(options = {}) {

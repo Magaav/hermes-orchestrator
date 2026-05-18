@@ -50,11 +50,18 @@ Use these rules before evolving this project:
   update the active roadmap before or during each major direction change, commit
   stable checkpoints, and leave exact next actions in docs before context gets
   blurry.
+- Treat the next action as durable handoff state, not chat memory. For ongoing
+  product or roadmap work, update the relevant roadmap or plugin README with a
+  short, explicit `Durable Next Step` before ending the turn. This entry should
+  be concrete enough for a future agent to resume after context compaction
+  without relying on the previous transcript.
 - If context is lost or compacted, resume by reading this README, then
   `/local/docs/roadmap/README.md`, then
   `/local/docs/roadmap/space-os/README.md`, then the relevant plugin README.
   Inspect runtime/codeflow again before changing source, because current code
-  truth wins over remembered intent.
+  truth wins over remembered intent. If a relevant `Durable Next Step` exists,
+  reconcile it with the current code and make it the default next action unless
+  the user gives a newer direction.
 - During extended implementation, chain work in small verified steps:
   inspect, document the finding, implement the smallest plugin-owned change,
   verify, sync docs, commit, then continue from the roadmap's next action.
@@ -63,7 +70,8 @@ Use these rules before evolving this project:
   local-only work or a separate PR branch, push the committed checkpoint to
   GitHub so repository browsing reflects the latest durable achievements.
 - End every final agent response with a concrete proposed next step for the
-  agent to run next. Keep it short and actionable so work can resume quickly.
+  agent to run next. For ongoing product work, that final next step must match
+  the durable handoff recorded in docs.
 
 ## Documentation Sync
 

@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v58";
+const CACHE_NAME = "wasm-agent-v97";
 const ASSETS = [
   "/",
   "/index.html",
@@ -27,6 +27,7 @@ const ASSETS = [
   "/modules/browser/module.js",
   "/modules/wis/module.js",
   "/modules/wis/engine.js",
+  "/modules/wis/artifacts/camera.js",
   "/modules/client-state/module.js",
   "/modules/client-state/client-store.js",
   "/modules/observation/module.js",
@@ -71,6 +72,13 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/sync/events" ||
     url.pathname === "/fleet" ||
     url.pathname === "/health" ||
+    url.pathname === "/camera/push/status" ||
+    url.pathname === "/camera/push-frame" ||
+    url.pathname === "/camera/push-stream" ||
+    url.pathname === "/camera/push-playback" ||
+    url.pathname === "/camera/push-replay" ||
+    url.pathname === "/camera/push-timeline" ||
+    url.pathname === "/camera/push-archive-frame" ||
     url.pathname === "/agent/provider/models" ||
     url.pathname === "/observation/latest" ||
     url.pathname === "/voice-lab/room" ||

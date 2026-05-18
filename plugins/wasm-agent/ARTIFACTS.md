@@ -61,7 +61,99 @@ This is a substrate proof, not the final artifact envelope.
 `hermes.wasm_agent.wis.patch.v1`: a validated userland mutation envelope for
 changing WIS artifacts without granting source-file access. It can set artifact
 title/state, edit node text/props/actions, add/remove/replace nodes, and add
-documents inside account-owned or joined shared-space artifact storage.
+documents inside account-owned or joined shared-space artifact storage. Embedded
+agent patch blocks omit `space_id` for the current space; the adapter resolves
+placeholder current-space ids to the active wasm-agent space. The adapter
+accepts fenced blocks, `<wis-patch>` blocks, and raw JSON only when the object
+parses as the exact WIS patch schema; `add_document` may carry a sanitized
+document tree that renders immediately in the WIS widget.
+
+`hermes.wasm_agent.wis.wasm_engine.v1`: the browser-local WIS WASM
+microkernel embedded with the WIS engine. It does not grant network, file, or
+iframe access; it provides deterministic artifact metrics, layout planning, and
+media capability planning so generated artifacts can execute against a real
+WASM runtime while the JS shell owns DOM events and safe browser integration.
+`public/modules/wis/artifacts/camera.js` owns the portable camera artifact
+factory and `hermes.wasm_agent.wis.camera_controller.v1` controller contract, so
+focused camera artifacts can be generated or shared without copying host-shell
+`app.js` code.
+For camera artifacts, the current product shape is one WIS artifact per physical
+camera. A focused camera artifact stores a single `state.cameras` entry plus a
+`camera_focus` marker, and the widget renders that camera full-width without the
+WIS inspector side panel, location bar, sandbox chip, or in-surface action row.
+The focused shell stays one row on compact screens, the widget height follows
+the camera frame aspect ratio, and camera setup lives in the WIS header config
+button. The no-backend path supports local
+`getUserMedia` cameras and browser-playable HTTP(S) media URLs. Client-local URL
+secrets are kept out of the persisted artifact state; artifact-level RTMP push
+sources take precedence over stale browser-local camera credentials from older
+experiments.
+RTSP is classified as needing a relay or publisher because browser WASM cannot
+open raw RTSP sockets. Intelbras DVR/NVR
+setup is a client-local helper with a credentials-first profile: the user enters
+host, username, password, channel, and subtype once, the browser stores the
+secret URL locally, and the default render path uses the true Intelbras RTSP
+`/cam/realmonitor` feed. New RTSP configs default to subtype `0` (main stream)
+and ask for the RTSP/tunnel port reachable from the wasm-agent server. The
+browser posts the secret URL to `/camera/rtsp-frame`; the backend first checks
+that the RTSP host/port is reachable from wasm-agent, then uses `ffmpeg` with
+RTSP TCP transport and the RTSP demuxer's socket timeout to decode one current
+RTSP frame into browser-playable JPEG bytes before the WIS image updates. The
+recovery panel can also call `/camera/diagnostics`, a short server-side TCP
+check plus route/source hint for the configured RTSP/HTTP/HTTPS DVR targets, to
+verify that wasm-agent can reach the DVR/tunnel before retrying decode and
+identify different-private-LAN/VPN routing blockers. Tunnel-style `host:port`
+values are parsed into a real host and RTSP port before checks run. The same
+route hint is attached to RTSP frame and stream preflight failures so the
+artifact can surface the exact network/tunnel blocker inline. Snapshot fallbacks
+that auto-promote back to the true RTSP feed preserve the saved RTSP/tunnel port
+instead of silently returning to `554`, while direct HTTP snapshot/portal
+recovery and portal-open actions strip RTSP tunnel ports and use HTTP recovery
+ports. Stale saved portal URLs that point at RTSP tunnel ports are ignored and
+regenerated as HTTP-safe portal origins. If the selected realmonitor subtype fails, the proxy checks the alternate subtype before
+returning a diagnostic. If no frame arrives, the frame is all black, the
+selected channel/subtype is unreachable, or the DVR/tunnel host cannot be
+reached from wasm-agent, the artifact renders a diagnostic instead of a black
+camera pane. The older
+`/camera/rtsp-session` plus `/camera/rtsp-stream?token=...` multipart relay
+remains available, but the WIS camera card favors verified frame polling for
+cam1 because it can distinguish real pixels from an empty pipe. Recovery actions
+can reuse the same local secrets for direct snapshot polling, portal capture,
+HTTP(S) MJPEG, a reachability check plus immediate RTSP retry after a
+tunnel/network change, or the standard RTSP relay. Secret URLs still live only in
+browser-local camera config and are sent to the backend only for the explicit
+stream or snapshot relay request. Direct Intelbras snapshot configs with local
+credentials promote to the matching RTSP realmonitor source so a black still
+frame is not treated as success; snapshot configs without local credentials
+still auto-promote to the snapshot relay on HTTPS pages instead of asking the
+user to downgrade wasm-agent to HTTP.
+For DVRs that support outbound RTMP, WIS also supports a DVR-push source. The
+browser asks wasm-agent to start an ffmpeg RTMP listener, stores the returned
+`rtmp://<host>:<port>/live/<stream-key>` URL only in local camera config, and
+renders the live view by preloading the latest server-side JPEG frame from
+`/camera/push-frame?stream_id=<id>` before swapping it into the visible image.
+That keeps the last good frame on screen through short ingest/browser hiccups.
+The camera widget header exposes only zoom, snapshot copy, audio, and
+principal/extra quality controls. Its full-width footer timeline defaults to the
+last 10 minutes and can switch to a detected recorded-footage range from
+`/camera/push-timeline`; selected points show archived JPEGs through
+`/camera/push-archive-frame`. The footer loads its timeline data when it renders
+and on direct footer interaction, so the scrubber does not depend on a separate
+widget focus click. It is scoped to the active WIS camera widget and keeps
+pointer tracking across drag/release transitions so scrubbing can commit an
+earlier retained frame instead of falling back to the live view. A click made
+before the timeline frames finish loading is stored as a pending seek and
+applied to the nearest retained frame when `/camera/push-timeline` returns.
+Scrubber controls own their click/drag loading path, so the footer does not
+start an eager parent reload that can replace the scrubber before release. The
+client loads timeline metadata through JSON `POST /camera/push-timeline`, while
+the GET endpoint remains for compatibility, to avoid stale service workers
+serving the app shell HTML for timeline reads. The camera push endpoints also
+tolerate app-route-prefixed paths so a shared-space URL cannot turn a timeline
+request into a generic app-shell navigation.
+This path uses the DVR itself as the always-on network bridge when wasm-agent
+cannot route to the DVR's private LAN; it is intentionally separate from
+Intelbras Cloud/P2P and does not attempt to reuse the vendor cloud tunnel.
 
 `hermes.wasm_agent.shared_space.v1`: a server-side state record for a shareable
 space. It tracks owner, members, join code, source/local space ids, configured

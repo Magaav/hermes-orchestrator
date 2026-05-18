@@ -116,8 +116,17 @@ class ClientFirstCloudTest(unittest.TestCase):
                 fleet = static_server.ensure_main_fleet_node(owner, {})
                 self.assertFalse(fleet["provisioned"])
                 self.assertTrue(fleet["node"]["node_id"].startswith("u"))
+                self.assertFalse(fleet["node"]["node_id"].endswith("-main"))
                 listed = static_server.list_user_fleet(owner)
-                self.assertEqual(listed["nodes"][0]["node_id"], fleet["node"]["node_id"])
+                self.assertEqual(listed["nodes"], [])
+                self.assertEqual(listed["system_nodes"][0]["node_id"], fleet["node"]["node_id"])
+
+                with self.assertRaises(static_server.BrowserError) as provider_node:
+                    static_server.ensure_main_fleet_node(owner, {"node_id": "agent:opencode-go:kimi-k2.6"})
+                self.assertEqual(provider_node.exception.code, "fleet_node_denied")
+                listed_after = static_server.list_user_fleet(owner)
+                self.assertEqual(listed_after["nodes"], [])
+                self.assertEqual(len(listed_after["system_nodes"]), 1)
 
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

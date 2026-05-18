@@ -264,6 +264,36 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
             """
         )
 
+    def overlay_metrics(self):
+        return self.driver.execute_async(
+            """
+            const done = arguments[arguments.length - 1];
+            const input = document.querySelector("#agentInput");
+            const overlay = document.querySelector("#agentInputOverlay");
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const inputStyle = getComputedStyle(input);
+              const overlayStyle = getComputedStyle(overlay);
+              const px = (value) => Number.parseFloat(value) || 0;
+              const inputTextWidth = input.clientWidth - px(inputStyle.paddingLeft) - px(inputStyle.paddingRight);
+              const overlayTextWidth = overlay.clientWidth - px(overlayStyle.paddingLeft) - px(overlayStyle.paddingRight);
+              const inputBorderX = px(inputStyle.borderLeftWidth) + px(inputStyle.borderRightWidth);
+              const overlayBorderX = px(overlayStyle.borderLeftWidth) + px(overlayStyle.borderRightWidth);
+              done({
+                inputOverflowY: inputStyle.overflowY,
+                overlayOverflowY: overlayStyle.overflowY,
+                inputScrollHeight: input.scrollHeight,
+                inputClientHeight: input.clientHeight,
+                overlayScrollHeight: overlay.scrollHeight,
+                overlayClientHeight: overlay.clientHeight,
+                inputScrollbarGutter: input.offsetWidth - input.clientWidth - inputBorderX,
+                overlayScrollbarGutter: overlay.offsetWidth - overlay.clientWidth - overlayBorderX,
+                inputTextWidth,
+                overlayTextWidth,
+              });
+            }));
+            """
+        )
+
     def test_textarea_is_raw_source_of_truth(self):
         state = self.set_editor_text("`test`")
         self.assertEqual(state["value"], "`test`")
@@ -316,6 +346,25 @@ class AgentInputEditorBrowserTest(unittest.TestCase):
         state = self.editor_state()
         self.assertEqual(state["value"], "hello\nworld")
         self.assertIn("hello\nworld", state["overlayText"])
+
+    def test_overlay_does_not_create_second_scrollbar_or_caret_gutter(self):
+        raw = "\n".join([
+            "can we check other nodes from `/local/logs/nodes/uckk73p34yrk-main/`?",
+            "also we have access to save things inside `/local`",
+            "and ` sandboxed itself",
+            "line four keeps the textarea vertically scrollable",
+            "line five keeps the textarea vertically scrollable",
+            "line six keeps the textarea vertically scrollable",
+            "line seven keeps the textarea vertically scrollable",
+            "line eight keeps the textarea vertically scrollable",
+        ])
+        self.set_editor_text(raw)
+        metrics = self.overlay_metrics()
+        self.assertGreater(metrics["inputScrollHeight"], metrics["inputClientHeight"])
+        self.assertEqual(metrics["overlayOverflowY"], "hidden")
+        self.assertGreaterEqual(metrics["inputScrollbarGutter"], 0)
+        self.assertLess(abs(metrics["overlayScrollbarGutter"]), 1.1)
+        self.assertLess(abs(metrics["inputTextWidth"] - metrics["overlayTextWidth"]), 1.1)
 
 
 if __name__ == "__main__":

@@ -58,8 +58,13 @@
   z-index: 1;
   pointer-events: none;
   overflow: hidden;
+  scrollbar-width: none;
   color: #ffffff;
   background: transparent;
+}
+
+.chat-composer-overlay::-webkit-scrollbar {
+  display: none;
 }
 
 .chat-composer-overlay[hidden] {

@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import secrets
+import select
 import shutil
 import socket
 import sqlite3
@@ -21,14 +22,14 @@ import struct
 import threading
 import time
 import uuid
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPBasicAuthHandler, HTTPDigestAuthHandler, HTTPPasswordMgrWithDefaultRealm, Request, build_opener, urlopen
 
 try:
     from PIL import Image
@@ -61,6 +62,36 @@ DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
+DEFAULT_CAMERA_SNAPSHOT_PROXY_TIMEOUT_SEC = 8
+DEFAULT_CAMERA_SNAPSHOT_PROXY_MAX_BYTES = 2 * 1024 * 1024
+DEFAULT_CAMERA_STREAM_PROXY_TIMEOUT_SEC = 20
+DEFAULT_CAMERA_STREAM_SESSION_TTL_SEC = 10 * 60
+DEFAULT_CAMERA_STREAM_PROXY_CHUNK_BYTES = 64 * 1024
+DEFAULT_CAMERA_RTSP_RELAY_TIMEOUT_SEC = 20
+DEFAULT_CAMERA_RTSP_RELAY_FPS = 5
+DEFAULT_CAMERA_RTSP_RELAY_QUALITY = 5
+DEFAULT_CAMERA_RTSP_FRAME_TIMEOUT_SEC = 8
+CAMERA_RTSP_MJPEG_BOUNDARY = "wasm-agent-rtsp"
+DEFAULT_CAMERA_PUSH_RTMP_PORT = 1935
+DEFAULT_CAMERA_PUSH_FRAME_FPS = 15
+DEFAULT_CAMERA_PUSH_FRAME_QUALITY = 2
+DEFAULT_CAMERA_PUSH_STALE_AFTER_SEC = 10
+DEFAULT_CAMERA_PUSH_REPLAY_SEC = 5 * 60
+DEFAULT_CAMERA_PUSH_REPLAY_MAX_SEC = 10 * 60
+DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC = 10 * 60
+DEFAULT_CAMERA_PUSH_ARCHIVE_RETENTION_SEC = 24 * 60 * 60
+DEFAULT_CAMERA_PUSH_PLAYBACK_FPS = 15
+DEFAULT_CAMERA_PUSH_PLAYBACK_RETENTION_SEC = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
+DEFAULT_CAMERA_PUSH_PLAYBACK_SAMPLE_SEC = 1 / DEFAULT_CAMERA_PUSH_PLAYBACK_FPS
+DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC = 5.0
+DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC = 30
+CAMERA_PUSH_MJPEG_BOUNDARY = "wasm-agent-push"
+CAMERA_PUSH_SCHEMA = "hermes.wasm_agent.camera.push_ingest.v1"
+PRIVATE_IPV4_RANGES = (
+    (ip_network("10.0.0.0/8"), "10.0.0.0/8"),
+    (ip_network("172.16.0.0/12"), "172.16.0.0/12"),
+    (ip_network("192.168.0.0/16"), "192.168.0.0/16"),
+)
 DEFAULT_USER_QUOTA_BYTES = 1024 * 1024 * 1024
 SPACE_AREA_MIN_PX = 1
 SPACE_AREA_MAX_PX = 2000
@@ -91,6 +122,24 @@ CORE_FIRMWARE_PREFIXES = (
 WIS_SPACE_SCHEMA = "hermes.wasm_agent.wis.space.v1"
 WIS_PATCH_SCHEMA = "hermes.wasm_agent.wis.patch.v1"
 WIS_PATCH_RESULT_SCHEMA = "hermes.wasm_agent.wis.patch_result.v1"
+WIS_CURRENT_SPACE_SENTINELS = {
+    "active",
+    "active-space",
+    "active_space",
+    "active-space-id",
+    "active_space_id",
+    "current",
+    "current-space",
+    "current_space",
+    "current-space-id",
+    "current_space_id",
+    "current-wasm-agent-space",
+}
+CLIENT_SNAPSHOT_SCHEMA = "hermes.wasm_agent.client_snapshot.v1"
+CLIENT_SNAPSHOT_REQUEST_SCHEMA = "hermes.wasm_agent.client_snapshot.request.v1"
+CLIENT_SNAPSHOT_RESPONSE_SCHEMA = "hermes.wasm_agent.client_snapshot.response.v1"
+CLIENT_SNAPSHOT_HISTORY_LIMIT = 12
+CLIENT_SNAPSHOT_MAX_STORED_BYTES = 1024 * 1024
 SHARED_SPACE_SCHEMA = "hermes.wasm_agent.shared_space.v1"
 SHARED_SPACE_LIST_SCHEMA = "hermes.wasm_agent.shared_spaces.v1"
 SHARED_SPACE_ROOM_SCHEMA = "hermes.wasm_agent.shared_space.room.v1"
@@ -125,6 +174,7 @@ AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
 AGENT_READINESS_READY = "ready"
 AGENT_READINESS_BACKEND_UNAVAILABLE = "backend_unavailable"
 AGENT_READINESS_SANDBOX_NOT_PROVISIONED = "sandbox_not_provisioned"
+AGENT_READINESS_SANDBOX_BILLING_INCOMPLETE = "sandbox_billing_incomplete"
 AGENT_READINESS_INSUFFICIENT_FLUX = "insufficient_flux"
 AGENT_READINESS_PROVIDER_NOT_AVAILABLE = "provider_not_available"
 AGENT_HARNESS_SCHEMA = "hermes.wasm_agent.agent_harness.v1"
@@ -179,6 +229,14 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.browser_timeout_sec = browser_timeout_sec
         self.browser_sessions: dict[str, dict[str, Any]] = {}
         self.browser_sessions_lock = threading.Lock()
+        self.camera_stream_sessions: dict[str, dict[str, Any]] = {}
+        self.camera_stream_sessions_lock = threading.Lock()
+        self.camera_push_processes: dict[str, subprocess.Popen[bytes]] = {}
+        self.camera_push_processes_lock = threading.Lock()
+
+
+def endpoint_path(path: str, endpoint: str) -> bool:
+    return path == endpoint or path.endswith(endpoint)
 
 
 class WasmAgentHandler(SimpleHTTPRequestHandler):
@@ -227,6 +285,135 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 )
                 return
             serve_browser_stream(self)
+            return
+        if path == "/camera/stream":
+            try:
+                token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                serve_camera_stream_proxy(self, token)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_stream_proxy_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/rtsp-stream":
+            try:
+                token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                serve_camera_rtsp_mjpeg_proxy(self, token)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_rtsp_stream_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-frame"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                serve_camera_push_frame(self, stream_id)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_frame_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-stream"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                serve_camera_push_mjpeg_stream(self, stream_id)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_stream_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-playback"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                from_ms = (query.get("from_ms") or query.get("timestamp_ms") or query.get("from") or [""])[0]
+                seconds = (query.get("seconds") or query.get("sec") or [""])[0]
+                follow = (query.get("follow") or ["1"])[0]
+                serve_camera_push_playback(self, stream_id, from_ms, seconds, follow)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_playback_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-replay"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                seconds = (query.get("seconds") or query.get("sec") or [""])[0]
+                serve_camera_push_replay(self, stream_id, seconds)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_replay_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-timeline"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                day = (query.get("day") or [""])[0]
+                mode = (query.get("mode") or ["live"])[0]
+                seconds = (query.get("seconds") or query.get("sec") or [""])[0]
+                self._json(HTTPStatus.OK, camera_push_timeline(self.server, stream_id, day, mode, seconds))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_timeline_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-archive-frame"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                frame = (query.get("frame") or query.get("id") or [""])[0]
+                serve_camera_push_archive_frame(self, stream_id, frame)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_archive_frame_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push/status"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                stream_id = (query.get("stream_id") or query.get("stream") or ["cam-1"])[0]
+                self._json(HTTPStatus.OK, camera_push_status(self.server, stream_id, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_status_error", "message": str(exc)}},
+                )
             return
         if path.startswith("/bridge/"):
             try:
@@ -315,6 +502,20 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/client/snapshot":
+            try:
+                self._json(HTTPStatus.OK, latest_client_snapshot(self.server, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/client/snapshot/request":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                status = str((query.get("status") or ["pending"])[0] or "pending")
+                self._json(HTTPStatus.OK, list_client_snapshot_requests(self.server, user, status=status))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/timeline/status":
             try:
                 query = parse_qs(urlparse(self.path).query)
@@ -364,6 +565,16 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 space_id = str((query.get("space") or ["home"])[0] or "home")
                 shared_space_id = str((query.get("shared_space") or [""])[0] or "")
                 self._json(HTTPStatus.OK, list_wis_artifacts(self.server, user, space_id, shared_space_id=shared_space_id))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        wis_artifact_match = re.fullmatch(r"/wis/artifacts/([A-Za-z0-9_-]+)", path)
+        if wis_artifact_match:
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                space_id = str((query.get("space") or ["home"])[0] or "home")
+                shared_space_id = str((query.get("shared_space") or [""])[0] or "")
+                self._json(HTTPStatus.OK, read_wis_artifact(self.server, user, space_id, wis_artifact_match.group(1), shared_space_id=shared_space_id))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -648,6 +859,144 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "observation_error", "message": str(exc)}},
                 )
             return
+        if path == "/client/snapshot":
+            try:
+                body = self._read_json(max_bytes=2 * 1024 * 1024)
+                self._json(HTTPStatus.OK, save_client_snapshot(self.server, body, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "client_snapshot_error", "message": str(exc)}},
+                )
+            return
+        if path == "/client/snapshot/request":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, create_client_snapshot_request(self.server, body, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "client_snapshot_request_error", "message": str(exc)}},
+                )
+            return
+        if path == "/client/snapshot/response":
+            try:
+                body = self._read_json(max_bytes=2 * 1024 * 1024)
+                self._json(HTTPStatus.OK, save_client_snapshot_response(self.server, body, user, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "client_snapshot_response_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/snapshot":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, camera_snapshot_proxy(body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_snapshot_proxy_error", "message": str(exc)}},
+                )
+            return
+        if endpoint_path(path, "/camera/push-timeline"):
+            try:
+                body = self._read_json(max_bytes=16 * 1024)
+                self._json(HTTPStatus.OK, camera_push_timeline(
+                    self.server,
+                    body.get("stream_id") or body.get("stream") or "cam-1",
+                    body.get("day") or "",
+                    body.get("mode") or "live",
+                    body.get("seconds") or body.get("sec") or DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC,
+                ))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_timeline_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/stream-session":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, create_camera_stream_session(self.server, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_stream_session_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/rtsp-session":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, create_camera_rtsp_stream_session(self.server, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_rtsp_session_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/rtsp-frame":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, camera_rtsp_frame_proxy(body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_rtsp_frame_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/diagnostics":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, camera_diagnostics(body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_diagnostics_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/push/start":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, start_camera_push_ingest(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_start_error", "message": str(exc)}},
+                )
+            return
+        if path == "/camera/push/stop":
+            try:
+                body = self._read_json(max_bytes=32 * 1024)
+                self._json(HTTPStatus.OK, stop_camera_push_ingest(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {"ok": False, "error": {"code": "camera_push_stop_error", "message": str(exc)}},
+                )
+            return
         if path == "/agent/attachments":
             try:
                 body = self._read_json(max_bytes=4 * 1024 * 1024)
@@ -867,7 +1216,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "same-origin")
-        self.send_header("Permissions-Policy", "camera=(), microphone=(self), geolocation=(), payment=()")
+        self.send_header("Permissions-Policy", "camera=(self), microphone=(self), geolocation=(), payment=()")
         if public_deployment(self):
             self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         self.send_header("Content-Security-Policy", content_security_policy(self))
@@ -897,7 +1246,10 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             self.send_header(key, value)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
 
     def _redirect(self, location: str, *, headers: dict[str, str] | None = None) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
@@ -1424,6 +1776,1727 @@ def provider_proxy_completion(
     }
 
 
+def camera_proxy_clean_url(raw_url: str) -> tuple[str, str, str]:
+    raw = clipped_verbatim(str(raw_url or "").strip(), 4096)
+    if not raw:
+        raise BrowserError("camera_snapshot_missing_url", "Camera snapshot proxy requires a URL.")
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise BrowserError("camera_snapshot_bad_scheme", "Camera snapshot proxy only supports HTTP or HTTPS DVR URLs.")
+    if not parsed.hostname:
+        raise BrowserError("camera_snapshot_missing_host", "Camera snapshot proxy requires a DVR host.")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    clean_url = parsed._replace(netloc=netloc).geturl()
+    return clean_url, unquote(parsed.username or ""), unquote(parsed.password or "")
+
+
+def camera_rtsp_clean_url(raw_url: str) -> tuple[str, str, str]:
+    raw = clipped_verbatim(str(raw_url or "").strip(), 4096)
+    if not raw:
+        raise BrowserError("camera_rtsp_missing_url", "Camera RTSP relay requires a URL.")
+    parsed = urlparse(raw)
+    if parsed.scheme != "rtsp":
+        raise BrowserError("camera_rtsp_bad_scheme", "Camera RTSP relay only supports rtsp:// DVR URLs.")
+    if not parsed.hostname:
+        raise BrowserError("camera_rtsp_missing_host", "Camera RTSP relay requires a DVR host.")
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    clean_url = parsed._replace(netloc=netloc).geturl()
+    return clean_url, unquote(parsed.username or ""), unquote(parsed.password or "")
+
+
+def camera_url_with_credentials(clean_url: str, username: str, password: str) -> str:
+    if not (username or password):
+        return clean_url
+    parsed = urlparse(clean_url)
+    if not parsed.hostname:
+        return clean_url
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
+    netloc = f"{auth}{host}"
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
+def camera_proxy_auth_opener(clean_url: str, username: str, password: str):
+    if not (username or password):
+        return None
+    password_mgr = HTTPPasswordMgrWithDefaultRealm()
+    password_mgr.add_password(None, clean_url, username, password)
+    return build_opener(HTTPDigestAuthHandler(password_mgr), HTTPBasicAuthHandler(password_mgr))
+
+
+def camera_parse_any_url(raw_url: Any) -> Any:
+    raw = clipped_verbatim(str(raw_url or "").strip(), 4096)
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"rtsp", "http", "https"} or not parsed.hostname:
+        return None
+    return parsed
+
+
+def camera_host_port_parts(raw_host: str) -> tuple[str, int | None]:
+    raw = clipped_verbatim(str(raw_host or "").strip(), 512)
+    if not raw:
+        return "", None
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = parsed.hostname or raw.strip("[]")
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if not parsed.hostname and ":" in host and not host.startswith("["):
+        maybe_host, maybe_port = host.rsplit(":", 1)
+        if maybe_port.isdigit():
+            host = maybe_host
+            port = max(1, min(65535, int(maybe_port)))
+    return host.strip("[]"), port
+
+
+def camera_tcp_check(host: str, port: int, *, label: str, timeout_sec: float = 2.0) -> dict[str, Any]:
+    started = time.monotonic()
+    result: dict[str, Any] = {
+        "label": label,
+        "host": host,
+        "port": port,
+        "ok": False,
+    }
+    try:
+        with socket.create_connection((host, port), timeout=max(0.5, min(5.0, timeout_sec))):
+            result["ok"] = True
+    except OSError as exc:
+        result["error"] = clipped(str(exc), 180)
+    result["duration_ms"] = round((time.monotonic() - started) * 1000)
+    return result
+
+
+def camera_private_ipv4_range(value: str) -> str:
+    try:
+        address = ip_address(str(value or ""))
+    except ValueError:
+        return ""
+    if address.version != 4:
+        return ""
+    for network, label in PRIVATE_IPV4_RANGES:
+        if address in network:
+            return label
+    return ""
+
+
+def camera_private_route_advice(target_ip: str, source_ip: str) -> str:
+    target_range = camera_private_ipv4_range(target_ip)
+    source_range = camera_private_ipv4_range(source_ip)
+    if not target_range or not source_range or target_range == source_range:
+        return ""
+    return (
+        f"The DVR target {target_ip} is in private range {target_range}, but wasm-agent would route from "
+        f"{source_ip} in {source_range}. That usually means the DVR is on a different private LAN or VPN. "
+        "Use a routed/VPN path or an RTSP tunnel host:port reachable from the wasm-agent server."
+    )
+
+
+def camera_route_hint(host: str, port: int) -> dict[str, Any]:
+    result: dict[str, Any] = {"host": host, "port": port}
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    except OSError as exc:
+        result["error"] = clipped(str(exc), 180)
+        return result
+    if not infos:
+        result["error"] = "no route candidates"
+        return result
+    family, _socktype, _proto, _canonname, sockaddr = infos[0]
+    target_ip = str(sockaddr[0])
+    result["target_ip"] = target_ip
+    try:
+        target_address = ip_address(target_ip)
+        result["target_scope"] = (
+            "loopback"
+            if target_address.is_loopback
+            else ("private" if target_address.is_private else ("link-local" if target_address.is_link_local else "public"))
+        )
+    except ValueError:
+        pass
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.connect(sockaddr)
+            source_ip = str(sock.getsockname()[0])
+            result["source_ip"] = source_ip
+            advice = camera_private_route_advice(target_ip, source_ip)
+            if advice:
+                result["advice"] = advice
+                result["private_lan_mismatch"] = True
+    except OSError as exc:
+        result["source_error"] = clipped(str(exc), 180)
+    return result
+
+
+def camera_diagnostics(body: dict[str, Any]) -> dict[str, Any]:
+    urls = [
+        ("source", body.get("url")),
+        ("portal", body.get("portalUrl") or body.get("portal_url")),
+        ("snapshot", body.get("snapshotUrl") or body.get("snapshot_url")),
+        ("stream", body.get("streamUrl") or body.get("stream_url")),
+    ]
+    host, host_port = camera_host_port_parts(str(body.get("host") or ""))
+    timeout_ms = max(500, min(5000, int(body.get("timeout_ms") or body.get("timeoutMs") or 2000)))
+    checks: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, int]] = set()
+
+    def port_value(*names: str, default: int) -> int:
+        for name in names:
+            raw = body.get(name)
+            if raw in {None, ""}:
+                continue
+            try:
+                return max(1, min(65535, int(float(str(raw)))))
+            except (TypeError, ValueError):
+                continue
+        return default
+
+    def add_check(label: str, check_host: str, port: int) -> None:
+        clean_host = str(check_host or "").strip("[]")
+        if not clean_host or port <= 0:
+            return
+        key = (clean_host, port)
+        if key in seen:
+            return
+        seen.add(key)
+        checks.append((label, clean_host, port))
+
+    for label, raw_url in urls:
+        parsed = camera_parse_any_url(raw_url)
+        if not parsed:
+            continue
+        default_port = 554 if parsed.scheme == "rtsp" else (443 if parsed.scheme == "https" else 80)
+        add_check(f"{label}:{parsed.scheme}", parsed.hostname or "", parsed.port or default_port)
+    if host:
+        add_check("host:rtsp", host, port_value("rtspPort", "rtsp_port", default=host_port or 554))
+        add_check("host:http", host, port_value("httpPort", "http_port", default=80))
+        add_check("host:https", host, port_value("httpsPort", "https_port", default=443))
+    if not checks:
+        raise BrowserError("camera_diagnostics_missing_target", "Camera diagnostics require a DVR URL or host.")
+
+    tcp = [camera_tcp_check(check_host, port, label=label, timeout_sec=timeout_ms / 1000) for label, check_host, port in checks]
+    route_hints = [camera_route_hint(check_host, port) for _label, check_host, port in checks]
+    reachable = any(item.get("ok") for item in tcp)
+    route_advice = next((str(item.get("advice") or "") for item in route_hints if item.get("advice")), "")
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.camera.diagnostics.v1",
+        "reachable": reachable,
+        "tcp": tcp,
+        "route": route_hints,
+        "advice": (
+            "At least one DVR port is reachable from wasm-agent."
+            if reachable
+            else (
+                route_advice
+                or "No checked DVR ports are reachable from wasm-agent. Use a DVR/cloud tunnel host that forwards RTSP and, if needed, HTTP/HTTPS."
+            )
+        ),
+    }
+
+
+def camera_snapshot_proxy(body: dict[str, Any]) -> dict[str, Any]:
+    clean_url, url_user, url_password = camera_proxy_clean_url(str(body.get("url") or ""))
+    username = str(body.get("username") or body.get("user") or url_user or "")
+    password = str(body.get("password") or url_password or "")
+    timeout_ms = max(1000, min(20000, int(body.get("timeout_ms") or body.get("timeoutMs") or DEFAULT_CAMERA_SNAPSHOT_PROXY_TIMEOUT_SEC * 1000)))
+    headers = {
+        "Accept": "image/jpeg,image/jpg,image/png,image/webp,image/*,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+        "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} camera-snapshot-proxy",
+    }
+    opener = camera_proxy_auth_opener(clean_url, username, password)
+    request = Request(clean_url, headers=headers, method="GET")
+    started = time.monotonic()
+    try:
+        with (opener.open(request, timeout=timeout_ms / 1000) if opener else urlopen(request, timeout=timeout_ms / 1000)) as response:
+            content_type = str(response.headers.get("Content-Type") or "image/jpeg").split(";", 1)[0].strip().lower()
+            data = response.read(DEFAULT_CAMERA_SNAPSHOT_PROXY_MAX_BYTES + 1)
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise BrowserError("camera_snapshot_auth_failed", f"DVR rejected the camera credentials (HTTP {exc.code}).", status=HTTPStatus.BAD_GATEWAY) from exc
+        raise BrowserError("camera_snapshot_http_error", f"DVR snapshot request failed with HTTP {exc.code}.", status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        raise BrowserError("camera_snapshot_unreachable", f"DVR snapshot endpoint was unreachable: {exc.reason}", status=HTTPStatus.BAD_GATEWAY) from exc
+    if len(data) > DEFAULT_CAMERA_SNAPSHOT_PROXY_MAX_BYTES:
+        raise BrowserError("camera_snapshot_too_large", "DVR snapshot response exceeded the 2 MB limit.", status=HTTPStatus.BAD_GATEWAY)
+    if not data:
+        raise BrowserError("camera_snapshot_empty", "DVR snapshot endpoint returned an empty response.", status=HTTPStatus.BAD_GATEWAY)
+    if not content_type.startswith("image/"):
+        raise BrowserError("camera_snapshot_not_image", f"DVR returned {content_type or 'an unknown content type'} instead of an image.", status=HTTPStatus.BAD_GATEWAY)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.camera.snapshot_proxy.v1",
+        "image": {
+            "content_type": content_type,
+            "bytes": len(data),
+            "data_url": f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}",
+        },
+        "diagnostic": {
+            "mode": "same-origin-snapshot-proxy",
+            "duration_ms": round((time.monotonic() - started) * 1000),
+            "has_credentials": bool(username or password),
+        },
+    }
+
+
+def prune_camera_stream_sessions(server: WasmAgentServer) -> None:
+    now = time.time()
+    with server.camera_stream_sessions_lock:
+        for token, session in list(server.camera_stream_sessions.items()):
+            if float(session.get("expires_at") or 0) <= now:
+                server.camera_stream_sessions.pop(token, None)
+
+
+def create_camera_stream_session(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+    clean_url, url_user, url_password = camera_proxy_clean_url(str(body.get("url") or ""))
+    username = str(body.get("username") or body.get("user") or url_user or "")
+    password = str(body.get("password") or url_password or "")
+    timeout_ms = max(1000, min(60000, int(body.get("timeout_ms") or body.get("timeoutMs") or DEFAULT_CAMERA_STREAM_PROXY_TIMEOUT_SEC * 1000)))
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    expires_at = now + DEFAULT_CAMERA_STREAM_SESSION_TTL_SEC
+    session = {
+        "url": clean_url,
+        "username": username,
+        "password": password,
+        "timeout_ms": timeout_ms,
+        "transport": "http-mjpeg",
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+    prune_camera_stream_sessions(server)
+    with server.camera_stream_sessions_lock:
+        server.camera_stream_sessions[token] = session
+    parsed = urlparse(clean_url)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.camera.stream_session.v1",
+        "stream": {
+            "url": f"/camera/stream?token={quote(token, safe='')}",
+            "expires_at": int(expires_at),
+            "mode": "same-origin-mjpeg-proxy",
+        },
+        "diagnostic": {
+            "source_host": parsed.hostname or "",
+            "source_path": parsed.path,
+            "has_credentials": bool(username or password),
+            "ttl_sec": DEFAULT_CAMERA_STREAM_SESSION_TTL_SEC,
+        },
+    }
+
+
+def camera_stream_session_for_token(server: WasmAgentServer, token: str) -> dict[str, Any]:
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        raise BrowserError("camera_stream_missing_token", "Camera stream token is required.", status=HTTPStatus.BAD_REQUEST)
+    now = time.time()
+    with server.camera_stream_sessions_lock:
+        session = server.camera_stream_sessions.get(clean_token)
+        if not session:
+            raise BrowserError("camera_stream_unknown_token", "Camera stream token is not active.", status=HTTPStatus.NOT_FOUND)
+        if float(session.get("expires_at") or 0) <= now:
+            server.camera_stream_sessions.pop(clean_token, None)
+            raise BrowserError("camera_stream_expired_token", "Camera stream token expired.", status=HTTPStatus.GONE)
+        return dict(session)
+
+
+def serve_camera_stream_proxy(handler: WasmAgentHandler, token: str) -> None:
+    session = camera_stream_session_for_token(handler.server, token)
+    if str(session.get("transport") or "http-mjpeg") != "http-mjpeg":
+        raise BrowserError("camera_stream_wrong_transport", "Camera stream token is not for the HTTP MJPEG relay.", status=HTTPStatus.BAD_REQUEST)
+    clean_url = str(session.get("url") or "")
+    username = str(session.get("username") or "")
+    password = str(session.get("password") or "")
+    timeout_ms = max(1000, min(60000, int(session.get("timeout_ms") or DEFAULT_CAMERA_STREAM_PROXY_TIMEOUT_SEC * 1000)))
+    headers = {
+        "Accept": "multipart/x-mixed-replace,image/jpeg,image/jpg,image/*,*/*;q=0.8",
+        "Cache-Control": "no-cache",
+        "Connection": "close",
+        "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} camera-stream-proxy",
+    }
+    opener = camera_proxy_auth_opener(clean_url, username, password)
+    request = Request(clean_url, headers=headers, method="GET")
+    try:
+        response = opener.open(request, timeout=timeout_ms / 1000) if opener else urlopen(request, timeout=timeout_ms / 1000)
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            raise BrowserError("camera_stream_auth_failed", f"DVR rejected the camera credentials (HTTP {exc.code}).", status=HTTPStatus.BAD_GATEWAY) from exc
+        raise BrowserError("camera_stream_http_error", f"DVR stream request failed with HTTP {exc.code}.", status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        raise BrowserError("camera_stream_unreachable", f"DVR stream endpoint was unreachable: {exc.reason}", status=HTTPStatus.BAD_GATEWAY) from exc
+
+    with response:
+        content_type = str(response.headers.get("Content-Type") or "multipart/x-mixed-replace").strip()
+        base_type = content_type.split(";", 1)[0].strip().lower()
+        if not (base_type.startswith("multipart/") or base_type.startswith("image/") or base_type == "application/octet-stream"):
+            raise BrowserError("camera_stream_not_media", f"DVR returned {base_type or 'an unknown content type'} instead of a media stream.", status=HTTPStatus.BAD_GATEWAY)
+        handler.send_response(HTTPStatus.OK)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        handler.send_header("Pragma", "no-cache")
+        handler.send_header("Connection", "close")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.end_headers()
+        while True:
+            try:
+                chunk = response.read(DEFAULT_CAMERA_STREAM_PROXY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
+
+
+def create_camera_rtsp_stream_session(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
+    clean_url, url_user, url_password = camera_rtsp_clean_url(str(body.get("url") or ""))
+    username = str(body.get("username") or body.get("user") or url_user or "")
+    password = str(body.get("password") or url_password or "")
+    timeout_ms = max(1000, min(60000, int(body.get("timeout_ms") or body.get("timeoutMs") or DEFAULT_CAMERA_RTSP_RELAY_TIMEOUT_SEC * 1000)))
+    fps = max(1, min(12, int(float(body.get("fps") or DEFAULT_CAMERA_RTSP_RELAY_FPS))))
+    quality = max(2, min(12, int(float(body.get("quality") or DEFAULT_CAMERA_RTSP_RELAY_QUALITY))))
+    token = secrets.token_urlsafe(24)
+    now = time.time()
+    expires_at = now + DEFAULT_CAMERA_STREAM_SESSION_TTL_SEC
+    session = {
+        "url": clean_url,
+        "username": username,
+        "password": password,
+        "timeout_ms": timeout_ms,
+        "fps": fps,
+        "quality": quality,
+        "transport": "rtsp-mjpeg",
+        "created_at": now,
+        "expires_at": expires_at,
+    }
+    prune_camera_stream_sessions(server)
+    with server.camera_stream_sessions_lock:
+        server.camera_stream_sessions[token] = session
+    parsed = urlparse(clean_url)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.camera.rtsp_stream_session.v1",
+        "stream": {
+            "url": f"/camera/rtsp-stream?token={quote(token, safe='')}",
+            "expires_at": int(expires_at),
+            "mode": "same-origin-rtsp-mjpeg-transcode",
+            "fps": fps,
+        },
+        "diagnostic": {
+            "source_host": parsed.hostname or "",
+            "source_path": parsed.path,
+            "source_query": parsed.query,
+            "has_credentials": bool(username or password),
+            "ttl_sec": DEFAULT_CAMERA_STREAM_SESSION_TTL_SEC,
+        },
+    }
+
+
+def camera_rtsp_ffmpeg_path() -> str:
+    configured = os.getenv("HERMES_WASM_AGENT_FFMPEG", "ffmpeg").strip() or "ffmpeg"
+    resolved = shutil.which(configured) if os.path.basename(configured) == configured else configured
+    if not resolved:
+        raise BrowserError("camera_rtsp_ffmpeg_missing", "True RTSP camera relay requires ffmpeg on the wasm-agent host.", status=HTTPStatus.BAD_GATEWAY)
+    return resolved
+
+
+def camera_rtsp_ffmpeg_command(input_url: str, *, timeout_ms: int, fps: int, quality: int) -> list[str]:
+    return [
+        camera_rtsp_ffmpeg_path(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-timeout",
+        str(max(1000, timeout_ms) * 1000),
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-analyzeduration",
+        "1000000",
+        "-probesize",
+        "32768",
+        "-i",
+        input_url,
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        f"fps={max(1, min(12, fps))}",
+        "-q:v",
+        str(max(2, min(12, quality))),
+        "-f",
+        "mpjpeg",
+        "-boundary_tag",
+        CAMERA_RTSP_MJPEG_BOUNDARY,
+        "pipe:1",
+    ]
+
+
+def camera_rtsp_ffmpeg_frame_command(input_url: str, *, timeout_ms: int, quality: int) -> list[str]:
+    return [
+        camera_rtsp_ffmpeg_path(),
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-timeout",
+        str(max(1000, timeout_ms) * 1000),
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-analyzeduration",
+        "1000000",
+        "-probesize",
+        "32768",
+        "-i",
+        input_url,
+        "-an",
+        "-sn",
+        "-dn",
+        "-frames:v",
+        "1",
+        "-q:v",
+        str(max(2, min(12, quality))),
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "mjpeg",
+        "pipe:1",
+    ]
+
+
+def camera_rtsp_url_with_subtype(clean_url: str, subtype: str) -> str:
+    parsed = urlparse(clean_url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    query["subtype"] = [subtype]
+    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+
+def camera_rtsp_frame_candidate_urls(clean_url: str) -> list[tuple[str, str]]:
+    candidates = [(clean_url, "requested")]
+    parsed = urlparse(clean_url)
+    if not parsed.path.rstrip("/").lower().endswith("/cam/realmonitor"):
+        return candidates
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    if not query.get("channel"):
+        return candidates
+    current_subtype = str((query.get("subtype") or [""])[0]).strip()
+    fallback_subtypes: list[str]
+    if current_subtype == "0":
+        fallback_subtypes = ["1"]
+    elif current_subtype == "1":
+        fallback_subtypes = ["0"]
+    else:
+        fallback_subtypes = ["0", "1"]
+    seen = {clean_url}
+    for subtype in fallback_subtypes:
+        fallback_url = camera_rtsp_url_with_subtype(clean_url, subtype)
+        if fallback_url in seen:
+            continue
+        seen.add(fallback_url)
+        candidates.append((fallback_url, f"subtype={subtype}"))
+    return candidates
+
+
+def skip_camera_rtsp_preflight() -> bool:
+    return os.getenv("HERMES_WASM_AGENT_SKIP_RTSP_PREFLIGHT", "").lower() in {"1", "true", "yes", "on"}
+
+
+def camera_rtsp_tcp_preflight(clean_url: str) -> None:
+    parsed = urlparse(clean_url)
+    host = parsed.hostname
+    if not host:
+        return
+    port = parsed.port or 554
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return
+    except OSError as exc:
+        route_hint = camera_route_hint(host, port)
+        route_advice = str(route_hint.get("advice") or "")
+        extra = f" {route_advice}" if route_advice else ""
+        raise BrowserError(
+            "camera_rtsp_unreachable",
+            f"wasm-agent cannot open TCP to the DVR RTSP host at {host}:{port}. Check that the DVR/cloud tunnel is reachable from the wasm-agent host and that RTSP port forwarding is enabled.{extra}",
+            status=HTTPStatus.BAD_GATEWAY,
+        ) from exc
+
+
+def redact_camera_diagnostic_text(text: str) -> str:
+    return re.sub(r"(rtsp://)[^/@\s]+@", r"\1user:***@", str(text or ""))[:700]
+
+
+def camera_jpeg_diagnostic(data: bytes) -> dict[str, Any]:
+    diagnostic: dict[str, Any] = {
+        "bytes": len(data),
+        "probably_black": False,
+    }
+    if Image is None:
+        return diagnostic
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            rgb = image.convert("RGB")
+            extrema = rgb.getextrema()
+            pixels = max(1, rgb.width * rgb.height)
+            # Sample every nth pixel cheaply through resize so a full frame does not
+            # turn the relay into an image-analysis workload.
+            sample = rgb.resize((min(64, rgb.width), min(64, rgb.height)))
+            values = list(sample.getdata())
+            mean = [sum(pixel[channel] for pixel in values) / len(values) for channel in range(3)]
+            bright_pixels = sum(1 for pixel in values if max(pixel) >= 24)
+            diagnostic.update({
+                "width": rgb.width,
+                "height": rgb.height,
+                "mean": [round(value, 2) for value in mean],
+                "bright_ratio": round(bright_pixels / len(values), 4),
+                "probably_black": max(mean) < 8 and bright_pixels / len(values) < 0.01 and pixels > 0,
+                "extrema": extrema,
+            })
+    except Exception:
+        diagnostic["image_probe"] = "unreadable"
+    return diagnostic
+
+
+def camera_rtsp_frame_proxy(body: dict[str, Any]) -> dict[str, Any]:
+    clean_url, url_user, url_password = camera_rtsp_clean_url(str(body.get("url") or ""))
+    username = str(body.get("username") or body.get("user") or url_user or "")
+    password = str(body.get("password") or url_password or "")
+    timeout_ms = max(1000, min(20000, int(body.get("timeout_ms") or body.get("timeoutMs") or DEFAULT_CAMERA_RTSP_FRAME_TIMEOUT_SEC * 1000)))
+    quality = max(2, min(12, int(float(body.get("quality") or DEFAULT_CAMERA_RTSP_RELAY_QUALITY))))
+    if not skip_camera_rtsp_preflight():
+        camera_rtsp_tcp_preflight(clean_url)
+    started = time.monotonic()
+    attempts: list[dict[str, Any]] = []
+    saw_black_frame = False
+    last_detail = ""
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for candidate_url, reason in camera_rtsp_frame_candidate_urls(clean_url):
+        input_url = camera_url_with_credentials(candidate_url, username, password)
+        command = camera_rtsp_ffmpeg_frame_command(input_url, timeout_ms=timeout_ms, quality=quality)
+        parsed = urlparse(candidate_url)
+        attempt_started = time.monotonic()
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=(timeout_ms / 1000) + 2,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            attempts.append({
+                "source_query": parsed.query,
+                "status": "timeout",
+                "reason": reason,
+                "duration_ms": round((time.monotonic() - attempt_started) * 1000),
+            })
+            continue
+        except FileNotFoundError as exc:
+            raise BrowserError("camera_rtsp_ffmpeg_missing", "True RTSP camera relay requires ffmpeg on the wasm-agent host.", status=HTTPStatus.BAD_GATEWAY) from exc
+        if completed.returncode != 0 or not completed.stdout:
+            last_detail = redact_camera_diagnostic_text(completed.stderr.decode("utf-8", "replace"))
+            attempts.append({
+                "source_query": parsed.query,
+                "status": "no_frame",
+                "reason": reason,
+                "duration_ms": round((time.monotonic() - attempt_started) * 1000),
+                "detail": last_detail,
+            })
+            continue
+        diagnostic = camera_jpeg_diagnostic(completed.stdout)
+        if diagnostic.get("probably_black"):
+            saw_black_frame = True
+            attempts.append({
+                "source_query": parsed.query,
+                "status": "black_frame",
+                "reason": reason,
+                "duration_ms": round((time.monotonic() - attempt_started) * 1000),
+            })
+            continue
+        attempts.append({
+            "source_query": parsed.query,
+            "status": "ok",
+            "reason": reason,
+            "duration_ms": round((time.monotonic() - attempt_started) * 1000),
+        })
+        return {
+            "ok": True,
+            "schema": "hermes.wasm_agent.camera.rtsp_frame.v1",
+            "image": {
+                "content_type": "image/jpeg",
+                "bytes": len(completed.stdout),
+                "data_url": f"data:image/jpeg;base64,{base64.b64encode(completed.stdout).decode('ascii')}",
+            },
+            "diagnostic": {
+                **diagnostic,
+                "mode": "same-origin-rtsp-frame",
+                "duration_ms": round((time.monotonic() - started) * 1000),
+                "source_host": parsed.hostname or "",
+                "source_path": parsed.path,
+                "source_query": parsed.query,
+                "has_credentials": bool(username or password),
+                "attempts": attempts,
+            },
+        }
+    checked_alternate = len(attempts) > 1
+    if saw_black_frame:
+        raise BrowserError(
+            "camera_rtsp_black_frame",
+            "DVR RTSP endpoint returned an all-black frame, so WIS did not treat it as the real camera image. Check the selected channel/subtype or the camera signal on the DVR.",
+            status=HTTPStatus.BAD_GATEWAY,
+        )
+    if last_timeout is not None and not last_detail:
+        message = "DVR RTSP endpoint did not emit a video frame before the timeout."
+        if checked_alternate:
+            message = "DVR RTSP endpoint did not emit a video frame before the timeout on the selected or alternate subtype."
+        raise BrowserError(
+            "camera_rtsp_no_frame",
+            f"{message} Check that wasm-agent can reach the DVR/cloud tunnel, RTSP is enabled, credentials are correct, and the channel/subtype has live video.",
+            status=HTTPStatus.BAD_GATEWAY,
+        ) from last_timeout
+    detail = last_detail
+    if checked_alternate and detail:
+        detail = f"Checked selected and alternate subtype. {detail}"
+    raise BrowserError(
+        "camera_rtsp_no_frame",
+        f"DVR RTSP endpoint did not return a frame. {detail}".strip(),
+        status=HTTPStatus.BAD_GATEWAY,
+    )
+
+
+def camera_push_root(server: WasmAgentServer) -> Path:
+    root = server.state_dir / "camera-push"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def safe_camera_push_stream_id(raw: Any) -> str:
+    return safe_state_id(str(raw or "cam-1"), "cam-1")[:64]
+
+
+def camera_push_stream_index(stream_id: str) -> int:
+    match = re.search(r"(\d+)$", stream_id)
+    if not match:
+        return 1
+    try:
+        return max(1, min(128, int(match.group(1))))
+    except ValueError:
+        return 1
+
+
+def camera_push_port(stream_id: str, body: dict[str, Any] | None = None) -> int:
+    body = body or {}
+    raw = body.get("port") or body.get("rtmpPort") or body.get("rtmp_port")
+    if raw in {None, ""}:
+        base = int(os.getenv("HERMES_WASM_AGENT_RTMP_INGEST_PORT", str(DEFAULT_CAMERA_PUSH_RTMP_PORT)) or DEFAULT_CAMERA_PUSH_RTMP_PORT)
+        return max(1024, min(65535, base + camera_push_stream_index(stream_id) - 1))
+    try:
+        return max(1024, min(65535, int(float(str(raw)))))
+    except (TypeError, ValueError):
+        raise BrowserError("camera_push_bad_port", "RTMP push ingest port must be a number between 1024 and 65535.", status=HTTPStatus.BAD_REQUEST)
+
+
+def camera_push_stream_dir(server: WasmAgentServer, stream_id: str) -> Path:
+    path = camera_push_root(server) / safe_camera_push_stream_id(stream_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def camera_push_session_path(server: WasmAgentServer, stream_id: str) -> Path:
+    return camera_push_stream_dir(server, stream_id) / "session.json"
+
+
+def camera_push_latest_frame_path(server: WasmAgentServer, stream_id: str) -> Path:
+    return camera_push_stream_dir(server, stream_id) / "latest.jpg"
+
+
+def camera_push_archive_dir(server: WasmAgentServer, stream_id: str) -> Path:
+    path = camera_push_stream_dir(server, stream_id) / "archive"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def camera_push_playback_dir(server: WasmAgentServer, stream_id: str) -> Path:
+    path = camera_push_stream_dir(server, stream_id) / "playback"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def camera_push_log_path(server: WasmAgentServer, stream_id: str) -> Path:
+    return camera_push_stream_dir(server, stream_id) / "ffmpeg.log"
+
+
+def camera_push_read_session(server: WasmAgentServer, stream_id: str) -> dict[str, Any]:
+    payload = read_json_file(camera_push_session_path(server, stream_id), {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def camera_push_write_session(server: WasmAgentServer, stream_id: str, payload: dict[str, Any]) -> None:
+    write_json_file(camera_push_session_path(server, stream_id), payload)
+
+
+def camera_push_public_host(body: dict[str, Any], handler: WasmAgentHandler | None = None) -> str:
+    explicit = str(body.get("publicHost") or body.get("public_host") or os.getenv("HERMES_WASM_AGENT_RTMP_PUBLIC_HOST", "")).strip()
+    if explicit:
+        return explicit.replace("rtmp://", "").replace("rtmps://", "").split("/", 1)[0].split(":", 1)[0]
+    host = request_host_origin(handler).removeprefix("https://").removeprefix("http://").split(":", 1)[0] if handler else ""
+    return host or "127.0.0.1"
+
+
+def camera_push_public_port(bind_port: int, body: dict[str, Any]) -> int:
+    raw = body.get("publicPort") or body.get("public_port") or os.getenv("HERMES_WASM_AGENT_RTMP_PUBLIC_PORT", "")
+    if raw in {None, ""}:
+        return bind_port
+    try:
+        return max(1, min(65535, int(float(str(raw)))))
+    except (TypeError, ValueError):
+        return bind_port
+
+
+def camera_push_stream_key(existing: dict[str, Any], stream_id: str) -> str:
+    previous = str(existing.get("stream_key") or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]{6,96}", previous):
+        return previous
+    token = secrets.token_urlsafe(9).replace("_", "").replace("-", "")
+    return f"{safe_camera_push_stream_id(stream_id)}-{token}"
+
+
+def camera_push_rtmp_urls(
+    *,
+    stream_id: str,
+    stream_key: str,
+    bind_port: int,
+    body: dict[str, Any],
+    handler: WasmAgentHandler | None = None,
+) -> tuple[str, str]:
+    bind_host = str(body.get("bindHost") or body.get("bind_host") or os.getenv("HERMES_WASM_AGENT_RTMP_BIND_HOST", "0.0.0.0") or "0.0.0.0").strip()
+    public_host = camera_push_public_host(body, handler)
+    public_port = camera_push_public_port(bind_port, body)
+    bind_url = f"rtmp://{bind_host}:{bind_port}/live/{quote(stream_key, safe='._-')}"
+    public_url = f"rtmp://{public_host}:{public_port}/live/{quote(stream_key, safe='._-')}"
+    return bind_url, public_url
+
+
+def camera_push_ffmpeg_command(input_url: str, output_path: Path, *, fps: int, quality: int) -> list[str]:
+    return [
+        camera_rtsp_ffmpeg_path(),
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-listen",
+        "1",
+        "-i",
+        input_url,
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        f"fps={max(1, min(15, fps))}",
+        "-q:v",
+        str(max(2, min(12, quality))),
+        "-f",
+        "image2",
+        "-update",
+        "1",
+        "-y",
+        str(output_path),
+    ]
+
+
+def camera_push_process_for(server: WasmAgentServer, stream_id: str) -> subprocess.Popen[bytes] | None:
+    processes = getattr(server, "camera_push_processes", {})
+    proc = processes.get(stream_id) if isinstance(processes, dict) else None
+    return proc if proc is not None and hasattr(proc, "poll") else None
+
+
+def camera_push_process_running(server: WasmAgentServer, stream_id: str) -> bool:
+    proc = camera_push_process_for(server, stream_id)
+    if proc is not None:
+        return proc.poll() is None
+    session = camera_push_read_session(server, stream_id)
+    pid = int(session.get("pid") or 0)
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def camera_push_frame_info(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"available": False}
+    stat = path.stat()
+    age_sec = max(0.0, time.time() - stat.st_mtime)
+    return {
+        "available": True,
+        "bytes": stat.st_size,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+        "age_sec": round(age_sec, 3),
+        "fresh": age_sec <= DEFAULT_CAMERA_PUSH_STALE_AFTER_SEC,
+        "stale_after_sec": DEFAULT_CAMERA_PUSH_STALE_AFTER_SEC,
+    }
+
+
+def camera_push_archive_latest_frame(
+    server: WasmAgentServer,
+    stream_id: str,
+    frame_path: Path | None = None,
+    *,
+    min_interval_sec: int = 0,
+) -> Path | None:
+    frame_path = frame_path or camera_push_latest_frame_path(server, stream_id)
+    if not frame_path.exists():
+        return None
+    try:
+        stat = frame_path.stat()
+    except OSError:
+        return None
+    if stat.st_size <= 0:
+        return None
+    archive_dir = camera_push_archive_dir(server, stream_id)
+    if min_interval_sec > 0:
+        newest: tuple[float, Path] | None = None
+        for existing in archive_dir.glob("*.jpg"):
+            try:
+                existing_stat = existing.stat()
+            except OSError:
+                continue
+            if newest is None or existing_stat.st_mtime > newest[0]:
+                newest = (existing_stat.st_mtime, existing)
+        if newest is not None and stat.st_mtime - newest[0] < min_interval_sec:
+            return newest[1]
+    archive_path = archive_dir / f"{stat.st_mtime_ns}-{stat.st_size}.jpg"
+    if not archive_path.exists():
+        try:
+            shutil.copy2(frame_path, archive_path)
+        except OSError:
+            return None
+    camera_push_prune_archive(server, stream_id)
+    return archive_path
+
+
+def camera_push_playback_latest_frame(
+    server: WasmAgentServer,
+    stream_id: str,
+    frame_path: Path | None = None,
+    *,
+    min_interval_sec: float = DEFAULT_CAMERA_PUSH_PLAYBACK_SAMPLE_SEC,
+) -> Path | None:
+    frame_path = frame_path or camera_push_latest_frame_path(server, stream_id)
+    if not frame_path.exists():
+        return None
+    try:
+        stat = frame_path.stat()
+    except OSError:
+        return None
+    if stat.st_size <= 0:
+        return None
+    try:
+        data = frame_path.read_bytes()
+        after_stat = frame_path.stat()
+    except OSError:
+        return None
+    if after_stat.st_mtime_ns != stat.st_mtime_ns or after_stat.st_size != stat.st_size:
+        stat = after_stat
+        try:
+            data = frame_path.read_bytes()
+        except OSError:
+            return None
+    if not data:
+        return None
+    playback_dir = camera_push_playback_dir(server, stream_id)
+    newest: tuple[float, Path] | None = None
+    for existing in playback_dir.glob("*.jpg"):
+        try:
+            existing_stat = existing.stat()
+        except OSError:
+            continue
+        if newest is None or existing_stat.st_mtime > newest[0]:
+            newest = (existing_stat.st_mtime, existing)
+    if not data.startswith(b"\xff\xd8") or not data.rstrip().endswith(b"\xff\xd9"):
+        return newest[1] if newest is not None else None
+    if min_interval_sec > 0 and newest is not None and stat.st_mtime - newest[0] < min_interval_sec:
+        return newest[1]
+    playback_path = playback_dir / f"{stat.st_mtime_ns}-{stat.st_size}.jpg"
+    if not playback_path.exists():
+        temp_path = playback_dir / f".{playback_path.name}.tmp"
+        try:
+            temp_path.write_bytes(data)
+            os.utime(temp_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            temp_path.replace(playback_path)
+        except OSError:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            return None
+    else:
+        try:
+            os.utime(playback_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        except OSError:
+            pass
+    camera_push_prune_playback(server, stream_id)
+    return playback_path
+
+
+def camera_push_prune_archive(server: WasmAgentServer, stream_id: str, keep_sec: int = DEFAULT_CAMERA_PUSH_ARCHIVE_RETENTION_SEC) -> None:
+    archive_dir = camera_push_archive_dir(server, stream_id)
+    cutoff = time.time() - max(DEFAULT_CAMERA_PUSH_REPLAY_SEC, min(DEFAULT_CAMERA_PUSH_ARCHIVE_RETENTION_SEC, keep_sec))
+    for path in archive_dir.glob("*.jpg"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def camera_push_prune_playback(server: WasmAgentServer, stream_id: str, keep_sec: int = DEFAULT_CAMERA_PUSH_PLAYBACK_RETENTION_SEC) -> None:
+    playback_dir = camera_push_playback_dir(server, stream_id)
+    cutoff = time.time() - max(30, min(DEFAULT_CAMERA_PUSH_PLAYBACK_RETENTION_SEC, keep_sec))
+    for path in playback_dir.glob("*.jpg"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def safe_camera_push_archive_frame_id(raw: Any) -> str:
+    frame_id = Path(str(raw or "")).name
+    if not re.fullmatch(r"\d+-\d+\.jpg", frame_id):
+        raise BrowserError("camera_push_bad_frame", "Camera timeline frame id is invalid.", status=HTTPStatus.BAD_REQUEST)
+    return frame_id
+
+
+def camera_push_archive_frame_path(server: WasmAgentServer, stream_id: str, frame_id: Any) -> Path:
+    archive_dir = camera_push_archive_dir(server, stream_id).resolve()
+    path = (archive_dir / safe_camera_push_archive_frame_id(frame_id)).resolve()
+    if path.parent != archive_dir:
+        raise BrowserError("camera_push_bad_frame", "Camera timeline frame id is invalid.", status=HTTPStatus.BAD_REQUEST)
+    return path
+
+
+def camera_push_archive_frame_url(stream_id: str, frame_id: str) -> str:
+    return f"/camera/push-archive-frame?stream_id={quote(stream_id, safe='')}&frame={quote(frame_id, safe='')}"
+
+
+def camera_push_archive_frame_record(stream_id: str, path: Path) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if stat.st_size <= 0:
+        return None
+    frame_id = path.name
+    return {
+        "id": frame_id,
+        "url": camera_push_archive_frame_url(stream_id, frame_id),
+        "bytes": stat.st_size,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
+        "timestamp_ms": int(stat.st_mtime * 1000),
+    }
+
+
+def camera_push_timeline(
+    server: WasmAgentServer,
+    stream_id: Any = "cam-1",
+    day: Any = "",
+    mode: Any = "live",
+    seconds: Any = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC,
+) -> dict[str, Any]:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    camera_push_archive_latest_frame(
+        server,
+        clean_stream,
+        min_interval_sec=DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC,
+    )
+    camera_push_prune_archive(server, clean_stream)
+    clean_mode = str(mode or "live").strip().lower()
+    if clean_mode not in {"live", "recorded"}:
+        clean_mode = "live"
+    try:
+        live_seconds = int(float(str(seconds or DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC)))
+    except (TypeError, ValueError):
+        live_seconds = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
+    live_seconds = max(60, min(24 * 60 * 60, live_seconds))
+    requested_day = str(day or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", requested_day):
+        requested_day = time.strftime("%Y-%m-%d", time.gmtime())
+    frames: list[dict[str, Any]] = []
+    latest_frame_ms = 0
+    latest_frame_path = camera_push_latest_frame_path(server, clean_stream)
+    try:
+        latest_frame_stat = latest_frame_path.stat()
+        if latest_frame_stat.st_size > 0:
+            latest_frame_ms = int(latest_frame_stat.st_mtime * 1000)
+    except OSError:
+        latest_frame_ms = 0
+    latest_playback = camera_push_playback_latest_frame(server, clean_stream)
+    if latest_playback:
+        try:
+            latest_frame_ms = max(latest_frame_ms, int(latest_playback.stat().st_mtime * 1000))
+        except OSError:
+            pass
+    for path in camera_push_archive_dir(server, clean_stream).glob("*.jpg"):
+        record = camera_push_archive_frame_record(clean_stream, path)
+        if not record:
+            continue
+        if clean_mode == "recorded" or str(record["updated_at"])[:10] == requested_day:
+            frames.append(record)
+    frames.sort(key=lambda item: int(item["timestamp_ms"]))
+    available_start_ms = int(frames[0]["timestamp_ms"]) if frames else 0
+    sampled_available_end_ms = int(frames[-1]["timestamp_ms"]) if frames else 0
+    available_end_ms = max(sampled_available_end_ms, latest_frame_ms)
+    if not available_start_ms and latest_frame_ms:
+        available_start_ms = latest_frame_ms
+    end_ms = available_end_ms if clean_mode == "live" else sampled_available_end_ms
+    start_ms = max(available_start_ms, end_ms - (live_seconds * 1000)) if clean_mode == "live" and end_ms else available_start_ms
+    visible_frames = [
+        frame for frame in frames
+        if not end_ms or (start_ms <= int(frame["timestamp_ms"]) <= end_ms)
+    ]
+    return {
+        "ok": True,
+        "schema": f"{CAMERA_PUSH_SCHEMA}.timeline",
+        "stream_id": clean_stream,
+        "mode": clean_mode,
+        "day": requested_day,
+        "range_source": "wasm-agent-retained-archive",
+        "sample_interval_sec": DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC,
+        "live_window_sec": live_seconds,
+        "retention_sec": DEFAULT_CAMERA_PUSH_ARCHIVE_RETENTION_SEC,
+        "available_range": {
+            "start_ms": available_start_ms,
+            "end_ms": available_end_ms,
+            "frame_count": len(frames),
+            "duration_sec": int(max(0, available_end_ms - available_start_ms) / 1000),
+        },
+        "range": {
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "duration_sec": int(max(0, end_ms - start_ms) / 1000),
+        },
+        "frames": visible_frames[-2880:],
+    }
+
+
+def camera_push_recent_archive_frames(server: WasmAgentServer, stream_id: str, seconds: Any = DEFAULT_CAMERA_PUSH_REPLAY_SEC) -> list[Path]:
+    try:
+        replay_sec = int(float(str(seconds or DEFAULT_CAMERA_PUSH_REPLAY_SEC)))
+    except (TypeError, ValueError):
+        replay_sec = DEFAULT_CAMERA_PUSH_REPLAY_SEC
+    replay_sec = max(5, min(DEFAULT_CAMERA_PUSH_REPLAY_MAX_SEC, replay_sec))
+    camera_push_archive_latest_frame(server, stream_id, min_interval_sec=DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC)
+    camera_push_prune_archive(server, stream_id)
+    cutoff = time.time() - replay_sec
+    frames: list[tuple[float, Path]] = []
+    for path in camera_push_archive_dir(server, stream_id).glob("*.jpg"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_size > 0 and stat.st_mtime >= cutoff:
+            frames.append((stat.st_mtime, path))
+    return [path for _mtime, path in sorted(frames)]
+
+
+def camera_push_playback_frames_from(
+    server: WasmAgentServer,
+    stream_id: str,
+    from_ms: Any = 0,
+    seconds: Any = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC,
+) -> list[Path]:
+    try:
+        start_ms = int(float(str(from_ms or 0)))
+    except (TypeError, ValueError):
+        start_ms = 0
+    try:
+        playback_sec = int(float(str(seconds or DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC)))
+    except (TypeError, ValueError):
+        playback_sec = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
+    playback_sec = max(5, min(DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC, playback_sec))
+    camera_push_playback_latest_frame(server, stream_id)
+    camera_push_prune_playback(server, stream_id)
+    end_ms = start_ms + (playback_sec * 1000) if start_ms > 0 else 0
+    frames: list[tuple[float, Path]] = []
+    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        timestamp_ms = int(stat.st_mtime * 1000)
+        if stat.st_size <= 0:
+            continue
+        if start_ms > 0 and timestamp_ms < start_ms:
+            continue
+        if end_ms and timestamp_ms > end_ms:
+            continue
+        frames.append((stat.st_mtime, path))
+    return [path for _mtime, path in sorted(frames)]
+
+
+def camera_push_next_playback_frame(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    start_ms: int = 0,
+    after_mtime_ns: int = -1,
+    end_ms: int = 0,
+) -> tuple[Path, os.stat_result] | None:
+    camera_push_playback_latest_frame(server, stream_id)
+    camera_push_prune_playback(server, stream_id)
+    frames: list[tuple[int, Path, os.stat_result]] = []
+    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        timestamp_ms = int(stat.st_mtime * 1000)
+        if stat.st_size <= 0 or stat.st_mtime_ns <= after_mtime_ns:
+            continue
+        if start_ms > 0 and timestamp_ms < start_ms:
+            continue
+        if end_ms > 0 and timestamp_ms > end_ms:
+            continue
+        frames.append((stat.st_mtime_ns, path, stat))
+    if not frames:
+        return None
+    _mtime_ns, path, stat = sorted(frames, key=lambda item: item[0])[0]
+    return path, stat
+
+
+def camera_push_nearest_playback_frame(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    target_ms: int = 0,
+    end_ms: int = 0,
+    max_distance_ms: int = 0,
+) -> tuple[Path, os.stat_result] | None:
+    if target_ms <= 0:
+        return camera_push_next_playback_frame(server, stream_id, start_ms=0, after_mtime_ns=-1, end_ms=end_ms)
+    camera_push_playback_latest_frame(server, stream_id)
+    camera_push_prune_playback(server, stream_id)
+    frames: list[tuple[int, int, Path, os.stat_result]] = []
+    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        timestamp_ms = int(stat.st_mtime * 1000)
+        if stat.st_size <= 0:
+            continue
+        if end_ms > 0 and timestamp_ms > end_ms:
+            continue
+        frames.append((abs(timestamp_ms - target_ms), stat.st_mtime_ns, path, stat))
+    if not frames:
+        return None
+    distance_ms, _mtime_ns, path, stat = sorted(frames, key=lambda item: (item[0], item[1]))[0]
+    if max_distance_ms > 0 and distance_ms > max_distance_ms:
+        return None
+    return path, stat
+
+
+def camera_push_frame_url(stream_id: str) -> str:
+    return f"/camera/push-frame?stream_id={quote(stream_id, safe='')}"
+
+
+def camera_push_stream_url(stream_id: str) -> str:
+    return f"/camera/push-stream?stream_id={quote(stream_id, safe='')}"
+
+
+def camera_push_replay_url(stream_id: str, seconds: int = DEFAULT_CAMERA_PUSH_REPLAY_SEC) -> str:
+    return f"/camera/push-replay?stream_id={quote(stream_id, safe='')}&seconds={int(seconds)}"
+
+
+def camera_push_status(server: WasmAgentServer, stream_id: Any = "cam-1", handler: WasmAgentHandler | None = None) -> dict[str, Any]:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    session = camera_push_read_session(server, clean_stream)
+    bind_port = int(session.get("bind_port") or camera_push_port(clean_stream))
+    stream_key = camera_push_stream_key(session, clean_stream)
+    _bind_url, public_url = camera_push_rtmp_urls(
+        stream_id=clean_stream,
+        stream_key=stream_key,
+        bind_port=bind_port,
+        body=session,
+        handler=handler,
+    )
+    frame_path = camera_push_latest_frame_path(server, clean_stream)
+    camera_push_archive_latest_frame(
+        server,
+        clean_stream,
+        frame_path,
+        min_interval_sec=DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC,
+    )
+    frame = camera_push_frame_info(frame_path)
+    running = camera_push_process_running(server, clean_stream)
+    fresh = bool(frame.get("available") and frame.get("fresh"))
+    state = "receiving" if fresh and running else ("stale" if frame.get("available") else ("listening" if running else ("stopped" if session else "not_configured")))
+    replay_frames = camera_push_recent_archive_frames(server, clean_stream)
+    return {
+        "ok": True,
+        "schema": CAMERA_PUSH_SCHEMA,
+        "stream_id": clean_stream,
+        "state": state,
+        "running": running,
+        "ingest": {
+            "mode": "rtmp-push",
+            "url": public_url,
+            "bind_port": bind_port,
+            "app": "live",
+            "stream_key": stream_key,
+        },
+        "frame": {
+            **frame,
+            "url": camera_push_frame_url(clean_stream),
+        },
+        "stream": {
+            "url": camera_push_stream_url(clean_stream),
+            "mode": "mjpeg",
+            "fps": int(session.get("fps") or DEFAULT_CAMERA_PUSH_FRAME_FPS),
+            "audio": False,
+        },
+        "audio": {
+            "available": False,
+            "source": "jpeg-frame-extractor",
+        },
+        "replay": {
+            "url": camera_push_replay_url(clean_stream),
+            "seconds": DEFAULT_CAMERA_PUSH_REPLAY_SEC,
+            "frame_count": len(replay_frames),
+        },
+        "pid": int(session.get("pid") or 0),
+        "started_at": str(session.get("started_at") or ""),
+        "log_path": str(camera_push_log_path(server, clean_stream)),
+    }
+
+
+def start_camera_push_ingest(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler | None = None) -> dict[str, Any]:
+    stream_id = safe_camera_push_stream_id(body.get("stream_id") or body.get("streamId") or body.get("stream") or "cam-1")
+    stream_dir = camera_push_stream_dir(server, stream_id)
+    latest_path = camera_push_latest_frame_path(server, stream_id)
+    existing = camera_push_read_session(server, stream_id)
+    bind_port = camera_push_port(stream_id, body or existing)
+    stream_key = camera_push_stream_key(existing, stream_id)
+    bind_url, public_url = camera_push_rtmp_urls(
+        stream_id=stream_id,
+        stream_key=stream_key,
+        bind_port=bind_port,
+        body={**existing, **body},
+        handler=handler,
+    )
+    fps = max(1, min(15, int(float(body.get("fps") or existing.get("fps") or DEFAULT_CAMERA_PUSH_FRAME_FPS))))
+    quality = max(2, min(12, int(float(body.get("quality") or existing.get("quality") or DEFAULT_CAMERA_PUSH_FRAME_QUALITY))))
+    command = camera_push_ffmpeg_command(bind_url, latest_path, fps=fps, quality=quality)
+    lock = getattr(server, "camera_push_processes_lock", threading.Lock())
+    with lock:
+        proc = camera_push_process_for(server, stream_id)
+        if proc is not None and proc.poll() is None:
+            if (
+                int(existing.get("fps") or 0) == fps
+                and int(existing.get("quality") or 0) == quality
+                and int(existing.get("bind_port") or bind_port) == bind_port
+            ):
+                return camera_push_status(server, stream_id, handler)
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+            getattr(server, "camera_push_processes", {}).pop(stream_id, None)
+        if proc is None and camera_push_process_running(server, stream_id):
+            if (
+                int(existing.get("fps") or 0) == fps
+                and int(existing.get("quality") or 0) == quality
+                and int(existing.get("bind_port") or bind_port) == bind_port
+            ):
+                return camera_push_status(server, stream_id, handler)
+            try:
+                os.kill(int(existing.get("pid") or 0), 15)
+            except OSError:
+                pass
+        log_handle = camera_push_log_path(server, stream_id).open("ab")
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=str(stream_dir),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=log_handle,
+            )
+        except FileNotFoundError as exc:
+            raise BrowserError("camera_push_ffmpeg_missing", "RTMP push ingest requires ffmpeg on the wasm-agent host.", status=HTTPStatus.BAD_GATEWAY) from exc
+        except OSError as exc:
+            raise BrowserError("camera_push_start_failed", f"Could not start the RTMP ingest listener on port {bind_port}: {exc}", status=HTTPStatus.BAD_GATEWAY) from exc
+        finally:
+            log_handle.close()
+        getattr(server, "camera_push_processes", {})[stream_id] = proc
+    session = {
+        "schema": CAMERA_PUSH_SCHEMA,
+        "stream_id": stream_id,
+        "stream_key": stream_key,
+        "bind_port": bind_port,
+        "public_url": public_url,
+        "fps": fps,
+        "quality": quality,
+        "pid": proc.pid,
+        "started_at": iso_timestamp(),
+        "publicHost": camera_push_public_host(body, handler),
+        "publicPort": camera_push_public_port(bind_port, body),
+    }
+    camera_push_write_session(server, stream_id, session)
+    return camera_push_status(server, stream_id, handler)
+
+
+def stop_camera_push_ingest(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler | None = None) -> dict[str, Any]:
+    stream_id = safe_camera_push_stream_id(body.get("stream_id") or body.get("streamId") or body.get("stream") or "cam-1")
+    proc = camera_push_process_for(server, stream_id)
+    if proc is not None and proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=4)
+    session = camera_push_read_session(server, stream_id)
+    if proc is None and int(session.get("pid") or 0) > 0:
+        try:
+            os.kill(int(session.get("pid") or 0), 15)
+        except OSError:
+            pass
+    if session:
+        session["stopped_at"] = iso_timestamp()
+        session["pid"] = 0
+        camera_push_write_session(server, stream_id, session)
+    return camera_push_status(server, stream_id, handler)
+
+
+def serve_camera_push_frame(handler: WasmAgentHandler, stream_id: Any) -> None:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    frame_path = camera_push_latest_frame_path(handler.server, clean_stream)
+    if not frame_path.exists():
+        raise BrowserError("camera_push_frame_missing", "No RTMP-pushed frame is available yet.", status=HTTPStatus.NOT_FOUND)
+    data = frame_path.read_bytes()
+    if not data:
+        raise BrowserError("camera_push_frame_empty", "The latest RTMP-pushed frame is empty.", status=HTTPStatus.NOT_FOUND)
+    camera_push_playback_latest_frame(
+        handler.server,
+        clean_stream,
+        frame_path,
+        min_interval_sec=DEFAULT_CAMERA_PUSH_PLAYBACK_SAMPLE_SEC,
+    )
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "image/jpeg")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def serve_camera_push_archive_frame(handler: WasmAgentHandler, stream_id: Any, frame_id: Any) -> None:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    frame_path = camera_push_archive_frame_path(handler.server, clean_stream, frame_id)
+    if not frame_path.exists():
+        raise BrowserError("camera_push_archive_frame_missing", "That camera timeline frame is no longer retained.", status=HTTPStatus.NOT_FOUND)
+    data = frame_path.read_bytes()
+    if not data:
+        raise BrowserError("camera_push_archive_frame_empty", "That camera timeline frame is empty.", status=HTTPStatus.NOT_FOUND)
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "image/jpeg")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def camera_push_request_fps(handler: WasmAgentHandler, stream_id: str) -> float:
+    query = parse_qs(urlparse(handler.path).query)
+    raw = (query.get("fps") or [""])[0]
+    if raw in {None, ""}:
+        raw = camera_push_read_session(handler.server, stream_id).get("fps") or DEFAULT_CAMERA_PUSH_FRAME_FPS
+    try:
+        return max(1.0, min(15.0, float(str(raw))))
+    except (TypeError, ValueError):
+        return float(DEFAULT_CAMERA_PUSH_FRAME_FPS)
+
+
+def write_camera_push_mjpeg_frame(handler: WasmAgentHandler, boundary: str, data: bytes, path: Path) -> None:
+    try:
+        stat = path.stat()
+        updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+        timestamp_ms = int(stat.st_mtime * 1000)
+    except OSError:
+        updated_at = iso_timestamp()
+        timestamp_ms = int(time.time() * 1000)
+    header = (
+        f"--{boundary}\r\n"
+        "Content-Type: image/jpeg\r\n"
+        f"Content-Length: {len(data)}\r\n"
+        f"X-Frame-Updated-At: {updated_at}\r\n"
+        f"X-Frame-Timestamp-Ms: {timestamp_ms}\r\n"
+        f"X-Frame-Id: {path.name}\r\n"
+        "\r\n"
+    ).encode("ascii")
+    handler.wfile.write(header)
+    handler.wfile.write(data)
+    handler.wfile.write(b"\r\n")
+    handler.wfile.flush()
+
+
+def send_camera_push_mjpeg_headers(handler: WasmAgentHandler, boundary: str) -> None:
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Connection", "close")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+
+
+def serve_camera_push_mjpeg_stream(handler: WasmAgentHandler, stream_id: Any) -> None:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    frame_path = camera_push_latest_frame_path(handler.server, clean_stream)
+    fps = camera_push_request_fps(handler, clean_stream)
+    interval = 1.0 / fps
+    last_mtime_ns = -1
+    boundary = CAMERA_PUSH_MJPEG_BOUNDARY
+    send_camera_push_mjpeg_headers(handler, boundary)
+    while True:
+        try:
+            stat = frame_path.stat()
+        except OSError:
+            time.sleep(min(0.5, interval))
+            continue
+        if time.time() - stat.st_mtime > DEFAULT_CAMERA_PUSH_STALE_AFTER_SEC:
+            last_mtime_ns = max(last_mtime_ns, stat.st_mtime_ns)
+            time.sleep(min(0.5, interval))
+            continue
+        if stat.st_size <= 0 or stat.st_mtime_ns == last_mtime_ns:
+            time.sleep(min(0.5, interval))
+            continue
+        data = frame_path.read_bytes()
+        if not data:
+            time.sleep(min(0.5, interval))
+            continue
+        last_mtime_ns = stat.st_mtime_ns
+        camera_push_archive_latest_frame(handler.server, clean_stream, frame_path)
+        camera_push_playback_latest_frame(handler.server, clean_stream, frame_path)
+        write_camera_push_mjpeg_frame(handler, boundary, data, frame_path)
+        time.sleep(interval)
+
+
+def serve_camera_push_replay(handler: WasmAgentHandler, stream_id: Any, seconds: Any = DEFAULT_CAMERA_PUSH_REPLAY_SEC) -> None:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    fps = camera_push_request_fps(handler, clean_stream)
+    interval = 1.0 / min(fps, 15.0)
+    frames = camera_push_recent_archive_frames(handler.server, clean_stream, seconds)
+    if not frames:
+        raise BrowserError("camera_push_replay_empty", "No archived camera frames are available for replay yet.", status=HTTPStatus.NOT_FOUND)
+    boundary = f"{CAMERA_PUSH_MJPEG_BOUNDARY}-replay"
+    send_camera_push_mjpeg_headers(handler, boundary)
+    for frame_path in frames:
+        try:
+            data = frame_path.read_bytes()
+        except OSError:
+            continue
+        if not data:
+            continue
+        write_camera_push_mjpeg_frame(handler, boundary, data, frame_path)
+        time.sleep(interval)
+
+
+def serve_camera_push_playback(
+    handler: WasmAgentHandler,
+    stream_id: Any,
+    from_ms: Any = 0,
+    seconds: Any = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC,
+    follow: Any = "1",
+) -> None:
+    clean_stream = safe_camera_push_stream_id(stream_id)
+    try:
+        start_ms = int(float(str(from_ms or 0)))
+    except (TypeError, ValueError):
+        start_ms = 0
+    try:
+        playback_sec = int(float(str(seconds or DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC)))
+    except (TypeError, ValueError):
+        playback_sec = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
+    playback_sec = max(5, min(DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC, playback_sec))
+    end_ms = start_ms + (playback_sec * 1000) if start_ms > 0 else 0
+    should_follow = str(follow or "1").strip().lower() not in {"0", "false", "no", "off"}
+    first = camera_push_nearest_playback_frame(
+        handler.server,
+        clean_stream,
+        end_ms=0 if should_follow else end_ms,
+        target_ms=start_ms,
+        max_distance_ms=int(DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC * 1000) if start_ms > 0 else 0,
+    )
+    if not first:
+        raise BrowserError("camera_push_playback_empty", "No smooth camera playback frames are available from that point yet.", status=HTTPStatus.NOT_FOUND)
+    boundary = f"{CAMERA_PUSH_MJPEG_BOUNDARY}-playback"
+    send_camera_push_mjpeg_headers(handler, boundary)
+    origin_media_sec = 0.0
+    origin_wall_sec = 0.0
+    previous_media_sec = 0.0
+    last_mtime_ns = -1
+    next_frame: tuple[Path, os.stat_result] | None = first
+    while next_frame:
+        frame_path, stat = next_frame
+        if previous_media_sec and stat.st_mtime - previous_media_sec > DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC:
+            break
+        if not origin_media_sec:
+            origin_media_sec = stat.st_mtime
+            origin_wall_sec = time.monotonic()
+        target_wall_sec = origin_wall_sec + max(0.0, stat.st_mtime - origin_media_sec)
+        delay_sec = target_wall_sec - time.monotonic()
+        if delay_sec > 0:
+            time.sleep(delay_sec)
+        try:
+            data = frame_path.read_bytes()
+        except OSError:
+            data = b""
+        last_mtime_ns = stat.st_mtime_ns
+        previous_media_sec = stat.st_mtime
+        if data:
+            write_camera_push_mjpeg_frame(handler, boundary, data, frame_path)
+        while True:
+            next_frame = camera_push_next_playback_frame(
+                handler.server,
+                clean_stream,
+                start_ms=start_ms,
+                after_mtime_ns=last_mtime_ns,
+                end_ms=0 if should_follow else end_ms,
+            )
+            if next_frame or not should_follow:
+                break
+            time.sleep(0.05)
+
+
+def read_camera_process_chunk(process: subprocess.Popen[bytes], timeout_sec: float) -> bytes:
+    assert process.stdout is not None
+    deadline = time.monotonic() + max(0.5, timeout_sec)
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            chunk = process.stdout.read(DEFAULT_CAMERA_STREAM_PROXY_CHUNK_BYTES)
+            return chunk or b""
+        ready, _, _ = select.select([process.stdout], [], [], min(0.25, max(0.0, deadline - time.monotonic())))
+        if not ready:
+            continue
+        chunk = process.stdout.read(DEFAULT_CAMERA_STREAM_PROXY_CHUNK_BYTES)
+        return chunk or b""
+    return b""
+
+
+def serve_camera_rtsp_mjpeg_proxy(handler: WasmAgentHandler, token: str) -> None:
+    session = camera_stream_session_for_token(handler.server, token)
+    if str(session.get("transport") or "") != "rtsp-mjpeg":
+        raise BrowserError("camera_rtsp_wrong_transport", "Camera stream token is not for the RTSP relay.", status=HTTPStatus.BAD_REQUEST)
+    clean_url = str(session.get("url") or "")
+    if not skip_camera_rtsp_preflight():
+        camera_rtsp_tcp_preflight(clean_url)
+    input_url = camera_url_with_credentials(
+        clean_url,
+        str(session.get("username") or ""),
+        str(session.get("password") or ""),
+    )
+    timeout_ms = max(1000, min(60000, int(session.get("timeout_ms") or DEFAULT_CAMERA_RTSP_RELAY_TIMEOUT_SEC * 1000)))
+    fps = max(1, min(12, int(session.get("fps") or DEFAULT_CAMERA_RTSP_RELAY_FPS)))
+    quality = max(2, min(12, int(session.get("quality") or DEFAULT_CAMERA_RTSP_RELAY_QUALITY)))
+    command = camera_rtsp_ffmpeg_command(input_url, timeout_ms=timeout_ms, fps=fps, quality=quality)
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise BrowserError("camera_rtsp_ffmpeg_missing", "True RTSP camera relay requires ffmpeg on the wasm-agent host.", status=HTTPStatus.BAD_GATEWAY) from exc
+    except Exception as exc:
+        raise BrowserError("camera_rtsp_start_failed", f"Could not start the RTSP camera relay: {exc}", status=HTTPStatus.BAD_GATEWAY) from exc
+
+    first_chunk = read_camera_process_chunk(process, min(DEFAULT_CAMERA_RTSP_FRAME_TIMEOUT_SEC, timeout_ms / 1000))
+    if not first_chunk:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        raise BrowserError(
+            "camera_rtsp_no_frame",
+            "DVR RTSP relay opened but did not emit a video frame. Check DVR/cloud reachability, credentials, channel/subtype, and RTSP enablement.",
+            status=HTTPStatus.BAD_GATEWAY,
+        )
+
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", f"multipart/x-mixed-replace;boundary={CAMERA_RTSP_MJPEG_BOUNDARY}")
+    handler.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+    handler.send_header("Pragma", "no-cache")
+    handler.send_header("Connection", "close")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    try:
+        assert process.stdout is not None
+        try:
+            handler.wfile.write(first_chunk)
+            handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        while True:
+            chunk = process.stdout.read(DEFAULT_CAMERA_STREAM_PROXY_CHUNK_BYTES)
+            if not chunk:
+                break
+            try:
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
 def wasm_agent_deployment_mode() -> str:
     raw = os.getenv("HERMES_WASM_AGENT_DEPLOYMENT_MODE", DEPLOYMENT_MODE_LOCAL).strip().lower()
     if raw in {DEPLOYMENT_MODE_LOCAL, DEPLOYMENT_MODE_CLOUD}:
@@ -1634,10 +3707,12 @@ def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = Non
 
 def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> str:
     img_src = "'self' data: blob: https://accounts.google.com https://lh3.googleusercontent.com"
+    media_src = "'self' data: blob: https:"
     connect_src = "'self' https://accounts.google.com stun: turn: turns:"
     if not public_deployment(handler):
-        img_src = "'self' data: blob: https:"
-        connect_src = "'self' ws: wss: http://127.0.0.1:* http://localhost:* stun: turn: turns:"
+        img_src = "'self' data: blob: http: https:"
+        media_src = "'self' data: blob: http: https:"
+        connect_src = "'self' ws: wss: http: https: stun: turn: turns:"
     script_src = "'self' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net"
     if not public_deployment(handler):
         script_src = "'self' 'unsafe-inline' 'wasm-unsafe-eval' https://accounts.google.com https://cdn.jsdelivr.net"
@@ -1646,6 +3721,7 @@ def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> st
         f"script-src {script_src}; "
         "style-src 'self' 'unsafe-inline' https://accounts.google.com; "
         f"img-src {img_src}; "
+        f"media-src {media_src}; "
         f"connect-src {connect_src}; "
         "frame-src https://accounts.google.com; "
         "worker-src 'self' blob:; "
@@ -2269,7 +4345,7 @@ def ensure_agent_target_allowed(user: dict[str, Any] | None, target_node: str) -
             "Only an admin can route embedded chat turns to the global orchestrator. Select an account-owned sandbox node.",
             status=HTTPStatus.FORBIDDEN,
         )
-    allowed = {AGENT_DEFAULT_SANDBOX_NODE_ID, account_main_node_id(user)}
+    allowed = {AGENT_DEFAULT_SANDBOX_NODE_ID, *account_main_node_id_candidates(user)}
     if node not in allowed:
         raise BrowserError(
             "agent_target_denied",
@@ -2353,10 +4429,12 @@ def mutation_block_spec() -> dict[str, Any]:
 def wis_patch_block_spec() -> dict[str, Any]:
     return {
         "schema": "hermes.wasm_agent.wis.patch_spec.v1",
-        "format": f"Return a fenced json block with schema {WIS_PATCH_SCHEMA} for userland WIS/interface artifacts.",
+        "format": (
+            f"Return a fenced json block with schema {WIS_PATCH_SCHEMA} for userland WIS/interface artifacts. "
+            "Omit space_id to target the current wasm-agent space; include it only for a known explicit space id."
+        ),
         "example": {
             "schema": WIS_PATCH_SCHEMA,
-            "space_id": "current-space",
             "artifact_id": "main",
             "operations": [
                 {"op": "set_title", "title": "Deploy Checklist"},
@@ -2384,6 +4462,7 @@ def wis_patch_block_spec() -> dict[str, Any]:
             "replace_node",
             "add_document",
         ],
+        "space_id": "optional; omitted means the active wasm-agent space injected by the adapter",
         "limits": {
             "max_operations": 40,
             "max_artifact_bytes": 512 * 1024,
@@ -2430,6 +4509,55 @@ def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, An
     text = str(reply or "")
     payloads: list[dict[str, Any]] = []
     spans: list[tuple[int, int]] = []
+
+    def spans_overlap(candidate: tuple[int, int]) -> bool:
+        start, end = candidate
+        return any(start < span_end and end > span_start for span_start, span_end in spans)
+
+    def json_object_end(start: int) -> int | None:
+        if start < 0 or start >= len(text) or text[start] != "{":
+            return None
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        return None
+
+    def expand_raw_json_span(start: int, end: int) -> tuple[int, int]:
+        line_start = text.rfind("\n", 0, start) + 1
+        previous_line_end = line_start - 1
+        if previous_line_end < 0:
+            return start, end
+        previous_line_start = text.rfind("\n", 0, previous_line_end) + 1
+        previous_line = text[previous_line_start:previous_line_end].strip().lower()
+        between = text[previous_line_end: start].strip()
+        if previous_line in {"json", "wis-patch", "patch"} and not between:
+            return previous_line_start, end
+        return start, end
+
+    def append_payload(payload: dict[str, Any], span: tuple[int, int]) -> None:
+        if spans_overlap(span):
+            return
+        payloads.append(payload)
+        spans.append(span)
+
     fence_re = re.compile(r"```(?:json|wis-patch|patch)?\s*\n(.*?)\n```", re.DOTALL | re.IGNORECASE)
     for match in fence_re.finditer(text):
         block = match.group(1).strip()
@@ -2440,8 +4568,7 @@ def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, An
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict) and payload.get("schema") == WIS_PATCH_SCHEMA:
-            payloads.append(payload)
-            spans.append(match.span())
+            append_payload(payload, match.span())
     tag_re = re.compile(r"<wis-patch>\s*(.*?)\s*</wis-patch>", re.DOTALL | re.IGNORECASE)
     for match in tag_re.finditer(text):
         block = match.group(1).strip()
@@ -2450,8 +4577,25 @@ def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, An
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict) and payload.get("schema") == WIS_PATCH_SCHEMA:
-            payloads.append(payload)
-            spans.append(match.span())
+            append_payload(payload, match.span())
+
+    schema_index = text.find(WIS_PATCH_SCHEMA)
+    while schema_index != -1:
+        if not spans_overlap((schema_index, schema_index + len(WIS_PATCH_SCHEMA))):
+            start = text.rfind("{", 0, schema_index)
+            while start != -1:
+                end = json_object_end(start)
+                if end is not None and end >= schema_index:
+                    try:
+                        payload = json.loads(text[start:end])
+                    except json.JSONDecodeError:
+                        payload = None
+                    if isinstance(payload, dict) and payload.get("schema") == WIS_PATCH_SCHEMA:
+                        append_payload(payload, expand_raw_json_span(start, end))
+                        break
+                start = text.rfind("{", 0, start)
+        schema_index = text.find(WIS_PATCH_SCHEMA, schema_index + len(WIS_PATCH_SCHEMA))
+
     if not spans:
         return text, payloads
     cleaned = text
@@ -2460,12 +4604,21 @@ def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, An
     return cleaned.strip(), payloads
 
 
+def normalize_wis_patch_space_id(raw: Any, fallback: str) -> str:
+    active_space_id = safe_state_id(str(fallback or ""), "home")
+    candidate = safe_state_id(str(raw or ""), "")
+    if not candidate or candidate in WIS_CURRENT_SPACE_SENTINELS:
+        return active_space_id
+    return candidate
+
+
 def apply_agent_wis_patches_from_reply(
     server: WasmAgentServer,
     reply: str,
     *,
     user: dict[str, Any] | None,
     space_id: str,
+    shared_space_id: str = "",
 ) -> tuple[str, dict[str, Any] | None]:
     cleaned_reply, payloads = extract_agent_wis_patch_payloads(reply)
     if not payloads:
@@ -2479,7 +4632,9 @@ def apply_agent_wis_patches_from_reply(
     }
     for payload in payloads:
         patch = json_clone(payload)
-        patch.setdefault("space_id", space_id)
+        patch["space_id"] = normalize_wis_patch_space_id(patch.get("space_id"), space_id)
+        if shared_space_id and not patch.get("shared_space_id"):
+            patch["shared_space_id"] = shared_space_id
         try:
             patch_result = patch_wis_artifact(server, user, patch)
             result["patches"].append(patch_result)
@@ -2670,6 +4825,32 @@ def user_observation_path(server: WasmAgentServer, user: dict[str, Any] | None) 
     path = user_root(server, user) / "observation" / "latest.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def user_client_snapshot_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "client-snapshots"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_client_snapshot_latest_path(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    return user_client_snapshot_dir(server, user) / "latest.json"
+
+
+def user_client_snapshot_request_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_client_snapshot_dir(server, user) / "requests"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def user_client_snapshot_response_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_client_snapshot_dir(server, user) / "responses"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def client_snapshot_request_path(server: WasmAgentServer, user: dict[str, Any] | None, request_id: str) -> Path:
+    return user_client_snapshot_request_dir(server, user) / f"request_{safe_state_id(request_id, 'request')}.json"
 
 
 def user_devices_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
@@ -3755,7 +5936,17 @@ def base36_int(value: str) -> str:
 
 
 def account_main_node_id(user: dict[str, Any] | None) -> str:
-    return safe_state_id(f"u{base36_int(user_id(user))}-main", "account-main")
+    return safe_state_id(f"u{base36_int(user_id(user))}", "account")
+
+
+def legacy_account_main_node_id(user: dict[str, Any] | None) -> str:
+    return safe_state_id(f"{account_main_node_id(user)}-main", "account-main")
+
+
+def account_main_node_id_candidates(user: dict[str, Any] | None) -> list[str]:
+    node_id = account_main_node_id(user)
+    legacy = legacy_account_main_node_id(user)
+    return [node_id, legacy] if legacy != node_id else [node_id]
 
 
 def flux_main_node_provision_cost() -> int:
@@ -4072,6 +6263,30 @@ def account_node_runtime_url_source(server: WasmAgentServer, node_id: str) -> tu
     return "", "missing_account_sandbox_url"
 
 
+def resolve_account_main_node_id(server: WasmAgentServer, user: dict[str, Any] | None) -> str:
+    node_id = account_main_node_id(user)
+    legacy = legacy_account_main_node_id(user)
+    if legacy == node_id:
+        return node_id
+    env_root = agents_root(server) / "envs"
+    node_env = env_root / f"{node_id}.env"
+    legacy_env = env_root / f"{legacy}.env"
+    if not node_env.exists() and legacy_env.exists():
+        return legacy
+    with auth_connect() as conn:
+        legacy_row = conn.execute(
+            "SELECT 1 FROM user_fleet_tb WHERE user_id = ? AND node_id = ? LIMIT 1",
+            (user_id(user), legacy),
+        ).fetchone()
+        node_row = conn.execute(
+            "SELECT 1 FROM user_fleet_tb WHERE user_id = ? AND node_id = ? LIMIT 1",
+            (user_id(user), node_id),
+        ).fetchone()
+    if legacy_row and not node_row:
+        return legacy
+    return node_id
+
+
 def onboarding_options_for_readiness(user: dict[str, Any] | None, status: str) -> list[dict[str, Any]]:
     if user_is_admin(user) or status == AGENT_READINESS_READY:
         return []
@@ -4140,6 +6355,102 @@ def bridge_node_probe(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
 
 def readiness_node_running(node: dict[str, Any]) -> bool:
     return bool(node.get("running")) or str(node.get("status") or "").lower() in {"running", "ok", "ready"}
+
+
+def live_account_sandbox_snapshot(server: WasmAgentServer, node_id: str) -> dict[str, Any]:
+    runtime_url, runtime_source = account_node_runtime_url_source(server, node_id)
+    try:
+        health = bridge_health_probe(server)
+        node = bridge_node_probe(server, node_id)
+    except BrowserError:
+        return {}
+    if not readiness_node_running(node):
+        return {}
+    return {
+        "runtime_url": runtime_url,
+        "runtime_source": runtime_source,
+        "health": health,
+        "node": node,
+    }
+
+
+def wait_for_live_account_sandbox(
+    server: WasmAgentServer,
+    node_id: str,
+    *,
+    timeout_sec: float = 30,
+    interval_sec: float = 2,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    while True:
+        snapshot = live_account_sandbox_snapshot(server, node_id)
+        if snapshot:
+            return snapshot
+        if time.monotonic() >= deadline:
+            return {}
+        time.sleep(max(0.1, interval_sec))
+
+
+def should_probe_late_sandbox_after_create_error(exc: Exception) -> bool:
+    return isinstance(exc, BrowserError) and exc.code in {"bridge_timeout", "bridge_http_error"}
+
+
+def account_sandbox_bridge_result(node_id: str, snapshot: dict[str, Any], *, source: str, recovered_after: str = "") -> dict[str, Any]:
+    result = {
+        "ok": True,
+        "node_create": {
+            "node_id": node_id,
+            "already_running": True,
+            "source": source,
+        },
+        "node": snapshot.get("node") or {},
+    }
+    if recovered_after:
+        result["node_create"]["recovered_after"] = recovered_after
+    return result
+
+
+def account_sandbox_paid_binding(user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
+    uid = user_id(user)
+    target = f"node:{node_id}"
+    with auth_connect() as conn:
+        main = conn.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total
+              FROM flux_credit_ledger_tb
+             WHERE user_id = ? AND kind = 'provision' AND target = ?
+            """,
+            (uid, target),
+        ).fetchone()
+        main_total = int(main["total"] or 0) if main else 0
+        if main_total < 0:
+            return {"paid": True, "source": "main_provision", "net": main_total}
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_harness_tb
+             WHERE user_id = ? AND node_id = ? AND lifecycle_state = 'ready'
+             ORDER BY created_at DESC, id DESC
+            """,
+            (uid, node_id),
+        ).fetchall()
+        for row in rows:
+            harness_id = str(row["id"])
+            ledger = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0) AS total
+                  FROM flux_credit_ledger_tb
+                 WHERE user_id = ?
+                   AND (
+                     (kind = 'harness_provision' AND target = ?)
+                     OR (kind = 'refund' AND idempotency_key = ?)
+                   )
+                """,
+                (uid, f"harness:{harness_id}", f"refund:{harness_id}"),
+            ).fetchone()
+            harness_total = int(ledger["total"] or 0) if ledger else 0
+            if harness_total < 0:
+                return {"paid": True, "source": "agent_harness", "net": harness_total, "harness": public_agent_harness(row)}
+    return {"paid": False, "source": "none", "net": 0}
 
 
 def latest_user_harness_for_node(user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
@@ -4272,9 +6583,10 @@ def agent_readiness(
             backend={"bridge": health, "node": node},
         )
 
-    account_node = account_main_node_id(user)
+    account_node = resolve_account_main_node_id(server, user)
     lifecycle = latest_user_harness_for_node(user, account_node)
     runtime_url, runtime_source = account_node_runtime_url_source(server, account_node)
+    env_path = agents_root(server) / "envs" / f"{account_node}.env"
     lifecycle_readiness = readiness_from_harness_lifecycle(
         user=user,
         requested_target_node=requested,
@@ -4284,8 +6596,25 @@ def agent_readiness(
         harness=lifecycle,
     )
     if lifecycle_readiness:
+        if lifecycle.get("lifecycle_state") == "failed":
+            live_sandbox = live_account_sandbox_snapshot(server, account_node)
+            billing = account_sandbox_paid_binding(user, account_node) if live_sandbox else {"paid": False, "source": "none"}
+            if live_sandbox and not billing.get("paid"):
+                return readiness_payload(
+                    user=user,
+                    requested_target_node=requested,
+                    target_node=account_node,
+                    resolved_account_node=account_node,
+                    status=AGENT_READINESS_SANDBOX_BILLING_INCOMPLETE,
+                    bridge_url_source=runtime_source,
+                    bridge_url=server.bridge_url,
+                    account_sandbox_url=runtime_url,
+                    message="Sandbox exists, but the previous provisioning charge was refunded before harness binding completed.",
+                    missing_dependency="account_sandbox_billing",
+                    backend={"node": live_sandbox.get("node") or {}, "billing": billing, "harness": lifecycle},
+        )
         return lifecycle_readiness
-    if not runtime_url:
+    if not runtime_url and not env_path.exists():
         return readiness_payload(
             user=user,
             requested_target_node=requested,
@@ -4344,6 +6673,21 @@ def agent_readiness(
             missing_dependency="account_sandbox_node_running",
             backend={"bridge": health, "node": node},
         )
+    billing = account_sandbox_paid_binding(user, account_node)
+    if not billing.get("paid"):
+        return readiness_payload(
+            user=user,
+            requested_target_node=requested,
+            target_node=account_node,
+            resolved_account_node=account_node,
+            status=AGENT_READINESS_SANDBOX_BILLING_INCOMPLETE,
+            bridge_url_source=runtime_source,
+            bridge_url=server.bridge_url,
+            account_sandbox_url=runtime_url,
+            message="Sandbox exists, but billing and harness binding did not complete.",
+            missing_dependency="account_sandbox_billing",
+            backend={"bridge": health, "node": node, "billing": billing},
+        )
     return readiness_payload(
         user=user,
         requested_target_node=requested,
@@ -4364,14 +6708,44 @@ def public_fleet_node(row: sqlite3.Row) -> dict[str, Any]:
         "node_id": str(row["node_id"]),
         "role": str(row["role"]),
         "main": bool(row["is_main"]),
+        "classification": "system" if bool(row["is_main"]) or str(row["role"]) == "owner" else "user_agent",
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
         "backend": "hermes-node",
     }
 
 
+def provider_or_model_fleet_node_id(raw: str) -> bool:
+    value = str(raw or "").strip().lower()
+    safe = safe_state_id(value, "")
+    provider_names = {"openrouter", "opencode-go", "opencode-zen", "openai", "nvidia", "minimax"}
+    if value.startswith(("model:", "provider:", "agent:model:", "agent:provider:")):
+        return True
+    if value.startswith("agent:") and any(value.startswith(f"agent:{provider}:") for provider in provider_names):
+        return True
+    return (
+        safe.startswith(("model-", "provider-", "agent-model-", "agent-provider-"))
+        or any(safe.startswith(f"agent-{provider}-") for provider in provider_names)
+    )
+
+
+def validate_main_fleet_node_id(user: dict[str, Any] | None, raw_node_id: Any) -> str:
+    requested_raw = str(raw_node_id or "").strip()
+    node_id = safe_state_id(requested_raw, "") if requested_raw else account_main_node_id(user)
+    expected = account_main_node_id(user)
+    allowed = set(account_main_node_id_candidates(user))
+    if requested_raw and (provider_or_model_fleet_node_id(requested_raw) or node_id not in allowed):
+        raise BrowserError(
+            "fleet_node_denied",
+            "Fleet main-node metadata only accepts the authenticated user's deterministic system node; provider/model selections stay outside the fleet registry.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+    return node_id if requested_raw else expected
+
+
 def list_user_fleet(user: dict[str, Any] | None) -> dict[str, Any]:
     uid = user_id(user)
+    main_node_ids = set(account_main_node_id_candidates(user))
     with auth_connect() as conn:
         rows = conn.execute(
             "SELECT * FROM user_fleet_tb WHERE user_id = ? ORDER BY is_main DESC, created_at ASC",
@@ -4385,11 +6759,15 @@ def list_user_fleet(user: dict[str, Any] | None) -> dict[str, Any]:
             """,
             (uid,),
         ).fetchall()
+    public_nodes = [public_fleet_node(row) for row in rows if not provider_or_model_fleet_node_id(str(row["node_id"]))]
+    system_nodes = [node for node in public_nodes if node["node_id"] in main_node_ids or node["main"] or node["role"] == "owner"]
+    user_nodes = [node for node in public_nodes if node not in system_nodes]
     return {
         "ok": True,
         "schema": USER_FLEET_SCHEMA,
         "deployment_mode": wasm_agent_deployment_mode(),
-        "nodes": [public_fleet_node(row) for row in rows],
+        "nodes": user_nodes,
+        "system_nodes": system_nodes,
         "harnesses": [public_agent_harness(row) for row in harness_rows],
         "direct_provider_scope": "browser-local",
         "server_policy": "server stores ownership metadata only until backend execution is explicitly requested",
@@ -4398,8 +6776,7 @@ def list_user_fleet(user: dict[str, Any] | None) -> dict[str, Any]:
 
 def ensure_main_fleet_node(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
     uid = user_id(user)
-    requested = safe_state_id(str(body.get("node_id") or ""), "")
-    node_id = requested or account_main_node_id(user)
+    node_id = validate_main_fleet_node_id(user, body.get("node_id"))
     now = int(time.time())
     with auth_connect() as conn:
         conn.execute("UPDATE user_fleet_tb SET is_main = 0, updated_at = ? WHERE user_id = ?", (now, uid))
@@ -4423,6 +6800,7 @@ def ensure_main_fleet_node(user: dict[str, Any] | None, body: dict[str, Any]) ->
 
 def ensure_main_fleet_node_in_conn(conn: sqlite3.Connection, user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
     uid = user_id(user)
+    node_id = validate_main_fleet_node_id(user, node_id)
     now = int(time.time())
     conn.execute("UPDATE user_fleet_tb SET is_main = 0, updated_at = ? WHERE user_id = ?", (now, uid))
     conn.execute(
@@ -4454,8 +6832,12 @@ def validate_provision_main_body(user: dict[str, Any] | None, body: dict[str, An
 
 def provider_api_key_env_name(provider: str) -> str:
     clean = str(provider or "").strip().lower()
-    if clean in {"openrouter", "opencode-go", "opencode-zen"}:
+    if clean == "openrouter":
         return "OPENROUTER_API_KEY"
+    if clean == "opencode-go":
+        return "OPENCODE_GO_API_KEY"
+    if clean == "opencode-zen":
+        return "OPENCODE_ZEN_API_KEY"
     if clean == "nvidia":
         return "NVIDIA_API_KEY"
     if clean in {"minimax", "minimax-cn"}:
@@ -4618,6 +7000,7 @@ def public_agent_harness(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, 
             return parsed if isinstance(parsed, dict) else {}
         except Exception:
             return {}
+    metadata = parsed_json("metadata_json")
     return {
         "schema": AGENT_HARNESS_SCHEMA,
         "id": str(row["id"]),
@@ -4635,7 +7018,8 @@ def public_agent_harness(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, 
         "cleanup_after_at": int(row["cleanup_after_at"] or 0),
         "created_at": int(row["created_at"]),
         "updated_at": int(row["updated_at"]),
-        "metadata": parsed_json("metadata_json"),
+        "instructions": str(metadata.get("instructions") or ""),
+        "metadata": metadata,
     }
 
 
@@ -4685,6 +7069,9 @@ def write_harness_row_in_conn(
     now = int(time.time())
     cleanup_after = now + 30 * 24 * 60 * 60
     quota = {"max_flux_debit": flux_agent_harness_cost(), "cleanup_after_days": 30, "recovery_visible": True}
+    stored_metadata = dict(metadata or {})
+    if config.get("instructions"):
+        stored_metadata["instructions"] = clipped(str(config.get("instructions") or ""), 2000)
     conn.execute(
         """
         INSERT INTO agent_harness_tb (
@@ -4722,7 +7109,7 @@ def write_harness_row_in_conn(
             cleanup_after,
             now,
             now,
-            json.dumps(metadata or {}, ensure_ascii=True, sort_keys=True),
+            json.dumps(stored_metadata, ensure_ascii=True, sort_keys=True),
         ),
     )
     row = conn.execute("SELECT * FROM agent_harness_tb WHERE id = ?", (config["harness_id"],)).fetchone()
@@ -4874,7 +7261,23 @@ def provision_agent_harness_node(
         conn.execute("COMMIT")
 
     try:
-        bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload)
+        live_sandbox = live_account_sandbox_snapshot(server, node_id)
+        if live_sandbox:
+            bridge_result = account_sandbox_bridge_result(node_id, live_sandbox, source="existing_account_sandbox")
+        else:
+            try:
+                bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload, timeout=120)
+            except Exception as create_exc:
+                recovered_sandbox = wait_for_live_account_sandbox(server, node_id) if should_probe_late_sandbox_after_create_error(create_exc) else {}
+                if not recovered_sandbox:
+                    raise
+                recovered_after = create_exc.code if isinstance(create_exc, BrowserError) else type(create_exc).__name__
+                bridge_result = account_sandbox_bridge_result(
+                    node_id,
+                    recovered_sandbox,
+                    source="late_account_sandbox_recovery",
+                    recovered_after=recovered_after,
+                )
         runtime_url, runtime_source = account_node_runtime_url_source(server, node_id)
         capabilities = {
             "mode": "hermes_backend",
@@ -5044,7 +7447,19 @@ def provision_main_fleet_node(
             ),
         )
         node = ensure_main_fleet_node_in_conn(conn, user, node_id)
-        bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload)
+        try:
+            bridge_result = bridge_proxy(server, "POST", "/nodes", bridge_payload, timeout=120)
+        except Exception as create_exc:
+            recovered_sandbox = wait_for_live_account_sandbox(server, node_id) if should_probe_late_sandbox_after_create_error(create_exc) else {}
+            if not recovered_sandbox:
+                raise
+            recovered_after = create_exc.code if isinstance(create_exc, BrowserError) else type(create_exc).__name__
+            bridge_result = account_sandbox_bridge_result(
+                node_id,
+                recovered_sandbox,
+                source="late_account_sandbox_recovery",
+                recovered_after=recovered_after,
+            )
         append_instance_audit(
             conn,
             actor_user_id=uid,
@@ -5527,6 +7942,32 @@ def list_wis_artifacts(
     }
 
 
+def read_wis_artifact(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    space_id: str,
+    artifact_id: str,
+    *,
+    shared_space_id: str = "",
+) -> dict[str, Any]:
+    root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
+    aid = safe_state_id(artifact_id, "main")
+    path = wis_artifact_file(root, aid)
+    payload = read_json_file(path, {})
+    if not isinstance(payload, dict) or payload.get("schema") != WIS_SPACE_SCHEMA:
+        raise BrowserError("wis_artifact_not_found", "That WIS artifact was not found.", status=HTTPStatus.NOT_FOUND)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.wis.artifact.v1",
+        "scope": scope,
+        "space_id": safe_state_id(space_id, "home"),
+        "shared_space_id": safe_state_id(shared_space_id, ""),
+        "artifact_id": aid,
+        "artifact": payload,
+        "path": repo_relative_string(server, path),
+    }
+
+
 def wis_value_set(data: dict[str, Any], key: str, value: Any) -> None:
     parts = [safe_state_id(part, "") for part in str(key or "").split(".") if safe_state_id(part, "")]
     if not parts:
@@ -5572,12 +8013,26 @@ def sanitize_wis_node(raw: Any) -> dict[str, Any]:
     node_id = safe_state_id(str(raw.get("id") or f"node_{next_snowflake_id():x}"), "")
     if not node_id:
         raise BrowserError("invalid_wis_patch", "WIS node id is required.")
+    props = json_clone(raw.get("props") if isinstance(raw.get("props"), dict) else {})
+    for key in ("layout", "title", "label", "url", "src", "placeholder", "className"):
+        value = raw.get(key)
+        if value is not None and key not in props:
+            props[key] = clipped(str(value), 1000)
+    style = raw.get("style")
+    if "style" not in props:
+        if isinstance(style, list):
+            props["style"] = [clipped(str(item), 200) for item in style[:20]]
+        elif isinstance(style, str):
+            props["style"] = [clipped(style, 200)]
+    node_text = clipped(str(raw.get("text") or ""), 1000)
+    if not node_text and str(raw.get("type") or "") == "button" and props.get("label"):
+        node_text = clipped(str(props.get("label") or ""), 1000)
     node = {
         "id": node_id,
         "type": safe_state_id(str(raw.get("type") or "section"), "section"),
         "role": clipped(str(raw.get("role") or ""), 80),
-        "text": clipped(str(raw.get("text") or ""), 1000),
-        "props": json_clone(raw.get("props") if isinstance(raw.get("props"), dict) else {}),
+        "text": node_text,
+        "props": props,
         "children": [],
     }
     if raw.get("level"):
@@ -5588,6 +8043,25 @@ def sanitize_wis_node(raw: Any) -> dict[str, Any]:
     if isinstance(children, list):
         node["children"] = [sanitize_wis_node(child) for child in children[:80]]
     return node
+
+
+def wis_title_from_node(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+    node_type = str(node.get("type") or "")
+    text = clipped(str(node.get("text") or ""), 120)
+    if text and node_type in {"heading", "title"}:
+        return text
+    props = node.get("props")
+    if isinstance(props, dict) and props.get("title") and node_type in {"document", "section", "card"}:
+        return clipped(str(props.get("title") or ""), 120)
+    children = node.get("children")
+    if isinstance(children, list):
+        for child in children:
+            title = wis_title_from_node(child if isinstance(child, dict) else None)
+            if title:
+                return title
+    return ""
 
 
 def wis_patch_document(definition: dict[str, Any], document_id: str) -> dict[str, Any]:
@@ -5690,7 +8164,19 @@ def apply_wis_patch_operations(definition: dict[str, Any], patch: dict[str, Any]
             else:
                 raise BrowserError("invalid_wis_patch", "WIS node was not found.")
         elif op == "add_document":
-            wis_patch_document(definition, str(operation.get("document_id") or "main"))
+            raw_node = operation.get("node")
+            if isinstance(raw_node, dict):
+                next_tree = sanitize_wis_node(raw_node)
+                if next_tree.get("type") == "document" and not next_tree.get("role"):
+                    next_tree["role"] = "document"
+                document["tree"] = next_tree
+                title = clipped(
+                    str(operation.get("title") or patch.get("title") or wis_title_from_node(next_tree) or ""),
+                    120,
+                )
+                if title:
+                    definition["title"] = title
+                    document["title"] = title
             changed += 1
         else:
             raise BrowserError("invalid_wis_patch", f"Unsupported WIS patch operation: {op}.")
@@ -5720,6 +8206,19 @@ def patch_wis_artifact(server: WasmAgentServer, user: dict[str, Any] | None, bod
     if len(encoded) > 512 * 1024:
         raise BrowserError("wis_artifact_too_large", "WIS artifact exceeds the 512 KB limit.")
     write_json_file(path, definition)
+    try:
+        print(json.dumps({
+            "event": "wis.artifact.patch",
+            "artifact_id": artifact_id,
+            "title": str(definition.get("title") or ""),
+            "schema": str(definition.get("schema") or ""),
+            "space_id": space_id,
+            "shared_space_id": shared_space_id,
+            "scope": scope,
+            "operations": changed,
+        }, ensure_ascii=True), flush=True)
+    except Exception:
+        pass
     return {
         "schema": WIS_PATCH_RESULT_SCHEMA,
         "applied": changed > 0,
@@ -5727,6 +8226,8 @@ def patch_wis_artifact(server: WasmAgentServer, user: dict[str, Any] | None, bod
         "space_id": space_id,
         "shared_space_id": shared_space_id,
         "artifact_id": artifact_id,
+        "title": str(definition.get("title") or artifact_id),
+        "artifact_schema": str(definition.get("schema") or ""),
         "operations": changed,
         "path": repo_relative_string(server, path),
         "updated_at": now,
@@ -6206,7 +8707,14 @@ def bridge_route_allowed(method: str, path: str) -> bool:
     return False
 
 
-def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str, Any] | None) -> dict[str, Any]:
+def bridge_proxy(
+    server: WasmAgentServer,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None,
+    *,
+    timeout: float = 20,
+) -> dict[str, Any]:
     if not path.startswith("/"):
         path = f"/{path}"
     parsed = urlparse(path)
@@ -6221,7 +8729,7 @@ def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str
         headers["Content-Type"] = "application/json"
     request = Request(url, data=data, headers=headers, method=method.upper())
     try:
-        with urlopen(request, timeout=20) as response:
+        with urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:1000]
@@ -6230,6 +8738,8 @@ def bridge_proxy(server: WasmAgentServer, method: str, path: str, body: dict[str
         raise BrowserError("bridge_http_error", detail or str(exc), status=HTTPStatus.BAD_GATEWAY) from exc
     except URLError as exc:
         raise BrowserError("bridge_unavailable", str(exc.reason), status=HTTPStatus.BAD_GATEWAY) from exc
+    except TimeoutError as exc:
+        raise BrowserError("bridge_timeout", f"Bridge request timed out after {timeout:g}s.", status=HTTPStatus.BAD_GATEWAY) from exc
     try:
         payload = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
@@ -6415,6 +8925,223 @@ def latest_observation(server: WasmAgentServer, user: dict[str, Any] | None = No
     except Exception as exc:
         raise BrowserError("observation_read_failed", f"Could not read latest observation: {exc}") from exc
     return {"ok": True, "observation": payload}
+
+
+def clamp_client_snapshot_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return clipped(str(value), 400)
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value if math.isfinite(float(value)) else 0
+    if isinstance(value, str):
+        return clipped(value, 12000 if depth <= 4 else 2000)
+    if isinstance(value, list):
+        limit = 80 if depth <= 2 else 40
+        return [clamp_client_snapshot_value(item, depth=depth + 1) for item in value[:limit]]
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        limit = 120 if depth <= 2 else 80
+        for key, item in list(value.items())[:limit]:
+            clean_key = clipped(str(key), 120)
+            if clean_key.lower() in {"apikey", "api_key", "authorization", "password", "secret", "token"}:
+                output[clean_key] = "[redacted]"
+            else:
+                output[clean_key] = clamp_client_snapshot_value(item, depth=depth + 1)
+        return output
+    return clipped(str(value), 1200)
+
+
+def prune_client_snapshots(root: Path) -> None:
+    snapshots = []
+    for path in root.glob("snapshot_*.json"):
+        try:
+            snapshots.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    for _mtime, path in sorted(snapshots, reverse=True)[CLIENT_SNAPSHOT_HISTORY_LIMIT:]:
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
+
+def save_client_snapshot(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    user: dict[str, Any] | None = None,
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    schema = str(body.get("schema") or "")
+    if schema != CLIENT_SNAPSHOT_SCHEMA:
+        raise BrowserError("invalid_client_snapshot", "Client snapshot payload schema is not supported.")
+    snapshot_id = safe_state_id(str(body.get("snapshot_id") or f"snapshot_{next_snowflake_id():x}"), "snapshot")
+    payload = clamp_client_snapshot_value(body)
+    if not isinstance(payload, dict):
+        raise BrowserError("invalid_client_snapshot", "Client snapshot payload must be an object.")
+    received_at = iso_timestamp()
+    device_id = request_account_device_id(user, handler) if handler else ""
+    payload.update({
+        "schema": CLIENT_SNAPSHOT_SCHEMA,
+        "snapshot_id": snapshot_id,
+        "server_received_at": received_at,
+        "server_user_id": user_id(user),
+        "server_device_id": device_id,
+    })
+    encoded = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    if len(encoded) > CLIENT_SNAPSHOT_MAX_STORED_BYTES:
+        raise BrowserError(
+            "client_snapshot_too_large",
+            "Client snapshot exceeds the 1 MB stored debug limit.",
+            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
+    ensure_user_quota(server, user, len(encoded))
+    root = user_client_snapshot_dir(server, user)
+    snapshot_path = root / f"snapshot_{snapshot_id}.json"
+    latest_path = user_client_snapshot_latest_path(server, user)
+    write_json_file(snapshot_path, payload)
+    write_json_file(latest_path, payload)
+    prune_client_snapshots(root)
+    sessions = payload.get("sessions") if isinstance(payload.get("sessions"), list) else []
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.client_snapshot.result.v1",
+        "stored": True,
+        "snapshot_id": snapshot_id,
+        "received_at": received_at,
+        "device_id": device_id,
+        "session_count": len(sessions),
+        "active_session_id": str(payload.get("active_session_id") or ""),
+        "path": repo_relative_string(server, snapshot_path),
+        "latest_path": repo_relative_string(server, latest_path),
+        "bytes": len(encoded),
+    }
+
+
+def latest_client_snapshot(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    path = user_client_snapshot_latest_path(server, user)
+    if not path.exists():
+        return {"ok": True, "schema": CLIENT_SNAPSHOT_SCHEMA, "snapshot": None}
+    payload = read_json_file(path, {})
+    if not isinstance(payload, dict):
+        raise BrowserError("client_snapshot_read_failed", "Could not read latest client snapshot.")
+    return {
+        "ok": True,
+        "schema": CLIENT_SNAPSHOT_SCHEMA,
+        "snapshot": payload,
+        "path": repo_relative_string(server, path),
+    }
+
+
+def normalize_client_snapshot_scope(value: Any) -> str:
+    scope = str(value or "all").strip().lower()
+    return scope if scope in {"context", "tokens", "state", "all"} else "all"
+
+
+def create_client_snapshot_request(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request_id = safe_state_id(str(body.get("request_id") or body.get("requestId") or f"req_{next_snowflake_id():x}"), "request")
+    now = iso_timestamp()
+    request = {
+        "schema": CLIENT_SNAPSHOT_REQUEST_SCHEMA,
+        "type": "client.snapshot.request",
+        "request_id": request_id,
+        "scope": normalize_client_snapshot_scope(body.get("scope")),
+        "status": "pending",
+        "created_at": now,
+        "updated_at": now,
+        "server_user_id": user_id(user),
+        "source": clipped(str(body.get("source") or "server"), 120),
+        "target_device_id": clipped(str(body.get("target_device_id") or body.get("device_id") or ""), 120),
+    }
+    write_json_file(client_snapshot_request_path(server, user, request_id), request)
+    return {"ok": True, "schema": CLIENT_SNAPSHOT_REQUEST_SCHEMA, "request": request}
+
+
+def list_client_snapshot_requests(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None = None,
+    *,
+    status: str = "pending",
+) -> dict[str, Any]:
+    wanted = str(status or "pending").strip().lower()
+    requests: list[dict[str, Any]] = []
+    for path in sorted(user_client_snapshot_request_dir(server, user).glob("request_*.json")):
+        payload = read_json_file(path, {})
+        if not isinstance(payload, dict):
+            continue
+        if wanted and str(payload.get("status") or "").lower() != wanted:
+            continue
+        requests.append(payload)
+    requests.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {
+        "ok": True,
+        "schema": CLIENT_SNAPSHOT_REQUEST_SCHEMA,
+        "requests": requests[:20],
+    }
+
+
+def save_client_snapshot_response(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    user: dict[str, Any] | None = None,
+    handler: WasmAgentHandler | None = None,
+) -> dict[str, Any]:
+    schema = str(body.get("schema") or "")
+    if schema and schema != CLIENT_SNAPSHOT_RESPONSE_SCHEMA:
+        raise BrowserError("invalid_client_snapshot_response", "Client snapshot response schema is not supported.")
+    request_id = safe_state_id(str(body.get("request_id") or body.get("requestId") or ""), "")
+    if not request_id:
+        raise BrowserError("invalid_client_snapshot_response", "Client snapshot response requires request_id.")
+    now = iso_timestamp()
+    ok = bool(body.get("ok"))
+    request_path = client_snapshot_request_path(server, user, request_id)
+    request = read_json_file(request_path, {})
+    if not isinstance(request, dict):
+        request = {}
+    snapshot_result: dict[str, Any] | None = None
+    if ok:
+        payload = body.get("payload")
+        if not isinstance(payload, dict):
+            raise BrowserError("invalid_client_snapshot_response", "Successful client snapshot response requires a payload.")
+        payload = dict(payload)
+        payload["request_id"] = request_id
+        payload["request_scope"] = normalize_client_snapshot_scope(request.get("scope") or payload.get("scope"))
+        snapshot_result = save_client_snapshot(server, payload, user=user, handler=handler)
+    response = {
+        "schema": CLIENT_SNAPSHOT_RESPONSE_SCHEMA,
+        "type": "client.snapshot.response",
+        "request_id": request_id,
+        "ok": ok,
+        "received_at": now,
+        "server_user_id": user_id(user),
+        "device_id": request_account_device_id(user, handler) if handler else "",
+        "snapshot_id": snapshot_result.get("snapshot_id", "") if snapshot_result else "",
+        "error": clamp_client_snapshot_value(body.get("error") if isinstance(body.get("error"), dict) else {}),
+    }
+    response_path = user_client_snapshot_response_dir(server, user) / f"response_{request_id}.json"
+    write_json_file(response_path, response)
+    if request:
+        request.update({
+            "status": "responded" if ok else "failed",
+            "updated_at": now,
+            "responded_at": now,
+            "response_path": repo_relative_string(server, response_path),
+            "snapshot_id": response["snapshot_id"],
+        })
+        write_json_file(request_path, request)
+    return {
+        "ok": True,
+        "schema": CLIENT_SNAPSHOT_RESPONSE_SCHEMA,
+        "request_id": request_id,
+        "stored": ok,
+        "snapshot": snapshot_result,
+        "bytes": snapshot_result.get("bytes", 0) if snapshot_result else 0,
+        "response_path": repo_relative_string(server, response_path),
+    }
 
 
 def git_run(
@@ -7792,11 +10519,15 @@ def tool_action_detail(tool: dict[str, Any]) -> str:
     if name == "current_turn_observation":
         workspace = tool.get("workspace") if isinstance(tool.get("workspace"), dict) else {}
         events = tool.get("recent_events") if isinstance(tool.get("recent_events"), list) else []
-        return f"{workspace.get('active_panel', 'workspace')} / {len(events)} recent events"
+        active_space = workspace.get("active_space") if isinstance(workspace.get("active_space"), dict) else {}
+        space_name = active_space.get("display_name") or active_space.get("name") or workspace.get("active_space_name") or workspace.get("active_panel", "workspace")
+        return f"{space_name} / {len(events)} recent events"
     if name == "observation_latest":
         workspace = tool.get("workspace") if isinstance(tool.get("workspace"), dict) else {}
         fleet = tool.get("fleet") if isinstance(tool.get("fleet"), dict) else {}
-        return f"{workspace.get('active_panel', 'workspace')} / node {fleet.get('selected_node') or '-'}"
+        active_space = workspace.get("active_space") if isinstance(workspace.get("active_space"), dict) else {}
+        space_name = active_space.get("display_name") or active_space.get("name") or workspace.get("active_space_name") or workspace.get("active_panel", "workspace")
+        return f"{space_name} / node {fleet.get('selected_node') or '-'}"
     if name == "app_map":
         files = content.get("primary_files") if isinstance(content.get("primary_files"), list) else []
         return f"{len(files)} files / {content.get('write_boundary', 'local boundary')}"
@@ -8056,6 +10787,8 @@ def agent_action_events(
     changed: list[dict[str, Any]],
     bridge_trace: dict[str, Any] | None,
     readiness: dict[str, Any] | None,
+    node_config: dict[str, Any] | None,
+    space_context: dict[str, Any] | None,
     mutation_policy: dict[str, Any] | None,
     wis_patch_result: dict[str, Any] | None,
     mutation_result: dict[str, Any] | None,
@@ -8093,6 +10826,30 @@ def agent_action_events(
             "detail": str(readiness.get("missing_dependency") or readiness.get("status") or ""),
             "meta": str(readiness.get("message") or ""),
             "preview": compact_json(readiness, 1200),
+        })
+    if node_config:
+        safe_node_config = {k: v for k, v in node_config.items() if k != "instructions"}
+        safe_node_config["has_instructions"] = bool(node_config.get("instructions"))
+        actions.append({
+            "id": "node_config",
+            "topic": "run-hermes",
+            "kind": "trace",
+            "label": "Node config",
+            "status": "done",
+            "detail": f"{node_config.get('name') or target_node} / {node_config.get('type') or 'hermes'}",
+            "meta": str(node_config.get("instruction_source") or "none"),
+            "preview": compact_json(safe_node_config, 1200),
+        })
+    if space_context:
+        actions.append({
+            "id": "space_context",
+            "topic": "run-wasm",
+            "kind": "context",
+            "label": "Current space",
+            "status": "done",
+            "detail": f"{space_context.get('name') or space_context.get('id')} / {space_context.get('id')}",
+            "meta": str(space_context.get("display_name") or ""),
+            "preview": compact_json(space_context, 900),
         })
     for index, tool in enumerate(tools, 1):
         actions.append(tool_action_event(tool, index))
@@ -8591,6 +11348,37 @@ def agent_latest_observation(server: WasmAgentServer, user: dict[str, Any] | Non
     }
 
 
+def agent_latest_client_snapshot(server: WasmAgentServer, user: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = latest_client_snapshot(server, user)
+    payload = result.get("snapshot") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    wis = payload.get("wis") if isinstance(payload.get("wis"), dict) else {}
+    agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
+    return {
+        "tool": "client_snapshot_latest",
+        "path": result.get("path", ""),
+        "snapshot_id": payload.get("snapshot_id", ""),
+        "created_at": payload.get("created_at", ""),
+        "reason": payload.get("reason", ""),
+        "scope": payload.get("scope", ""),
+        "active_space": payload.get("active_space", {}),
+        "agent": {
+            "target_node": agent.get("target_node", ""),
+            "selected_node": agent.get("selected_node", ""),
+            "model": agent.get("model"),
+            "direct_provider": agent.get("direct_provider"),
+        },
+        "wis": {
+            "active_artifact": wis.get("active_artifact"),
+            "artifact_count": wis.get("artifact_count"),
+            "camera_configs": wis.get("camera_configs", []),
+            "camera_runtime": wis.get("camera_runtime", []),
+            "camera_debug_events": wis.get("camera_debug_events", []),
+        },
+    }
+
+
 def infer_agent_tools(
     server: WasmAgentServer,
     message: str,
@@ -8615,6 +11403,7 @@ def infer_agent_tools(
             action_callback(tool_action_event(tool, action_offset + len(tools)))
 
     add_tool(agent_latest_observation(server, user))
+    add_tool(agent_latest_client_snapshot(server, user))
     admin_context_allowed = user_is_admin(user)
     wants_evolution_context = any(
         phrase in lowered
@@ -9443,6 +12232,92 @@ def bridge_event_preview(event: dict[str, Any]) -> str:
     return ""
 
 
+def bridge_event_status(event: dict[str, Any]) -> str:
+    event_name = bridge_event_name(event)
+    raw_status = str(event.get("status") or "").lower()
+    if event.get("error") is True or raw_status in {"error", "failed", "failure"} or event_name.endswith(".failed"):
+        return "error"
+    if event_name.endswith(".completed") or raw_status in {"completed", "complete", "succeeded", "success"}:
+        return "done"
+    if raw_status in {"queued", "submitted", "pending"}:
+        return "queued"
+    if event_name.endswith(".started") or raw_status in {"running", "in_progress", "working"}:
+        return "running"
+    return raw_status or "done"
+
+
+def bridge_event_source_layer(event: dict[str, Any]) -> str:
+    source = str(event.get("source") or "").strip().lower()
+    event_name = bridge_event_name(event)
+    if source in {"run_status", "status", "poll"}:
+        return "backend"
+    if event_name in {"reasoning.available", "reasoning.delta", "thinking.delta"}:
+        return "model"
+    if event_name.startswith("run.events"):
+        return "bridge"
+    if event_name.startswith("run."):
+        return "backend"
+    return "backend"
+
+
+def bridge_lifecycle_event_name(event: dict[str, Any]) -> str:
+    event_name = bridge_event_name(event)
+    if event_name == "thinking.delta":
+        return "model.reasoning.delta"
+    if event_name == "reasoning.delta":
+        return "model.reasoning.delta"
+    if event_name == "reasoning.available":
+        return "model.reasoning.available"
+    if event_name == "run.events_unavailable":
+        return "bridge.run.events_unavailable"
+    if event_name.startswith("run."):
+        suffix = event_name.split(".", 1)[1] or "event"
+        if suffix in {"running", "in_progress", "working"}:
+            suffix = "started"
+        if suffix in {"complete", "succeeded", "success"}:
+            suffix = "completed"
+        if suffix in {"submitted", "pending"}:
+            suffix = "queued"
+        return f"{bridge_event_source_layer(event)}.run.{suffix}"
+    return f"{bridge_event_source_layer(event)}.{event_name}"
+
+
+def bridge_trace_step_key(step: dict[str, Any]) -> str:
+    kind = str(step.get("kind") or "")
+    if kind in {"backend.run.queued", "backend.run.started", "backend.run.completed", "bridge.run.started", "bridge.run.completed"}:
+        return kind
+    return f"{kind}:{str(step.get('status') or '').lower()}:{str(step.get('tool') or '')}"
+
+
+def bridge_trace_step_score(step: dict[str, Any]) -> int:
+    summary = str(step.get("summary") or "").strip().lower()
+    status = str(step.get("status") or "").strip().lower()
+    score = 0
+    if summary and summary != status:
+        score += 4
+    if str(step.get("source") or "") != "run_status":
+        score += 2
+    if step.get("timestamp"):
+        score += 1
+    return score
+
+
+def append_bridge_trace_step(steps: list[dict[str, Any]], seen: dict[str, int], step: dict[str, Any]) -> None:
+    key = bridge_trace_step_key(step)
+    existing_index = seen.get(key)
+    if existing_index is None:
+        seen[key] = len(steps)
+        steps.append(step)
+        return
+    existing = steps[existing_index]
+    merged_sources = sorted({str(existing.get("source") or ""), str(step.get("source") or "")} - {""})
+    replacement = step if bridge_trace_step_score(step) > bridge_trace_step_score(existing) else existing
+    steps[existing_index] = {
+        **replacement,
+        "sources": merged_sources,
+    }
+
+
 def bridge_run_event_action(event: dict[str, Any], index: int = 0) -> dict[str, Any] | None:
     if not isinstance(event, dict):
         return None
@@ -9469,20 +12344,16 @@ def bridge_run_event_action(event: dict[str, Any], index: int = 0) -> dict[str, 
             "arguments": bridge_event_tool_arguments(event),
             "preview": bridge_event_preview(event),
         }
-    raw_status = str(event.get("status") or "").lower()
-    status = "running"
-    if event_name.endswith(".completed") or raw_status in {"completed", "complete", "succeeded", "success"}:
-        status = "done"
-    if event_name.endswith(".failed") or raw_status in {"failed", "failure", "error"} or event.get("error"):
-        status = "error"
+    status = bridge_event_status(event)
+    label = bridge_lifecycle_event_name(event)
     return {
-        "id": f"bridge_event_{timeline_ref_name(event_name)}",
+        "id": f"bridge_event_{timeline_ref_name(label)}",
         "topic": "run-hermes",
         "kind": "trace",
-        "label": f"Hermes: {event_name}",
+        "label": label,
         "status": status,
         "detail": bridge_event_summary(event),
-        "meta": str(event.get("status") or event.get("timestamp") or ""),
+        "meta": str(event.get("source") or event.get("status") or event.get("timestamp") or ""),
         "preview": compact_json(event, 900),
     }
 
@@ -9491,6 +12362,7 @@ def bridge_trace_from_task(task: dict[str, Any]) -> dict[str, Any]:
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     events = result.get("events") if isinstance(result.get("events"), list) else []
     compact_steps: list[dict[str, Any]] = []
+    seen_steps: dict[str, int] = {}
     tools_by_key: dict[str, dict[str, Any]] = {}
     reasoning_text = str(result.get("thinking_stream") or "")
     for index, event in enumerate(events[:36], 1):
@@ -9510,12 +12382,14 @@ def bridge_trace_from_task(task: dict[str, Any]) -> dict[str, Any]:
                 "summary": bridge_event_summary(event),
             }
             continue
-        compact_steps.append({
+        append_bridge_trace_step(compact_steps, seen_steps, {
             "index": index,
-            "kind": event_name,
-            "status": str(event.get("status") or ""),
+            "kind": bridge_lifecycle_event_name(event),
+            "raw_event": event_name,
+            "status": str(event.get("status") or bridge_event_status(event)),
             "summary": bridge_event_summary(event),
             "tool": str(event.get("tool") or ""),
+            "source": str(event.get("source") or "event_stream"),
             "timestamp": event.get("timestamp") or "",
         })
         if event_name in {"reasoning.available", "reasoning.delta", "thinking.delta"}:
@@ -9610,9 +12484,9 @@ def bridge_trace_action_events(trace: dict[str, Any] | None) -> list[dict[str, A
             "id": "bridge_steps",
             "topic": "run-hermes",
             "kind": "trace",
-            "label": "Hermes backend trace",
+            "label": "Hermes backend lifecycle",
             "status": "done",
-            "detail": f"{len(steps)} backend events",
+            "detail": f"{len(steps)} lifecycle events",
             "meta": trace.get("model") or "bridge",
             "preview": compact_json(steps, 1200),
         })
@@ -9620,14 +12494,17 @@ def bridge_trace_action_events(trace: dict[str, Any] | None) -> list[dict[str, A
             if not isinstance(step, dict):
                 continue
             kind = str(step.get("kind") or "event")
+            step_status = str(step.get("status") or "")
+            row_status = "error" if step_status.lower() in {"error", "failed", "failure"} else "done"
+            source = step.get("source") or "/".join(str(item) for item in step.get("sources", []) if item)
             actions.append({
                 "id": f"bridge_event_{index}_{timeline_ref_name(kind)}",
                 "topic": "run-hermes",
                 "kind": "trace",
-                "label": f"Hermes event: {kind}",
-                "status": "done",
+                "label": kind,
+                "status": row_status,
                 "detail": clipped(str(step.get("summary") or step.get("status") or ""), 180),
-                "meta": str(step.get("tool") or step.get("timestamp") or ""),
+                "meta": str(source or step.get("tool") or step.get("timestamp") or ""),
                 "preview": compact_json(step, 900),
             })
     tool_calls = trace.get("tool_calls") if isinstance(trace.get("tool_calls"), list) else []
@@ -9659,6 +12536,157 @@ def bridge_trace_action_events(trace: dict[str, Any] | None) -> list[dict[str, A
     return actions
 
 
+def latest_public_harness_for_node(user: dict[str, Any] | None, node_id: str) -> dict[str, Any]:
+    uid = user_id(user)
+    with auth_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM agent_harness_tb
+             WHERE user_id = ? AND node_id = ? AND lifecycle_state != 'archived'
+             ORDER BY lifecycle_state = 'ready' DESC, created_at DESC, id DESC
+             LIMIT 1
+            """,
+            (uid, node_id),
+        ).fetchone()
+    return public_agent_harness(row) if row else {}
+
+
+def embedded_node_config_from_body(
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    target_node: str,
+    selected_model: dict[str, str] | None,
+) -> dict[str, str]:
+    raw = body.get("node_config") if isinstance(body.get("node_config"), dict) else {}
+    harness = latest_public_harness_for_node(user, target_node) if user and target_node else {}
+    name = clipped(str(raw.get("name") or harness.get("harness_name") or harness.get("node_name") or target_node or "Embedded agent").strip(), 120)
+    node_type = clipped(str(raw.get("type") or harness.get("harness_type") or "hermes").strip(), 80)
+    raw_instructions = str(raw.get("instructions") or "").strip()
+    harness_instructions = str(harness.get("instructions") or (harness.get("metadata") or {}).get("instructions") or "").strip()
+    instructions = clipped(raw_instructions or harness_instructions, 4000)
+    instruction_source = clipped(
+        str(raw.get("instruction_source") or ("browser-local node form" if raw_instructions else "account harness metadata" if harness_instructions else "none")).strip(),
+        120,
+    )
+    provider = clipped(str((selected_model or {}).get("provider") or raw.get("provider") or "").strip(), 120)
+    model = clipped(str((selected_model or {}).get("id") or raw.get("model") or "").strip(), 180)
+    provider_model_source = clipped(
+        str(raw.get("provider_model_source") or ("chat model selector" if (selected_model or {}).get("id") else "node runtime default")).strip(),
+        120,
+    )
+    return {
+        "schema": "hermes.wasm_agent.node_run_config.v1",
+        "node_id": clipped(str(target_node or raw.get("node_id") or "").strip(), 120),
+        "name": name,
+        "type": node_type,
+        "instructions": instructions,
+        "instruction_source": instruction_source,
+        "config_source": clipped(str(raw.get("config_source") or ("account fleet harness" if harness else "node runtime")).strip(), 120),
+        "provider": provider,
+        "model": model,
+        "provider_model_source": provider_model_source,
+    }
+
+
+def embedded_space_context_from_body(body: dict[str, Any], observation: dict[str, Any]) -> dict[str, Any]:
+    workspace = observation.get("workspace") if isinstance(observation.get("workspace"), dict) else {}
+    body_space = body.get("active_space") if isinstance(body.get("active_space"), dict) else {}
+    observed_space = workspace.get("active_space") if isinstance(workspace.get("active_space"), dict) else {}
+    merged_space = {**observed_space, **body_space}
+    raw_space_id = (
+        body.get("space_id")
+        or merged_space.get("id")
+        or merged_space.get("space_id")
+        or merged_space.get("storage_id")
+        or workspace.get("active_space_id")
+        or workspace.get("active_panel")
+        or "home"
+    )
+    space_id = safe_state_id(str(raw_space_id or ""), "home")
+    panel = clipped(str(merged_space.get("panel") or workspace.get("active_panel") or space_id).strip(), 120)
+    name = clipped(str(
+        body.get("space_name")
+        or merged_space.get("name")
+        or merged_space.get("title")
+        or workspace.get("active_space_name")
+        or merged_space.get("display_name")
+        or space_id
+    ).strip(), 160)
+    display_name = clipped(str(
+        body.get("space_display_name")
+        or merged_space.get("display_name")
+        or workspace.get("active_space_display_name")
+        or name
+    ).strip(), 160)
+    kind = clipped(str(
+        merged_space.get("kind")
+        or ("home" if space_id == "home" else "admin" if space_id == "admin" else "user")
+    ).strip(), 60)
+    shared_space_id = safe_state_id(str(merged_space.get("shared_space_id") or workspace.get("shared_space_id") or ""), "")
+    room = merged_space.get("room") if isinstance(merged_space.get("room"), dict) else {}
+    def room_count(key: str) -> int:
+        try:
+            return max(0, int(float(room.get(key) or 0)))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+    return {
+        "schema": "hermes.wasm_agent.active_space.v1",
+        "id": space_id,
+        "storage_id": space_id,
+        "panel": panel,
+        "kind": kind,
+        "name": name or space_id,
+        "title": name or space_id,
+        "display_name": display_name or name or space_id,
+        "shared": bool(merged_space.get("shared") or shared_space_id),
+        "shared_space_id": shared_space_id,
+        "room": {
+            "id": str(room.get("id") or shared_space_id),
+            "online_count": room_count("online_count"),
+            "member_count": room_count("member_count"),
+            "online_device_count": room_count("online_device_count"),
+        } if room or shared_space_id else None,
+    }
+
+
+def embedded_space_context_prompt(space_context: dict[str, Any]) -> str:
+    if not space_context:
+        return ""
+    lines = [
+        "Current wasm-agent space:",
+        f"- space id: {space_context.get('id') or ''}",
+        f"- current space name: {space_context.get('name') or ''}",
+        f"- display name: {space_context.get('display_name') or space_context.get('name') or ''}",
+        f"- panel: {space_context.get('panel') or ''}",
+        f"- kind: {space_context.get('kind') or ''}",
+    ]
+    if space_context.get("shared_space_id"):
+        lines.append(f"- shared space id: {space_context.get('shared_space_id')}")
+    lines.append("Use the current space name when the user asks where they are or which space is active.")
+    return "\n".join(lines).strip()
+
+
+def embedded_node_config_prompt(node_config: dict[str, str]) -> str:
+    name = str(node_config.get("name") or "Embedded agent")
+    node_type = str(node_config.get("type") or "hermes")
+    lines = [
+        f"You are `{name}`, the configured `{node_type}` agent for this wasm-agent run.",
+        "Active node configuration:",
+        f"- node id: {node_config.get('node_id') or ''}",
+        f"- node name: {name}",
+        f"- node type: {node_type}",
+        f"- instruction source: {node_config.get('instruction_source') or 'none'}",
+        f"- provider/model source: {node_config.get('provider_model_source') or 'node runtime default'}",
+    ]
+    if node_config.get("provider") or node_config.get("model"):
+        lines.append(f"- provider/model: {node_config.get('provider') or 'default'} / {node_config.get('model') or 'default'}")
+    instructions = str(node_config.get("instructions") or "").strip()
+    if instructions:
+        lines.extend(["", "Configured instructions:", instructions])
+    return "\n".join(lines).strip()
+
+
 def call_agent_bridge_runs(
     server: WasmAgentServer,
     *,
@@ -9685,7 +12713,7 @@ def call_agent_bridge_runs(
             "id": "bridge_run",
             "topic": "run-hermes",
             "kind": "model",
-            "label": "Hermes run",
+            "label": "bridge.run.started",
             "status": "running",
             "detail": f"{target_node} / {model_id}",
             "meta": "Runs API",
@@ -9730,7 +12758,7 @@ def call_agent_bridge_runs(
                     "id": "bridge_run",
                     "topic": "run-hermes",
                     "kind": "model",
-                    "label": "Hermes run",
+                    "label": "bridge.run.poll",
                     "status": "done" if str(task.get("status") or "").lower() in {"completed", "succeeded"} else "running",
                     "detail": f"{run_status} / {len(events)} events",
                     "meta": str(result.get("last_event") or task_id),
@@ -9747,7 +12775,7 @@ def call_agent_bridge_runs(
                 "id": "bridge_run",
                 "topic": "run-hermes",
                 "kind": "model",
-                "label": "Hermes run",
+                "label": "bridge.run.failed",
                 "status": "error",
                 "detail": str(error.get("message") or "Hermes Runs API task did not complete."),
                 "meta": task_id,
@@ -9765,7 +12793,7 @@ def call_agent_bridge_runs(
             "id": "bridge_run",
             "topic": "run-hermes",
             "kind": "model",
-            "label": "Hermes run",
+            "label": "bridge.run.completed",
             "status": "done",
             "detail": str(result.get("last_event") or "completed"),
             "meta": task_id,
@@ -9783,6 +12811,8 @@ def call_agent_bridge(
     images: list[dict[str, Any]] | None = None,
     image_card_focus: bool = False,
     mutation_policy: dict[str, Any] | None = None,
+    node_config: dict[str, str] | None = None,
+    space_context: dict[str, Any] | None = None,
     action_callback: Any | None = None,
 ) -> tuple[str, str, dict[str, Any] | None, dict[str, Any] | None]:
     timeout_sec = agent_bridge_timeout_sec()
@@ -9807,8 +12837,11 @@ def call_agent_bridge(
         user_content = content_parts
     else:
         user_content = text_content
+    node_config = node_config or {"node_id": target_node, "name": "Embedded agent", "type": "hermes"}
     system_content = (
-        f"You are the configured embedded agent inside wasm-agent talking through target node `{target_node}`. "
+        f"{embedded_node_config_prompt(node_config)}\n\n"
+        f"{embedded_space_context_prompt(space_context or {})}\n\n"
+        f"You are talking through target node `{target_node}`. "
         f"The selected chat model is `{model_id}`. "
         "Use compact tool results to answer briefly. You may inspect context, "
         "but do not claim you executed mutations or shell actions beyond listed tools. "
@@ -10052,6 +13085,19 @@ def deterministic_agent_reply(message: str, tools: list[dict[str, Any]], reason:
     cards = attachment_cards_from_tools(tools)
     if asks_about_attached_image(message, cards):
         return image_card_reply(cards, reason)
+    if "space" in lowered and ("name" in lowered or "current" in lowered or "where" in lowered):
+        for tool in tools:
+            workspace = tool.get("workspace") if isinstance(tool.get("workspace"), dict) else {}
+            active_space = workspace.get("active_space") if isinstance(workspace.get("active_space"), dict) else {}
+            name = str(active_space.get("name") or workspace.get("active_space_name") or "").strip()
+            display = str(active_space.get("display_name") or workspace.get("active_space_display_name") or name).strip()
+            space_id = str(active_space.get("id") or workspace.get("active_space_id") or workspace.get("active_panel") or "").strip()
+            if name or display or space_id:
+                return (
+                    f"The current wasm-agent space is `{display or name or space_id}`"
+                    f"{f' (`{space_id}`)' if space_id and space_id != (display or name) else ''}. "
+                    f"{reason}."
+                )
     if "last" in lowered and ("click" in lowered or "button" in lowered):
         click = {}
         for tool in tools:
@@ -10158,11 +13204,12 @@ def embedded_agent_message(
     requested_target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or default_agent_target_node(user))
     ensure_agent_target_allowed(user, requested_target_node)
     target_node = (
-        account_main_node_id(user)
+        resolve_account_main_node_id(server, user)
         if not user_is_admin(user) and requested_target_node == AGENT_DEFAULT_SANDBOX_NODE_ID
         else requested_target_node
     )
     selected_model = requested_agent_model(body)
+    node_config = embedded_node_config_from_body(body, user=user, target_node=target_node, selected_model=selected_model)
     readiness_result: dict[str, Any] | None = None
     mutation_policy = agent_mutation_policy(server, user, target_node)
     def emit_step(
@@ -10189,13 +13236,14 @@ def embedded_agent_message(
             })
 
     def ensure_bridge_readiness() -> dict[str, Any]:
-        nonlocal target_node, readiness_result, mutation_policy
+        nonlocal target_node, readiness_result, mutation_policy, node_config
         if readiness_result is None:
             readiness_result = agent_readiness(server, user, target_node=requested_target_node)
             resolved = str(readiness_result.get("target_node") or target_node)
             if resolved and resolved != target_node:
                 target_node = resolved
                 mutation_policy = agent_mutation_policy(server, user, target_node)
+                node_config = embedded_node_config_from_body(body, user=user, target_node=target_node, selected_model=selected_model)
             emit_step(
                 "agent_readiness",
                 "Agent readiness",
@@ -10205,6 +13253,16 @@ def embedded_agent_message(
                 kind="model",
                 meta=str(readiness_result.get("message") or ""),
                 preview=compact_json(readiness_result, 1200),
+            )
+            emit_step(
+                "node_config",
+                "Node config",
+                "done",
+                f"{node_config.get('name') or target_node} / {node_config.get('type') or 'hermes'}",
+                topic="run-hermes",
+                kind="trace",
+                meta=str(node_config.get("instruction_source") or "none"),
+                preview=compact_json({k: v for k, v in node_config.items() if k != "instructions"} | {"has_instructions": bool(node_config.get("instructions"))}, 1200),
             )
         return readiness_result
 
@@ -10224,13 +13282,32 @@ def embedded_agent_message(
     before_tree = safe_worktree_tree_sha(server)
     started = time.monotonic()
     observation = body.get("observation") if isinstance(body.get("observation"), dict) else {}
+    space_context = embedded_space_context_from_body(body, observation)
+    workspace = observation.get("workspace") if isinstance(observation.get("workspace"), dict) else {}
+    workspace = {
+        **workspace,
+        "active_space_id": space_context.get("id") or "",
+        "active_space_name": space_context.get("name") or "",
+        "active_space_display_name": space_context.get("display_name") or space_context.get("name") or "",
+        "active_space": space_context,
+    }
+    observation = {**observation, "workspace": workspace}
+    emit_step(
+        "space_context",
+        "Current space",
+        "done",
+        f"{space_context.get('name') or space_context.get('id')} / {space_context.get('id')}",
+        kind="context",
+        meta=str(space_context.get("display_name") or ""),
+        preview=compact_json(space_context, 900),
+    )
     tools: list[dict[str, Any]] = []
     if observation and not image_focused_turn:
         current_observation_tool = {
             "tool": "current_turn_observation",
             "timestamp": observation.get("timestamp", ""),
             "cap": observation.get("cap", {}),
-            "workspace": observation.get("workspace", {}),
+            "workspace": workspace,
             "requested_click_context": observation.get("requested_click_context", {}),
             "recent_events": observation.get("recent_events", [])[:6],
         }
@@ -10299,6 +13376,8 @@ def embedded_agent_message(
                 images=None,
                 image_card_focus=True,
                 mutation_policy=mutation_policy,
+                node_config=node_config,
+                space_context=space_context,
                 action_callback=action_callback,
             )
         if source.startswith("local_") and source != "local_readiness_fallback":
@@ -10359,17 +13438,20 @@ def embedded_agent_message(
                 selected_model=selected_model,
                 images=bridge_images,
                 mutation_policy=mutation_policy,
+                node_config=node_config,
+                space_context=space_context,
                 action_callback=action_callback,
             )
     reply = correct_negative_symbol_reply(server, message, reply)
     emit_step("decode_hermes_response", "Decode Hermes response", "done", source, topic="run-hermes", kind="trace")
-    space_id = safe_state_id(str(body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home")
+    space_id = safe_state_id(str(space_context.get("id") or body.get("space_id") or observation.get("workspace", {}).get("active_panel") or "home"), "home")
     wis_patch_result: dict[str, Any] | None = None
     reply, wis_patch_result = apply_agent_wis_patches_from_reply(
         server,
         reply,
         user=user,
         space_id=space_id,
+        shared_space_id=safe_state_id(str(space_context.get("shared_space_id") or ""), ""),
     )
     if action_callback and wis_patch_result:
         applied = bool(wis_patch_result.get("applied"))
@@ -10475,6 +13557,8 @@ def embedded_agent_message(
             changed=files,
             bridge_trace=bridge_trace,
             readiness=readiness_result,
+            node_config=node_config,
+            space_context=space_context,
             mutation_policy=mutation_policy,
             wis_patch_result=wis_patch_result,
             mutation_result=mutation_result,
@@ -10491,6 +13575,8 @@ def embedded_agent_message(
             "context_estimated_tokens": max(1, context_bytes // 4),
             "token_usage": token_usage,
             "selected_model": selected_model,
+            "node_config": {k: v for k, v in node_config.items() if k != "instructions"} | {"has_instructions": bool(node_config.get("instructions"))},
+            "space_context": space_context,
             "model_tokens_avoided": source.startswith("local_"),
             "bridge_trace": bridge_trace,
             "readiness": readiness_result,
