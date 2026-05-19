@@ -317,6 +317,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 serve_camera_push_frame(self, stream_id)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception as exc:
                 self._json(
                     HTTPStatus.BAD_GATEWAY,
@@ -396,6 +398,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 serve_camera_push_archive_frame(self, stream_id, frame)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception as exc:
                 self._json(
                     HTTPStatus.BAD_GATEWAY,
@@ -2942,24 +2946,78 @@ def camera_push_playback_frames_from(
     except (TypeError, ValueError):
         playback_sec = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
     playback_sec = max(5, min(DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC, playback_sec))
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
     end_ms = start_ms + (playback_sec * 1000) if start_ms > 0 else 0
-    frames: list[tuple[float, Path]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0:
-            continue
-        if start_ms > 0 and timestamp_ms < start_ms:
-            continue
-        if end_ms and timestamp_ms > end_ms:
-            continue
-        frames.append((stat.st_mtime, path))
-    return [path for _mtime, path in sorted(frames)]
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        refresh_latest=True,
+    )
+    return [path for _mtime_ns, _source_priority, path, _stat in frames]
+
+
+def camera_push_recorded_frame_candidates(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    start_ms: int = 0,
+    after_mtime_ns: int = -1,
+    end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
+) -> list[tuple[int, int, Path, os.stat_result]]:
+    if refresh_latest:
+        camera_push_playback_latest_frame(server, stream_id)
+    camera_push_prune_playback(server, stream_id)
+    if include_archive:
+        camera_push_prune_archive(server, stream_id)
+    playback_dir = camera_push_playback_dir(server, stream_id)
+    directories: list[tuple[int, Path]] = [(0, playback_dir)]
+    if include_archive:
+        directories.append((1, camera_push_archive_dir(server, stream_id)))
+    by_mtime_ns: dict[int, tuple[int, Path, os.stat_result]] = {}
+    for source_priority, directory in directories:
+        for path in directory.glob("*.jpg"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            timestamp_ms = int(stat.st_mtime * 1000)
+            if stat.st_size <= 0 or stat.st_mtime_ns <= after_mtime_ns:
+                continue
+            if start_ms > 0 and timestamp_ms < start_ms:
+                continue
+            if end_ms > 0 and timestamp_ms > end_ms:
+                continue
+            existing = by_mtime_ns.get(stat.st_mtime_ns)
+            if existing is not None and existing[0] <= source_priority:
+                continue
+            by_mtime_ns[stat.st_mtime_ns] = (source_priority, path, stat)
+    return [
+        (mtime_ns, source_priority, path, stat)
+        for mtime_ns, (source_priority, path, stat)
+        in sorted(by_mtime_ns.items(), key=lambda item: (item[0], item[1][0]))
+    ]
+
+
+def camera_push_playback_frame_count_from(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    start_ms: int = 0,
+    end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = False,
+) -> int:
+    return len(camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    ))
 
 
 def camera_push_next_playback_frame(
@@ -2969,26 +3027,21 @@ def camera_push_next_playback_frame(
     start_ms: int = 0,
     after_mtime_ns: int = -1,
     end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
 ) -> tuple[Path, os.stat_result] | None:
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
-    frames: list[tuple[int, Path, os.stat_result]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0 or stat.st_mtime_ns <= after_mtime_ns:
-            continue
-        if start_ms > 0 and timestamp_ms < start_ms:
-            continue
-        if end_ms > 0 and timestamp_ms > end_ms:
-            continue
-        frames.append((stat.st_mtime_ns, path, stat))
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        after_mtime_ns=after_mtime_ns,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    )
     if not frames:
         return None
-    _mtime_ns, path, stat = sorted(frames, key=lambda item: item[0])[0]
+    _mtime_ns, _source_priority, path, stat = frames[0]
     return path, stat
 
 
@@ -2999,26 +3052,36 @@ def camera_push_nearest_playback_frame(
     target_ms: int = 0,
     end_ms: int = 0,
     max_distance_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
 ) -> tuple[Path, os.stat_result] | None:
     if target_ms <= 0:
-        return camera_push_next_playback_frame(server, stream_id, start_ms=0, after_mtime_ns=-1, end_ms=end_ms)
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
-    frames: list[tuple[int, int, Path, os.stat_result]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0:
-            continue
-        if end_ms > 0 and timestamp_ms > end_ms:
-            continue
-        frames.append((abs(timestamp_ms - target_ms), stat.st_mtime_ns, path, stat))
+        return camera_push_next_playback_frame(
+            server,
+            stream_id,
+            start_ms=0,
+            after_mtime_ns=-1,
+            end_ms=end_ms,
+            include_archive=include_archive,
+            refresh_latest=refresh_latest,
+        )
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    )
     if not frames:
         return None
-    distance_ms, _mtime_ns, path, stat = sorted(frames, key=lambda item: (item[0], item[1]))[0]
+    nearest: list[tuple[int, int, Path, os.stat_result]] = []
+    for _mtime_ns, _source_priority, path, stat in frames:
+        try:
+            timestamp_ms = int(stat.st_mtime * 1000)
+        except (OverflowError, ValueError):
+            timestamp_ms = 0
+        nearest.append((abs(timestamp_ms - target_ms), stat.st_mtime_ns, path, stat))
+    distance_ms, _mtime_ns, path, stat = sorted(nearest, key=lambda item: (item[0], item[1]))[0]
     if max_distance_ms > 0 and distance_ms > max_distance_ms:
         return None
     return path, stat
@@ -3363,6 +3426,8 @@ def serve_camera_push_playback(
         end_ms=0 if should_follow else end_ms,
         target_ms=start_ms,
         max_distance_ms=int(DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC * 1000) if start_ms > 0 else 0,
+        include_archive=True,
+        refresh_latest=should_follow,
     )
     if not first:
         raise BrowserError("camera_push_playback_empty", "No smooth camera playback frames are available from that point yet.", status=HTTPStatus.NOT_FOUND)
@@ -3399,6 +3464,8 @@ def serve_camera_push_playback(
                 start_ms=start_ms,
                 after_mtime_ns=last_mtime_ns,
                 end_ms=0 if should_follow else end_ms,
+                include_archive=True,
+                refresh_latest=should_follow,
             )
             if next_frame or not should_follow:
                 break

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import tempfile
 import threading
 import time
+import urllib.request
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -55,6 +57,28 @@ def fake_server(root: Path) -> SimpleNamespace:
         camera_push_processes={},
         camera_push_processes_lock=threading.Lock(),
     )
+
+
+def start_test_server(root: Path) -> tuple[server_mod.WasmAgentServer, threading.Thread]:
+    def handler(*handler_args: object, **handler_kwargs: object) -> server_mod.WasmAgentHandler:
+        return server_mod.WasmAgentHandler(
+            *handler_args,
+            directory=str(PLUGIN_ROOT / "public"),
+            **handler_kwargs,
+        )
+
+    httpd = server_mod.WasmAgentServer(
+        ("127.0.0.1", 0),
+        handler,
+        plugin_root=PLUGIN_ROOT,
+        public_root=PLUGIN_ROOT / "public",
+        state_dir=root / "state",
+        bridge_url="http://127.0.0.1:8790",
+        browser_timeout_sec=1.0,
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, thread
 
 
 class CameraPushIngestTest(unittest.TestCase):
@@ -188,6 +212,96 @@ class CameraPushIngestTest(unittest.TestCase):
                 max_distance_ms=1000,
             )
             self.assertIsNone(too_far)
+
+    def test_push_playback_cursor_reads_archive_sequence_without_live_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            server = fake_server(Path(tempdir))
+            archive_dir = server_mod.camera_push_archive_dir(server, "cam-1")
+            playback_dir = server_mod.camera_push_playback_dir(server, "cam-1")
+            start_time = time.time() - 120
+            archive_paths = []
+            for index in range(3):
+                frame_path = archive_dir / f"{index + 1}000000000-8.jpg"
+                frame_path.write_bytes(b"\xff\xd8archive" + bytes([index]) + b"\xff\xd9")
+                frame_time = start_time + index
+                os.utime(frame_path, (frame_time, frame_time))
+                archive_paths.append(frame_path)
+
+            latest_path = server_mod.camera_push_latest_frame_path(server, "cam-1")
+            latest_path.write_bytes(b"\xff\xd8live-now\xff\xd9")
+            live_time = start_time + 90
+            os.utime(latest_path, (live_time, live_time))
+
+            first = server_mod.camera_push_nearest_playback_frame(
+                server,
+                "cam-1",
+                target_ms=int(start_time * 1000),
+                max_distance_ms=1000,
+                refresh_latest=False,
+            )
+            self.assertIsNotNone(first)
+            self.assertEqual(first[0], archive_paths[0])
+            second = server_mod.camera_push_next_playback_frame(
+                server,
+                "cam-1",
+                start_ms=int(start_time * 1000),
+                after_mtime_ns=first[1].st_mtime_ns,
+                refresh_latest=False,
+            )
+            self.assertIsNotNone(second)
+            self.assertEqual(second[0], archive_paths[1])
+            self.assertEqual(list(playback_dir.glob("*.jpg")), [])
+
+    def test_push_playback_http_stream_returns_recorded_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            httpd, thread = start_test_server(root)
+            try:
+                stream_id = "cam-http"
+                archive_dir = server_mod.camera_push_archive_dir(httpd, stream_id)
+                start_time = time.time() - 120
+                for index in range(5):
+                    frame_path = archive_dir / f"http-{index + 1}.jpg"
+                    frame_path.write_bytes(b"\xff\xd8http-recorded-" + bytes([48 + index]) + b"\xff\xd9")
+                    frame_time = start_time + (index * 0.04)
+                    os.utime(frame_path, (frame_time, frame_time))
+
+                latest_path = server_mod.camera_push_latest_frame_path(httpd, stream_id)
+                latest_path.write_bytes(b"\xff\xd8live-now\xff\xd9")
+                live_time = start_time + 90
+                os.utime(latest_path, (live_time, live_time))
+
+                url = (
+                    f"http://127.0.0.1:{httpd.server_address[1]}"
+                    f"/camera/push-playback?stream_id={stream_id}"
+                    f"&from_ms={int(start_time * 1000)}&seconds=5&follow=0"
+                )
+                with patch.object(server_mod, "authenticated_request_user", lambda _handler: {"id": 1, "email": "camera@test.local"}):
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        content_type = response.headers.get("Content-Type", "")
+                        body = response.read()
+
+                self.assertEqual(response.status, 200)
+                self.assertIn("multipart/x-mixed-replace", content_type)
+                self.assertIn("boundary=wasm-agent-push-playback", content_type)
+                parts = [
+                    part for part in body.split(b"--wasm-agent-push-playback")
+                    if b"Content-Type: image/jpeg" in part
+                ]
+                self.assertEqual(len(parts), 5)
+                timestamps: list[int] = []
+                for part in parts:
+                    match = re.search(rb"X-Frame-Timestamp-Ms: (\d+)", part)
+                    self.assertIsNotNone(match)
+                    timestamps.append(int(match.group(1)))
+                self.assertEqual(timestamps, sorted(timestamps))
+                self.assertIn(b"http-recorded-0", body)
+                self.assertIn(b"http-recorded-4", body)
+                self.assertNotIn(b"live-now", body)
+            finally:
+                httpd.shutdown()
+                thread.join(timeout=2)
+                httpd.server_close()
 
     def test_push_timeline_lists_today_archive_frames(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

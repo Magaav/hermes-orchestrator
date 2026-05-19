@@ -3687,6 +3687,31 @@ textarea:focus {
   line-height: 1;
 }
 
+.wis-camera-tool-button.is-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.wis-camera-tool-button.is-icon-only {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+
+.wis-camera-tool-icon {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+  flex: 0 0 auto;
+}
+
+.wis-camera-tool-label {
+  font-size: 10px;
+  line-height: 1;
+}
+
 .wis-camera-tool-button:hover,
 .wis-camera-tool-button:focus-visible,
 .wis-camera-tool-button.active {
@@ -3695,7 +3720,9 @@ textarea:focus {
   background: rgba(125, 220, 255, 0.1);
 }
 
-.wis-camera-tool-button:disabled {
+.wis-camera-tool-button:disabled,
+.wis-camera-tool-button.is-disabled,
+.wis-camera-tool-button[aria-disabled="true"] {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -3829,16 +3856,26 @@ textarea:focus {
   left: var(--wis-camera-timeline-preview, var(--wis-camera-timeline-progress, 100%));
 }
 
+.wis-camera-timeline-controls-row,
 .wis-camera-timeline-actions {
   display: flex;
   justify-content: flex-end;
   gap: 6px;
 }
 
+.wis-camera-timeline-controls-row {
+  align-items: center;
+  min-width: 0;
+}
+
 .wis-camera-timeline-actions .wis-camera-tool-button {
   min-height: 26px;
   padding: 0 8px;
   font-size: 11px;
+}
+
+.wis-camera-timeline-controls-row .wis-camera-tool-button {
+  min-height: 28px;
 }
 
 .wis-node-webcam_placeholder.is-zoom-selecting {
@@ -3955,10 +3992,32 @@ textarea:focus {
   height: 100%;
   min-height: 116px;
   object-fit: cover;
+  opacity: 1;
+  visibility: visible;
+  filter: none;
+  transition: none;
+  animation: none;
+}
+
+.wis-camera-image.wis-camera-buffer {
+  z-index: 1;
+}
+
+.wis-camera-image.wis-camera-buffer.is-buffer-front {
+  z-index: 2;
+  opacity: 1;
+  visibility: visible;
+}
+
+.wis-camera-image.wis-camera-buffer.is-buffer-back {
+  z-index: 1;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: none;
 }
 
 .wis-camera-image.is-buffering {
-  opacity: 0;
+  opacity: 1;
 }
 
 .wis-camera-focus-frame .wis-camera-video,
@@ -7774,6 +7833,7 @@ details.agent-action-row .agent-action-row-summary {
     gap: 7px;
   }
 
+  .wis-camera-timeline-controls-row,
   .wis-camera-timeline-actions {
     justify-content: flex-end;
   }

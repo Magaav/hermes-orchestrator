@@ -29,10 +29,13 @@ rendering, agent-readable state, and a cleaner app shell.
 This section is the cross-compaction handoff for active `wasm-agent` work. When
 the next action changes, update this before ending the turn.
 
-Current next action: continue the camera extraction by moving the remaining
-focused camera DOM renderer/header/timeline wiring behind a shareable controller
-adapter in `public/modules/wis/artifacts/camera.js`, leaving `app.js` as the host
-shell. Current evidence: the portable focused-camera artifact factory,
+Current next action: reload the real authenticated client so service-worker
+cache `wasm-agent-v102` takes effect, then repeat the CAM 1 middle-timeline
+click and Live return in the user's browser to confirm the real client matches
+the headless acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
+`playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
+live on the Live button.
+Current evidence: the portable focused-camera artifact factory,
 slot/focus helpers, push-camera config shape, controller contract, push endpoint
 URL generation, default/normalized push config, stream-quality ids, frame
 polling cadence, pending timeline seeks, timeline load TTL, frame labels, and
@@ -46,13 +49,53 @@ WIS camera now uses retained `/camera/push-frame` polling for the live image,
 minimal camera header controls for zoom/snapshot/audio/quality, and a full-width
 footer timeline that defaults to the last 10 minutes with a detected
 recorded-range mode. The footer is scoped to the active widget and uses robust
-pointer capture for scrubbing; a first click while the timeline range is still
-loading is remembered and applied as soon as retained frames arrive, and scrubber
-clicks no longer trigger a parent footer reload that can rebuild the control
-before the seek commits. Timeline reads use the JSON `POST /camera/push-timeline`
+pointer capture for scrubbing through the shared camera artifact controller;
+`app.js` now only renders the scrubber and attaches it as the controller's
+`timelineElement`. Timeline clicks from the last-10-min Live rail now promote the
+stream into a recorded/seeking owner state instead of being ignored or leaving
+the mode badge live; the app cancels live timers, fences stale live image writes,
+sets the playback anchor from the clicked timestamp, and starts a single
+generation-owned recorded playback session. A first click while the timeline
+range is still loading is remembered and applied as soon as retained frames
+arrive. Scrubber clicks no longer trigger a parent footer reload that can
+rebuild the control before the seek commits. Controller-owned recorded timeline
+seeks now hand the real loaded segment back to the playback controller while the
+visible media surface keeps the last good frame frozen until the latest recorded
+generation decodes a replacement from `/camera/push-playback`; the archive-frame
+URL remains a fallback if the playback stream cannot open. Timeline reads use
+the JSON `POST /camera/push-timeline`
 path so stale service workers cannot return the app shell HTML in place of
-retained-frame metadata, and the server accepts app-route-prefixed camera push
-paths from shared-space pages. The DVR
+retained-frame metadata, stale in-flight timeline loads are timestamped so the
+client can retry instead of leaving the scrubber in a permanent loading state,
+and a client-side watchdog actively clears and retries a stalled timeline load
+without waiting for a later render or interaction. The server accepts
+app-route-prefixed camera push paths from shared-space pages. The recorded
+playback image lifecycle, including
+the last-good-frame placeholder, fallback archive-frame image, and
+`/camera/push-playback` stream handoff, now lives in
+`public/modules/wis/artifacts/camera.js`; `app.js` only assembles host URLs and
+passes shell callbacks into the camera artifact helper. Recorded timeline seeks
+reuse the current media DOM node when possible and seed rebuilt surfaces from
+`wisCameraLastGoodFrames`, so seeking and rebuffering overlay status text on top
+of the frozen frame instead of clearing, hiding, or remounting a black media
+pane. Recorded timeline seeks tag DOM playback segments as media-clocked, so the
+camera artifact controller no longer starts a synthetic RAF image-render loop
+for playback. It keeps the
+desired timeline clock separate from the last displayed frame timestamp, runs a
+timeline-only clock loop after the first recorded frame, and treats
+`/camera/push-playback` as an imperfect DVR evidence stream: bad timestamps are
+normalized, stale queued frames are dropped, burst frames catch up to the clock,
+slow/starved streams show catching-up or rebuffering state, and repeated packet
+stalls restart from the current desired clock before settling into a stalled/gap
+state. Recorded playback also keeps one active stream reader/scheduler per
+stream generation, treats repeat same-frame renders as no-ops, diffs playback
+status/timeline updates before touching DOM or WIS patch state, and emits one
+compact `camera.perf.sample` per second while verbose per-frame camera logging is
+off by default. A headless Chromium retained-frame harness for CAM 1 now shows
+one stable image node, one active playback loop/reader, zero steady DOM
+replacements, and low-cadence source swaps, while the WIS engine regression
+covers six rapid seeks settling to the latest generation and live return
+clearing playback loops/readers. The DVR
 outbound RTMP publisher is active at
 `rtmp://147.15.64.233:1935/live/livestream0` after switching Stream Principal
 from H.265 to H.264/H.264H; the last checked CAM 1 frames were live

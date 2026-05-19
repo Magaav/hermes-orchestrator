@@ -3,7 +3,9 @@ import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
 import {
   WIS_CAMERA_ARTIFACT_SCHEMA,
+  WIS_CAMERA_ARTIFACT_BUILD,
   WIS_CAMERA_CONTROLLER_SCHEMA,
+  WIS_CAMERA_TIMELINE_OWNER_STATES,
   cameraSlotFromNode as wisCameraSlotFromNode,
   claimMediaWriter,
   createCameraArtifactController,
@@ -15,39 +17,47 @@ import {
   createWisCameraToolButton,
   createWisDefaultPushCameraConfigForSlot,
   createWisFocusedCameraArtifact,
-  renderWisCameraArtifactHeader,
   formatWisCameraTimelineRange,
   focusedWisCameraSlot as focusedWisCameraSlotFromSurface,
-  decodeAndSwapImage,
   isWisCameraPushConfig,
   isWisFocusedCameraSurface,
-  isMediaWriterCurrent,
   normalizeWisCameraConfigForSlot as normalizeWisCameraConfigForSlotContract,
   normalizeWisCameraSlot,
+  noteWisCameraPerf,
   readWisCameraConfigs as readWisCameraArtifactConfigs,
+  rememberWisCameraLastGoodFrameFromImage,
+  renderWisCameraArtifactHeader,
+  renderWisCameraPushArchiveFrame as renderWisCameraPushArchiveFrameContract,
+  releaseMediaStreamWriter,
   resolveWisCameraPendingTimelineSeek,
+  sampleWisCameraPerf,
   saveWisCameraConfigs as saveWisCameraArtifactConfigs,
+  setWisCameraVisibilityState,
+  setWisCameraTimelineOwnerState,
   shouldLoadWisCameraTimeline as shouldLoadWisCameraTimelineContract,
+  wisCameraActivePlaybackLoop,
   wisCameraBaseStreamId as wisCameraBaseStreamIdContract,
+  wisCameraPerformanceBudget as wisCameraPerformanceBudgetContract,
   wisCameraPushFramePollMs as wisCameraPushFramePollMsContract,
   wisCameraQualityStreamId as wisCameraQualityStreamIdContract,
-  wisCameraDisplayedFrameFromImage as wisCameraDisplayedFrameFromImageContract,
   wisCameraMonotonicNow,
   wisCameraPlaybackClockMs as wisCameraPlaybackClockMsContract,
   wisCameraPlaybackState as wisCameraPlaybackStateContract,
-  wisCameraRecordedSessionMatches,
   wisCameraRecordedTimelineTitle,
-  setWisCameraPlaybackFrame,
+  wisCameraRecordedOwnsTimeline as wisCameraRecordedOwnsTimelineContract,
+  wisCameraTimelineOwnerState as wisCameraTimelineOwnerStateContract,
+  pauseWisCameraPlaybackState,
+  resumeWisCameraPlaybackState,
   startWisCameraPlaybackSeek,
   stopWisCameraPlaybackState,
-  streamWisCameraPushPlaybackFrames as streamWisCameraPushPlaybackFramesContract,
+  traceWisCameraBoundary,
   wisCameraTimelineFrameClosestToTime,
   wisCameraTimelineFrameAtRatio,
   wisCameraTimelineFrameLabel as wisCameraTimelineFrameLabelContract,
   wisCameraTimelineFramePlaybackKey as wisCameraTimelineFramePlaybackKeyContract,
   wisCameraTimelinePlaybackStartMs,
-  wisCameraTimelineTargetAtRatio,
   wisCameraTimelineTimeWindow,
+  isMediaWriterCurrent,
 } from "./modules/wis/artifacts/camera.js";
 import { createClientFirstStore } from "./modules/client-state/client-store.js";
 import { createChatComposer } from "./modules/chat-composer/chat-composer.js";
@@ -67,6 +77,16 @@ import {
   sharedVoiceSignalIsFresh,
   sharedVoiceSignalPayload,
 } from "./modules/spaces/shared-voice-room.js";
+
+traceWisCameraBoundary("app.cameraArtifactBuild.loaded", {
+  module: "app.js",
+  cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD,
+});
+try {
+  document.documentElement.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+} catch {
+  // Build marker is diagnostic only.
+}
 
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
@@ -117,6 +137,7 @@ const SPACE_DISTANCE_STEP = 0.05;
 const RESOURCE_POLL_MS = 2500;
 const SECURITY_POLL_MS = 5000;
 const USER_EVENT_LIMIT = 160;
+const WIS_CAMERA_TIMELINE_LOAD_STALE_MS = 12000;
 const INTERACTION_TRACE_LIMIT = 96;
 const POINTER_MOVE_SAMPLE_MS = 80;
 const WHEEL_TRACE_SAMPLE_MS = 120;
@@ -2450,6 +2471,11 @@ function stopWisCameraTimer(slot) {
   const key = cleanText(slot, "");
   const timer = key ? state.wisCameraTimers.get(key) : null;
   if (!timer) return;
+  if (timer && typeof timer === "object" && timer.kind === "wis-camera-scheduler-task") {
+    state.wisCameraSchedulerTasks?.delete?.(key);
+    state.wisCameraTimers.delete(key);
+    return;
+  }
   clearTimeout(timer);
   clearInterval(timer);
   state.wisCameraTimers.delete(key);
@@ -2461,6 +2487,186 @@ function stopAllWisCameraStreams() {
 
 function stopAllWisCameraTimers() {
   for (const slot of Array.from(state.wisCameraTimers.keys())) stopWisCameraTimer(slot);
+}
+
+function wisCameraAppScheduler() {
+  if (!state.wisCameraSchedulerTasks) state.wisCameraSchedulerTasks = new Map();
+  if (!state.wisCameraScheduler) {
+    state.wisCameraScheduler = {
+      timer: 0,
+      tasks: state.wisCameraSchedulerTasks,
+    };
+  }
+  return state.wisCameraScheduler;
+}
+
+function armWisCameraAppScheduler() {
+  const scheduler = wisCameraAppScheduler();
+  if (scheduler.timer || !scheduler.tasks.size) return;
+  const now = performance.now();
+  let nextAt = Infinity;
+  scheduler.tasks.forEach((task) => {
+    nextAt = Math.min(nextAt, Number(task.nextAt || now));
+  });
+  if (!Number.isFinite(nextAt)) return;
+  scheduler.timer = window.setTimeout(() => {
+    scheduler.timer = 0;
+    const runNow = performance.now();
+    scheduler.tasks.forEach((task) => {
+      if (Number(task.nextAt || 0) > runNow + 1) return;
+	      if (cleanText(task.mode, "live") === "live" && wisCameraRecordedOwnsStream(task.streamId || task.slot)) {
+	        scheduler.tasks.delete(task.slot);
+	        state.wisCameraTimers.delete(task.slot);
+	        traceWisCameraBoundary("live.scheduler.commit", {
+	          decision: "BLOCKED",
+	          streamId: task.streamId || task.slot,
+	          slot: task.slot,
+	          ownerAtCommit: wisCameraTimelineOwnerStateContract(state, task.streamId || task.slot),
+	          generation: Number(recordedWisCameraSession(task.streamId || task.slot)?.generation || 0),
+	          frameSource: "live-scheduler",
+	          reason: "scheduler-live-task",
+	          ...wisCameraLoopOwnerSnapshot(task.streamId || task.slot, task.slot),
+	        });
+	        logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+          streamId: task.streamId || task.slot,
+          reason: "scheduler-live-task",
+          ...wisCameraLoopOwnerSnapshot(task.streamId || task.slot, task.slot),
+        }, { always: true, sampleMs: 1000 });
+        return;
+      }
+      const budget = wisCameraPerformanceBudgetContract(state, task.streamId || task.slot, {
+        env: window,
+        mode: task.mode || "live",
+      });
+      const intervalMs = Math.max(Number(task.intervalMs || 1000), Number(budget.visualMinIntervalMs || 0));
+      if (budget.allowVisualWork || task.allowWhenSuspended) {
+        try {
+          task.callback?.(budget);
+        } catch (error) {
+          logWisCameraMediaEvent("camera.scheduler.task.error", {
+            streamId: task.streamId || task.slot,
+            error: error?.message || String(error),
+          }, { sampleMs: 1000 });
+        }
+      }
+      task.nextAt = performance.now() + (budget.allowVisualWork ? intervalMs : Number(budget.retryMs || 2500));
+    });
+    armWisCameraAppScheduler();
+  }, Math.max(0, Math.round(nextAt - now)));
+}
+
+function scheduleWisCameraTimer(slot, callback, intervalMs, options = {}) {
+  const key = cleanText(slot, "");
+  if (!key || typeof callback !== "function") return null;
+  stopWisCameraTimer(key);
+  const scheduler = wisCameraAppScheduler();
+  const task = {
+    kind: "wis-camera-scheduler-task",
+    slot: key,
+    streamId: cleanText(options.streamId, key),
+    mode: cleanText(options.mode, "live"),
+    intervalMs: Math.max(250, Math.round(Number(intervalMs) || 1000)),
+    callback,
+    allowWhenSuspended: Boolean(options.allowWhenSuspended),
+    nextAt: performance.now() + Math.max(0, Number(options.delayMs || 0)),
+  };
+  scheduler.tasks.set(key, task);
+  state.wisCameraTimers.set(key, task);
+  if (scheduler.timer) {
+    window.clearTimeout(scheduler.timer);
+    scheduler.timer = 0;
+  }
+  armWisCameraAppScheduler();
+  return task;
+}
+
+function nudgeWisCameraTimer(slot) {
+  const key = cleanText(slot, "");
+  const task = key ? state.wisCameraSchedulerTasks?.get?.(key) : null;
+  if (!task) return;
+  task.nextAt = performance.now();
+  const scheduler = wisCameraAppScheduler();
+  if (scheduler.timer) {
+    window.clearTimeout(scheduler.timer);
+    scheduler.timer = 0;
+  }
+  armWisCameraAppScheduler();
+}
+
+function ensureWisCameraVisibilityObserver() {
+  if (state.wisCameraVisibilityObserverInstalled) return;
+  state.wisCameraVisibilityObserverInstalled = true;
+  if (!state.wisCameraVisibilityElements) state.wisCameraVisibilityElements = new Map();
+  if ("IntersectionObserver" in window) {
+    state.wisCameraVisibilityObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        const meta = state.wisCameraVisibilityElements?.get(entry.target);
+        if (!meta) return;
+        const focused = wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === meta.slot;
+        setWisCameraVisibilityState(state, meta.streamId, {
+          slot: meta.slot,
+          visible: Boolean(entry.isIntersecting),
+          ratio: Number(entry.intersectionRatio || 0),
+          focused,
+          active: focused || widgetById("wis")?.classList?.contains("is-widget-active"),
+          pageHidden: document.hidden,
+        });
+        if (entry.isIntersecting && !document.hidden) {
+          nudgeWisCameraTimer(meta.slot);
+          nudgeWisCameraTimer(meta.streamId);
+          wisCameraActivePlaybackLoop(state, meta.streamId)?.schedule?.("viewport-visible");
+        }
+      });
+    }, { threshold: [0, 0.01, 0.25, 0.6, 1] });
+  }
+  document.addEventListener("visibilitychange", () => {
+    const hidden = document.hidden;
+    state.wisCameraVisibilityElements?.forEach((meta, element) => {
+      if (element.isConnected === false) {
+        state.wisCameraVisibilityObserver?.unobserve?.(element);
+        state.wisCameraVisibilityElements.delete(element);
+        return;
+      }
+      const rect = element.getBoundingClientRect?.();
+      const visible = !hidden && (!rect || (rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth));
+      setWisCameraVisibilityState(state, meta.streamId, {
+        slot: meta.slot,
+        visible,
+        ratio: visible ? 1 : 0,
+        focused: wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === meta.slot,
+        active: visible,
+        pageHidden: hidden,
+      });
+      if (!hidden) {
+        nudgeWisCameraTimer(meta.slot);
+        nudgeWisCameraTimer(meta.streamId);
+        wisCameraActivePlaybackLoop(state, meta.streamId)?.schedule?.("page-visible");
+      }
+    });
+  });
+}
+
+function trackWisCameraVisibility(element, slot, streamId) {
+  if (!element || !streamId) return;
+  ensureWisCameraVisibilityObserver();
+  const cleanSlot = cleanText(slot, "");
+  const key = cleanText(streamId, cleanSlot);
+  const focused = wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === cleanSlot;
+  state.wisCameraVisibilityElements?.set(element, { slot: cleanSlot, streamId: key });
+  element.dataset.wisCameraStreamId = key;
+  setWisCameraVisibilityState(state, key, {
+    slot: cleanSlot,
+    visible: !document.hidden,
+    ratio: document.hidden ? 0 : 1,
+    focused,
+    active: focused || widgetById("wis")?.classList?.contains("is-widget-active"),
+    pageHidden: document.hidden,
+  });
+  state.wisCameraVisibilityObserver?.observe?.(element);
+}
+
+function wisCameraBudget(streamId, mode = "live") {
+  return wisCameraPerformanceBudgetContract(state, streamId, { env: window, mode });
 }
 
 function localWisCameraConfig(slot) {
@@ -3231,10 +3437,18 @@ function cameraPushReplayUrl(streamId = "cam-1", seconds = 300) {
   return createWisCameraPushEndpoints(streamId, WIS_CAMERA_CONTROLLER_CONTRACT.endpoints, { replaySeconds: seconds }).replayUrl;
 }
 
+function cameraPushPlaybackResolvedStartMs(frame = {}, options = {}) {
+  const frameMs = Number(frame?.timestamp_ms ?? frame?.timestampMs ?? frame?.snapped_timestamp_ms ?? frame?.snappedTimestampMs);
+  if (Number.isFinite(frameMs) && frameMs > 0) return frameMs;
+  const optionMs = Number(options.fromMs ?? options.from_ms);
+  if (Number.isFinite(optionMs) && optionMs > 0) return optionMs;
+  return wisCameraTimelinePlaybackStartMs(frame);
+}
+
 function cameraPushPlaybackUrl(streamId = "cam-1", frame = {}, options = {}) {
   return createWisCameraPushEndpoints(streamId, WIS_CAMERA_CONTROLLER_CONTRACT.endpoints, {
     frame: frame?.id,
-    fromMs: wisCameraTimelinePlaybackStartMs(frame),
+    fromMs: cameraPushPlaybackResolvedStartMs(frame, options),
     fps: options.fps,
     follow: options.follow,
   }).playbackUrl;
@@ -3569,6 +3783,7 @@ function exportWisSpace(origin = "surface") {
 function installWisAutomationHook() {
   if (!state.wisSandbox || state.wisAutomationInstalled) return;
   state.wisUnsubscribe = state.wisSandbox.subscribe(scheduleWisRender);
+  installWisCameraTraceDumpHelper();
   window.wasmAgentWis = {
     inspect() {
       return wisSurfaceState();
@@ -3585,6 +3800,9 @@ function installWisAutomationHook() {
     },
     cameraController() {
       return WIS_CAMERA_CONTROLLER_CONTRACT;
+    },
+    dumpCameraTrace(streamId = "") {
+      return dumpWisCameraTrace(streamId);
     },
   };
   state.wisAutomationInstalled = true;
@@ -3650,6 +3868,34 @@ function wisCameraQualityStreamId(slot, camera = {}) {
   const base = wisCameraBaseStreamId(slot, camera);
   const mode = wisCameraQualityMode(base);
   return wisCameraQualityStreamIdContract(slot, camera, mode);
+}
+
+function wisCameraSlotForStreamId(streamId, preferredSlot = "") {
+  const key = cleanText(streamId, "");
+  const preferred = cleanText(preferredSlot, "");
+  const candidates = [];
+  const addCandidate = (slot) => {
+    const cleanSlot = cleanText(slot, "");
+    if (cleanSlot && !candidates.includes(cleanSlot)) candidates.push(cleanSlot);
+  };
+  addCandidate(preferred);
+  addCandidate(wisFocusedCameraSlot() || "");
+  addCandidate(key);
+  try {
+    const cameras = wisSurfaceState()?.state?.cameras;
+    if (cameras && typeof cameras === "object") Object.keys(cameras).forEach(addCandidate);
+  } catch {
+    // Slot resolution is best effort; callers still validate the camera config.
+  }
+  for (const slot of candidates) {
+    const camera = wisCameraConfigForSlot(slot) || {};
+    if (!wisCameraIsPushConfig(camera)) continue;
+    const base = wisCameraBaseStreamId(slot, camera);
+    const primary = cleanText(camera.primaryStreamId || camera.primary_stream_id, base);
+    const extra = cleanText(camera.extraStreamId || camera.extra_stream_id || camera.subStreamId || camera.sub_stream_id, `${base}-extra`);
+    if ([base, primary, extra, wisCameraQualityStreamId(slot, camera)].some((candidate) => cleanText(candidate, "") === key)) return slot;
+  }
+  return preferred || wisFocusedCameraSlot() || key || "cam-1";
 }
 
 function wisCameraTimelineMode(streamId) {
@@ -3726,8 +3972,34 @@ function wisCameraSegmentForTarget(streamId, targetTimeMs = 0, options = {}) {
   const frame = requestedFrame?.id
     ? requestedFrame
     : wisCameraTimelineFrameClosestToTime(frames, targetTime, windowModel);
-  if (!frame) return null;
+  if (!frame) {
+    traceWisCameraBoundary("archive.frame.resolved", {
+      functionName: "wisCameraSegmentForTarget",
+      streamId: key,
+      requestedTimestampMs: targetTime,
+      archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? windowModel.visibleStart ?? 0),
+      archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? windowModel.visibleEnd ?? 0),
+      resolvedTimestampMs: null,
+      recordedPlaybackPossible: false,
+      fetchResult: "empty",
+      frameCount: frames.length,
+    });
+    return null;
+  }
   const snappedTimestampMs = wisCameraTimelineFrameTimestampMs(frame, targetTime);
+  traceWisCameraBoundary("archive.frame.resolved", {
+    functionName: "wisCameraSegmentForTarget",
+    streamId: key,
+    requestedTimestampMs: targetTime,
+    archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? windowModel.visibleStart ?? 0),
+    archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? windowModel.visibleEnd ?? 0),
+    resolvedTimestampMs: snappedTimestampMs,
+    recordedPlaybackPossible: Boolean(frame?.id && frame?.url),
+    fetchResult: frame?.id && frame?.url ? "non-empty" : "empty",
+    frameCount: frames.length,
+    segmentId: cleanText(frame?.id, ""),
+    segmentUrl: cleanText(frame?.url, ""),
+  });
   return {
     ...frame,
     timestamp_ms: snappedTimestampMs,
@@ -3738,7 +4010,41 @@ function wisCameraSegmentForTarget(streamId, targetTimeMs = 0, options = {}) {
 
 const wisCameraMediaLogAt = new Map();
 
+function wisCameraVerboseDiagnosticsEnabled() {
+  try {
+    return Boolean(window.WASM_AGENT_CAMERA_DEBUG || localStorage.getItem("wasmAgent.cameraDebug") === "1");
+  } catch {
+    return false;
+  }
+}
+
 function logWisCameraMediaEvent(event, data = {}, options = {}) {
+  if (event === "camera.visual.blink_detected") {
+    if (!(state.wisCameraBlinkEvents instanceof Map)) state.wisCameraBlinkEvents = new Map();
+    const blinkStreamId = cleanText(data.streamId || data.cameraId, "");
+    if (blinkStreamId) state.wisCameraBlinkEvents.set(blinkStreamId, Number(state.wisCameraBlinkEvents.get(blinkStreamId) || 0) + 1);
+  }
+  const verbose = wisCameraVerboseDiagnosticsEnabled();
+  let perfDebug = verbose;
+  try {
+    perfDebug = perfDebug || localStorage.getItem("wasmAgent.cameraPerfDebug") === "1";
+  } catch {
+    perfDebug = verbose;
+  }
+  const critical = event === "camera.visual.blink_detected"
+    || event === "camera.playback.transition"
+    || event === "camera.timeline.seek"
+    || event === "camera.loop.owner"
+    || event === "camera.visual.frame_commit"
+    || event.includes("ownership")
+    || event.includes("blocked_by_recorded_owner")
+    || event.includes("stale_writer")
+    || event.includes(".error")
+    || event.includes("violation");
+  const perfSample = event === "camera.perf.sample";
+  const always = Boolean(options.always && critical);
+  if (perfSample && !perfDebug) return;
+  if (!always && !critical && !verbose && !(perfSample && perfDebug)) return;
   const sampleMs = Number(options.sampleMs || 0);
   const now = performance.now();
   if (sampleMs > 0) {
@@ -3746,22 +4052,579 @@ function logWisCameraMediaEvent(event, data = {}, options = {}) {
     const lastAt = Number(wisCameraMediaLogAt.get(key) || 0);
     if (lastAt > 0 && now - lastAt < sampleMs) return;
     wisCameraMediaLogAt.set(key, now);
-  }
-  const payload = { event, t: now, ...data };
-  try {
-    console.debug("[camera]", event, payload);
+	  }
+	  const payload = { event, t: now, cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD, ...data };
+	  traceWisCameraBoundary(event, payload);
+	  try {
+	    console.debug("[camera]", event, payload);
   } catch {
     // Camera media diagnostics are best effort.
   }
 }
 
-function wisCameraRecordedMediaOwner(streamId, session = null) {
+function cloneWisCameraTraceValue(value) {
+  try {
+    if (typeof structuredClone === "function") return structuredClone(value);
+  } catch {
+    // Fall through to JSON cloning.
+  }
+  try {
+    return JSON.parse(JSON.stringify(value ?? null));
+  } catch {
+    return value == null ? value : String(value);
+  }
+}
+
+function wisCameraCurrentTraceStreamId(streamId = "") {
+  const explicit = cleanText(streamId, "");
+  if (explicit) return explicit;
+  const recordedKeys = [];
+  try {
+    state.wisCameraRecordedSessions?.forEach?.((session, key) => {
+      if (session?.mode === "recorded" && key) recordedKeys.push(cleanText(key, ""));
+    });
+  } catch {
+    // Trace helpers must never disturb camera playback.
+  }
+  if (recordedKeys.length) return recordedKeys[recordedKeys.length - 1];
+  const timelineStream = cleanText(state.wisCameraTimeline?.streamId, "");
+  if (timelineStream) return timelineStream;
+  const slot = wisFocusedCameraSlot() || "cam-1";
+  const camera = wisCameraConfigForSlot(slot) || {};
+  return wisCameraQualityStreamId(slot, camera);
+}
+
+function wisCameraControlTargetSummary(target = null) {
+  if (!target) return null;
+  const button = target.closest?.("[data-wis-camera-control]") || target;
+  const row = target.closest?.(".wis-camera-timeline-controls-row");
+  const rect = button?.getBoundingClientRect?.();
   return {
-    kind: "recorded-playback",
-    streamId: cleanText(streamId, ""),
-    sessionId: cleanText(session?.id, ""),
-    generation: Number(session?.generation || 0),
+    tagName: cleanText(button?.tagName, ""),
+    className: cleanText(button?.className, ""),
+    control: cleanText(button?.dataset?.wisCameraControl, ""),
+    streamId: cleanText(button?.dataset?.wisCameraStreamId || row?.dataset?.streamId, ""),
+    slot: cleanText(button?.dataset?.wisCameraSlot, ""),
+    action: cleanText(button?.dataset?.wisCameraAction, ""),
+    disabled: Boolean(button?.disabled),
+    ariaDisabled: cleanText(button?.getAttribute?.("aria-disabled"), ""),
+    ariaPressed: cleanText(button?.getAttribute?.("aria-pressed"), ""),
+    title: cleanText(button?.getAttribute?.("title"), ""),
+    rect: rect ? {
+      left: Math.round(Number(rect.left || 0)),
+      top: Math.round(Number(rect.top || 0)),
+      width: Math.round(Number(rect.width || 0)),
+      height: Math.round(Number(rect.height || 0)),
+    } : null,
   };
+}
+
+function wisCameraTraceEventStreamId(entry = {}) {
+  const item = entry && typeof entry === "object" ? entry : {};
+  return cleanText(item.streamId || item.cameraId || item.artifactId || item.mediaStreamId || item.visibleImageStreamId, "");
+}
+
+function wisCameraLatestTraceEvent(events = [], predicate = null) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const entry = events[index];
+    if (!entry || typeof entry !== "object") continue;
+    if (!predicate || predicate(entry)) return entry;
+  }
+  return null;
+}
+
+function wisCameraTraceNumber(...values) {
+  for (const value of values) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return 0;
+}
+
+function wisCameraTraceHasNumber(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
+function wisCameraPlaybackUrlParts(playbackUrl = "") {
+  const raw = cleanText(playbackUrl, "");
+  if (!raw) return { playbackUrl: "", playbackUrlFromMs: 0, playbackUrlFollow: "" };
+  try {
+    const parsed = new URL(raw, window.location?.href || "http://localhost/");
+    return {
+      playbackUrl: raw,
+      playbackUrlFromMs: wisCameraTraceNumber(
+        parsed.searchParams.get("from_ms"),
+        parsed.searchParams.get("timestamp_ms"),
+        parsed.searchParams.get("timestampMs")
+      ),
+      playbackUrlFollow: cleanText(parsed.searchParams.get("follow"), ""),
+    };
+  } catch {
+    return { playbackUrl: raw, playbackUrlFromMs: 0, playbackUrlFollow: "" };
+  }
+}
+
+function wisCameraVisibleImageSummary(media = null) {
+  if (!media) return null;
+  const rect = media.getBoundingClientRect?.();
+  const style = window.getComputedStyle ? window.getComputedStyle(media) : null;
+  const connected = Boolean(media.isConnected);
+  const visible = Boolean(
+    connected
+    && rect
+    && Number(rect.width || 0) > 0
+    && Number(rect.height || 0) > 0
+    && rect.bottom >= 0
+    && rect.right >= 0
+    && rect.top <= window.innerHeight
+    && rect.left <= window.innerWidth
+    && style?.display !== "none"
+    && style?.visibility !== "hidden"
+    && style?.opacity !== "0"
+  );
+  const surface = media.closest?.(".wis-node-webcam_placeholder[data-wis-camera-slot]");
+  const src = cleanText(media.currentSrc || media.src || media.dataset?.wisLastGoodSrc || "", "");
+  return {
+    streamId: cleanText(media.dataset?.wisMediaStreamId || media.dataset?.wisCameraStreamId || surface?.dataset?.wisCameraStreamId, ""),
+    owner: cleanText(media.dataset?.wisMediaOwner, ""),
+    frameMs: wisCameraTraceNumber(media.dataset?.wisPlaybackFrameMs, media.dataset?.wisFrameTimestampMs),
+    srcPrefix: src.slice(0, 180),
+    isConnected: connected,
+    isVisible: visible,
+    rect: rect ? {
+      left: Math.round(Number(rect.left || 0)),
+      top: Math.round(Number(rect.top || 0)),
+      width: Math.round(Number(rect.width || 0)),
+      height: Math.round(Number(rect.height || 0)),
+    } : null,
+  };
+}
+
+function wisCameraVisibleImagesForTrace() {
+  return Array.from(document.querySelectorAll?.(".wis-camera-image, .wis-camera-video") || [])
+    .map((media) => wisCameraVisibleImageSummary(media))
+    .filter(Boolean);
+}
+
+function wisCameraControllerStreamIdForTrace(streamId = "") {
+  const key = cleanText(streamId, "");
+  const controllers = state.wisCameraArtifactControllers;
+  if (key && controllers?.get?.(key)) return key;
+  try {
+    const keys = Array.from(controllers?.keys?.() || []).map((candidate) => cleanText(candidate, "")).filter(Boolean);
+    return keys[keys.length - 1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function wisCameraOwnerStateFromControllerMode(mode = "live") {
+  const cleanMode = cleanText(mode, "live");
+  if (cleanMode === "live") return WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  if (["seeking", "buffering", "loading"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+  if (["paused", "ended", "gap", "stalled", "error"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+  return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+}
+
+function wisCameraPlaybackTracePayload(streamId = "", extra = {}) {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const session = recordedWisCameraSession(key);
+  const controller = key ? state.wisCameraArtifactControllers?.get?.(key) : null;
+  let controllerState = null;
+  try {
+    controllerState = controller?.getState?.() || null;
+  } catch {
+    controllerState = null;
+  }
+  const timeline = wisCameraTimelineForStream(key);
+  const frames = Array.isArray(timeline.frames) ? timeline.frames : [];
+  const controllerMode = cleanText(controllerState?.playbackClock?.mode, "");
+  const appOwnerState = key ? wisCameraTimelineOwnerStateContract(state, key) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const controllerOwnerState = controllerMode ? wisCameraOwnerStateFromControllerMode(controllerMode) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const ownerState = appOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE
+    ? appOwnerState
+    : controllerOwnerState;
+  const windowModel = wisCameraTimelineTimeWindow(timeline, frames, {
+    playbackPosition: Number(session ? wisCameraRecordedClockMs(session) : 0),
+  });
+  const activeLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const playbackClockMs = Number(session
+    ? wisCameraRecordedClockMs(session)
+    : (controllerState?.playbackClock?.anchorRecordingTimeMs ? controller?.getCurrentPlaybackTimeMs?.() : 0));
+  return {
+    streamId: key,
+    owner: ownerState,
+    appOwnerState,
+    controllerOwnerState,
+    controllerMode,
+    currentMode: cleanText(controllerMode || session?.status || session?.mode || timeline.mode, "live"),
+    paused: Boolean(session?.userPaused || session?.clockPaused || session?.status === "paused" || controllerState?.playbackClock?.mode === "paused"),
+    playbackRate: Number(session?.playbackRate || session?.rate || controllerState?.playbackClock?.rate || 1),
+    requestedTimestampMs: Number(session?.requestedSeekTimestampMs || controllerState?.playbackClock?.targetTimeMs || 0),
+    persistedSeekTimestampMs: Number(session?.persistedSeekTimestampMs || session?.requestedSeekTimestampMs || controllerState?.playbackClock?.targetTimeMs || 0),
+    mediaAnchorMs: Number(session?.anchorRecordingTimeMs || controllerState?.playbackClock?.anchorRecordingTimeMs || 0),
+    wallAnchorMs: Number(session?.anchorWallTimeMs || controllerState?.playbackClock?.anchorWallTimeMs || 0),
+    playbackClockMs: Number.isFinite(playbackClockMs) ? playbackClockMs : 0,
+    visibleFrameMs: Number(session?.lastDisplayedFrameTimeMs || controllerState?.playbackClock?.displayedRecordingTimeMs || 0),
+    archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? timeline?.range?.start_ms ?? windowModel.visibleStart ?? 0),
+    archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? timeline?.range?.end_ms ?? windowModel.visibleEnd ?? 0),
+    generation: Number(session?.generation || controllerState?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+	    controllerFound: Boolean(controller),
+	    activePlaybackLoops: activeLoop && !activeLoop.disposed ? 1 : 0,
+	    activeReaders: activeLoop?.readerActive ? 1 : 0,
+	    playbackReaderCreatedCount: Number(session?.playbackReaderCreatedCount || activeLoop?.playbackReaderCreatedCount || 0),
+	    playbackReaderDoneCount: Number(session?.playbackReaderDoneCount || activeLoop?.playbackReaderDoneCount || 0),
+	    playbackReaderAbortCount: Number(session?.playbackReaderAbortCount || activeLoop?.playbackReaderAbortCount || 0),
+	    playbackReaderErrorCount: Number(session?.playbackReaderErrorCount || activeLoop?.playbackReaderErrorCount || 0),
+	    playbackChunksReceived: Number(session?.playbackChunksReceived || activeLoop?.playbackChunksReceived || 0),
+	    playbackFramesParsed: Number(session?.playbackFramesParsed || activeLoop?.playbackFramesParsed || 0),
+	    playbackFramesCommitted: Number(session?.playbackFramesCommitted || activeLoop?.playbackFramesCommitted || 0),
+	    playbackReaderLastDoneReason: cleanText(session?.playbackReaderLastDoneReason || activeLoop?.playbackReaderLastDoneReason, ""),
+	    playbackReaderLifetimeMs: Number(session?.playbackReaderLifetimeMs || activeLoop?.playbackReaderLifetimeMs || 0),
+	    ...extra,
+	  };
+	}
+
+function traceWisCameraPlayPause(event, streamId = "", extra = {}) {
+  return traceWisCameraBoundary(event, wisCameraPlaybackTracePayload(streamId, extra));
+}
+
+function dumpWisCameraTrace(streamId = "") {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const trace = Array.isArray(window.__WIS_CAMERA_TRACE_ALL__)
+    ? window.__WIS_CAMERA_TRACE_ALL__
+    : (Array.isArray(window.__WIS_CAMERA_TRACE__) ? window.__WIS_CAMERA_TRACE__ : []);
+  const session = recordedWisCameraSession(key);
+  const activeLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const perf = key ? (sampleWisCameraPerf(state, key, {}, null, { force: true }) || {}) : {};
+  const events = trace
+    .map((entry) => cloneWisCameraTraceValue(entry))
+    .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
+  const last300Events = events.slice(-300);
+  const eventBelongsToCurrentStream = (entry) => {
+    const eventStreamId = wisCameraTraceEventStreamId(entry);
+    return !key || !eventStreamId || eventStreamId === key;
+  };
+  const committedRecordedFrames = Array.from(new Set(events
+    .filter((entry) => (
+      eventBelongsToCurrentStream(entry)
+      && ((entry.event === "camera.visual.frame_commit" && cleanText(entry.mode, "recorded") === "recorded" && entry.decodedOk !== false)
+      || entry.event === "recorded.commit.accepted"
+      )
+    ))
+    .map((entry) => Number(entry.frameTimestampMs || entry.visibleFrameMs || entry.timestampMs || 0))
+    .filter((timestampMs) => Number.isFinite(timestampMs) && timestampMs > 0)))
+    .sort((a, b) => a - b);
+  const controlButtonEvents = events
+    .filter((entry) => cleanText(entry.event, "").startsWith("controls.")
+      || entry.event === "playback.control.clicked"
+      || cleanText(entry.event, "").startsWith("playback.pause")
+      || cleanText(entry.event, "").startsWith("playback.resume"))
+    .slice(-80);
+  const playbackFetchEvents = events
+    .filter((entry) => [
+      "archive.fetch.started",
+      "archive.fetch.result",
+      "camera.media.playback_stream.start",
+      "camera.media.playback_stream.first_packet",
+      "camera.media.playback_stream.abort",
+	      "camera.media.playback_stream.restart",
+	      "camera.media.playback_stream.stall_suspected",
+	      "camera.media.playback_stream.duplicate_ignored",
+	      "camera.media.playback_reader.created",
+	      "camera.media.playback_reader.read_started",
+	      "camera.media.playback_reader.read_result",
+	      "camera.media.playback_reader.done",
+	      "camera.media.playback_reader.abort",
+	      "camera.media.playback_reader.error",
+	      "camera.media.playback_frame.parsed",
+	      "camera.server.seek.requested",
+      "camera.server.first_frame.received",
+      "camera.server.first_frame.offset_from_seek",
+      "camera.server.stream.gap_suspected",
+      "camera.server.stream.stall_suspected",
+      "camera.server.stream.restart",
+    ].includes(cleanText(entry.event, "")))
+    .slice(-120);
+  const timelineSeekEvents = events
+    .filter((entry) => [
+      "timeline.pointer",
+      "timeline.commit",
+      "timeline.seek.persisted",
+      "timeline.seek.overwritten",
+      "timeline.pending.seek.applied",
+      "timeline.app.setFrame",
+      "camera.seekRequested",
+      "camera.seekRequested.entrypoint",
+      "camera.seekRequested.state",
+      "archive.frame.resolved",
+      "recorded.render.entrypoint",
+      "recorded.render.rejected",
+    ].includes(cleanText(entry.event, "")))
+    .slice(-120);
+  const ownerTransitions = events
+    .filter((entry) => entry.event === "ownerMutation" || entry.event === "camera.playback.transition")
+    .slice(-80);
+  const countMatching = (predicate) => events.reduce((count, entry) => count + (predicate(entry) ? 1 : 0), 0);
+  const current = wisCameraPlaybackTracePayload(key);
+  const focusedSlot = wisFocusedCameraSlot() || "";
+  const focusedCamera = focusedSlot ? wisCameraConfigForSlot(focusedSlot) : {};
+  const activeCameraStreamId = focusedSlot ? wisCameraQualityStreamId(focusedSlot, focusedCamera) : "";
+  const visibleImages = wisCameraVisibleImagesForTrace();
+  const visibleImage = visibleImages.find((image) => image.isVisible && image.streamId === key)
+    || visibleImages.find((image) => image.isVisible && image.streamId === activeCameraStreamId)
+    || visibleImages.find((image) => image.isVisible)
+    || visibleImages[0]
+    || null;
+  const clickedTimelineEvent = wisCameraLatestTraceEvent(events, (entry) => ["timeline.commit", "timeline.pointer"].includes(cleanText(entry.event, "")));
+  const clickedControlEvent = wisCameraLatestTraceEvent(controlButtonEvents, (entry) => cleanText(entry.event, "").startsWith("controls.")
+    || cleanText(entry.event, "") === "playback.control.clicked");
+  const resolvedFrameEvent = wisCameraLatestTraceEvent(events, (entry) => {
+    if (!eventBelongsToCurrentStream(entry)) return false;
+    if (wisCameraTraceHasNumber(entry.resolvedFrameTimestampMs) || wisCameraTraceHasNumber(entry.resolvedTimestampMs)) return true;
+    return ["archive.frame.resolved", "camera.seekRequested", "camera.seekRequested.entrypoint", "camera.seekRequested.state", "recorded.render.entrypoint"]
+      .includes(cleanText(entry.event, ""))
+      && wisCameraTraceHasNumber(entry.frameTimestampMs);
+  });
+  const playbackUrlEvent = wisCameraLatestTraceEvent(events, (entry) => eventBelongsToCurrentStream(entry)
+    && cleanText(entry.playbackUrl, "").includes("/camera/push-playback"));
+  const playbackUrlDetails = wisCameraPlaybackUrlParts(playbackUrlEvent?.playbackUrl || "");
+  const playPauseButton = document.querySelector?.(`.wis-camera-timeline-controls-row [data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(key)}"]`)
+    || document.querySelector?.(".wis-camera-timeline-controls-row [data-wis-camera-control='play-pause']")
+    || null;
+  return cloneWisCameraTraceValue({
+    build: WIS_CAMERA_ARTIFACT_BUILD,
+    currentStreamId: key,
+    activeCameraSlot: focusedSlot,
+    appOwnerState: current.appOwnerState,
+    controllerOwnerState: current.controllerOwnerState,
+    controllerMode: current.controllerMode,
+    currentOwner: current.owner,
+    currentMode: current.currentMode,
+    paused: current.paused,
+    playbackRate: current.playbackRate,
+    requestedTimestampMs: current.requestedTimestampMs,
+    persistedSeekTimestampMs: current.persistedSeekTimestampMs,
+    resolvedFrameTimestampMs: wisCameraTraceNumber(
+      resolvedFrameEvent?.resolvedFrameTimestampMs,
+      resolvedFrameEvent?.resolvedTimestampMs,
+      resolvedFrameEvent?.frameTimestampMs
+    ),
+    mediaAnchorMs: current.mediaAnchorMs,
+    wallAnchorMs: current.wallAnchorMs,
+	    playbackClockMs: current.playbackClockMs,
+	    visibleFrameMs: current.visibleFrameMs || Number(visibleImage?.frameMs || 0),
+    clickedTimelineStreamId: wisCameraTraceEventStreamId(clickedTimelineEvent),
+    clickedControlStreamId: wisCameraTraceEventStreamId(clickedControlEvent),
+    controllerStreamId: wisCameraControllerStreamIdForTrace(key),
+    activeCameraStreamId,
+    visibleImageStreamId: cleanText(visibleImage?.streamId, ""),
+    playbackUrl: playbackUrlDetails.playbackUrl,
+    playbackUrlFromMs: playbackUrlDetails.playbackUrlFromMs,
+    playbackUrlFollow: playbackUrlDetails.playbackUrlFollow,
+	    activePlaybackLoops: Number(perf.activePlaybackLoops ?? current.activePlaybackLoops ?? (activeLoop && !activeLoop.disposed ? 1 : 0)),
+	    activeReaders: Number(perf.activeReaders ?? current.activeReaders ?? (activeLoop?.readerActive ? 1 : 0)),
+	    playbackReaderCreatedCount: Number(perf.playbackReaderCreatedCount ?? current.playbackReaderCreatedCount ?? 0),
+	    playbackReaderDoneCount: Number(perf.playbackReaderDoneCount ?? current.playbackReaderDoneCount ?? 0),
+	    playbackReaderAbortCount: Number(perf.playbackReaderAbortCount ?? current.playbackReaderAbortCount ?? 0),
+	    playbackReaderErrorCount: Number(perf.playbackReaderErrorCount ?? current.playbackReaderErrorCount ?? 0),
+	    playbackChunksReceived: Number(perf.playbackChunksReceived ?? current.playbackChunksReceived ?? 0),
+	    playbackFramesParsed: Number(perf.playbackFramesParsed ?? current.playbackFramesParsed ?? 0),
+	    playbackFramesCommitted: Number(perf.playbackFramesCommitted ?? current.playbackFramesCommitted ?? committedRecordedFrames.length),
+	    playbackReaderLastDoneReason: cleanText(perf.playbackReaderLastDoneReason || current.playbackReaderLastDoneReason, ""),
+	    playbackReaderLifetimeMs: Number(perf.playbackReaderLifetimeMs ?? current.playbackReaderLifetimeMs ?? 0),
+	    committedRecordedFrameCount: committedRecordedFrames.length,
+    committedRecordedFrames,
+    holdAheadFrameCount: countMatching((entry) => cleanText(entry.reason, "").includes("hold-ahead") || cleanText(entry.event, "").includes("hold_ahead")),
+    duplicateFrameCount: countMatching((entry) => cleanText(entry.event, "").includes("duplicate") || cleanText(entry.reason, "").includes("duplicate")),
+    staleRejectCount: countMatching((entry) => cleanText(entry.event, "").includes("stale") || cleanText(entry.event, "").includes("rejected") || cleanText(entry.reason, "").includes("stale")),
+    liveBlockedCount: countMatching((entry) => cleanText(entry.event, "").includes("blocked_by_recorded_owner") || entry.decision === "BLOCKED"),
+    playButtonClicks: countMatching((entry) => (entry.event === "playback.control.clicked" && entry.control === "play") || (entry.event === "controls.playpause.click" && entry.action === "play")),
+    pauseButtonClicks: countMatching((entry) => (entry.event === "playback.control.clicked" && entry.control === "pause") || (entry.event === "controls.playpause.click" && entry.action === "pause")),
+    resumeButtonClicks: countMatching((entry) => cleanText(entry.event, "").startsWith("playback.resume.") || (entry.event === "playback.control.clicked" && entry.control === "play")),
+    playPauseButton: wisCameraControlTargetSummary(playPauseButton),
+    controlButtonEvents,
+    visibleImages,
+    playbackFetchEvents,
+    timelineSeekEvents,
+    ownerTransitions,
+    last300Events,
+  });
+}
+
+function installWisCameraTraceDumpHelper() {
+  try {
+    window.dumpWisCameraTrace = (streamId = "") => dumpWisCameraTrace(streamId);
+  } catch {
+    // Console helper installation is diagnostic only.
+  }
+}
+
+installWisCameraTraceDumpHelper();
+
+async function copyWisCameraTraceDump(streamId = "") {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const dump = dumpWisCameraTrace(key);
+  const text = JSON.stringify(dump, null, 2);
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard-writeText-unavailable");
+    await navigator.clipboard.writeText(text);
+    setWisCameraNotice(key, "Camera trace copied", "success");
+    traceWisCameraBoundary("controls.copytrace.copied", wisCameraPlaybackTracePayload(key, {
+      control: "copy-trace",
+      action: "copy",
+      reason: "debug-action",
+      dumpBuild: dump.build,
+      eventCount: Array.isArray(dump.last300Events) ? dump.last300Events.length : 0,
+    }));
+  } catch (error) {
+    setWisCameraNotice(key, "Camera trace available in console", "warn");
+    traceWisCameraBoundary("controls.copytrace.copy_failed", wisCameraPlaybackTracePayload(key, {
+      control: "copy-trace",
+      action: "copy",
+      reason: "debug-action",
+      error: error?.message || String(error),
+    }));
+    try {
+      console.info("WIS camera trace dump", dump);
+    } catch {
+      // Console diagnostics are best effort.
+    }
+  }
+  return dump;
+}
+
+function wisCameraPlaybackOwnerMode(session = null, fallback = "live") {
+  if (!session || typeof session !== "object") return cleanText(fallback, "live");
+  const status = cleanText(session.status || session.state, "");
+  if (["seeking", "buffering", "loading"].includes(status)) return "seeking";
+  if (session.mode === "recorded") return "recorded";
+  if (status === "error") return "error";
+  return cleanText(fallback, "live");
+}
+
+function wisCameraPlaybackOwnerState(session = null, fallback = WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) {
+  if (session?.ownerState || session?.timelineOwnerState) {
+    const explicit = cleanText(session.ownerState || session.timelineOwnerState, "").toUpperCase();
+    if (Object.values(WIS_CAMERA_TIMELINE_OWNER_STATES).includes(explicit)) return explicit;
+  }
+  const status = cleanText(session?.status || session?.state, "");
+  if (session?.mode === "recorded") {
+    if (["seeking", "buffering", "loading"].includes(status)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+    if (["paused", "ended", "gap", "stalled", "error"].includes(status)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+    return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  }
+  const fallbackState = cleanText(fallback, WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE).toUpperCase();
+  return Object.values(WIS_CAMERA_TIMELINE_OWNER_STATES).includes(fallbackState)
+    ? fallbackState
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+}
+
+function wisCameraRecordedOwnsStream(streamId) {
+  const key = cleanText(streamId, "");
+  return Boolean(key && wisCameraRecordedOwnsTimelineContract(state, key));
+}
+
+function wisCameraLoopOwnerSnapshot(streamId, slot = "") {
+  const key = cleanText(streamId, "");
+  const cleanSlot = cleanText(slot, key);
+  const playbackLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const liveTimer = (key && state.wisCameraTimers.get(key)) || (cleanSlot && state.wisCameraTimers.get(cleanSlot)) || null;
+  const recordedSession = recordedWisCameraSession(key);
+  const recordedOwns = wisCameraRecordedOwnsStream(key);
+  return {
+    streamId: key,
+    ownerState: wisCameraTimelineOwnerStateContract(state, key),
+    liveLoopActiveCount: liveTimer && !recordedOwns ? 1 : 0,
+    liveLoopIgnoredCount: liveTimer && recordedOwns ? 1 : 0,
+    recordedLoopActiveCount: playbackLoop && !playbackLoop.disposed ? 1 : 0,
+    activeGeneration: Number(recordedSession?.generation || playbackLoop?.generation || 0),
+    activeReaders: playbackLoop?.readerActive ? 1 : 0,
+    recordedSessionId: cleanText(recordedSession?.id, ""),
+  };
+}
+
+function logWisCameraLoopOwner(streamId, reason = "", slot = "") {
+  logWisCameraMediaEvent("camera.loop.owner", {
+    ...wisCameraLoopOwnerSnapshot(streamId, slot),
+    reason,
+  }, { always: true, sampleMs: 500 });
+}
+
+function enterWisCameraRecordedMode(streamId, frame = null, options = {}) {
+  const key = cleanText(streamId, "");
+  if (!key) return null;
+  const slot = cleanText(options.slot, wisFocusedCameraSlot() || key);
+	  const existingSession = recordedWisCameraSession(key);
+	  const previousMode = wisCameraPlaybackOwnerMode(existingSession, wisCameraTimelineMode(key));
+	  const previousOwnerState = wisCameraPlaybackOwnerState(existingSession);
+	  if (wisCameraTimelineMode(key) !== "recorded") state.wisCameraTimelineModes.set(key, "recorded");
+	  const liveLoopSnapshotBeforeStop = wisCameraLoopOwnerSnapshot(key, slot);
+	  stopWisCameraTimer(slot);
+	  stopWisCameraTimer(key);
+  const timestampMs = Number(
+    options.timestampMs
+      ?? options.targetTimeMs
+      ?? frame?.seek_target_ms
+      ?? frame?.seekTargetMs
+      ?? frame?.timestamp_ms
+      ?? frame?.timestampMs
+      ?? 0
+  );
+	  setWisCameraTimelineOwnerState(state, key, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING, {
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    sessionId: cleanText(existingSession?.id, ""),
+	    reason: cleanText(options.reason, "timeline-seek"),
+	    caller: "enterWisCameraRecordedMode",
+	  });
+	  traceWisCameraBoundary("ownerMutation", {
+	    streamId: key,
+	    previousOwner: previousOwnerState,
+	    nextOwner: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+	    transition: `${previousOwnerState} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING}`,
+	    reason: cleanText(options.reason, "timeline-seek"),
+	    caller: "enterWisCameraRecordedMode",
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    frameLayerOwner: "recorded",
+	    ...wisCameraLoopOwnerSnapshot(key, slot),
+	  }, { stack: true });
+	  traceWisCameraBoundary("live.commit", {
+	    decision: "BLOCKED",
+	    streamId: key,
+	    ownerAtCommit: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    frameTimestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+	    frameSource: "live-owner-fence",
+	    reason: "recorded-owner-fence",
+	    liveLoopActiveBeforeStop: Number(liveLoopSnapshotBeforeStop.liveLoopActiveCount || 0),
+	    liveLoopIgnoredBeforeStop: Number(liveLoopSnapshotBeforeStop.liveLoopIgnoredCount || 0),
+	    ...wisCameraLoopOwnerSnapshot(key, slot),
+	  });
+  logWisCameraMediaEvent("camera.playback.transition", {
+    streamId: key,
+    fromMode: previousMode,
+    toMode: "seeking",
+    fromOwnerState: previousOwnerState,
+    toOwnerState: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+    ownerStateTransition: `${previousOwnerState} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING}`,
+    frameLayerOwner: "recorded",
+    reason: cleanText(options.reason, "timeline-seek"),
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+    generation: Number(options.generation || existingSession?.generation || 0),
+  }, { always: true });
+  logWisCameraMediaEvent("camera.timeline.seek", {
+    streamId: key,
+    targetTimestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+    resolvedTimestampMs: Number(frame?.timestamp_ms || frame?.timestampMs || timestampMs || 0),
+    ratio: Number(options.ratio),
+    segmentId: cleanText(frame?.id, ""),
+    segmentUrl: cleanText(frame?.url, ""),
+    generation: Number(options.generation || existingSession?.generation || 0),
+    reason: cleanText(options.reason, "timeline-seek"),
+  }, { always: true });
+  logWisCameraLoopOwner(key, "enter-recorded", slot);
+  return existingSession;
 }
 
 function wisCameraImageHasRecordedOwner(image) {
@@ -3769,13 +4632,33 @@ function wisCameraImageHasRecordedOwner(image) {
 }
 
 function blockLiveWisCameraImageWrite(image, streamId, reason = "live-write") {
-  if (!wisCameraImageHasRecordedOwner(image)) return false;
+  const activeSession = recordedWisCameraSession(streamId);
+  if (!wisCameraImageHasRecordedOwner(image) && !activeSession && !wisCameraRecordedOwnsStream(streamId)) return false;
+  traceWisCameraBoundary("live.commit", {
+    decision: "BLOCKED",
+    streamId,
+    ownerAtCommit: wisCameraTimelineOwnerStateContract(state, streamId),
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
+    frameTimestampMs: Number(image?.dataset?.wisPlaybackFrameMs || 0),
+    frameSource: image?.dataset?.wisPlaybackStream || "live",
+    imageOwner: image?.dataset?.wisMediaOwner || "",
+    reason,
+    ...wisCameraLoopOwnerSnapshot(streamId),
+  });
   logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
     streamId,
-    generation: Number(image?.dataset?.wisMediaGeneration || 0),
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
     imageOwner: image?.dataset?.wisMediaOwner,
     reason,
+    sessionId: cleanText(activeSession?.id, ""),
   }, { sampleMs: 1000 });
+  logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+    streamId,
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
+    ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+    reason,
+    sessionId: cleanText(activeSession?.id, ""),
+  }, { always: true, sampleMs: 1000 });
   return true;
 }
 
@@ -3793,14 +4676,74 @@ function wisCameraPlaybackController(streamId) {
       getTimelineModel: () => wisCameraTimelineForStream(key),
       getPlaybackState: () => recordedWisCameraSession(key),
       findSegmentForTime: async (targetTimeMs, context = {}) => wisCameraSegmentForTarget(key, targetTimeMs, context),
-      loadSegment: async (segment, context = {}) => setWisCameraTimelineFrame(key, segment, {
-        force: false,
-        fromController: true,
-        restartSession: true,
-        source: context.source || "programmatic",
-        reason: context.reason || "controller-seek",
-        generation: context.generation,
-      }) || segment,
+	      onSeekPending: (context = {}) => {
+	        const slot = wisFocusedCameraSlot() || "cam-1";
+	        const segment = wisCameraSegmentForTarget(key, context.targetTimeMs || context.timestampMs, {
+	          requestedFrame: context.requestedFrame,
+	        });
+	        traceWisCameraBoundary("camera.seekRequested.entrypoint", {
+	          functionName: "wisCameraPlaybackController.onSeekPending",
+	          streamId: key,
+	          requestedTimestampMs: Number(context.targetTimeMs || context.timestampMs || 0),
+	          archiveWindowStartMs: Number(state.wisCameraTimeline?.availableRange?.start_ms ?? state.wisCameraTimeline?.available_range?.start_ms ?? state.wisCameraTimeline?.range?.start_ms ?? 0),
+	          archiveWindowEndMs: Number(state.wisCameraTimeline?.availableRange?.end_ms ?? state.wisCameraTimeline?.available_range?.end_ms ?? state.wisCameraTimeline?.range?.end_ms ?? 0),
+	          resolvedTimestampMs: Number(segment?.timestamp_ms || segment?.timestampMs || 0),
+	          recordedPlaybackPossible: Boolean(segment?.id && segment?.url),
+	          generation: Number(context.generation || 0),
+	          ownerBeforeSeek: wisCameraTimelineOwnerStateContract(state, key),
+	          reason: context.reason || "timeline-seek",
+	        });
+	        if (!segment?.id || !segment?.url) return null;
+	        stopWisCameraTimer(slot);
+        stopWisCameraTimer(key);
+        state.wisCameraTimelineSelections.set(key, segment);
+        const preservePaused = Boolean(recordedWisCameraSession(key)?.userPaused);
+        const session = startWisCameraRecordedSession(key, segment, {
+          explicitSeek: true,
+          restart: true,
+          generation: context.generation,
+          reason: context.reason || "timeline-seek",
+          timestampMs: context.targetTimeMs || context.timestampMs,
+          ratio: context.target?.ratio,
+          paused: preservePaused,
+        });
+        if (session) {
+          session.status = "seeking";
+          session.state = "seeking";
+          session.ownerState = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+          session.timelineOwnerState = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+          session.frameOwner = "recorded";
+          session.timelineOwner = "recorded";
+          session.clockPaused = true;
+          session.userPaused = preservePaused;
+          session.currentWallTime = Number(context.targetTimeMs || segment.seek_target_ms || segment.timestamp_ms || session.currentWallTime || 0);
+          session.updatedAt = Date.now();
+        }
+        logWisCameraLoopOwner(key, "seek-pending", slot);
+        if (!renderWisCameraPlaybackInPlace(key, segment, { force: true, generation: context.generation })) renderWis();
+        updateWisCameraRecordedPlaybackUi(key, { currentMs: session?.currentWallTime, timeline: true });
+        return segment;
+      },
+      loadSegment: async (segment, context = {}) => {
+        const activeSession = recordedWisCameraSession(key);
+        if (
+          activeSession
+          && Number(activeSession.generation || 0) === Number(context.generation || 0)
+          && wisCameraTimelineFramePlaybackKey(activeSession.requestedFrame || activeSession.frame) === wisCameraTimelineFramePlaybackKey(segment)
+        ) {
+          state.wisCameraTimelineSelections.set(key, segment);
+          return { ...segment, playbackClockSource: "media" };
+        }
+        setWisCameraTimelineFrame(key, segment, {
+          force: context.source === "user",
+          fromController: true,
+          restartSession: true,
+          source: context.source || "programmatic",
+          reason: context.reason || "controller-seek",
+          generation: context.generation,
+        });
+        return { ...segment, playbackClockSource: "media" };
+      },
       drawFrameAt: (timestampMs) => {
         updateWisCameraRecordedPlaybackUi(key, { currentMs: timestampMs });
       },
@@ -3885,8 +4828,135 @@ function setWisCameraTextContent(element, text = "") {
 function stopWisCameraPlaybackStream(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
   stopWisCameraPlaybackController(key, "playback-stream-stop");
   stopWisCameraPlaybackState(state, key);
+  releaseMediaStreamWriter(key, { kind: "recorded-playback", generation: session?.generation });
+}
+
+function toggleWisCameraRecordedPlayback(camera = {}, event = null) {
+  const targetSummary = wisCameraControlTargetSummary(event?.target || null);
+  const slot = cleanText(targetSummary?.slot || camera._slot, wisFocusedCameraSlot() || "cam-1");
+  const streamId = cleanText(targetSummary?.streamId, wisCameraQualityStreamId(slot, camera));
+  const session = recordedWisCameraSession(streamId);
+  const paused = Boolean(session?.clockPaused || session?.status === "paused");
+  const action = cleanText(targetSummary?.action, paused ? "play" : "pause");
+  traceWisCameraBoundary("controls.playpause.resolvedTarget", wisCameraPlaybackTracePayload(streamId, {
+    control: "play-pause",
+    action,
+    slot,
+    focusedSlot: wisFocusedCameraSlot() || "",
+    timelineStreamId: cleanText(state.wisCameraTimeline?.streamId, ""),
+    sessionKeys: Array.from(state.wisCameraRecordedSessions?.keys?.() || []).map((key) => cleanText(key, "")).filter(Boolean).slice(-10),
+    target: targetSummary,
+  }));
+  traceWisCameraPlayPause("controls.playpause.beforeState", streamId, {
+    control: "play-pause",
+    action,
+    slot,
+  });
+  traceWisCameraBoundary("playback.control.clicked", {
+    streamId,
+    control: action,
+    owner: wisCameraTimelineOwnerStateContract(state, streamId),
+    requestedTimestampMs: Number(session?.requestedSeekTimestampMs || 0),
+    persistedSeekTimestampMs: Number(session?.persistedSeekTimestampMs || session?.requestedSeekTimestampMs || 0),
+    mediaAnchorMs: Number(session?.anchorRecordingTimeMs || 0),
+    wallAnchorMs: Number(session?.anchorWallTimeMs || 0),
+    playbackClockMs: Number(session ? wisCameraRecordedClockMs(session) : 0),
+    visibleFrameMs: Number(session?.lastDisplayedFrameTimeMs || 0),
+    archiveWindowStartMs: Number(state.wisCameraTimeline?.availableRange?.start_ms ?? state.wisCameraTimeline?.available_range?.start_ms ?? state.wisCameraTimeline?.range?.start_ms ?? 0),
+    archiveWindowEndMs: Number(state.wisCameraTimeline?.availableRange?.end_ms ?? state.wisCameraTimeline?.available_range?.end_ms ?? state.wisCameraTimeline?.range?.end_ms ?? 0),
+    generation: Number(session?.generation || 0),
+    paused,
+    playbackRate: Number(session?.playbackRate || session?.rate || 1),
+  });
+  if (!session) {
+    traceWisCameraPlayPause("controls.playpause.controllerFound", streamId, {
+      control: "play-pause",
+      action,
+      slot,
+      controllerFound: Boolean(state.wisCameraArtifactControllers?.get?.(streamId)),
+      rejected: true,
+      reason: "no-recorded-session",
+    });
+    traceWisCameraPlayPause("playback.resume.rejected", streamId, {
+      control: "play-pause",
+      action,
+      slot,
+      reason: "no-recorded-session",
+    });
+    return;
+  }
+  const controller = wisCameraPlaybackController(streamId);
+  traceWisCameraPlayPause("controls.playpause.controllerFound", streamId, {
+    control: "play-pause",
+    action,
+    slot,
+    controllerFound: Boolean(controller),
+  });
+  if (paused) {
+    traceWisCameraPlayPause("playback.resume.called", streamId, {
+      control: "play-pause",
+      action,
+      slot,
+      reason: "timeline-play-button",
+    });
+    const resumed = resumeWisCameraPlaybackState(state, streamId, {
+      sessionId: session.id,
+      generation: session.generation,
+      reason: "timeline-play-button",
+    });
+    const controllerStarted = controller?.resumePlayback?.({ source: "control", reason: "timeline-play-button", generation: session.generation });
+    if (!resumed) {
+      traceWisCameraPlayPause("playback.resume.rejected", streamId, {
+        control: "play-pause",
+        action,
+        slot,
+        reason: "state-resume-returned-null",
+        controllerStarted: Boolean(controllerStarted),
+      });
+    } else {
+      traceWisCameraPlayPause("playback.resume.started", streamId, {
+        control: "play-pause",
+        action,
+        slot,
+        controllerStarted: Boolean(controllerStarted),
+      });
+    }
+    if (!wisCameraActivePlaybackLoop(state, streamId) && resumed?.frame) {
+      renderWisCameraPlaybackInPlace(streamId, resumed.frame, { force: true, generation: resumed.generation });
+    }
+  } else {
+    traceWisCameraPlayPause("playback.pause.called", streamId, {
+      control: "play-pause",
+      action,
+      slot,
+      reason: "timeline-pause-button",
+    });
+    const pausedSession = pauseWisCameraPlaybackState(state, streamId, {
+      sessionId: session.id,
+      generation: session.generation,
+      reason: "timeline-pause-button",
+    });
+    const controllerPaused = controller?.pausePlayback?.({ source: "control", reason: "timeline-pause-button", generation: session.generation });
+    if (!pausedSession) {
+      traceWisCameraPlayPause("playback.pause.rejected", streamId, {
+        control: "play-pause",
+        action,
+        slot,
+        reason: "state-pause-returned-null",
+        controllerPaused: Boolean(controllerPaused),
+      });
+    }
+  }
+  updateWisCameraRecordedPlaybackUi(streamId, { force: true });
+  renderWisCameraTimelineFooter({ ...camera, _slot: slot });
+  traceWisCameraPlayPause("controls.playpause.afterState", streamId, {
+    control: "play-pause",
+    action,
+    slot,
+  });
 }
 
 function wisMonotonicNow() {
@@ -3907,27 +4977,81 @@ function stopWisCameraRecordedClock(streamId) {
   const key = cleanText(streamId, "");
   const timer = key ? state.wisCameraRecordedTickTimers.get(key) : null;
   if (!timer) return;
-  clearInterval(timer);
+  if (timer && typeof timer === "object" && timer.kind === "wis-camera-scheduler-task") {
+    stopWisCameraTimer(`recorded-clock:${key}`);
+  } else {
+    clearInterval(timer);
+    clearTimeout(timer);
+  }
   state.wisCameraRecordedTickTimers.delete(key);
+}
+
+function syncWisCameraPlayPauseButtonForSession(streamId, session = null) {
+  const key = cleanText(streamId, "");
+  if (!key || !session) return false;
+  const widget = widgetById("wis");
+  const footer = widget?.querySelector?.(".wis-camera-timeline");
+  const button = footer?.querySelector?.(`[data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(key)}"]`);
+  if (!button) return false;
+  const paused = Boolean(session.clockPaused || session.status === "paused");
+  const expectedAction = paused ? "play" : "pause";
+  const expectedTitle = paused ? "Resume recorded playback" : "Pause recorded playback";
+  const expectedPressed = paused ? "false" : "true";
+  const currentAction = cleanText(button.dataset?.wisCameraAction, "");
+  const currentTitle = cleanText(button.getAttribute?.("title"), "");
+  const currentPressed = cleanText(button.getAttribute?.("aria-pressed"), "");
+  if (currentAction === expectedAction && currentTitle === expectedTitle && currentPressed === expectedPressed) return false;
+  traceWisCameraPlayPause("controls.playpause.uiStateMismatch", key, {
+    control: "play-pause",
+    action: currentAction,
+    expectedAction,
+    expectedTitle,
+    expectedPressed,
+    status: cleanText(session.status, ""),
+    clockPaused: Boolean(session.clockPaused),
+    button: wisCameraControlTargetSummary(button),
+  });
+  if (footer?.dataset) footer.dataset.wisTimelineSignature = "playpause-state-mismatch";
+  const slot = wisCameraSlotForStreamId(key, button.dataset?.wisCameraSlot || "");
+  const camera = wisCameraConfigForSlot(slot) || focusedWisCameraTimelineConfig() || {};
+  if (wisCameraIsPushConfig(camera)) renderWisCameraTimelineFooter({ ...camera, _slot: slot });
+  return true;
 }
 
 function updateWisCameraRecordedPlaybackUi(streamId, options = {}) {
   const key = cleanText(streamId, "");
   const session = recordedWisCameraSession(key);
   if (!session) return;
+  if (syncWisCameraPlayPauseButtonForSession(key, session)) return;
   const overrideMs = Number(options.currentMs);
   const currentMs = Number.isFinite(overrideMs) && overrideMs > 0 ? overrideMs : wisCameraRecordedClockMs(session);
+  if (!state.wisCameraTimelineUiState) state.wisCameraTimelineUiState = new Map();
+  const uiState = state.wisCameraTimelineUiState.get(key) || { lastTimelineAt: 0, lastProgress: null, lastAriaAt: 0 };
+  state.wisCameraTimelineUiState.set(key, uiState);
+  const nowMs = performance.now();
+  const forceUi = Boolean(options.force || options.userInteracting);
+  const budget = wisCameraBudget(key, "timeline");
+  if (!forceUi && !budget.allowTimelineWork) return;
+  if (options.timelineOnly && !forceUi && nowMs - Number(uiState.lastTimelineAt || 0) < Number(budget.timelineMinIntervalMs || 250)) return;
   const widget = widgetById("wis");
   const footer = widget?.querySelector?.(".wis-camera-timeline");
   const title = footer?.querySelector?.(".wis-camera-timeline-title");
-  if (!options.timelineOnly) setWisCameraTextContent(title, wisCameraRecordedTimelineTitle(session, currentMs));
+  const setTimelineText = (element, text = "") => {
+    const nextText = String(text ?? "");
+    if (element && element.textContent !== nextText) {
+      element.textContent = nextText;
+      noteWisCameraPerf(state, key, "timelinePatches");
+    }
+  };
+  if (!options.timelineOnly) setTimelineText(title, wisCameraRecordedTimelineTitle(session, currentMs));
   const sessionElement = session.id
     ? widget?.querySelector?.(`[data-wis-recorded-session-id="${CSS.escape(session.id)}"]`)
     : null;
   const status = sessionElement?.querySelector?.(".wis-camera-sync-status");
-  if (status && ["seeking", "buffering", "loading"].includes(session.status)) {
-    setWisCameraTextContent(status, `Syncing recording from ${cameraTimelineFrameLabel(session.frame)}...`);
+	  if (status && ["seeking", "buffering", "loading", "catching-up", "rebuffering", "restarting", "stalled", "gap", "ended"].includes(session.status)) {
+    setTimelineText(status, wisCameraRecordedTimelineTitle(session, currentMs));
   }
+  if (options.timeline === false) return;
   const timeline = state.wisCameraTimeline.streamId === key ? state.wisCameraTimeline : null;
   const frames = Array.isArray(timeline?.frames) ? timeline.frames : [];
   const { visibleStart, visibleEnd } = wisCameraTimelineTimeWindow(timeline || {}, frames, { playbackPosition: currentMs });
@@ -3945,10 +5069,39 @@ function updateWisCameraRecordedPlaybackUi(streamId, options = {}) {
       }, { sampleMs: 1000 });
       return;
     }
-    scrubber?.style?.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+    const previousProgress = Number(uiState.lastProgress);
+    const progressDelta = Number.isFinite(previousProgress) ? Math.abs(progress - previousProgress) : Infinity;
+    if (!forceUi && nowMs - Number(uiState.lastTimelineAt || 0) < Number(budget.timelineMinIntervalMs || 250) && progressDelta < 0.35) {
+      return;
+    }
+    const progressValue = `${progress}%`;
+    if (scrubber?.style?.getPropertyValue?.("--wis-camera-timeline-progress") !== progressValue) {
+      scrubber?.style?.setProperty("--wis-camera-timeline-progress", progressValue);
+      noteWisCameraPerf(state, key, "timelinePatches");
+      uiState.lastProgress = progress;
+      uiState.lastTimelineAt = nowMs;
+      traceWisCameraBoundary("timeline.progress.updated", {
+        streamId: key,
+        owner: wisCameraTimelineOwnerStateContract(state, key),
+        requestedTimestampMs: Number(session.requestedSeekTimestampMs || 0),
+        persistedSeekTimestampMs: Number(session.persistedSeekTimestampMs || session.requestedSeekTimestampMs || 0),
+        mediaAnchorMs: Number(session.anchorRecordingTimeMs || 0),
+        wallAnchorMs: Number(session.anchorWallTimeMs || 0),
+        playbackClockMs: currentMs,
+        visibleFrameMs: Number(session.lastDisplayedFrameTimeMs || 0),
+        archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? timeline?.range?.start_ms ?? visibleStart ?? 0),
+        archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? timeline?.range?.end_ms ?? visibleEnd ?? 0),
+        generation: Number(session.generation || 0),
+        paused: Boolean(session.clockPaused),
+        playbackRate: Number(session.playbackRate || session.rate || 1),
+        progress,
+      });
+    }
     const valueText = cameraTimelineFrameLabel({ timestamp_ms: currentMs });
-    if (scrubber?.getAttribute?.("aria-valuetext") !== valueText) {
+    if ((forceUi || nowMs - Number(uiState.lastAriaAt || 0) >= 1000) && scrubber?.getAttribute?.("aria-valuetext") !== valueText) {
       scrubber?.setAttribute?.("aria-valuetext", valueText);
+      noteWisCameraPerf(state, key, "timelinePatches");
+      uiState.lastAriaAt = nowMs;
     }
   }
 }
@@ -3957,10 +5110,11 @@ function startWisCameraRecordedClock(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
   stopWisCameraRecordedClock(key);
-  updateWisCameraRecordedPlaybackUi(key);
-  state.wisCameraRecordedTickTimers.set(key, window.setInterval(() => {
-    updateWisCameraRecordedPlaybackUi(key);
-  }, 500));
+  updateWisCameraRecordedPlaybackUi(key, { force: true });
+  const task = scheduleWisCameraTimer(`recorded-clock:${key}`, () => {
+    updateWisCameraRecordedPlaybackUi(key, { timelineOnly: true });
+  }, 500, { streamId: key, mode: "timeline" });
+  state.wisCameraRecordedTickTimers.set(key, task);
 }
 
 function startWisCameraRecordedSession(streamId, frame = null, options = {}) {
@@ -3968,76 +5122,82 @@ function startWisCameraRecordedSession(streamId, frame = null, options = {}) {
   if (!key || !frame?.id) return null;
   const existing = recordedWisCameraSession(key);
   if (!options.restart && wisCameraTimelineFramePlaybackKey(existing?.frame) === wisCameraTimelineFramePlaybackKey(frame)) return existing;
+  enterWisCameraRecordedMode(key, frame, {
+    reason: options.reason || "recorded-session-start",
+    timestampMs: options.timestampMs,
+    generation: options.generation,
+    ratio: options.ratio,
+  });
   stopWisCameraTimer(key);
   stopWisCameraRecordedClock(key);
   const session = startWisCameraPlaybackSeek(state, key, frame, {
     explicitSeek: options.explicitSeek,
     restart: options.restart,
     generation: options.generation,
+    paused: options.paused,
+    userPaused: options.paused,
+    reason: options.reason,
   });
+  logWisCameraLoopOwner(key, "recorded-session-start");
   return session;
-}
-
-function syncWisCameraRecordedSessionToDisplayedFrame(streamId, frame = null, status = "playing", options = {}) {
-  const key = cleanText(streamId, "");
-  const session = recordedWisCameraSession(key);
-  if (!session) return null;
-  const sessionId = cleanText(options.sessionId, "");
-  if (sessionId && session.id !== sessionId) return null;
-  const next = setWisCameraPlaybackFrame(state, key, frame || session.frame, {
-    sessionId,
-    generation: session.generation,
-    status: status === "playing" ? "recordedPlaying" : status,
-    state: status === "playing" ? "recordedPlaying" : status,
-    paused: false,
-    updateClockAnchor: options.updateClockAnchor !== false,
-  });
-  if (next) updateWisCameraRecordedPlaybackUi(key);
-  return next;
 }
 
 function stopWisCameraRecordedSession(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
+  traceWisCameraBoundary("fallback.live", {
+    functionName: "stopWisCameraRecordedSession",
+    streamId: key,
+    reason: "recorded-session-stop",
+    explicit: false,
+    previousOwner: wisCameraPlaybackOwnerState(session, wisCameraTimelineOwnerStateContract(state, key)),
+    generation: Number(session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   stopWisCameraRecordedClock(key);
   stopWisCameraPlaybackController(key, "recorded-session-stop");
   stopWisCameraPlaybackState(state, key);
+  releaseMediaStreamWriter(key, { kind: "recorded-playback", generation: session?.generation });
 }
 
-function wisCameraDisplayedFrameFromImage(image, fallbackFrame = null) {
-  return wisCameraDisplayedFrameFromImageContract(image, fallbackFrame);
-}
-
-async function streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, baseFrame = null, fallbackToImageSrc = null) {
-  const key = cleanText(streamId, "");
-  const session = recordedWisCameraSession(key);
-  const mediaOwner = wisCameraRecordedMediaOwner(key, session);
-  return streamWisCameraPushPlaybackFramesContract(state, {
-    streamId: key,
-    image,
-    playbackUrl,
-    baseFrame,
-    sessionId: session?.id,
-    generation: session?.generation,
-    mediaOwner,
-    fallbackToImageSrc,
-    onFrameDisplayed: () => updateWisCameraRecordedPlaybackUi(key),
-    onEnded: () => updateWisCameraRecordedPlaybackUi(key),
-    onError: () => updateWisCameraRecordedPlaybackUi(key),
-    onMediaEvent: (event, payload = {}) => logWisCameraMediaEvent(event, payload, {
-      sampleMs: event.includes(".sample") ? 1000 : 0,
-    }),
-  });
+function wisCameraSurfaceElement(slot = "") {
+  const key = cleanText(slot, "");
+  if (!key) return null;
+  return widgetById("wis")?.querySelector?.(`.wis-node-webcam_placeholder[data-wis-camera-slot="${CSS.escape(key)}"]`) || null;
 }
 
 function renderWisCameraPlaybackInPlace(streamId, frame = null, options = {}) {
   const key = cleanText(streamId, "");
   if (!key) return false;
-  const slot = wisFocusedCameraSlot() || "cam-1";
+  const slot = wisCameraSlotForStreamId(key, options.slot || frame?._slot || frame?.slot || "");
   const camera = wisCameraConfigForSlot(slot) || {};
-  if (!wisCameraIsPushConfig(camera) || wisCameraQualityStreamId(slot, camera) !== key) return false;
-  const element = widgetById("wis")?.querySelector?.(`[data-wis-camera-slot="${CSS.escape(slot)}"]`);
-  if (!element) return false;
+  if (!wisCameraIsPushConfig(camera) || wisCameraQualityStreamId(slot, camera) !== key) {
+    traceWisCameraBoundary("recorded.render.rejected", wisCameraPlaybackTracePayload(key, {
+      functionName: "renderWisCameraPlaybackInPlace",
+      streamId: key,
+      slot,
+      focusedSlot: wisFocusedCameraSlot() || "",
+      reason: "stream-slot-mismatch",
+      qualityStreamId: wisCameraQualityStreamId(slot, camera),
+      baseStreamId: wisCameraBaseStreamId(slot, camera),
+      frameId: cleanText(frame?.id, ""),
+    }));
+    return false;
+  }
+  const element = wisCameraSurfaceElement(slot);
+  if (!element) {
+    traceWisCameraBoundary("recorded.render.rejected", wisCameraPlaybackTracePayload(key, {
+      functionName: "renderWisCameraPlaybackInPlace",
+      streamId: key,
+      slot,
+      focusedSlot: wisFocusedCameraSlot() || "",
+      reason: "surface-element-missing",
+      frameId: cleanText(frame?.id, ""),
+    }));
+    return false;
+  }
   const showCameraIssue = (text, type = "recorded-playback-error") => {
     element.classList.remove("has-camera");
     element.replaceChildren();
@@ -4057,29 +5217,65 @@ function renderWisCameraPlaybackInPlace(streamId, frame = null, options = {}) {
 function returnWisCameraToLive(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
+  traceWisCameraBoundary("fallback.live", {
+    functionName: "returnWisCameraToLive",
+    streamId: key,
+    reason: "live-button",
+    explicit: true,
+    previousOwner: wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING),
+    nextOwner: WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE,
+    generation: Number(session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   state.wisCameraTimelineSelections.delete(key);
   stopWisCameraRecordedSession(key);
+  logWisCameraMediaEvent("camera.playback.transition", {
+    streamId: key,
+    fromMode: wisCameraPlaybackOwnerMode(session, "recorded"),
+    toMode: "live",
+    fromOwnerState: wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING),
+    toOwnerState: WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE,
+    ownerStateTransition: `${wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING)} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE}`,
+    frameLayerOwner: "live",
+    reason: "live-button",
+    timestampMs: Number(session?.currentWallTime || session?.recordedStartWallTime || 0),
+    generation: Number(session?.generation || 0),
+  }, { always: true });
+  logWisCameraLoopOwner(key, "return-live");
   setWisCameraTimelineMode(key, "live");
 }
 
 function setWisCameraTimelineFrame(streamId, frame = null, options = {}) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  traceWisCameraBoundary("timeline.app.setFrame", wisCameraPlaybackTracePayload(key, {
+    functionName: "setWisCameraTimelineFrame",
+    frameId: cleanText(frame?.id, ""),
+    requestedTimestampMs: Number(frame?.seek_target_ms || frame?.seekTargetMs || frame?.timestamp_ms || frame?.timestampMs || 0),
+    frameTimestampMs: Number(frame?.timestamp_ms || frame?.timestampMs || 0),
+    fromController: Boolean(options.fromController),
+    force: Boolean(options.force),
+    restartSession: options.restartSession === undefined ? null : Boolean(options.restartSession),
+    source: cleanText(options.source, ""),
+    reason: cleanText(options.reason, ""),
+    requestedGeneration: Number(options.generation ?? options.playbackGeneration ?? options.seekToken ?? 0),
+  }));
+  const requestedGeneration = Number(options.generation ?? options.playbackGeneration ?? options.seekToken);
+  const activeRecordedSession = recordedWisCameraSession(key);
+  if (Number.isFinite(requestedGeneration) && requestedGeneration > 0 && Number(activeRecordedSession?.generation || 0) > Math.round(requestedGeneration)) {
+    logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
+      streamId: key,
+      generation: Math.round(requestedGeneration),
+      activeGeneration: Number(activeRecordedSession?.generation || 0),
+      reason: "timeline-frame-stale-generation",
+    }, { sampleMs: 1000 });
+    return activeRecordedSession;
+  }
   const force = Boolean(options.force);
   if (frame?.id && frame?.url && !options.fromController) {
-    const controller = wisCameraPlaybackController(key);
-    if (controller) {
-      const source = cleanText(options.source, options.autoplay ? "playback" : "programmatic");
-      void controller.seekTo(wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, Date.now())), {
-        source,
-        reason: cleanText(options.reason, options.autoplay ? "timeline-autoplay" : "timeline-select"),
-        frame,
-        restart: force,
-      }).catch((error) => {
-        state.lastError = error.message || String(error);
-      });
-      return null;
-    }
+    stopWisCameraPlaybackController(key, "timeline-direct-select");
   }
   let session = null;
   if (frame?.id && frame?.url) {
@@ -4088,6 +5284,9 @@ function setWisCameraTimelineFrame(streamId, frame = null, options = {}) {
       explicitSeek: !options.autoplay,
       restart: options.restartSession === undefined ? force : Boolean(options.restartSession),
       generation: options.generation,
+      reason: options.reason || "timeline-frame-selected",
+      timestampMs: frame.seek_target_ms || frame.seekTargetMs || frame.timestamp_ms || frame.timestampMs,
+      ratio: options.ratio,
     });
   } else {
     state.wisCameraTimelineSelections.delete(key);
@@ -4131,8 +5330,27 @@ function applyPendingWisCameraTimelineSeek(streamId, frames = [], mode = "") {
   const frame = resolveWisCameraPendingTimelineSeek(pending, frames, timelineMode, state.wisCameraTimeline);
   if (!frame) return false;
   state.wisCameraTimelinePendingSeeks.delete(key);
-  // Legacy smoke guard: setWisCameraTimelineFrame(key, frame, { force: true })
-  setWisCameraTimelineFrame(key, frame, { force: true, source: "user", reason: "pending-timeline-seek" });
+  const targetTimeMs = Number(pending.targetTime ?? pending.target_time ?? frame.timestamp_ms ?? frame.timestampMs);
+  const controller = wisCameraPlaybackController(key);
+  traceWisCameraBoundary("timeline.pending.seek.applied", wisCameraPlaybackTracePayload(key, {
+    functionName: "applyPendingWisCameraTimelineSeek",
+    targetTimeMs,
+    frameId: cleanText(frame?.id, ""),
+    controllerFound: Boolean(controller),
+    mode: timelineMode,
+  }));
+  if (controller && Number.isFinite(targetTimeMs) && targetTimeMs > 0) {
+    void controller.seekTo(targetTimeMs, {
+      source: "user",
+      reason: "pending-timeline-seek",
+      frame,
+      restart: true,
+    }).catch((error) => {
+      state.lastError = error.message || String(error);
+    });
+  } else {
+    setWisCameraTimelineFrame(key, frame, { force: true, source: "user", reason: "pending-timeline-seek" });
+  }
   return true;
 }
 
@@ -4150,24 +5368,62 @@ function focusedWisCameraTimelineConfig() {
   return wisCameraIsPushConfig(camera) ? { ...camera, _slot: slot } : null;
 }
 
+function armWisCameraTimelineLoadWatchdog(streamId, mode, startedAt, loadSeq) {
+  window.setTimeout(() => {
+    const timeline = state.wisCameraTimeline || {};
+    if (
+      !timeline.loading
+      || timeline.streamId !== streamId
+      || timeline.mode !== mode
+      || Number(timeline.loadingStartedAt || timeline.loading_started_at || 0) !== Number(startedAt)
+      || Number(state.wisCameraTimelineLoadSeq || 0) !== Number(loadSeq)
+    ) return;
+    state.wisCameraTimeline = {
+      ...timeline,
+      streamId,
+      mode,
+      loading: false,
+      loadingStartedAt: 0,
+      loadedAt: 0,
+      error: "Timeline load stalled; retrying...",
+    };
+    renderWisCameraTimelineFooter(focusedWisCameraTimelineConfig());
+    void loadWisCameraTimeline(streamId, "stale-watchdog", mode);
+  }, WIS_CAMERA_TIMELINE_LOAD_STALE_MS);
+}
+
 async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
   const key = cleanText(streamId, "cam-1");
   const timelineMode = cleanText(mode, wisCameraTimelineMode(key));
-  if (state.wisCameraTimeline.loading && state.wisCameraTimeline.streamId === key && state.wisCameraTimeline.mode === timelineMode) return;
+  const currentTimeline = state.wisCameraTimeline || {};
+  const loadingStartedAt = Number(currentTimeline.loadingStartedAt || currentTimeline.loading_started_at || 0);
+  const loadingAgeMs = loadingStartedAt > 0 ? Date.now() - loadingStartedAt : Infinity;
+  if (
+    currentTimeline.loading
+    && currentTimeline.streamId === key
+    && currentTimeline.mode === timelineMode
+    && loadingAgeMs < WIS_CAMERA_TIMELINE_LOAD_STALE_MS
+  ) return;
+  const startedAt = Date.now();
+  const loadSeq = Number(state.wisCameraTimelineLoadSeq || 0) + 1;
+  state.wisCameraTimelineLoadSeq = loadSeq;
   state.wisCameraTimeline = {
     ...state.wisCameraTimeline,
     streamId: key,
     mode: timelineMode,
     loading: true,
+    loadingStartedAt: startedAt,
     error: "",
   };
   renderWisCameraTimelineFooter(focusedWisCameraTimelineConfig());
+  armWisCameraTimelineLoadWatchdog(key, timelineMode, startedAt, loadSeq);
   try {
     const payload = await fetchJson("/camera/push-timeline", {
       method: "POST",
       timeoutMs: 10000,
       body: { stream_id: key, mode: timelineMode, seconds: 600 },
     });
+    if (Number(state.wisCameraTimelineLoadSeq || 0) !== loadSeq) return;
     state.wisCameraTimeline = {
       streamId: cleanText(payload?.stream_id, key),
       mode: cleanText(payload?.mode, timelineMode),
@@ -4176,6 +5432,7 @@ async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
       range: payload?.range && typeof payload.range === "object" ? payload.range : null,
       availableRange: payload?.available_range && typeof payload.available_range === "object" ? payload.available_range : null,
       loadedAt: Date.now(),
+      loadingStartedAt: 0,
       loading: false,
       error: "",
     };
@@ -4187,12 +5444,14 @@ async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
     });
     if (applyPendingWisCameraTimelineSeek(key, state.wisCameraTimeline.frames, timelineMode)) return;
   } catch (error) {
+    if (Number(state.wisCameraTimelineLoadSeq || 0) !== loadSeq) return;
     state.wisCameraTimeline = {
       ...state.wisCameraTimeline,
       streamId: key,
       mode: timelineMode,
       loading: false,
       loadedAt: Date.now(),
+      loadingStartedAt: 0,
       error: error.message || String(error),
     };
   }
@@ -4218,6 +5477,17 @@ function scheduleWisCameraTimelineLoad(streamId, origin = "render", mode = "") {
 function setWisCameraTimelineMode(streamId, mode = "live") {
   const key = cleanText(streamId, "cam-1");
   const nextMode = cleanText(mode, "live") === "recorded" ? "recorded" : "live";
+  traceWisCameraBoundary(nextMode === "live" ? "fallback.live" : "timeline.mode", {
+    functionName: "setWisCameraTimelineMode",
+    streamId: key,
+    previousMode: wisCameraTimelineMode(key),
+    nextMode,
+    previousOwner: wisCameraTimelineOwnerStateContract(state, key),
+    nextOwner: nextMode === "live" ? WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE : wisCameraTimelineOwnerStateContract(state, key),
+    explicit: nextMode === "live",
+    reason: "timeline-mode-button",
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   state.wisCameraTimelineModes.set(key, nextMode);
   state.wisCameraTimelineSelections.delete(key);
   if (nextMode === "live") stopWisCameraRecordedSession(key);
@@ -4297,7 +5567,7 @@ async function loadWisCameraRelaySnapshot(slot, camera, image, showCameraIssue) 
     })) {
       publishWisCameraDebugSnapshot(slot, { type: "snapshot-relay-loaded" });
     }
-    syncWisCameraAspect(image.closest?.("[data-wis-camera-slot]"), image);
+    syncWisCameraAspect(image.closest?.(".wis-node-webcam_placeholder[data-wis-camera-slot]") || image.closest?.("[data-wis-camera-slot]"), image);
   } catch (error) {
     showCameraIssue(error.message || "Camera relay could not fetch the DVR snapshot.", "snapshot-relay-error");
   }
@@ -4512,12 +5782,14 @@ function wisCameraShouldUseSnapshotRelay(camera = {}, url = "") {
 }
 
 function renderWisCameraRelayImage(element, slot, camera, showCameraIssue) {
+  const streamId = wisCameraBaseStreamId(slot, camera);
   const image = document.createElement("img");
   image.className = "wis-camera-image wis-camera-snapshot";
   image.alt = camera.label || slot;
   image.addEventListener("load", () => syncWisCameraAspect(element, image));
   let inFlight = false;
   const refresh = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
     if (inFlight) return;
     inFlight = true;
     void loadWisCameraRelaySnapshot(slot, camera, image, showCameraIssue).finally(() => {
@@ -4527,7 +5799,7 @@ function renderWisCameraRelayImage(element, slot, camera, showCameraIssue) {
   element.classList.add("has-camera");
   element.append(image);
   refresh();
-  state.wisCameraTimers.set(slot, setInterval(refresh, 2500));
+  scheduleWisCameraTimer(slot, refresh, 2500, { streamId, mode: "live" });
 }
 
 function renderWisCameraStreamRelayImage(element, slot, camera, showCameraIssue) {
@@ -4557,6 +5829,7 @@ function renderWisCameraStreamRelayImage(element, slot, camera, showCameraIssue)
 }
 
 function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
+  const streamId = wisCameraBaseStreamId(slot, camera);
   const retry = state.wisCameraRtspRetryAfter.get(slot);
   if (retry && retry.until > Date.now()) {
     const span = document.createElement("span");
@@ -4577,6 +5850,7 @@ function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
   element.append(status);
   let inFlight = false;
   const refresh = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
     if (inFlight) return;
     inFlight = true;
     void loadWisCameraRtspFrame(element, slot, camera, image, status, showCameraIssue).finally(() => {
@@ -4584,7 +5858,7 @@ function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
     });
   };
   refresh();
-  state.wisCameraTimers.set(slot, setInterval(refresh, 2000));
+  scheduleWisCameraTimer(slot, refresh, 2000, { streamId, mode: "live" });
 }
 
 function wisCameraPushFramePollMs(camera = {}) {
@@ -4593,13 +5867,50 @@ function wisCameraPushFramePollMs(camera = {}) {
 
 function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue) {
   const streamId = wisCameraQualityStreamId(slot, camera);
+  const activeRecordedSession = recordedWisCameraSession(streamId);
+  if (activeRecordedSession || wisCameraRecordedOwnsStream(streamId)) {
+    logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
+      streamId,
+      generation: Number(activeRecordedSession?.generation || 0),
+      sessionId: cleanText(activeRecordedSession?.id, ""),
+      reason: "push-frame-poll-render-blocked",
+    }, { sampleMs: 1000 });
+    logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+      streamId,
+      generation: Number(activeRecordedSession?.generation || 0),
+      ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+      sessionId: cleanText(activeRecordedSession?.id, ""),
+      reason: "push-frame-poll-render-blocked",
+    }, { always: true, sampleMs: 1000 });
+    if (activeRecordedSession) {
+      renderWisCameraPushArchiveFrame(element, slot, camera, activeRecordedSession.frame || activeRecordedSession.requestedFrame, showCameraIssue, {
+        generation: activeRecordedSession.generation,
+      });
+    }
+    return;
+  }
   const baseStreamId = wisCameraBaseStreamId(slot, camera);
   const configuredFrameUrl = streamId === baseStreamId
     ? (cleanText(camera.frameUrl || camera.frame_url, "") || cameraPushFrameUrl(streamId))
     : cameraPushFrameUrl(streamId);
   const image = document.createElement("img");
+  const liveOwner = { kind: "live", streamId, generation: 0 };
   image.className = "wis-camera-image wis-camera-stream wis-camera-push is-frame-polled";
   image.alt = camera.label || slot;
+  if (!claimMediaWriter(image, liveOwner)) {
+    logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
+      streamId,
+      generation: 0,
+      reason: "push-frame-poll-claim",
+    }, { sampleMs: 1000 });
+    logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+      streamId,
+      generation: 0,
+      ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+      reason: "push-frame-poll-claim",
+    }, { always: true, sampleMs: 1000 });
+    return;
+  }
   const status = document.createElement("span");
   status.className = "wis-camera-message warn";
   status.textContent = "Connecting to live DVR frames...";
@@ -4627,6 +5938,8 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
   };
 
   const refreshFrame = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-refresh")) return;
     if (frameInFlight) return;
     frameInFlight = true;
     const loader = new Image();
@@ -4635,7 +5948,25 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     loader.addEventListener("load", () => {
       frameInFlight = false;
       if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll")) return;
+      if (!isMediaWriterCurrent(image, liveOwner)) {
+        logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
+          streamId,
+          generation: 0,
+          ownerKind: "live",
+          imageOwner: image.dataset?.wisMediaOwner,
+          reason: "push-frame-poll-stale-owner",
+        }, { sampleMs: 1000 });
+        return;
+      }
       image.src = loader.src;
+      noteWisCameraPerf(state, streamId, "srcChanges");
+      image.dataset.wisPlaybackStream = "live";
+      image.dataset.wisPlaybackFrameMs = "";
+      image.dataset.wisPlaybackFrameId = "";
+      rememberWisCameraLastGoodFrameFromImage(state, streamId, image, null, {
+        ownerKind: "live",
+        generation: 0,
+      });
       syncWisCameraAspect(element, loader);
       status.remove();
       actions.remove();
@@ -4656,18 +5987,22 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     }, { once: true });
     loader.addEventListener("error", () => {
       frameInFlight = false;
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-error")) return;
       showStatusBeforeFirstFrame("Waiting for the first live DVR frame...");
     }, { once: true });
     loader.src = cameraCacheBustedUrl(configuredFrameUrl);
   };
 
   const refreshStatus = async () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-refresh")) return;
     if (statusInFlight) return;
     statusInFlight = true;
     try {
       const payload = await fetchJson(cameraPushStatusUrl(streamId), { timeoutMs: 8000 });
       const stateLabel = cleanText(payload?.state, "listening");
       const frameAvailable = Boolean(payload?.frame?.available);
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-result")) return;
       if (!frameAvailable) {
         showStatusBeforeFirstFrame(stateLabel === "listening"
           ? `Listening for DVR RTMP push${ingestUrl ? `: ${ingestUrl}` : "."}`
@@ -4692,6 +6027,7 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
         publishWisCameraDebugSnapshot(slot, { type: "push-frame-loaded" });
       }
     } catch (error) {
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-error")) return;
       if (!frameLoaded) showCameraIssue(error.message || "DVR RTMP push status could not be read.", "push-frame-error");
     } finally {
       statusInFlight = false;
@@ -4699,6 +6035,7 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
   };
 
   const tick = () => {
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-tick")) return;
     refreshFrame();
     const now = Date.now();
     if (now - lastStatusAt >= 5000) {
@@ -4707,238 +6044,77 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     }
   };
   tick();
-  state.wisCameraTimers.set(slot, setInterval(tick, wisCameraPushFramePollMs(camera)));
+  scheduleWisCameraTimer(slot, tick, wisCameraPushFramePollMs(camera), { streamId, mode: "live" });
 }
 
 function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCameraIssue, options = {}) {
   const streamId = wisCameraQualityStreamId(slot, camera);
-  const forceSync = Boolean(options.force);
   stopWisCameraTimer(slot);
   stopWisCameraTimer(streamId);
-  if (!frame?.id || !frame?.url) {
-    showCameraIssue("No recording for this period.", "push-timeline-frame-missing");
-    return;
-  }
-  const timelineMode = wisCameraTimelineMode(streamId);
-  let session = recordedWisCameraSession(streamId);
-  if (!session || wisCameraTimelineFramePlaybackKey(session.frame) !== wisCameraTimelineFramePlaybackKey(frame)) {
-    session = startWisCameraRecordedSession(streamId, frame, { explicitSeek: forceSync, restart: forceSync });
-  }
-  const sessionId = cleanText(session?.id, "");
-  const mediaOwner = wisCameraRecordedMediaOwner(streamId, session);
-  const currentSessionMatches = () => wisCameraRecordedSessionMatches(recordedWisCameraSession(streamId), sessionId);
-  const syncDisplayedFrame = (displayedFrame, nextStatus = "playing", syncOptions = {}) => {
-    const activeSession = recordedWisCameraSession(streamId);
-    if (!wisCameraRecordedSessionMatches(activeSession, sessionId)) return null;
-    return syncWisCameraRecordedSessionToDisplayedFrame(streamId, displayedFrame, nextStatus, {
-      holdUntilNextFrame: image.dataset.wisPlaybackStream === "1",
-      sessionId,
-      updateClockAnchor: syncOptions.updateClockAnchor !== false,
-    });
-  };
-  const previousMedia = Array.from(element.querySelectorAll(".wis-camera-image, .wis-camera-video"));
-  previousMedia.forEach((media) => {
-    if (media?.tagName === "IMG") claimMediaWriter(media, mediaOwner);
-  });
-  element.querySelectorAll(".wis-camera-message, .wis-camera-fallback").forEach((node) => node.remove());
-  const image = document.createElement("img");
-  const keepPreviousUntilReady = previousMedia.length > 0;
-  image.className = `wis-camera-image wis-camera-stream wis-camera-push is-timeline-frame${keepPreviousUntilReady ? " is-buffering" : ""}`;
-  image.alt = `${camera.label || slot} playback from ${cameraTimelineFrameLabel(frame)}`;
-  image.decoding = "async";
-  image.loading = "eager";
-  image.fetchPriority = "high";
-  if (session?.id) {
-    element.dataset.wisRecordedSessionId = session.id;
-    image.dataset.wisRecordedSessionId = session.id;
-  }
-  claimMediaWriter(image, mediaOwner);
-  const status = document.createElement("span");
-  status.className = "wis-camera-message warn wis-camera-sync-status";
-  status.textContent = `Syncing recording from ${cameraTimelineFrameLabel(frame)}...`;
-  element.classList.add("has-camera");
-  element.append(image, status);
-  let imageLoaded = false;
-  const reveal = () => {
-    if (!imageLoaded) return;
-    image.classList.remove("is-buffering");
-    previousMedia.forEach((media) => {
-      if (media !== image && media.isConnected) media.remove();
-    });
-  };
-  const revealTimer = keepPreviousUntilReady ? window.setTimeout(() => {
-    if (currentSessionMatches()) reveal();
-  }, 550) : 0;
+  const session = recordedWisCameraSession(streamId);
   const archiveFrameUrl = cameraCacheBustedUrl(cleanText(frame?.url, ""));
+  const budget = wisCameraBudget(streamId, "recorded");
+  const requestedFps = Number(camera.fps || camera.frameFps || camera.frame_fps || 15);
+  const playbackFps = Math.max(1, Math.round(Math.min(Number.isFinite(requestedFps) && requestedFps > 0 ? requestedFps : 15, budget.recordedVisualFps || 1)));
   const playbackUrl = cameraCacheBustedUrl(cameraPushPlaybackUrl(streamId, frame, {
-    fps: camera.fps || camera.frameFps || camera.frame_fps || 15,
-    follow: timelineMode === "live" && !session?.explicitSeek,
+    fps: playbackFps,
+    follow: false,
   }) || archiveFrameUrl);
-  let playbackStarted = false;
-  let playbackFallbackActive = false;
-  let firstFramePatchSent = false;
-  const markFirstRecordedFrameDisplayed = (displayedFrame) => {
-    if (firstFramePatchSent) return;
-    firstFramePatchSent = true;
-    wisCameraPlaybackController(streamId)?.markFirstRecordedFrameDisplayed?.(displayedFrame, {
-      source: forceSync ? "user" : "restore",
-      reason: forceSync ? "timeline-seek-first-frame" : "recorded-restore-first-frame",
-      firstFrameTimeMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, Date.now())),
-      segmentId: cleanText(frame.id, ""),
-    });
-  };
-  const displayArchiveFrame = async (reason = "first-frame", displayOptions = {}) => {
-    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return false;
-    logWisCameraMediaEvent("camera.media.first_frame.fetch.start", {
-      streamId,
-      generation: Number(session?.generation || 0),
-      ownerKind: mediaOwner.kind,
-      imageOwner: image.dataset.wisMediaOwner,
-      frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-      reason,
-    });
-    image.dataset.wisPlaybackStream = "";
-    image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
-    image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-    try {
-      const swapped = await decodeAndSwapImage(image, archiveFrameUrl, mediaOwner, {
-        env: window,
-        onStale: () => logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
-          streamId,
-          generation: Number(session?.generation || 0),
-          ownerKind: mediaOwner.kind,
-          imageOwner: image.dataset.wisMediaOwner,
-          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-          reason,
-        }, { sampleMs: 1000 }),
-        onSwap: () => logWisCameraMediaEvent("camera.media.src.swap", {
-          streamId,
-          generation: Number(session?.generation || 0),
-          ownerKind: mediaOwner.kind,
-          imageOwner: image.dataset.wisMediaOwner,
-          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-          reason,
-        }),
-      });
-      if (!swapped || !currentSessionMatches()) return false;
-      imageLoaded = true;
-      const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-      syncDisplayedFrame(displayedFrame, "playing", {
-        updateClockAnchor: displayOptions.updateClockAnchor !== false,
-      });
-      markFirstRecordedFrameDisplayed(displayedFrame);
-      logWisCameraMediaEvent("camera.media.first_frame.displayed", {
-        streamId,
-        generation: Number(session?.generation || 0),
-        ownerKind: mediaOwner.kind,
-        imageOwner: image.dataset.wisMediaOwner,
-        frameTimestampMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, 0)),
-        reason,
-      });
-      if (revealTimer) window.clearTimeout(revealTimer);
-      window.clearTimeout(assumedPlayingTimer);
-      reveal();
-      syncWisCameraAspect(element, image);
-      status.remove();
-      applyWisCameraZoom(element, streamId);
-      return true;
-    } catch (error) {
-      logWisCameraMediaEvent("camera.media.first_frame.error", {
-        streamId,
-        generation: Number(session?.generation || 0),
-        ownerKind: mediaOwner.kind,
-        imageOwner: image.dataset.wisMediaOwner,
-        reason,
-        error: error?.message || String(error),
-      });
-      return false;
-    }
-  };
-  const fallbackToImageSrc = () => {
-    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return;
-    playbackFallbackActive = true;
-    void displayArchiveFrame("playback-stream-fallback", { updateClockAnchor: false });
-  };
-  const startPlaybackStream = () => {
-    if (playbackStarted || !currentSessionMatches()) return;
-    playbackStarted = true;
-    void streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, frame, fallbackToImageSrc);
-  };
-  const startPlaybackStreamAfterPaint = async () => {
-    await displayArchiveFrame("timeline-seek-first-frame", { updateClockAnchor: true });
-    startPlaybackStream();
-  };
-  const assumedPlayingTimer = window.setTimeout(() => {
-    if (!currentSessionMatches()) {
-      status.remove();
-      return;
-    }
-    if (!imageLoaded || !playbackFallbackActive) return;
-    const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-    syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
-    reveal();
-    status.remove();
-  }, keepPreviousUntilReady ? 2200 : 1800);
-  image.addEventListener("load", () => {
-    if (!currentSessionMatches()) {
-      if (revealTimer) window.clearTimeout(revealTimer);
-      window.clearTimeout(assumedPlayingTimer);
-      status.remove();
-      return;
-    }
-    imageLoaded = true;
-    const isStreamFrame = image.dataset.wisPlaybackStream === "1";
-    if (!isStreamFrame && playbackFallbackActive) {
-      const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-      syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
-    }
-    if (revealTimer) window.clearTimeout(revealTimer);
-    if (isStreamFrame || playbackFallbackActive) window.clearTimeout(assumedPlayingTimer);
-    reveal();
-    syncWisCameraAspect(element, image);
-    if (isStreamFrame || playbackFallbackActive) status.remove();
-    applyWisCameraZoom(element, streamId);
+  traceWisCameraBoundary("recorded.render.entrypoint", {
+    functionName: "renderWisCameraPushArchiveFrame",
+    streamId,
+    slot,
+    generation: Number(options.generation || session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    frameId: cleanText(frame?.id, ""),
+    frameTimestampMs: wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, 0)),
+    archiveFrameUrl,
+    playbackUrl,
+    visibleLayerOwner: element?.querySelector?.(".wis-camera-image, .wis-camera-video")?.dataset?.wisMediaOwner || "",
+    ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+    ...wisCameraLoopOwnerSnapshot(streamId, slot),
   });
-  image.addEventListener("error", () => {
-    if (revealTimer) window.clearTimeout(revealTimer);
-    window.clearTimeout(assumedPlayingTimer);
-    if (!currentSessionMatches()) {
-      status.remove();
-      return;
-    }
-    state.wisCameraTimelineSelections.delete(streamId);
-    if (session) {
-      setWisCameraPlaybackFrame(state, streamId, frame, {
-        sessionId,
-        generation: session.generation,
-        status: "gap",
-        state: "error",
-        paused: true,
+  return renderWisCameraPushArchiveFrameContract(state, {
+    element,
+    streamId,
+    slot,
+    camera,
+    frame,
+    force: options.force,
+    generation: options.generation,
+    archiveFrameUrl,
+    playbackUrl,
+    env: window,
+    document,
+    showCameraIssue,
+    playbackController: () => wisCameraPlaybackController(streamId),
+    onFrameDisplayed: (_session, displayedFrame = null) => {
+      const displayedMs = wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, 0));
+      updateWisCameraRecordedPlaybackUi(streamId, {
+        currentMs: displayedMs,
+        timeline: false,
       });
-    }
-    if (previousMedia.some((media) => media.isConnected)) {
-      image.remove();
-      status.textContent = "No recording for this period.";
-      element.classList.add("has-camera");
-      return;
-    }
-    showCameraIssue("No recording for this period.", "push-timeline-frame-error");
-  }, { once: true });
-  image.dataset.wisPlaybackStream = "";
-  image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
-  image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-  if (typeof window.requestAnimationFrame === "function") {
-    window.requestAnimationFrame(startPlaybackStreamAfterPaint);
-  } else {
-    window.setTimeout(startPlaybackStreamAfterPaint, 0);
-  }
+    },
+    onEnded: () => updateWisCameraRecordedPlaybackUi(streamId),
+    onError: () => updateWisCameraRecordedPlaybackUi(streamId),
+    onMissingFrame: () => state.wisCameraTimelineSelections.delete(streamId),
+    onMediaEvent: (event, payload = {}, detail = {}) => logWisCameraMediaEvent(event, payload, {
+      sampleMs: detail.sampleMs ?? (event.includes(".sample") ? 1000 : 0),
+      always: detail.always,
+    }),
+    syncAspect: (targetElement, image) => syncWisCameraAspect(targetElement, image),
+    applyZoom: (targetElement, targetStreamId) => applyWisCameraZoom(targetElement, targetStreamId),
+  });
 }
 
 function renderWisCameraPushImage(element, slot, camera, showCameraIssue) {
   const streamId = wisCameraQualityStreamId(slot, camera);
-  const timelineFrame = selectedWisCameraTimelineFrame(streamId);
+  const activeRecordedSession = recordedWisCameraSession(streamId);
+  const timelineFrame = activeRecordedSession?.frame || activeRecordedSession?.requestedFrame || selectedWisCameraTimelineFrame(streamId);
   if (timelineFrame) {
-    renderWisCameraPushArchiveFrame(element, slot, camera, timelineFrame, showCameraIssue);
+    renderWisCameraPushArchiveFrame(element, slot, camera, timelineFrame, showCameraIssue, {
+      generation: activeRecordedSession?.generation,
+    });
     return;
   }
   renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue);
@@ -5047,8 +6223,23 @@ function renderWisCameraNode(element, node) {
   stopWisCameraTimer(slot);
   const camera = wisCameraConfigForSlot(slot) || node.props?.camera || wisSurfaceState()?.state?.cameras?.[slot] || {};
   const streamId = wisCameraIsPushConfig(camera) ? wisCameraQualityStreamId(slot, camera) : wisCameraBaseStreamId(slot, camera);
+  noteWisCameraPerf(state, streamId, "renders");
   element.dataset.wisCameraSlot = slot;
-  element.replaceChildren();
+  trackWisCameraVisibility(element, slot, streamId);
+  const existingMedia = element.querySelector?.(".wis-camera-video, .wis-camera-image") || null;
+  if (existingMedia?.tagName === "IMG") {
+    rememberWisCameraLastGoodFrameFromImage(state, streamId, existingMedia, selectedWisCameraTimelineFrame(streamId), {
+      ownerKind: existingMedia.dataset?.wisMediaOwner,
+      generation: existingMedia.dataset?.wisMediaGeneration,
+    });
+  }
+  const preservePendingRecordedMedia = Boolean(wisCameraIsPushConfig(camera) && selectedWisCameraTimelineFrame(streamId) && existingMedia);
+  if (preservePendingRecordedMedia) {
+    element.querySelectorAll?.(".wis-camera-message, .wis-camera-fallback")?.forEach((node) => node.remove?.());
+  } else {
+    if (existingMedia) noteWisCameraPerf(state, streamId, "domReplacements");
+    element.replaceChildren();
+  }
   const message = (text, tone = "") => {
     const span = document.createElement("span");
     span.className = tone ? `wis-camera-message ${tone}` : "wis-camera-message";
@@ -5058,6 +6249,7 @@ function renderWisCameraNode(element, node) {
   const showCameraIssue = (text, type = "load-error", issueCamera = camera) => {
     stopWisCameraTimer(slot);
     element.classList.remove("has-camera");
+    if (element.querySelector?.(".wis-camera-video, .wis-camera-image")) noteWisCameraPerf(state, streamId, "domReplacements");
     element.replaceChildren();
     const wrapper = document.createElement("div");
     wrapper.className = "wis-camera-fallback";
@@ -5182,13 +6374,14 @@ function renderWisCameraNode(element, node) {
         showCameraIssue(text, "snapshot-error");
       }, { once: true });
       const refresh = () => {
+        if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
         if (blockLiveWisCameraImageWrite(image, slot, "snapshot-direct")) return;
         image.src = appendCameraCacheBuster(url);
       };
       element.classList.add("has-camera");
       element.append(image);
       refresh();
-      state.wisCameraTimers.set(slot, setInterval(refresh, 2000));
+      scheduleWisCameraTimer(slot, refresh, 2000, { streamId, mode: "live" });
       return;
     }
     if (camera.element === "img") {
@@ -5468,6 +6661,17 @@ function downloadSnapshotFallback(blob, streamId) {
 
 async function currentWisCameraSnapshotBlob(slot, camera = {}) {
   const streamId = wisCameraQualityStreamId(slot, camera);
+  const media = wisCameraSurfaceElement(slot)?.querySelector(".wis-camera-video, .wis-camera-image");
+  if (media) {
+    const width = Math.max(1, media.videoWidth || media.naturalWidth || media.clientWidth || 1);
+    const height = Math.max(1, media.videoHeight || media.naturalHeight || media.clientHeight || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(media, 0, 0, width, height);
+    return canvasBlob(canvas, "image/png");
+  }
   if (wisCameraIsPushConfig(camera)) {
     const selected = selectedWisCameraTimelineFrame(streamId);
     const url = selected?.url || cameraPushFrameUrl(streamId);
@@ -5475,16 +6679,7 @@ async function currentWisCameraSnapshotBlob(slot, camera = {}) {
     if (!response.ok) throw new Error("Current camera frame is not available.");
     return response.blob();
   }
-  const media = widgetById("wis")?.querySelector(`[data-wis-camera-slot="${CSS.escape(slot)}"] .wis-camera-video, [data-wis-camera-slot="${CSS.escape(slot)}"] .wis-camera-image`);
-  if (!media) throw new Error("No visible camera frame is available.");
-  const width = Math.max(1, media.videoWidth || media.naturalWidth || media.clientWidth || 1);
-  const height = Math.max(1, media.videoHeight || media.naturalHeight || media.clientHeight || 1);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(media, 0, 0, width, height);
-  return canvasBlob(canvas, "image/png");
+  throw new Error("No visible camera frame is available.");
 }
 
 async function copyWisCameraSnapshot(camera = {}) {
@@ -5507,6 +6702,9 @@ async function copyWisCameraSnapshot(camera = {}) {
 async function toggleWisCameraQuality(camera = {}) {
   const slot = cleanText(camera._slot, wisFocusedCameraSlot() || "cam-1");
   const baseStreamId = wisCameraBaseStreamId(slot, camera);
+  const previousActiveStreamId = wisCameraQualityStreamId(slot, camera);
+  const previousRecordedSession = recordedWisCameraSession(previousActiveStreamId);
+  const preserveRecordedTimestampMs = previousRecordedSession ? wisCameraRecordedClockMs(previousRecordedSession) : 0;
   const currentMode = state.wisCameraQualityModes.get(baseStreamId) || "primary";
   const primed = state.wisCameraQualityPrimed.has(baseStreamId);
   const nextMode = primed && currentMode === "primary" ? "extra" : "primary";
@@ -5525,6 +6723,17 @@ async function toggleWisCameraQuality(camera = {}) {
   state.wisCameraQualityPrimed.add(baseStreamId);
   state.wisCameraQualityModes.set(baseStreamId, nextMode);
   const activeStreamId = wisCameraQualityStreamId(slot, camera);
+  if (previousRecordedSession) {
+    stopWisCameraRecordedSession(previousActiveStreamId);
+    state.wisCameraTimelineModes.set(activeStreamId, "recorded");
+    if (Number.isFinite(preserveRecordedTimestampMs) && preserveRecordedTimestampMs > 0) {
+      setPendingWisCameraTimelineSeek(activeStreamId, {
+        ratio: 1,
+        targetTime: preserveRecordedTimestampMs,
+        playbackPosition: preserveRecordedTimestampMs,
+      }, "recorded");
+    }
+  }
   state.wisCameraTimelineSelections.delete(baseStreamId);
   state.wisCameraTimelineSelections.delete(activeStreamId);
   stopWisCameraTimer(baseStreamId);
@@ -5565,6 +6774,7 @@ function renderWisCameraHeader(camera = null) {
     muted: wisCameraAudioMuted(streamId),
     audioAvailable: wisCameraAudioAvailable(slot, camera),
     qualityMode: wisCameraQualityMode(baseStreamId),
+    controlsInTimeline: true,
     onConfigure: (targetCamera) => void configureWisCameraSlot({ id: `${slot}-header-config`, props: { slot, data: { slot }, camera: targetCamera } }).catch((error) => {
       state.lastError = error.message || String(error);
       recordUserEvent("wis.camera_header_config_failed", {
@@ -5589,19 +6799,31 @@ function renderWisCameraTimelineFooter(camera = null) {
   const widget = widgetById("wis");
   if (!widget) return;
   let footer = widget.querySelector(".wis-camera-timeline");
-  const streamId = camera ? wisCameraQualityStreamId(camera._slot || "", camera) : "";
+  const slot = camera ? cleanText(camera._slot, wisFocusedCameraSlot() || "cam-1") : "";
+  const streamId = camera ? wisCameraQualityStreamId(slot, camera) : "";
   const show = wisCameraIsPushConfig(camera || {}) && streamId;
-  if (!show) {
-    footer?.remove();
-    return;
-  }
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.className = "wis-camera-timeline";
-    const keepTimelineInteractionInWidget = (event) => {
+	  if (!show) {
+	    footer?.remove();
+	    return;
+	  }
+	  footer?.setAttribute?.("data-camera-artifact-build", WIS_CAMERA_ARTIFACT_BUILD);
+	  if (!footer) {
+	    footer = document.createElement("div");
+	    footer.className = "wis-camera-timeline";
+	    footer.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+	    const keepTimelineInteractionInWidget = (event) => {
       if (event.type === "pointerdown" || event.type === "click") bringWidgetForward(widget);
       const target = event.target;
-      const handledByTimelineControl = Boolean(target?.closest?.(".wis-camera-timeline-scrubber, .wis-camera-timeline-actions"));
+      const handledByTimelineControl = Boolean(target?.closest?.(".wis-camera-timeline-scrubber, .wis-camera-timeline-controls-row, .wis-camera-timeline-actions"));
+      const playPauseTarget = target?.closest?.("[data-wis-camera-control='play-pause']");
+      if (playPauseTarget && (event.type === "pointerdown" || event.type === "click")) {
+        traceWisCameraBoundary(`controls.playpause.footer.${event.type}`, wisCameraPlaybackTracePayload(playPauseTarget.dataset?.wisCameraStreamId || streamId, {
+          control: "play-pause",
+          action: cleanText(playPauseTarget.dataset?.wisCameraAction, ""),
+          target: wisCameraControlTargetSummary(playPauseTarget),
+          footerStreamId: streamId,
+        }));
+      }
       if (event.type === "pointerdown" || event.type === "keydown" || event.type === "click") {
         if (!handledByTimelineControl) maybeLoadFocusedWisCameraTimeline("timeline-interaction");
       }
@@ -5642,15 +6864,38 @@ function renderWisCameraTimelineFooter(camera = null) {
   const cameraPlaybackController = wisCameraPlaybackController(streamId);
   const recordedSession = recordedWisCameraSession(streamId);
   const selected = recordedSession?.frame || selectedWisCameraTimelineFrame(streamId);
+  const footerSignature = [
+    streamId,
+    mode,
+    Number(timeline.loadedAt || 0),
+    timeline.loading ? "loading" : "ready",
+    cleanText(timeline.error, ""),
+    frames.length,
+    cleanText(recordedSession?.id, ""),
+    cleanText(recordedSession?.status, ""),
+    recordedSession?.clockPaused ? "paused" : "running",
+    wisCameraQualityMode(wisCameraBaseStreamId(slot || streamId, camera)),
+    state.wisCameraZoomSelections.has(streamId) ? "zoom" : "nozoom",
+    wisCameraAudioMuted(streamId) ? "muted" : "audio",
+    cleanText(selected?.id, ""),
+  ].join("|");
+  const existingScrubber = footer.querySelector?.(`.wis-camera-timeline-scrubber[data-stream-id="${CSS.escape(streamId)}"]`);
+  if (existingScrubber && footer.dataset.wisTimelineSignature === footerSignature) {
+    cameraPlaybackController?.configure?.({
+      timelineElement: existingScrubber,
+      timeline,
+      frames,
+      mode,
+    });
+    updateWisCameraRecordedPlaybackUi(streamId);
+    return;
+  }
   const playbackClockMs = recordedSession ? wisCameraRecordedClockMs(recordedSession) : 0;
   const selectedIndex = selected?.id
     ? frames.findIndex((frame) => frame.id === selected.id)
     : frames.length - 1;
   const actualIndex = Math.max(0, selectedIndex);
   const currentFrame = frames[actualIndex] || null;
-  let lastCommittedTimelineFrameId = selected
-    ? `${cleanText(selected.id, "")}|${Math.round(wisCameraTimelinePlaybackStartMs(selected, wisCameraTimelineFrameTimestampMs(selected, 0)))}`
-    : "";
   const committedTimelineTitle = () => {
     const activeSession = recordedWisCameraSession(streamId);
     if (activeSession) return wisCameraRecordedTimelineTitle(activeSession, wisCameraRecordedClockMs(activeSession));
@@ -5664,17 +6909,17 @@ function renderWisCameraTimelineFooter(camera = null) {
   const title = document.createElement("span");
   title.className = "wis-camera-timeline-title";
   title.textContent = label;
-  const detail = document.createElement("span");
-  detail.textContent = timeline.error
-    ? timeline.error
-    : `${formatCameraTimelineRange(timeline.range || timeline.availableRange, mode)}${frames.length ? ` / ${frames.length} points` : ""}`;
-  meta.append(title, detail);
+	  const detail = document.createElement("span");
+	  detail.textContent = timeline.error
+	    ? timeline.error
+	    : `${formatCameraTimelineRange(timeline.range || timeline.availableRange, mode)}${frames.length ? ` / ${frames.length} points` : ""} / ${WIS_CAMERA_ARTIFACT_BUILD}`;
+	  meta.append(title, detail);
 
   const maxFrameIndex = Math.max(0, frames.length - 1);
   const timelineWindow = wisCameraTimelineTimeWindow(timeline, frames, {
     playbackPosition: playbackClockMs || Number(selected?.timestamp_ms || currentFrame?.timestamp_ms || 0),
   });
-  const { retentionStart, retentionEnd, visibleStart, visibleEnd, playbackPosition } = timelineWindow;
+  const { visibleStart, visibleEnd } = timelineWindow;
   const hasVisibleTimelineWindow = visibleEnd > visibleStart;
   const scrubber = document.createElement("div");
   scrubber.className = "wis-camera-timeline-scrubber";
@@ -5691,21 +6936,6 @@ function renderWisCameraTimelineFooter(camera = null) {
   fill.className = "wis-camera-timeline-fill";
   scrubber.append(rail, fill);
   let previewTimelineIndex = actualIndex;
-  let previewTimelineTarget = null;
-  let suppressNextTimelineClick = false;
-  const resetTimelineTitle = () => {
-    title.textContent = committedTimelineTitle();
-  };
-  const suppressTimelineClickForRender = (durationMs = 400) => {
-    footer.dataset.wisSuppressTimelineClickUntil = String(Date.now() + durationMs);
-  };
-  const shouldSuppressTimelineClickForRender = () => {
-    const until = Number(footer.dataset.wisSuppressTimelineClickUntil || 0);
-    if (!Number.isFinite(until) || until <= 0) return false;
-    if (Date.now() < until) return true;
-    delete footer.dataset.wisSuppressTimelineClickUntil;
-    return false;
-  };
   const progressForTimelineTime = (timestampMs = 0, fallbackIndex = previewTimelineIndex) => {
     const timeMs = Number(timestampMs);
     if (Number.isFinite(timeMs) && hasVisibleTimelineWindow) {
@@ -5713,31 +6943,14 @@ function renderWisCameraTimelineFooter(camera = null) {
     }
     return maxFrameIndex > 0 ? (fallbackIndex / maxFrameIndex) * 100 : 100;
   };
-  const timelineFrameIndex = (frame = null) => {
-    if (!frame) return -1;
-    const frameId = cleanText(frame.id, "");
-    if (frameId) {
-      const idIndex = frames.findIndex((candidate) => cleanText(candidate?.id, "") === frameId);
-      if (idIndex >= 0) return idIndex;
-    }
-    const timestampMs = Number(frame.timestamp_ms ?? frame.timestampMs);
-    if (!Number.isFinite(timestampMs)) return -1;
-    return frames.findIndex((candidate) => Number(candidate?.timestamp_ms ?? candidate?.timestampMs) === timestampMs);
-  };
-  const timelineFrameCommitKey = (frame = null) => {
-    if (!frame) return "";
-    const frameId = cleanText(frame.id, "");
-    const timestampMs = wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, 0));
-    return `${frameId}|${Number.isFinite(timestampMs) ? Math.round(timestampMs) : 0}`;
-  };
   const previewTimelineFrame = (index = previewTimelineIndex, displayTimeMs = null, options = {}) => {
     previewTimelineIndex = clamp(Math.round(Number(index) || 0), 0, maxFrameIndex);
     const frame = frames[previewTimelineIndex] || null;
-    const timestampMs = Number(displayTimeMs ?? frame?.timestamp_ms ?? frame?.timestampMs);
+    const timestampMs = Number(displayTimeMs ?? wisCameraTimelinePlaybackStartMs(frame, frame?.timestamp_ms ?? frame?.timestampMs));
     const progress = frame ? progressForTimelineTime(timestampMs, previewTimelineIndex) : 100;
-    const visualProperty = timelineDragging || options.previewOnly ? "--wis-camera-timeline-preview" : "--wis-camera-timeline-progress";
-    scrubber.style.setProperty(visualProperty, `${progress}%`);
-    if (visualProperty === "--wis-camera-timeline-preview") scrubber.dataset.wisTimelinePreviewing = "1";
+    scrubber.style.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+    scrubber.style.removeProperty("--wis-camera-timeline-preview");
+    delete scrubber.dataset.wisTimelinePreviewing;
     scrubber.setAttribute("aria-valuenow", String(previewTimelineIndex));
     const labelFrame = Number.isFinite(timestampMs) ? { ...(frame || {}), timestamp_ms: timestampMs } : frame;
     scrubber.setAttribute("aria-valuetext", labelFrame ? cameraTimelineFrameLabel(labelFrame) : "No points yet");
@@ -5745,272 +6958,84 @@ function renderWisCameraTimelineFooter(camera = null) {
       title.textContent = labelFrame ? `Point ${cameraTimelineFrameLabel(labelFrame)}` : "No points yet";
     }
   };
-  const timelineTargetForPointer = (event) => {
-    const rect = scrubber.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const ratio = rect.width > 0 ? clamp(x / rect.width, 0, 1) : 1;
-    const target = wisCameraTimelineTargetAtRatio(timeline, frames, ratio, { playbackPosition });
-    const snappedFrame = target.snappedFrame || wisCameraTimelineFrameClosestToTime(frames, target.targetTime, target);
-    const snappedTargetTime = Number(snappedFrame?.timestamp_ms ?? snappedFrame?.timestampMs ?? target.snappedTargetTime ?? target.targetTime);
-    return {
-      ...target,
-      x,
-      ratio,
-      snappedFrame,
-      snappedTargetTime,
-    };
-  };
-  const frameForTimelineTarget = (target = previewTimelineTarget) => {
-    const snappedFrame = target?.snappedFrame || frames[previewTimelineIndex] || currentFrame;
-    if (!snappedFrame) return null;
-    const targetTime = Number(target?.targetTime ?? target?.snappedTargetTime ?? snappedFrame.timestamp_ms ?? snappedFrame.timestampMs);
-    if (!Number.isFinite(targetTime)) return snappedFrame;
-    const targetVisibleStart = Number(target?.visibleStart ?? visibleStart);
-    const targetVisibleEnd = Number(target?.visibleEnd ?? visibleEnd);
-    const targetTimestampMs = targetVisibleEnd > targetVisibleStart
-      ? clamp(targetTime, targetVisibleStart, targetVisibleEnd)
-      : targetTime;
-    const snappedTimestampMs = Number(target?.snappedTargetTime ?? snappedFrame.timestamp_ms ?? snappedFrame.timestampMs ?? targetTimestampMs);
-    return {
-      ...snappedFrame,
-      timestamp_ms: Number.isFinite(snappedTimestampMs) ? snappedTimestampMs : targetTimestampMs,
-      seek_target_ms: targetTime,
-      snapped_timestamp_ms: Number.isFinite(snappedTimestampMs) ? snappedTimestampMs : targetTimestampMs,
-    };
-  };
-  const commitTimelineFrame = (target = previewTimelineTarget) => {
-    const frame = frameForTimelineTarget(target);
-    const commitKey = timelineFrameCommitKey(frame);
-    if (!frame || !commitKey || commitKey === lastCommittedTimelineFrameId) {
-      resetTimelineTitle();
-      return;
-    }
-    lastCommittedTimelineFrameId = commitKey;
-    // Legacy smoke guard: setWisCameraTimelineFrame(streamId, frame, { force: true })
-    setWisCameraTimelineFrame(streamId, frame, { force: true, source: "user", reason: "timeline-commit" });
-  };
-  const previewTimelinePointer = (event) => {
-    if (!frames.length) return;
-    const target = timelineTargetForPointer(event);
-    previewTimelineTarget = target;
-    const frame = target.snappedFrame;
-    const frameIndex = timelineFrameIndex(frame);
-    if (frameIndex < 0) return;
-    previewTimelineFrame(frameIndex, target.targetTime, { previewOnly: timelineDragging });
-  };
-  const loadThenSeekTimelinePointer = (event, origin = "scrubber-pointer") => {
-    const target = timelineTargetForPointer(event);
-    setPendingWisCameraTimelineSeek(streamId, target.visibleEnd > target.visibleStart
-      ? {
-        ratio: target.ratio,
-        targetTime: target.targetTime,
-        visibleStart: target.visibleStart,
-        visibleEnd: target.visibleEnd,
-        retentionStart: target.retentionStart,
-        retentionEnd: target.retentionEnd,
-        playbackPosition: target.playbackPosition,
-      }
-      : target.ratio, mode);
-    if (timeline.loading) return;
-    void loadWisCameraTimeline(streamId, origin, mode);
-  };
-  let timelineDragging = false;
-  let timelinePointerId = 0;
-  const stopTimelineWindowCapture = () => {
-    window.removeEventListener("pointermove", moveTimelinePointer, true);
-    window.removeEventListener("pointerup", endTimelinePointer, true);
-    window.removeEventListener("pointercancel", cancelTimelinePointer, true);
-  };
-  const shouldHandleTimelinePointer = (event) => (
-    timelineDragging && (!timelinePointerId || event.pointerId === timelinePointerId)
-  );
-  const moveTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    previewTimelinePointer(event);
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointermove", {
-      reason: "timeline-pointermove",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    logWisCameraMediaEvent("camera.timeline.scrub.preview.sample", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-      ratio: Number(previewTimelineTarget?.ratio || 0),
-      previewProgress: scrubber.style.getPropertyValue("--wis-camera-timeline-preview") || "",
-      elementConnected: scrubber.isConnected !== false,
-    }, { sampleMs: 250 });
-  };
-  const cancelTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    timelineDragging = false;
-    timelinePointerId = 0;
-    stopTimelineWindowCapture();
-    scrubber.classList.remove("is-scrubbing");
-    scrubber.style.removeProperty("--wis-camera-timeline-preview");
-    delete scrubber.dataset.wisTimelinePreviewing;
-    logWisCameraMediaEvent("camera.timeline.scrub.end", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      reason: "timeline-pointercancel",
-      elementConnected: scrubber.isConnected !== false,
-    });
-    resetTimelineTitle();
-  };
-  const endTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.type !== "lostpointercapture") previewTimelinePointer(event);
-    stopTimelineWindowCapture();
-    try {
-      scrubber.releasePointerCapture(event.pointerId);
-    } catch {
-      // Capture may already be released by the browser.
-    }
-    suppressNextTimelineClick = true;
-    suppressTimelineClickForRender();
-    const commitTarget = previewTimelineTarget;
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerup", {
-      reason: "timeline-pointerup",
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-    });
-    logWisCameraMediaEvent("camera.timeline.scrub.commit_seek", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-      ratio: Number(commitTarget?.ratio || 0),
-    });
-    timelineDragging = false;
-    timelinePointerId = 0;
-    scrubber.classList.remove("is-scrubbing");
-    scrubber.style.removeProperty("--wis-camera-timeline-preview");
-    delete scrubber.dataset.wisTimelinePreviewing;
-    logWisCameraMediaEvent("camera.timeline.scrub.end", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-      ratio: Number(commitTarget?.ratio || 0),
-      elementConnected: scrubber.isConnected !== false,
-    });
-    commitTimelineFrame(commitTarget);
-  };
-  scrubber.addEventListener("pointerdown", (event) => {
-    if (!frames.length) {
-      event.preventDefault();
-      event.stopPropagation();
-      scrubber.focus({ preventScroll: true });
-      suppressNextTimelineClick = true;
-      suppressTimelineClickForRender();
-      cameraPlaybackController?.recordTimelineUserEvent?.("pointerdown", {
-        reason: "timeline-pointerdown-empty",
-      });
-      loadThenSeekTimelinePointer(event, "scrubber-pointer");
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    timelineDragging = true;
-    timelinePointerId = event.pointerId || 0;
-    scrubber.classList.add("is-scrubbing");
-    scrubber.dataset.wisTimelinePreviewing = "1";
-    scrubber.focus({ preventScroll: true });
-    previewTimelinePointer(event);
-    logWisCameraMediaEvent("camera.timeline.scrub.begin", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: timelinePointerId,
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-      ratio: Number(previewTimelineTarget?.ratio || 0),
-      elementConnected: scrubber.isConnected !== false,
-    });
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerdown", {
-      reason: "timeline-pointerdown",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    try {
-      scrubber.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture can be unavailable during rapid touch transitions.
-    }
-    window.addEventListener("pointermove", moveTimelinePointer, true);
-    window.addEventListener("pointerup", endTimelinePointer, true);
-    window.addEventListener("pointercancel", cancelTimelinePointer, true);
-  });
-  scrubber.addEventListener("pointermove", moveTimelinePointer);
-  scrubber.addEventListener("pointerup", endTimelinePointer);
-  scrubber.addEventListener("pointercancel", cancelTimelinePointer);
-  scrubber.addEventListener("lostpointercapture", (event) => {
-    if (timelineDragging) endTimelinePointer(event);
-  });
-  scrubber.addEventListener("click", (event) => {
-    if (suppressNextTimelineClick || shouldSuppressTimelineClickForRender()) {
-      event.preventDefault();
-      event.stopPropagation();
-      suppressNextTimelineClick = false;
-      logWisCameraMediaEvent("camera.timeline.click.suppressed_after_drag", {
-        streamId,
-        generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      }, { sampleMs: 1000 });
-      return;
-    }
-    if (!frames.length) {
-      event.preventDefault();
-      event.stopPropagation();
-      loadThenSeekTimelinePointer(event, "scrubber-click");
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    previewTimelinePointer(event);
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerup", {
-      reason: "timeline-click",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    commitTimelineFrame();
-  });
-  scrubber.addEventListener("keydown", (event) => {
-    const keyDeltas = {
-      ArrowLeft: -1,
-      ArrowDown: -1,
-      ArrowRight: 1,
-      ArrowUp: 1,
-      PageDown: -10,
-      PageUp: 10,
-      Home: -Number.MAX_SAFE_INTEGER,
-      End: Number.MAX_SAFE_INTEGER,
-    };
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      event.stopPropagation();
-      commitTimelineFrame();
-      return;
-    }
-    if (!(event.key in keyDeltas) || !frames.length) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const delta = keyDeltas[event.key];
-    previewTimelineFrame(delta === -Number.MAX_SAFE_INTEGER ? 0 : (delta === Number.MAX_SAFE_INTEGER ? maxFrameIndex : previewTimelineIndex + delta));
-    commitTimelineFrame(null);
-  });
   previewTimelineFrame(actualIndex, null, { updateTitle: false });
 
-  const actions = document.createElement("div");
-  actions.className = "wis-camera-timeline-actions";
+  const controlsRow = document.createElement("div");
+  controlsRow.className = "wis-camera-timeline-controls-row";
+  controlsRow.dataset.wisCameraTimelineControls = "1";
+  controlsRow.dataset.streamId = streamId;
+  const activeZoom = Boolean(state.wisCameraZoomSelections.get(streamId)?.rect || state.wisCameraZoomSelections.get(streamId)?.selecting);
+  const paused = Boolean(recordedSession?.clockPaused || recordedSession?.status === "paused");
+  const playPauseAction = paused ? "play" : "pause";
+  const playPause = wisCameraToolButton(paused ? "Play" : "Pause", paused ? "Resume recorded playback" : "Pause recorded playback", (event) => {
+    toggleWisCameraRecordedPlayback({ ...camera, _slot: slot || streamId }, event);
+  }, {
+    icon: paused ? "play" : "pause",
+    control: "play-pause",
+    streamId,
+    slot: slot || streamId,
+    action: playPauseAction,
+    active: Boolean(recordedSession && !paused),
+    pressed: Boolean(recordedSession && !paused),
+  });
+  if (!recordedSession) {
+    playPause.setAttribute("aria-disabled", "true");
+    playPause.dataset.wisCameraDisabledReason = "no-recorded-session";
+    playPause.classList.add("is-disabled");
+  }
+  traceWisCameraBoundary("controls.playpause.rendered", wisCameraPlaybackTracePayload(streamId, {
+    control: "play-pause",
+    action: playPauseAction,
+    slot: slot || streamId,
+    disabled: Boolean(playPause.disabled),
+    title: cleanText(playPause.title, ""),
+  }));
+  const zoomButton = wisCameraToolButton(activeZoom ? "Reset" : "Zoom", activeZoom ? "Reset zoom" : "Select zoom area", () => {
+    toggleWisCameraZoom({ ...camera, _slot: slot || streamId });
+  }, { icon: "zoom", control: "zoom", streamId, slot: slot || streamId, action: activeZoom ? "reset" : "select", active: activeZoom, pressed: activeZoom });
+  const snapshotButton = wisCameraToolButton("Snap", "Copy snapshot", () => {
+    void copyWisCameraSnapshot({ ...camera, _slot: slot || streamId });
+  }, { icon: "snapshot", control: "snapshot", streamId, slot: slot || streamId, action: "copy" });
+  const audioAvailable = wisCameraAudioAvailable(slot || streamId, camera);
+  const muted = wisCameraAudioMuted(streamId);
+  const audioButton = wisCameraToolButton(muted ? "Muted" : "Audio", audioAvailable ? (muted ? "Turn audio on" : "Mute audio") : "No audio available", () => {
+    toggleWisCameraAudio({ ...camera, _slot: slot || streamId });
+  }, {
+    icon: muted ? "muted" : "audio",
+    control: "audio",
+    streamId,
+    slot: slot || streamId,
+    action: muted ? "unmute" : "mute",
+    disabled: !audioAvailable,
+    active: audioAvailable && !muted,
+    pressed: audioAvailable && !muted,
+  });
+  const baseStreamId = wisCameraBaseStreamId(slot || streamId, camera);
+  const qualityMode = wisCameraQualityMode(baseStreamId);
+  const qualityButton = wisCameraToolButton(qualityMode === "extra" ? "Extra" : "Main", "Toggle main/extra stream quality", () => {
+    void toggleWisCameraQuality({ ...camera, _slot: slot || streamId });
+  }, { icon: "quality", control: "quality", streamId, slot: slot || streamId, action: qualityMode === "extra" ? "primary" : "extra", active: true, pressed: qualityMode === "extra" });
+  const traceButton = wisCameraToolButton("Trace", "Copy Camera Trace", () => {
+    void copyWisCameraTraceDump(streamId);
+  }, { icon: "trace", control: "copy-trace", streamId, slot: slot || streamId, action: "copy" });
   const live = wisCameraToolButton(recordedSession ? "Return to live" : "Live", recordedSession ? "Return to live camera" : "Use live last 10 minutes", () => {
     returnWisCameraToLive(streamId);
-  }, { active: mode === "live" && !recordedSession, pressed: mode === "live" && !selected && !recordedSession });
+  }, { icon: "live", control: "live", streamId, slot: slot || streamId, action: "live", active: mode === "live" && !recordedSession, pressed: mode === "live" && !selected && !recordedSession });
   const recorded = wisCameraToolButton(timeline.loading && mode === "recorded" ? "Detecting" : "Recorded", "Detect recorded footage range", () => {
     setWisCameraTimelineMode(streamId, "recorded");
-  }, { active: mode === "recorded" || Boolean(recordedSession), pressed: mode === "recorded" || Boolean(recordedSession), disabled: Boolean(timeline.loading && mode === "recorded") });
-  actions.append(live, recorded);
+  }, { icon: "recorded", control: "recorded", streamId, slot: slot || streamId, action: "recorded", active: mode === "recorded" || Boolean(recordedSession), pressed: mode === "recorded" || Boolean(recordedSession), disabled: Boolean(timeline.loading && mode === "recorded") });
+  controlsRow.append(playPause, zoomButton, snapshotButton, qualityButton, audioButton, traceButton, recorded, live);
 
-  footer.replaceChildren(meta, actions, scrubber);
+	  footer.dataset.wisTimelineSignature = footerSignature;
+	  footer.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+	  noteWisCameraPerf(state, streamId, "timelinePatches");
+  footer.replaceChildren(meta, controlsRow, scrubber);
+  cameraPlaybackController?.configure?.({
+    timelineElement: scrubber,
+    timeline,
+    frames,
+    mode,
+  });
 }
 
 function renderWis() {
@@ -8261,7 +9286,7 @@ function cameraConfigForSnapshot(key, config = {}) {
 function wisCameraRuntimeForSnapshot() {
   const slots = [];
   try {
-    els.wisViewport?.querySelectorAll("[data-wis-camera-slot]")?.forEach((element) => {
+    els.wisViewport?.querySelectorAll(".wis-node-webcam_placeholder[data-wis-camera-slot]")?.forEach((element) => {
       const media = element.querySelector("img, video");
       slots.push({
         slot: cleanText(element.dataset.wisCameraSlot, ""),
@@ -8278,6 +9303,40 @@ function wisCameraRuntimeForSnapshot() {
     // Runtime diagnostics must never make snapshot collection fragile.
   }
   return slots;
+}
+
+function wisCameraPerfForSnapshot() {
+  const keys = new Set();
+  try {
+    if (state.wisCameraPlaybackPerf instanceof Map) {
+      state.wisCameraPlaybackPerf.forEach((_value, key) => {
+        if (key) keys.add(cleanText(key, ""));
+      });
+    }
+    if (state.wisCameraTimeline?.streamId) keys.add(cleanText(state.wisCameraTimeline.streamId, ""));
+    state.wisCameraRecordedSessions?.forEach?.((_session, key) => {
+      if (key) keys.add(cleanText(key, ""));
+    });
+  } catch {
+    // Snapshot diagnostics should stay best-effort.
+  }
+  return Array.from(keys)
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((key) => {
+      const sample = sampleWisCameraPerf(state, key, {}, null, { force: true }) || {};
+      const badSamples = Number(
+        Number(sample.activePlaybackLoops || 0) > 1
+        || Number(sample.activeReaders || 0) > 1
+        || (sample.mode === "live" && Number(sample.activePlaybackLoops || 0) > 0)
+      );
+      return {
+        ...sample,
+        stream_id: key,
+        blink_events: Number(state.wisCameraBlinkEvents?.get?.(key) || 0),
+        bad_samples: badSamples,
+      };
+    });
 }
 
 function wisCameraTimelineFrameForSnapshot(frame = null) {
@@ -8316,6 +9375,8 @@ function wisCameraTimelineForSnapshot() {
     loading: Boolean(timeline.loading),
     error: cleanText(timeline.error, ""),
     loaded_at: Number(timeline.loadedAt || 0),
+    loading_started_at: Number(timeline.loadingStartedAt || timeline.loading_started_at || 0),
+    load_seq: Number(state.wisCameraTimelineLoadSeq || 0),
     frame_count: frames.length,
     range: timeline.range || null,
     available_range: timeline.availableRange || null,
@@ -8370,6 +9431,7 @@ function wisDebugSnapshot() {
     camera_timer_slots: Array.from(state.wisCameraTimers.keys()).slice(0, 40),
     camera_runtime: wisCameraRuntimeForSnapshot(),
     camera_timeline: wisCameraTimelineForSnapshot(),
+    camera_perf: wisCameraPerfForSnapshot(),
     camera_debug_events: Array.from(state.wisCameraDebugEvents.entries())
       .slice(-20)
       .map(([key, event]) => ({ key, ...event })),

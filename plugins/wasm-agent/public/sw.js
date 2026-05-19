@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v97";
+const CACHE_NAME = "wasm-agent-v103-timeline-trace";
 const ASSETS = [
   "/",
   "/index.html",
