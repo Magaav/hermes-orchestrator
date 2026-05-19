@@ -4106,6 +4106,8 @@ function wisCameraControlTargetSummary(target = null) {
     streamId: cleanText(button?.dataset?.wisCameraStreamId || row?.dataset?.streamId, ""),
     slot: cleanText(button?.dataset?.wisCameraSlot, ""),
     action: cleanText(button?.dataset?.wisCameraAction, ""),
+    icon: cleanText(button?.dataset?.icon, ""),
+    disabledReason: cleanText(button?.dataset?.wisCameraDisabledReason, ""),
     disabled: Boolean(button?.disabled),
     ariaDisabled: cleanText(button?.getAttribute?.("aria-disabled"), ""),
     ariaPressed: cleanText(button?.getAttribute?.("aria-pressed"), ""),
@@ -4218,12 +4220,182 @@ function wisCameraControllerStreamIdForTrace(streamId = "") {
   }
 }
 
+function wisCameraVisibleImageForStream(streamId = "") {
+  const key = cleanText(streamId, "");
+  const images = wisCameraVisibleImagesForTrace();
+  return images.find((image) => image.isVisible && image.streamId === key)
+    || images.find((image) => image.streamId === key)
+    || images.find((image) => image.isVisible)
+    || images[0]
+    || null;
+}
+
 function wisCameraOwnerStateFromControllerMode(mode = "live") {
   const cleanMode = cleanText(mode, "live");
   if (cleanMode === "live") return WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
   if (["seeking", "buffering", "loading"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
   if (["paused", "ended", "gap", "stalled", "error"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
   return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+}
+
+function wisCameraReadControllerState(controller = null) {
+  try {
+    return controller?.getState?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function wisCameraPlayPauseStateForStream(streamId = "", options = {}) {
+  const button = options.button || null;
+  const targetSummary = button ? wisCameraControlTargetSummary(button) : {};
+  const clickedControlStreamId = cleanText(targetSummary.streamId || streamId, "");
+  const key = clickedControlStreamId || wisCameraCurrentTraceStreamId(streamId);
+  const controller = options.controller !== undefined
+    ? options.controller
+    : (key ? state.wisCameraArtifactControllers?.get?.(key) : null);
+  const controllerState = wisCameraReadControllerState(controller);
+  const controllerMode = cleanText(controllerState?.playbackClock?.mode, "");
+  const controllerOwnerState = controllerMode
+    ? wisCameraOwnerStateFromControllerMode(controllerMode)
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const session = options.session !== undefined ? options.session : recordedWisCameraSession(key);
+  const appOwnerState = key ? wisCameraTimelineOwnerStateContract(state, key) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const sessionOwnerState = session
+    ? wisCameraPlaybackOwnerState(session, controllerOwnerState || appOwnerState)
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const sessionStatus = cleanText(session?.status || session?.state, "");
+  let owner = WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  if (session) {
+    if (["seeking", "buffering", "loading"].includes(sessionStatus)) owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+    else if (session.clockPaused || session.userPaused || sessionStatus === "paused") owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+    else owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  } else if (controllerOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) owner = controllerOwnerState;
+  else if (appOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) owner = appOwnerState;
+  const mode = controllerMode
+    || sessionStatus
+    || cleanText(session?.mode, "")
+    || (owner === WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE ? "live" : "recorded");
+  const paused = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+  const seeking = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+  const playing = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  const notRecorded = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const action = playing ? "pause" : "play";
+  const icon = playing ? "pause" : "play";
+  const label = playing ? "Pause" : "Play";
+  const title = notRecorded
+    ? "Not in recorded mode"
+    : (seeking ? "Recorded playback is seeking" : (playing ? "Pause recorded playback" : "Resume recorded playback"));
+  const disabledReason = notRecorded
+    ? "not-recorded-mode"
+    : (seeking ? "recorded-seeking" : (!session ? "no-recorded-session" : ""));
+  const expectedPressed = playing ? "true" : "false";
+  const visibleImage = wisCameraVisibleImageForStream(key);
+  const domAction = cleanText(targetSummary.action, "");
+  const domIcon = cleanText(targetSummary.icon || (domAction === "pause" ? "pause" : (domAction === "play" ? "play" : "")), "");
+  const domPressed = cleanText(targetSummary.ariaPressed, "");
+  const domDisabledReason = cleanText(targetSummary.disabledReason, "");
+  const domMismatch = Boolean(button) && (
+    (domAction && domAction !== action)
+    || (domIcon && domIcon !== icon)
+    || (domPressed && domPressed !== expectedPressed)
+    || (domDisabledReason && domDisabledReason !== disabledReason)
+  );
+  return {
+    streamId: key,
+    clickedControlStreamId: key,
+    controllerStreamId: controller ? key : "",
+    visibleImageStreamId: cleanText(visibleImage?.streamId, ""),
+    controllerFound: Boolean(controller),
+    sessionFound: Boolean(session),
+    owner,
+    mode,
+    paused,
+    seeking,
+    playing,
+    action,
+    icon,
+    label,
+    title,
+    disabledReason,
+    expectedPressed,
+    generation: Number(session?.generation || controllerState?.generation || controllerState?.playbackClock?.generation || 0),
+    session,
+    controller,
+    controllerMode,
+    appOwnerState,
+    sessionOwnerState,
+    controllerOwnerState,
+    domAction,
+    domIcon,
+    domPressed,
+    domDisabledReason,
+    domMismatch,
+    button: targetSummary,
+  };
+}
+
+function wisCameraPlayPauseTraceContext(resolved = {}, extra = {}) {
+  const after = extra.afterState || null;
+  const { afterState: _afterState, ...safeExtra } = extra;
+  const beforeOwner = cleanText(extra.ownerBefore ?? resolved.owner, "");
+  const beforeMode = cleanText(extra.modeBefore ?? resolved.mode, "");
+  const beforePaused = Boolean(extra.pausedBefore ?? resolved.paused);
+  const beforeIcon = cleanText(extra.iconBefore ?? (resolved.domIcon || resolved.icon), "");
+  const afterOwner = cleanText(extra.ownerAfter ?? after?.owner ?? resolved.owner, "");
+  const afterMode = cleanText(extra.modeAfter ?? after?.mode ?? resolved.mode, "");
+  const afterPaused = Boolean(extra.pausedAfter ?? after?.paused ?? resolved.paused);
+  const afterIcon = cleanText(extra.iconAfter ?? after?.icon ?? resolved.icon, "");
+  return {
+    clickedControlStreamId: cleanText(extra.clickedControlStreamId ?? resolved.clickedControlStreamId ?? resolved.streamId, ""),
+    controllerStreamId: cleanText(extra.controllerStreamId ?? resolved.controllerStreamId, ""),
+    visibleImageStreamId: cleanText(extra.visibleImageStreamId ?? resolved.visibleImageStreamId, ""),
+    ownerBefore: beforeOwner,
+    modeBefore: beforeMode,
+    pausedBefore: beforePaused,
+    iconBefore: beforeIcon,
+    ownerAfter: afterOwner,
+    modeAfter: afterMode,
+    pausedAfter: afterPaused,
+    iconAfter: afterIcon,
+    generation: Number(extra.generation ?? after?.generation ?? resolved.generation ?? 0),
+    rejectionReason: cleanText(extra.rejectionReason || "", ""),
+    controllerFound: Boolean(extra.controllerFound ?? resolved.controllerFound),
+    action: cleanText(extra.action ?? resolved.action, ""),
+    expectedAction: cleanText(extra.expectedAction ?? resolved.action, ""),
+    expectedIcon: cleanText(extra.expectedIcon ?? resolved.icon, ""),
+    disabledReason: cleanText(extra.disabledReason ?? resolved.disabledReason, ""),
+    ...safeExtra,
+  };
+}
+
+function wisCameraPlayPausePointerContext(event = null) {
+  const documentRef = event?.target?.ownerDocument || document;
+  const topElement = Number.isFinite(Number(event?.clientX)) && Number.isFinite(Number(event?.clientY))
+    ? documentRef?.elementFromPoint?.(Number(event.clientX), Number(event.clientY))
+    : null;
+  return {
+    pointerType: cleanText(event?.pointerType, ""),
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    elementFromPoint: topElement ? {
+      tagName: cleanText(topElement.tagName, ""),
+      className: cleanText(topElement.className, ""),
+      control: cleanText(topElement.dataset?.wisCameraControl, ""),
+    } : null,
+  };
+}
+
+function traceWisCameraPlayPauseButtonEvent(kind = "click", streamId = "", button = null, event = null) {
+  const resolved = wisCameraPlayPauseStateForStream(streamId, { button });
+  traceWisCameraPlayPause(`controls.playpause.${cleanText(kind, "event")}`, resolved.streamId, wisCameraPlayPauseTraceContext(resolved, {
+    control: "play-pause",
+    nativeDisabled: Boolean(button?.disabled),
+    ariaDisabled: cleanText(button?.getAttribute?.("aria-disabled"), ""),
+    target: wisCameraControlTargetSummary(button),
+    ...wisCameraPlayPausePointerContext(event),
+  }));
+  return true;
 }
 
 function wisCameraPlaybackTracePayload(streamId = "", extra = {}) {
@@ -4287,7 +4459,33 @@ function wisCameraPlaybackTracePayload(streamId = "", extra = {}) {
 	}
 
 function traceWisCameraPlayPause(event, streamId = "", extra = {}) {
-  return traceWisCameraBoundary(event, wisCameraPlaybackTracePayload(streamId, extra));
+  const priority = {};
+  [
+    "control",
+    "action",
+    "reason",
+    "rejectionReason",
+    "clickedControlStreamId",
+    "controllerStreamId",
+    "visibleImageStreamId",
+    "ownerBefore",
+    "modeBefore",
+    "pausedBefore",
+    "iconBefore",
+    "ownerAfter",
+    "modeAfter",
+    "pausedAfter",
+    "iconAfter",
+    "generation",
+    "expectedAction",
+    "expectedIcon",
+    "disabledReason",
+    "controllerFound",
+    "mismatch",
+  ].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(extra, key)) priority[key] = extra[key];
+  });
+  return traceWisCameraBoundary(event, { ...priority, ...wisCameraPlaybackTracePayload(streamId, extra) });
 }
 
 function dumpWisCameraTrace(streamId = "") {
@@ -4835,128 +5033,147 @@ function stopWisCameraPlaybackStream(streamId) {
 }
 
 function toggleWisCameraRecordedPlayback(camera = {}, event = null) {
-  const targetSummary = wisCameraControlTargetSummary(event?.target || null);
+  const button = event?.currentTarget?.closest?.("[data-wis-camera-control='play-pause']")
+    || event?.target?.closest?.("[data-wis-camera-control='play-pause']")
+    || null;
+  const targetSummary = wisCameraControlTargetSummary(button || event?.target || null);
   const slot = cleanText(targetSummary?.slot || camera._slot, wisFocusedCameraSlot() || "cam-1");
   const streamId = cleanText(targetSummary?.streamId, wisCameraQualityStreamId(slot, camera));
-  const session = recordedWisCameraSession(streamId);
-  const paused = Boolean(session?.clockPaused || session?.status === "paused");
-  const action = cleanText(targetSummary?.action, paused ? "play" : "pause");
-  traceWisCameraBoundary("controls.playpause.resolvedTarget", wisCameraPlaybackTracePayload(streamId, {
+  const controller = streamId ? wisCameraPlaybackController(streamId) : null;
+  let beforeState = wisCameraPlayPauseStateForStream(streamId, { button, controller });
+  const renderForCurrentState = () => {
+    const currentCamera = wisCameraConfigForSlot(slot) || camera || {};
+    if (wisCameraIsPushConfig(currentCamera)) renderWisCameraTimelineFooter({ ...currentCamera, _slot: slot });
+  };
+  const currentButton = () => widgetById("wis")?.querySelector?.(
+    `[data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(streamId)}"]`
+  ) || null;
+  const resolveAfterState = () => wisCameraPlayPauseStateForStream(streamId, {
+    button: currentButton() || button,
+    controller,
+  });
+  const traceWithState = (eventName, resolved, extra = {}) => traceWisCameraPlayPause(eventName, streamId, wisCameraPlayPauseTraceContext(resolved, {
     control: "play-pause",
-    action,
     slot,
+    target: targetSummary,
     focusedSlot: wisFocusedCameraSlot() || "",
     timelineStreamId: cleanText(state.wisCameraTimeline?.streamId, ""),
     sessionKeys: Array.from(state.wisCameraRecordedSessions?.keys?.() || []).map((key) => cleanText(key, "")).filter(Boolean).slice(-10),
-    target: targetSummary,
+    ...extra,
   }));
-  traceWisCameraPlayPause("controls.playpause.beforeState", streamId, {
-    control: "play-pause",
-    action,
-    slot,
+  traceWithState("controls.playpause.resolvedTarget", beforeState);
+  traceWithState("controls.playpause.controllerFound", beforeState, {
+    controllerFound: Boolean(controller),
   });
+  traceWithState("controls.playpause.uiStateMismatch", beforeState, {
+    mismatch: beforeState.domMismatch,
+    domAction: beforeState.domAction,
+    domIcon: beforeState.domIcon,
+    expectedAction: beforeState.action,
+    expectedIcon: beforeState.icon,
+  });
+  traceWithState("controls.playpause.beforeState", beforeState);
   traceWisCameraBoundary("playback.control.clicked", {
-    streamId,
-    control: action,
-    owner: wisCameraTimelineOwnerStateContract(state, streamId),
-    requestedTimestampMs: Number(session?.requestedSeekTimestampMs || 0),
-    persistedSeekTimestampMs: Number(session?.persistedSeekTimestampMs || session?.requestedSeekTimestampMs || 0),
-    mediaAnchorMs: Number(session?.anchorRecordingTimeMs || 0),
-    wallAnchorMs: Number(session?.anchorWallTimeMs || 0),
-    playbackClockMs: Number(session ? wisCameraRecordedClockMs(session) : 0),
-    visibleFrameMs: Number(session?.lastDisplayedFrameTimeMs || 0),
-    archiveWindowStartMs: Number(state.wisCameraTimeline?.availableRange?.start_ms ?? state.wisCameraTimeline?.available_range?.start_ms ?? state.wisCameraTimeline?.range?.start_ms ?? 0),
-    archiveWindowEndMs: Number(state.wisCameraTimeline?.availableRange?.end_ms ?? state.wisCameraTimeline?.available_range?.end_ms ?? state.wisCameraTimeline?.range?.end_ms ?? 0),
-    generation: Number(session?.generation || 0),
-    paused,
-    playbackRate: Number(session?.playbackRate || session?.rate || 1),
+    ...wisCameraPlaybackTracePayload(streamId, wisCameraPlayPauseTraceContext(beforeState, {
+      control: "play-pause",
+      action: beforeState.action,
+      slot,
+    })),
+    control: beforeState.action,
   });
-  if (!session) {
-    traceWisCameraPlayPause("controls.playpause.controllerFound", streamId, {
-      control: "play-pause",
-      action,
-      slot,
-      controllerFound: Boolean(state.wisCameraArtifactControllers?.get?.(streamId)),
-      rejected: true,
-      reason: "no-recorded-session",
+  if (beforeState.domMismatch) {
+    renderForCurrentState();
+    const afterState = resolveAfterState();
+    const reason = "ui-state-mismatch-corrected";
+    setWisCameraNotice(streamId, "Play/Pause state refreshed", "warn", 2400);
+    traceWithState(`playback.${beforeState.action === "pause" ? "pause" : "resume"}.rejected`, beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
     });
-    traceWisCameraPlayPause("playback.resume.rejected", streamId, {
-      control: "play-pause",
-      action,
-      slot,
-      reason: "no-recorded-session",
+    traceWithState("controls.playpause.afterState", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
     });
     return;
   }
-  const controller = wisCameraPlaybackController(streamId);
-  traceWisCameraPlayPause("controls.playpause.controllerFound", streamId, {
-    control: "play-pause",
-    action,
-    slot,
-    controllerFound: Boolean(controller),
-  });
-  if (paused) {
-    traceWisCameraPlayPause("playback.resume.called", streamId, {
-      control: "play-pause",
-      action,
-      slot,
+  if (beforeState.disabledReason) {
+    const reason = beforeState.disabledReason;
+    setWisCameraNotice(streamId, reason === "not-recorded-mode" ? "Play/Pause unavailable: not in recorded mode" : "Play/Pause unavailable", "warn", 3200);
+    renderForCurrentState();
+    const afterState = resolveAfterState();
+    traceWithState("playback.resume.rejected", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    traceWithState("controls.playpause.afterState", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    return;
+  }
+  const session = beforeState.session;
+  if (beforeState.action === "play") {
+    traceWithState("playback.resume.called", beforeState, {
       reason: "timeline-play-button",
     });
     const resumed = resumeWisCameraPlaybackState(state, streamId, {
-      sessionId: session.id,
-      generation: session.generation,
+      sessionId: session?.id,
+      generation: session?.generation,
       reason: "timeline-play-button",
     });
-    const controllerStarted = controller?.resumePlayback?.({ source: "control", reason: "timeline-play-button", generation: session.generation });
+    const controllerStarted = controller?.resumePlayback?.({ source: "control", reason: "timeline-play-button", generation: session?.generation });
+    renderForCurrentState();
+    const afterState = resolveAfterState();
     if (!resumed) {
-      traceWisCameraPlayPause("playback.resume.rejected", streamId, {
-        control: "play-pause",
-        action,
-        slot,
-        reason: "state-resume-returned-null",
+      const reason = "state-resume-returned-null";
+      traceWithState("playback.resume.rejected", beforeState, {
+        rejectionReason: reason,
+        reason,
         controllerStarted: Boolean(controllerStarted),
+        afterState,
       });
     } else {
-      traceWisCameraPlayPause("playback.resume.started", streamId, {
-        control: "play-pause",
-        action,
-        slot,
+      traceWithState("playback.resume.started", beforeState, {
         controllerStarted: Boolean(controllerStarted),
+        afterState,
       });
     }
     if (!wisCameraActivePlaybackLoop(state, streamId) && resumed?.frame) {
       renderWisCameraPlaybackInPlace(streamId, resumed.frame, { force: true, generation: resumed.generation });
     }
-  } else {
-    traceWisCameraPlayPause("playback.pause.called", streamId, {
-      control: "play-pause",
-      action,
-      slot,
-      reason: "timeline-pause-button",
-    });
-    const pausedSession = pauseWisCameraPlaybackState(state, streamId, {
-      sessionId: session.id,
-      generation: session.generation,
-      reason: "timeline-pause-button",
-    });
-    const controllerPaused = controller?.pausePlayback?.({ source: "control", reason: "timeline-pause-button", generation: session.generation });
-    if (!pausedSession) {
-      traceWisCameraPlayPause("playback.pause.rejected", streamId, {
-        control: "play-pause",
-        action,
-        slot,
-        reason: "state-pause-returned-null",
-        controllerPaused: Boolean(controllerPaused),
-      });
-    }
+    traceWithState("controls.playpause.afterState", beforeState, { afterState });
+    return;
   }
-  updateWisCameraRecordedPlaybackUi(streamId, { force: true });
-  renderWisCameraTimelineFooter({ ...camera, _slot: slot });
-  traceWisCameraPlayPause("controls.playpause.afterState", streamId, {
-    control: "play-pause",
-    action,
-    slot,
+  traceWithState("playback.pause.called", beforeState, {
+    reason: "timeline-pause-button",
   });
+  const pausedSession = pauseWisCameraPlaybackState(state, streamId, {
+    sessionId: session?.id,
+    generation: session?.generation,
+    reason: "timeline-pause-button",
+  });
+  const controllerPaused = controller?.pausePlayback?.({ source: "control", reason: "timeline-pause-button", generation: session?.generation });
+  renderForCurrentState();
+  const afterState = resolveAfterState();
+  if (!pausedSession) {
+    const reason = "state-pause-returned-null";
+    traceWithState("playback.pause.rejected", beforeState, {
+      rejectionReason: reason,
+      reason,
+      controllerPaused: Boolean(controllerPaused),
+      afterState,
+    });
+  } else {
+    traceWithState("playback.pause.applied", beforeState, {
+      controllerPaused: Boolean(controllerPaused),
+      afterState,
+    });
+  }
+  traceWithState("controls.playpause.afterState", beforeState, { afterState });
 }
 
 function wisMonotonicNow() {
@@ -4988,29 +5205,42 @@ function stopWisCameraRecordedClock(streamId) {
 
 function syncWisCameraPlayPauseButtonForSession(streamId, session = null) {
   const key = cleanText(streamId, "");
-  if (!key || !session) return false;
+  if (!key) return false;
   const widget = widgetById("wis");
   const footer = widget?.querySelector?.(".wis-camera-timeline");
   const button = footer?.querySelector?.(`[data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(key)}"]`);
   if (!button) return false;
-  const paused = Boolean(session.clockPaused || session.status === "paused");
-  const expectedAction = paused ? "play" : "pause";
-  const expectedTitle = paused ? "Resume recorded playback" : "Pause recorded playback";
-  const expectedPressed = paused ? "false" : "true";
+  const resolved = wisCameraPlayPauseStateForStream(key, { button, session });
+  const expectedAction = resolved.action;
+  const expectedTitle = resolved.title;
+  const expectedPressed = resolved.expectedPressed;
+  const expectedIcon = resolved.icon;
+  const expectedDisabledReason = resolved.disabledReason;
   const currentAction = cleanText(button.dataset?.wisCameraAction, "");
+  const currentIcon = cleanText(button.dataset?.icon, "");
   const currentTitle = cleanText(button.getAttribute?.("title"), "");
   const currentPressed = cleanText(button.getAttribute?.("aria-pressed"), "");
-  if (currentAction === expectedAction && currentTitle === expectedTitle && currentPressed === expectedPressed) return false;
-  traceWisCameraPlayPause("controls.playpause.uiStateMismatch", key, {
+  const currentDisabledReason = cleanText(button.dataset?.wisCameraDisabledReason, "");
+  if (
+    currentAction === expectedAction
+    && currentIcon === expectedIcon
+    && currentTitle === expectedTitle
+    && currentPressed === expectedPressed
+    && currentDisabledReason === expectedDisabledReason
+  ) return false;
+  traceWisCameraPlayPause("controls.playpause.uiStateMismatch", key, wisCameraPlayPauseTraceContext(resolved, {
     control: "play-pause",
     action: currentAction,
     expectedAction,
+    expectedIcon,
     expectedTitle,
     expectedPressed,
-    status: cleanText(session.status, ""),
-    clockPaused: Boolean(session.clockPaused),
+    expectedDisabledReason,
+    status: cleanText(session?.status, ""),
+    clockPaused: Boolean(session?.clockPaused),
     button: wisCameraControlTargetSummary(button),
-  });
+    mismatch: true,
+  }));
   if (footer?.dataset) footer.dataset.wisTimelineSignature = "playpause-state-mismatch";
   const slot = wisCameraSlotForStreamId(key, button.dataset?.wisCameraSlot || "");
   const camera = wisCameraConfigForSlot(slot) || focusedWisCameraTimelineConfig() || {};
@@ -6863,6 +7093,10 @@ function renderWisCameraTimelineFooter(camera = null) {
   const frames = timeline.frames || [];
   const cameraPlaybackController = wisCameraPlaybackController(streamId);
   const recordedSession = recordedWisCameraSession(streamId);
+  const playPauseState = wisCameraPlayPauseStateForStream(streamId, {
+    controller: cameraPlaybackController,
+    session: recordedSession,
+  });
   const selected = recordedSession?.frame || selectedWisCameraTimelineFrame(streamId);
   const footerSignature = [
     streamId,
@@ -6874,6 +7108,11 @@ function renderWisCameraTimelineFooter(camera = null) {
     cleanText(recordedSession?.id, ""),
     cleanText(recordedSession?.status, ""),
     recordedSession?.clockPaused ? "paused" : "running",
+    playPauseState.owner,
+    playPauseState.mode,
+    playPauseState.action,
+    playPauseState.icon,
+    playPauseState.disabledReason,
     wisCameraQualityMode(wisCameraBaseStreamId(slot || streamId, camera)),
     state.wisCameraZoomSelections.has(streamId) ? "zoom" : "nozoom",
     wisCameraAudioMuted(streamId) ? "muted" : "audio",
@@ -6965,31 +7204,32 @@ function renderWisCameraTimelineFooter(camera = null) {
   controlsRow.dataset.wisCameraTimelineControls = "1";
   controlsRow.dataset.streamId = streamId;
   const activeZoom = Boolean(state.wisCameraZoomSelections.get(streamId)?.rect || state.wisCameraZoomSelections.get(streamId)?.selecting);
-  const paused = Boolean(recordedSession?.clockPaused || recordedSession?.status === "paused");
-  const playPauseAction = paused ? "play" : "pause";
-  const playPause = wisCameraToolButton(paused ? "Play" : "Pause", paused ? "Resume recorded playback" : "Pause recorded playback", (event) => {
+  const playPause = wisCameraToolButton(playPauseState.label, playPauseState.title, (event) => {
     toggleWisCameraRecordedPlayback({ ...camera, _slot: slot || streamId }, event);
   }, {
-    icon: paused ? "play" : "pause",
+    icon: playPauseState.icon,
     control: "play-pause",
     streamId,
     slot: slot || streamId,
-    action: playPauseAction,
-    active: Boolean(recordedSession && !paused),
-    pressed: Boolean(recordedSession && !paused),
+    action: playPauseState.action,
+    active: playPauseState.playing,
+    pressed: playPauseState.playing,
+    traceEvent: (kind, button, event) => traceWisCameraPlayPauseButtonEvent(kind, streamId, button, event),
   });
-  if (!recordedSession) {
+  if (playPauseState.disabledReason) {
     playPause.setAttribute("aria-disabled", "true");
-    playPause.dataset.wisCameraDisabledReason = "no-recorded-session";
+    playPause.dataset.wisCameraDisabledReason = playPauseState.disabledReason;
     playPause.classList.add("is-disabled");
   }
-  traceWisCameraBoundary("controls.playpause.rendered", wisCameraPlaybackTracePayload(streamId, {
+  traceWisCameraBoundary("controls.playpause.buttonRendered", wisCameraPlaybackTracePayload(streamId, wisCameraPlayPauseTraceContext(playPauseState, {
     control: "play-pause",
-    action: playPauseAction,
+    action: playPauseState.action,
     slot: slot || streamId,
     disabled: Boolean(playPause.disabled),
+    ariaDisabled: cleanText(playPause.getAttribute("aria-disabled"), ""),
+    icon: playPauseState.icon,
     title: cleanText(playPause.title, ""),
-  }));
+  })));
   const zoomButton = wisCameraToolButton(activeZoom ? "Reset" : "Zoom", activeZoom ? "Reset zoom" : "Select zoom area", () => {
     toggleWisCameraZoom({ ...camera, _slot: slot || streamId });
   }, { icon: "zoom", control: "zoom", streamId, slot: slot || streamId, action: activeZoom ? "reset" : "select", active: activeZoom, pressed: activeZoom });

@@ -5,7 +5,7 @@ export const WIS_CAMERA_CONFIGS_STORAGE_KEY = "wasmAgent.wisCameraConfigs.v1";
 export const WIS_CAMERA_DEFAULT_SLOT = "cam-1";
 export const WIS_CAMERA_NODE_TYPE = "webcam_placeholder";
 export const WIS_CAMERA_PUSH_MEDIA_MODE = "rtmp-push-ingest";
-export const WIS_CAMERA_ARTIFACT_BUILD = "PLAYPAUSE_TRACE_20260519_002";
+export const WIS_CAMERA_ARTIFACT_BUILD = "PLAYPAUSE_SOURCE_20260519_003";
 export const WIS_SPACE_SCHEMA = "hermes.wasm_agent.wis.space.v1";
 export const WIS_CAMERA_PUSH_ENDPOINTS = Object.freeze({
   status: "/camera/push/status",
@@ -6344,10 +6344,13 @@ export function createWisCameraToolButton(documentRef, label, title, onClick, op
     button.setAttribute("aria-disabled", "true");
   }
   button.addEventListener("pointerdown", (event) => {
-    traceWisCameraToolButtonEvent("pointerdown", button, event, options);
+      if (typeof options.traceEvent === "function" && options.traceEvent("pointerdown", button, event) !== false) return;
+      traceWisCameraToolButtonEvent("pointerdown", button, event, options);
   });
   button.addEventListener("click", (event) => {
-    traceWisCameraToolButtonEvent("click", button, event, options);
+      if (typeof options.traceEvent !== "function" || options.traceEvent("click", button, event) === false) {
+        traceWisCameraToolButtonEvent("click", button, event, options);
+      }
     event.preventDefault();
     event.stopPropagation();
     if (button.disabled) return;

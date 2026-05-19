@@ -505,7 +505,7 @@ const engineUrl = pathToFileURL(path.join(tempDir, "engine.mjs")).href;
   const flushMicrotasks = async (count = 8) => {
     for (let index = 0; index < count; index += 1) await Promise.resolve();
   };
-  assert.strictEqual(WIS_CAMERA_ARTIFACT_BUILD, "PLAYPAUSE_TRACE_20260519_002", "camera artifact build marker should be exported for browser cache verification");
+  assert.strictEqual(WIS_CAMERA_ARTIFACT_BUILD, "PLAYPAUSE_SOURCE_20260519_003", "camera artifact build marker should be exported for browser cache verification");
   const imageRuntime = createWisCameraArtifactState({});
   const imageElement = makeFakeElement("div");
   const imagePipeline = renderWisCameraPushArchiveFrame(imageRuntime, {
