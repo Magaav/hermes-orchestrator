@@ -856,8 +856,8 @@
               </label>
               <div id="nodeHarnessBridgeInfoBalloon" class="node-harness-info-balloon" hidden>
                 <p>A bridge URL is an HTTP endpoint that lets wasm-agent talk to your own running Hermes-compatible agent.</p>
-                <p>Required routes: GET /health, GET /bridge/v1/models, and POST /bridge/v1/chat or the project's existing canonical chat route.</p>
-                <p>The bridge must allow the wasm-agent origin with CORS when called from this browser.</p>
+                <p>Required routes: GET /health, GET /bridge/v1/models or /v1/models, and POST /bridge/v1/chat, /tasks, or a Hermes /v1/runs API.</p>
+                <p>Loopback and private LAN bridges are checked from this browser and must allow the wasm-agent origin with CORS.</p>
                 <code>https://your-domain.example/bridge</code>
               </div>
               <label>

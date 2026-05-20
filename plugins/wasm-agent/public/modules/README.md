@@ -54,6 +54,9 @@ tree and workflow.
   commits live under `refs/wasm-agent-timeline/<acc_id>/<space_id>/*`.
 - `assistant/`: embedded assistant firmware contract; local transcripts and
   settings currently live in browser local storage.
+- `remote-control/`: consented co-control firmware contract; it owns low-bandwidth
+  viewport frame capture and the controller preview surface while the shell
+  handles auth, sync-event transport, and grant lifecycle.
 - `image-card-core/`: built-in browser image-card analyzer contract; the runtime
   uses native image decode plus Canvas sampling and stays resident with the app.
 - `barcode-reader/`: lazy image evidence contract; it initializes native

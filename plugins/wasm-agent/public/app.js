@@ -77,6 +77,23 @@ import {
   sharedVoiceSignalIsFresh,
   sharedVoiceSignalPayload,
 } from "./modules/spaces/shared-voice-room.js";
+import {
+  REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+  REMOTE_CONTROL_VIEWPORT_FRAME_MS,
+  REMOTE_CONTROL_VIEWPORT_LIVE_FRAME_MS,
+  REMOTE_CONTROL_VIEWPORT_LIVE_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_DURABLE_FRAME_MS,
+  captureRemoteControlViewportFrame,
+  removeRemoteControlViewportPanel,
+  renderRemoteControlViewportPanel as renderRemoteControlViewportSurface,
+  remoteControlViewportPoint,
+  remoteControlViewportPixelCaptureActive,
+  setRemoteControlViewportPixelCaptureStopHandler,
+  startRemoteControlViewportPixelCapture,
+  stopRemoteControlViewportPixelCapture,
+} from "./modules/remote-control/viewport.js";
 
 traceWisCameraBoundary("app.cameraArtifactBuild.loaded", {
   module: "app.js",
@@ -110,6 +127,7 @@ const AGENT_HARNESS_DEFAULT_INFRA_MODE = "hermes_backend";
 const AGENT_HARNESS_OWN_INFRA_MODE = "custom_bridge";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
+const RESERVED_USER_SPACE_IDS = new Set(["home", "admin", "space-home", "space-admin"]);
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
 const CHAT_QUERY_KEY = "chat";
 const CHAT_QUERY_VALUE = "wasm-agent-chat";
@@ -147,6 +165,25 @@ const CLIENT_SNAPSHOT_REQUEST_POLL_MS = 2500;
 const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
+const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
+const SHARED_SPACE_POINTER_SEND_MS = 90;
+const SHARED_SPACE_POINTER_POLL_MS = 280;
+const SHARED_SPACE_POINTER_TTL_MS = 1800;
+const SHARED_SPACE_POINTER_CLICK_TTL_MS = 520;
+const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
+const REMOTE_CONTROL_REQUEST_TTL_MS = 2 * 60 * 1000;
+const REMOTE_CONTROL_GRANT_TTL_MS = 10 * 60 * 1000;
+const REMOTE_CONTROL_ADMIN_SESSION_TTL_MS = 60 * 60 * 1000;
+const REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY = "wasmAgent.remoteControl.adminCoControlSession.v1";
+const REMOTE_CONTROL_SYNC_POLL_MS = 180;
+const REMOTE_CONTROL_WHEEL_MIN_MS = 120;
+const REMOTE_CONTROL_POINTER_MOVE_MIN_MS = 70;
+const REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS = 350;
+const REMOTE_CONTROL_ACTION_LOG_LIMIT = 80;
+const REMOTE_CONTROL_LIVE_FRAME_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
+const REMOTE_CONTROL_SECRET_RE = /password|passwd|secret|token|api[_-]?key|credential|authorization/i;
+const REMOTE_CONTROL_BLOCKED_INPUT_TYPES = new Set(["password", "file", "hidden"]);
+const REMOTE_CONTROL_INTERACTIVE_SELECTOR = "button,input,textarea,select,s-select,a,[contenteditable='true'],[tabindex],summary,label";
 const DIRECT_EMOJI_SET = ["😀", "😂", "😍", "🥳", "🙏", "👍", "🔥", "🚀", "👀", "✅", "🧠", "❤️"];
 const DIRECT_REACTION_SET = ["👍", "❤️", "😂", "🔥", "👀", "✅"];
 const DIRECT_STICKERS = [
@@ -1377,6 +1414,55 @@ const state = {
   socialNotificationKeys: new Set(),
   socialPulseTimer: 0,
   agentSocialPicker: "",
+  remoteControl: {
+    incomingRequests: {},
+    outgoingRequests: {},
+    requestResponses: {},
+    activeGrant: null,
+    activeController: null,
+    appliedEventIds: new Set(),
+    actionSeq: 0,
+    sendQueue: Promise.resolve(),
+    suppressEvents: false,
+    captureInstalled: false,
+    lastWheelAt: 0,
+    adminCoControlSession: readRemoteControlAdminCoControlSession(),
+    actionLog: [],
+    viewportStreamTimer: 0,
+    viewportStreamIntervalMs: 0,
+    viewportStreamBusy: false,
+    viewportSeq: 0,
+    viewportFrame: null,
+    viewportFrameReceivedAt: 0,
+    viewportLastDurableFrameAt: 0,
+    viewportRenderTimer: 0,
+    viewportFrameError: "",
+    viewportFrameMaxBytes: REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+    viewportLatestProbeAt: 0,
+    stopLatestProbeAt: 0,
+    syncTimer: 0,
+    syncBusy: false,
+    syncCursor: "",
+    liveSocket: null,
+    liveSocketReady: false,
+    liveSocketToken: 0,
+    liveReconnectTimer: 0,
+    livePending: {},
+    lastPointerMoveAt: 0,
+    viewportPointerActive: false,
+    viewportPointerMoved: false,
+    viewportPointerId: 0,
+    viewportPointerStartX: 0,
+    viewportPointerStartY: 0,
+    viewportPointerSuppressClickUntil: 0,
+    remotePointerTarget: null,
+    remotePointerStartX: 0,
+    remotePointerStartY: 0,
+    remotePointerMoved: false,
+    remoteSyntheticClickUntil: 0,
+    remoteSyntheticClickX: 0,
+    remoteSyntheticClickY: 0,
+  },
   agentSessions: readAgentSessions(),
   activeAgentSessionId: "",
   clientSnapshotBusy: false,
@@ -1402,6 +1488,11 @@ const state = {
   spacePinchStartCanvasDistance: 1,
   spacePinchChanged: false,
   spacePinchSuppressPanUntil: 0,
+  sharedSpacePointers: {},
+  sharedSpacePointerSyncInterval: 0,
+  sharedSpacePointerSyncBusy: false,
+  sharedSpacePointerLastSentAt: 0,
+  sharedSpacePointerLastEventIdBySpace: {},
   configAreaDraft: null,
 };
 
@@ -1415,6 +1506,27 @@ function bytesFromBase64(value) {
 function cleanText(value, fallback = "-") {
   const text = String(value ?? "").trim();
   return text || fallback;
+}
+
+function isReservedUserSpaceId(value) {
+  return RESERVED_USER_SPACE_IDS.has(cleanText(value, "").toLowerCase());
+}
+
+function sanitizeUserSpaces(spaces, fallback = []) {
+  if (!Array.isArray(spaces)) return fallback;
+  const seen = new Set();
+  return spaces.reduce((items, space) => {
+    if (!space || typeof space !== "object") return items;
+    const id = cleanText(space.id, "").toLowerCase();
+    if (!id || isReservedUserSpaceId(id) || seen.has(id)) return items;
+    seen.add(id);
+    items.push({
+      ...space,
+      id,
+      title: cleanText(space.title || id, id),
+    });
+    return items;
+  }, []);
 }
 
 function truncateText(value, max = 180) {
@@ -7825,6 +7937,234 @@ function activeSharedRoom() {
   return sharedSpaceId ? state.sharedRooms[sharedSpaceId] || null : null;
 }
 
+function sharedSpacePointerKey(event = {}) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const userId = cleanText(event.sender_user_id || payload.user_id || payload.userId, "");
+  const deviceId = cleanText(payload.device_id || payload.deviceId, "");
+  if (!userId && !deviceId) return "";
+  return `${userId}:${deviceId}`;
+}
+
+function sharedSpacePointerColor(seed = "") {
+  let hash = 0;
+  for (const char of String(seed || "space")) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
+  const hue = hash % 360;
+  return `hsl(${hue} 88% 66%)`;
+}
+
+function activeSharedSpacePointerId(room = activeSharedRoom()) {
+  const currentUserId = cleanText(room?.current_user_id || state.authUser?.id, "");
+  const currentDeviceId = cleanText(room?.current_device_id || clientDeviceId(), "");
+  return `${currentUserId}:${currentDeviceId}`;
+}
+
+function currentSharedSpacePointerTarget() {
+  const space = sharedUserSpaceForPanel();
+  const room = space?.shared_space_id ? state.sharedRooms[space.shared_space_id] || null : null;
+  if (!space?.shared_space_id || !room?.id) return null;
+  return { space, room };
+}
+
+function sharedSpacePointerPoint(event) {
+  const viewport = els.spaceViewport;
+  const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
+  if (!viewport || !rect) return null;
+  if (
+    event.clientX < rect.left
+    || event.clientX > rect.right
+    || event.clientY < rect.top
+    || event.clientY > rect.bottom
+  ) return null;
+  const distance = Math.max(SPACE_DISTANCE_MIN, canvasDistance());
+  const x = (viewport.scrollLeft + event.clientX - rect.left) / distance;
+  const y = (viewport.scrollTop + event.clientY - rect.top) / distance;
+  const area = canvasAreaSize();
+  return {
+    x: clamp(Math.round(x), 0, Math.max(1, area.width)),
+    y: clamp(Math.round(y), 0, Math.max(1, area.height)),
+  };
+}
+
+function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
+  const id = cleanText(sharedSpaceId, "");
+  if (!id || !Array.isArray(events)) return false;
+  const currentKey = activeSharedSpacePointerId(state.sharedRooms[id]);
+  let changed = false;
+  let latestId = cleanText(state.sharedSpacePointerLastEventIdBySpace[id] || "", "");
+  const pointers = { ...(state.sharedSpacePointers[id] || {}) };
+  for (const event of events) {
+    if (!event || event.kind !== SHARED_SPACE_POINTER_EVENT_KIND) continue;
+    const eventId = cleanText(event.id, "");
+    if (eventId && latestId && eventId <= latestId) continue;
+    if (eventId && (!latestId || eventId > latestId)) latestId = eventId;
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+    const key = sharedSpacePointerKey(event);
+    if (!key || key === currentKey) continue;
+    const point = {
+      x: clamp(Number(payload.x || 0), 0, CANVAS_AREA_MAX_PX),
+      y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
+    };
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    pointers[key] = {
+      key,
+      user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
+      device_id: cleanText(payload.device_id || "", ""),
+      user_label: cleanText(payload.user_label || sharedSpaceUserLabel(event.sender_user_id), "Member"),
+      type: cleanText(payload.type || "move", "move"),
+      x: point.x,
+      y: point.y,
+      color: sharedSpacePointerColor(key),
+      event_id: eventId,
+      click_until: ["down", "click"].includes(cleanText(payload.type || "", "")) ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
+      last_seen_at: Date.now(),
+    };
+    changed = true;
+  }
+  if (latestId) state.sharedSpacePointerLastEventIdBySpace[id] = latestId;
+  state.sharedSpacePointers[id] = pointers;
+  if (changed) renderSharedSpacePointers();
+  return changed;
+}
+
+function renderSharedSpacePointers() {
+  const target = currentSharedSpacePointerTarget();
+  const board = els.spaceBoard || spaceSurface();
+  if (!board) return;
+  let layer = board.querySelector("[data-shared-space-pointer-layer]");
+  if (!target) {
+    layer?.remove();
+    return;
+  }
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.className = "shared-space-pointer-layer";
+    layer.dataset.sharedSpacePointerLayer = "true";
+    board.append(layer);
+  }
+  const now = Date.now();
+  const pointers = state.sharedSpacePointers[target.room.id] || {};
+  const live = Object.values(pointers).filter((pointer) => now - Number(pointer.last_seen_at || 0) <= SHARED_SPACE_POINTER_TTL_MS);
+  const seen = new Set();
+  for (const pointer of live) {
+    seen.add(pointer.key);
+    let node = layer.querySelector(`[data-shared-space-pointer="${CSS.escape(pointer.key)}"]`);
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "shared-space-pointer";
+      node.dataset.sharedSpacePointer = pointer.key;
+      node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
+      layer.append(node);
+    }
+    node.style.left = `${logicalToScreenPx(pointer.x)}px`;
+    node.style.top = `${logicalToScreenPx(pointer.y)}px`;
+    node.style.setProperty("--shared-pointer-color", pointer.color);
+    node.classList.toggle("is-clicking", now < Number(pointer.click_until || 0));
+    node.querySelector("strong").textContent = pointer.user_label || "Member";
+  }
+  layer.querySelectorAll("[data-shared-space-pointer]").forEach((node) => {
+    if (!seen.has(node.dataset.sharedSpacePointer || "")) node.remove();
+  });
+}
+
+async function sendSharedSpacePointerEvent(type, event) {
+  const target = currentSharedSpacePointerTarget();
+  if (!target) return;
+  const point = sharedSpacePointerPoint(event);
+  if (!point) return;
+  const now = performance.now();
+  if (type === "move" && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
+  state.sharedSpacePointerLastSentAt = now;
+  const payload = {
+    type,
+    x: point.x,
+    y: point.y,
+    device_id: clientDeviceId(),
+    user_label: publicUserLabel(state.authUser),
+    distance: Number(canvasDistance().toFixed(2)),
+  };
+  void fetchJson("/spaces/room", {
+    method: "POST",
+    timeoutMs: 2500,
+    body: {
+      action: "event",
+      shared_space_id: target.space.shared_space_id,
+      space_id: target.space.id,
+      kind: SHARED_SPACE_POINTER_EVENT_KIND,
+      payload,
+    },
+  }).then((result) => {
+    if (result?.room?.id) {
+      state.sharedRooms[result.room.id] = result.room;
+      mergeSharedSpacePointerEvents(result.room.id, result.room.events);
+    }
+  }).catch(() => {});
+}
+
+async function syncSharedSpacePointers(origin = "pointer-poll") {
+  const target = currentSharedSpacePointerTarget();
+  if (!target || state.sharedSpacePointerSyncBusy) return;
+  state.sharedSpacePointerSyncBusy = true;
+  try {
+    const payload = await fetchJson("/spaces/room", {
+      method: "POST",
+      timeoutMs: 2500,
+      body: {
+        action: "read",
+        shared_space_id: target.space.shared_space_id,
+        space_id: target.space.id,
+      },
+    });
+    const room = payload.room || null;
+    if (room?.id) {
+      state.sharedRooms[room.id] = room;
+      mergeSharedSpacePointerEvents(room.id, room.events);
+      renderSharedSpacePointers();
+    }
+  } catch (error) {
+    if (origin !== "pointer-poll") {
+      recordUserEvent("workspace.shared_space_pointer_sync_error", {
+        target: `space:${target.space.id}`,
+        summary: error.message,
+        data: { shared_space_id: target.space.shared_space_id, error: error.message },
+      });
+    }
+  } finally {
+    state.sharedSpacePointerSyncBusy = false;
+  }
+}
+
+function updateSharedSpacePointerSync() {
+  const shouldRun = Boolean(state.authUser && currentSharedSpacePointerTarget());
+  if (!shouldRun) {
+    if (state.sharedSpacePointerSyncInterval) {
+      window.clearInterval(state.sharedSpacePointerSyncInterval);
+      state.sharedSpacePointerSyncInterval = 0;
+    }
+    renderSharedSpacePointers();
+    return;
+  }
+  if (!state.sharedSpacePointerSyncInterval) {
+    state.sharedSpacePointerSyncInterval = window.setInterval(
+      () => void syncSharedSpacePointers("pointer-poll"),
+      SHARED_SPACE_POINTER_POLL_MS
+    );
+    void syncSharedSpacePointers("pointer-start");
+  }
+}
+
+function installSharedSpacePointerAwareness() {
+  const sendMove = (event) => void sendSharedSpacePointerEvent("move", event);
+  document.addEventListener("pointermove", sendMove, { capture: true, passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    void sendSharedSpacePointerEvent("down", event);
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerup", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    void sendSharedSpacePointerEvent("up", event);
+  }, { capture: true, passive: true });
+}
+
 function remoteSpaceAreaChanged(before, after) {
   const beforeArea = spaceAreaFromMetadata(before?.space_area);
   const afterArea = spaceAreaFromMetadata(after?.space_area);
@@ -7839,6 +8179,7 @@ function updateSharedSpaceSyncPolling() {
       window.clearInterval(state.sharedSpaceSyncInterval);
       state.sharedSpaceSyncInterval = 0;
     }
+    updateSharedSpacePointerSync();
     return;
   }
   if (!state.sharedSpaceSyncInterval) {
@@ -7848,6 +8189,7 @@ function updateSharedSpaceSyncPolling() {
     );
     void syncSharedSpaceForOpenClient("shared-space-start");
   }
+  updateSharedSpacePointerSync();
 }
 
 async function syncSharedSpaceForOpenClient(origin = "shared-space-poll") {
@@ -7919,10 +8261,12 @@ async function loadSharedSpaceRoom(options = {}) {
   const room = payload.room || null;
   if (room?.id) {
     state.sharedRooms[room.id] = room;
+    mergeSharedSpacePointerEvents(room.id, room.events);
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
     if (state.agentView === "people") renderAgentPeoplePanel();
     queueSharedVoiceRoomProcessing(room);
+    updateSharedSpacePointerSync();
   }
   return room;
 }
@@ -9106,6 +9450,7 @@ function applyLauncherPreference() {
 
 function saveUserSpaces() {
   if (state.authUser) {
+    state.userSpaces = sanitizeUserSpaces(state.userSpaces);
     void fetchJson("/spaces", {
       method: "POST",
       timeoutMs: 8000,
@@ -9134,7 +9479,7 @@ function persistSpaceAreaMetadata(spaceId, spaceArea) {
     },
   }).then((result) => {
     if (Array.isArray(result.spaces)) {
-      state.userSpaces = result.spaces;
+      state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
       renderSpaceLauncher();
       updateSharedSpaceSyncPolling();
     }
@@ -9190,7 +9535,7 @@ async function loadUserSpaces(options = {}) {
   const beforeActiveSpace = userSpaceById(activePanel);
   try {
     const payload = await fetchJson("/spaces", { timeoutMs: 8000 });
-    state.userSpaces = Array.isArray(payload.spaces) ? payload.spaces : [];
+    state.userSpaces = sanitizeUserSpaces(payload.spaces);
     state.userStorage = payload.storage || null;
     state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
     const afterActiveSpace = userSpaceById(activePanel);
@@ -10915,6 +11260,25 @@ function userFleetHarnessForNode(nodeId = "") {
   return state.userFleetHarnesses.find((harness) => agentHarnessNodeId(harness) === target) || null;
 }
 
+function ownedAgentConfigFromFleetHarness(harness = {}) {
+  const infraMode = normalizeAgentHarnessInfraMode(harness?.infra_mode || harness?.infraMode || "");
+  const bridgeUrl = normalizeOwnedAgentBridgeUrl(harness?.bridge_url || harness?.bridgeUrl || "");
+  if (infraMode !== AGENT_HARNESS_OWN_INFRA_MODE || !bridgeUrl) return null;
+  return normalizeAgentOwnedAgentConfig({
+    name: agentHarnessDisplayName(harness),
+    role: cleanText(harness.instructions || harness.metadata?.instructions || "", ""),
+    type: "hermes",
+    bridgeUrl,
+  });
+}
+
+function adoptOwnedAgentFromFleetHarnesses() {
+  if (isAdminUser() || ownedAgentConfigured() || !Array.isArray(state.userFleetHarnesses)) return;
+  const config = state.userFleetHarnesses.map(ownedAgentConfigFromFleetHarness).find(Boolean);
+  if (!config) return;
+  saveAgentOwnedAgentConfig(config);
+}
+
 function userFleetNodeId(node = {}) {
   return cleanText(node?.node_id || node?.nodeId || node?.id, "");
 }
@@ -11035,6 +11399,16 @@ function shouldUseOwnedAgentBridge(session = activeAgentSession()) {
 
 function ownedAgentBridgeUrl(config = state.agentOwnedAgent) {
   return normalizeOwnedAgentBridgeUrl(config?.bridgeUrl || "");
+}
+
+function ownedAgentBridgeIsPrivateUrl(value = ownedAgentBridgeUrl()) {
+  const bridgeUrl = normalizeOwnedAgentBridgeUrl(value);
+  if (!bridgeUrl) return false;
+  try {
+    return isPrivateProviderHostname(new URL(bridgeUrl).hostname);
+  } catch {
+    return false;
+  }
 }
 
 function directProviderConfigFingerprint(config = activeAgentDirectProviderConfig()) {
@@ -11251,7 +11625,8 @@ function nodeFormStatusText(config = nodeFormConfigSource()) {
     return `Wasm-Agent-Cloud based (${cost}◇)`;
   }
   if (harness?.enabled && harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE) {
-    return harness.bridgeUrl ? "Private bridge / probe on create" : "Private bridge URL required";
+    if (!harness.bridgeUrl) return "Private bridge URL required";
+    return ownedAgentBridgeIsPrivateUrl(harness.bridgeUrl) ? "Private bridge / browser probe" : "Private bridge / server probe";
   }
   return directProviderStatusText(config);
 }
@@ -13080,6 +13455,7 @@ function applyCanvasGeometry(options = {}) {
   if (options.drawCanvas !== false) drawCanvas();
   if (options.updateNavigation !== false) updateSpaceNavigationHints();
   if (options.renderMiniMap !== false) renderSpaceMiniMap();
+  renderSharedSpacePointers();
 }
 
 function spaceMapMetrics() {
@@ -14970,6 +15346,8 @@ async function loadAuthSession() {
   loadAgentDirectProviderForUser();
   loadAgentOwnedAgentForUser();
   state.authChecked = true;
+  if (state.authUser) startRemoteControlLiveSocket("auth-session");
+  else closeRemoteControlLiveSocket({ reconnect: false });
   renderLogin();
 }
 
@@ -15036,6 +15414,7 @@ async function logout() {
     window.clearInterval(state.socialSyncInterval);
     state.socialSyncInterval = 0;
   }
+  closeRemoteControlLiveSocket({ reconnect: false });
   if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
   renderAuthGate();
@@ -15100,6 +15479,45 @@ async function fetchJson(path, options = {}) {
     }
     if (!response.ok || payload.ok === false) {
       const error = new Error(payload?.error?.message || `HTTP ${response.status}`);
+      error.payload = payload;
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  } finally {
+    window.clearTimeout(timeout);
+    if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function fetchExternalJson(url, options = {}) {
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (options.signal) options.signal.addEventListener("abort", abortFromCaller, { once: true });
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const headers = {
+    "Accept": "application/json",
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+    ...(options.headers || {}),
+  };
+  try {
+    const response = await fetch(url, {
+      method: options.method || "GET",
+      cache: options.cache || "no-store",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { ok: false, error: { message: text.slice(0, 600) } };
+    }
+    if (!response.ok || payload.ok === false) {
+      const error = new Error(payload?.error?.message || payload?.message || `HTTP ${response.status}`);
       error.payload = payload;
       error.status = response.status;
       throw error;
@@ -16825,6 +17243,43 @@ async function submitNodeForm(event) {
       renderNodesPanel();
       return;
     }
+    if (harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE && ownedAgentBridgeIsPrivateUrl(harness.bridgeUrl)) {
+      state.agentProvisionBusy = true;
+      state.nodesPanelStatus = "Checking private bridge";
+      setNodeFormStatus("Checking private bridge from this browser");
+      renderNodesPanel();
+      try {
+        await probeOwnedAgentBridge(harness.bridgeUrl);
+        saveAgentOwnedAgentConfig({
+          name: harness.name || config?.nodeName || "My agent",
+          role: harness.instructions || "",
+          type: "hermes",
+          bridgeUrl: harness.bridgeUrl,
+        });
+        state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+        closeNodeForm();
+        state.agentSetupBalloonOpen = false;
+        state.nodesPanelStatus = "Private bridge saved";
+        recordUserEvent("agent.owned_bridge_saved_client", {
+          target: "owned-agent",
+          summary: `Saved ${harness.name || "private Hermes bridge"}`,
+          data: { bridge_host: new URL(harness.bridgeUrl).host, browser_local: true },
+        });
+        renderAgentNodeSelect();
+        renderAgentModelSelect();
+        renderAgentReadinessStatus();
+        renderNodesPanel();
+      } catch (error) {
+        state.nodesPanelStatus = "";
+        setNodeFormStatus(`Private bridge not reachable: ${error.message || String(error)}`, { attention: true });
+        renderAgentReadinessStatus();
+        renderNodesPanel();
+      } finally {
+        state.agentProvisionBusy = false;
+        renderNodesPanel();
+      }
+      return;
+    }
     state.agentProvisionBusy = true;
     state.nodesPanelStatus = harness.infraMode === AGENT_HARNESS_DEFAULT_INFRA_MODE ? "Provisioning sandbox..." : "Checking own bridge";
     setNodeFormStatus(state.nodesPanelStatus);
@@ -17032,36 +17487,212 @@ function compactJsonForPrompt(value, max = 1200) {
   }
 }
 
+function ownedAgentBridgeTimeoutMs() {
+  return Math.min(Number(state.agentTurnTimeoutMs || DEFAULT_AGENT_TURN_TIMEOUT_MS), 120000);
+}
+
+function ownedAgentBridgeTimeoutSec() {
+  return Math.max(60, Math.round(ownedAgentBridgeTimeoutMs() / 1000));
+}
+
+function ownedAgentReplyFromPayload(payload = {}) {
+  if (typeof payload === "string") return cleanText(payload, "");
+  if (!payload || typeof payload !== "object") return "";
+  const result = payload.result && typeof payload.result === "object" ? payload.result : {};
+  const output = payload.output && typeof payload.output === "object" ? payload.output : {};
+  const candidates = [
+    result.response,
+    result.reply,
+    result.message,
+    result.text,
+    result.content,
+    result.output,
+    result.final_response,
+    payload.response,
+    payload.reply,
+    payload.message,
+    payload.text,
+    payload.content,
+    payload.output,
+    payload.final_response,
+    output.text,
+    output.content,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    if (candidate && typeof candidate === "object") {
+      const nested = ownedAgentReplyFromPayload(candidate);
+      if (nested) return nested;
+    }
+  }
+  const choices = Array.isArray(payload.choices)
+    ? payload.choices
+    : Array.isArray(result.choices) ? result.choices : [];
+  for (const choice of choices) {
+    const message = choice?.message && typeof choice.message === "object" ? choice.message : {};
+    const content = message.content ?? choice?.text ?? choice?.delta?.content;
+    if (typeof content === "string" && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const joined = content.map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text") return part.text || "";
+        return "";
+      }).join("").trim();
+      if (joined) return joined;
+    }
+  }
+  return "";
+}
+
 function ownedAgentReplyFromTask(task = {}) {
-  const result = task.result && typeof task.result === "object" ? task.result : {};
-  return cleanText(result.response || result.reply || result.message || taskPreview(task), "");
+  return ownedAgentReplyFromPayload(task);
+}
+
+function ownedAgentTaskStatus(task = {}) {
+  return cleanText(task.status || task.state || task.run_status || "", "").toLowerCase();
+}
+
+function ownedAgentTaskId(task = {}) {
+  return cleanText(task.task_id || task.taskId || task.id || "", "");
+}
+
+function ownedAgentRunId(payload = {}) {
+  return cleanText(payload.run_id || payload.runId || payload.id || payload.result?.run_id || "", "");
+}
+
+function ownedAgentTaskActive(task = {}) {
+  return ["running", "queued", "pending", "submitted", "active", "in_progress", "started", "working"].includes(ownedAgentTaskStatus(task));
+}
+
+function ownedAgentBridgePromptBody(prompt) {
+  return {
+    prompt,
+    input: prompt,
+    target_node: "orchestrator",
+    timeout_sec: ownedAgentBridgeTimeoutSec(),
+    stream: false,
+    messages: [{ role: "user", content: prompt }],
+  };
+}
+
+async function pollOwnedAgentTask(baseUrl, initialTask = {}) {
+  let task = initialTask.task || initialTask;
+  const taskId = ownedAgentTaskId(task);
+  const started = Date.now();
+  const timeoutMs = ownedAgentBridgeTimeoutMs();
+  while (taskId && ownedAgentTaskActive(task)) {
+    if (Date.now() - started > timeoutMs) throw new Error("Owned agent bridge timed out.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    const latest = await fetchExternalJson(`${baseUrl}/tasks/${encodeURIComponent(taskId)}`, { timeoutMs: 10000 });
+    task = latest.task || latest;
+  }
+  if (task?.error) throw new Error(task.error.message || task.error || "Owned agent bridge returned an error.");
+  const reply = ownedAgentReplyFromTask(task);
+  if (!reply) throw new Error("Owned agent bridge did not return a reply.");
+  return { reply, task };
+}
+
+async function callOwnedAgentTasksBridge(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/tasks`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: ownedAgentBridgePromptBody(prompt),
+  });
+  return pollOwnedAgentTask(baseUrl, payload.task || payload);
+}
+
+async function callOwnedAgentChatBridge(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/bridge/v1/chat`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: ownedAgentBridgePromptBody(prompt),
+  });
+  const task = payload.task || payload;
+  if (ownedAgentTaskId(task) && ownedAgentTaskActive(task)) return pollOwnedAgentTask(baseUrl, task);
+  const reply = ownedAgentReplyFromPayload(payload);
+  if (!reply) throw new Error("Owned agent bridge chat route did not return a reply.");
+  return { reply, task: payload };
+}
+
+async function callOwnedAgentChatCompletions(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: {
+      model: state.agentOwnedAgent?.type || "hermes-agent",
+      stream: false,
+      messages: [{ role: "user", content: prompt }],
+      timeout_sec: ownedAgentBridgeTimeoutSec(),
+    },
+  });
+  const reply = ownedAgentReplyFromPayload(payload);
+  if (!reply) throw new Error("Owned agent chat completions route did not return a reply.");
+  return { reply, task: payload };
+}
+
+async function callOwnedAgentRunsApi(baseUrl, prompt) {
+  const created = await fetchExternalJson(`${baseUrl}/v1/runs`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: {
+      input: prompt,
+      session_id: `wasm-agent-owned-${Date.now().toString(36)}`,
+      timeout_sec: ownedAgentBridgeTimeoutSec(),
+    },
+  });
+  const runId = ownedAgentRunId(created);
+  if (!runId) throw new Error("Owned Hermes Runs API did not return a run id.");
+  let status = created;
+  const started = Date.now();
+  const timeoutMs = ownedAgentBridgeTimeoutMs();
+  while (["", "queued", "pending", "submitted", "running", "active", "in_progress", "started", "working"].includes(ownedAgentTaskStatus(status))) {
+    if (Date.now() - started > timeoutMs) throw new Error("Owned Hermes Runs API timed out.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    status = await fetchExternalJson(`${baseUrl}/v1/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
+  }
+  if (["failed", "cancelled", "canceled", "error"].includes(ownedAgentTaskStatus(status))) {
+    throw new Error(status.error?.message || status.message || `Owned Hermes run ${ownedAgentTaskStatus(status)}.`);
+  }
+  const reply = ownedAgentReplyFromPayload(status);
+  if (!reply) throw new Error("Owned Hermes Runs API did not return a reply.");
+  return { reply, task: status };
+}
+
+async function probeOwnedAgentBridge(baseUrl) {
+  const health = await fetchExternalJson(`${baseUrl}/health`, { timeoutMs: 8000 });
+  let models = null;
+  let lastError = null;
+  for (const path of ["/bridge/v1/models", "/v1/models"]) {
+    try {
+      models = await fetchExternalJson(`${baseUrl}${path}`, { timeoutMs: 8000 });
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!models) throw lastError || new Error("Owned agent bridge model route is unavailable.");
+  return { health, models };
 }
 
 async function callOwnedAgentBridge(message, transcript = [], observation = {}) {
   const baseUrl = ownedAgentBridgeUrl();
   if (!baseUrl) throw new Error("Missing owned agent bridge URL.");
   const prompt = ownedAgentPrompt(message, transcript, observation);
-  const payload = await fetchJson(`${baseUrl}/tasks`, {
-    method: "POST",
-    timeoutMs: Math.min(state.agentTurnTimeoutMs, 120000),
-    body: {
-      prompt,
-      target_node: "orchestrator",
-      timeout_sec: Math.max(60, Math.round(state.agentTurnTimeoutMs / 1000)),
-    },
-  });
-  let task = payload.task || payload;
-  const started = Date.now();
-  while (task?.task_id && ["running", "queued", "pending", "submitted"].includes(cleanText(task.status, "").toLowerCase())) {
-    if (Date.now() - started > state.agentTurnTimeoutMs) throw new Error("Owned agent bridge timed out.");
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    const latest = await fetchJson(`${baseUrl}/tasks/${encodeURIComponent(task.task_id)}`, { timeoutMs: 10000 });
-    task = latest.task || latest;
+  const callers = [
+    ["bridge chat", () => callOwnedAgentChatBridge(baseUrl, prompt)],
+    ["tasks", () => callOwnedAgentTasksBridge(baseUrl, prompt)],
+    ["Hermes Runs API", () => callOwnedAgentRunsApi(baseUrl, prompt)],
+    ["chat completions", () => callOwnedAgentChatCompletions(baseUrl, prompt)],
+  ];
+  const errors = [];
+  for (const [label, caller] of callers) {
+    try {
+      return await caller();
+    } catch (error) {
+      errors.push(`${label}: ${error.message || String(error)}`);
+    }
   }
-  if (task?.error) throw new Error(task.error.message || "Owned agent bridge returned an error.");
-  const reply = ownedAgentReplyFromTask(task);
-  if (!reply) throw new Error("Owned agent bridge did not return a reply.");
-  return { reply, task };
+  throw new Error(`Owned agent bridge did not answer. ${errors.join("; ")}`);
 }
 
 async function provisionMainWithFlux(agentConfig = {}) {
@@ -17317,6 +17948,2101 @@ async function submitCreditGrant(event) {
   }
 }
 
+function remoteControlId(prefix = "rc") {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function remoteControlToken() {
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 18)}`;
+}
+
+function remoteControlNow() {
+  return Date.now();
+}
+
+function remoteControlExpired(record = {}) {
+  return Number(record.expires_at || record.expiresAt || 0) <= remoteControlNow();
+}
+
+function remoteControlEventMs(event = {}) {
+  const created = Number(event.created_at || event.createdAt || 0);
+  if (!Number.isFinite(created) || created <= 0) return remoteControlNow();
+  return created < 1_000_000_000_000 ? created * 1000 : created;
+}
+
+function pruneRemoteControlRequestResponses() {
+  const now = remoteControlNow();
+  const entries = Object.entries(state.remoteControl.requestResponses || {})
+    .filter(([, response]) => Number(response?.expires_at || response?.expiresAt || 0) > now)
+    .slice(-REMOTE_CONTROL_ACTION_LOG_LIMIT);
+  state.remoteControl.requestResponses = Object.fromEntries(entries);
+}
+
+function remoteControlRequestResponse(requestId = "") {
+  const id = cleanText(requestId, "");
+  if (!id) return null;
+  pruneRemoteControlRequestResponses();
+  return state.remoteControl.requestResponses?.[id] || null;
+}
+
+function rememberRemoteControlRequestResponse(requestId = "", response = {}) {
+  const id = cleanText(requestId, "");
+  if (!id) return null;
+  pruneRemoteControlRequestResponses();
+  const expiresAt = Number(response.expires_at || response.expiresAt || 0)
+    || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const stored = {
+    ...response,
+    request_id: id,
+    expires_at: expiresAt,
+    remembered_at: remoteControlNow(),
+  };
+  state.remoteControl.requestResponses[id] = stored;
+  return stored;
+}
+
+function readRemoteControlAdminCoControlSession() {
+  try {
+    const raw = window.sessionStorage?.getItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY) || "";
+    const session = raw ? JSON.parse(raw) : null;
+    if (!session || typeof session !== "object" || remoteControlExpired(session)) {
+      window.sessionStorage?.removeItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY);
+      return null;
+    }
+    return {
+      controller_user_id: cleanText(session.controller_user_id || session.controllerUserId, ""),
+      controller_device_id: cleanText(session.controller_device_id || session.controllerDeviceId, ""),
+      controller_label: cleanText(session.controller_label || session.controllerLabel, "Admin"),
+      expires_at: Number(session.expires_at || session.expiresAt || 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveRemoteControlAdminCoControlSession(session = null) {
+  state.remoteControl.adminCoControlSession = session;
+  try {
+    if (session) window.sessionStorage?.setItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+    else window.sessionStorage?.removeItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // Browser storage can be disabled; in-memory session state still works.
+  }
+}
+
+function remoteControlAdminCoControlSessionActive(userId = "", deviceId = "") {
+  const session = state.remoteControl.adminCoControlSession || readRemoteControlAdminCoControlSession();
+  if (!session || remoteControlExpired(session)) {
+    saveRemoteControlAdminCoControlSession(null);
+    return false;
+  }
+  const controllerDeviceId = cleanText(session.controller_device_id || session.controllerDeviceId, "");
+  const requestedDeviceId = cleanText(deviceId, "");
+  return cleanText(session.controller_user_id, "") === cleanText(userId, "")
+    && (!requestedDeviceId || !controllerDeviceId || controllerDeviceId === requestedDeviceId);
+}
+
+function remoteControlUserById(userId = "") {
+  const id = cleanText(userId, "");
+  if (!id) return null;
+  const friendship = friendshipByUserId(id);
+  return friendship ? friendshipUser(friendship) : activeSharedSpaceMembers().find((member) => member.id === id) || null;
+}
+
+function remoteControlUserLabel(userId = "", fallback = "Someone") {
+  const user = remoteControlUserById(userId);
+  if (user) return socialUserLabel(user, fallback);
+  return userId === cleanText(state.authUser?.id, "") ? publicUserLabel(state.authUser) : cleanText(userId, fallback);
+}
+
+function remoteControlConversationIdForUser(userId = "") {
+  const id = cleanText(userId, "");
+  return id ? directConversationId(id) : "";
+}
+
+function remoteControlCurrentDeviceId() {
+  return cleanText(state.deviceAuthority?.current_device_id || "", "");
+}
+
+function remoteControlDeviceConversationId(deviceId = "") {
+  const userId = cleanText(state.authUser?.id, "");
+  const targetDeviceId = cleanText(deviceId, "");
+  return userId && targetDeviceId ? `rc-device-${userId}-${targetDeviceId}` : "";
+}
+
+function remoteControlKind(kind = "") {
+  return cleanText(kind, "");
+}
+
+function remoteControlIsKind(kind = "") {
+  return [
+    "remote-control-request",
+    "remote-control-response",
+    "remote-control-action",
+    REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    "remote-control-stop",
+  ].includes(remoteControlKind(kind));
+}
+
+function remoteControlRecordAction(direction, detail = "") {
+  const entry = {
+    direction,
+    detail: truncateText(detail, 120),
+    at: new Date().toISOString(),
+  };
+  state.remoteControl.actionLog.push(entry);
+  state.remoteControl.actionLog = state.remoteControl.actionLog.slice(-REMOTE_CONTROL_ACTION_LOG_LIMIT);
+  renderRemoteControlChrome();
+  recordUserEvent("remote_control.action", {
+    target: "remote-control",
+    summary: `${direction}: ${entry.detail}`,
+    data: { direction, detail: entry.detail },
+  });
+}
+
+function remoteControlHasLiveTraffic() {
+  const hasActiveGrant = state.remoteControl.activeGrant && !remoteControlExpired(state.remoteControl.activeGrant);
+  const hasActiveController = state.remoteControl.activeController && !remoteControlExpired(state.remoteControl.activeController);
+  const hasIncoming = Object.values(state.remoteControl.incomingRequests || {}).some((request) => !remoteControlExpired(request));
+  const hasOutgoing = Object.values(state.remoteControl.outgoingRequests || {}).some((request) => !remoteControlExpired(request));
+  return Boolean(hasActiveGrant || hasActiveController || hasIncoming || hasOutgoing);
+}
+
+function stopRemoteControlFastSyncIfIdle() {
+  if (remoteControlHasLiveTraffic()) return;
+  if (state.remoteControl.syncTimer) {
+    window.clearInterval(state.remoteControl.syncTimer);
+    state.remoteControl.syncTimer = 0;
+  }
+}
+
+function remoteControlLiveUrl() {
+  const url = new URL("/remote-control/live", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
+function remoteControlEventIdNewer(id = "", cursor = "") {
+  const next = cleanText(id, "");
+  const current = cleanText(cursor, "");
+  if (!next) return false;
+  if (!current) return true;
+  try {
+    return BigInt(next) > BigInt(current);
+  } catch {
+    return next > current;
+  }
+}
+
+function advanceRemoteControlSyncCursor(id = "") {
+  if (remoteControlEventIdNewer(id, state.remoteControl.syncCursor)) {
+    state.remoteControl.syncCursor = cleanText(id, state.remoteControl.syncCursor);
+  }
+}
+
+function remoteControlLiveConnected() {
+  if (!("WebSocket" in window)) return false;
+  return Boolean(state.remoteControl.liveSocket?.readyState === WebSocket.OPEN && state.remoteControl.liveSocketReady);
+}
+
+function remoteControlLiveShouldConnect() {
+  return Boolean(state.authUser && ("WebSocket" in window));
+}
+
+function rejectRemoteControlLivePending(error) {
+  const pending = state.remoteControl.livePending || {};
+  state.remoteControl.livePending = {};
+  Object.values(pending).forEach((entry) => {
+    window.clearTimeout(entry.timeout);
+    entry.reject(error);
+  });
+}
+
+function closeRemoteControlLiveSocket(options = {}) {
+  if (state.remoteControl.liveReconnectTimer) {
+    window.clearTimeout(state.remoteControl.liveReconnectTimer);
+    state.remoteControl.liveReconnectTimer = 0;
+  }
+  const socket = state.remoteControl.liveSocket;
+  state.remoteControl.liveSocket = null;
+  state.remoteControl.liveSocketReady = false;
+  state.remoteControl.liveSocketToken += 1;
+  rejectRemoteControlLivePending(new Error("Remote control live channel closed."));
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    try {
+      socket.close();
+    } catch {
+      // Socket may already be closing.
+    }
+  }
+  if (options.reconnect && remoteControlLiveShouldConnect()) scheduleRemoteControlLiveReconnect("close");
+}
+
+function scheduleRemoteControlLiveReconnect(origin = "reconnect") {
+  if (!remoteControlLiveShouldConnect()) return;
+  if (state.remoteControl.liveReconnectTimer) return;
+  state.remoteControl.liveReconnectTimer = window.setTimeout(() => {
+    state.remoteControl.liveReconnectTimer = 0;
+    startRemoteControlLiveSocket(origin);
+  }, 900);
+}
+
+function handleRemoteControlLiveMessage(message = {}) {
+  const type = cleanText(message.type, "");
+  if (type === "ready") {
+    state.remoteControl.liveSocketReady = true;
+    return;
+  }
+  if (type === "ping") {
+    try {
+      state.remoteControl.liveSocket?.send(JSON.stringify({ type: "pong", ts: message.ts || Date.now() }));
+    } catch {
+      // The close handler will reconnect if the live session is still needed.
+    }
+    return;
+  }
+  if (type === "event") {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    if (!remoteControlIsKind(event.kind)) return;
+    if (!event.ephemeral) advanceRemoteControlSyncCursor(event.id);
+    handleRemoteControlSyncEvent(event);
+    return;
+  }
+  if (type !== "ack") return;
+  const requestId = cleanText(message.request_id || message.requestId, "");
+  const pending = requestId ? state.remoteControl.livePending?.[requestId] : null;
+  if (!pending) return;
+  window.clearTimeout(pending.timeout);
+  delete state.remoteControl.livePending[requestId];
+  if (message.ok) {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    advanceRemoteControlSyncCursor(event.id);
+    pending.resolve({ ok: true, event });
+    return;
+  }
+  const error = new Error(cleanText(message.error?.message, "Remote control live channel failed."));
+  error.code = cleanText(message.error?.code, "remote_control_live_error");
+  error.payload = message;
+  pending.reject(error);
+}
+
+function startRemoteControlLiveSocket(origin = "active") {
+  if (!remoteControlLiveShouldConnect()) return null;
+  const existing = state.remoteControl.liveSocket;
+  if (existing && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) return existing;
+  if (state.remoteControl.liveReconnectTimer) {
+    window.clearTimeout(state.remoteControl.liveReconnectTimer);
+    state.remoteControl.liveReconnectTimer = 0;
+  }
+  const token = state.remoteControl.liveSocketToken + 1;
+  state.remoteControl.liveSocketToken = token;
+  state.remoteControl.liveSocketReady = false;
+  const socket = new WebSocket(remoteControlLiveUrl());
+  state.remoteControl.liveSocket = socket;
+  socket.addEventListener("open", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    try {
+      socket.send(JSON.stringify({ type: "hello", origin }));
+    } catch {
+      // The close handler will reconnect if the live session is still needed.
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    try {
+      handleRemoteControlLiveMessage(JSON.parse(event.data));
+    } catch (error) {
+      remoteControlRecordAction("error", `live channel: ${error.message || String(error)}`);
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    state.remoteControl.liveSocket = null;
+    state.remoteControl.liveSocketReady = false;
+    rejectRemoteControlLivePending(new Error("Remote control live channel closed."));
+    scheduleRemoteControlLiveReconnect("close");
+  });
+  socket.addEventListener("error", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    state.remoteControl.liveSocketReady = false;
+  });
+  return socket;
+}
+
+function appendRemoteControlLiveEvent(body = {}) {
+  const socket = startRemoteControlLiveSocket("append");
+  if (!socket || !remoteControlLiveConnected()) return null;
+  const requestId = remoteControlId("rc_live");
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      delete state.remoteControl.livePending[requestId];
+      reject(new Error("Remote control live channel timed out."));
+    }, 650);
+    state.remoteControl.livePending[requestId] = { resolve, reject, timeout };
+    try {
+      socket.send(JSON.stringify({ type: "append", request_id: requestId, body }));
+    } catch (error) {
+      window.clearTimeout(timeout);
+      delete state.remoteControl.livePending[requestId];
+      reject(error);
+    }
+  });
+}
+
+function sendRemoteControlLiveFrameEvent(body = {}) {
+  const socket = startRemoteControlLiveSocket("viewport-frame");
+  if (!socket || !remoteControlLiveConnected()) return false;
+  if (Number(socket.bufferedAmount || 0) > REMOTE_CONTROL_LIVE_FRAME_BUFFER_LIMIT_BYTES) return true;
+  try {
+    socket.send(JSON.stringify({
+      type: "frame",
+      request_id: remoteControlId("rc_frame_live"),
+      body,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function syncRemoteControlEvents(origin = "fast-poll") {
+  if (!state.authUser || state.remoteControl.syncBusy) return;
+  if (!remoteControlHasLiveTraffic()) {
+    stopRemoteControlFastSyncIfIdle();
+    return;
+  }
+  state.remoteControl.syncBusy = true;
+  try {
+    const query = new URLSearchParams({ limit: "120" });
+    const cursor = cleanText(state.remoteControl.syncCursor || state.agentPeople?.syncCursor, "");
+    if (cursor) query.set("after_id", cursor);
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    const allEvents = Array.isArray(payload.events) ? payload.events : [];
+    for (const event of allEvents) {
+      if (remoteControlIsKind(event.kind)) handleRemoteControlSyncEvent(event);
+    }
+    state.remoteControl.syncCursor = cleanText(payload.cursor || allEvents.at(-1)?.id || state.remoteControl.syncCursor, "");
+    await syncRemoteControlLatestStopEvent(origin);
+    await syncRemoteControlLatestViewportFrame(origin);
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  } finally {
+    state.remoteControl.syncBusy = false;
+    stopRemoteControlFastSyncIfIdle();
+  }
+}
+
+function remoteControlActiveStopSession() {
+  const controller = state.remoteControl.activeController;
+  if (controller && !remoteControlExpired(controller) && controller.conversation_id) {
+    return {
+      conversation_id: controller.conversation_id,
+      grant_id: controller.grant_id,
+      token: controller.token,
+    };
+  }
+  const grant = state.remoteControl.activeGrant;
+  if (grant && !remoteControlExpired(grant) && grant.conversation_id) {
+    return {
+      conversation_id: grant.conversation_id,
+      grant_id: grant.grant_id,
+      token: grant.token,
+    };
+  }
+  return null;
+}
+
+async function syncRemoteControlLatestStopEvent(origin = "latest-stop") {
+  if (!state.authUser) return;
+  const session = remoteControlActiveStopSession();
+  if (!session?.conversation_id || !session.grant_id || !session.token) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.stopLatestProbeAt < REMOTE_CONTROL_SYNC_POLL_MS * 2) return;
+  state.remoteControl.stopLatestProbeAt = now;
+  try {
+    const query = new URLSearchParams({
+      conversation_id: session.conversation_id,
+      kind: "remote-control-stop",
+      latest: "1",
+      limit: "8",
+    });
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    for (const event of Array.isArray(payload.events) ? payload.events : []) {
+      if (event.kind === "remote-control-stop") handleRemoteControlStop(event);
+    }
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  }
+}
+
+async function syncRemoteControlLatestViewportFrame(origin = "latest-frame") {
+  const controller = state.remoteControl.activeController;
+  if (!state.authUser || !controller || remoteControlExpired(controller) || !controller.conversation_id) return;
+  const now = remoteControlNow();
+  const frameAge = state.remoteControl.viewportFrameReceivedAt
+    ? now - state.remoteControl.viewportFrameReceivedAt
+    : Number.POSITIVE_INFINITY;
+  if (frameAge < REMOTE_CONTROL_VIEWPORT_FRAME_MS * 2) return;
+  if (now - state.remoteControl.viewportLatestProbeAt < REMOTE_CONTROL_VIEWPORT_FRAME_MS) return;
+  state.remoteControl.viewportLatestProbeAt = now;
+  try {
+    const query = new URLSearchParams({
+      conversation_id: controller.conversation_id,
+      kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+      latest: "1",
+      limit: "8",
+    });
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    for (const event of Array.isArray(payload.events) ? payload.events : []) {
+      if (event.kind === REMOTE_CONTROL_VIEWPORT_FRAME_KIND) handleRemoteControlFrame(event);
+    }
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  }
+}
+
+function startRemoteControlFastSync(origin = "active") {
+  if (!state.authUser || !remoteControlHasLiveTraffic()) return;
+  startRemoteControlLiveSocket(origin);
+  if (!state.remoteControl.syncCursor) state.remoteControl.syncCursor = cleanText(state.agentPeople?.syncCursor, "");
+  if (!state.remoteControl.syncTimer) {
+    state.remoteControl.syncTimer = window.setInterval(
+      () => void syncRemoteControlEvents("fast-poll"),
+      REMOTE_CONTROL_SYNC_POLL_MS
+    );
+  }
+  void syncRemoteControlEvents(origin);
+}
+
+function refreshRemoteControlFastSync(origin = "state") {
+  if (remoteControlHasLiveTraffic()) startRemoteControlFastSync(origin);
+  else stopRemoteControlFastSyncIfIdle();
+}
+
+function remoteControlSyncEventBody({ peerUserId, conversationId, kind, payload }) {
+  const peerId = cleanText(peerUserId, "");
+  const convId = cleanText(conversationId || remoteControlConversationIdForUser(peerId), "");
+  if (!convId) throw new Error("Remote control requires a sync conversation.");
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const body = {
+    conversation_id: convId,
+    client_event_id: remoteControlId(kind.replace(/[^a-z0-9_-]/gi, "_")),
+    kind,
+    payload: {
+      schema: REMOTE_CONTROL_SCHEMA,
+      ...payload,
+    },
+  };
+  if (peerId && peerId !== currentUserId) body.peer_user_id = peerId;
+  return body;
+}
+
+async function appendRemoteControlSyncEvent({ peerUserId, conversationId, kind, payload, live = true }) {
+  const body = remoteControlSyncEventBody({ peerUserId, conversationId, kind, payload });
+  const liveResult = remoteControlIsKind(kind) && live
+    ? await appendRemoteControlLiveEvent(body).catch(() => null)
+    : null;
+  if (liveResult?.event) return liveResult;
+  return fetchJson("/sync/events", {
+    method: "POST",
+    timeoutMs: 8000,
+    body,
+  });
+}
+
+async function requestRemoteControl(user, options = {}) {
+  const targetUserId = socialUserId(user);
+  if (!targetUserId || targetUserId === cleanText(state.authUser?.id, "")) return;
+  const friendship = friendshipByUserId(targetUserId);
+  const adminSupport = Boolean(options.adminSupport && isAdminUser());
+  if (friendship?.status !== "accepted" && !adminSupport) {
+    pushSocialToast("error", "Control unavailable", "Accepted friendship required", `remote-control-denied:${targetUserId}`);
+    return;
+  }
+  const requestId = remoteControlId("rc_req");
+  const expiresAt = remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const conversationId = remoteControlConversationIdForUser(targetUserId);
+  state.remoteControl.outgoingRequests[requestId] = {
+    request_id: requestId,
+    target_user_id: targetUserId,
+    target_label: socialUserLabel(user, "friend"),
+    conversation_id: conversationId,
+    expires_at: expiresAt,
+    admin_support: adminSupport,
+  };
+  renderRemoteControlChrome();
+  startRemoteControlFastSync("request");
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: targetUserId,
+      conversationId,
+      kind: "remote-control-request",
+      payload: {
+        request_id: requestId,
+        scope: "app",
+        admin_support: adminSupport,
+        requester_label: publicUserLabel(state.authUser),
+        expires_at: expiresAt,
+        controls: ["viewport", "click", "pointer", "text", "scroll", "keys"],
+      },
+    });
+    pushSocialToast("remote-control", adminSupport ? "Co-control request sent" : "Control request sent", socialUserLabel(user, "friend"), `remote-control-requested:${requestId}`);
+    recordUserEvent("remote_control.requested", {
+      target: `user:${targetUserId}`,
+      summary: `${adminSupport ? "Requested admin co-control of" : "Requested control of"} ${socialUserLabel(user, "friend")}`,
+      data: { conversation_id: conversationId, request_id: requestId, scope: "app", admin_support: adminSupport },
+    });
+  } catch (error) {
+    delete state.remoteControl.outgoingRequests[requestId];
+    renderRemoteControlChrome();
+    refreshRemoteControlFastSync("request-error");
+    pushSocialToast("error", "Control request failed", error.message, `remote-control-error:${requestId}`);
+  }
+}
+
+async function requestRemoteControlDevice(device = {}) {
+  const targetDeviceId = cleanText(device.id || device.device_id || "", "");
+  const fromDeviceId = remoteControlCurrentDeviceId();
+  const currentUserId = cleanText(state.authUser?.id, "");
+  if (!currentUserId || !targetDeviceId || !fromDeviceId || targetDeviceId === fromDeviceId) return;
+  const requestId = remoteControlId("rc_dev_req");
+  const expiresAt = remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const conversationId = remoteControlDeviceConversationId(targetDeviceId);
+  const targetLabel = cleanText(device.label, "device");
+  state.remoteControl.outgoingRequests[requestId] = {
+    request_id: requestId,
+    target_user_id: currentUserId,
+    target_device_id: targetDeviceId,
+    from_device_id: fromDeviceId,
+    target_label: targetLabel,
+    conversation_id: conversationId,
+    expires_at: expiresAt,
+    same_account_device: true,
+  };
+  renderRemoteControlChrome();
+  startRemoteControlFastSync("device-request");
+  try {
+    await appendRemoteControlSyncEvent({
+      conversationId,
+      kind: "remote-control-request",
+      payload: {
+        request_id: requestId,
+        scope: "app",
+        same_account_device: true,
+        requester_label: `${publicUserLabel(state.authUser)} / ${remoteControlUserLabel(currentUserId, "desktop")}`,
+        target_device_id: targetDeviceId,
+        from_device_id: fromDeviceId,
+        expires_at: expiresAt,
+        controls: ["viewport", "click", "pointer", "text", "scroll", "keys"],
+      },
+    });
+    pushSocialToast("remote-control", "Device co-control request sent", targetLabel, `remote-control-device-requested:${requestId}`);
+    recordUserEvent("remote_control.device_requested", {
+      target: `device:${targetDeviceId}`,
+      summary: `Requested co-control of ${targetLabel}`,
+      data: { conversation_id: conversationId, request_id: requestId, target_device_id: targetDeviceId, from_device_id: fromDeviceId },
+    });
+  } catch (error) {
+    delete state.remoteControl.outgoingRequests[requestId];
+    renderRemoteControlChrome();
+    refreshRemoteControlFastSync("device-request-error");
+    pushSocialToast("error", "Device control failed", error.message, `remote-control-device-error:${requestId}`);
+  }
+}
+
+function handleRemoteControlRequest(event) {
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const authorId = cleanText(event.author_user_id, "");
+  if (!currentUserId || !authorId) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const adminSupport = Boolean(payload.admin_support && payload.admin_verified);
+  const currentDeviceId = remoteControlCurrentDeviceId();
+  const fromDeviceId = cleanText(payload.from_device_id || payload.fromDeviceId, "");
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  const sameAccountDevice = Boolean(
+    payload.same_account_device
+      && authorId === currentUserId
+      && currentDeviceId
+      && targetDeviceId === currentDeviceId
+      && fromDeviceId
+      && fromDeviceId !== currentDeviceId
+  );
+  if (authorId === currentUserId && !sameAccountDevice) return;
+  if (friendshipByUserId(authorId)?.status !== "accepted" && !adminSupport && !sameAccountDevice) return;
+  const requestId = cleanText(payload.request_id, "");
+  if (!requestId || state.remoteControl.incomingRequests[requestId]) return;
+  const previousResponse = remoteControlRequestResponse(requestId);
+  if (
+    previousResponse
+    && cleanText(previousResponse.conversation_id, "") === cleanText(event.conversation_id, "")
+    && cleanText(previousResponse.requester_user_id, "") === authorId
+  ) return;
+  const request = {
+    request_id: requestId,
+    requester_user_id: authorId,
+    requester_device_id: fromDeviceId,
+    target_device_id: targetDeviceId,
+    requester_label: cleanText(payload.requester_label || remoteControlUserLabel(authorId), "Someone"),
+    admin_support: adminSupport,
+    same_account_device: sameAccountDevice,
+    conversation_id: cleanText(event.conversation_id, ""),
+    expires_at: Number(payload.expires_at || 0) || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS,
+    sync_event_id: cleanText(event.id, ""),
+  };
+  if (remoteControlExpired(request)) return;
+  state.remoteControl.incomingRequests[requestId] = request;
+  startRemoteControlFastSync("incoming-request");
+  if ((adminSupport || sameAccountDevice) && remoteControlAdminCoControlSessionActive(authorId, fromDeviceId)) {
+    void respondRemoteControlRequest(requestId, true, { automatic: true });
+    return;
+  }
+  pushSocialToast("remote-control", adminSupport || sameAccountDevice ? "Co-control request" : "Control request", request.requester_label, `remote-control-in:${requestId}`);
+  renderRemoteControlChrome();
+}
+
+async function respondRemoteControlRequest(requestId, accepted, options = {}) {
+  const request = state.remoteControl.incomingRequests[requestId];
+  if (!request) return;
+  if (remoteControlRequestResponse(requestId)) return;
+  rememberRemoteControlRequestResponse(requestId, {
+    pending: true,
+    accepted: false,
+    requester_user_id: request.requester_user_id,
+    requester_device_id: request.requester_device_id,
+    conversation_id: request.conversation_id,
+    expires_at: request.expires_at,
+  });
+  delete state.remoteControl.incomingRequests[requestId];
+  let grant = null;
+  if (accepted && !remoteControlExpired(request)) {
+    if ((request.admin_support || request.same_account_device) && options.rememberAdmin) {
+      saveRemoteControlAdminCoControlSession({
+        controller_user_id: request.requester_user_id,
+        controller_device_id: request.requester_device_id,
+        controller_label: request.requester_label,
+        expires_at: remoteControlNow() + REMOTE_CONTROL_ADMIN_SESSION_TTL_MS,
+      });
+    }
+    grant = {
+      grant_id: remoteControlId("rc_grant"),
+      token: remoteControlToken(),
+      request_id: request.request_id,
+      controller_user_id: request.requester_user_id,
+      controller_device_id: request.requester_device_id,
+      target_device_id: request.target_device_id,
+      controller_label: request.requester_label,
+      conversation_id: request.conversation_id,
+      expires_at: remoteControlNow() + REMOTE_CONTROL_GRANT_TTL_MS,
+      started_at: remoteControlNow(),
+      scope: "app",
+      admin_support: Boolean(request.admin_support),
+      same_account_device: Boolean(request.same_account_device),
+    };
+    state.remoteControl.activeGrant = grant;
+    rememberRemoteControlRequestResponse(requestId, {
+      pending: true,
+      accepted: true,
+      grant_id: grant.grant_id,
+      token: grant.token,
+      requester_user_id: request.requester_user_id,
+      requester_device_id: request.requester_device_id,
+      conversation_id: request.conversation_id,
+      expires_at: grant.expires_at,
+    });
+    state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES;
+    remoteControlRecordAction(
+      "accepted",
+      request.admin_support || request.same_account_device
+        ? `${options.automatic ? "Session" : "Browser"} co-control granted to ${grant.controller_label}`
+        : `Control granted to ${grant.controller_label}`
+    );
+    if (!options.automatic) await startRemoteControlExactPixelSharing("accept");
+  }
+  renderRemoteControlChrome();
+  refreshRemoteControlFastSync(grant ? "grant-response" : "request-declined");
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: request.requester_user_id,
+      conversationId: request.conversation_id,
+      kind: "remote-control-response",
+      payload: {
+        request_id: request.request_id,
+        accepted: Boolean(grant),
+        grant_id: grant?.grant_id || "",
+        token: grant?.token || "",
+        scope: "app",
+        admin_support: Boolean(request.admin_support),
+        same_account_device: Boolean(request.same_account_device),
+        target_device_id: request.target_device_id || "",
+        from_device_id: remoteControlCurrentDeviceId(),
+        expires_at: grant?.expires_at || remoteControlNow(),
+        responder_label: publicUserLabel(state.authUser),
+      },
+    });
+    rememberRemoteControlRequestResponse(requestId, {
+      pending: false,
+      accepted: Boolean(grant),
+      grant_id: grant?.grant_id || "",
+      token: grant?.token || "",
+      requester_user_id: request.requester_user_id,
+      requester_device_id: request.requester_device_id,
+      conversation_id: request.conversation_id,
+      expires_at: grant?.expires_at || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS,
+    });
+    if (grant) startRemoteControlViewportStream("grant-accepted");
+    if (!grant) remoteControlRecordAction("declined", `Control request from ${request.requester_label}`);
+  } catch (error) {
+    delete state.remoteControl.requestResponses[requestId];
+    if (grant && state.remoteControl.activeGrant?.grant_id === grant.grant_id) {
+      state.remoteControl.activeGrant = null;
+      stopRemoteControlViewportStream();
+      renderRemoteControlChrome();
+      refreshRemoteControlFastSync("response-error");
+    }
+    pushSocialToast("error", "Control response failed", error.message, `remote-control-response-error:${request.request_id}`);
+  }
+}
+
+function handleRemoteControlResponse(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const requestId = cleanText(payload.request_id, "");
+  const pendingRequest = state.remoteControl.outgoingRequests[requestId] || null;
+  const currentController = state.remoteControl.activeController;
+  const duplicateAcceptedResponse = Boolean(
+    !pendingRequest
+      && payload.accepted
+      && payload.grant_id
+      && payload.token
+      && currentController
+      && cleanText(currentController.request_id || currentController.requestId, "") === requestId
+      && cleanText(currentController.conversation_id, "") === cleanText(event.conversation_id, "")
+      && cleanText(currentController.target_user_id, "") === cleanText(event.author_user_id, "")
+  );
+  const request = pendingRequest || (duplicateAcceptedResponse ? {
+    request_id: currentController.request_id,
+    target_user_id: currentController.target_user_id,
+    target_device_id: currentController.target_device_id,
+    from_device_id: currentController.from_device_id,
+    target_label: currentController.target_label,
+    conversation_id: currentController.conversation_id,
+    admin_support: currentController.admin_support,
+    same_account_device: currentController.same_account_device,
+  } : null);
+  if (!request) return;
+  if (cleanText(event.author_user_id, "") !== request.target_user_id) return;
+  if (request.target_device_id) {
+    const responderDeviceId = cleanText(payload.from_device_id || payload.fromDeviceId, "");
+    if (responderDeviceId && responderDeviceId !== request.target_device_id) return;
+  }
+  if (pendingRequest) delete state.remoteControl.outgoingRequests[requestId];
+  if (payload.accepted && payload.grant_id && payload.token) {
+    const responseEventId = cleanText(event.id, "");
+    const currentEventId = Number(currentController?.response_event_id || 0);
+    const nextEventId = Number(responseEventId || 0);
+    if (duplicateAcceptedResponse && currentEventId && nextEventId && nextEventId <= currentEventId) return;
+    const replacedGrant = Boolean(
+      currentController?.grant_id
+        && currentController.grant_id !== cleanText(payload.grant_id, "")
+    );
+    state.remoteControl.activeController = {
+      grant_id: cleanText(payload.grant_id, ""),
+      token: cleanText(payload.token, ""),
+      request_id: request.request_id,
+      target_user_id: cleanText(event.author_user_id, ""),
+      target_device_id: cleanText(request.target_device_id || payload.from_device_id || payload.fromDeviceId, ""),
+      from_device_id: cleanText(request.from_device_id || remoteControlCurrentDeviceId(), ""),
+      target_label: request.target_label || remoteControlUserLabel(event.author_user_id, "friend"),
+      conversation_id: request.conversation_id,
+      expires_at: Number(payload.expires_at || 0) || remoteControlNow() + REMOTE_CONTROL_GRANT_TTL_MS,
+      started_at: remoteControlNow(),
+      response_event_id: responseEventId,
+      response_event_ms: remoteControlEventMs(event),
+      scope: "app",
+      admin_support: Boolean(request.admin_support || payload.admin_support),
+      same_account_device: Boolean(request.same_account_device || payload.same_account_device),
+    };
+    if (replacedGrant) {
+      state.remoteControl.viewportFrame = null;
+      state.remoteControl.viewportFrameReceivedAt = 0;
+      state.remoteControl.viewportLatestProbeAt = 0;
+      resetRemoteControlViewportPointer();
+    }
+    remoteControlRecordAction(
+      duplicateAcceptedResponse ? "updated" : "started",
+      duplicateAcceptedResponse
+        ? `Synced viewport grant for ${state.remoteControl.activeController.target_label}`
+        : state.remoteControl.activeController.same_account_device
+          ? `Co-controlling ${state.remoteControl.activeController.target_label}`
+          : `Controlling ${state.remoteControl.activeController.target_label}`
+    );
+    installRemoteControlCapture();
+    startRemoteControlFastSync("controller-started");
+    if (!duplicateAcceptedResponse) {
+      pushSocialToast("remote-control", "Control accepted", state.remoteControl.activeController.target_label, `remote-control-ok:${requestId}`);
+    }
+  } else {
+    if (duplicateAcceptedResponse) return;
+    remoteControlRecordAction("declined", `${request.target_label || "Friend"} declined control`);
+    pushSocialToast("remote-control", "Control declined", request.target_label || "Friend", `remote-control-declined:${requestId}`);
+  }
+  refreshRemoteControlFastSync(payload.accepted ? "response" : "response-declined");
+  renderRemoteControlChrome();
+}
+
+function remoteControlStopMatchesSession(event, session, grantId, token, requestId, expectedAuthorId = "") {
+  if (!session) return false;
+  if (session.grant_id === grantId && session.token === token) return true;
+  const eventConversationId = cleanText(event.conversation_id, "");
+  if (!eventConversationId || eventConversationId !== cleanText(session.conversation_id, "")) return false;
+  const authorId = cleanText(event.author_user_id, "");
+  if (expectedAuthorId && authorId !== cleanText(expectedAuthorId, "")) return false;
+  const sessionRequestId = cleanText(session.request_id || session.requestId, "");
+  const stopRequestId = cleanText(requestId, "");
+  if (sessionRequestId && stopRequestId && sessionRequestId !== stopRequestId) return false;
+  const sessionStarted = Number(session.started_at || session.startedAt || 0);
+  const stopMs = remoteControlEventMs(event);
+  if (sessionStarted && stopMs + 1000 < sessionStarted) return false;
+  if (sessionRequestId && stopRequestId && sessionRequestId === stopRequestId) return true;
+  return Boolean(grantId && token);
+}
+
+function handleRemoteControlStop(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const grantId = cleanText(payload.grant_id, "");
+  const token = cleanText(payload.token, "");
+  const requestId = cleanText(payload.request_id || payload.requestId, "");
+  const reason = cleanText(payload.reason || "stopped", "stopped");
+  let stopped = false;
+  if (remoteControlStopMatchesSession(event, state.remoteControl.activeGrant, grantId, token, requestId, state.remoteControl.activeGrant?.controller_user_id)) {
+    remoteControlRecordAction("stopped", `${remoteControlUserLabel(event.author_user_id, "Controller")} stopped: ${reason}`);
+    state.remoteControl.activeGrant = null;
+    state.remoteControl.stopLatestProbeAt = 0;
+    stopRemoteControlViewportStream();
+    stopped = true;
+  }
+  if (remoteControlStopMatchesSession(event, state.remoteControl.activeController, grantId, token, requestId, state.remoteControl.activeController?.target_user_id)) {
+    remoteControlRecordAction("stopped", `Stopped controlling ${state.remoteControl.activeController.target_label}`);
+    state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    state.remoteControl.viewportLatestProbeAt = 0;
+    state.remoteControl.stopLatestProbeAt = 0;
+    state.remoteControl.remotePointerTarget = null;
+    resetRemoteControlViewportPointer();
+    stopped = true;
+  }
+  if (!stopped) return;
+  refreshRemoteControlFastSync("stop");
+  renderRemoteControlChrome();
+}
+
+async function stopRemoteControl(reason = "user_stop") {
+  const controller = state.remoteControl.activeController;
+  const grant = state.remoteControl.activeGrant;
+  if (grant?.admin_support || grant?.same_account_device) saveRemoteControlAdminCoControlSession(null);
+  state.remoteControl.activeController = null;
+  state.remoteControl.activeGrant = null;
+  state.remoteControl.viewportFrame = null;
+  state.remoteControl.viewportFrameReceivedAt = 0;
+  state.remoteControl.viewportLatestProbeAt = 0;
+  state.remoteControl.stopLatestProbeAt = 0;
+  state.remoteControl.remotePointerTarget = null;
+  resetRemoteControlViewportPointer();
+  stopRemoteControlViewportStream();
+  renderRemoteControlChrome();
+  refreshRemoteControlFastSync("stop");
+  const target = controller
+    ? {
+      peerUserId: controller.target_user_id,
+      conversationId: controller.conversation_id,
+      grantId: controller.grant_id,
+      token: controller.token,
+      requestId: controller.request_id || "",
+      targetUserId: controller.target_user_id,
+      targetDeviceId: controller.target_device_id || "",
+      controllerUserId: cleanText(state.authUser?.id, ""),
+      controllerDeviceId: controller.from_device_id || remoteControlCurrentDeviceId(),
+    }
+    : grant
+      ? {
+        peerUserId: grant.controller_user_id,
+        conversationId: grant.conversation_id,
+        grantId: grant.grant_id,
+        token: grant.token,
+        requestId: grant.request_id || "",
+        targetUserId: cleanText(state.authUser?.id, ""),
+        targetDeviceId: grant.target_device_id || remoteControlCurrentDeviceId(),
+        controllerUserId: grant.controller_user_id,
+        controllerDeviceId: grant.controller_device_id || "",
+      }
+      : null;
+  if (!target) return;
+  remoteControlRecordAction("stopped", reason);
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: target.peerUserId,
+      conversationId: target.conversationId,
+      kind: "remote-control-stop",
+      payload: {
+        grant_id: target.grantId,
+        token: target.token,
+        request_id: target.requestId,
+        target_user_id: target.targetUserId,
+        target_device_id: target.targetDeviceId,
+        controller_user_id: target.controllerUserId,
+        controller_device_id: target.controllerDeviceId,
+        reason,
+      },
+    });
+  } catch (error) {
+    pushSocialToast("error", "Stop signal failed", error.message, `remote-control-stop-error:${target.grantId}`);
+  }
+}
+
+setRemoteControlViewportPixelCaptureStopHandler((reason) => {
+  if (!state.remoteControl.activeGrant) return;
+  void stopRemoteControl(reason || "display_capture_ended");
+});
+
+function renderRemoteControlChrome() {
+  renderRemoteControlConsent();
+  renderRemoteControlBanner();
+  renderRemoteControlViewportPanel();
+}
+
+function renderRemoteControlConsent() {
+  const requests = Object.values(state.remoteControl.incomingRequests || {})
+    .filter((request) => !remoteControlExpired(request))
+    .sort((a, b) => Number(b.expires_at || 0) - Number(a.expires_at || 0));
+  state.remoteControl.incomingRequests = Object.fromEntries(requests.map((request) => [request.request_id, request]));
+  let panel = document.querySelector("[data-remote-control-consent]");
+  if (!requests.length) {
+    panel?.remove();
+    return;
+  }
+  const request = requests[0];
+  const coControl = Boolean(request.admin_support || request.same_account_device);
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.className = "remote-control-consent";
+    panel.dataset.remoteControl = "true";
+    panel.dataset.remoteControlConsent = "true";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-live", "polite");
+    document.body.append(panel);
+  }
+  const title = document.createElement("strong");
+  title.textContent = coControl
+    ? `${request.requester_label} wants to co-control`
+    : `${request.requester_label} wants control`;
+  const detail = document.createElement("span");
+  detail.textContent = request.same_account_device
+    ? "Same account device, app surface and viewport"
+    : request.admin_support ? "Browser session, app surface and viewport" : "App surface and viewport";
+  const actions = document.createElement("div");
+  actions.className = "remote-control-actions";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.textContent = coControl ? "Accept once" : "Accept";
+  accept.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, true));
+  const decline = document.createElement("button");
+  decline.type = "button";
+  decline.textContent = "Decline";
+  decline.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, false));
+  if (coControl) {
+    const allowSession = document.createElement("button");
+    allowSession.type = "button";
+    allowSession.textContent = "Allow session";
+    allowSession.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, true, { rememberAdmin: true }));
+    actions.append(allowSession, accept, decline);
+  } else {
+    actions.append(accept, decline);
+  }
+  panel.replaceChildren(title, detail, actions);
+}
+
+async function startRemoteControlExactPixelSharing(origin = "button") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) return false;
+  const wasActive = remoteControlViewportPixelCaptureActive();
+  try {
+    const active = wasActive || await startRemoteControlViewportPixelCapture();
+    if (active && !wasActive) remoteControlRecordAction("accepted", "Exact pixel viewport sharing active");
+    if (active) startRemoteControlViewportStream(`exact-pixels:${origin}`);
+    else remoteControlRecordAction("info", "Exact pixel sharing unavailable in this browser");
+    renderRemoteControlChrome();
+    return Boolean(active);
+  } catch (error) {
+    remoteControlRecordAction("info", `Exact pixel sharing unavailable: ${error.message || String(error)}`);
+    renderRemoteControlChrome();
+    return false;
+  }
+}
+
+function renderRemoteControlBanner() {
+  if (state.remoteControl.activeGrant && remoteControlExpired(state.remoteControl.activeGrant)) {
+    state.remoteControl.activeGrant = null;
+    stopRemoteControlViewportStream();
+  }
+  if (state.remoteControl.activeController && remoteControlExpired(state.remoteControl.activeController)) {
+    state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+  }
+  const activeGrant = state.remoteControl.activeGrant;
+  const activeController = state.remoteControl.activeController;
+  let banner = document.querySelector("[data-remote-control-banner]");
+  if (!activeGrant && !activeController) {
+    banner?.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("section");
+    banner.className = "remote-control-banner";
+    banner.dataset.remoteControl = "true";
+    banner.dataset.remoteControlBanner = "true";
+    banner.setAttribute("aria-live", "polite");
+    document.body.append(banner);
+  }
+  const label = document.createElement("strong");
+  const detail = document.createElement("span");
+  const latest = state.remoteControl.actionLog.at(-1);
+  if (activeGrant) {
+    const coControl = Boolean(activeGrant.admin_support || activeGrant.same_account_device);
+    label.textContent = coControl ? `Co-controlling with ${activeGrant.controller_label}` : `${activeGrant.controller_label} is controlling`;
+    detail.textContent = latest ? latest.detail : coControl ? "Stop revokes this browser session" : "App surface and viewport";
+    banner.dataset.mode = "receiving";
+  } else {
+    const coControl = Boolean(activeController.admin_support || activeController.same_account_device);
+    label.textContent = coControl ? `Co-controlling ${activeController.target_label}` : `Controlling ${activeController.target_label}`;
+    detail.textContent = latest ? latest.detail : coControl ? "Shared app surface and viewport" : "App surface and viewport";
+    banner.dataset.mode = "controlling";
+  }
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.textContent = activeGrant?.admin_support || activeGrant?.same_account_device ? "Stop access" : "Stop";
+  stop.addEventListener("click", () => void stopRemoteControl("stop_button"));
+  const actions = document.createElement("div");
+  actions.className = "remote-control-banner-actions";
+  if (activeGrant && !remoteControlViewportPixelCaptureActive()) {
+    const sharePixels = document.createElement("button");
+    sharePixels.type = "button";
+    sharePixels.textContent = "Share pixels";
+    sharePixels.addEventListener("click", () => void startRemoteControlExactPixelSharing("banner"));
+    actions.append(sharePixels);
+  }
+  actions.append(stop);
+  banner.replaceChildren(label, detail, actions);
+}
+
+async function sendRemoteControlViewportStatus(grant, status, message, reason = "status") {
+  if (!grant || remoteControlExpired(grant)) return;
+  await appendRemoteControlSyncEvent({
+    peerUserId: grant.controller_user_id,
+    conversationId: grant.conversation_id,
+    kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    payload: {
+      grant_id: grant.grant_id,
+      token: grant.token,
+      request_id: grant.request_id || "",
+      target_user_id: cleanText(state.authUser?.id, ""),
+      target_device_id: grant.target_device_id || remoteControlCurrentDeviceId(),
+      controller_user_id: grant.controller_user_id,
+      controller_device_id: grant.controller_device_id || "",
+      seq: state.remoteControl.viewportSeq,
+      status,
+      message: truncateText(message, 180),
+      reason,
+      captured_at: new Date().toISOString(),
+    },
+  });
+}
+
+function remoteControlPayloadTooLarge(error) {
+  const text = `${error?.message || ""} ${error?.payload?.error?.message || ""} ${error?.payload?.error?.code || ""}`;
+  return /payload.*too large|sync_payload_too_large|request entity too large|413/i.test(text);
+}
+
+function remoteControlViewportFrameIntervalMs() {
+  return remoteControlViewportPixelCaptureActive()
+    ? REMOTE_CONTROL_VIEWPORT_LIVE_FRAME_MS
+    : REMOTE_CONTROL_VIEWPORT_FRAME_MS;
+}
+
+async function sendRemoteControlViewportFramePayload(grant, payload) {
+  const eventInput = {
+    peerUserId: grant.controller_user_id,
+    conversationId: grant.conversation_id,
+    kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    payload,
+  };
+  const body = remoteControlSyncEventBody(eventInput);
+  if (sendRemoteControlLiveFrameEvent(body)) {
+    const now = remoteControlNow();
+    if (now - state.remoteControl.viewportLastDurableFrameAt >= REMOTE_CONTROL_VIEWPORT_DURABLE_FRAME_MS) {
+      state.remoteControl.viewportLastDurableFrameAt = now;
+      void appendRemoteControlSyncEvent({ ...eventInput, live: false }).catch((error) => {
+        if (remoteControlPayloadTooLarge(error)) return;
+        remoteControlRecordAction("error", `viewport keyframe: ${error.message || String(error)}`);
+      });
+    }
+    return { ok: true, live: true };
+  }
+  return appendRemoteControlSyncEvent({ ...eventInput, live: false });
+}
+
+async function sendRemoteControlViewportFrame(reason = "timer") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) {
+    state.remoteControl.activeGrant = null;
+    stopRemoteControlViewportStream();
+    renderRemoteControlChrome();
+    return;
+  }
+  if (state.remoteControl.viewportStreamBusy) return;
+  state.remoteControl.viewportStreamBusy = true;
+  try {
+    const exactPixels = remoteControlViewportPixelCaptureActive();
+    const frame = await captureRemoteControlViewportFrame(reason, {
+      maxBytes: exactPixels
+        ? Math.min(
+          state.remoteControl.viewportFrameMaxBytes || REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+          REMOTE_CONTROL_VIEWPORT_LIVE_MAX_BYTES
+        )
+        : state.remoteControl.viewportFrameMaxBytes || REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+      fast: exactPixels,
+    });
+    if (!frame) {
+      await sendRemoteControlViewportStatus(
+        grant,
+        "waiting",
+        document.visibilityState === "hidden"
+          ? "Remote tab is backgrounded; waiting for browser capture."
+          : "Remote viewport capture is starting.",
+        reason
+      );
+      return;
+    }
+    state.remoteControl.viewportSeq += 1;
+    await sendRemoteControlViewportFramePayload(grant, {
+      grant_id: grant.grant_id,
+      token: grant.token,
+      request_id: grant.request_id || "",
+      target_user_id: cleanText(state.authUser?.id, ""),
+      target_device_id: grant.target_device_id || remoteControlCurrentDeviceId(),
+      controller_user_id: grant.controller_user_id,
+      controller_device_id: grant.controller_device_id || "",
+      seq: state.remoteControl.viewportSeq,
+      image: frame.data_url,
+      image_type: frame.type,
+      image_bytes: frame.size,
+      width: frame.width,
+      height: frame.height,
+      renderer: frame.renderer || "",
+      viewport_width: frame.viewport_width,
+      viewport_height: frame.viewport_height,
+      layout_width: frame.layout_width,
+      layout_height: frame.layout_height,
+      device_pixel_ratio: frame.device_pixel_ratio,
+      reason: frame.reason,
+      captured_at: new Date().toISOString(),
+    });
+    state.remoteControl.viewportFrameError = "";
+  } catch (error) {
+    const message = error.message || String(error);
+    if (
+      remoteControlPayloadTooLarge(error)
+      && state.remoteControl.viewportFrameMaxBytes > REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES
+    ) {
+      state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES;
+      await sendRemoteControlViewportStatus(
+        grant,
+        "waiting",
+        "Remote viewport frame was too large; retrying with a compact preview.",
+        reason
+      ).catch(() => {});
+      window.setTimeout(() => void sendRemoteControlViewportFrame("payload-retry"), 80);
+      return;
+    }
+    await sendRemoteControlViewportStatus(grant, "error", `Remote viewport capture failed: ${message}`, reason).catch(() => {});
+    if (state.remoteControl.viewportFrameError !== message) {
+      state.remoteControl.viewportFrameError = message;
+      remoteControlRecordAction("error", `viewport frame: ${message}`);
+    }
+  } finally {
+    state.remoteControl.viewportStreamBusy = false;
+  }
+}
+
+function startRemoteControlViewportStream(reason = "start") {
+  if (!state.remoteControl.activeGrant) return;
+  const intervalMs = remoteControlViewportFrameIntervalMs();
+  if (
+    state.remoteControl.viewportStreamTimer
+    && state.remoteControl.viewportStreamIntervalMs
+    && state.remoteControl.viewportStreamIntervalMs !== intervalMs
+  ) {
+    window.clearInterval(state.remoteControl.viewportStreamTimer);
+    state.remoteControl.viewportStreamTimer = 0;
+  }
+  if (!state.remoteControl.viewportStreamTimer) {
+    state.remoteControl.viewportStreamIntervalMs = intervalMs;
+    state.remoteControl.viewportStreamTimer = window.setInterval(
+      () => void sendRemoteControlViewportFrame("timer"),
+      intervalMs
+    );
+  }
+  void sendRemoteControlViewportFrame(reason);
+}
+
+function stopRemoteControlViewportStream() {
+  if (state.remoteControl.viewportStreamTimer) {
+    window.clearInterval(state.remoteControl.viewportStreamTimer);
+    state.remoteControl.viewportStreamTimer = 0;
+  }
+  state.remoteControl.viewportStreamIntervalMs = 0;
+  state.remoteControl.viewportStreamBusy = false;
+  state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES;
+  state.remoteControl.viewportLastDurableFrameAt = 0;
+  stopRemoteControlViewportPixelCapture();
+}
+
+function scheduleRemoteControlViewportRender() {
+  if (state.remoteControl.viewportRenderTimer) return;
+  const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+  state.remoteControl.viewportRenderTimer = schedule(() => {
+    state.remoteControl.viewportRenderTimer = 0;
+    renderRemoteControlViewportPanel();
+  });
+}
+
+function handleRemoteControlFrame(event) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const grantId = cleanText(payload.grant_id, "");
+  const token = cleanText(payload.token, "");
+  const requestId = cleanText(payload.request_id || payload.requestId, "");
+  const exactGrant = grantId === controller.grant_id && token === controller.token;
+  const siblingGrant = Boolean(
+    !exactGrant
+      && grantId
+      && token
+      && requestId
+      && requestId === cleanText(controller.request_id || controller.requestId, "")
+      && cleanText(event.conversation_id, "") === cleanText(controller.conversation_id, "")
+  );
+  if (!exactGrant && !siblingGrant) return;
+  if (cleanText(event.author_user_id, "") !== controller.target_user_id) return;
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const controllerUserId = cleanText(payload.controller_user_id, "");
+  if (controllerUserId && controllerUserId !== currentUserId) return;
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  if (controller.target_device_id && targetDeviceId && targetDeviceId !== controller.target_device_id) return;
+  const controllerDeviceId = cleanText(payload.controller_device_id || payload.controllerDeviceId, "");
+  if (controller.from_device_id && controllerDeviceId && controllerDeviceId !== controller.from_device_id) return;
+  const incomingSeq = Number(payload.seq || 0);
+  if (siblingGrant) {
+    state.remoteControl.activeController = {
+      ...controller,
+      grant_id: grantId,
+      token,
+      response_event_id: cleanText(event.id, controller.response_event_id || ""),
+      response_event_ms: remoteControlEventMs(event),
+    };
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    resetRemoteControlViewportPointer();
+    remoteControlRecordAction("updated", `Synced viewport frame grant for ${controller.target_label}`);
+  }
+  const previousSeq = Number(state.remoteControl.viewportFrame?.seq || 0);
+  if (incomingSeq && previousSeq && incomingSeq <= previousSeq) return;
+  const image = cleanText(payload.image, "");
+  if (!image.startsWith("data:image/")) {
+    const status = cleanText(payload.status, "");
+    const message = cleanText(payload.message || payload.error, "");
+    if (!status && !message) return;
+    const previous = state.remoteControl.viewportFrame?.image ? state.remoteControl.viewportFrame : {};
+    state.remoteControl.viewportFrame = {
+      ...previous,
+      status: status || "waiting",
+      message: message || "Remote viewport capture is starting.",
+      seq: Number(incomingSeq || previous.seq || 0),
+      captured_at: cleanText(payload.captured_at || payload.capturedAt || previous.captured_at, ""),
+      target_device_id: targetDeviceId || previous.target_device_id || "",
+    };
+    state.remoteControl.viewportFrameReceivedAt = remoteControlNow();
+    scheduleRemoteControlViewportRender();
+    return;
+  }
+  state.remoteControl.viewportFrame = {
+    image,
+    width: Number(payload.width || 0),
+    height: Number(payload.height || 0),
+    viewport_width: Number(payload.viewport_width || payload.viewportWidth || 0),
+    viewport_height: Number(payload.viewport_height || payload.viewportHeight || 0),
+    image_bytes: Number(payload.image_bytes || payload.imageBytes || 0),
+    renderer: cleanText(payload.renderer, ""),
+    status: "ok",
+    message: "",
+    seq: incomingSeq,
+    captured_at: cleanText(payload.captured_at || payload.capturedAt, ""),
+    target_device_id: targetDeviceId,
+  };
+  state.remoteControl.viewportFrameReceivedAt = remoteControlNow();
+  scheduleRemoteControlViewportRender();
+}
+
+function sendRemoteControlViewportPointerAction(event, type) {
+  if (!state.remoteControl.activeController) return false;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const button = Number(event.button);
+  const buttons = Number(event.buttons);
+  sendRemoteControlAction({
+    ...point,
+    type,
+    pointer_id: Number(event.pointerId || state.remoteControl.viewportPointerId || 1),
+    pointer_type: cleanText(event.pointerType || "mouse", "mouse"),
+    button: Number.isFinite(button) ? button : 0,
+    buttons: type === "pointer_up" ? 0 : Number.isFinite(buttons) ? buttons : 1,
+    viewport_width: point.viewport_width || undefined,
+    viewport_height: point.viewport_height || undefined,
+  });
+  return true;
+}
+
+function sendRemoteControlViewportClickAction(event) {
+  if (!state.remoteControl.activeController) return false;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  sendRemoteControlAction({ ...point, type: "click" });
+  return true;
+}
+
+function resetRemoteControlViewportPointer() {
+  state.remoteControl.viewportPointerActive = false;
+  state.remoteControl.viewportPointerMoved = false;
+  state.remoteControl.viewportPointerId = 0;
+  state.remoteControl.viewportPointerStartX = 0;
+  state.remoteControl.viewportPointerStartY = 0;
+}
+
+function handleRemoteControlViewportPointerDown(event) {
+  if (!state.remoteControl.activeController || event.isPrimary === false) return;
+  const button = Number(event.button || 0);
+  if (button > 0) return;
+  state.remoteControl.viewportPointerActive = true;
+  state.remoteControl.viewportPointerMoved = false;
+  state.remoteControl.viewportPointerId = Number(event.pointerId || 1);
+  state.remoteControl.viewportPointerStartX = Number(event.clientX || 0);
+  state.remoteControl.viewportPointerStartY = Number(event.clientY || 0);
+  event.currentTarget?.closest?.("[data-remote-control-viewport]")?.focus?.({ preventScroll: true });
+  try {
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // Pointer capture can be unavailable after a fast frame refresh.
+  }
+  sendRemoteControlViewportPointerAction(event, "pointer_down");
+}
+
+function handleRemoteControlViewportPointerMove(event) {
+  if (!state.remoteControl.viewportPointerActive) return;
+  if (state.remoteControl.viewportPointerId && Number(event.pointerId || 0) !== state.remoteControl.viewportPointerId) return;
+  const distance = Math.hypot(
+    Number(event.clientX || 0) - state.remoteControl.viewportPointerStartX,
+    Number(event.clientY || 0) - state.remoteControl.viewportPointerStartY
+  );
+  if (distance > 3) state.remoteControl.viewportPointerMoved = true;
+  if (!state.remoteControl.viewportPointerMoved) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastPointerMoveAt < REMOTE_CONTROL_POINTER_MOVE_MIN_MS) return;
+  state.remoteControl.lastPointerMoveAt = now;
+  sendRemoteControlViewportPointerAction(event, "pointer_move");
+}
+
+function handleRemoteControlViewportPointerUp(event) {
+  if (!state.remoteControl.viewportPointerActive) return;
+  if (event.type === "lostpointercapture") {
+    resetRemoteControlViewportPointer();
+    return;
+  }
+  if (state.remoteControl.viewportPointerId && Number(event.pointerId || 0) !== state.remoteControl.viewportPointerId) return;
+  const moved = state.remoteControl.viewportPointerMoved;
+  sendRemoteControlViewportPointerAction(event, "pointer_up");
+  try {
+    event.currentTarget?.releasePointerCapture?.(event.pointerId);
+  } catch {
+    // The browser may release capture before the cleanup handler runs.
+  }
+  if (moved) state.remoteControl.viewportPointerSuppressClickUntil = remoteControlNow() + REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS;
+  else if (sendRemoteControlViewportClickAction(event)) {
+    state.remoteControl.viewportPointerSuppressClickUntil = remoteControlNow() + REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS;
+  }
+  resetRemoteControlViewportPointer();
+}
+
+function handleRemoteControlViewportClick(event) {
+  if (!state.remoteControl.activeController) return;
+  if (remoteControlNow() < state.remoteControl.viewportPointerSuppressClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  const point = remoteControlViewportPoint(event);
+  if (!point) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.closest?.("[data-remote-control-viewport]")?.focus?.();
+  sendRemoteControlViewportClickAction(event);
+}
+
+function handleRemoteControlViewportWheel(event) {
+  if (!state.remoteControl.activeController) return;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastWheelAt < REMOTE_CONTROL_WHEEL_MIN_MS) return;
+  state.remoteControl.lastWheelAt = now;
+  sendRemoteControlAction({
+    ...point,
+    type: "scroll",
+    delta_x: clamp(Number(event.deltaX || 0), -800, 800),
+    delta_y: clamp(Number(event.deltaY || 0), -800, 800),
+  });
+}
+
+function handleRemoteControlViewportKeydown(event) {
+  if (!state.remoteControl.activeController) return;
+  if (event.target?.matches?.("button")) return;
+  const key = cleanText(event.key, "");
+  if (key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    sendRemoteControlAction({ type: "insert_text", text: key });
+    return;
+  }
+  if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+  event.preventDefault();
+  sendRemoteControlAction({ type: "key", key });
+}
+
+function renderRemoteControlViewportPanel() {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) {
+    if (controller && remoteControlExpired(controller)) state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    resetRemoteControlViewportPointer();
+    removeRemoteControlViewportPanel();
+    return;
+  }
+  renderRemoteControlViewportSurface({
+    controller,
+    frame: state.remoteControl.viewportFrame,
+    receivedAt: state.remoteControl.viewportFrameReceivedAt,
+    now: remoteControlNow(),
+    onClick: handleRemoteControlViewportClick,
+    onWheel: handleRemoteControlViewportWheel,
+    onKeydown: handleRemoteControlViewportKeydown,
+    onPointerDown: handleRemoteControlViewportPointerDown,
+    onPointerMove: handleRemoteControlViewportPointerMove,
+    onPointerUp: handleRemoteControlViewportPointerUp,
+  });
+}
+
+function remoteControlAppElement(element) {
+  const target = element?.nodeType === 1 ? element : element?.parentElement;
+  if (!target || target.closest?.("[data-remote-control]")) return null;
+  if (!document.body?.contains(target)) return null;
+  return target;
+}
+
+function remoteControlSecretElement(element) {
+  const target = element?.closest?.("input,textarea") || (element?.matches?.("input,textarea") ? element : null);
+  if (!target) return false;
+  const type = cleanText(target.getAttribute("type") || "", "").toLowerCase();
+  const nameBits = [
+    target.id,
+    target.name,
+    target.getAttribute("autocomplete"),
+    target.getAttribute("placeholder"),
+    target.getAttribute("aria-label"),
+  ].join(" ");
+  return REMOTE_CONTROL_BLOCKED_INPUT_TYPES.has(type) || REMOTE_CONTROL_SECRET_RE.test(nameBits);
+}
+
+function remoteControlTargetAllowed(element, actionType = "") {
+  const source = remoteControlAppElement(element);
+  if (!source || remoteControlSecretElement(source)) return null;
+  const target = source.closest?.(REMOTE_CONTROL_INTERACTIVE_SELECTOR);
+  if (!target || target.closest?.("[data-remote-control]")) return null;
+  if (remoteControlSecretElement(target)) return null;
+  if (actionType === "set_value" && target.matches?.("s-select")) return null;
+  return target;
+}
+
+function remoteControlClickTarget(element) {
+  const target = remoteControlTargetAllowed(element, "click");
+  if (target) return target;
+  const source = remoteControlAppElement(element);
+  if (!source || remoteControlSecretElement(source)) return null;
+  return source;
+}
+
+function remoteControlSelectorForElement(element) {
+  const target = remoteControlTargetAllowed(element, "selector");
+  if (!target) return "";
+  const escapeCss = (value) => window.CSS?.escape
+    ? CSS.escape(value)
+    : String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+  if (target.id) return `#${escapeCss(target.id)}`;
+  const parts = [];
+  let node = target;
+  while (node && node.nodeType === 1 && node !== document.body && parts.length < 5) {
+    let part = node.tagName.toLowerCase();
+    if (node.classList?.length) part += `.${Array.from(node.classList).slice(0, 2).map(escapeCss).join(".")}`;
+    const parent = node.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter((item) => item.tagName === node.tagName);
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+    }
+    parts.unshift(part);
+    node = parent;
+  }
+  return parts.join(" > ");
+}
+
+function remoteControlElementFromAction(action = {}) {
+  if (action.selector) {
+    try {
+      const selected = document.querySelector(action.selector);
+      if (selected) return selected;
+    } catch {
+      // Fall through to coordinates.
+    }
+  }
+  const xRatio = Number(action.x_ratio ?? action.xRatio);
+  const yRatio = Number(action.y_ratio ?? action.yRatio);
+  if (Number.isFinite(xRatio) && Number.isFinite(yRatio)) {
+    const point = remoteControlActionPoint(action);
+    if (point) return document.elementFromPoint(point.x, point.y);
+  }
+  return document.activeElement;
+}
+
+function remoteControlActionPoint(action = {}) {
+  const xRatio = Number(action.x_ratio ?? action.xRatio);
+  const yRatio = Number(action.y_ratio ?? action.yRatio);
+  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) return null;
+  const viewport = window.visualViewport;
+  const width = Math.max(1, Number(viewport?.width || action.viewport_width || action.viewportWidth || window.innerWidth || 1));
+  const height = Math.max(1, Number(viewport?.height || action.viewport_height || action.viewportHeight || window.innerHeight || 1));
+  return {
+    x: Number(viewport?.offsetLeft || 0) + clamp(xRatio, 0, 1) * width,
+    y: Number(viewport?.offsetTop || 0) + clamp(yRatio, 0, 1) * height,
+  };
+}
+
+function remoteControlPointerEventName(type = "") {
+  if (type === "pointer_down") return "pointerdown";
+  if (type === "pointer_move") return "pointermove";
+  if (type === "pointer_up") return "pointerup";
+  return "";
+}
+
+function dispatchRemoteControlPointerAction(action = {}, baseElement = null) {
+  const type = cleanText(action.type, "");
+  const eventName = remoteControlPointerEventName(type);
+  const point = remoteControlActionPoint(action);
+  if (!eventName || !point) return false;
+  let target = eventName === "pointerdown" ? remoteControlAppElement(baseElement) : state.remoteControl.remotePointerTarget;
+  if (!target || !document.contains(target)) target = remoteControlAppElement(baseElement);
+  if (!target) return false;
+  const pointerId = Number(action.pointer_id || action.pointerId || 1);
+  const pointerType = cleanText(action.pointer_type || action.pointerType || "mouse", "mouse");
+  const button = Number(action.button || 0);
+  const buttons = eventName === "pointerup" ? 0 : Number(action.buttons || 1);
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: point.x,
+    clientY: point.y,
+    button: Number.isFinite(button) ? button : 0,
+    buttons: Number.isFinite(buttons) ? buttons : eventName === "pointerup" ? 0 : 1,
+  };
+  if (eventName === "pointerdown") {
+    state.remoteControl.remotePointerTarget = target;
+    state.remoteControl.remotePointerStartX = point.x;
+    state.remoteControl.remotePointerStartY = point.y;
+    state.remoteControl.remotePointerMoved = false;
+  } else if (eventName === "pointermove") {
+    const moved = Math.hypot(
+      point.x - Number(state.remoteControl.remotePointerStartX || point.x),
+      point.y - Number(state.remoteControl.remotePointerStartY || point.y)
+    );
+    if (moved > 4) state.remoteControl.remotePointerMoved = true;
+  }
+  if (typeof PointerEvent === "function") {
+    target.dispatchEvent(new PointerEvent(eventName, {
+      ...init,
+      pointerId: Number.isFinite(pointerId) ? pointerId : 1,
+      pointerType,
+      isPrimary: true,
+    }));
+  }
+  const mouseName = eventName === "pointerdown" ? "mousedown" : eventName === "pointermove" ? "mousemove" : "mouseup";
+  target.dispatchEvent(new MouseEvent(mouseName, init));
+  if (eventName === "pointerup") {
+    const clickDistance = Math.hypot(
+      point.x - Number(state.remoteControl.remotePointerStartX || point.x),
+      point.y - Number(state.remoteControl.remotePointerStartY || point.y)
+    );
+    const tapTarget = state.remoteControl.remotePointerTarget || target;
+    if (!state.remoteControl.remotePointerMoved && clickDistance <= 6 && dispatchRemoteControlClick(tapTarget, action, { includePress: false, source: "pointer_tap" })) {
+      state.remoteControl.remoteSyntheticClickUntil = remoteControlNow() + 700;
+      state.remoteControl.remoteSyntheticClickX = point.x;
+      state.remoteControl.remoteSyntheticClickY = point.y;
+    }
+    state.remoteControl.remotePointerTarget = null;
+    state.remoteControl.remotePointerStartX = 0;
+    state.remoteControl.remotePointerStartY = 0;
+    state.remoteControl.remotePointerMoved = false;
+  }
+  return true;
+}
+
+function dispatchRemoteControlClick(element, action = {}, options = {}) {
+  const target = remoteControlClickTarget(element);
+  const point = remoteControlActionPoint(action);
+  if (!target || !point) return false;
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: point.x,
+    clientY: point.y,
+    button: 0,
+    buttons: 0,
+  };
+  target.focus?.({ preventScroll: true });
+  if (options.includePress !== false) {
+    target.dispatchEvent(new MouseEvent("mousedown", { ...init, buttons: 1 }));
+    target.dispatchEvent(new MouseEvent("mouseup", init));
+  }
+  if (typeof target.click === "function" && target.matches?.(REMOTE_CONTROL_INTERACTIVE_SELECTOR)) {
+    target.click();
+  } else {
+    target.dispatchEvent(new MouseEvent("click", init));
+  }
+  remoteControlRecordAction("received", `${options.source === "pointer_tap" ? "tap" : "click"} ${target.id || target.getAttribute?.("aria-label") || target.tagName?.toLowerCase?.() || "element"}`);
+  return true;
+}
+
+function remoteControlSuppressDuplicateExplicitClick(action = {}) {
+  const until = Number(state.remoteControl.remoteSyntheticClickUntil || 0);
+  if (!until || remoteControlNow() > until) return false;
+  const point = remoteControlActionPoint(action);
+  if (!point) return false;
+  const distance = Math.hypot(
+    point.x - Number(state.remoteControl.remoteSyntheticClickX || 0),
+    point.y - Number(state.remoteControl.remoteSyntheticClickY || 0)
+  );
+  if (distance > 8) return false;
+  state.remoteControl.remoteSyntheticClickUntil = 0;
+  return true;
+}
+
+function setRemoteControlElementValue(element, value) {
+  const target = remoteControlTargetAllowed(element, "set_value");
+  if (!target) return false;
+  state.remoteControl.suppressEvents = true;
+  try {
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      target.focus();
+      target.value = String(value ?? "");
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    if (target.isContentEditable) {
+      target.focus();
+      target.textContent = String(value ?? "");
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: String(value ?? "") }));
+      return true;
+    }
+  } finally {
+    window.setTimeout(() => {
+      state.remoteControl.suppressEvents = false;
+    }, 0);
+  }
+  return false;
+}
+
+function remoteControlEditableTarget(element) {
+  const target = remoteControlTargetAllowed(element, "set_value");
+  if (!target) return null;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) return target;
+  return null;
+}
+
+function dispatchRemoteControlEditEvents(target, inputType = "insertText", data = "") {
+  try {
+    target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+  } catch {
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  target.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function insertRemoteControlText(element, text = "") {
+  const target = remoteControlEditableTarget(element);
+  const value = String(text ?? "").slice(0, 200);
+  if (!target || !value) return false;
+  target.focus?.();
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const start = Number.isFinite(target.selectionStart) ? target.selectionStart : target.value.length;
+    const end = Number.isFinite(target.selectionEnd) ? target.selectionEnd : start;
+    if (typeof target.setRangeText === "function") target.setRangeText(value, start, end, "end");
+    else target.value = `${target.value.slice(0, start)}${value}${target.value.slice(end)}`;
+    dispatchRemoteControlEditEvents(target, "insertText", value);
+    return true;
+  }
+  if (target.isContentEditable) {
+    target.textContent = `${target.textContent || ""}${value}`;
+    dispatchRemoteControlEditEvents(target, "insertText", value);
+    return true;
+  }
+  return false;
+}
+
+function applyRemoteControlEditKey(element, key = "") {
+  const target = remoteControlEditableTarget(element);
+  if (!target || !["Backspace", "Delete"].includes(key)) return false;
+  target.focus?.();
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const value = target.value || "";
+    let start = Number.isFinite(target.selectionStart) ? target.selectionStart : value.length;
+    let end = Number.isFinite(target.selectionEnd) ? target.selectionEnd : start;
+    if (start === end && key === "Backspace" && start > 0) start -= 1;
+    if (start === end && key === "Delete" && end < value.length) end += 1;
+    target.value = `${value.slice(0, start)}${value.slice(end)}`;
+    target.setSelectionRange?.(start, start);
+    dispatchRemoteControlEditEvents(target, key === "Backspace" ? "deleteContentBackward" : "deleteContentForward", "");
+    return true;
+  }
+  if (target.isContentEditable) {
+    target.textContent = key === "Backspace" ? (target.textContent || "").slice(0, -1) : target.textContent || "";
+    dispatchRemoteControlEditEvents(target, key === "Backspace" ? "deleteContentBackward" : "deleteContentForward", "");
+    return true;
+  }
+  return false;
+}
+
+function scrollableRemoteControlElement(element) {
+  let node = element;
+  while (node && node !== document.body) {
+    const style = window.getComputedStyle(node);
+    const canScroll = /(auto|scroll)/.test(`${style.overflow}${style.overflowY}${style.overflowX}`)
+      && (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth);
+    if (canScroll) return node;
+    node = node.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+function remoteControlScrollDeltas(action = {}) {
+  const deltaX = Number(action.delta_x ?? action.deltaX ?? 0);
+  const deltaY = Number(action.delta_y ?? action.deltaY ?? 0);
+  return {
+    x: Number.isFinite(deltaX) ? deltaX : 0,
+    y: Number.isFinite(deltaY) ? deltaY : 0,
+  };
+}
+
+function applyRemoteControlCanvasWheelZoom(action = {}, element = null) {
+  const viewport = els.spaceViewport;
+  const source = remoteControlAppElement(element);
+  if (!viewport || !source || (source !== viewport && !viewport.contains(source))) return false;
+  const deltas = remoteControlScrollDeltas(action);
+  const widget = source.closest?.(".widget");
+  if (widget && widgetWheelScrollableElement(source, widget, deltas)) return false;
+  if (spaceDistanceGestureBlocked(source)) {
+    remoteControlRecordAction("received", "scroll contained");
+    return true;
+  }
+  if (!source.closest?.(".space-viewport,.space-board,#spaceCanvas,.app-layer")) return false;
+  const point = remoteControlActionPoint(action);
+  const anchor = point ? viewportGestureAnchor(point.x, point.y) : null;
+  if (!anchor) return true;
+  const delta = deltas.y;
+  if (Math.abs(delta) < 0.5) return true;
+  stopSpacePanMomentum();
+  const previous = canvasDistance();
+  const next = previous * Math.exp(-delta * 0.0012);
+  const applied = setCanvasDistanceAround(next, anchor, {
+    origin: "remote-wheel",
+    persist: false,
+    render: false,
+    layout: false,
+    renderMiniMap: false,
+    zoomInfo: true,
+  });
+  if (applied !== previous) {
+    setSpaceZoomInfoVisible(true);
+    scheduleCanvasDistanceCommit("remote-wheel");
+    scheduleSpaceZoomMiniMapHide();
+    remoteControlRecordAction("received", "canvas zoom");
+  }
+  return true;
+}
+
+function applyRemoteControlAction(action = {}, eventId = "") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) {
+    state.remoteControl.activeGrant = null;
+    renderRemoteControlChrome();
+    return;
+  }
+  const type = cleanText(action.type, "");
+  const baseElement = remoteControlElementFromAction(action);
+  const target = remoteControlTargetAllowed(baseElement, type);
+  const appElement = remoteControlAppElement(baseElement);
+  const pointerAction = Boolean(remoteControlPointerEventName(type));
+  const clickTarget = type === "click" ? remoteControlClickTarget(baseElement) : null;
+  if ((!target && !clickTarget && type !== "scroll" && type !== "insert_text" && !pointerAction) || (type === "scroll" && !appElement)) return;
+  state.remoteControl.suppressEvents = true;
+  try {
+    if (pointerAction) {
+      if (dispatchRemoteControlPointerAction(action, baseElement) && type !== "pointer_move") remoteControlRecordAction("received", type);
+    } else if (type === "click" && clickTarget) {
+      if (!remoteControlSuppressDuplicateExplicitClick(action)) dispatchRemoteControlClick(baseElement, action);
+    } else if (type === "set_value") {
+      if (setRemoteControlElementValue(target, action.value)) remoteControlRecordAction("received", "text input");
+    } else if (type === "insert_text") {
+      if (insertRemoteControlText(baseElement, action.text)) remoteControlRecordAction("received", "text input");
+    } else if (type === "scroll") {
+      if (applyRemoteControlCanvasWheelZoom(action, appElement)) return;
+      const deltas = remoteControlScrollDeltas(action);
+      const scroller = scrollableRemoteControlElement(appElement);
+      scroller.scrollBy({
+        left: deltas.x,
+        top: deltas.y,
+        behavior: "auto",
+      });
+      remoteControlRecordAction("received", "scroll");
+    } else if (type === "key" && target) {
+      const key = cleanText(action.key, "");
+      if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+      if (applyRemoteControlEditKey(target, key)) {
+        remoteControlRecordAction("received", `key ${key}`);
+        return;
+      }
+      target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      if (key === "Enter" && target.matches?.("button, summary")) target.click?.();
+      remoteControlRecordAction("received", `key ${key}`);
+    }
+  } finally {
+    state.remoteControl.appliedEventIds.add(eventId);
+    window.setTimeout(() => {
+      state.remoteControl.suppressEvents = false;
+    }, 0);
+  }
+}
+
+function handleRemoteControlAction(event) {
+  const eventId = cleanText(event.id, "");
+  if (eventId && state.remoteControl.appliedEventIds.has(eventId)) return;
+  const grant = state.remoteControl.activeGrant;
+  if (!grant) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  if (cleanText(payload.grant_id, "") !== grant.grant_id || cleanText(payload.token, "") !== grant.token) return;
+  if (cleanText(event.author_user_id, "") !== grant.controller_user_id) return;
+  if (grant.controller_device_id && cleanText(payload.from_device_id || payload.fromDeviceId, "") !== grant.controller_device_id) return;
+  const targetUserId = cleanText(payload.target_user_id, "");
+  if (targetUserId && targetUserId !== cleanText(state.authUser?.id, "")) return;
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  if (targetDeviceId && targetDeviceId !== remoteControlCurrentDeviceId()) return;
+  applyRemoteControlAction(payload.action || {}, eventId);
+}
+
+function remoteControlActionBase(event, target = event?.target) {
+  const element = remoteControlTargetAllowed(target, "send");
+  if (!element || element.closest?.("[data-remote-control]")) return null;
+  return {
+    selector: remoteControlSelectorForElement(element),
+    x_ratio: Number.isFinite(event?.clientX) ? clamp(event.clientX / Math.max(1, window.innerWidth), 0, 1) : undefined,
+    y_ratio: Number.isFinite(event?.clientY) ? clamp(event.clientY / Math.max(1, window.innerHeight), 0, 1) : undefined,
+  };
+}
+
+function remoteControlShouldSend(event) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) {
+    if (controller) state.remoteControl.activeController = null;
+    renderRemoteControlChrome();
+    return false;
+  }
+  if (state.remoteControl.suppressEvents || !event?.isTrusted) return false;
+  if (event.target?.closest?.("[data-remote-control]")) return false;
+  return Boolean(document.querySelector("#app")?.contains(event.target));
+}
+
+function sendRemoteControlAction(action) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || !action?.type) return;
+  state.remoteControl.actionSeq += 1;
+  const seq = state.remoteControl.actionSeq;
+  if (action.type !== "pointer_move") {
+    remoteControlRecordAction("sent", ["set_value", "insert_text"].includes(action.type) ? "text input" : action.type);
+  }
+  state.remoteControl.sendQueue = state.remoteControl.sendQueue
+    .catch(() => {})
+    .then(() => appendRemoteControlSyncEvent({
+      peerUserId: controller.target_user_id,
+      conversationId: controller.conversation_id,
+      kind: "remote-control-action",
+      payload: {
+        grant_id: controller.grant_id,
+        token: controller.token,
+        request_id: controller.request_id || "",
+        target_user_id: controller.target_user_id,
+        target_device_id: controller.target_device_id || "",
+        from_device_id: controller.from_device_id || remoteControlCurrentDeviceId(),
+        seq,
+        action,
+      },
+    }))
+    .catch((error) => {
+      remoteControlRecordAction("error", error.message || String(error));
+    });
+}
+
+function handleRemoteControlLocalClick(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const base = remoteControlActionBase(event);
+  if (!base) return;
+  sendRemoteControlAction({ ...base, type: "click" });
+}
+
+function handleRemoteControlLocalInput(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const target = remoteControlTargetAllowed(event.target, "set_value");
+  if (!target) return;
+  const value = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+    ? target.value
+    : target.isContentEditable ? target.textContent || "" : "";
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event, target),
+    type: "set_value",
+    value: String(value).slice(0, 4000),
+  });
+}
+
+function handleRemoteControlLocalWheel(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastWheelAt < REMOTE_CONTROL_WHEEL_MIN_MS) return;
+  state.remoteControl.lastWheelAt = now;
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event),
+    type: "scroll",
+    delta_x: clamp(Number(event.deltaX || 0), -800, 800),
+    delta_y: clamp(Number(event.deltaY || 0), -800, 800),
+  });
+}
+
+function handleRemoteControlLocalKeydown(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const key = cleanText(event.key, "");
+  if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event),
+    type: "key",
+    key,
+  });
+}
+
+function installRemoteControlCapture() {
+  if (state.remoteControl.captureInstalled) return;
+  state.remoteControl.captureInstalled = true;
+  document.addEventListener("click", handleRemoteControlLocalClick, true);
+  document.addEventListener("input", handleRemoteControlLocalInput, true);
+  document.addEventListener("wheel", handleRemoteControlLocalWheel, { capture: true, passive: true });
+  document.querySelector("#app")?.addEventListener("keydown", handleRemoteControlLocalKeydown, true);
+}
+
+function handleRemoteControlSyncEvent(event) {
+  const kind = remoteControlKind(event.kind);
+  if (kind === "remote-control-request") handleRemoteControlRequest(event);
+  else if (kind === "remote-control-response") handleRemoteControlResponse(event);
+  else if (kind === "remote-control-action") handleRemoteControlAction(event);
+  else if (kind === REMOTE_CONTROL_VIEWPORT_FRAME_KIND) handleRemoteControlFrame(event);
+  else if (kind === "remote-control-stop") handleRemoteControlStop(event);
+}
+
+function hideAgentPersonContextMenu(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("agent-person-menu")) return;
+  document.querySelector("[data-agent-person-context-menu]")?.remove();
+  if (!options.skipStack) closeUiNavigationLayer("agent-person-menu", { skipHistory: true, replaceHistory: true });
+}
+
+function agentPersonContextMenuButton(label, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("role", "menuitem");
+  button.textContent = label;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hideAgentPersonContextMenu({ skipHistory: true });
+    handler();
+  });
+  return button;
+}
+
+function showAgentPersonContextMenu(user, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!isAdminUser() || !user || socialUserId(user) === cleanText(state.authUser?.id, "")) return;
+  hideAgentPersonContextMenu({ skipHistory: true, skipStack: true });
+  const menu = document.createElement("div");
+  menu.className = "app-context-menu agent-person-context-menu";
+  menu.dataset.agentPersonContextMenu = "true";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${socialUserLabel(user, "User")} actions`);
+  menu.append(
+    agentPersonContextMenuButton("Access interface", () => void requestRemoteControl(user, { adminSupport: true })),
+    agentPersonContextMenuButton("Grant Flux", () => openCreditGrantModal(user))
+  );
+  document.body.append(menu);
+  positionFixedMenu(menu, event);
+  pushUiNavigationLayer("agent-person-menu", () => hideAgentPersonContextMenu({ skipHistory: true, skipStack: true }));
+  recordUserEvent("agent.person_context_menu_requested", {
+    target: `user:${socialUserId(user)}`,
+    summary: `Opened person menu for ${socialUserLabel(user, "user")}`,
+    data: { user_id: socialUserId(user), admin: true },
+  });
+}
+
 function peopleRow(user, options = {}) {
   const id = socialUserId(user);
   const row = document.createElement("article");
@@ -17361,11 +20087,7 @@ function peopleRow(user, options = {}) {
     });
   }
   if (isAdminUser() && id && id !== cleanText(state.authUser?.id, "") && cleanText(user?.role, "user") !== "admin") {
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openCreditGrantModal(user);
-    });
+    row.addEventListener("contextmenu", (event) => showAgentPersonContextMenu(user, event));
   }
   return row;
 }
@@ -17396,7 +20118,16 @@ function peopleActionGroup(...buttons) {
 
 function renderAgentPeoplePanel() {
   if (!els.agentPeoplePanel || state.agentView !== "people") return;
-  if (els.agentPeopleSearchButton) els.agentPeopleSearchButton.disabled = !state.authUser || state.agentPeople.searchBusy;
+  const admin = isAdminUser();
+  if (els.agentPeopleSearchInput) {
+    els.agentPeopleSearchInput.placeholder = "id or email";
+  }
+  if (els.agentPeopleSearchButton) {
+    els.agentPeopleSearchButton.disabled = !state.authUser || state.agentPeople.searchBusy;
+    const searchTitle = "Add friend";
+    els.agentPeopleSearchButton.title = searchTitle;
+    els.agentPeopleSearchButton.setAttribute("aria-label", searchTitle);
+  }
   if (els.agentPeopleStatus) {
     const count = (state.agentPeople.friendships || []).length + activeSharedSpaceMembers().length;
     els.agentPeopleStatus.textContent = state.agentPeople.busy ? "Loading" : state.agentPeople.status || `${count} people`;
@@ -17453,7 +20184,10 @@ function renderAgentPeoplePanel() {
         kind: "friend",
         meta: unread ? `${unread} unread` : "friend",
         unread,
-        action: peopleActionButton("agent-icon-close", `Remove ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "removed")),
+        action: peopleActionGroup(
+          peopleActionButton("agent-icon-control", `Request control from ${socialUserLabel(user, "friend")}`, () => void requestRemoteControl(user)),
+          peopleActionButton("agent-icon-close", `Remove ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "removed"))
+        ),
         openDirect: true,
       }));
     }
@@ -17463,7 +20197,13 @@ function renderAgentPeoplePanel() {
     if (member.current) continue;
     const friendship = friendshipByUserId(member.id);
     if (friendship?.status === "accepted") continue;
-    const action = peopleActionButton("agent-icon-plus", `Add ${socialUserLabel(member, "member")}`, () => void requestFriendshipByUserId(member.id));
+    const addAction = peopleActionButton("agent-icon-plus", `Add ${socialUserLabel(member, "member")}`, () => void requestFriendshipByUserId(member.id));
+    const action = admin
+      ? peopleActionGroup(
+        addAction,
+        peopleActionButton("agent-icon-control", `Request support control from ${socialUserLabel(member, "member")}`, () => void requestRemoteControl(member, { adminSupport: true }))
+      )
+      : addAction;
     members.push(peopleRow(member, { kind: "member", meta: "space member", action }));
   }
   const sections = [
@@ -17554,6 +20294,16 @@ async function loadAgentPeople(origin = "auto", options = {}) {
     state.agentPeople.busy = false;
     renderAgentPeoplePanel();
   }
+}
+
+async function requestAdminSupportControlByQuery(query = "") {
+  const value = cleanText(query, "");
+  if (!value || !isAdminUser()) return;
+  const params = new URLSearchParams({ q: value });
+  const payload = await fetchJson(`/account/users/lookup?${params.toString()}`, { timeoutMs: 8000 });
+  const user = payload.user && typeof payload.user === "object" ? payload.user : null;
+  if (!user || !socialUserId(user)) throw new Error("That user was not found.");
+  await requestRemoteControl(user, { adminSupport: true });
 }
 
 async function submitAgentPeopleSearch(event) {
@@ -17947,6 +20697,10 @@ async function mergeDirectSyncEvents(events = [], options = {}) {
   for (const event of events) {
     const conversationId = cleanText(event.conversation_id, "");
     if (!conversationId) continue;
+    if (remoteControlIsKind(event.kind)) {
+      handleRemoteControlSyncEvent(event);
+      continue;
+    }
     const session = ensureDirectSessionForConversation(conversationId, event);
     session.sync_cursor = String(event.id || session.sync_cursor || "");
     if (event.kind === "reaction") {
@@ -18027,7 +20781,7 @@ async function syncDirectMessages(origin = "poll") {
   try {
     const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
     const events = (Array.isArray(payload.events) ? payload.events : [])
-      .filter((event) => cleanText(event.conversation_id, "").startsWith("dm-"));
+      .filter((event) => cleanText(event.conversation_id, "").startsWith("dm-") || remoteControlIsKind(event.kind));
     if (events.length) {
       await mergeDirectSyncEvents(events, { notify: origin !== "startup" && origin !== "cache" });
       state.agentPeople.syncCursor = payload.cursor || events.at(-1)?.id || state.agentPeople.syncCursor;
@@ -18095,6 +20849,7 @@ async function syncSocialLayer(origin = "poll") {
 
 function startSocialSync() {
   if (!state.authUser) return;
+  startRemoteControlLiveSocket("social-start");
   if (!state.socialSyncInterval) {
     state.socialSyncInterval = window.setInterval(() => void syncSocialLayer("poll"), SOCIAL_SYNC_POLL_MS);
   }
@@ -22368,8 +25123,18 @@ function renderDevices() {
         event.stopPropagation();
         void syncDevice(device);
       });
+      const control = document.createElement("button");
+      control.className = "device-control-button icon-button";
+      control.type = "button";
+      control.title = `Access interface on ${cleanText(device.label, "device")}`;
+      control.setAttribute("aria-label", control.title);
+      control.disabled = !state.authUser || Boolean(device.current) || !device.online;
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void requestRemoteControlDevice(device);
+      });
       copy.append(title, meta, detail);
-      card.append(icon, copy, main, sync);
+      card.append(icon, copy, control, main, sync);
       return card;
     })
   );
@@ -24424,8 +27189,8 @@ function renderArtifacts() {
     render_count: state.wisArtifacts.length,
   });
   const spaceItems = [
-    "space-home",
-    "space-admin",
+    "Home (built-in)",
+    ...(isAdminUser() ? ["Admin (built-in)"] : []),
     ...state.userSpaces.map((space) => `${space.title} (${space.id})`),
   ];
   const appItems = SPACE_APP_DEFINITIONS.map((app) => {
@@ -24525,6 +27290,7 @@ async function loadUserFleet(origin = "auto") {
     state.userFleetNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
     state.userFleetSystemNodes = Array.isArray(payload.system_nodes) ? payload.system_nodes : [];
     state.userFleetHarnesses = Array.isArray(payload.harnesses) ? payload.harnesses : [];
+    adoptOwnedAgentFromFleetHarnesses();
     state.userFleetPolicy = cleanText(payload.server_policy, "");
     state.userFleetMode = cleanText(payload.deployment_mode, "");
     renderUserFleet();
@@ -25018,7 +27784,7 @@ async function joinSpaceFromModal() {
       body: { join_code: joinCode },
     });
     const result = payload.spaces || {};
-    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
     renderSpaceLauncher();
     const shared = payload.shared_space || {};
     const joinedSpace = state.userSpaces.find((space) => space.shared_space_id === shared.id)
@@ -25551,7 +28317,7 @@ async function importStorageBackup(file) {
         device_layouts: {},
       },
     });
-    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
     state.userStorage = result.storage || state.userStorage;
     state.spaceWidgetLayouts = payload.widget_layouts && typeof payload.widget_layouts === "object"
       ? payload.widget_layouts
@@ -27513,6 +30279,7 @@ function wireEvents() {
   installWidgetDragging();
   installWidgetResizing();
   installSpacePanning();
+  installSharedSpacePointerAwareness();
   installAgentDragging();
   installAgentPanelDragging();
   installNodesPanelDragging();
