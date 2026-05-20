@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v128-shared-space-pointers";
+const CACHE_NAME = "wasm-agent-v129-shared-pointer-paths";
 const ASSETS = [
   "/",
   "/index.html",

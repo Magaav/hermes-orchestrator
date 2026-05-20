@@ -176,6 +176,11 @@ const SHARED_SPACE_POINTER_TRACE_MIN_PX = 4;
 const SHARED_SPACE_POINTER_TRACE_STEP_PX = 8;
 const SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE = 10;
 const SHARED_SPACE_POINTER_TRACE_LIMIT = 140;
+const SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT = 48;
+const SHARED_SPACE_POINTER_PATH_STEP_PX = 6;
+const SHARED_SPACE_POINTER_PATH_MAX_POINTS = 18;
+const SHARED_SPACE_POINTER_PATH_ANIMATION_MS = 10;
+const SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS = 120;
 const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
 const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
 const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
@@ -1515,8 +1520,10 @@ const state = {
   sharedSpacePointerLiveToken: 0,
   sharedSpacePointerPress: null,
   sharedSpacePointerMoveEvent: null,
+  sharedSpacePointerMoveSamples: [],
   sharedSpacePointerMoveFrame: 0,
   sharedSpacePointerMoveTimer: 0,
+  sharedSpacePointerLastMovePoint: null,
   sharedSpacePointerFollowTarget: null,
   sharedSpacePointerFollowFrame: 0,
   configAreaDraft: null,
@@ -8165,6 +8172,99 @@ function sharedSpacePointerPoint(event) {
   };
 }
 
+function cleanSharedSpacePointerPoint(point) {
+  const area = canvasAreaSize();
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    x: clamp(Number(x.toFixed(2)), 0, Math.max(1, area.width)),
+    y: clamp(Number(y.toFixed(2)), 0, Math.max(1, area.height)),
+  };
+}
+
+function sameSharedSpacePointerPoint(first, second, tolerance = 0.35) {
+  return Boolean(
+    first
+    && second
+    && Math.abs(Number(first.x || 0) - Number(second.x || 0)) <= tolerance
+    && Math.abs(Number(first.y || 0) - Number(second.y || 0)) <= tolerance
+  );
+}
+
+function pushSharedSpacePointerPoint(points, point) {
+  const clean = cleanSharedSpacePointerPoint(point);
+  if (!clean) return;
+  if (!points.length || !sameSharedSpacePointerPoint(points[points.length - 1], clean)) points.push(clean);
+}
+
+function compactSharedSpacePointerPath(points) {
+  if (points.length <= SHARED_SPACE_POINTER_PATH_MAX_POINTS) return points;
+  const compacted = [];
+  const lastIndex = points.length - 1;
+  for (let index = 0; index < SHARED_SPACE_POINTER_PATH_MAX_POINTS; index += 1) {
+    const sourceIndex = Math.round((index * lastIndex) / Math.max(1, SHARED_SPACE_POINTER_PATH_MAX_POINTS - 1));
+    pushSharedSpacePointerPoint(compacted, points[sourceIndex]);
+  }
+  pushSharedSpacePointerPoint(compacted, points[lastIndex]);
+  return compacted.slice(-SHARED_SPACE_POINTER_PATH_MAX_POINTS);
+}
+
+function densifySharedSpacePointerPath(points = []) {
+  const source = [];
+  points.forEach((point) => pushSharedSpacePointerPoint(source, point));
+  if (source.length <= 1) return source;
+  const dense = [source[0]];
+  for (let index = 1; index < source.length; index += 1) {
+    const from = source[index - 1];
+    const to = source[index];
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.ceil(distance / SHARED_SPACE_POINTER_PATH_STEP_PX));
+    for (let step = 1; step <= steps; step += 1) {
+      const ratio = step / steps;
+      pushSharedSpacePointerPoint(dense, {
+        x: from.x + (to.x - from.x) * ratio,
+        y: from.y + (to.y - from.y) * ratio,
+      });
+    }
+  }
+  return compactSharedSpacePointerPath(dense);
+}
+
+function sharedSpacePointerPathFromSamples(samples = [], finalPoint = null, previousPoint = null) {
+  const points = [];
+  pushSharedSpacePointerPoint(points, previousPoint);
+  if (Array.isArray(samples)) {
+    samples.forEach((sample) => {
+      const point = sharedSpacePointerPoint(sample);
+      if (point) pushSharedSpacePointerPoint(points, point);
+    });
+  }
+  pushSharedSpacePointerPoint(points, finalPoint);
+  return densifySharedSpacePointerPath(points);
+}
+
+function sharedSpacePointerPayloadPath(payload = {}, fallbackPoint = null) {
+  const points = [];
+  const payloadPoints = Array.isArray(payload.points) ? payload.points : [];
+  payloadPoints.forEach((point) => pushSharedSpacePointerPoint(points, point));
+  pushSharedSpacePointerPoint(points, fallbackPoint);
+  return densifySharedSpacePointerPath(points);
+}
+
+function sharedSpacePointerScreenPoint(point) {
+  const clean = cleanSharedSpacePointerPoint(point);
+  if (!clean) return null;
+  return {
+    x: logicalToScreenPx(clean.x),
+    y: logicalToScreenPx(clean.y),
+  };
+}
+
+function sharedSpacePointerTransform(screenX, screenY) {
+  return `translate3d(${screenX}px, ${screenY}px, 0) translate(2px, 2px)`;
+}
+
 function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
   const id = cleanText(sharedSpaceId, "");
   if (!id || !Array.isArray(events)) return false;
@@ -8189,6 +8289,7 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
     };
     if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    const path = sharedSpacePointerPayloadPath(payload, point);
     const nextPointer = {
       key,
       user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
@@ -8200,6 +8301,7 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       color: sharedSpacePointerColor(key),
       event_id: eventId,
       pointer_event_id: pointerEventId,
+      path,
       pulse_id: isPulse ? cleanText(pointerEventId || eventId || `${key}-${Date.now()}`, "") : cleanText(pointers[key]?.pulse_id || "", ""),
       click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
       last_seen_at: Date.now(),
@@ -8253,6 +8355,46 @@ function addSharedSpacePointerTracePath(layer, pointer, fromX, fromY, toX, toY) 
   }
 }
 
+function addSharedSpacePointerTracePoints(layer, pointer, screenPoints = []) {
+  if (!Array.isArray(screenPoints) || screenPoints.length < 2) return;
+  for (let index = 1; index < screenPoints.length; index += 1) {
+    const from = screenPoints[index - 1];
+    const to = screenPoints[index];
+    if (!from || !to) continue;
+    addSharedSpacePointerTracePath(layer, pointer, from.x, from.y, to.x, to.y);
+  }
+}
+
+function animateSharedSpacePointerNode(node, screenPoints = [], finalTransform = "") {
+  if (!node || typeof node.animate !== "function" || !Array.isArray(screenPoints) || screenPoints.length < 2) return false;
+  const keyframes = [];
+  const activeAnimations = typeof node.getAnimations === "function" ? node.getAnimations() : [];
+  const currentTransform = activeAnimations.length && typeof getComputedStyle === "function"
+    ? getComputedStyle(node).transform
+    : "";
+  activeAnimations.forEach((animation) => animation.cancel());
+  if (currentTransform && currentTransform !== "none") keyframes.push({ transform: currentTransform });
+  const pathPoints = keyframes.length ? screenPoints.slice(1) : screenPoints;
+  pathPoints.forEach((point) => {
+    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+      keyframes.push({ transform: sharedSpacePointerTransform(point.x, point.y) });
+    }
+  });
+  if (keyframes.length < 2) return false;
+  const duration = clamp(
+    (keyframes.length - 1) * SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
+    SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
+    SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS
+  );
+  try {
+    node.animate(keyframes, { duration, easing: "linear" });
+    node.style.transform = finalTransform;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function renderSharedSpacePointers() {
   const target = currentSharedSpacePointerTarget();
   const board = els.spaceBoard || spaceSurface();
@@ -8287,6 +8429,18 @@ function renderSharedSpacePointers() {
     const previousX = Number(node.dataset.sharedPointerScreenX || "");
     const previousY = Number(node.dataset.sharedPointerScreenY || "");
     const previousTraceAt = Number(node.dataset.sharedPointerTraceAt || 0);
+    const pathEventId = cleanText(pointer.pointer_event_id || pointer.event_id || "", "");
+    const newPointerPath = pathEventId && node.dataset.sharedPointerRenderedEventId !== pathEventId;
+    const pathPoints = Array.isArray(pointer.path) && pointer.path.length ? pointer.path : [{ x: pointer.x, y: pointer.y }];
+    const screenPath = pathPoints.map(sharedSpacePointerScreenPoint).filter(Boolean);
+    if (
+      newPointerPath
+      && Number.isFinite(previousX)
+      && Number.isFinite(previousY)
+      && (!screenPath.length || Math.hypot(screenPath[0].x - previousX, screenPath[0].y - previousY) >= 0.5)
+    ) {
+      screenPath.unshift({ x: previousX, y: previousY });
+    }
     if (
       Number.isFinite(previousX)
       && Number.isFinite(previousY)
@@ -8294,11 +8448,14 @@ function renderSharedSpacePointers() {
       && Math.hypot(screenX - previousX, screenY - previousY) >= SHARED_SPACE_POINTER_TRACE_MIN_PX
     ) {
       node.dataset.sharedPointerTraceAt = String(now);
-      addSharedSpacePointerTracePath(layer, pointer, previousX, previousY, screenX, screenY);
+      if (newPointerPath && screenPath.length > 1) addSharedSpacePointerTracePoints(layer, pointer, screenPath);
+      else addSharedSpacePointerTracePath(layer, pointer, previousX, previousY, screenX, screenY);
     }
     node.dataset.sharedPointerScreenX = String(screenX);
     node.dataset.sharedPointerScreenY = String(screenY);
-    node.style.transform = `translate3d(${screenX}px, ${screenY}px, 0) translate(2px, 2px)`;
+    const finalTransform = sharedSpacePointerTransform(screenX, screenY);
+    if (!newPointerPath || !animateSharedSpacePointerNode(node, screenPath, finalTransform)) node.style.transform = finalTransform;
+    if (pathEventId) node.dataset.sharedPointerRenderedEventId = pathEventId;
     node.style.setProperty("--shared-pointer-color", pointer.color);
     const clicking = now < Number(pointer.click_until || 0);
     const pulseId = cleanText(pointer.pulse_id || "", "");
@@ -8384,6 +8541,7 @@ function clearSharedSpacePointerMoveQueue() {
   state.sharedSpacePointerMoveFrame = 0;
   state.sharedSpacePointerMoveTimer = 0;
   state.sharedSpacePointerMoveEvent = null;
+  state.sharedSpacePointerMoveSamples = [];
 }
 
 function flushSharedSpacePointerMove() {
@@ -8396,7 +8554,9 @@ function flushSharedSpacePointerMove() {
     return;
   }
   state.sharedSpacePointerMoveEvent = null;
-  void sendSharedSpacePointerEvent("move", event, { liveOnly: true });
+  const samples = state.sharedSpacePointerMoveSamples.slice();
+  state.sharedSpacePointerMoveSamples = [];
+  void sendSharedSpacePointerEvent("move", event, { liveOnly: true, samples });
 }
 
 function scheduleSharedSpacePointerMoveFlush() {
@@ -8424,7 +8584,13 @@ function isSharedSpacePointerMove(event) {
 function queueSharedSpacePointerMove(event) {
   if (!isSharedSpacePointerMove(event)) return;
   const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
-  const latest = coalesced.length ? coalesced[coalesced.length - 1] : event;
+  const samples = coalesced.length ? coalesced : [event];
+  const latest = samples[samples.length - 1] || event;
+  const snapshots = samples.map((sample) => sharedSpacePointerEventSnapshot(sample, event));
+  state.sharedSpacePointerMoveSamples.push(...snapshots);
+  if (state.sharedSpacePointerMoveSamples.length > SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT) {
+    state.sharedSpacePointerMoveSamples = state.sharedSpacePointerMoveSamples.slice(-SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT);
+  }
   state.sharedSpacePointerMoveEvent = sharedSpacePointerEventSnapshot(latest, event);
   scheduleSharedSpacePointerMoveFlush();
 }
@@ -8438,6 +8604,9 @@ async function sendSharedSpacePointerEvent(type, event, options = {}) {
   if (type === "move" && !options.force && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
   state.sharedSpacePointerLastSentAt = now;
   const pointerEventId = remoteControlId("space_ptr");
+  const path = type === "move"
+    ? sharedSpacePointerPathFromSamples(options.samples, point, state.sharedSpacePointerLastMovePoint)
+    : [];
   const payload = {
     type,
     pointer_event_id: pointerEventId,
@@ -8447,6 +8616,7 @@ async function sendSharedSpacePointerEvent(type, event, options = {}) {
     user_label: publicUserLabel(state.authUser),
     distance: Number(canvasDistance().toFixed(2)),
   };
+  if (path.length > 1) payload.points = path;
   const body = {
     action: "event",
     shared_space_id: target.space.shared_space_id,
@@ -8454,6 +8624,8 @@ async function sendSharedSpacePointerEvent(type, event, options = {}) {
     kind: SHARED_SPACE_POINTER_EVENT_KIND,
     payload,
   };
+  if (type === "move" || type === "down") state.sharedSpacePointerLastMovePoint = point;
+  if (["up", "click"].includes(type)) state.sharedSpacePointerLastMovePoint = null;
   const durableDue = type !== "move" || now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= SHARED_SPACE_POINTER_DURABLE_MS;
   const liveOnly = type === "move" && options.liveOnly === true && !durableDue;
   const liveSent = sendSharedSpacePointerLiveEvent(target, body, { liveOnly });
@@ -8513,6 +8685,7 @@ function updateSharedSpacePointerSync() {
   if (!shouldRun) {
     closeSharedSpacePointerLiveSocket();
     clearSharedSpacePointerMoveQueue();
+    state.sharedSpacePointerLastMovePoint = null;
     if (state.sharedSpacePointerFollowFrame) window.cancelAnimationFrame(state.sharedSpacePointerFollowFrame);
     state.sharedSpacePointerFollowFrame = 0;
     state.sharedSpacePointerFollowTarget = null;

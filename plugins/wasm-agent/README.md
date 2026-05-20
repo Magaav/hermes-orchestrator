@@ -32,7 +32,7 @@ the next action changes, update this before ending the turn.
 Current next action: reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
-v128 service worker activates: first by receiving a
+v129 service worker activates: first by receiving a
 compact bootstrap preview or fallback/status event if the relay rejects a full
 frame, then by using the receiving-side `Share pixels` button for any
 auto-granted co-control session and confirming the controller-side frame status
@@ -47,12 +47,13 @@ and in-surface widget buttons through the live remote-control channel without
 waiting for the social poll, and confirm dragging the remote canvas pans it
 through pointer down/move/up, then confirm scrolling the empty remote canvas
 changes space distance instead of native-scrolling the space viewport;
-then reload two real clients in the same shared space and confirm moving,
-pressing, and clicking over the canvas shows each peer's labeled pointer and
-click pulse in the other client without opening chat; then reload the real
-authenticated Zangao client and confirm `/spaces` no longer returns or renders
-`space-home`/`space-admin` as account-owned user spaces; then reload the real
-authenticated Asolaria clients and confirm the Asolaria title row shows the shared voice control after
+then reload two real clients in the same shared space and confirm circular
+moving, pressing, and clicking over the canvas shows each peer's labeled pointer
+following a fluid path and click pulse in the other client without opening chat;
+then reload the real authenticated Zangao client and confirm `/spaces` no
+longer returns or renders `space-home`/`space-admin` as account-owned user
+spaces; then reload the real authenticated Asolaria clients and confirm the
+Asolaria title row shows the shared voice control after
 `HERMES_WASM_AGENT_SHARED_VOICE_ENABLED=1` and the Asolaria `voice-room`
 capability are present, and resume the prior CAM 1 middle-timeline click and
 Live return browser verification so the real client matches the headless
@@ -128,9 +129,11 @@ deduped by client event id, fast pointer-up taps are promoted to explicit
 clicks/touches restart a larger wave instead of being swallowed by the previous
 animation. Pointer motion now streams through a frame-rate, coalesced live-only
 path at the cursor cadence limit, writes only periodic durable keyframes for
-room-poll fallback, fills longer cursor jumps with short capped fading trace
-segments, and softly follows the latest peer cursor when it leaves the
-comfortable visible viewport. The follow loop is clamped per frame and pauses
+room-poll fallback, carries a capped densified point path from sender to
+receiver so curved motion does not collapse to one robotic chord per frame,
+fills longer cursor jumps with short capped fading trace segments, and softly
+follows the latest peer cursor when it leaves the comfortable visible viewport.
+The follow loop is clamped per frame and pauses
 while the local user is actively panning, zooming, or holding a pointer down, so
 different zoom/scroll positions still line up without sticky jumps.
 Zangao's account state had stale
