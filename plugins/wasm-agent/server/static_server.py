@@ -5752,15 +5752,7 @@ def append_shared_space_room_event(
     body: dict[str, Any],
 ) -> dict[str, Any]:
     events = read_shared_space_events(server, shared_space_id)
-    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
-    event = {
-        "schema": SHARED_SPACE_ROOM_EVENT_SCHEMA,
-        "id": f"room_evt_{next_snowflake_id():x}",
-        "kind": event_kind,
-        "sender_user_id": user_id(user),
-        "created_at": iso_timestamp(),
-        "payload": sanitize_room_event_payload(body.get("payload") if isinstance(body.get("payload"), dict) else {}),
-    }
+    event = build_shared_space_room_event(user, body)
     events.append(event)
     write_json_file(shared_space_events_path(server, shared_space_id), {
         "schema": "hermes.wasm_agent.shared_space.room_events.v1",
@@ -5768,6 +5760,21 @@ def append_shared_space_room_event(
         "events": events[-SHARED_SPACE_EVENT_LIMIT:],
     })
     return event
+
+
+def build_shared_space_room_event(
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
+    return {
+        "schema": SHARED_SPACE_ROOM_EVENT_SCHEMA,
+        "id": f"room_evt_{next_snowflake_id():x}",
+        "kind": event_kind,
+        "sender_user_id": user_id(user),
+        "created_at": iso_timestamp(),
+        "payload": sanitize_room_event_payload(body.get("payload") if isinstance(body.get("payload"), dict) else {}),
+    }
 
 
 def public_shared_space_room(
@@ -14463,7 +14470,12 @@ def handle_shared_space_room_live(
             shared_space_live_error(client_ws, request_id, "shared_space_denied", "You cannot access that shared space.")
             continue
         try:
-            event = append_shared_space_room_event(server, user, shared_space_id, body)
+            live_only = body.get("live_only") is True or str(body.get("live_only") or "").strip().lower() in {"1", "true", "yes"}
+            event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
+            if live_only and event_kind != "space-pointer":
+                shared_space_live_error(client_ws, request_id, "unsupported_live_only_kind", "Only shared-space pointer events can be live-only.")
+                continue
+            event = build_shared_space_room_event(user, body) if live_only else append_shared_space_room_event(server, user, shared_space_id, body)
             client_ws.send_json({"type": "ack", "ok": True, "request_id": request_id, "event": event})
             shared_space_live_broadcast(server, shared_space_id, event, source=client_ws)
         except BrowserError as exc:

@@ -126,8 +126,12 @@ waiting for the next room poll, while duplicate durable pointer events are
 deduped by client event id, fast pointer-up taps are promoted to explicit
 `click` pulses, and each pulse carries a fresh pulse id so repeated quick
 clicks/touches restart a larger wave instead of being swallowed by the previous
-animation. Pointer motion animates through transform-only updates so different
-zoom/scroll positions still line up.
+animation. Pointer motion now streams through a coalesced live-only path at the
+cursor cadence limit, writes only periodic durable keyframes for room-poll
+fallback, and softly follows the latest peer cursor when it leaves the
+comfortable visible viewport. The follow loop is clamped per frame and pauses
+while the local user is actively panning or zooming, so different zoom/scroll
+positions still line up without sticky jumps.
 Zangao's account state had stale
 `spaces/space-home/wis` and `spaces/space-admin/wis` directories; the server now
 requires real `space.json` metadata before listing user spaces, reserves

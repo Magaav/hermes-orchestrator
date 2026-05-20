@@ -876,7 +876,7 @@ h2 {
   transform: translate3d(0, 0, 0) translate(2px, 2px);
   color: #050a12;
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.38));
-  transition: transform 80ms linear;
+  transition: transform 48ms linear;
   will-change: transform;
 }
 

@@ -166,10 +166,15 @@ const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
 const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
-const SHARED_SPACE_POINTER_SEND_MS = 60;
+const SHARED_SPACE_POINTER_SEND_MS = 32;
 const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
 const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
+const SHARED_SPACE_POINTER_DURABLE_MS = 720;
+const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
+const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
+const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
+const SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX = 0.75;
 const SHARED_SPACE_POINTER_LIVE_RECONNECT_MS = 900;
 const SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES = 96 * 1024;
 const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
@@ -1482,6 +1487,8 @@ const state = {
   spaceZoomInfoHideTimer: 0,
   spacePanMomentumFrame: 0,
   spacePanMomentumActive: false,
+  spacePanActive: false,
+  spaceNavigationInputAt: 0,
   spaceDistanceCommitTimer: 0,
   spaceZoomMiniMapTimer: 0,
   spaceGesturePointers: new Map(),
@@ -1502,6 +1509,11 @@ const state = {
   sharedSpacePointerLiveReconnectTimer: 0,
   sharedSpacePointerLiveToken: 0,
   sharedSpacePointerPress: null,
+  sharedSpacePointerMoveEvent: null,
+  sharedSpacePointerMoveFrame: 0,
+  sharedSpacePointerMoveTimer: 0,
+  sharedSpacePointerFollowTarget: null,
+  sharedSpacePointerFollowFrame: 0,
   configAreaDraft: null,
 };
 
@@ -8099,20 +8111,33 @@ function startSharedSpacePointerLiveSocket(origin = "active") {
   return socket;
 }
 
-function sendSharedSpacePointerLiveEvent(target, body = {}) {
+function sendSharedSpacePointerLiveEvent(target, body = {}, options = {}) {
   const socket = startSharedSpacePointerLiveSocket("pointer-send");
   if (!socket || !sharedSpacePointerLiveConnected(target)) return false;
-  if (Number(socket.bufferedAmount || 0) > SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES) return true;
+  if (Number(socket.bufferedAmount || 0) > SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES) return options.liveOnly === true;
+  const liveBody = options.liveOnly ? { ...body, live_only: true } : body;
   try {
     socket.send(JSON.stringify({
       type: "event",
       request_id: remoteControlId("space_ptr"),
-      body,
+      body: liveBody,
     }));
     return true;
   } catch {
     return false;
   }
+}
+
+function sharedSpacePointerEventSnapshot(event, fallback = event) {
+  return {
+    clientX: Number(event?.clientX ?? fallback?.clientX ?? 0),
+    clientY: Number(event?.clientY ?? fallback?.clientY ?? 0),
+    pointerId: Number(event?.pointerId ?? fallback?.pointerId ?? 0),
+    pointerType: cleanText(event?.pointerType || fallback?.pointerType || "", ""),
+    button: Number(event?.button ?? fallback?.button ?? 0),
+    buttons: Number(event?.buttons ?? fallback?.buttons ?? 0),
+    isPrimary: event?.isPrimary ?? fallback?.isPrimary ?? true,
+  };
 }
 
 function sharedSpacePointerPoint(event) {
@@ -8159,7 +8184,7 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
     };
     if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
-    pointers[key] = {
+    const nextPointer = {
       key,
       user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
       device_id: cleanText(payload.device_id || "", ""),
@@ -8174,11 +8199,16 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
       last_seen_at: Date.now(),
     };
+    pointers[key] = nextPointer;
+    state.sharedSpacePointerFollowTarget = { shared_space_id: id, key, x: nextPointer.x, y: nextPointer.y, at: Date.now() };
     changed = true;
   }
   if (latestId) state.sharedSpacePointerLastEventIdBySpace[id] = latestId;
   state.sharedSpacePointers[id] = pointers;
-  if (changed) renderSharedSpacePointers();
+  if (changed) {
+    renderSharedSpacePointers();
+    scheduleSharedSpacePointerNavigationFollow();
+  }
   return changed;
 }
 
@@ -8229,13 +8259,117 @@ function renderSharedSpacePointers() {
   });
 }
 
-async function sendSharedSpacePointerEvent(type, event) {
+function sharedSpacePointerNavigationBlocked() {
+  return Boolean(
+    state.spacePanActive
+    || state.spacePanMomentumActive
+    || state.spacePinchActive
+    || Boolean(state.activePointers?.size)
+    || performance.now() < state.spacePinchSuppressPanUntil
+    || performance.now() - Number(state.spaceNavigationInputAt || 0) < 120
+  );
+}
+
+function sharedSpacePointerFollowScrollTarget(pointer) {
+  const viewport = els.spaceViewport;
+  const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
+  if (!viewport || !rect || !pointer) return null;
+  const visibleWidth = Math.max(1, Number(rect.width || viewport.clientWidth || 1));
+  const visibleHeight = Math.max(1, Number(rect.height || viewport.clientHeight || 1));
+  const margin = Math.min(
+    SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX,
+    Math.max(48, Math.min(visibleWidth, visibleHeight) * 0.28)
+  );
+  const x = logicalToScreenPx(pointer.x);
+  const y = logicalToScreenPx(pointer.y);
+  let left = viewport.scrollLeft;
+  let top = viewport.scrollTop;
+  if (x < viewport.scrollLeft + margin) left = x - margin;
+  else if (x > viewport.scrollLeft + visibleWidth - margin) left = x - visibleWidth + margin;
+  if (y < viewport.scrollTop + margin) top = y - margin;
+  else if (y > viewport.scrollTop + visibleHeight - margin) top = y - visibleHeight + margin;
+  return {
+    left: clamp(left, 0, Math.max(0, viewport.scrollWidth - viewport.clientWidth)),
+    top: clamp(top, 0, Math.max(0, viewport.scrollHeight - viewport.clientHeight)),
+  };
+}
+
+function stepSharedSpacePointerNavigationFollow() {
+  state.sharedSpacePointerFollowFrame = 0;
+  const target = state.sharedSpacePointerFollowTarget;
+  const active = currentSharedSpacePointerTarget();
+  const viewport = els.spaceViewport;
+  if (!target || !active || !viewport || target.shared_space_id !== active.room.id) return;
+  if (Date.now() - Number(target.at || 0) > SHARED_SPACE_POINTER_TTL_MS) return;
+  if (sharedSpacePointerNavigationBlocked()) return;
+  const desired = sharedSpacePointerFollowScrollTarget(target);
+  if (!desired) return;
+  const dx = desired.left - viewport.scrollLeft;
+  const dy = desired.top - viewport.scrollTop;
+  if (Math.abs(dx) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX && Math.abs(dy) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX) return;
+  const stepX = clamp(dx * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
+  const stepY = clamp(dy * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
+  viewport.scrollLeft += Math.abs(stepX) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dx : stepX;
+  viewport.scrollTop += Math.abs(stepY) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dy : stepY;
+  updateSpaceNavigationHints();
+  renderSpaceMiniMap();
+  scheduleSharedSpacePointerNavigationFollow();
+}
+
+function scheduleSharedSpacePointerNavigationFollow() {
+  if (state.sharedSpacePointerFollowFrame || sharedSpacePointerNavigationBlocked()) return;
+  state.sharedSpacePointerFollowFrame = window.requestAnimationFrame(stepSharedSpacePointerNavigationFollow);
+}
+
+function clearSharedSpacePointerMoveQueue() {
+  if (state.sharedSpacePointerMoveFrame) window.cancelAnimationFrame(state.sharedSpacePointerMoveFrame);
+  if (state.sharedSpacePointerMoveTimer) window.clearTimeout(state.sharedSpacePointerMoveTimer);
+  state.sharedSpacePointerMoveFrame = 0;
+  state.sharedSpacePointerMoveTimer = 0;
+  state.sharedSpacePointerMoveEvent = null;
+}
+
+function flushSharedSpacePointerMove() {
+  state.sharedSpacePointerMoveFrame = 0;
+  const event = state.sharedSpacePointerMoveEvent;
+  if (!event) return;
+  const dueIn = state.sharedSpacePointerLastSentAt + SHARED_SPACE_POINTER_SEND_MS - performance.now();
+  if (dueIn > 4) {
+    scheduleSharedSpacePointerMoveFlush();
+    return;
+  }
+  state.sharedSpacePointerMoveEvent = null;
+  void sendSharedSpacePointerEvent("move", event, { liveOnly: true });
+}
+
+function scheduleSharedSpacePointerMoveFlush() {
+  if (state.sharedSpacePointerMoveFrame || state.sharedSpacePointerMoveTimer) return;
+  const dueIn = state.sharedSpacePointerLastSentAt + SHARED_SPACE_POINTER_SEND_MS - performance.now();
+  if (dueIn > 4) {
+    state.sharedSpacePointerMoveTimer = window.setTimeout(() => {
+      state.sharedSpacePointerMoveTimer = 0;
+      state.sharedSpacePointerMoveFrame = window.requestAnimationFrame(flushSharedSpacePointerMove);
+    }, dueIn);
+    return;
+  }
+  state.sharedSpacePointerMoveFrame = window.requestAnimationFrame(flushSharedSpacePointerMove);
+}
+
+function queueSharedSpacePointerMove(event) {
+  if (!isPrimaryPointer(event)) return;
+  const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+  const latest = coalesced.length ? coalesced[coalesced.length - 1] : event;
+  state.sharedSpacePointerMoveEvent = sharedSpacePointerEventSnapshot(latest, event);
+  scheduleSharedSpacePointerMoveFlush();
+}
+
+async function sendSharedSpacePointerEvent(type, event, options = {}) {
   const target = currentSharedSpacePointerTarget();
   if (!target) return;
   const point = sharedSpacePointerPoint(event);
   if (!point) return;
   const now = performance.now();
-  if (type === "move" && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
+  if (type === "move" && !options.force && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
   state.sharedSpacePointerLastSentAt = now;
   const pointerEventId = remoteControlId("space_ptr");
   const payload = {
@@ -8254,9 +8388,14 @@ async function sendSharedSpacePointerEvent(type, event) {
     kind: SHARED_SPACE_POINTER_EVENT_KIND,
     payload,
   };
-  const liveSent = sendSharedSpacePointerLiveEvent(target, body);
-  const durableDue = now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= 720;
-  if (liveSent && type === "move" && !durableDue) return;
+  const durableDue = type !== "move" || now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= SHARED_SPACE_POINTER_DURABLE_MS;
+  const liveOnly = type === "move" && options.liveOnly === true && !durableDue;
+  const liveSent = sendSharedSpacePointerLiveEvent(target, body, { liveOnly });
+  if (liveSent) {
+    if (!liveOnly) state.sharedSpacePointerLastDurableSentAt = now;
+    return;
+  }
+  if (type === "move" && !durableDue) return;
   state.sharedSpacePointerLastDurableSentAt = now;
   void fetchJson("/spaces/room", {
     method: "POST",
@@ -8307,6 +8446,10 @@ function updateSharedSpacePointerSync() {
   const shouldRun = Boolean(state.authUser && currentSharedSpacePointerTarget());
   if (!shouldRun) {
     closeSharedSpacePointerLiveSocket();
+    clearSharedSpacePointerMoveQueue();
+    if (state.sharedSpacePointerFollowFrame) window.cancelAnimationFrame(state.sharedSpacePointerFollowFrame);
+    state.sharedSpacePointerFollowFrame = 0;
+    state.sharedSpacePointerFollowTarget = null;
     if (state.sharedSpacePointerSyncInterval) {
       window.clearInterval(state.sharedSpacePointerSyncInterval);
       state.sharedSpacePointerSyncInterval = 0;
@@ -8325,20 +8468,21 @@ function updateSharedSpacePointerSync() {
 }
 
 function installSharedSpacePointerAwareness() {
-  const sendMove = (event) => void sendSharedSpacePointerEvent("move", event);
-  document.addEventListener("pointermove", sendMove, { capture: true, passive: true });
+  document.addEventListener("pointermove", queueSharedSpacePointerMove, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
     state.sharedSpacePointerPress = {
       pointer_id: Number(event.pointerId || 0),
       x: Number(event.clientX || 0),
       y: Number(event.clientY || 0),
       at: performance.now(),
     };
-    void sendSharedSpacePointerEvent("down", event);
+    void sendSharedSpacePointerEvent("down", sharedSpacePointerEventSnapshot(event), { force: true });
   }, { capture: true, passive: true });
   document.addEventListener("pointerup", (event) => {
     if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
     const press = state.sharedSpacePointerPress;
     state.sharedSpacePointerPress = null;
     const samePointer = !press?.pointer_id || Number(event.pointerId || 0) === press.pointer_id;
@@ -8348,12 +8492,13 @@ function installSharedSpacePointerAwareness() {
       && performance.now() - Number(press.at || 0) <= 700
       && Math.hypot(Number(event.clientX || 0) - Number(press.x || 0), Number(event.clientY || 0) - Number(press.y || 0)) <= 14
     );
-    void sendSharedSpacePointerEvent(quickTap ? "click" : "up", event);
+    void sendSharedSpacePointerEvent(quickTap ? "click" : "up", sharedSpacePointerEventSnapshot(event), { force: true });
   }, { capture: true, passive: true });
   document.addEventListener("pointercancel", (event) => {
     if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
     state.sharedSpacePointerPress = null;
-    void sendSharedSpacePointerEvent("up", event);
+    void sendSharedSpacePointerEvent("up", sharedSpacePointerEventSnapshot(event), { force: true });
   }, { capture: true, passive: true });
 }
 
@@ -29789,6 +29934,7 @@ function installSpaceDistanceGestures(viewport) {
   viewport.addEventListener("wheel", (event) => {
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
     if (containBlockedSpaceWheel(event, viewport)) return;
+    state.spaceNavigationInputAt = performance.now();
     preventSpaceWheelDefault(event);
     const delta = wheelDeltaPixels(event, viewport);
     if (Math.abs(delta) < 0.5) return;
@@ -29816,6 +29962,7 @@ function installSpaceDistanceGestures(viewport) {
     if (event.pointerType !== "touch") return;
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
     if (spaceDistanceGestureBlocked(event.target)) return;
+    state.spaceNavigationInputAt = performance.now();
     state.spaceGesturePointers.set(event.pointerId, {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -29834,6 +29981,7 @@ function installSpaceDistanceGestures(viewport) {
 
   viewport.addEventListener("pointermove", (event) => {
     if (!state.spaceGesturePointers.has(event.pointerId)) return;
+    state.spaceNavigationInputAt = performance.now();
     state.spaceGesturePointers.set(event.pointerId, {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -29893,6 +30041,8 @@ function installSpacePanning() {
     let velocitySamples = [];
     let moved = false;
     let finished = false;
+    state.spacePanActive = true;
+    state.spaceNavigationInputAt = performance.now();
     viewport.classList.add("is-panning");
     setSpaceMiniMapVisible(true);
     try {
@@ -29903,6 +30053,7 @@ function installSpacePanning() {
     const move = (moveEvent) => {
       moveEvent.preventDefault();
       if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
+      state.spaceNavigationInputAt = performance.now();
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
       const now = performance.now();
       const dt = Math.max(1, now - lastTime);
@@ -29925,6 +30076,8 @@ function installSpacePanning() {
     const end = (endEvent) => {
       if (finished) return;
       finished = true;
+      state.spacePanActive = false;
+      state.spaceNavigationInputAt = performance.now();
       viewport.classList.remove("is-panning");
       renderSpaceMiniMap();
       viewport.removeEventListener("pointermove", move);
