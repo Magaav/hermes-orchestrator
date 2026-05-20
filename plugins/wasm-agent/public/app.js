@@ -166,14 +166,16 @@ const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
 const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
-const SHARED_SPACE_POINTER_SEND_MS = 32;
+const SHARED_SPACE_POINTER_SEND_MS = 16;
 const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
 const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
 const SHARED_SPACE_POINTER_DURABLE_MS = 720;
-const SHARED_SPACE_POINTER_TRACE_MS = 42;
-const SHARED_SPACE_POINTER_TRACE_MIN_PX = 10;
-const SHARED_SPACE_POINTER_TRACE_LIMIT = 80;
+const SHARED_SPACE_POINTER_TRACE_MS = 16;
+const SHARED_SPACE_POINTER_TRACE_MIN_PX = 4;
+const SHARED_SPACE_POINTER_TRACE_STEP_PX = 8;
+const SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE = 10;
+const SHARED_SPACE_POINTER_TRACE_LIMIT = 140;
 const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
 const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
 const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
@@ -8232,6 +8234,25 @@ function addSharedSpacePointerTrace(layer, pointer, screenX, screenY) {
   }
 }
 
+function addSharedSpacePointerTracePath(layer, pointer, fromX, fromY, toX, toY) {
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  if (!Number.isFinite(distance) || distance < SHARED_SPACE_POINTER_TRACE_MIN_PX) return;
+  const steps = clamp(
+    Math.ceil(distance / SHARED_SPACE_POINTER_TRACE_STEP_PX),
+    1,
+    SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE
+  );
+  for (let index = 0; index < steps; index += 1) {
+    const ratio = index / steps;
+    addSharedSpacePointerTrace(
+      layer,
+      pointer,
+      fromX + (toX - fromX) * ratio,
+      fromY + (toY - fromY) * ratio
+    );
+  }
+}
+
 function renderSharedSpacePointers() {
   const target = currentSharedSpacePointerTarget();
   const board = els.spaceBoard || spaceSurface();
@@ -8273,7 +8294,7 @@ function renderSharedSpacePointers() {
       && Math.hypot(screenX - previousX, screenY - previousY) >= SHARED_SPACE_POINTER_TRACE_MIN_PX
     ) {
       node.dataset.sharedPointerTraceAt = String(now);
-      addSharedSpacePointerTrace(layer, pointer, previousX, previousY);
+      addSharedSpacePointerTracePath(layer, pointer, previousX, previousY, screenX, screenY);
     }
     node.dataset.sharedPointerScreenX = String(screenX);
     node.dataset.sharedPointerScreenY = String(screenY);

@@ -887,16 +887,16 @@ h2 {
   left: 0;
   top: 0;
   z-index: 1;
-  width: 9px;
-  height: 9px;
-  margin-left: -4px;
-  margin-top: -4px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3px;
+  margin-top: -3px;
   border-radius: 50%;
   background: var(--shared-pointer-color);
   box-shadow: 0 0 16px color-mix(in srgb, var(--shared-pointer-color) 72%, transparent);
-  opacity: 0.62;
+  opacity: 0.56;
   transform: translate3d(0, 0, 0);
-  animation: shared-pointer-trace-fade 760ms ease-out forwards;
+  animation: shared-pointer-trace-fade 640ms ease-out forwards;
   will-change: transform, opacity;
 }
 
@@ -951,7 +951,7 @@ h2 {
 
 @keyframes shared-pointer-trace-fade {
   0% {
-    opacity: 0.62;
+    opacity: 0.56;
     transform: scale(1);
   }
   100% {
