@@ -171,6 +171,9 @@ const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
 const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
 const SHARED_SPACE_POINTER_DURABLE_MS = 720;
+const SHARED_SPACE_POINTER_TRACE_MS = 42;
+const SHARED_SPACE_POINTER_TRACE_MIN_PX = 10;
+const SHARED_SPACE_POINTER_TRACE_LIMIT = 80;
 const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
 const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
 const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
@@ -8212,6 +8215,23 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
   return changed;
 }
 
+function addSharedSpacePointerTrace(layer, pointer, screenX, screenY) {
+  if (!layer || !pointer) return;
+  const trace = document.createElement("span");
+  trace.className = "shared-space-pointer-trace";
+  trace.setAttribute("aria-hidden", "true");
+  trace.style.setProperty("--shared-pointer-color", pointer.color);
+  trace.style.left = `${screenX + 2}px`;
+  trace.style.top = `${screenY + 2}px`;
+  layer.append(trace);
+  trace.addEventListener("animationend", () => trace.remove(), { once: true });
+  window.setTimeout(() => trace.remove(), 1100);
+  const traces = layer.querySelectorAll(".shared-space-pointer-trace");
+  if (traces.length > SHARED_SPACE_POINTER_TRACE_LIMIT) {
+    Array.from(traces).slice(0, traces.length - SHARED_SPACE_POINTER_TRACE_LIMIT).forEach((node) => node.remove());
+  }
+}
+
 function renderSharedSpacePointers() {
   const target = currentSharedSpacePointerTarget();
   const board = els.spaceBoard || spaceSurface();
@@ -8241,7 +8261,23 @@ function renderSharedSpacePointers() {
       node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
       layer.append(node);
     }
-    node.style.transform = `translate3d(${logicalToScreenPx(pointer.x)}px, ${logicalToScreenPx(pointer.y)}px, 0) translate(2px, 2px)`;
+    const screenX = logicalToScreenPx(pointer.x);
+    const screenY = logicalToScreenPx(pointer.y);
+    const previousX = Number(node.dataset.sharedPointerScreenX || "");
+    const previousY = Number(node.dataset.sharedPointerScreenY || "");
+    const previousTraceAt = Number(node.dataset.sharedPointerTraceAt || 0);
+    if (
+      Number.isFinite(previousX)
+      && Number.isFinite(previousY)
+      && now - previousTraceAt >= SHARED_SPACE_POINTER_TRACE_MS
+      && Math.hypot(screenX - previousX, screenY - previousY) >= SHARED_SPACE_POINTER_TRACE_MIN_PX
+    ) {
+      node.dataset.sharedPointerTraceAt = String(now);
+      addSharedSpacePointerTrace(layer, pointer, previousX, previousY);
+    }
+    node.dataset.sharedPointerScreenX = String(screenX);
+    node.dataset.sharedPointerScreenY = String(screenY);
+    node.style.transform = `translate3d(${screenX}px, ${screenY}px, 0) translate(2px, 2px)`;
     node.style.setProperty("--shared-pointer-color", pointer.color);
     const clicking = now < Number(pointer.click_until || 0);
     const pulseId = cleanText(pointer.pulse_id || "", "");
@@ -8355,8 +8391,17 @@ function scheduleSharedSpacePointerMoveFlush() {
   state.sharedSpacePointerMoveFrame = window.requestAnimationFrame(flushSharedSpacePointerMove);
 }
 
+function isSharedSpacePointerMove(event) {
+  if (event?.isPrimary === false) return false;
+  if (event?.pointerType === "mouse") {
+    const buttons = Number(event.buttons || 0);
+    return !buttons || (buttons & 1) === 1;
+  }
+  return true;
+}
+
 function queueSharedSpacePointerMove(event) {
-  if (!isPrimaryPointer(event)) return;
+  if (!isSharedSpacePointerMove(event)) return;
   const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
   const latest = coalesced.length ? coalesced[coalesced.length - 1] : event;
   state.sharedSpacePointerMoveEvent = sharedSpacePointerEventSnapshot(latest, event);

@@ -873,11 +873,31 @@ h2 {
   gap: 5px;
   left: 0;
   top: 0;
+  z-index: 2;
   transform: translate3d(0, 0, 0) translate(2px, 2px);
   color: #050a12;
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.38));
   transition: transform 48ms linear;
   will-change: transform;
+}
+
+.shared-space-pointer-trace {
+  --shared-pointer-color: #7ddcff;
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  margin-left: -4px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--shared-pointer-color);
+  box-shadow: 0 0 16px color-mix(in srgb, var(--shared-pointer-color) 72%, transparent);
+  opacity: 0.62;
+  transform: translate3d(0, 0, 0);
+  animation: shared-pointer-trace-fade 760ms ease-out forwards;
+  will-change: transform, opacity;
 }
 
 .shared-space-pointer-mark {
@@ -926,6 +946,17 @@ h2 {
   100% {
     opacity: 0;
     transform: scale(2.25);
+  }
+}
+
+@keyframes shared-pointer-trace-fade {
+  0% {
+    opacity: 0.62;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.34);
   }
 }
 
