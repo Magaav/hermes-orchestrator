@@ -169,7 +169,7 @@ const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
 const SHARED_SPACE_POINTER_SEND_MS = 60;
 const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
-const SHARED_SPACE_POINTER_CLICK_TTL_MS = 520;
+const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
 const SHARED_SPACE_POINTER_LIVE_RECONNECT_MS = 900;
 const SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES = 96 * 1024;
 const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
@@ -1501,6 +1501,7 @@ const state = {
   sharedSpacePointerLiveReady: false,
   sharedSpacePointerLiveReconnectTimer: 0,
   sharedSpacePointerLiveToken: 0,
+  sharedSpacePointerPress: null,
   configAreaDraft: null,
 };
 
@@ -8151,6 +8152,8 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
     if (!key || key === currentKey) continue;
     const pointerEventId = cleanText(payload.pointer_event_id || payload.pointerEventId, "");
     if (pointerEventId && pointers[key]?.pointer_event_id === pointerEventId) continue;
+    const eventType = cleanText(payload.type || "move", "move");
+    const isPulse = ["down", "click"].includes(eventType);
     const point = {
       x: clamp(Number(payload.x || 0), 0, CANVAS_AREA_MAX_PX),
       y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
@@ -8161,13 +8164,14 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
       device_id: cleanText(payload.device_id || "", ""),
       user_label: cleanText(payload.user_label || sharedSpaceUserLabel(event.sender_user_id), "Member"),
-      type: cleanText(payload.type || "move", "move"),
+      type: eventType,
       x: point.x,
       y: point.y,
       color: sharedSpacePointerColor(key),
       event_id: eventId,
       pointer_event_id: pointerEventId,
-      click_until: ["down", "click"].includes(cleanText(payload.type || "", "")) ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
+      pulse_id: isPulse ? cleanText(pointerEventId || eventId || `${key}-${Date.now()}`, "") : cleanText(pointers[key]?.pulse_id || "", ""),
+      click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
       last_seen_at: Date.now(),
     };
     changed = true;
@@ -8209,7 +8213,15 @@ function renderSharedSpacePointers() {
     }
     node.style.transform = `translate3d(${logicalToScreenPx(pointer.x)}px, ${logicalToScreenPx(pointer.y)}px, 0) translate(2px, 2px)`;
     node.style.setProperty("--shared-pointer-color", pointer.color);
-    node.classList.toggle("is-clicking", now < Number(pointer.click_until || 0));
+    const clicking = now < Number(pointer.click_until || 0);
+    const pulseId = cleanText(pointer.pulse_id || "", "");
+    if (clicking && pulseId && node.dataset.sharedPointerPulseId !== pulseId) {
+      node.dataset.sharedPointerPulseId = pulseId;
+      const ring = document.createElement("i");
+      ring.setAttribute("aria-hidden", "true");
+      node.querySelector("i")?.replaceWith(ring);
+    }
+    node.classList.toggle("is-clicking", clicking);
     node.querySelector("strong").textContent = pointer.user_label || "Member";
   }
   layer.querySelectorAll("[data-shared-space-pointer]").forEach((node) => {
@@ -8317,10 +8329,30 @@ function installSharedSpacePointerAwareness() {
   document.addEventListener("pointermove", sendMove, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
+    state.sharedSpacePointerPress = {
+      pointer_id: Number(event.pointerId || 0),
+      x: Number(event.clientX || 0),
+      y: Number(event.clientY || 0),
+      at: performance.now(),
+    };
     void sendSharedSpacePointerEvent("down", event);
   }, { capture: true, passive: true });
   document.addEventListener("pointerup", (event) => {
     if (!isPrimaryPointer(event)) return;
+    const press = state.sharedSpacePointerPress;
+    state.sharedSpacePointerPress = null;
+    const samePointer = !press?.pointer_id || Number(event.pointerId || 0) === press.pointer_id;
+    const quickTap = Boolean(
+      press
+      && samePointer
+      && performance.now() - Number(press.at || 0) <= 700
+      && Math.hypot(Number(event.clientX || 0) - Number(press.x || 0), Number(event.clientY || 0) - Number(press.y || 0)) <= 14
+    );
+    void sendSharedSpacePointerEvent(quickTap ? "click" : "up", event);
+  }, { capture: true, passive: true });
+  document.addEventListener("pointercancel", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    state.sharedSpacePointerPress = null;
     void sendSharedSpacePointerEvent("up", event);
   }, { capture: true, passive: true });
 }

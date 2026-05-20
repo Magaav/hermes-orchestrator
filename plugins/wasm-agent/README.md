@@ -123,8 +123,11 @@ canvas is active, keep a same-origin `/spaces/room/live` WebSocket open for the
 active shared space, and retain the room poll as fallback. Connected clients see
 peer cursor labels and click pulses in logical canvas coordinates without
 waiting for the next room poll, while duplicate durable pointer events are
-deduped by client event id and pointer motion animates through transform-only
-updates so different zoom/scroll positions still line up.
+deduped by client event id, fast pointer-up taps are promoted to explicit
+`click` pulses, and each pulse carries a fresh pulse id so repeated quick
+clicks/touches restart a larger wave instead of being swallowed by the previous
+animation. Pointer motion animates through transform-only updates so different
+zoom/scroll positions still line up.
 Zangao's account state had stale
 `spaces/space-home/wis` and `spaces/space-admin/wis` directories; the server now
 requires real `space.json` metadata before listing user spaces, reserves

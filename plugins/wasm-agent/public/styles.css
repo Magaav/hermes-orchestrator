@@ -904,28 +904,28 @@ h2 {
 
 .shared-space-pointer i {
   position: absolute;
-  left: -9px;
-  top: -9px;
-  width: 28px;
-  height: 28px;
-  border: 2px solid var(--shared-pointer-color);
+  left: -18px;
+  top: -18px;
+  width: 48px;
+  height: 48px;
+  border: 3px solid var(--shared-pointer-color);
   border-radius: 50%;
   opacity: 0;
-  transform: scale(0.4);
+  transform: scale(0.28);
 }
 
 .shared-space-pointer.is-clicking i {
-  animation: shared-pointer-click 520ms ease-out;
+  animation: shared-pointer-click 680ms ease-out;
 }
 
 @keyframes shared-pointer-click {
   0% {
-    opacity: 0.86;
-    transform: scale(0.35);
+    opacity: 0.92;
+    transform: scale(0.24);
   }
   100% {
     opacity: 0;
-    transform: scale(1.7);
+    transform: scale(2.25);
   }
 }
 
