@@ -252,6 +252,8 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.camera_push_processes_lock = threading.Lock()
         self.remote_control_live_clients: dict[str, set[Any]] = {}
         self.remote_control_live_clients_lock = threading.Lock()
+        self.shared_space_live_clients: dict[str, set[Any]] = {}
+        self.shared_space_live_clients_lock = threading.Lock()
 
 
 def endpoint_path(path: str, endpoint: str) -> bool:
@@ -319,6 +321,21 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 )
                 return
             serve_remote_control_live(self, user)
+            return
+        if path == "/spaces/room/live":
+            if not same_origin_websocket(self):
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "origin_rejected",
+                            "message": "WebSocket origin does not match this wasm-agent host.",
+                        },
+                    },
+                )
+                return
+            serve_shared_space_room_live(self, user)
             return
         if path == "/camera/stream":
             try:
@@ -14294,6 +14311,165 @@ class BrowserClientWebSocket:
                 raise BrowserError("browser_ws_closed", "Browser websocket closed.")
             chunks.extend(chunk)
         return bytes(chunks)
+
+
+def serve_shared_space_room_live(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:
+    if not user:
+        handler._json(
+            HTTPStatus.UNAUTHORIZED,
+            {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
+        )
+        return
+    query = parse_qs(urlparse(handler.path).query)
+    shared_space_id = safe_state_id(str((query.get("shared_space_id") or query.get("shared_space") or [""])[0] or ""), "")
+    if not shared_space_id:
+        handler._json(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "error": {"code": "invalid_shared_space", "message": "shared_space_id is required."}},
+        )
+        return
+    record = read_shared_space_record(handler.server, shared_space_id)
+    if not record:
+        handler._json(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "error": {"code": "shared_space_not_found", "message": "That shared space was not found."}},
+        )
+        return
+    if not user_can_access_shared_space(record, user):
+        handler._json(
+            HTTPStatus.FORBIDDEN,
+            {"ok": False, "error": {"code": "shared_space_denied", "message": "You cannot access that shared space."}},
+        )
+        return
+    key = handler.headers.get("Sec-WebSocket-Key", "").strip()
+    upgrade = handler.headers.get("Upgrade", "").lower()
+    if upgrade != "websocket" or not key:
+        handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
+        return
+
+    accept = base64.b64encode(
+        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
+    ).decode("ascii")
+    handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.close_connection = True
+
+    client_ws = BrowserClientWebSocket(handler)
+    shared_space_live_register(handler.server, shared_space_id, client_ws)
+    try:
+        client_ws.send_json({
+            "type": "ready",
+            "schema": "hermes.wasm_agent.shared_space.live.v1",
+            "shared_space_id": shared_space_id,
+            "user_id": user_id(user),
+        })
+        handle_shared_space_room_live(handler.server, client_ws, user, shared_space_id)
+    finally:
+        shared_space_live_unregister(handler.server, shared_space_id, client_ws)
+        client_ws.close()
+
+
+def shared_space_live_register(server: WasmAgentServer, shared_space_id: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.shared_space_live_clients_lock:
+        server.shared_space_live_clients.setdefault(shared_space_id, set()).add(client_ws)
+
+
+def shared_space_live_unregister(server: WasmAgentServer, shared_space_id: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.shared_space_live_clients_lock:
+        clients = server.shared_space_live_clients.get(shared_space_id)
+        if not clients:
+            return
+        clients.discard(client_ws)
+        if not clients:
+            server.shared_space_live_clients.pop(shared_space_id, None)
+
+
+def shared_space_live_broadcast(
+    server: WasmAgentServer,
+    shared_space_id: str,
+    event: dict[str, Any],
+    *,
+    source: BrowserClientWebSocket | None = None,
+) -> None:
+    sid = safe_state_id(shared_space_id, "")
+    if not sid or not event:
+        return
+    payload = {"type": "event", "shared_space_id": sid, "event": event}
+    stale: list[BrowserClientWebSocket] = []
+    with server.shared_space_live_clients_lock:
+        targets = [
+            client
+            for client in server.shared_space_live_clients.get(sid, set())
+            if client is not source
+        ]
+    for client in targets:
+        try:
+            client.send_json(payload)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        shared_space_live_unregister(server, sid, client)
+
+
+def shared_space_live_error(
+    client_ws: BrowserClientWebSocket,
+    request_id: str,
+    code: str,
+    message: str,
+) -> None:
+    client_ws.send_json({
+        "type": "ack",
+        "ok": False,
+        "request_id": request_id,
+        "error": {"code": code, "message": message},
+    })
+
+
+def handle_shared_space_room_live(
+    server: WasmAgentServer,
+    client_ws: BrowserClientWebSocket,
+    user: dict[str, Any],
+    shared_space_id: str,
+) -> None:
+    while True:
+        try:
+            message = client_ws.recv_json(wait=25)
+        except BrowserError as exc:
+            if exc.code == "browser_ws_timeout":
+                client_ws.send_json({"type": "ping", "ts": int(time.time() * 1000)})
+                continue
+            if exc.code == "browser_ws_closed":
+                break
+            raise
+        if not isinstance(message, dict):
+            continue
+        message_type = str(message.get("type") or "").strip()
+        request_id = safe_state_id(str(message.get("request_id") or ""), "")
+        if message_type in {"pong", "hello"}:
+            continue
+        if message_type != "event":
+            shared_space_live_error(client_ws, request_id, "unsupported_shared_space_live_message", "Unsupported shared-space live message.")
+            continue
+        body = message.get("body") if isinstance(message.get("body"), dict) else {}
+        body_sid = safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or shared_space_id), "")
+        if body_sid != shared_space_id:
+            shared_space_live_error(client_ws, request_id, "shared_space_mismatch", "Live shared-space events must target the connected room.")
+            continue
+        record = read_shared_space_record(server, shared_space_id)
+        if not record or not user_can_access_shared_space(record, user):
+            shared_space_live_error(client_ws, request_id, "shared_space_denied", "You cannot access that shared space.")
+            continue
+        try:
+            event = append_shared_space_room_event(server, user, shared_space_id, body)
+            client_ws.send_json({"type": "ack", "ok": True, "request_id": request_id, "event": event})
+            shared_space_live_broadcast(server, shared_space_id, event, source=client_ws)
+        except BrowserError as exc:
+            shared_space_live_error(client_ws, request_id, exc.code, exc.message)
+        except Exception as exc:
+            shared_space_live_error(client_ws, request_id, "shared_space_live_error", str(exc))
 
 
 def serve_remote_control_live(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:

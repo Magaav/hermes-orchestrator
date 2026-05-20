@@ -302,7 +302,10 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Shared spaces must have explicit owner/member records and join codes under
   wasm-agent state. Joining a space should create a local launcher entry and
   allow collaborative WIS/component/automation evolution without granting access
-  to protected core source.
+  to protected core source. The active shared space may keep a same-origin
+  `/spaces/room/live` WebSocket for low-latency ephemeral UI collaboration such
+  as peer pointer motion, but the room poll remains the fallback contract and
+  all events must still be member-gated by the server.
 - Shared-space voice belongs to the room surface, not the assistant chat. The
   room endpoint is the signaling channel for voice membership and WebRTC
   offer/answer/ICE events, but ordinary shared-space presence must never start

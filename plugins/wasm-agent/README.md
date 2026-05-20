@@ -119,9 +119,12 @@ controller so old pixels cannot repaint behind current actions, reuses the pixel
 capture canvas, encodes exact-pixel frames asynchronously where the browser
 supports it, and keeps the controller preview DOM stable across frame refreshes.
 Shared spaces now publish lightweight `space-pointer` room events while the
-canvas is active and poll that channel quickly only for the open shared space,
-rendering peer cursor labels and click pulses in logical canvas coordinates so
-different zoom/scroll positions still line up.
+canvas is active, keep a same-origin `/spaces/room/live` WebSocket open for the
+active shared space, and retain the room poll as fallback. Connected clients see
+peer cursor labels and click pulses in logical canvas coordinates without
+waiting for the next room poll, while duplicate durable pointer events are
+deduped by client event id and pointer motion animates through transform-only
+updates so different zoom/scroll positions still line up.
 Zangao's account state had stale
 `spaces/space-home/wis` and `spaces/space-admin/wis` directories; the server now
 requires real `space.json` metadata before listing user spaces, reserves

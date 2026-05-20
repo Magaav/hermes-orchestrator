@@ -166,10 +166,12 @@ const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
 const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
-const SHARED_SPACE_POINTER_SEND_MS = 90;
-const SHARED_SPACE_POINTER_POLL_MS = 280;
+const SHARED_SPACE_POINTER_SEND_MS = 60;
+const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
 const SHARED_SPACE_POINTER_CLICK_TTL_MS = 520;
+const SHARED_SPACE_POINTER_LIVE_RECONNECT_MS = 900;
+const SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES = 96 * 1024;
 const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
 const REMOTE_CONTROL_REQUEST_TTL_MS = 2 * 60 * 1000;
 const REMOTE_CONTROL_GRANT_TTL_MS = 10 * 60 * 1000;
@@ -1492,7 +1494,13 @@ const state = {
   sharedSpacePointerSyncInterval: 0,
   sharedSpacePointerSyncBusy: false,
   sharedSpacePointerLastSentAt: 0,
+  sharedSpacePointerLastDurableSentAt: 0,
   sharedSpacePointerLastEventIdBySpace: {},
+  sharedSpacePointerLiveSocket: null,
+  sharedSpacePointerLiveSpaceId: "",
+  sharedSpacePointerLiveReady: false,
+  sharedSpacePointerLiveReconnectTimer: 0,
+  sharedSpacePointerLiveToken: 0,
   configAreaDraft: null,
 };
 
@@ -7965,6 +7973,147 @@ function currentSharedSpacePointerTarget() {
   return { space, room };
 }
 
+function sharedSpacePointerLiveUrl(target = currentSharedSpacePointerTarget()) {
+  if (!target?.space?.shared_space_id) return "";
+  const url = new URL("/spaces/room/live", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("shared_space_id", target.space.shared_space_id);
+  url.searchParams.set("space_id", target.space.id);
+  return url.toString();
+}
+
+function sharedSpacePointerLiveConnected(target = currentSharedSpacePointerTarget()) {
+  if (!("WebSocket" in window)) return false;
+  const sharedSpaceId = cleanText(target?.space?.shared_space_id || "", "");
+  return Boolean(
+    sharedSpaceId
+    && state.sharedSpacePointerLiveSpaceId === sharedSpaceId
+    && state.sharedSpacePointerLiveSocket?.readyState === WebSocket.OPEN
+    && state.sharedSpacePointerLiveReady
+  );
+}
+
+function closeSharedSpacePointerLiveSocket(options = {}) {
+  if (state.sharedSpacePointerLiveReconnectTimer) {
+    window.clearTimeout(state.sharedSpacePointerLiveReconnectTimer);
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+  }
+  const socket = state.sharedSpacePointerLiveSocket;
+  state.sharedSpacePointerLiveSocket = null;
+  state.sharedSpacePointerLiveReady = false;
+  state.sharedSpacePointerLiveSpaceId = "";
+  state.sharedSpacePointerLiveToken += 1;
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    try {
+      socket.close();
+    } catch {
+      // Socket may already be closing.
+    }
+  }
+  if (options.reconnect) scheduleSharedSpacePointerLiveReconnect("close");
+}
+
+function scheduleSharedSpacePointerLiveReconnect(origin = "reconnect") {
+  const target = currentSharedSpacePointerTarget();
+  if (!state.authUser || !target?.space?.shared_space_id || !("WebSocket" in window)) return;
+  if (state.sharedSpacePointerLiveReconnectTimer) return;
+  state.sharedSpacePointerLiveReconnectTimer = window.setTimeout(() => {
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+    startSharedSpacePointerLiveSocket(origin);
+  }, SHARED_SPACE_POINTER_LIVE_RECONNECT_MS);
+}
+
+function handleSharedSpacePointerLiveMessage(message = {}) {
+  const type = cleanText(message.type, "");
+  if (type === "ready") {
+    state.sharedSpacePointerLiveReady = true;
+    return;
+  }
+  if (type === "ping") {
+    try {
+      state.sharedSpacePointerLiveSocket?.send(JSON.stringify({ type: "pong", ts: message.ts || Date.now() }));
+    } catch {
+      // The close handler reconnects if this room is still active.
+    }
+    return;
+  }
+  if (type === "event") {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    const sharedSpaceId = cleanText(message.shared_space_id || event.shared_space_id || state.sharedSpacePointerLiveSpaceId, "");
+    if (event.kind === SHARED_SPACE_POINTER_EVENT_KIND) mergeSharedSpacePointerEvents(sharedSpaceId, [event]);
+  }
+}
+
+function startSharedSpacePointerLiveSocket(origin = "active") {
+  const target = currentSharedSpacePointerTarget();
+  const sharedSpaceId = cleanText(target?.space?.shared_space_id || "", "");
+  if (!state.authUser || !sharedSpaceId || !("WebSocket" in window)) return null;
+  const existing = state.sharedSpacePointerLiveSocket;
+  if (existing && state.sharedSpacePointerLiveSpaceId === sharedSpaceId && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) {
+    return existing;
+  }
+  if (existing) closeSharedSpacePointerLiveSocket();
+  if (state.sharedSpacePointerLiveReconnectTimer) {
+    window.clearTimeout(state.sharedSpacePointerLiveReconnectTimer);
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+  }
+  const url = sharedSpacePointerLiveUrl(target);
+  if (!url) return null;
+  const token = state.sharedSpacePointerLiveToken + 1;
+  state.sharedSpacePointerLiveToken = token;
+  state.sharedSpacePointerLiveReady = false;
+  state.sharedSpacePointerLiveSpaceId = sharedSpaceId;
+  const socket = new WebSocket(url);
+  state.sharedSpacePointerLiveSocket = socket;
+  socket.addEventListener("open", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    try {
+      socket.send(JSON.stringify({ type: "hello", origin }));
+    } catch {
+      // The close handler reconnects if this room is still active.
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    try {
+      handleSharedSpacePointerLiveMessage(JSON.parse(event.data));
+    } catch (error) {
+      recordUserEvent("workspace.shared_space_pointer_live_error", {
+        target: `space:${target.space.id}`,
+        summary: error.message || String(error),
+        data: { shared_space_id: sharedSpaceId, error: error.message || String(error) },
+      });
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    state.sharedSpacePointerLiveSocket = null;
+    state.sharedSpacePointerLiveReady = false;
+    scheduleSharedSpacePointerLiveReconnect("close");
+  });
+  socket.addEventListener("error", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    state.sharedSpacePointerLiveReady = false;
+  });
+  return socket;
+}
+
+function sendSharedSpacePointerLiveEvent(target, body = {}) {
+  const socket = startSharedSpacePointerLiveSocket("pointer-send");
+  if (!socket || !sharedSpacePointerLiveConnected(target)) return false;
+  if (Number(socket.bufferedAmount || 0) > SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES) return true;
+  try {
+    socket.send(JSON.stringify({
+      type: "event",
+      request_id: remoteControlId("space_ptr"),
+      body,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function sharedSpacePointerPoint(event) {
   const viewport = els.spaceViewport;
   const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
@@ -8000,6 +8149,8 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
     const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
     const key = sharedSpacePointerKey(event);
     if (!key || key === currentKey) continue;
+    const pointerEventId = cleanText(payload.pointer_event_id || payload.pointerEventId, "");
+    if (pointerEventId && pointers[key]?.pointer_event_id === pointerEventId) continue;
     const point = {
       x: clamp(Number(payload.x || 0), 0, CANVAS_AREA_MAX_PX),
       y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
@@ -8015,6 +8166,7 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       y: point.y,
       color: sharedSpacePointerColor(key),
       event_id: eventId,
+      pointer_event_id: pointerEventId,
       click_until: ["down", "click"].includes(cleanText(payload.type || "", "")) ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
       last_seen_at: Date.now(),
     };
@@ -8055,8 +8207,7 @@ function renderSharedSpacePointers() {
       node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
       layer.append(node);
     }
-    node.style.left = `${logicalToScreenPx(pointer.x)}px`;
-    node.style.top = `${logicalToScreenPx(pointer.y)}px`;
+    node.style.transform = `translate3d(${logicalToScreenPx(pointer.x)}px, ${logicalToScreenPx(pointer.y)}px, 0) translate(2px, 2px)`;
     node.style.setProperty("--shared-pointer-color", pointer.color);
     node.classList.toggle("is-clicking", now < Number(pointer.click_until || 0));
     node.querySelector("strong").textContent = pointer.user_label || "Member";
@@ -8074,24 +8225,31 @@ async function sendSharedSpacePointerEvent(type, event) {
   const now = performance.now();
   if (type === "move" && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
   state.sharedSpacePointerLastSentAt = now;
+  const pointerEventId = remoteControlId("space_ptr");
   const payload = {
     type,
+    pointer_event_id: pointerEventId,
     x: point.x,
     y: point.y,
     device_id: clientDeviceId(),
     user_label: publicUserLabel(state.authUser),
     distance: Number(canvasDistance().toFixed(2)),
   };
+  const body = {
+    action: "event",
+    shared_space_id: target.space.shared_space_id,
+    space_id: target.space.id,
+    kind: SHARED_SPACE_POINTER_EVENT_KIND,
+    payload,
+  };
+  const liveSent = sendSharedSpacePointerLiveEvent(target, body);
+  const durableDue = now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= 720;
+  if (liveSent && type === "move" && !durableDue) return;
+  state.sharedSpacePointerLastDurableSentAt = now;
   void fetchJson("/spaces/room", {
     method: "POST",
     timeoutMs: 2500,
-    body: {
-      action: "event",
-      shared_space_id: target.space.shared_space_id,
-      space_id: target.space.id,
-      kind: SHARED_SPACE_POINTER_EVENT_KIND,
-      payload,
-    },
+    body,
   }).then((result) => {
     if (result?.room?.id) {
       state.sharedRooms[result.room.id] = result.room;
@@ -8136,6 +8294,7 @@ async function syncSharedSpacePointers(origin = "pointer-poll") {
 function updateSharedSpacePointerSync() {
   const shouldRun = Boolean(state.authUser && currentSharedSpacePointerTarget());
   if (!shouldRun) {
+    closeSharedSpacePointerLiveSocket();
     if (state.sharedSpacePointerSyncInterval) {
       window.clearInterval(state.sharedSpacePointerSyncInterval);
       state.sharedSpacePointerSyncInterval = 0;
@@ -8143,6 +8302,7 @@ function updateSharedSpacePointerSync() {
     renderSharedSpacePointers();
     return;
   }
+  startSharedSpacePointerLiveSocket("pointer-sync");
   if (!state.sharedSpacePointerSyncInterval) {
     state.sharedSpacePointerSyncInterval = window.setInterval(
       () => void syncSharedSpacePointers("pointer-poll"),

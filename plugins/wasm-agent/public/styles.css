@@ -871,10 +871,13 @@ h2 {
   grid-template-columns: 16px auto;
   align-items: center;
   gap: 5px;
-  transform: translate(2px, 2px);
+  left: 0;
+  top: 0;
+  transform: translate3d(0, 0, 0) translate(2px, 2px);
   color: #050a12;
   filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.38));
-  transition: left 90ms linear, top 90ms linear;
+  transition: transform 80ms linear;
+  will-change: transform;
 }
 
 .shared-space-pointer-mark {
