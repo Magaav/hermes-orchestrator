@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v97";
+const CACHE_NAME = "wasm-agent-v129-shared-pointer-paths";
 const ASSETS = [
   "/",
   "/index.html",
@@ -37,6 +37,8 @@ const ASSETS = [
   "/modules/module-manager/module.js",
   "/modules/timeline/module.js",
   "/modules/assistant/module.js",
+  "/modules/remote-control/module.js",
+  "/modules/remote-control/viewport.js",
   "/modules/image-card-core/module.js",
   "/modules/barcode-reader/module.js",
   "/modules/ocr/module.js",

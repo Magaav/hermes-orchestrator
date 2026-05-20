@@ -56,6 +56,8 @@ class WisSharedSpaceTest(unittest.TestCase):
             state_dir=state_dir,
             bridge_url="http://127.0.0.1:8790",
             browser_timeout_sec=1.0,
+            shared_space_live_clients={},
+            shared_space_live_clients_lock=static_server.threading.Lock(),
         )
         self.owner = make_user("101", "owner@example.test")
         self.member = make_user("202", "member@example.test")
@@ -134,6 +136,117 @@ class WisSharedSpaceTest(unittest.TestCase):
                 FakeHandler(device_id="outsider-device"),
             )
         self.assertEqual(denied.exception.status, static_server.HTTPStatus.FORBIDDEN)
+
+    def test_shared_space_live_channel_broadcasts_pointer_events(self) -> None:
+        self.create_owner_space()
+        shared = static_server.share_user_space(self.server, self.owner, {
+            "space_id": "playground",
+            "title": "Playground",
+        })["shared_space"]
+        static_server.join_shared_space(
+            self.server,
+            self.member,
+            {"join_code": shared["join_code"]},
+            FakeHandler(device_id="member-device"),
+        )
+
+        class CaptureWebSocket:
+            def __init__(self, incoming=None) -> None:  # noqa: ANN001 - tiny websocket double
+                self.incoming = list(incoming or [])
+                self.messages = []
+
+            def recv_json(self, *, wait=None):  # noqa: ANN001 - mirrors BrowserClientWebSocket
+                if self.incoming:
+                    return self.incoming.pop(0)
+                raise static_server.BrowserError("browser_ws_closed", "closed")
+
+            def send_json(self, payload):
+                self.messages.append(payload)
+
+        owner_ws = CaptureWebSocket()
+        member_ws = CaptureWebSocket([
+            {
+                "type": "event",
+                "request_id": "pointer-live-1",
+                "body": {
+                    "kind": "space-pointer",
+                    "payload": {
+                        "type": "move",
+                        "x": 128,
+                        "y": 256,
+                        "device_id": "member-device",
+                        "pointer_event_id": "ptr-local-1",
+                    },
+                },
+            }
+        ])
+        self.server.shared_space_live_clients[shared["id"]] = {owner_ws, member_ws}
+
+        static_server.handle_shared_space_room_live(self.server, member_ws, self.member, shared["id"])
+
+        self.assertEqual(member_ws.messages[0]["type"], "ack")
+        self.assertTrue(member_ws.messages[0]["ok"])
+        self.assertEqual(owner_ws.messages[0]["type"], "event")
+        self.assertEqual(owner_ws.messages[0]["event"]["kind"], "space-pointer")
+        self.assertEqual(owner_ws.messages[0]["event"]["payload"]["pointer_event_id"], "ptr-local-1")
+        events = static_server.read_shared_space_events(self.server, shared["id"])
+        self.assertEqual(events[-1]["payload"]["x"], 128)
+
+    def test_shared_space_live_only_pointer_events_do_not_fill_room_history(self) -> None:
+        self.create_owner_space()
+        shared = static_server.share_user_space(self.server, self.owner, {
+            "space_id": "playground",
+            "title": "Playground",
+        })["shared_space"]
+        static_server.join_shared_space(
+            self.server,
+            self.member,
+            {"join_code": shared["join_code"]},
+            FakeHandler(device_id="member-device"),
+        )
+
+        class CaptureWebSocket:
+            def __init__(self, incoming=None) -> None:  # noqa: ANN001 - tiny websocket double
+                self.incoming = list(incoming or [])
+                self.messages = []
+
+            def recv_json(self, *, wait=None):  # noqa: ANN001 - mirrors BrowserClientWebSocket
+                if self.incoming:
+                    return self.incoming.pop(0)
+                raise static_server.BrowserError("browser_ws_closed", "closed")
+
+            def send_json(self, payload):
+                self.messages.append(payload)
+
+        owner_ws = CaptureWebSocket()
+        member_ws = CaptureWebSocket([
+            {
+                "type": "event",
+                "request_id": "pointer-live-only-1",
+                "body": {
+                    "kind": "space-pointer",
+                    "live_only": True,
+                    "payload": {
+                        "type": "move",
+                        "x": 320,
+                        "y": 180,
+                        "device_id": "member-device",
+                        "pointer_event_id": "ptr-live-only-1",
+                    },
+                },
+            }
+        ])
+        self.server.shared_space_live_clients[shared["id"]] = {owner_ws, member_ws}
+        before = static_server.read_shared_space_events(self.server, shared["id"])
+
+        static_server.handle_shared_space_room_live(self.server, member_ws, self.member, shared["id"])
+
+        self.assertEqual(member_ws.messages[0]["type"], "ack")
+        self.assertTrue(member_ws.messages[0]["ok"])
+        self.assertEqual(owner_ws.messages[0]["event"]["payload"]["x"], 320)
+        self.assertEqual(owner_ws.messages[0]["event"]["payload"]["pointer_event_id"], "ptr-live-only-1")
+        after = static_server.read_shared_space_events(self.server, shared["id"])
+        self.assertEqual(after, before)
 
     def test_shared_voice_signal_preserves_sdp_and_targets_present_devices(self) -> None:
         self.create_owner_space()

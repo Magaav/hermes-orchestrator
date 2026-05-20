@@ -3,7 +3,9 @@ import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
 import {
   WIS_CAMERA_ARTIFACT_SCHEMA,
+  WIS_CAMERA_ARTIFACT_BUILD,
   WIS_CAMERA_CONTROLLER_SCHEMA,
+  WIS_CAMERA_TIMELINE_OWNER_STATES,
   cameraSlotFromNode as wisCameraSlotFromNode,
   claimMediaWriter,
   createCameraArtifactController,
@@ -15,39 +17,47 @@ import {
   createWisCameraToolButton,
   createWisDefaultPushCameraConfigForSlot,
   createWisFocusedCameraArtifact,
-  renderWisCameraArtifactHeader,
   formatWisCameraTimelineRange,
   focusedWisCameraSlot as focusedWisCameraSlotFromSurface,
-  decodeAndSwapImage,
   isWisCameraPushConfig,
   isWisFocusedCameraSurface,
-  isMediaWriterCurrent,
   normalizeWisCameraConfigForSlot as normalizeWisCameraConfigForSlotContract,
   normalizeWisCameraSlot,
+  noteWisCameraPerf,
   readWisCameraConfigs as readWisCameraArtifactConfigs,
+  rememberWisCameraLastGoodFrameFromImage,
+  renderWisCameraArtifactHeader,
+  renderWisCameraPushArchiveFrame as renderWisCameraPushArchiveFrameContract,
+  releaseMediaStreamWriter,
   resolveWisCameraPendingTimelineSeek,
+  sampleWisCameraPerf,
   saveWisCameraConfigs as saveWisCameraArtifactConfigs,
+  setWisCameraVisibilityState,
+  setWisCameraTimelineOwnerState,
   shouldLoadWisCameraTimeline as shouldLoadWisCameraTimelineContract,
+  wisCameraActivePlaybackLoop,
   wisCameraBaseStreamId as wisCameraBaseStreamIdContract,
+  wisCameraPerformanceBudget as wisCameraPerformanceBudgetContract,
   wisCameraPushFramePollMs as wisCameraPushFramePollMsContract,
   wisCameraQualityStreamId as wisCameraQualityStreamIdContract,
-  wisCameraDisplayedFrameFromImage as wisCameraDisplayedFrameFromImageContract,
   wisCameraMonotonicNow,
   wisCameraPlaybackClockMs as wisCameraPlaybackClockMsContract,
   wisCameraPlaybackState as wisCameraPlaybackStateContract,
-  wisCameraRecordedSessionMatches,
   wisCameraRecordedTimelineTitle,
-  setWisCameraPlaybackFrame,
+  wisCameraRecordedOwnsTimeline as wisCameraRecordedOwnsTimelineContract,
+  wisCameraTimelineOwnerState as wisCameraTimelineOwnerStateContract,
+  pauseWisCameraPlaybackState,
+  resumeWisCameraPlaybackState,
   startWisCameraPlaybackSeek,
   stopWisCameraPlaybackState,
-  streamWisCameraPushPlaybackFrames as streamWisCameraPushPlaybackFramesContract,
+  traceWisCameraBoundary,
   wisCameraTimelineFrameClosestToTime,
   wisCameraTimelineFrameAtRatio,
   wisCameraTimelineFrameLabel as wisCameraTimelineFrameLabelContract,
   wisCameraTimelineFramePlaybackKey as wisCameraTimelineFramePlaybackKeyContract,
   wisCameraTimelinePlaybackStartMs,
-  wisCameraTimelineTargetAtRatio,
   wisCameraTimelineTimeWindow,
+  isMediaWriterCurrent,
 } from "./modules/wis/artifacts/camera.js";
 import { createClientFirstStore } from "./modules/client-state/client-store.js";
 import { createChatComposer } from "./modules/chat-composer/chat-composer.js";
@@ -67,6 +77,33 @@ import {
   sharedVoiceSignalIsFresh,
   sharedVoiceSignalPayload,
 } from "./modules/spaces/shared-voice-room.js";
+import {
+  REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+  REMOTE_CONTROL_VIEWPORT_FRAME_MS,
+  REMOTE_CONTROL_VIEWPORT_LIVE_FRAME_MS,
+  REMOTE_CONTROL_VIEWPORT_LIVE_MAX_BYTES,
+  REMOTE_CONTROL_VIEWPORT_DURABLE_FRAME_MS,
+  captureRemoteControlViewportFrame,
+  removeRemoteControlViewportPanel,
+  renderRemoteControlViewportPanel as renderRemoteControlViewportSurface,
+  remoteControlViewportPoint,
+  remoteControlViewportPixelCaptureActive,
+  setRemoteControlViewportPixelCaptureStopHandler,
+  startRemoteControlViewportPixelCapture,
+  stopRemoteControlViewportPixelCapture,
+} from "./modules/remote-control/viewport.js";
+
+traceWisCameraBoundary("app.cameraArtifactBuild.loaded", {
+  module: "app.js",
+  cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD,
+});
+try {
+  document.documentElement.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+} catch {
+  // Build marker is diagnostic only.
+}
 
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
@@ -90,6 +127,7 @@ const AGENT_HARNESS_DEFAULT_INFRA_MODE = "hermes_backend";
 const AGENT_HARNESS_OWN_INFRA_MODE = "custom_bridge";
 const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
+const RESERVED_USER_SPACE_IDS = new Set(["home", "admin", "space-home", "space-admin"]);
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
 const CHAT_QUERY_KEY = "chat";
 const CHAT_QUERY_VALUE = "wasm-agent-chat";
@@ -117,6 +155,7 @@ const SPACE_DISTANCE_STEP = 0.05;
 const RESOURCE_POLL_MS = 2500;
 const SECURITY_POLL_MS = 5000;
 const USER_EVENT_LIMIT = 160;
+const WIS_CAMERA_TIMELINE_LOAD_STALE_MS = 12000;
 const INTERACTION_TRACE_LIMIT = 96;
 const POINTER_MOVE_SAMPLE_MS = 80;
 const WHEEL_TRACE_SAMPLE_MS = 120;
@@ -126,6 +165,42 @@ const CLIENT_SNAPSHOT_REQUEST_POLL_MS = 2500;
 const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
+const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
+const SHARED_SPACE_POINTER_SEND_MS = 16;
+const SHARED_SPACE_POINTER_POLL_MS = 220;
+const SHARED_SPACE_POINTER_TTL_MS = 1800;
+const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
+const SHARED_SPACE_POINTER_DURABLE_MS = 720;
+const SHARED_SPACE_POINTER_TRACE_MS = 16;
+const SHARED_SPACE_POINTER_TRACE_MIN_PX = 4;
+const SHARED_SPACE_POINTER_TRACE_STEP_PX = 8;
+const SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE = 10;
+const SHARED_SPACE_POINTER_TRACE_LIMIT = 140;
+const SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT = 48;
+const SHARED_SPACE_POINTER_PATH_STEP_PX = 6;
+const SHARED_SPACE_POINTER_PATH_MAX_POINTS = 18;
+const SHARED_SPACE_POINTER_PATH_ANIMATION_MS = 10;
+const SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS = 120;
+const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
+const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
+const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
+const SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX = 0.75;
+const SHARED_SPACE_POINTER_LIVE_RECONNECT_MS = 900;
+const SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES = 96 * 1024;
+const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
+const REMOTE_CONTROL_REQUEST_TTL_MS = 2 * 60 * 1000;
+const REMOTE_CONTROL_GRANT_TTL_MS = 10 * 60 * 1000;
+const REMOTE_CONTROL_ADMIN_SESSION_TTL_MS = 60 * 60 * 1000;
+const REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY = "wasmAgent.remoteControl.adminCoControlSession.v1";
+const REMOTE_CONTROL_SYNC_POLL_MS = 180;
+const REMOTE_CONTROL_WHEEL_MIN_MS = 120;
+const REMOTE_CONTROL_POINTER_MOVE_MIN_MS = 70;
+const REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS = 350;
+const REMOTE_CONTROL_ACTION_LOG_LIMIT = 80;
+const REMOTE_CONTROL_LIVE_FRAME_BUFFER_LIMIT_BYTES = 4 * 1024 * 1024;
+const REMOTE_CONTROL_SECRET_RE = /password|passwd|secret|token|api[_-]?key|credential|authorization/i;
+const REMOTE_CONTROL_BLOCKED_INPUT_TYPES = new Set(["password", "file", "hidden"]);
+const REMOTE_CONTROL_INTERACTIVE_SELECTOR = "button,input,textarea,select,s-select,a,[contenteditable='true'],[tabindex],summary,label";
 const DIRECT_EMOJI_SET = ["😀", "😂", "😍", "🥳", "🙏", "👍", "🔥", "🚀", "👀", "✅", "🧠", "❤️"];
 const DIRECT_REACTION_SET = ["👍", "❤️", "😂", "🔥", "👀", "✅"];
 const DIRECT_STICKERS = [
@@ -1356,6 +1431,55 @@ const state = {
   socialNotificationKeys: new Set(),
   socialPulseTimer: 0,
   agentSocialPicker: "",
+  remoteControl: {
+    incomingRequests: {},
+    outgoingRequests: {},
+    requestResponses: {},
+    activeGrant: null,
+    activeController: null,
+    appliedEventIds: new Set(),
+    actionSeq: 0,
+    sendQueue: Promise.resolve(),
+    suppressEvents: false,
+    captureInstalled: false,
+    lastWheelAt: 0,
+    adminCoControlSession: readRemoteControlAdminCoControlSession(),
+    actionLog: [],
+    viewportStreamTimer: 0,
+    viewportStreamIntervalMs: 0,
+    viewportStreamBusy: false,
+    viewportSeq: 0,
+    viewportFrame: null,
+    viewportFrameReceivedAt: 0,
+    viewportLastDurableFrameAt: 0,
+    viewportRenderTimer: 0,
+    viewportFrameError: "",
+    viewportFrameMaxBytes: REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+    viewportLatestProbeAt: 0,
+    stopLatestProbeAt: 0,
+    syncTimer: 0,
+    syncBusy: false,
+    syncCursor: "",
+    liveSocket: null,
+    liveSocketReady: false,
+    liveSocketToken: 0,
+    liveReconnectTimer: 0,
+    livePending: {},
+    lastPointerMoveAt: 0,
+    viewportPointerActive: false,
+    viewportPointerMoved: false,
+    viewportPointerId: 0,
+    viewportPointerStartX: 0,
+    viewportPointerStartY: 0,
+    viewportPointerSuppressClickUntil: 0,
+    remotePointerTarget: null,
+    remotePointerStartX: 0,
+    remotePointerStartY: 0,
+    remotePointerMoved: false,
+    remoteSyntheticClickUntil: 0,
+    remoteSyntheticClickX: 0,
+    remoteSyntheticClickY: 0,
+  },
   agentSessions: readAgentSessions(),
   activeAgentSessionId: "",
   clientSnapshotBusy: false,
@@ -1373,6 +1497,8 @@ const state = {
   spaceZoomInfoHideTimer: 0,
   spacePanMomentumFrame: 0,
   spacePanMomentumActive: false,
+  spacePanActive: false,
+  spaceNavigationInputAt: 0,
   spaceDistanceCommitTimer: 0,
   spaceZoomMiniMapTimer: 0,
   spaceGesturePointers: new Map(),
@@ -1381,6 +1507,25 @@ const state = {
   spacePinchStartCanvasDistance: 1,
   spacePinchChanged: false,
   spacePinchSuppressPanUntil: 0,
+  sharedSpacePointers: {},
+  sharedSpacePointerSyncInterval: 0,
+  sharedSpacePointerSyncBusy: false,
+  sharedSpacePointerLastSentAt: 0,
+  sharedSpacePointerLastDurableSentAt: 0,
+  sharedSpacePointerLastEventIdBySpace: {},
+  sharedSpacePointerLiveSocket: null,
+  sharedSpacePointerLiveSpaceId: "",
+  sharedSpacePointerLiveReady: false,
+  sharedSpacePointerLiveReconnectTimer: 0,
+  sharedSpacePointerLiveToken: 0,
+  sharedSpacePointerPress: null,
+  sharedSpacePointerMoveEvent: null,
+  sharedSpacePointerMoveSamples: [],
+  sharedSpacePointerMoveFrame: 0,
+  sharedSpacePointerMoveTimer: 0,
+  sharedSpacePointerLastMovePoint: null,
+  sharedSpacePointerFollowTarget: null,
+  sharedSpacePointerFollowFrame: 0,
   configAreaDraft: null,
 };
 
@@ -1394,6 +1539,27 @@ function bytesFromBase64(value) {
 function cleanText(value, fallback = "-") {
   const text = String(value ?? "").trim();
   return text || fallback;
+}
+
+function isReservedUserSpaceId(value) {
+  return RESERVED_USER_SPACE_IDS.has(cleanText(value, "").toLowerCase());
+}
+
+function sanitizeUserSpaces(spaces, fallback = []) {
+  if (!Array.isArray(spaces)) return fallback;
+  const seen = new Set();
+  return spaces.reduce((items, space) => {
+    if (!space || typeof space !== "object") return items;
+    const id = cleanText(space.id, "").toLowerCase();
+    if (!id || isReservedUserSpaceId(id) || seen.has(id)) return items;
+    seen.add(id);
+    items.push({
+      ...space,
+      id,
+      title: cleanText(space.title || id, id),
+    });
+    return items;
+  }, []);
 }
 
 function truncateText(value, max = 180) {
@@ -2450,6 +2616,11 @@ function stopWisCameraTimer(slot) {
   const key = cleanText(slot, "");
   const timer = key ? state.wisCameraTimers.get(key) : null;
   if (!timer) return;
+  if (timer && typeof timer === "object" && timer.kind === "wis-camera-scheduler-task") {
+    state.wisCameraSchedulerTasks?.delete?.(key);
+    state.wisCameraTimers.delete(key);
+    return;
+  }
   clearTimeout(timer);
   clearInterval(timer);
   state.wisCameraTimers.delete(key);
@@ -2461,6 +2632,186 @@ function stopAllWisCameraStreams() {
 
 function stopAllWisCameraTimers() {
   for (const slot of Array.from(state.wisCameraTimers.keys())) stopWisCameraTimer(slot);
+}
+
+function wisCameraAppScheduler() {
+  if (!state.wisCameraSchedulerTasks) state.wisCameraSchedulerTasks = new Map();
+  if (!state.wisCameraScheduler) {
+    state.wisCameraScheduler = {
+      timer: 0,
+      tasks: state.wisCameraSchedulerTasks,
+    };
+  }
+  return state.wisCameraScheduler;
+}
+
+function armWisCameraAppScheduler() {
+  const scheduler = wisCameraAppScheduler();
+  if (scheduler.timer || !scheduler.tasks.size) return;
+  const now = performance.now();
+  let nextAt = Infinity;
+  scheduler.tasks.forEach((task) => {
+    nextAt = Math.min(nextAt, Number(task.nextAt || now));
+  });
+  if (!Number.isFinite(nextAt)) return;
+  scheduler.timer = window.setTimeout(() => {
+    scheduler.timer = 0;
+    const runNow = performance.now();
+    scheduler.tasks.forEach((task) => {
+      if (Number(task.nextAt || 0) > runNow + 1) return;
+	      if (cleanText(task.mode, "live") === "live" && wisCameraRecordedOwnsStream(task.streamId || task.slot)) {
+	        scheduler.tasks.delete(task.slot);
+	        state.wisCameraTimers.delete(task.slot);
+	        traceWisCameraBoundary("live.scheduler.commit", {
+	          decision: "BLOCKED",
+	          streamId: task.streamId || task.slot,
+	          slot: task.slot,
+	          ownerAtCommit: wisCameraTimelineOwnerStateContract(state, task.streamId || task.slot),
+	          generation: Number(recordedWisCameraSession(task.streamId || task.slot)?.generation || 0),
+	          frameSource: "live-scheduler",
+	          reason: "scheduler-live-task",
+	          ...wisCameraLoopOwnerSnapshot(task.streamId || task.slot, task.slot),
+	        });
+	        logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+          streamId: task.streamId || task.slot,
+          reason: "scheduler-live-task",
+          ...wisCameraLoopOwnerSnapshot(task.streamId || task.slot, task.slot),
+        }, { always: true, sampleMs: 1000 });
+        return;
+      }
+      const budget = wisCameraPerformanceBudgetContract(state, task.streamId || task.slot, {
+        env: window,
+        mode: task.mode || "live",
+      });
+      const intervalMs = Math.max(Number(task.intervalMs || 1000), Number(budget.visualMinIntervalMs || 0));
+      if (budget.allowVisualWork || task.allowWhenSuspended) {
+        try {
+          task.callback?.(budget);
+        } catch (error) {
+          logWisCameraMediaEvent("camera.scheduler.task.error", {
+            streamId: task.streamId || task.slot,
+            error: error?.message || String(error),
+          }, { sampleMs: 1000 });
+        }
+      }
+      task.nextAt = performance.now() + (budget.allowVisualWork ? intervalMs : Number(budget.retryMs || 2500));
+    });
+    armWisCameraAppScheduler();
+  }, Math.max(0, Math.round(nextAt - now)));
+}
+
+function scheduleWisCameraTimer(slot, callback, intervalMs, options = {}) {
+  const key = cleanText(slot, "");
+  if (!key || typeof callback !== "function") return null;
+  stopWisCameraTimer(key);
+  const scheduler = wisCameraAppScheduler();
+  const task = {
+    kind: "wis-camera-scheduler-task",
+    slot: key,
+    streamId: cleanText(options.streamId, key),
+    mode: cleanText(options.mode, "live"),
+    intervalMs: Math.max(250, Math.round(Number(intervalMs) || 1000)),
+    callback,
+    allowWhenSuspended: Boolean(options.allowWhenSuspended),
+    nextAt: performance.now() + Math.max(0, Number(options.delayMs || 0)),
+  };
+  scheduler.tasks.set(key, task);
+  state.wisCameraTimers.set(key, task);
+  if (scheduler.timer) {
+    window.clearTimeout(scheduler.timer);
+    scheduler.timer = 0;
+  }
+  armWisCameraAppScheduler();
+  return task;
+}
+
+function nudgeWisCameraTimer(slot) {
+  const key = cleanText(slot, "");
+  const task = key ? state.wisCameraSchedulerTasks?.get?.(key) : null;
+  if (!task) return;
+  task.nextAt = performance.now();
+  const scheduler = wisCameraAppScheduler();
+  if (scheduler.timer) {
+    window.clearTimeout(scheduler.timer);
+    scheduler.timer = 0;
+  }
+  armWisCameraAppScheduler();
+}
+
+function ensureWisCameraVisibilityObserver() {
+  if (state.wisCameraVisibilityObserverInstalled) return;
+  state.wisCameraVisibilityObserverInstalled = true;
+  if (!state.wisCameraVisibilityElements) state.wisCameraVisibilityElements = new Map();
+  if ("IntersectionObserver" in window) {
+    state.wisCameraVisibilityObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        const meta = state.wisCameraVisibilityElements?.get(entry.target);
+        if (!meta) return;
+        const focused = wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === meta.slot;
+        setWisCameraVisibilityState(state, meta.streamId, {
+          slot: meta.slot,
+          visible: Boolean(entry.isIntersecting),
+          ratio: Number(entry.intersectionRatio || 0),
+          focused,
+          active: focused || widgetById("wis")?.classList?.contains("is-widget-active"),
+          pageHidden: document.hidden,
+        });
+        if (entry.isIntersecting && !document.hidden) {
+          nudgeWisCameraTimer(meta.slot);
+          nudgeWisCameraTimer(meta.streamId);
+          wisCameraActivePlaybackLoop(state, meta.streamId)?.schedule?.("viewport-visible");
+        }
+      });
+    }, { threshold: [0, 0.01, 0.25, 0.6, 1] });
+  }
+  document.addEventListener("visibilitychange", () => {
+    const hidden = document.hidden;
+    state.wisCameraVisibilityElements?.forEach((meta, element) => {
+      if (element.isConnected === false) {
+        state.wisCameraVisibilityObserver?.unobserve?.(element);
+        state.wisCameraVisibilityElements.delete(element);
+        return;
+      }
+      const rect = element.getBoundingClientRect?.();
+      const visible = !hidden && (!rect || (rect.width > 0 && rect.height > 0 && rect.bottom >= 0 && rect.right >= 0 && rect.top <= window.innerHeight && rect.left <= window.innerWidth));
+      setWisCameraVisibilityState(state, meta.streamId, {
+        slot: meta.slot,
+        visible,
+        ratio: visible ? 1 : 0,
+        focused: wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === meta.slot,
+        active: visible,
+        pageHidden: hidden,
+      });
+      if (!hidden) {
+        nudgeWisCameraTimer(meta.slot);
+        nudgeWisCameraTimer(meta.streamId);
+        wisCameraActivePlaybackLoop(state, meta.streamId)?.schedule?.("page-visible");
+      }
+    });
+  });
+}
+
+function trackWisCameraVisibility(element, slot, streamId) {
+  if (!element || !streamId) return;
+  ensureWisCameraVisibilityObserver();
+  const cleanSlot = cleanText(slot, "");
+  const key = cleanText(streamId, cleanSlot);
+  const focused = wisSurfaceIsFocusedCamera(wisSurfaceState()) && wisFocusedCameraSlot() === cleanSlot;
+  state.wisCameraVisibilityElements?.set(element, { slot: cleanSlot, streamId: key });
+  element.dataset.wisCameraStreamId = key;
+  setWisCameraVisibilityState(state, key, {
+    slot: cleanSlot,
+    visible: !document.hidden,
+    ratio: document.hidden ? 0 : 1,
+    focused,
+    active: focused || widgetById("wis")?.classList?.contains("is-widget-active"),
+    pageHidden: document.hidden,
+  });
+  state.wisCameraVisibilityObserver?.observe?.(element);
+}
+
+function wisCameraBudget(streamId, mode = "live") {
+  return wisCameraPerformanceBudgetContract(state, streamId, { env: window, mode });
 }
 
 function localWisCameraConfig(slot) {
@@ -3231,10 +3582,18 @@ function cameraPushReplayUrl(streamId = "cam-1", seconds = 300) {
   return createWisCameraPushEndpoints(streamId, WIS_CAMERA_CONTROLLER_CONTRACT.endpoints, { replaySeconds: seconds }).replayUrl;
 }
 
+function cameraPushPlaybackResolvedStartMs(frame = {}, options = {}) {
+  const frameMs = Number(frame?.timestamp_ms ?? frame?.timestampMs ?? frame?.snapped_timestamp_ms ?? frame?.snappedTimestampMs);
+  if (Number.isFinite(frameMs) && frameMs > 0) return frameMs;
+  const optionMs = Number(options.fromMs ?? options.from_ms);
+  if (Number.isFinite(optionMs) && optionMs > 0) return optionMs;
+  return wisCameraTimelinePlaybackStartMs(frame);
+}
+
 function cameraPushPlaybackUrl(streamId = "cam-1", frame = {}, options = {}) {
   return createWisCameraPushEndpoints(streamId, WIS_CAMERA_CONTROLLER_CONTRACT.endpoints, {
     frame: frame?.id,
-    fromMs: wisCameraTimelinePlaybackStartMs(frame),
+    fromMs: cameraPushPlaybackResolvedStartMs(frame, options),
     fps: options.fps,
     follow: options.follow,
   }).playbackUrl;
@@ -3569,6 +3928,7 @@ function exportWisSpace(origin = "surface") {
 function installWisAutomationHook() {
   if (!state.wisSandbox || state.wisAutomationInstalled) return;
   state.wisUnsubscribe = state.wisSandbox.subscribe(scheduleWisRender);
+  installWisCameraTraceDumpHelper();
   window.wasmAgentWis = {
     inspect() {
       return wisSurfaceState();
@@ -3585,6 +3945,9 @@ function installWisAutomationHook() {
     },
     cameraController() {
       return WIS_CAMERA_CONTROLLER_CONTRACT;
+    },
+    dumpCameraTrace(streamId = "") {
+      return dumpWisCameraTrace(streamId);
     },
   };
   state.wisAutomationInstalled = true;
@@ -3650,6 +4013,34 @@ function wisCameraQualityStreamId(slot, camera = {}) {
   const base = wisCameraBaseStreamId(slot, camera);
   const mode = wisCameraQualityMode(base);
   return wisCameraQualityStreamIdContract(slot, camera, mode);
+}
+
+function wisCameraSlotForStreamId(streamId, preferredSlot = "") {
+  const key = cleanText(streamId, "");
+  const preferred = cleanText(preferredSlot, "");
+  const candidates = [];
+  const addCandidate = (slot) => {
+    const cleanSlot = cleanText(slot, "");
+    if (cleanSlot && !candidates.includes(cleanSlot)) candidates.push(cleanSlot);
+  };
+  addCandidate(preferred);
+  addCandidate(wisFocusedCameraSlot() || "");
+  addCandidate(key);
+  try {
+    const cameras = wisSurfaceState()?.state?.cameras;
+    if (cameras && typeof cameras === "object") Object.keys(cameras).forEach(addCandidate);
+  } catch {
+    // Slot resolution is best effort; callers still validate the camera config.
+  }
+  for (const slot of candidates) {
+    const camera = wisCameraConfigForSlot(slot) || {};
+    if (!wisCameraIsPushConfig(camera)) continue;
+    const base = wisCameraBaseStreamId(slot, camera);
+    const primary = cleanText(camera.primaryStreamId || camera.primary_stream_id, base);
+    const extra = cleanText(camera.extraStreamId || camera.extra_stream_id || camera.subStreamId || camera.sub_stream_id, `${base}-extra`);
+    if ([base, primary, extra, wisCameraQualityStreamId(slot, camera)].some((candidate) => cleanText(candidate, "") === key)) return slot;
+  }
+  return preferred || wisFocusedCameraSlot() || key || "cam-1";
 }
 
 function wisCameraTimelineMode(streamId) {
@@ -3726,8 +4117,34 @@ function wisCameraSegmentForTarget(streamId, targetTimeMs = 0, options = {}) {
   const frame = requestedFrame?.id
     ? requestedFrame
     : wisCameraTimelineFrameClosestToTime(frames, targetTime, windowModel);
-  if (!frame) return null;
+  if (!frame) {
+    traceWisCameraBoundary("archive.frame.resolved", {
+      functionName: "wisCameraSegmentForTarget",
+      streamId: key,
+      requestedTimestampMs: targetTime,
+      archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? windowModel.visibleStart ?? 0),
+      archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? windowModel.visibleEnd ?? 0),
+      resolvedTimestampMs: null,
+      recordedPlaybackPossible: false,
+      fetchResult: "empty",
+      frameCount: frames.length,
+    });
+    return null;
+  }
   const snappedTimestampMs = wisCameraTimelineFrameTimestampMs(frame, targetTime);
+  traceWisCameraBoundary("archive.frame.resolved", {
+    functionName: "wisCameraSegmentForTarget",
+    streamId: key,
+    requestedTimestampMs: targetTime,
+    archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? windowModel.visibleStart ?? 0),
+    archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? windowModel.visibleEnd ?? 0),
+    resolvedTimestampMs: snappedTimestampMs,
+    recordedPlaybackPossible: Boolean(frame?.id && frame?.url),
+    fetchResult: frame?.id && frame?.url ? "non-empty" : "empty",
+    frameCount: frames.length,
+    segmentId: cleanText(frame?.id, ""),
+    segmentUrl: cleanText(frame?.url, ""),
+  });
   return {
     ...frame,
     timestamp_ms: snappedTimestampMs,
@@ -3738,7 +4155,41 @@ function wisCameraSegmentForTarget(streamId, targetTimeMs = 0, options = {}) {
 
 const wisCameraMediaLogAt = new Map();
 
+function wisCameraVerboseDiagnosticsEnabled() {
+  try {
+    return Boolean(window.WASM_AGENT_CAMERA_DEBUG || localStorage.getItem("wasmAgent.cameraDebug") === "1");
+  } catch {
+    return false;
+  }
+}
+
 function logWisCameraMediaEvent(event, data = {}, options = {}) {
+  if (event === "camera.visual.blink_detected") {
+    if (!(state.wisCameraBlinkEvents instanceof Map)) state.wisCameraBlinkEvents = new Map();
+    const blinkStreamId = cleanText(data.streamId || data.cameraId, "");
+    if (blinkStreamId) state.wisCameraBlinkEvents.set(blinkStreamId, Number(state.wisCameraBlinkEvents.get(blinkStreamId) || 0) + 1);
+  }
+  const verbose = wisCameraVerboseDiagnosticsEnabled();
+  let perfDebug = verbose;
+  try {
+    perfDebug = perfDebug || localStorage.getItem("wasmAgent.cameraPerfDebug") === "1";
+  } catch {
+    perfDebug = verbose;
+  }
+  const critical = event === "camera.visual.blink_detected"
+    || event === "camera.playback.transition"
+    || event === "camera.timeline.seek"
+    || event === "camera.loop.owner"
+    || event === "camera.visual.frame_commit"
+    || event.includes("ownership")
+    || event.includes("blocked_by_recorded_owner")
+    || event.includes("stale_writer")
+    || event.includes(".error")
+    || event.includes("violation");
+  const perfSample = event === "camera.perf.sample";
+  const always = Boolean(options.always && critical);
+  if (perfSample && !perfDebug) return;
+  if (!always && !critical && !verbose && !(perfSample && perfDebug)) return;
   const sampleMs = Number(options.sampleMs || 0);
   const now = performance.now();
   if (sampleMs > 0) {
@@ -3746,22 +4197,777 @@ function logWisCameraMediaEvent(event, data = {}, options = {}) {
     const lastAt = Number(wisCameraMediaLogAt.get(key) || 0);
     if (lastAt > 0 && now - lastAt < sampleMs) return;
     wisCameraMediaLogAt.set(key, now);
-  }
-  const payload = { event, t: now, ...data };
-  try {
-    console.debug("[camera]", event, payload);
+	  }
+	  const payload = { event, t: now, cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD, ...data };
+	  traceWisCameraBoundary(event, payload);
+	  try {
+	    console.debug("[camera]", event, payload);
   } catch {
     // Camera media diagnostics are best effort.
   }
 }
 
-function wisCameraRecordedMediaOwner(streamId, session = null) {
+function cloneWisCameraTraceValue(value) {
+  try {
+    if (typeof structuredClone === "function") return structuredClone(value);
+  } catch {
+    // Fall through to JSON cloning.
+  }
+  try {
+    return JSON.parse(JSON.stringify(value ?? null));
+  } catch {
+    return value == null ? value : String(value);
+  }
+}
+
+function wisCameraCurrentTraceStreamId(streamId = "") {
+  const explicit = cleanText(streamId, "");
+  if (explicit) return explicit;
+  const recordedKeys = [];
+  try {
+    state.wisCameraRecordedSessions?.forEach?.((session, key) => {
+      if (session?.mode === "recorded" && key) recordedKeys.push(cleanText(key, ""));
+    });
+  } catch {
+    // Trace helpers must never disturb camera playback.
+  }
+  if (recordedKeys.length) return recordedKeys[recordedKeys.length - 1];
+  const timelineStream = cleanText(state.wisCameraTimeline?.streamId, "");
+  if (timelineStream) return timelineStream;
+  const slot = wisFocusedCameraSlot() || "cam-1";
+  const camera = wisCameraConfigForSlot(slot) || {};
+  return wisCameraQualityStreamId(slot, camera);
+}
+
+function wisCameraControlTargetSummary(target = null) {
+  if (!target) return null;
+  const button = target.closest?.("[data-wis-camera-control]") || target;
+  const row = target.closest?.(".wis-camera-timeline-controls-row");
+  const rect = button?.getBoundingClientRect?.();
   return {
-    kind: "recorded-playback",
-    streamId: cleanText(streamId, ""),
-    sessionId: cleanText(session?.id, ""),
-    generation: Number(session?.generation || 0),
+    tagName: cleanText(button?.tagName, ""),
+    className: cleanText(button?.className, ""),
+    control: cleanText(button?.dataset?.wisCameraControl, ""),
+    streamId: cleanText(button?.dataset?.wisCameraStreamId || row?.dataset?.streamId, ""),
+    slot: cleanText(button?.dataset?.wisCameraSlot, ""),
+    action: cleanText(button?.dataset?.wisCameraAction, ""),
+    icon: cleanText(button?.dataset?.icon, ""),
+    disabledReason: cleanText(button?.dataset?.wisCameraDisabledReason, ""),
+    disabled: Boolean(button?.disabled),
+    ariaDisabled: cleanText(button?.getAttribute?.("aria-disabled"), ""),
+    ariaPressed: cleanText(button?.getAttribute?.("aria-pressed"), ""),
+    title: cleanText(button?.getAttribute?.("title"), ""),
+    rect: rect ? {
+      left: Math.round(Number(rect.left || 0)),
+      top: Math.round(Number(rect.top || 0)),
+      width: Math.round(Number(rect.width || 0)),
+      height: Math.round(Number(rect.height || 0)),
+    } : null,
   };
+}
+
+function wisCameraTraceEventStreamId(entry = {}) {
+  const item = entry && typeof entry === "object" ? entry : {};
+  return cleanText(item.streamId || item.cameraId || item.artifactId || item.mediaStreamId || item.visibleImageStreamId, "");
+}
+
+function wisCameraLatestTraceEvent(events = [], predicate = null) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const entry = events[index];
+    if (!entry || typeof entry !== "object") continue;
+    if (!predicate || predicate(entry)) return entry;
+  }
+  return null;
+}
+
+function wisCameraTraceNumber(...values) {
+  for (const value of values) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+  }
+  return 0;
+}
+
+function wisCameraTraceHasNumber(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+}
+
+function wisCameraPlaybackUrlParts(playbackUrl = "") {
+  const raw = cleanText(playbackUrl, "");
+  if (!raw) return { playbackUrl: "", playbackUrlFromMs: 0, playbackUrlFollow: "" };
+  try {
+    const parsed = new URL(raw, window.location?.href || "http://localhost/");
+    return {
+      playbackUrl: raw,
+      playbackUrlFromMs: wisCameraTraceNumber(
+        parsed.searchParams.get("from_ms"),
+        parsed.searchParams.get("timestamp_ms"),
+        parsed.searchParams.get("timestampMs")
+      ),
+      playbackUrlFollow: cleanText(parsed.searchParams.get("follow"), ""),
+    };
+  } catch {
+    return { playbackUrl: raw, playbackUrlFromMs: 0, playbackUrlFollow: "" };
+  }
+}
+
+function wisCameraVisibleImageSummary(media = null) {
+  if (!media) return null;
+  const rect = media.getBoundingClientRect?.();
+  const style = window.getComputedStyle ? window.getComputedStyle(media) : null;
+  const connected = Boolean(media.isConnected);
+  const visible = Boolean(
+    connected
+    && rect
+    && Number(rect.width || 0) > 0
+    && Number(rect.height || 0) > 0
+    && rect.bottom >= 0
+    && rect.right >= 0
+    && rect.top <= window.innerHeight
+    && rect.left <= window.innerWidth
+    && style?.display !== "none"
+    && style?.visibility !== "hidden"
+    && style?.opacity !== "0"
+  );
+  const surface = media.closest?.(".wis-node-webcam_placeholder[data-wis-camera-slot]");
+  const src = cleanText(media.currentSrc || media.src || media.dataset?.wisLastGoodSrc || "", "");
+  return {
+    streamId: cleanText(media.dataset?.wisMediaStreamId || media.dataset?.wisCameraStreamId || surface?.dataset?.wisCameraStreamId, ""),
+    owner: cleanText(media.dataset?.wisMediaOwner, ""),
+    frameMs: wisCameraTraceNumber(media.dataset?.wisPlaybackFrameMs, media.dataset?.wisFrameTimestampMs),
+    srcPrefix: src.slice(0, 180),
+    isConnected: connected,
+    isVisible: visible,
+    rect: rect ? {
+      left: Math.round(Number(rect.left || 0)),
+      top: Math.round(Number(rect.top || 0)),
+      width: Math.round(Number(rect.width || 0)),
+      height: Math.round(Number(rect.height || 0)),
+    } : null,
+  };
+}
+
+function wisCameraVisibleImagesForTrace() {
+  return Array.from(document.querySelectorAll?.(".wis-camera-image, .wis-camera-video") || [])
+    .map((media) => wisCameraVisibleImageSummary(media))
+    .filter(Boolean);
+}
+
+function wisCameraControllerStreamIdForTrace(streamId = "") {
+  const key = cleanText(streamId, "");
+  const controllers = state.wisCameraArtifactControllers;
+  if (key && controllers?.get?.(key)) return key;
+  try {
+    const keys = Array.from(controllers?.keys?.() || []).map((candidate) => cleanText(candidate, "")).filter(Boolean);
+    return keys[keys.length - 1] || "";
+  } catch {
+    return "";
+  }
+}
+
+function wisCameraVisibleImageForStream(streamId = "") {
+  const key = cleanText(streamId, "");
+  const images = wisCameraVisibleImagesForTrace();
+  return images.find((image) => image.isVisible && image.streamId === key)
+    || images.find((image) => image.streamId === key)
+    || images.find((image) => image.isVisible)
+    || images[0]
+    || null;
+}
+
+function wisCameraOwnerStateFromControllerMode(mode = "live") {
+  const cleanMode = cleanText(mode, "live");
+  if (cleanMode === "live") return WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  if (["seeking", "buffering", "loading"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+  if (["paused", "ended", "gap", "stalled", "error"].includes(cleanMode)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+  return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+}
+
+function wisCameraReadControllerState(controller = null) {
+  try {
+    return controller?.getState?.() || null;
+  } catch {
+    return null;
+  }
+}
+
+function wisCameraPlayPauseStateForStream(streamId = "", options = {}) {
+  const button = options.button || null;
+  const targetSummary = button ? wisCameraControlTargetSummary(button) : {};
+  const clickedControlStreamId = cleanText(targetSummary.streamId || streamId, "");
+  const key = clickedControlStreamId || wisCameraCurrentTraceStreamId(streamId);
+  const controller = options.controller !== undefined
+    ? options.controller
+    : (key ? state.wisCameraArtifactControllers?.get?.(key) : null);
+  const controllerState = wisCameraReadControllerState(controller);
+  const controllerMode = cleanText(controllerState?.playbackClock?.mode, "");
+  const controllerOwnerState = controllerMode
+    ? wisCameraOwnerStateFromControllerMode(controllerMode)
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const session = options.session !== undefined ? options.session : recordedWisCameraSession(key);
+  const appOwnerState = key ? wisCameraTimelineOwnerStateContract(state, key) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const sessionOwnerState = session
+    ? wisCameraPlaybackOwnerState(session, controllerOwnerState || appOwnerState)
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const sessionStatus = cleanText(session?.status || session?.state, "");
+  let owner = WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  if (session) {
+    if (["seeking", "buffering", "loading"].includes(sessionStatus)) owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+    else if (session.clockPaused || session.userPaused || sessionStatus === "paused") owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+    else owner = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  } else if (controllerOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) owner = controllerOwnerState;
+  else if (appOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) owner = appOwnerState;
+  const mode = controllerMode
+    || sessionStatus
+    || cleanText(session?.mode, "")
+    || (owner === WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE ? "live" : "recorded");
+  const paused = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+  const seeking = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+  const playing = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  const notRecorded = owner === WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const action = playing ? "pause" : "play";
+  const icon = playing ? "pause" : "play";
+  const label = playing ? "Pause" : "Play";
+  const title = notRecorded
+    ? "Not in recorded mode"
+    : (seeking ? "Recorded playback is seeking" : (playing ? "Pause recorded playback" : "Resume recorded playback"));
+  const disabledReason = notRecorded
+    ? "not-recorded-mode"
+    : (seeking ? "recorded-seeking" : (!session ? "no-recorded-session" : ""));
+  const expectedPressed = playing ? "true" : "false";
+  const visibleImage = wisCameraVisibleImageForStream(key);
+  const domAction = cleanText(targetSummary.action, "");
+  const domIcon = cleanText(targetSummary.icon || (domAction === "pause" ? "pause" : (domAction === "play" ? "play" : "")), "");
+  const domPressed = cleanText(targetSummary.ariaPressed, "");
+  const domDisabledReason = cleanText(targetSummary.disabledReason, "");
+  const domMismatch = Boolean(button) && (
+    (domAction && domAction !== action)
+    || (domIcon && domIcon !== icon)
+    || (domPressed && domPressed !== expectedPressed)
+    || (domDisabledReason && domDisabledReason !== disabledReason)
+  );
+  return {
+    streamId: key,
+    clickedControlStreamId: key,
+    controllerStreamId: controller ? key : "",
+    visibleImageStreamId: cleanText(visibleImage?.streamId, ""),
+    controllerFound: Boolean(controller),
+    sessionFound: Boolean(session),
+    owner,
+    mode,
+    paused,
+    seeking,
+    playing,
+    action,
+    icon,
+    label,
+    title,
+    disabledReason,
+    expectedPressed,
+    generation: Number(session?.generation || controllerState?.generation || controllerState?.playbackClock?.generation || 0),
+    session,
+    controller,
+    controllerMode,
+    appOwnerState,
+    sessionOwnerState,
+    controllerOwnerState,
+    domAction,
+    domIcon,
+    domPressed,
+    domDisabledReason,
+    domMismatch,
+    button: targetSummary,
+  };
+}
+
+function wisCameraPlayPauseTraceContext(resolved = {}, extra = {}) {
+  const after = extra.afterState || null;
+  const { afterState: _afterState, ...safeExtra } = extra;
+  const beforeOwner = cleanText(extra.ownerBefore ?? resolved.owner, "");
+  const beforeMode = cleanText(extra.modeBefore ?? resolved.mode, "");
+  const beforePaused = Boolean(extra.pausedBefore ?? resolved.paused);
+  const beforeIcon = cleanText(extra.iconBefore ?? (resolved.domIcon || resolved.icon), "");
+  const afterOwner = cleanText(extra.ownerAfter ?? after?.owner ?? resolved.owner, "");
+  const afterMode = cleanText(extra.modeAfter ?? after?.mode ?? resolved.mode, "");
+  const afterPaused = Boolean(extra.pausedAfter ?? after?.paused ?? resolved.paused);
+  const afterIcon = cleanText(extra.iconAfter ?? after?.icon ?? resolved.icon, "");
+  return {
+    clickedControlStreamId: cleanText(extra.clickedControlStreamId ?? resolved.clickedControlStreamId ?? resolved.streamId, ""),
+    controllerStreamId: cleanText(extra.controllerStreamId ?? resolved.controllerStreamId, ""),
+    visibleImageStreamId: cleanText(extra.visibleImageStreamId ?? resolved.visibleImageStreamId, ""),
+    ownerBefore: beforeOwner,
+    modeBefore: beforeMode,
+    pausedBefore: beforePaused,
+    iconBefore: beforeIcon,
+    ownerAfter: afterOwner,
+    modeAfter: afterMode,
+    pausedAfter: afterPaused,
+    iconAfter: afterIcon,
+    generation: Number(extra.generation ?? after?.generation ?? resolved.generation ?? 0),
+    rejectionReason: cleanText(extra.rejectionReason || "", ""),
+    controllerFound: Boolean(extra.controllerFound ?? resolved.controllerFound),
+    action: cleanText(extra.action ?? resolved.action, ""),
+    expectedAction: cleanText(extra.expectedAction ?? resolved.action, ""),
+    expectedIcon: cleanText(extra.expectedIcon ?? resolved.icon, ""),
+    disabledReason: cleanText(extra.disabledReason ?? resolved.disabledReason, ""),
+    ...safeExtra,
+  };
+}
+
+function wisCameraPlayPausePointerContext(event = null) {
+  const documentRef = event?.target?.ownerDocument || document;
+  const topElement = Number.isFinite(Number(event?.clientX)) && Number.isFinite(Number(event?.clientY))
+    ? documentRef?.elementFromPoint?.(Number(event.clientX), Number(event.clientY))
+    : null;
+  return {
+    pointerType: cleanText(event?.pointerType, ""),
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    elementFromPoint: topElement ? {
+      tagName: cleanText(topElement.tagName, ""),
+      className: cleanText(topElement.className, ""),
+      control: cleanText(topElement.dataset?.wisCameraControl, ""),
+    } : null,
+  };
+}
+
+function traceWisCameraPlayPauseButtonEvent(kind = "click", streamId = "", button = null, event = null) {
+  const resolved = wisCameraPlayPauseStateForStream(streamId, { button });
+  traceWisCameraPlayPause(`controls.playpause.${cleanText(kind, "event")}`, resolved.streamId, wisCameraPlayPauseTraceContext(resolved, {
+    control: "play-pause",
+    nativeDisabled: Boolean(button?.disabled),
+    ariaDisabled: cleanText(button?.getAttribute?.("aria-disabled"), ""),
+    target: wisCameraControlTargetSummary(button),
+    ...wisCameraPlayPausePointerContext(event),
+  }));
+  return true;
+}
+
+function wisCameraPlaybackTracePayload(streamId = "", extra = {}) {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const session = recordedWisCameraSession(key);
+  const controller = key ? state.wisCameraArtifactControllers?.get?.(key) : null;
+  let controllerState = null;
+  try {
+    controllerState = controller?.getState?.() || null;
+  } catch {
+    controllerState = null;
+  }
+  const timeline = wisCameraTimelineForStream(key);
+  const frames = Array.isArray(timeline.frames) ? timeline.frames : [];
+  const controllerMode = cleanText(controllerState?.playbackClock?.mode, "");
+  const appOwnerState = key ? wisCameraTimelineOwnerStateContract(state, key) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const controllerOwnerState = controllerMode ? wisCameraOwnerStateFromControllerMode(controllerMode) : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+  const ownerState = appOwnerState !== WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE
+    ? appOwnerState
+    : controllerOwnerState;
+  const windowModel = wisCameraTimelineTimeWindow(timeline, frames, {
+    playbackPosition: Number(session ? wisCameraRecordedClockMs(session) : 0),
+  });
+  const activeLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const playbackClockMs = Number(session
+    ? wisCameraRecordedClockMs(session)
+    : (controllerState?.playbackClock?.anchorRecordingTimeMs ? controller?.getCurrentPlaybackTimeMs?.() : 0));
+  return {
+    streamId: key,
+    owner: ownerState,
+    appOwnerState,
+    controllerOwnerState,
+    controllerMode,
+    currentMode: cleanText(controllerMode || session?.status || session?.mode || timeline.mode, "live"),
+    paused: Boolean(session?.userPaused || session?.clockPaused || session?.status === "paused" || controllerState?.playbackClock?.mode === "paused"),
+    playbackRate: Number(session?.playbackRate || session?.rate || controllerState?.playbackClock?.rate || 1),
+    requestedTimestampMs: Number(session?.requestedSeekTimestampMs || controllerState?.playbackClock?.targetTimeMs || 0),
+    persistedSeekTimestampMs: Number(session?.persistedSeekTimestampMs || session?.requestedSeekTimestampMs || controllerState?.playbackClock?.targetTimeMs || 0),
+    mediaAnchorMs: Number(session?.anchorRecordingTimeMs || controllerState?.playbackClock?.anchorRecordingTimeMs || 0),
+    wallAnchorMs: Number(session?.anchorWallTimeMs || controllerState?.playbackClock?.anchorWallTimeMs || 0),
+    playbackClockMs: Number.isFinite(playbackClockMs) ? playbackClockMs : 0,
+    visibleFrameMs: Number(session?.lastDisplayedFrameTimeMs || controllerState?.playbackClock?.displayedRecordingTimeMs || 0),
+    archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? timeline?.range?.start_ms ?? windowModel.visibleStart ?? 0),
+    archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? timeline?.range?.end_ms ?? windowModel.visibleEnd ?? 0),
+    generation: Number(session?.generation || controllerState?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+	    controllerFound: Boolean(controller),
+	    activePlaybackLoops: activeLoop && !activeLoop.disposed ? 1 : 0,
+	    activeReaders: activeLoop?.readerActive ? 1 : 0,
+	    playbackReaderCreatedCount: Number(session?.playbackReaderCreatedCount || activeLoop?.playbackReaderCreatedCount || 0),
+	    playbackReaderDoneCount: Number(session?.playbackReaderDoneCount || activeLoop?.playbackReaderDoneCount || 0),
+	    playbackReaderAbortCount: Number(session?.playbackReaderAbortCount || activeLoop?.playbackReaderAbortCount || 0),
+	    playbackReaderErrorCount: Number(session?.playbackReaderErrorCount || activeLoop?.playbackReaderErrorCount || 0),
+	    playbackChunksReceived: Number(session?.playbackChunksReceived || activeLoop?.playbackChunksReceived || 0),
+	    playbackFramesParsed: Number(session?.playbackFramesParsed || activeLoop?.playbackFramesParsed || 0),
+	    playbackFramesCommitted: Number(session?.playbackFramesCommitted || activeLoop?.playbackFramesCommitted || 0),
+	    playbackReaderLastDoneReason: cleanText(session?.playbackReaderLastDoneReason || activeLoop?.playbackReaderLastDoneReason, ""),
+	    playbackReaderLifetimeMs: Number(session?.playbackReaderLifetimeMs || activeLoop?.playbackReaderLifetimeMs || 0),
+	    ...extra,
+	  };
+	}
+
+function traceWisCameraPlayPause(event, streamId = "", extra = {}) {
+  const priority = {};
+  [
+    "control",
+    "action",
+    "reason",
+    "rejectionReason",
+    "clickedControlStreamId",
+    "controllerStreamId",
+    "visibleImageStreamId",
+    "ownerBefore",
+    "modeBefore",
+    "pausedBefore",
+    "iconBefore",
+    "ownerAfter",
+    "modeAfter",
+    "pausedAfter",
+    "iconAfter",
+    "generation",
+    "expectedAction",
+    "expectedIcon",
+    "disabledReason",
+    "controllerFound",
+    "mismatch",
+  ].forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(extra, key)) priority[key] = extra[key];
+  });
+  return traceWisCameraBoundary(event, { ...priority, ...wisCameraPlaybackTracePayload(streamId, extra) });
+}
+
+function dumpWisCameraTrace(streamId = "") {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const trace = Array.isArray(window.__WIS_CAMERA_TRACE_ALL__)
+    ? window.__WIS_CAMERA_TRACE_ALL__
+    : (Array.isArray(window.__WIS_CAMERA_TRACE__) ? window.__WIS_CAMERA_TRACE__ : []);
+  const session = recordedWisCameraSession(key);
+  const activeLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const perf = key ? (sampleWisCameraPerf(state, key, {}, null, { force: true }) || {}) : {};
+  const events = trace
+    .map((entry) => cloneWisCameraTraceValue(entry))
+    .filter((entry) => entry && typeof entry === "object" && !Array.isArray(entry));
+  const last300Events = events.slice(-300);
+  const eventBelongsToCurrentStream = (entry) => {
+    const eventStreamId = wisCameraTraceEventStreamId(entry);
+    return !key || !eventStreamId || eventStreamId === key;
+  };
+  const committedRecordedFrames = Array.from(new Set(events
+    .filter((entry) => (
+      eventBelongsToCurrentStream(entry)
+      && ((entry.event === "camera.visual.frame_commit" && cleanText(entry.mode, "recorded") === "recorded" && entry.decodedOk !== false)
+      || entry.event === "recorded.commit.accepted"
+      )
+    ))
+    .map((entry) => Number(entry.frameTimestampMs || entry.visibleFrameMs || entry.timestampMs || 0))
+    .filter((timestampMs) => Number.isFinite(timestampMs) && timestampMs > 0)))
+    .sort((a, b) => a - b);
+  const controlButtonEvents = events
+    .filter((entry) => cleanText(entry.event, "").startsWith("controls.")
+      || entry.event === "playback.control.clicked"
+      || cleanText(entry.event, "").startsWith("playback.pause")
+      || cleanText(entry.event, "").startsWith("playback.resume"))
+    .slice(-80);
+  const playbackFetchEvents = events
+    .filter((entry) => [
+      "archive.fetch.started",
+      "archive.fetch.result",
+      "camera.media.playback_stream.start",
+      "camera.media.playback_stream.first_packet",
+      "camera.media.playback_stream.abort",
+	      "camera.media.playback_stream.restart",
+	      "camera.media.playback_stream.stall_suspected",
+	      "camera.media.playback_stream.duplicate_ignored",
+	      "camera.media.playback_reader.created",
+	      "camera.media.playback_reader.read_started",
+	      "camera.media.playback_reader.read_result",
+	      "camera.media.playback_reader.done",
+	      "camera.media.playback_reader.abort",
+	      "camera.media.playback_reader.error",
+	      "camera.media.playback_frame.parsed",
+	      "camera.server.seek.requested",
+      "camera.server.first_frame.received",
+      "camera.server.first_frame.offset_from_seek",
+      "camera.server.stream.gap_suspected",
+      "camera.server.stream.stall_suspected",
+      "camera.server.stream.restart",
+    ].includes(cleanText(entry.event, "")))
+    .slice(-120);
+  const timelineSeekEvents = events
+    .filter((entry) => [
+      "timeline.pointer",
+      "timeline.commit",
+      "timeline.seek.persisted",
+      "timeline.seek.overwritten",
+      "timeline.pending.seek.applied",
+      "timeline.app.setFrame",
+      "camera.seekRequested",
+      "camera.seekRequested.entrypoint",
+      "camera.seekRequested.state",
+      "archive.frame.resolved",
+      "recorded.render.entrypoint",
+      "recorded.render.rejected",
+    ].includes(cleanText(entry.event, "")))
+    .slice(-120);
+  const ownerTransitions = events
+    .filter((entry) => entry.event === "ownerMutation" || entry.event === "camera.playback.transition")
+    .slice(-80);
+  const countMatching = (predicate) => events.reduce((count, entry) => count + (predicate(entry) ? 1 : 0), 0);
+  const current = wisCameraPlaybackTracePayload(key);
+  const focusedSlot = wisFocusedCameraSlot() || "";
+  const focusedCamera = focusedSlot ? wisCameraConfigForSlot(focusedSlot) : {};
+  const activeCameraStreamId = focusedSlot ? wisCameraQualityStreamId(focusedSlot, focusedCamera) : "";
+  const visibleImages = wisCameraVisibleImagesForTrace();
+  const visibleImage = visibleImages.find((image) => image.isVisible && image.streamId === key)
+    || visibleImages.find((image) => image.isVisible && image.streamId === activeCameraStreamId)
+    || visibleImages.find((image) => image.isVisible)
+    || visibleImages[0]
+    || null;
+  const clickedTimelineEvent = wisCameraLatestTraceEvent(events, (entry) => ["timeline.commit", "timeline.pointer"].includes(cleanText(entry.event, "")));
+  const clickedControlEvent = wisCameraLatestTraceEvent(controlButtonEvents, (entry) => cleanText(entry.event, "").startsWith("controls.")
+    || cleanText(entry.event, "") === "playback.control.clicked");
+  const resolvedFrameEvent = wisCameraLatestTraceEvent(events, (entry) => {
+    if (!eventBelongsToCurrentStream(entry)) return false;
+    if (wisCameraTraceHasNumber(entry.resolvedFrameTimestampMs) || wisCameraTraceHasNumber(entry.resolvedTimestampMs)) return true;
+    return ["archive.frame.resolved", "camera.seekRequested", "camera.seekRequested.entrypoint", "camera.seekRequested.state", "recorded.render.entrypoint"]
+      .includes(cleanText(entry.event, ""))
+      && wisCameraTraceHasNumber(entry.frameTimestampMs);
+  });
+  const playbackUrlEvent = wisCameraLatestTraceEvent(events, (entry) => eventBelongsToCurrentStream(entry)
+    && cleanText(entry.playbackUrl, "").includes("/camera/push-playback"));
+  const playbackUrlDetails = wisCameraPlaybackUrlParts(playbackUrlEvent?.playbackUrl || "");
+  const playPauseButton = document.querySelector?.(`.wis-camera-timeline-controls-row [data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(key)}"]`)
+    || document.querySelector?.(".wis-camera-timeline-controls-row [data-wis-camera-control='play-pause']")
+    || null;
+  return cloneWisCameraTraceValue({
+    build: WIS_CAMERA_ARTIFACT_BUILD,
+    currentStreamId: key,
+    activeCameraSlot: focusedSlot,
+    appOwnerState: current.appOwnerState,
+    controllerOwnerState: current.controllerOwnerState,
+    controllerMode: current.controllerMode,
+    currentOwner: current.owner,
+    currentMode: current.currentMode,
+    paused: current.paused,
+    playbackRate: current.playbackRate,
+    requestedTimestampMs: current.requestedTimestampMs,
+    persistedSeekTimestampMs: current.persistedSeekTimestampMs,
+    resolvedFrameTimestampMs: wisCameraTraceNumber(
+      resolvedFrameEvent?.resolvedFrameTimestampMs,
+      resolvedFrameEvent?.resolvedTimestampMs,
+      resolvedFrameEvent?.frameTimestampMs
+    ),
+    mediaAnchorMs: current.mediaAnchorMs,
+    wallAnchorMs: current.wallAnchorMs,
+	    playbackClockMs: current.playbackClockMs,
+	    visibleFrameMs: current.visibleFrameMs || Number(visibleImage?.frameMs || 0),
+    clickedTimelineStreamId: wisCameraTraceEventStreamId(clickedTimelineEvent),
+    clickedControlStreamId: wisCameraTraceEventStreamId(clickedControlEvent),
+    controllerStreamId: wisCameraControllerStreamIdForTrace(key),
+    activeCameraStreamId,
+    visibleImageStreamId: cleanText(visibleImage?.streamId, ""),
+    playbackUrl: playbackUrlDetails.playbackUrl,
+    playbackUrlFromMs: playbackUrlDetails.playbackUrlFromMs,
+    playbackUrlFollow: playbackUrlDetails.playbackUrlFollow,
+	    activePlaybackLoops: Number(perf.activePlaybackLoops ?? current.activePlaybackLoops ?? (activeLoop && !activeLoop.disposed ? 1 : 0)),
+	    activeReaders: Number(perf.activeReaders ?? current.activeReaders ?? (activeLoop?.readerActive ? 1 : 0)),
+	    playbackReaderCreatedCount: Number(perf.playbackReaderCreatedCount ?? current.playbackReaderCreatedCount ?? 0),
+	    playbackReaderDoneCount: Number(perf.playbackReaderDoneCount ?? current.playbackReaderDoneCount ?? 0),
+	    playbackReaderAbortCount: Number(perf.playbackReaderAbortCount ?? current.playbackReaderAbortCount ?? 0),
+	    playbackReaderErrorCount: Number(perf.playbackReaderErrorCount ?? current.playbackReaderErrorCount ?? 0),
+	    playbackChunksReceived: Number(perf.playbackChunksReceived ?? current.playbackChunksReceived ?? 0),
+	    playbackFramesParsed: Number(perf.playbackFramesParsed ?? current.playbackFramesParsed ?? 0),
+	    playbackFramesCommitted: Number(perf.playbackFramesCommitted ?? current.playbackFramesCommitted ?? committedRecordedFrames.length),
+	    playbackReaderLastDoneReason: cleanText(perf.playbackReaderLastDoneReason || current.playbackReaderLastDoneReason, ""),
+	    playbackReaderLifetimeMs: Number(perf.playbackReaderLifetimeMs ?? current.playbackReaderLifetimeMs ?? 0),
+	    committedRecordedFrameCount: committedRecordedFrames.length,
+    committedRecordedFrames,
+    holdAheadFrameCount: countMatching((entry) => cleanText(entry.reason, "").includes("hold-ahead") || cleanText(entry.event, "").includes("hold_ahead")),
+    duplicateFrameCount: countMatching((entry) => cleanText(entry.event, "").includes("duplicate") || cleanText(entry.reason, "").includes("duplicate")),
+    staleRejectCount: countMatching((entry) => cleanText(entry.event, "").includes("stale") || cleanText(entry.event, "").includes("rejected") || cleanText(entry.reason, "").includes("stale")),
+    liveBlockedCount: countMatching((entry) => cleanText(entry.event, "").includes("blocked_by_recorded_owner") || entry.decision === "BLOCKED"),
+    playButtonClicks: countMatching((entry) => (entry.event === "playback.control.clicked" && entry.control === "play") || (entry.event === "controls.playpause.click" && entry.action === "play")),
+    pauseButtonClicks: countMatching((entry) => (entry.event === "playback.control.clicked" && entry.control === "pause") || (entry.event === "controls.playpause.click" && entry.action === "pause")),
+    resumeButtonClicks: countMatching((entry) => cleanText(entry.event, "").startsWith("playback.resume.") || (entry.event === "playback.control.clicked" && entry.control === "play")),
+    playPauseButton: wisCameraControlTargetSummary(playPauseButton),
+    controlButtonEvents,
+    visibleImages,
+    playbackFetchEvents,
+    timelineSeekEvents,
+    ownerTransitions,
+    last300Events,
+  });
+}
+
+function installWisCameraTraceDumpHelper() {
+  try {
+    window.dumpWisCameraTrace = (streamId = "") => dumpWisCameraTrace(streamId);
+  } catch {
+    // Console helper installation is diagnostic only.
+  }
+}
+
+installWisCameraTraceDumpHelper();
+
+async function copyWisCameraTraceDump(streamId = "") {
+  const key = wisCameraCurrentTraceStreamId(streamId);
+  const dump = dumpWisCameraTrace(key);
+  const text = JSON.stringify(dump, null, 2);
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("clipboard-writeText-unavailable");
+    await navigator.clipboard.writeText(text);
+    setWisCameraNotice(key, "Camera trace copied", "success");
+    traceWisCameraBoundary("controls.copytrace.copied", wisCameraPlaybackTracePayload(key, {
+      control: "copy-trace",
+      action: "copy",
+      reason: "debug-action",
+      dumpBuild: dump.build,
+      eventCount: Array.isArray(dump.last300Events) ? dump.last300Events.length : 0,
+    }));
+  } catch (error) {
+    setWisCameraNotice(key, "Camera trace available in console", "warn");
+    traceWisCameraBoundary("controls.copytrace.copy_failed", wisCameraPlaybackTracePayload(key, {
+      control: "copy-trace",
+      action: "copy",
+      reason: "debug-action",
+      error: error?.message || String(error),
+    }));
+    try {
+      console.info("WIS camera trace dump", dump);
+    } catch {
+      // Console diagnostics are best effort.
+    }
+  }
+  return dump;
+}
+
+function wisCameraPlaybackOwnerMode(session = null, fallback = "live") {
+  if (!session || typeof session !== "object") return cleanText(fallback, "live");
+  const status = cleanText(session.status || session.state, "");
+  if (["seeking", "buffering", "loading"].includes(status)) return "seeking";
+  if (session.mode === "recorded") return "recorded";
+  if (status === "error") return "error";
+  return cleanText(fallback, "live");
+}
+
+function wisCameraPlaybackOwnerState(session = null, fallback = WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE) {
+  if (session?.ownerState || session?.timelineOwnerState) {
+    const explicit = cleanText(session.ownerState || session.timelineOwnerState, "").toUpperCase();
+    if (Object.values(WIS_CAMERA_TIMELINE_OWNER_STATES).includes(explicit)) return explicit;
+  }
+  const status = cleanText(session?.status || session?.state, "");
+  if (session?.mode === "recorded") {
+    if (["seeking", "buffering", "loading"].includes(status)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+    if (["paused", "ended", "gap", "stalled", "error"].includes(status)) return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PAUSED;
+    return WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING;
+  }
+  const fallbackState = cleanText(fallback, WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE).toUpperCase();
+  return Object.values(WIS_CAMERA_TIMELINE_OWNER_STATES).includes(fallbackState)
+    ? fallbackState
+    : WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+}
+
+function wisCameraRecordedOwnsStream(streamId) {
+  const key = cleanText(streamId, "");
+  return Boolean(key && wisCameraRecordedOwnsTimelineContract(state, key));
+}
+
+function wisCameraLoopOwnerSnapshot(streamId, slot = "") {
+  const key = cleanText(streamId, "");
+  const cleanSlot = cleanText(slot, key);
+  const playbackLoop = key ? wisCameraActivePlaybackLoop(state, key) : null;
+  const liveTimer = (key && state.wisCameraTimers.get(key)) || (cleanSlot && state.wisCameraTimers.get(cleanSlot)) || null;
+  const recordedSession = recordedWisCameraSession(key);
+  const recordedOwns = wisCameraRecordedOwnsStream(key);
+  return {
+    streamId: key,
+    ownerState: wisCameraTimelineOwnerStateContract(state, key),
+    liveLoopActiveCount: liveTimer && !recordedOwns ? 1 : 0,
+    liveLoopIgnoredCount: liveTimer && recordedOwns ? 1 : 0,
+    recordedLoopActiveCount: playbackLoop && !playbackLoop.disposed ? 1 : 0,
+    activeGeneration: Number(recordedSession?.generation || playbackLoop?.generation || 0),
+    activeReaders: playbackLoop?.readerActive ? 1 : 0,
+    recordedSessionId: cleanText(recordedSession?.id, ""),
+  };
+}
+
+function logWisCameraLoopOwner(streamId, reason = "", slot = "") {
+  logWisCameraMediaEvent("camera.loop.owner", {
+    ...wisCameraLoopOwnerSnapshot(streamId, slot),
+    reason,
+  }, { always: true, sampleMs: 500 });
+}
+
+function enterWisCameraRecordedMode(streamId, frame = null, options = {}) {
+  const key = cleanText(streamId, "");
+  if (!key) return null;
+  const slot = cleanText(options.slot, wisFocusedCameraSlot() || key);
+	  const existingSession = recordedWisCameraSession(key);
+	  const previousMode = wisCameraPlaybackOwnerMode(existingSession, wisCameraTimelineMode(key));
+	  const previousOwnerState = wisCameraPlaybackOwnerState(existingSession);
+	  if (wisCameraTimelineMode(key) !== "recorded") state.wisCameraTimelineModes.set(key, "recorded");
+	  const liveLoopSnapshotBeforeStop = wisCameraLoopOwnerSnapshot(key, slot);
+	  stopWisCameraTimer(slot);
+	  stopWisCameraTimer(key);
+  const timestampMs = Number(
+    options.timestampMs
+      ?? options.targetTimeMs
+      ?? frame?.seek_target_ms
+      ?? frame?.seekTargetMs
+      ?? frame?.timestamp_ms
+      ?? frame?.timestampMs
+      ?? 0
+  );
+	  setWisCameraTimelineOwnerState(state, key, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING, {
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    sessionId: cleanText(existingSession?.id, ""),
+	    reason: cleanText(options.reason, "timeline-seek"),
+	    caller: "enterWisCameraRecordedMode",
+	  });
+	  traceWisCameraBoundary("ownerMutation", {
+	    streamId: key,
+	    previousOwner: previousOwnerState,
+	    nextOwner: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+	    transition: `${previousOwnerState} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING}`,
+	    reason: cleanText(options.reason, "timeline-seek"),
+	    caller: "enterWisCameraRecordedMode",
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    frameLayerOwner: "recorded",
+	    ...wisCameraLoopOwnerSnapshot(key, slot),
+	  }, { stack: true });
+	  traceWisCameraBoundary("live.commit", {
+	    decision: "BLOCKED",
+	    streamId: key,
+	    ownerAtCommit: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+	    generation: Number(options.generation || existingSession?.generation || 0),
+	    frameTimestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+	    frameSource: "live-owner-fence",
+	    reason: "recorded-owner-fence",
+	    liveLoopActiveBeforeStop: Number(liveLoopSnapshotBeforeStop.liveLoopActiveCount || 0),
+	    liveLoopIgnoredBeforeStop: Number(liveLoopSnapshotBeforeStop.liveLoopIgnoredCount || 0),
+	    ...wisCameraLoopOwnerSnapshot(key, slot),
+	  });
+  logWisCameraMediaEvent("camera.playback.transition", {
+    streamId: key,
+    fromMode: previousMode,
+    toMode: "seeking",
+    fromOwnerState: previousOwnerState,
+    toOwnerState: WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING,
+    ownerStateTransition: `${previousOwnerState} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING}`,
+    frameLayerOwner: "recorded",
+    reason: cleanText(options.reason, "timeline-seek"),
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+    generation: Number(options.generation || existingSession?.generation || 0),
+  }, { always: true });
+  logWisCameraMediaEvent("camera.timeline.seek", {
+    streamId: key,
+    targetTimestampMs: Number.isFinite(timestampMs) ? timestampMs : 0,
+    resolvedTimestampMs: Number(frame?.timestamp_ms || frame?.timestampMs || timestampMs || 0),
+    ratio: Number(options.ratio),
+    segmentId: cleanText(frame?.id, ""),
+    segmentUrl: cleanText(frame?.url, ""),
+    generation: Number(options.generation || existingSession?.generation || 0),
+    reason: cleanText(options.reason, "timeline-seek"),
+  }, { always: true });
+  logWisCameraLoopOwner(key, "enter-recorded", slot);
+  return existingSession;
 }
 
 function wisCameraImageHasRecordedOwner(image) {
@@ -3769,13 +4975,33 @@ function wisCameraImageHasRecordedOwner(image) {
 }
 
 function blockLiveWisCameraImageWrite(image, streamId, reason = "live-write") {
-  if (!wisCameraImageHasRecordedOwner(image)) return false;
+  const activeSession = recordedWisCameraSession(streamId);
+  if (!wisCameraImageHasRecordedOwner(image) && !activeSession && !wisCameraRecordedOwnsStream(streamId)) return false;
+  traceWisCameraBoundary("live.commit", {
+    decision: "BLOCKED",
+    streamId,
+    ownerAtCommit: wisCameraTimelineOwnerStateContract(state, streamId),
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
+    frameTimestampMs: Number(image?.dataset?.wisPlaybackFrameMs || 0),
+    frameSource: image?.dataset?.wisPlaybackStream || "live",
+    imageOwner: image?.dataset?.wisMediaOwner || "",
+    reason,
+    ...wisCameraLoopOwnerSnapshot(streamId),
+  });
   logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
     streamId,
-    generation: Number(image?.dataset?.wisMediaGeneration || 0),
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
     imageOwner: image?.dataset?.wisMediaOwner,
     reason,
+    sessionId: cleanText(activeSession?.id, ""),
   }, { sampleMs: 1000 });
+  logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+    streamId,
+    generation: Number(activeSession?.generation || image?.dataset?.wisMediaGeneration || 0),
+    ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+    reason,
+    sessionId: cleanText(activeSession?.id, ""),
+  }, { always: true, sampleMs: 1000 });
   return true;
 }
 
@@ -3793,14 +5019,74 @@ function wisCameraPlaybackController(streamId) {
       getTimelineModel: () => wisCameraTimelineForStream(key),
       getPlaybackState: () => recordedWisCameraSession(key),
       findSegmentForTime: async (targetTimeMs, context = {}) => wisCameraSegmentForTarget(key, targetTimeMs, context),
-      loadSegment: async (segment, context = {}) => setWisCameraTimelineFrame(key, segment, {
-        force: false,
-        fromController: true,
-        restartSession: true,
-        source: context.source || "programmatic",
-        reason: context.reason || "controller-seek",
-        generation: context.generation,
-      }) || segment,
+	      onSeekPending: (context = {}) => {
+	        const slot = wisFocusedCameraSlot() || "cam-1";
+	        const segment = wisCameraSegmentForTarget(key, context.targetTimeMs || context.timestampMs, {
+	          requestedFrame: context.requestedFrame,
+	        });
+	        traceWisCameraBoundary("camera.seekRequested.entrypoint", {
+	          functionName: "wisCameraPlaybackController.onSeekPending",
+	          streamId: key,
+	          requestedTimestampMs: Number(context.targetTimeMs || context.timestampMs || 0),
+	          archiveWindowStartMs: Number(state.wisCameraTimeline?.availableRange?.start_ms ?? state.wisCameraTimeline?.available_range?.start_ms ?? state.wisCameraTimeline?.range?.start_ms ?? 0),
+	          archiveWindowEndMs: Number(state.wisCameraTimeline?.availableRange?.end_ms ?? state.wisCameraTimeline?.available_range?.end_ms ?? state.wisCameraTimeline?.range?.end_ms ?? 0),
+	          resolvedTimestampMs: Number(segment?.timestamp_ms || segment?.timestampMs || 0),
+	          recordedPlaybackPossible: Boolean(segment?.id && segment?.url),
+	          generation: Number(context.generation || 0),
+	          ownerBeforeSeek: wisCameraTimelineOwnerStateContract(state, key),
+	          reason: context.reason || "timeline-seek",
+	        });
+	        if (!segment?.id || !segment?.url) return null;
+	        stopWisCameraTimer(slot);
+        stopWisCameraTimer(key);
+        state.wisCameraTimelineSelections.set(key, segment);
+        const preservePaused = Boolean(recordedWisCameraSession(key)?.userPaused);
+        const session = startWisCameraRecordedSession(key, segment, {
+          explicitSeek: true,
+          restart: true,
+          generation: context.generation,
+          reason: context.reason || "timeline-seek",
+          timestampMs: context.targetTimeMs || context.timestampMs,
+          ratio: context.target?.ratio,
+          paused: preservePaused,
+        });
+        if (session) {
+          session.status = "seeking";
+          session.state = "seeking";
+          session.ownerState = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+          session.timelineOwnerState = WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_SEEKING;
+          session.frameOwner = "recorded";
+          session.timelineOwner = "recorded";
+          session.clockPaused = true;
+          session.userPaused = preservePaused;
+          session.currentWallTime = Number(context.targetTimeMs || segment.seek_target_ms || segment.timestamp_ms || session.currentWallTime || 0);
+          session.updatedAt = Date.now();
+        }
+        logWisCameraLoopOwner(key, "seek-pending", slot);
+        if (!renderWisCameraPlaybackInPlace(key, segment, { force: true, generation: context.generation })) renderWis();
+        updateWisCameraRecordedPlaybackUi(key, { currentMs: session?.currentWallTime, timeline: true });
+        return segment;
+      },
+      loadSegment: async (segment, context = {}) => {
+        const activeSession = recordedWisCameraSession(key);
+        if (
+          activeSession
+          && Number(activeSession.generation || 0) === Number(context.generation || 0)
+          && wisCameraTimelineFramePlaybackKey(activeSession.requestedFrame || activeSession.frame) === wisCameraTimelineFramePlaybackKey(segment)
+        ) {
+          state.wisCameraTimelineSelections.set(key, segment);
+          return { ...segment, playbackClockSource: "media" };
+        }
+        setWisCameraTimelineFrame(key, segment, {
+          force: context.source === "user",
+          fromController: true,
+          restartSession: true,
+          source: context.source || "programmatic",
+          reason: context.reason || "controller-seek",
+          generation: context.generation,
+        });
+        return { ...segment, playbackClockSource: "media" };
+      },
       drawFrameAt: (timestampMs) => {
         updateWisCameraRecordedPlaybackUi(key, { currentMs: timestampMs });
       },
@@ -3885,8 +5171,154 @@ function setWisCameraTextContent(element, text = "") {
 function stopWisCameraPlaybackStream(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
   stopWisCameraPlaybackController(key, "playback-stream-stop");
   stopWisCameraPlaybackState(state, key);
+  releaseMediaStreamWriter(key, { kind: "recorded-playback", generation: session?.generation });
+}
+
+function toggleWisCameraRecordedPlayback(camera = {}, event = null) {
+  const button = event?.currentTarget?.closest?.("[data-wis-camera-control='play-pause']")
+    || event?.target?.closest?.("[data-wis-camera-control='play-pause']")
+    || null;
+  const targetSummary = wisCameraControlTargetSummary(button || event?.target || null);
+  const slot = cleanText(targetSummary?.slot || camera._slot, wisFocusedCameraSlot() || "cam-1");
+  const streamId = cleanText(targetSummary?.streamId, wisCameraQualityStreamId(slot, camera));
+  const controller = streamId ? wisCameraPlaybackController(streamId) : null;
+  let beforeState = wisCameraPlayPauseStateForStream(streamId, { button, controller });
+  const renderForCurrentState = () => {
+    const currentCamera = wisCameraConfigForSlot(slot) || camera || {};
+    if (wisCameraIsPushConfig(currentCamera)) renderWisCameraTimelineFooter({ ...currentCamera, _slot: slot });
+  };
+  const currentButton = () => widgetById("wis")?.querySelector?.(
+    `[data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(streamId)}"]`
+  ) || null;
+  const resolveAfterState = () => wisCameraPlayPauseStateForStream(streamId, {
+    button: currentButton() || button,
+    controller,
+  });
+  const traceWithState = (eventName, resolved, extra = {}) => traceWisCameraPlayPause(eventName, streamId, wisCameraPlayPauseTraceContext(resolved, {
+    control: "play-pause",
+    slot,
+    target: targetSummary,
+    focusedSlot: wisFocusedCameraSlot() || "",
+    timelineStreamId: cleanText(state.wisCameraTimeline?.streamId, ""),
+    sessionKeys: Array.from(state.wisCameraRecordedSessions?.keys?.() || []).map((key) => cleanText(key, "")).filter(Boolean).slice(-10),
+    ...extra,
+  }));
+  traceWithState("controls.playpause.resolvedTarget", beforeState);
+  traceWithState("controls.playpause.controllerFound", beforeState, {
+    controllerFound: Boolean(controller),
+  });
+  traceWithState("controls.playpause.uiStateMismatch", beforeState, {
+    mismatch: beforeState.domMismatch,
+    domAction: beforeState.domAction,
+    domIcon: beforeState.domIcon,
+    expectedAction: beforeState.action,
+    expectedIcon: beforeState.icon,
+  });
+  traceWithState("controls.playpause.beforeState", beforeState);
+  traceWisCameraBoundary("playback.control.clicked", {
+    ...wisCameraPlaybackTracePayload(streamId, wisCameraPlayPauseTraceContext(beforeState, {
+      control: "play-pause",
+      action: beforeState.action,
+      slot,
+    })),
+    control: beforeState.action,
+  });
+  if (beforeState.domMismatch) {
+    renderForCurrentState();
+    const afterState = resolveAfterState();
+    const reason = "ui-state-mismatch-corrected";
+    setWisCameraNotice(streamId, "Play/Pause state refreshed", "warn", 2400);
+    traceWithState(`playback.${beforeState.action === "pause" ? "pause" : "resume"}.rejected`, beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    traceWithState("controls.playpause.afterState", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    return;
+  }
+  if (beforeState.disabledReason) {
+    const reason = beforeState.disabledReason;
+    setWisCameraNotice(streamId, reason === "not-recorded-mode" ? "Play/Pause unavailable: not in recorded mode" : "Play/Pause unavailable", "warn", 3200);
+    renderForCurrentState();
+    const afterState = resolveAfterState();
+    traceWithState("playback.resume.rejected", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    traceWithState("controls.playpause.afterState", beforeState, {
+      rejectionReason: reason,
+      reason,
+      afterState,
+    });
+    return;
+  }
+  const session = beforeState.session;
+  if (beforeState.action === "play") {
+    traceWithState("playback.resume.called", beforeState, {
+      reason: "timeline-play-button",
+    });
+    const resumed = resumeWisCameraPlaybackState(state, streamId, {
+      sessionId: session?.id,
+      generation: session?.generation,
+      reason: "timeline-play-button",
+    });
+    const controllerStarted = controller?.resumePlayback?.({ source: "control", reason: "timeline-play-button", generation: session?.generation });
+    renderForCurrentState();
+    const afterState = resolveAfterState();
+    if (!resumed) {
+      const reason = "state-resume-returned-null";
+      traceWithState("playback.resume.rejected", beforeState, {
+        rejectionReason: reason,
+        reason,
+        controllerStarted: Boolean(controllerStarted),
+        afterState,
+      });
+    } else {
+      traceWithState("playback.resume.started", beforeState, {
+        controllerStarted: Boolean(controllerStarted),
+        afterState,
+      });
+    }
+    if (!wisCameraActivePlaybackLoop(state, streamId) && resumed?.frame) {
+      renderWisCameraPlaybackInPlace(streamId, resumed.frame, { force: true, generation: resumed.generation });
+    }
+    traceWithState("controls.playpause.afterState", beforeState, { afterState });
+    return;
+  }
+  traceWithState("playback.pause.called", beforeState, {
+    reason: "timeline-pause-button",
+  });
+  const pausedSession = pauseWisCameraPlaybackState(state, streamId, {
+    sessionId: session?.id,
+    generation: session?.generation,
+    reason: "timeline-pause-button",
+  });
+  const controllerPaused = controller?.pausePlayback?.({ source: "control", reason: "timeline-pause-button", generation: session?.generation });
+  renderForCurrentState();
+  const afterState = resolveAfterState();
+  if (!pausedSession) {
+    const reason = "state-pause-returned-null";
+    traceWithState("playback.pause.rejected", beforeState, {
+      rejectionReason: reason,
+      reason,
+      controllerPaused: Boolean(controllerPaused),
+      afterState,
+    });
+  } else {
+    traceWithState("playback.pause.applied", beforeState, {
+      controllerPaused: Boolean(controllerPaused),
+      afterState,
+    });
+  }
+  traceWithState("controls.playpause.afterState", beforeState, { afterState });
 }
 
 function wisMonotonicNow() {
@@ -3907,27 +5339,94 @@ function stopWisCameraRecordedClock(streamId) {
   const key = cleanText(streamId, "");
   const timer = key ? state.wisCameraRecordedTickTimers.get(key) : null;
   if (!timer) return;
-  clearInterval(timer);
+  if (timer && typeof timer === "object" && timer.kind === "wis-camera-scheduler-task") {
+    stopWisCameraTimer(`recorded-clock:${key}`);
+  } else {
+    clearInterval(timer);
+    clearTimeout(timer);
+  }
   state.wisCameraRecordedTickTimers.delete(key);
+}
+
+function syncWisCameraPlayPauseButtonForSession(streamId, session = null) {
+  const key = cleanText(streamId, "");
+  if (!key) return false;
+  const widget = widgetById("wis");
+  const footer = widget?.querySelector?.(".wis-camera-timeline");
+  const button = footer?.querySelector?.(`[data-wis-camera-control="play-pause"][data-wis-camera-stream-id="${CSS.escape(key)}"]`);
+  if (!button) return false;
+  const resolved = wisCameraPlayPauseStateForStream(key, { button, session });
+  const expectedAction = resolved.action;
+  const expectedTitle = resolved.title;
+  const expectedPressed = resolved.expectedPressed;
+  const expectedIcon = resolved.icon;
+  const expectedDisabledReason = resolved.disabledReason;
+  const currentAction = cleanText(button.dataset?.wisCameraAction, "");
+  const currentIcon = cleanText(button.dataset?.icon, "");
+  const currentTitle = cleanText(button.getAttribute?.("title"), "");
+  const currentPressed = cleanText(button.getAttribute?.("aria-pressed"), "");
+  const currentDisabledReason = cleanText(button.dataset?.wisCameraDisabledReason, "");
+  if (
+    currentAction === expectedAction
+    && currentIcon === expectedIcon
+    && currentTitle === expectedTitle
+    && currentPressed === expectedPressed
+    && currentDisabledReason === expectedDisabledReason
+  ) return false;
+  traceWisCameraPlayPause("controls.playpause.uiStateMismatch", key, wisCameraPlayPauseTraceContext(resolved, {
+    control: "play-pause",
+    action: currentAction,
+    expectedAction,
+    expectedIcon,
+    expectedTitle,
+    expectedPressed,
+    expectedDisabledReason,
+    status: cleanText(session?.status, ""),
+    clockPaused: Boolean(session?.clockPaused),
+    button: wisCameraControlTargetSummary(button),
+    mismatch: true,
+  }));
+  if (footer?.dataset) footer.dataset.wisTimelineSignature = "playpause-state-mismatch";
+  const slot = wisCameraSlotForStreamId(key, button.dataset?.wisCameraSlot || "");
+  const camera = wisCameraConfigForSlot(slot) || focusedWisCameraTimelineConfig() || {};
+  if (wisCameraIsPushConfig(camera)) renderWisCameraTimelineFooter({ ...camera, _slot: slot });
+  return true;
 }
 
 function updateWisCameraRecordedPlaybackUi(streamId, options = {}) {
   const key = cleanText(streamId, "");
   const session = recordedWisCameraSession(key);
   if (!session) return;
+  if (syncWisCameraPlayPauseButtonForSession(key, session)) return;
   const overrideMs = Number(options.currentMs);
   const currentMs = Number.isFinite(overrideMs) && overrideMs > 0 ? overrideMs : wisCameraRecordedClockMs(session);
+  if (!state.wisCameraTimelineUiState) state.wisCameraTimelineUiState = new Map();
+  const uiState = state.wisCameraTimelineUiState.get(key) || { lastTimelineAt: 0, lastProgress: null, lastAriaAt: 0 };
+  state.wisCameraTimelineUiState.set(key, uiState);
+  const nowMs = performance.now();
+  const forceUi = Boolean(options.force || options.userInteracting);
+  const budget = wisCameraBudget(key, "timeline");
+  if (!forceUi && !budget.allowTimelineWork) return;
+  if (options.timelineOnly && !forceUi && nowMs - Number(uiState.lastTimelineAt || 0) < Number(budget.timelineMinIntervalMs || 250)) return;
   const widget = widgetById("wis");
   const footer = widget?.querySelector?.(".wis-camera-timeline");
   const title = footer?.querySelector?.(".wis-camera-timeline-title");
-  if (!options.timelineOnly) setWisCameraTextContent(title, wisCameraRecordedTimelineTitle(session, currentMs));
+  const setTimelineText = (element, text = "") => {
+    const nextText = String(text ?? "");
+    if (element && element.textContent !== nextText) {
+      element.textContent = nextText;
+      noteWisCameraPerf(state, key, "timelinePatches");
+    }
+  };
+  if (!options.timelineOnly) setTimelineText(title, wisCameraRecordedTimelineTitle(session, currentMs));
   const sessionElement = session.id
     ? widget?.querySelector?.(`[data-wis-recorded-session-id="${CSS.escape(session.id)}"]`)
     : null;
   const status = sessionElement?.querySelector?.(".wis-camera-sync-status");
-  if (status && ["seeking", "buffering", "loading"].includes(session.status)) {
-    setWisCameraTextContent(status, `Syncing recording from ${cameraTimelineFrameLabel(session.frame)}...`);
+	  if (status && ["seeking", "buffering", "loading", "catching-up", "rebuffering", "restarting", "stalled", "gap", "ended"].includes(session.status)) {
+    setTimelineText(status, wisCameraRecordedTimelineTitle(session, currentMs));
   }
+  if (options.timeline === false) return;
   const timeline = state.wisCameraTimeline.streamId === key ? state.wisCameraTimeline : null;
   const frames = Array.isArray(timeline?.frames) ? timeline.frames : [];
   const { visibleStart, visibleEnd } = wisCameraTimelineTimeWindow(timeline || {}, frames, { playbackPosition: currentMs });
@@ -3945,10 +5444,39 @@ function updateWisCameraRecordedPlaybackUi(streamId, options = {}) {
       }, { sampleMs: 1000 });
       return;
     }
-    scrubber?.style?.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+    const previousProgress = Number(uiState.lastProgress);
+    const progressDelta = Number.isFinite(previousProgress) ? Math.abs(progress - previousProgress) : Infinity;
+    if (!forceUi && nowMs - Number(uiState.lastTimelineAt || 0) < Number(budget.timelineMinIntervalMs || 250) && progressDelta < 0.35) {
+      return;
+    }
+    const progressValue = `${progress}%`;
+    if (scrubber?.style?.getPropertyValue?.("--wis-camera-timeline-progress") !== progressValue) {
+      scrubber?.style?.setProperty("--wis-camera-timeline-progress", progressValue);
+      noteWisCameraPerf(state, key, "timelinePatches");
+      uiState.lastProgress = progress;
+      uiState.lastTimelineAt = nowMs;
+      traceWisCameraBoundary("timeline.progress.updated", {
+        streamId: key,
+        owner: wisCameraTimelineOwnerStateContract(state, key),
+        requestedTimestampMs: Number(session.requestedSeekTimestampMs || 0),
+        persistedSeekTimestampMs: Number(session.persistedSeekTimestampMs || session.requestedSeekTimestampMs || 0),
+        mediaAnchorMs: Number(session.anchorRecordingTimeMs || 0),
+        wallAnchorMs: Number(session.anchorWallTimeMs || 0),
+        playbackClockMs: currentMs,
+        visibleFrameMs: Number(session.lastDisplayedFrameTimeMs || 0),
+        archiveWindowStartMs: Number(timeline?.availableRange?.start_ms ?? timeline?.available_range?.start_ms ?? timeline?.range?.start_ms ?? visibleStart ?? 0),
+        archiveWindowEndMs: Number(timeline?.availableRange?.end_ms ?? timeline?.available_range?.end_ms ?? timeline?.range?.end_ms ?? visibleEnd ?? 0),
+        generation: Number(session.generation || 0),
+        paused: Boolean(session.clockPaused),
+        playbackRate: Number(session.playbackRate || session.rate || 1),
+        progress,
+      });
+    }
     const valueText = cameraTimelineFrameLabel({ timestamp_ms: currentMs });
-    if (scrubber?.getAttribute?.("aria-valuetext") !== valueText) {
+    if ((forceUi || nowMs - Number(uiState.lastAriaAt || 0) >= 1000) && scrubber?.getAttribute?.("aria-valuetext") !== valueText) {
       scrubber?.setAttribute?.("aria-valuetext", valueText);
+      noteWisCameraPerf(state, key, "timelinePatches");
+      uiState.lastAriaAt = nowMs;
     }
   }
 }
@@ -3957,10 +5485,11 @@ function startWisCameraRecordedClock(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
   stopWisCameraRecordedClock(key);
-  updateWisCameraRecordedPlaybackUi(key);
-  state.wisCameraRecordedTickTimers.set(key, window.setInterval(() => {
-    updateWisCameraRecordedPlaybackUi(key);
-  }, 500));
+  updateWisCameraRecordedPlaybackUi(key, { force: true });
+  const task = scheduleWisCameraTimer(`recorded-clock:${key}`, () => {
+    updateWisCameraRecordedPlaybackUi(key, { timelineOnly: true });
+  }, 500, { streamId: key, mode: "timeline" });
+  state.wisCameraRecordedTickTimers.set(key, task);
 }
 
 function startWisCameraRecordedSession(streamId, frame = null, options = {}) {
@@ -3968,76 +5497,82 @@ function startWisCameraRecordedSession(streamId, frame = null, options = {}) {
   if (!key || !frame?.id) return null;
   const existing = recordedWisCameraSession(key);
   if (!options.restart && wisCameraTimelineFramePlaybackKey(existing?.frame) === wisCameraTimelineFramePlaybackKey(frame)) return existing;
+  enterWisCameraRecordedMode(key, frame, {
+    reason: options.reason || "recorded-session-start",
+    timestampMs: options.timestampMs,
+    generation: options.generation,
+    ratio: options.ratio,
+  });
   stopWisCameraTimer(key);
   stopWisCameraRecordedClock(key);
   const session = startWisCameraPlaybackSeek(state, key, frame, {
     explicitSeek: options.explicitSeek,
     restart: options.restart,
     generation: options.generation,
+    paused: options.paused,
+    userPaused: options.paused,
+    reason: options.reason,
   });
+  logWisCameraLoopOwner(key, "recorded-session-start");
   return session;
-}
-
-function syncWisCameraRecordedSessionToDisplayedFrame(streamId, frame = null, status = "playing", options = {}) {
-  const key = cleanText(streamId, "");
-  const session = recordedWisCameraSession(key);
-  if (!session) return null;
-  const sessionId = cleanText(options.sessionId, "");
-  if (sessionId && session.id !== sessionId) return null;
-  const next = setWisCameraPlaybackFrame(state, key, frame || session.frame, {
-    sessionId,
-    generation: session.generation,
-    status: status === "playing" ? "recordedPlaying" : status,
-    state: status === "playing" ? "recordedPlaying" : status,
-    paused: false,
-    updateClockAnchor: options.updateClockAnchor !== false,
-  });
-  if (next) updateWisCameraRecordedPlaybackUi(key);
-  return next;
 }
 
 function stopWisCameraRecordedSession(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
+  traceWisCameraBoundary("fallback.live", {
+    functionName: "stopWisCameraRecordedSession",
+    streamId: key,
+    reason: "recorded-session-stop",
+    explicit: false,
+    previousOwner: wisCameraPlaybackOwnerState(session, wisCameraTimelineOwnerStateContract(state, key)),
+    generation: Number(session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   stopWisCameraRecordedClock(key);
   stopWisCameraPlaybackController(key, "recorded-session-stop");
   stopWisCameraPlaybackState(state, key);
+  releaseMediaStreamWriter(key, { kind: "recorded-playback", generation: session?.generation });
 }
 
-function wisCameraDisplayedFrameFromImage(image, fallbackFrame = null) {
-  return wisCameraDisplayedFrameFromImageContract(image, fallbackFrame);
-}
-
-async function streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, baseFrame = null, fallbackToImageSrc = null) {
-  const key = cleanText(streamId, "");
-  const session = recordedWisCameraSession(key);
-  const mediaOwner = wisCameraRecordedMediaOwner(key, session);
-  return streamWisCameraPushPlaybackFramesContract(state, {
-    streamId: key,
-    image,
-    playbackUrl,
-    baseFrame,
-    sessionId: session?.id,
-    generation: session?.generation,
-    mediaOwner,
-    fallbackToImageSrc,
-    onFrameDisplayed: () => updateWisCameraRecordedPlaybackUi(key),
-    onEnded: () => updateWisCameraRecordedPlaybackUi(key),
-    onError: () => updateWisCameraRecordedPlaybackUi(key),
-    onMediaEvent: (event, payload = {}) => logWisCameraMediaEvent(event, payload, {
-      sampleMs: event.includes(".sample") ? 1000 : 0,
-    }),
-  });
+function wisCameraSurfaceElement(slot = "") {
+  const key = cleanText(slot, "");
+  if (!key) return null;
+  return widgetById("wis")?.querySelector?.(`.wis-node-webcam_placeholder[data-wis-camera-slot="${CSS.escape(key)}"]`) || null;
 }
 
 function renderWisCameraPlaybackInPlace(streamId, frame = null, options = {}) {
   const key = cleanText(streamId, "");
   if (!key) return false;
-  const slot = wisFocusedCameraSlot() || "cam-1";
+  const slot = wisCameraSlotForStreamId(key, options.slot || frame?._slot || frame?.slot || "");
   const camera = wisCameraConfigForSlot(slot) || {};
-  if (!wisCameraIsPushConfig(camera) || wisCameraQualityStreamId(slot, camera) !== key) return false;
-  const element = widgetById("wis")?.querySelector?.(`[data-wis-camera-slot="${CSS.escape(slot)}"]`);
-  if (!element) return false;
+  if (!wisCameraIsPushConfig(camera) || wisCameraQualityStreamId(slot, camera) !== key) {
+    traceWisCameraBoundary("recorded.render.rejected", wisCameraPlaybackTracePayload(key, {
+      functionName: "renderWisCameraPlaybackInPlace",
+      streamId: key,
+      slot,
+      focusedSlot: wisFocusedCameraSlot() || "",
+      reason: "stream-slot-mismatch",
+      qualityStreamId: wisCameraQualityStreamId(slot, camera),
+      baseStreamId: wisCameraBaseStreamId(slot, camera),
+      frameId: cleanText(frame?.id, ""),
+    }));
+    return false;
+  }
+  const element = wisCameraSurfaceElement(slot);
+  if (!element) {
+    traceWisCameraBoundary("recorded.render.rejected", wisCameraPlaybackTracePayload(key, {
+      functionName: "renderWisCameraPlaybackInPlace",
+      streamId: key,
+      slot,
+      focusedSlot: wisFocusedCameraSlot() || "",
+      reason: "surface-element-missing",
+      frameId: cleanText(frame?.id, ""),
+    }));
+    return false;
+  }
   const showCameraIssue = (text, type = "recorded-playback-error") => {
     element.classList.remove("has-camera");
     element.replaceChildren();
@@ -4057,29 +5592,65 @@ function renderWisCameraPlaybackInPlace(streamId, frame = null, options = {}) {
 function returnWisCameraToLive(streamId) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  const session = recordedWisCameraSession(key);
+  traceWisCameraBoundary("fallback.live", {
+    functionName: "returnWisCameraToLive",
+    streamId: key,
+    reason: "live-button",
+    explicit: true,
+    previousOwner: wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING),
+    nextOwner: WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE,
+    generation: Number(session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   state.wisCameraTimelineSelections.delete(key);
   stopWisCameraRecordedSession(key);
+  logWisCameraMediaEvent("camera.playback.transition", {
+    streamId: key,
+    fromMode: wisCameraPlaybackOwnerMode(session, "recorded"),
+    toMode: "live",
+    fromOwnerState: wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING),
+    toOwnerState: WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE,
+    ownerStateTransition: `${wisCameraPlaybackOwnerState(session, WIS_CAMERA_TIMELINE_OWNER_STATES.RECORDED_PLAYING)} -> ${WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE}`,
+    frameLayerOwner: "live",
+    reason: "live-button",
+    timestampMs: Number(session?.currentWallTime || session?.recordedStartWallTime || 0),
+    generation: Number(session?.generation || 0),
+  }, { always: true });
+  logWisCameraLoopOwner(key, "return-live");
   setWisCameraTimelineMode(key, "live");
 }
 
 function setWisCameraTimelineFrame(streamId, frame = null, options = {}) {
   const key = cleanText(streamId, "");
   if (!key) return;
+  traceWisCameraBoundary("timeline.app.setFrame", wisCameraPlaybackTracePayload(key, {
+    functionName: "setWisCameraTimelineFrame",
+    frameId: cleanText(frame?.id, ""),
+    requestedTimestampMs: Number(frame?.seek_target_ms || frame?.seekTargetMs || frame?.timestamp_ms || frame?.timestampMs || 0),
+    frameTimestampMs: Number(frame?.timestamp_ms || frame?.timestampMs || 0),
+    fromController: Boolean(options.fromController),
+    force: Boolean(options.force),
+    restartSession: options.restartSession === undefined ? null : Boolean(options.restartSession),
+    source: cleanText(options.source, ""),
+    reason: cleanText(options.reason, ""),
+    requestedGeneration: Number(options.generation ?? options.playbackGeneration ?? options.seekToken ?? 0),
+  }));
+  const requestedGeneration = Number(options.generation ?? options.playbackGeneration ?? options.seekToken);
+  const activeRecordedSession = recordedWisCameraSession(key);
+  if (Number.isFinite(requestedGeneration) && requestedGeneration > 0 && Number(activeRecordedSession?.generation || 0) > Math.round(requestedGeneration)) {
+    logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
+      streamId: key,
+      generation: Math.round(requestedGeneration),
+      activeGeneration: Number(activeRecordedSession?.generation || 0),
+      reason: "timeline-frame-stale-generation",
+    }, { sampleMs: 1000 });
+    return activeRecordedSession;
+  }
   const force = Boolean(options.force);
   if (frame?.id && frame?.url && !options.fromController) {
-    const controller = wisCameraPlaybackController(key);
-    if (controller) {
-      const source = cleanText(options.source, options.autoplay ? "playback" : "programmatic");
-      void controller.seekTo(wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, Date.now())), {
-        source,
-        reason: cleanText(options.reason, options.autoplay ? "timeline-autoplay" : "timeline-select"),
-        frame,
-        restart: force,
-      }).catch((error) => {
-        state.lastError = error.message || String(error);
-      });
-      return null;
-    }
+    stopWisCameraPlaybackController(key, "timeline-direct-select");
   }
   let session = null;
   if (frame?.id && frame?.url) {
@@ -4088,6 +5659,9 @@ function setWisCameraTimelineFrame(streamId, frame = null, options = {}) {
       explicitSeek: !options.autoplay,
       restart: options.restartSession === undefined ? force : Boolean(options.restartSession),
       generation: options.generation,
+      reason: options.reason || "timeline-frame-selected",
+      timestampMs: frame.seek_target_ms || frame.seekTargetMs || frame.timestamp_ms || frame.timestampMs,
+      ratio: options.ratio,
     });
   } else {
     state.wisCameraTimelineSelections.delete(key);
@@ -4131,8 +5705,27 @@ function applyPendingWisCameraTimelineSeek(streamId, frames = [], mode = "") {
   const frame = resolveWisCameraPendingTimelineSeek(pending, frames, timelineMode, state.wisCameraTimeline);
   if (!frame) return false;
   state.wisCameraTimelinePendingSeeks.delete(key);
-  // Legacy smoke guard: setWisCameraTimelineFrame(key, frame, { force: true })
-  setWisCameraTimelineFrame(key, frame, { force: true, source: "user", reason: "pending-timeline-seek" });
+  const targetTimeMs = Number(pending.targetTime ?? pending.target_time ?? frame.timestamp_ms ?? frame.timestampMs);
+  const controller = wisCameraPlaybackController(key);
+  traceWisCameraBoundary("timeline.pending.seek.applied", wisCameraPlaybackTracePayload(key, {
+    functionName: "applyPendingWisCameraTimelineSeek",
+    targetTimeMs,
+    frameId: cleanText(frame?.id, ""),
+    controllerFound: Boolean(controller),
+    mode: timelineMode,
+  }));
+  if (controller && Number.isFinite(targetTimeMs) && targetTimeMs > 0) {
+    void controller.seekTo(targetTimeMs, {
+      source: "user",
+      reason: "pending-timeline-seek",
+      frame,
+      restart: true,
+    }).catch((error) => {
+      state.lastError = error.message || String(error);
+    });
+  } else {
+    setWisCameraTimelineFrame(key, frame, { force: true, source: "user", reason: "pending-timeline-seek" });
+  }
   return true;
 }
 
@@ -4150,24 +5743,62 @@ function focusedWisCameraTimelineConfig() {
   return wisCameraIsPushConfig(camera) ? { ...camera, _slot: slot } : null;
 }
 
+function armWisCameraTimelineLoadWatchdog(streamId, mode, startedAt, loadSeq) {
+  window.setTimeout(() => {
+    const timeline = state.wisCameraTimeline || {};
+    if (
+      !timeline.loading
+      || timeline.streamId !== streamId
+      || timeline.mode !== mode
+      || Number(timeline.loadingStartedAt || timeline.loading_started_at || 0) !== Number(startedAt)
+      || Number(state.wisCameraTimelineLoadSeq || 0) !== Number(loadSeq)
+    ) return;
+    state.wisCameraTimeline = {
+      ...timeline,
+      streamId,
+      mode,
+      loading: false,
+      loadingStartedAt: 0,
+      loadedAt: 0,
+      error: "Timeline load stalled; retrying...",
+    };
+    renderWisCameraTimelineFooter(focusedWisCameraTimelineConfig());
+    void loadWisCameraTimeline(streamId, "stale-watchdog", mode);
+  }, WIS_CAMERA_TIMELINE_LOAD_STALE_MS);
+}
+
 async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
   const key = cleanText(streamId, "cam-1");
   const timelineMode = cleanText(mode, wisCameraTimelineMode(key));
-  if (state.wisCameraTimeline.loading && state.wisCameraTimeline.streamId === key && state.wisCameraTimeline.mode === timelineMode) return;
+  const currentTimeline = state.wisCameraTimeline || {};
+  const loadingStartedAt = Number(currentTimeline.loadingStartedAt || currentTimeline.loading_started_at || 0);
+  const loadingAgeMs = loadingStartedAt > 0 ? Date.now() - loadingStartedAt : Infinity;
+  if (
+    currentTimeline.loading
+    && currentTimeline.streamId === key
+    && currentTimeline.mode === timelineMode
+    && loadingAgeMs < WIS_CAMERA_TIMELINE_LOAD_STALE_MS
+  ) return;
+  const startedAt = Date.now();
+  const loadSeq = Number(state.wisCameraTimelineLoadSeq || 0) + 1;
+  state.wisCameraTimelineLoadSeq = loadSeq;
   state.wisCameraTimeline = {
     ...state.wisCameraTimeline,
     streamId: key,
     mode: timelineMode,
     loading: true,
+    loadingStartedAt: startedAt,
     error: "",
   };
   renderWisCameraTimelineFooter(focusedWisCameraTimelineConfig());
+  armWisCameraTimelineLoadWatchdog(key, timelineMode, startedAt, loadSeq);
   try {
     const payload = await fetchJson("/camera/push-timeline", {
       method: "POST",
       timeoutMs: 10000,
       body: { stream_id: key, mode: timelineMode, seconds: 600 },
     });
+    if (Number(state.wisCameraTimelineLoadSeq || 0) !== loadSeq) return;
     state.wisCameraTimeline = {
       streamId: cleanText(payload?.stream_id, key),
       mode: cleanText(payload?.mode, timelineMode),
@@ -4176,6 +5807,7 @@ async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
       range: payload?.range && typeof payload.range === "object" ? payload.range : null,
       availableRange: payload?.available_range && typeof payload.available_range === "object" ? payload.available_range : null,
       loadedAt: Date.now(),
+      loadingStartedAt: 0,
       loading: false,
       error: "",
     };
@@ -4187,12 +5819,14 @@ async function loadWisCameraTimeline(streamId, origin = "manual", mode = "") {
     });
     if (applyPendingWisCameraTimelineSeek(key, state.wisCameraTimeline.frames, timelineMode)) return;
   } catch (error) {
+    if (Number(state.wisCameraTimelineLoadSeq || 0) !== loadSeq) return;
     state.wisCameraTimeline = {
       ...state.wisCameraTimeline,
       streamId: key,
       mode: timelineMode,
       loading: false,
       loadedAt: Date.now(),
+      loadingStartedAt: 0,
       error: error.message || String(error),
     };
   }
@@ -4218,6 +5852,17 @@ function scheduleWisCameraTimelineLoad(streamId, origin = "render", mode = "") {
 function setWisCameraTimelineMode(streamId, mode = "live") {
   const key = cleanText(streamId, "cam-1");
   const nextMode = cleanText(mode, "live") === "recorded" ? "recorded" : "live";
+  traceWisCameraBoundary(nextMode === "live" ? "fallback.live" : "timeline.mode", {
+    functionName: "setWisCameraTimelineMode",
+    streamId: key,
+    previousMode: wisCameraTimelineMode(key),
+    nextMode,
+    previousOwner: wisCameraTimelineOwnerStateContract(state, key),
+    nextOwner: nextMode === "live" ? WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE : wisCameraTimelineOwnerStateContract(state, key),
+    explicit: nextMode === "live",
+    reason: "timeline-mode-button",
+    ...wisCameraLoopOwnerSnapshot(key),
+  }, { stack: true });
   state.wisCameraTimelineModes.set(key, nextMode);
   state.wisCameraTimelineSelections.delete(key);
   if (nextMode === "live") stopWisCameraRecordedSession(key);
@@ -4297,7 +5942,7 @@ async function loadWisCameraRelaySnapshot(slot, camera, image, showCameraIssue) 
     })) {
       publishWisCameraDebugSnapshot(slot, { type: "snapshot-relay-loaded" });
     }
-    syncWisCameraAspect(image.closest?.("[data-wis-camera-slot]"), image);
+    syncWisCameraAspect(image.closest?.(".wis-node-webcam_placeholder[data-wis-camera-slot]") || image.closest?.("[data-wis-camera-slot]"), image);
   } catch (error) {
     showCameraIssue(error.message || "Camera relay could not fetch the DVR snapshot.", "snapshot-relay-error");
   }
@@ -4512,12 +6157,14 @@ function wisCameraShouldUseSnapshotRelay(camera = {}, url = "") {
 }
 
 function renderWisCameraRelayImage(element, slot, camera, showCameraIssue) {
+  const streamId = wisCameraBaseStreamId(slot, camera);
   const image = document.createElement("img");
   image.className = "wis-camera-image wis-camera-snapshot";
   image.alt = camera.label || slot;
   image.addEventListener("load", () => syncWisCameraAspect(element, image));
   let inFlight = false;
   const refresh = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
     if (inFlight) return;
     inFlight = true;
     void loadWisCameraRelaySnapshot(slot, camera, image, showCameraIssue).finally(() => {
@@ -4527,7 +6174,7 @@ function renderWisCameraRelayImage(element, slot, camera, showCameraIssue) {
   element.classList.add("has-camera");
   element.append(image);
   refresh();
-  state.wisCameraTimers.set(slot, setInterval(refresh, 2500));
+  scheduleWisCameraTimer(slot, refresh, 2500, { streamId, mode: "live" });
 }
 
 function renderWisCameraStreamRelayImage(element, slot, camera, showCameraIssue) {
@@ -4557,6 +6204,7 @@ function renderWisCameraStreamRelayImage(element, slot, camera, showCameraIssue)
 }
 
 function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
+  const streamId = wisCameraBaseStreamId(slot, camera);
   const retry = state.wisCameraRtspRetryAfter.get(slot);
   if (retry && retry.until > Date.now()) {
     const span = document.createElement("span");
@@ -4577,6 +6225,7 @@ function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
   element.append(status);
   let inFlight = false;
   const refresh = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
     if (inFlight) return;
     inFlight = true;
     void loadWisCameraRtspFrame(element, slot, camera, image, status, showCameraIssue).finally(() => {
@@ -4584,7 +6233,7 @@ function renderWisCameraRtspRelayImage(element, slot, camera, showCameraIssue) {
     });
   };
   refresh();
-  state.wisCameraTimers.set(slot, setInterval(refresh, 2000));
+  scheduleWisCameraTimer(slot, refresh, 2000, { streamId, mode: "live" });
 }
 
 function wisCameraPushFramePollMs(camera = {}) {
@@ -4593,13 +6242,50 @@ function wisCameraPushFramePollMs(camera = {}) {
 
 function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue) {
   const streamId = wisCameraQualityStreamId(slot, camera);
+  const activeRecordedSession = recordedWisCameraSession(streamId);
+  if (activeRecordedSession || wisCameraRecordedOwnsStream(streamId)) {
+    logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
+      streamId,
+      generation: Number(activeRecordedSession?.generation || 0),
+      sessionId: cleanText(activeRecordedSession?.id, ""),
+      reason: "push-frame-poll-render-blocked",
+    }, { sampleMs: 1000 });
+    logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+      streamId,
+      generation: Number(activeRecordedSession?.generation || 0),
+      ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+      sessionId: cleanText(activeRecordedSession?.id, ""),
+      reason: "push-frame-poll-render-blocked",
+    }, { always: true, sampleMs: 1000 });
+    if (activeRecordedSession) {
+      renderWisCameraPushArchiveFrame(element, slot, camera, activeRecordedSession.frame || activeRecordedSession.requestedFrame, showCameraIssue, {
+        generation: activeRecordedSession.generation,
+      });
+    }
+    return;
+  }
   const baseStreamId = wisCameraBaseStreamId(slot, camera);
   const configuredFrameUrl = streamId === baseStreamId
     ? (cleanText(camera.frameUrl || camera.frame_url, "") || cameraPushFrameUrl(streamId))
     : cameraPushFrameUrl(streamId);
   const image = document.createElement("img");
+  const liveOwner = { kind: "live", streamId, generation: 0 };
   image.className = "wis-camera-image wis-camera-stream wis-camera-push is-frame-polled";
   image.alt = camera.label || slot;
+  if (!claimMediaWriter(image, liveOwner)) {
+    logWisCameraMediaEvent("camera.media.live.write.blocked_by_recorded_owner", {
+      streamId,
+      generation: 0,
+      reason: "push-frame-poll-claim",
+    }, { sampleMs: 1000 });
+    logWisCameraMediaEvent("camera.timeline.live_update.blocked_by_recorded_owner", {
+      streamId,
+      generation: 0,
+      ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+      reason: "push-frame-poll-claim",
+    }, { always: true, sampleMs: 1000 });
+    return;
+  }
   const status = document.createElement("span");
   status.className = "wis-camera-message warn";
   status.textContent = "Connecting to live DVR frames...";
@@ -4627,6 +6313,8 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
   };
 
   const refreshFrame = () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-refresh")) return;
     if (frameInFlight) return;
     frameInFlight = true;
     const loader = new Image();
@@ -4635,7 +6323,25 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     loader.addEventListener("load", () => {
       frameInFlight = false;
       if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll")) return;
+      if (!isMediaWriterCurrent(image, liveOwner)) {
+        logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
+          streamId,
+          generation: 0,
+          ownerKind: "live",
+          imageOwner: image.dataset?.wisMediaOwner,
+          reason: "push-frame-poll-stale-owner",
+        }, { sampleMs: 1000 });
+        return;
+      }
       image.src = loader.src;
+      noteWisCameraPerf(state, streamId, "srcChanges");
+      image.dataset.wisPlaybackStream = "live";
+      image.dataset.wisPlaybackFrameMs = "";
+      image.dataset.wisPlaybackFrameId = "";
+      rememberWisCameraLastGoodFrameFromImage(state, streamId, image, null, {
+        ownerKind: "live",
+        generation: 0,
+      });
       syncWisCameraAspect(element, loader);
       status.remove();
       actions.remove();
@@ -4656,18 +6362,22 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     }, { once: true });
     loader.addEventListener("error", () => {
       frameInFlight = false;
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-error")) return;
       showStatusBeforeFirstFrame("Waiting for the first live DVR frame...");
     }, { once: true });
     loader.src = cameraCacheBustedUrl(configuredFrameUrl);
   };
 
   const refreshStatus = async () => {
+    if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-refresh")) return;
     if (statusInFlight) return;
     statusInFlight = true;
     try {
       const payload = await fetchJson(cameraPushStatusUrl(streamId), { timeoutMs: 8000 });
       const stateLabel = cleanText(payload?.state, "listening");
       const frameAvailable = Boolean(payload?.frame?.available);
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-result")) return;
       if (!frameAvailable) {
         showStatusBeforeFirstFrame(stateLabel === "listening"
           ? `Listening for DVR RTMP push${ingestUrl ? `: ${ingestUrl}` : "."}`
@@ -4692,6 +6402,7 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
         publishWisCameraDebugSnapshot(slot, { type: "push-frame-loaded" });
       }
     } catch (error) {
+      if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-status-error")) return;
       if (!frameLoaded) showCameraIssue(error.message || "DVR RTMP push status could not be read.", "push-frame-error");
     } finally {
       statusInFlight = false;
@@ -4699,6 +6410,7 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
   };
 
   const tick = () => {
+    if (blockLiveWisCameraImageWrite(image, streamId, "push-frame-poll-tick")) return;
     refreshFrame();
     const now = Date.now();
     if (now - lastStatusAt >= 5000) {
@@ -4707,238 +6419,77 @@ function renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue)
     }
   };
   tick();
-  state.wisCameraTimers.set(slot, setInterval(tick, wisCameraPushFramePollMs(camera)));
+  scheduleWisCameraTimer(slot, tick, wisCameraPushFramePollMs(camera), { streamId, mode: "live" });
 }
 
 function renderWisCameraPushArchiveFrame(element, slot, camera, frame, showCameraIssue, options = {}) {
   const streamId = wisCameraQualityStreamId(slot, camera);
-  const forceSync = Boolean(options.force);
   stopWisCameraTimer(slot);
   stopWisCameraTimer(streamId);
-  if (!frame?.id || !frame?.url) {
-    showCameraIssue("No recording for this period.", "push-timeline-frame-missing");
-    return;
-  }
-  const timelineMode = wisCameraTimelineMode(streamId);
-  let session = recordedWisCameraSession(streamId);
-  if (!session || wisCameraTimelineFramePlaybackKey(session.frame) !== wisCameraTimelineFramePlaybackKey(frame)) {
-    session = startWisCameraRecordedSession(streamId, frame, { explicitSeek: forceSync, restart: forceSync });
-  }
-  const sessionId = cleanText(session?.id, "");
-  const mediaOwner = wisCameraRecordedMediaOwner(streamId, session);
-  const currentSessionMatches = () => wisCameraRecordedSessionMatches(recordedWisCameraSession(streamId), sessionId);
-  const syncDisplayedFrame = (displayedFrame, nextStatus = "playing", syncOptions = {}) => {
-    const activeSession = recordedWisCameraSession(streamId);
-    if (!wisCameraRecordedSessionMatches(activeSession, sessionId)) return null;
-    return syncWisCameraRecordedSessionToDisplayedFrame(streamId, displayedFrame, nextStatus, {
-      holdUntilNextFrame: image.dataset.wisPlaybackStream === "1",
-      sessionId,
-      updateClockAnchor: syncOptions.updateClockAnchor !== false,
-    });
-  };
-  const previousMedia = Array.from(element.querySelectorAll(".wis-camera-image, .wis-camera-video"));
-  previousMedia.forEach((media) => {
-    if (media?.tagName === "IMG") claimMediaWriter(media, mediaOwner);
-  });
-  element.querySelectorAll(".wis-camera-message, .wis-camera-fallback").forEach((node) => node.remove());
-  const image = document.createElement("img");
-  const keepPreviousUntilReady = previousMedia.length > 0;
-  image.className = `wis-camera-image wis-camera-stream wis-camera-push is-timeline-frame${keepPreviousUntilReady ? " is-buffering" : ""}`;
-  image.alt = `${camera.label || slot} playback from ${cameraTimelineFrameLabel(frame)}`;
-  image.decoding = "async";
-  image.loading = "eager";
-  image.fetchPriority = "high";
-  if (session?.id) {
-    element.dataset.wisRecordedSessionId = session.id;
-    image.dataset.wisRecordedSessionId = session.id;
-  }
-  claimMediaWriter(image, mediaOwner);
-  const status = document.createElement("span");
-  status.className = "wis-camera-message warn wis-camera-sync-status";
-  status.textContent = `Syncing recording from ${cameraTimelineFrameLabel(frame)}...`;
-  element.classList.add("has-camera");
-  element.append(image, status);
-  let imageLoaded = false;
-  const reveal = () => {
-    if (!imageLoaded) return;
-    image.classList.remove("is-buffering");
-    previousMedia.forEach((media) => {
-      if (media !== image && media.isConnected) media.remove();
-    });
-  };
-  const revealTimer = keepPreviousUntilReady ? window.setTimeout(() => {
-    if (currentSessionMatches()) reveal();
-  }, 550) : 0;
+  const session = recordedWisCameraSession(streamId);
   const archiveFrameUrl = cameraCacheBustedUrl(cleanText(frame?.url, ""));
+  const budget = wisCameraBudget(streamId, "recorded");
+  const requestedFps = Number(camera.fps || camera.frameFps || camera.frame_fps || 15);
+  const playbackFps = Math.max(1, Math.round(Math.min(Number.isFinite(requestedFps) && requestedFps > 0 ? requestedFps : 15, budget.recordedVisualFps || 1)));
   const playbackUrl = cameraCacheBustedUrl(cameraPushPlaybackUrl(streamId, frame, {
-    fps: camera.fps || camera.frameFps || camera.frame_fps || 15,
-    follow: timelineMode === "live" && !session?.explicitSeek,
+    fps: playbackFps,
+    follow: false,
   }) || archiveFrameUrl);
-  let playbackStarted = false;
-  let playbackFallbackActive = false;
-  let firstFramePatchSent = false;
-  const markFirstRecordedFrameDisplayed = (displayedFrame) => {
-    if (firstFramePatchSent) return;
-    firstFramePatchSent = true;
-    wisCameraPlaybackController(streamId)?.markFirstRecordedFrameDisplayed?.(displayedFrame, {
-      source: forceSync ? "user" : "restore",
-      reason: forceSync ? "timeline-seek-first-frame" : "recorded-restore-first-frame",
-      firstFrameTimeMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, Date.now())),
-      segmentId: cleanText(frame.id, ""),
-    });
-  };
-  const displayArchiveFrame = async (reason = "first-frame", displayOptions = {}) => {
-    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return false;
-    logWisCameraMediaEvent("camera.media.first_frame.fetch.start", {
-      streamId,
-      generation: Number(session?.generation || 0),
-      ownerKind: mediaOwner.kind,
-      imageOwner: image.dataset.wisMediaOwner,
-      frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-      reason,
-    });
-    image.dataset.wisPlaybackStream = "";
-    image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
-    image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-    try {
-      const swapped = await decodeAndSwapImage(image, archiveFrameUrl, mediaOwner, {
-        env: window,
-        onStale: () => logWisCameraMediaEvent("camera.media.stale_writer.ignored", {
-          streamId,
-          generation: Number(session?.generation || 0),
-          ownerKind: mediaOwner.kind,
-          imageOwner: image.dataset.wisMediaOwner,
-          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-          reason,
-        }, { sampleMs: 1000 }),
-        onSwap: () => logWisCameraMediaEvent("camera.media.src.swap", {
-          streamId,
-          generation: Number(session?.generation || 0),
-          ownerKind: mediaOwner.kind,
-          imageOwner: image.dataset.wisMediaOwner,
-          frameTimestampMs: wisCameraTimelineFrameTimestampMs(frame),
-          reason,
-        }),
-      });
-      if (!swapped || !currentSessionMatches()) return false;
-      imageLoaded = true;
-      const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-      syncDisplayedFrame(displayedFrame, "playing", {
-        updateClockAnchor: displayOptions.updateClockAnchor !== false,
-      });
-      markFirstRecordedFrameDisplayed(displayedFrame);
-      logWisCameraMediaEvent("camera.media.first_frame.displayed", {
-        streamId,
-        generation: Number(session?.generation || 0),
-        ownerKind: mediaOwner.kind,
-        imageOwner: image.dataset.wisMediaOwner,
-        frameTimestampMs: wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, 0)),
-        reason,
-      });
-      if (revealTimer) window.clearTimeout(revealTimer);
-      window.clearTimeout(assumedPlayingTimer);
-      reveal();
-      syncWisCameraAspect(element, image);
-      status.remove();
-      applyWisCameraZoom(element, streamId);
-      return true;
-    } catch (error) {
-      logWisCameraMediaEvent("camera.media.first_frame.error", {
-        streamId,
-        generation: Number(session?.generation || 0),
-        ownerKind: mediaOwner.kind,
-        imageOwner: image.dataset.wisMediaOwner,
-        reason,
-        error: error?.message || String(error),
-      });
-      return false;
-    }
-  };
-  const fallbackToImageSrc = () => {
-    if (!image.isConnected || !currentSessionMatches() || !isMediaWriterCurrent(image, mediaOwner)) return;
-    playbackFallbackActive = true;
-    void displayArchiveFrame("playback-stream-fallback", { updateClockAnchor: false });
-  };
-  const startPlaybackStream = () => {
-    if (playbackStarted || !currentSessionMatches()) return;
-    playbackStarted = true;
-    void streamWisCameraPushPlaybackFrames(streamId, image, playbackUrl, frame, fallbackToImageSrc);
-  };
-  const startPlaybackStreamAfterPaint = async () => {
-    await displayArchiveFrame("timeline-seek-first-frame", { updateClockAnchor: true });
-    startPlaybackStream();
-  };
-  const assumedPlayingTimer = window.setTimeout(() => {
-    if (!currentSessionMatches()) {
-      status.remove();
-      return;
-    }
-    if (!imageLoaded || !playbackFallbackActive) return;
-    const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-    syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
-    reveal();
-    status.remove();
-  }, keepPreviousUntilReady ? 2200 : 1800);
-  image.addEventListener("load", () => {
-    if (!currentSessionMatches()) {
-      if (revealTimer) window.clearTimeout(revealTimer);
-      window.clearTimeout(assumedPlayingTimer);
-      status.remove();
-      return;
-    }
-    imageLoaded = true;
-    const isStreamFrame = image.dataset.wisPlaybackStream === "1";
-    if (!isStreamFrame && playbackFallbackActive) {
-      const displayedFrame = wisCameraDisplayedFrameFromImage(image, frame);
-      syncDisplayedFrame(displayedFrame, "playing", { updateClockAnchor: !firstFramePatchSent });
-    }
-    if (revealTimer) window.clearTimeout(revealTimer);
-    if (isStreamFrame || playbackFallbackActive) window.clearTimeout(assumedPlayingTimer);
-    reveal();
-    syncWisCameraAspect(element, image);
-    if (isStreamFrame || playbackFallbackActive) status.remove();
-    applyWisCameraZoom(element, streamId);
+  traceWisCameraBoundary("recorded.render.entrypoint", {
+    functionName: "renderWisCameraPushArchiveFrame",
+    streamId,
+    slot,
+    generation: Number(options.generation || session?.generation || 0),
+    sessionId: cleanText(session?.id, ""),
+    frameId: cleanText(frame?.id, ""),
+    frameTimestampMs: wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, 0)),
+    archiveFrameUrl,
+    playbackUrl,
+    visibleLayerOwner: element?.querySelector?.(".wis-camera-image, .wis-camera-video")?.dataset?.wisMediaOwner || "",
+    ownerState: wisCameraTimelineOwnerStateContract(state, streamId),
+    ...wisCameraLoopOwnerSnapshot(streamId, slot),
   });
-  image.addEventListener("error", () => {
-    if (revealTimer) window.clearTimeout(revealTimer);
-    window.clearTimeout(assumedPlayingTimer);
-    if (!currentSessionMatches()) {
-      status.remove();
-      return;
-    }
-    state.wisCameraTimelineSelections.delete(streamId);
-    if (session) {
-      setWisCameraPlaybackFrame(state, streamId, frame, {
-        sessionId,
-        generation: session.generation,
-        status: "gap",
-        state: "error",
-        paused: true,
+  return renderWisCameraPushArchiveFrameContract(state, {
+    element,
+    streamId,
+    slot,
+    camera,
+    frame,
+    force: options.force,
+    generation: options.generation,
+    archiveFrameUrl,
+    playbackUrl,
+    env: window,
+    document,
+    showCameraIssue,
+    playbackController: () => wisCameraPlaybackController(streamId),
+    onFrameDisplayed: (_session, displayedFrame = null) => {
+      const displayedMs = wisCameraTimelinePlaybackStartMs(displayedFrame, wisCameraTimelineFrameTimestampMs(displayedFrame, 0));
+      updateWisCameraRecordedPlaybackUi(streamId, {
+        currentMs: displayedMs,
+        timeline: false,
       });
-    }
-    if (previousMedia.some((media) => media.isConnected)) {
-      image.remove();
-      status.textContent = "No recording for this period.";
-      element.classList.add("has-camera");
-      return;
-    }
-    showCameraIssue("No recording for this period.", "push-timeline-frame-error");
-  }, { once: true });
-  image.dataset.wisPlaybackStream = "";
-  image.dataset.wisPlaybackFrameMs = String(wisCameraTimelineFrameTimestampMs(frame));
-  image.dataset.wisPlaybackFrameId = cleanText(frame.id, "");
-  if (typeof window.requestAnimationFrame === "function") {
-    window.requestAnimationFrame(startPlaybackStreamAfterPaint);
-  } else {
-    window.setTimeout(startPlaybackStreamAfterPaint, 0);
-  }
+    },
+    onEnded: () => updateWisCameraRecordedPlaybackUi(streamId),
+    onError: () => updateWisCameraRecordedPlaybackUi(streamId),
+    onMissingFrame: () => state.wisCameraTimelineSelections.delete(streamId),
+    onMediaEvent: (event, payload = {}, detail = {}) => logWisCameraMediaEvent(event, payload, {
+      sampleMs: detail.sampleMs ?? (event.includes(".sample") ? 1000 : 0),
+      always: detail.always,
+    }),
+    syncAspect: (targetElement, image) => syncWisCameraAspect(targetElement, image),
+    applyZoom: (targetElement, targetStreamId) => applyWisCameraZoom(targetElement, targetStreamId),
+  });
 }
 
 function renderWisCameraPushImage(element, slot, camera, showCameraIssue) {
   const streamId = wisCameraQualityStreamId(slot, camera);
-  const timelineFrame = selectedWisCameraTimelineFrame(streamId);
+  const activeRecordedSession = recordedWisCameraSession(streamId);
+  const timelineFrame = activeRecordedSession?.frame || activeRecordedSession?.requestedFrame || selectedWisCameraTimelineFrame(streamId);
   if (timelineFrame) {
-    renderWisCameraPushArchiveFrame(element, slot, camera, timelineFrame, showCameraIssue);
+    renderWisCameraPushArchiveFrame(element, slot, camera, timelineFrame, showCameraIssue, {
+      generation: activeRecordedSession?.generation,
+    });
     return;
   }
   renderWisCameraPushFramePolling(element, slot, camera, showCameraIssue);
@@ -5047,8 +6598,23 @@ function renderWisCameraNode(element, node) {
   stopWisCameraTimer(slot);
   const camera = wisCameraConfigForSlot(slot) || node.props?.camera || wisSurfaceState()?.state?.cameras?.[slot] || {};
   const streamId = wisCameraIsPushConfig(camera) ? wisCameraQualityStreamId(slot, camera) : wisCameraBaseStreamId(slot, camera);
+  noteWisCameraPerf(state, streamId, "renders");
   element.dataset.wisCameraSlot = slot;
-  element.replaceChildren();
+  trackWisCameraVisibility(element, slot, streamId);
+  const existingMedia = element.querySelector?.(".wis-camera-video, .wis-camera-image") || null;
+  if (existingMedia?.tagName === "IMG") {
+    rememberWisCameraLastGoodFrameFromImage(state, streamId, existingMedia, selectedWisCameraTimelineFrame(streamId), {
+      ownerKind: existingMedia.dataset?.wisMediaOwner,
+      generation: existingMedia.dataset?.wisMediaGeneration,
+    });
+  }
+  const preservePendingRecordedMedia = Boolean(wisCameraIsPushConfig(camera) && selectedWisCameraTimelineFrame(streamId) && existingMedia);
+  if (preservePendingRecordedMedia) {
+    element.querySelectorAll?.(".wis-camera-message, .wis-camera-fallback")?.forEach((node) => node.remove?.());
+  } else {
+    if (existingMedia) noteWisCameraPerf(state, streamId, "domReplacements");
+    element.replaceChildren();
+  }
   const message = (text, tone = "") => {
     const span = document.createElement("span");
     span.className = tone ? `wis-camera-message ${tone}` : "wis-camera-message";
@@ -5058,6 +6624,7 @@ function renderWisCameraNode(element, node) {
   const showCameraIssue = (text, type = "load-error", issueCamera = camera) => {
     stopWisCameraTimer(slot);
     element.classList.remove("has-camera");
+    if (element.querySelector?.(".wis-camera-video, .wis-camera-image")) noteWisCameraPerf(state, streamId, "domReplacements");
     element.replaceChildren();
     const wrapper = document.createElement("div");
     wrapper.className = "wis-camera-fallback";
@@ -5182,13 +6749,14 @@ function renderWisCameraNode(element, node) {
         showCameraIssue(text, "snapshot-error");
       }, { once: true });
       const refresh = () => {
+        if (!wisCameraBudget(streamId, "live").allowVisualWork) return;
         if (blockLiveWisCameraImageWrite(image, slot, "snapshot-direct")) return;
         image.src = appendCameraCacheBuster(url);
       };
       element.classList.add("has-camera");
       element.append(image);
       refresh();
-      state.wisCameraTimers.set(slot, setInterval(refresh, 2000));
+      scheduleWisCameraTimer(slot, refresh, 2000, { streamId, mode: "live" });
       return;
     }
     if (camera.element === "img") {
@@ -5468,6 +7036,17 @@ function downloadSnapshotFallback(blob, streamId) {
 
 async function currentWisCameraSnapshotBlob(slot, camera = {}) {
   const streamId = wisCameraQualityStreamId(slot, camera);
+  const media = wisCameraSurfaceElement(slot)?.querySelector(".wis-camera-video, .wis-camera-image");
+  if (media) {
+    const width = Math.max(1, media.videoWidth || media.naturalWidth || media.clientWidth || 1);
+    const height = Math.max(1, media.videoHeight || media.naturalHeight || media.clientHeight || 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(media, 0, 0, width, height);
+    return canvasBlob(canvas, "image/png");
+  }
   if (wisCameraIsPushConfig(camera)) {
     const selected = selectedWisCameraTimelineFrame(streamId);
     const url = selected?.url || cameraPushFrameUrl(streamId);
@@ -5475,16 +7054,7 @@ async function currentWisCameraSnapshotBlob(slot, camera = {}) {
     if (!response.ok) throw new Error("Current camera frame is not available.");
     return response.blob();
   }
-  const media = widgetById("wis")?.querySelector(`[data-wis-camera-slot="${CSS.escape(slot)}"] .wis-camera-video, [data-wis-camera-slot="${CSS.escape(slot)}"] .wis-camera-image`);
-  if (!media) throw new Error("No visible camera frame is available.");
-  const width = Math.max(1, media.videoWidth || media.naturalWidth || media.clientWidth || 1);
-  const height = Math.max(1, media.videoHeight || media.naturalHeight || media.clientHeight || 1);
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(media, 0, 0, width, height);
-  return canvasBlob(canvas, "image/png");
+  throw new Error("No visible camera frame is available.");
 }
 
 async function copyWisCameraSnapshot(camera = {}) {
@@ -5507,6 +7077,9 @@ async function copyWisCameraSnapshot(camera = {}) {
 async function toggleWisCameraQuality(camera = {}) {
   const slot = cleanText(camera._slot, wisFocusedCameraSlot() || "cam-1");
   const baseStreamId = wisCameraBaseStreamId(slot, camera);
+  const previousActiveStreamId = wisCameraQualityStreamId(slot, camera);
+  const previousRecordedSession = recordedWisCameraSession(previousActiveStreamId);
+  const preserveRecordedTimestampMs = previousRecordedSession ? wisCameraRecordedClockMs(previousRecordedSession) : 0;
   const currentMode = state.wisCameraQualityModes.get(baseStreamId) || "primary";
   const primed = state.wisCameraQualityPrimed.has(baseStreamId);
   const nextMode = primed && currentMode === "primary" ? "extra" : "primary";
@@ -5525,6 +7098,17 @@ async function toggleWisCameraQuality(camera = {}) {
   state.wisCameraQualityPrimed.add(baseStreamId);
   state.wisCameraQualityModes.set(baseStreamId, nextMode);
   const activeStreamId = wisCameraQualityStreamId(slot, camera);
+  if (previousRecordedSession) {
+    stopWisCameraRecordedSession(previousActiveStreamId);
+    state.wisCameraTimelineModes.set(activeStreamId, "recorded");
+    if (Number.isFinite(preserveRecordedTimestampMs) && preserveRecordedTimestampMs > 0) {
+      setPendingWisCameraTimelineSeek(activeStreamId, {
+        ratio: 1,
+        targetTime: preserveRecordedTimestampMs,
+        playbackPosition: preserveRecordedTimestampMs,
+      }, "recorded");
+    }
+  }
   state.wisCameraTimelineSelections.delete(baseStreamId);
   state.wisCameraTimelineSelections.delete(activeStreamId);
   stopWisCameraTimer(baseStreamId);
@@ -5565,6 +7149,7 @@ function renderWisCameraHeader(camera = null) {
     muted: wisCameraAudioMuted(streamId),
     audioAvailable: wisCameraAudioAvailable(slot, camera),
     qualityMode: wisCameraQualityMode(baseStreamId),
+    controlsInTimeline: true,
     onConfigure: (targetCamera) => void configureWisCameraSlot({ id: `${slot}-header-config`, props: { slot, data: { slot }, camera: targetCamera } }).catch((error) => {
       state.lastError = error.message || String(error);
       recordUserEvent("wis.camera_header_config_failed", {
@@ -5589,19 +7174,31 @@ function renderWisCameraTimelineFooter(camera = null) {
   const widget = widgetById("wis");
   if (!widget) return;
   let footer = widget.querySelector(".wis-camera-timeline");
-  const streamId = camera ? wisCameraQualityStreamId(camera._slot || "", camera) : "";
+  const slot = camera ? cleanText(camera._slot, wisFocusedCameraSlot() || "cam-1") : "";
+  const streamId = camera ? wisCameraQualityStreamId(slot, camera) : "";
   const show = wisCameraIsPushConfig(camera || {}) && streamId;
-  if (!show) {
-    footer?.remove();
-    return;
-  }
-  if (!footer) {
-    footer = document.createElement("div");
-    footer.className = "wis-camera-timeline";
-    const keepTimelineInteractionInWidget = (event) => {
+	  if (!show) {
+	    footer?.remove();
+	    return;
+	  }
+	  footer?.setAttribute?.("data-camera-artifact-build", WIS_CAMERA_ARTIFACT_BUILD);
+	  if (!footer) {
+	    footer = document.createElement("div");
+	    footer.className = "wis-camera-timeline";
+	    footer.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+	    const keepTimelineInteractionInWidget = (event) => {
       if (event.type === "pointerdown" || event.type === "click") bringWidgetForward(widget);
       const target = event.target;
-      const handledByTimelineControl = Boolean(target?.closest?.(".wis-camera-timeline-scrubber, .wis-camera-timeline-actions"));
+      const handledByTimelineControl = Boolean(target?.closest?.(".wis-camera-timeline-scrubber, .wis-camera-timeline-controls-row, .wis-camera-timeline-actions"));
+      const playPauseTarget = target?.closest?.("[data-wis-camera-control='play-pause']");
+      if (playPauseTarget && (event.type === "pointerdown" || event.type === "click")) {
+        traceWisCameraBoundary(`controls.playpause.footer.${event.type}`, wisCameraPlaybackTracePayload(playPauseTarget.dataset?.wisCameraStreamId || streamId, {
+          control: "play-pause",
+          action: cleanText(playPauseTarget.dataset?.wisCameraAction, ""),
+          target: wisCameraControlTargetSummary(playPauseTarget),
+          footerStreamId: streamId,
+        }));
+      }
       if (event.type === "pointerdown" || event.type === "keydown" || event.type === "click") {
         if (!handledByTimelineControl) maybeLoadFocusedWisCameraTimeline("timeline-interaction");
       }
@@ -5641,16 +7238,48 @@ function renderWisCameraTimelineFooter(camera = null) {
   const frames = timeline.frames || [];
   const cameraPlaybackController = wisCameraPlaybackController(streamId);
   const recordedSession = recordedWisCameraSession(streamId);
+  const playPauseState = wisCameraPlayPauseStateForStream(streamId, {
+    controller: cameraPlaybackController,
+    session: recordedSession,
+  });
   const selected = recordedSession?.frame || selectedWisCameraTimelineFrame(streamId);
+  const footerSignature = [
+    streamId,
+    mode,
+    Number(timeline.loadedAt || 0),
+    timeline.loading ? "loading" : "ready",
+    cleanText(timeline.error, ""),
+    frames.length,
+    cleanText(recordedSession?.id, ""),
+    cleanText(recordedSession?.status, ""),
+    recordedSession?.clockPaused ? "paused" : "running",
+    playPauseState.owner,
+    playPauseState.mode,
+    playPauseState.action,
+    playPauseState.icon,
+    playPauseState.disabledReason,
+    wisCameraQualityMode(wisCameraBaseStreamId(slot || streamId, camera)),
+    state.wisCameraZoomSelections.has(streamId) ? "zoom" : "nozoom",
+    wisCameraAudioMuted(streamId) ? "muted" : "audio",
+    cleanText(selected?.id, ""),
+  ].join("|");
+  const existingScrubber = footer.querySelector?.(`.wis-camera-timeline-scrubber[data-stream-id="${CSS.escape(streamId)}"]`);
+  if (existingScrubber && footer.dataset.wisTimelineSignature === footerSignature) {
+    cameraPlaybackController?.configure?.({
+      timelineElement: existingScrubber,
+      timeline,
+      frames,
+      mode,
+    });
+    updateWisCameraRecordedPlaybackUi(streamId);
+    return;
+  }
   const playbackClockMs = recordedSession ? wisCameraRecordedClockMs(recordedSession) : 0;
   const selectedIndex = selected?.id
     ? frames.findIndex((frame) => frame.id === selected.id)
     : frames.length - 1;
   const actualIndex = Math.max(0, selectedIndex);
   const currentFrame = frames[actualIndex] || null;
-  let lastCommittedTimelineFrameId = selected
-    ? `${cleanText(selected.id, "")}|${Math.round(wisCameraTimelinePlaybackStartMs(selected, wisCameraTimelineFrameTimestampMs(selected, 0)))}`
-    : "";
   const committedTimelineTitle = () => {
     const activeSession = recordedWisCameraSession(streamId);
     if (activeSession) return wisCameraRecordedTimelineTitle(activeSession, wisCameraRecordedClockMs(activeSession));
@@ -5664,17 +7293,17 @@ function renderWisCameraTimelineFooter(camera = null) {
   const title = document.createElement("span");
   title.className = "wis-camera-timeline-title";
   title.textContent = label;
-  const detail = document.createElement("span");
-  detail.textContent = timeline.error
-    ? timeline.error
-    : `${formatCameraTimelineRange(timeline.range || timeline.availableRange, mode)}${frames.length ? ` / ${frames.length} points` : ""}`;
-  meta.append(title, detail);
+	  const detail = document.createElement("span");
+	  detail.textContent = timeline.error
+	    ? timeline.error
+	    : `${formatCameraTimelineRange(timeline.range || timeline.availableRange, mode)}${frames.length ? ` / ${frames.length} points` : ""} / ${WIS_CAMERA_ARTIFACT_BUILD}`;
+	  meta.append(title, detail);
 
   const maxFrameIndex = Math.max(0, frames.length - 1);
   const timelineWindow = wisCameraTimelineTimeWindow(timeline, frames, {
     playbackPosition: playbackClockMs || Number(selected?.timestamp_ms || currentFrame?.timestamp_ms || 0),
   });
-  const { retentionStart, retentionEnd, visibleStart, visibleEnd, playbackPosition } = timelineWindow;
+  const { visibleStart, visibleEnd } = timelineWindow;
   const hasVisibleTimelineWindow = visibleEnd > visibleStart;
   const scrubber = document.createElement("div");
   scrubber.className = "wis-camera-timeline-scrubber";
@@ -5691,21 +7320,6 @@ function renderWisCameraTimelineFooter(camera = null) {
   fill.className = "wis-camera-timeline-fill";
   scrubber.append(rail, fill);
   let previewTimelineIndex = actualIndex;
-  let previewTimelineTarget = null;
-  let suppressNextTimelineClick = false;
-  const resetTimelineTitle = () => {
-    title.textContent = committedTimelineTitle();
-  };
-  const suppressTimelineClickForRender = (durationMs = 400) => {
-    footer.dataset.wisSuppressTimelineClickUntil = String(Date.now() + durationMs);
-  };
-  const shouldSuppressTimelineClickForRender = () => {
-    const until = Number(footer.dataset.wisSuppressTimelineClickUntil || 0);
-    if (!Number.isFinite(until) || until <= 0) return false;
-    if (Date.now() < until) return true;
-    delete footer.dataset.wisSuppressTimelineClickUntil;
-    return false;
-  };
   const progressForTimelineTime = (timestampMs = 0, fallbackIndex = previewTimelineIndex) => {
     const timeMs = Number(timestampMs);
     if (Number.isFinite(timeMs) && hasVisibleTimelineWindow) {
@@ -5713,31 +7327,14 @@ function renderWisCameraTimelineFooter(camera = null) {
     }
     return maxFrameIndex > 0 ? (fallbackIndex / maxFrameIndex) * 100 : 100;
   };
-  const timelineFrameIndex = (frame = null) => {
-    if (!frame) return -1;
-    const frameId = cleanText(frame.id, "");
-    if (frameId) {
-      const idIndex = frames.findIndex((candidate) => cleanText(candidate?.id, "") === frameId);
-      if (idIndex >= 0) return idIndex;
-    }
-    const timestampMs = Number(frame.timestamp_ms ?? frame.timestampMs);
-    if (!Number.isFinite(timestampMs)) return -1;
-    return frames.findIndex((candidate) => Number(candidate?.timestamp_ms ?? candidate?.timestampMs) === timestampMs);
-  };
-  const timelineFrameCommitKey = (frame = null) => {
-    if (!frame) return "";
-    const frameId = cleanText(frame.id, "");
-    const timestampMs = wisCameraTimelinePlaybackStartMs(frame, wisCameraTimelineFrameTimestampMs(frame, 0));
-    return `${frameId}|${Number.isFinite(timestampMs) ? Math.round(timestampMs) : 0}`;
-  };
   const previewTimelineFrame = (index = previewTimelineIndex, displayTimeMs = null, options = {}) => {
     previewTimelineIndex = clamp(Math.round(Number(index) || 0), 0, maxFrameIndex);
     const frame = frames[previewTimelineIndex] || null;
-    const timestampMs = Number(displayTimeMs ?? frame?.timestamp_ms ?? frame?.timestampMs);
+    const timestampMs = Number(displayTimeMs ?? wisCameraTimelinePlaybackStartMs(frame, frame?.timestamp_ms ?? frame?.timestampMs));
     const progress = frame ? progressForTimelineTime(timestampMs, previewTimelineIndex) : 100;
-    const visualProperty = timelineDragging || options.previewOnly ? "--wis-camera-timeline-preview" : "--wis-camera-timeline-progress";
-    scrubber.style.setProperty(visualProperty, `${progress}%`);
-    if (visualProperty === "--wis-camera-timeline-preview") scrubber.dataset.wisTimelinePreviewing = "1";
+    scrubber.style.setProperty("--wis-camera-timeline-progress", `${progress}%`);
+    scrubber.style.removeProperty("--wis-camera-timeline-preview");
+    delete scrubber.dataset.wisTimelinePreviewing;
     scrubber.setAttribute("aria-valuenow", String(previewTimelineIndex));
     const labelFrame = Number.isFinite(timestampMs) ? { ...(frame || {}), timestamp_ms: timestampMs } : frame;
     scrubber.setAttribute("aria-valuetext", labelFrame ? cameraTimelineFrameLabel(labelFrame) : "No points yet");
@@ -5745,272 +7342,85 @@ function renderWisCameraTimelineFooter(camera = null) {
       title.textContent = labelFrame ? `Point ${cameraTimelineFrameLabel(labelFrame)}` : "No points yet";
     }
   };
-  const timelineTargetForPointer = (event) => {
-    const rect = scrubber.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    const ratio = rect.width > 0 ? clamp(x / rect.width, 0, 1) : 1;
-    const target = wisCameraTimelineTargetAtRatio(timeline, frames, ratio, { playbackPosition });
-    const snappedFrame = target.snappedFrame || wisCameraTimelineFrameClosestToTime(frames, target.targetTime, target);
-    const snappedTargetTime = Number(snappedFrame?.timestamp_ms ?? snappedFrame?.timestampMs ?? target.snappedTargetTime ?? target.targetTime);
-    return {
-      ...target,
-      x,
-      ratio,
-      snappedFrame,
-      snappedTargetTime,
-    };
-  };
-  const frameForTimelineTarget = (target = previewTimelineTarget) => {
-    const snappedFrame = target?.snappedFrame || frames[previewTimelineIndex] || currentFrame;
-    if (!snappedFrame) return null;
-    const targetTime = Number(target?.targetTime ?? target?.snappedTargetTime ?? snappedFrame.timestamp_ms ?? snappedFrame.timestampMs);
-    if (!Number.isFinite(targetTime)) return snappedFrame;
-    const targetVisibleStart = Number(target?.visibleStart ?? visibleStart);
-    const targetVisibleEnd = Number(target?.visibleEnd ?? visibleEnd);
-    const targetTimestampMs = targetVisibleEnd > targetVisibleStart
-      ? clamp(targetTime, targetVisibleStart, targetVisibleEnd)
-      : targetTime;
-    const snappedTimestampMs = Number(target?.snappedTargetTime ?? snappedFrame.timestamp_ms ?? snappedFrame.timestampMs ?? targetTimestampMs);
-    return {
-      ...snappedFrame,
-      timestamp_ms: Number.isFinite(snappedTimestampMs) ? snappedTimestampMs : targetTimestampMs,
-      seek_target_ms: targetTime,
-      snapped_timestamp_ms: Number.isFinite(snappedTimestampMs) ? snappedTimestampMs : targetTimestampMs,
-    };
-  };
-  const commitTimelineFrame = (target = previewTimelineTarget) => {
-    const frame = frameForTimelineTarget(target);
-    const commitKey = timelineFrameCommitKey(frame);
-    if (!frame || !commitKey || commitKey === lastCommittedTimelineFrameId) {
-      resetTimelineTitle();
-      return;
-    }
-    lastCommittedTimelineFrameId = commitKey;
-    // Legacy smoke guard: setWisCameraTimelineFrame(streamId, frame, { force: true })
-    setWisCameraTimelineFrame(streamId, frame, { force: true, source: "user", reason: "timeline-commit" });
-  };
-  const previewTimelinePointer = (event) => {
-    if (!frames.length) return;
-    const target = timelineTargetForPointer(event);
-    previewTimelineTarget = target;
-    const frame = target.snappedFrame;
-    const frameIndex = timelineFrameIndex(frame);
-    if (frameIndex < 0) return;
-    previewTimelineFrame(frameIndex, target.targetTime, { previewOnly: timelineDragging });
-  };
-  const loadThenSeekTimelinePointer = (event, origin = "scrubber-pointer") => {
-    const target = timelineTargetForPointer(event);
-    setPendingWisCameraTimelineSeek(streamId, target.visibleEnd > target.visibleStart
-      ? {
-        ratio: target.ratio,
-        targetTime: target.targetTime,
-        visibleStart: target.visibleStart,
-        visibleEnd: target.visibleEnd,
-        retentionStart: target.retentionStart,
-        retentionEnd: target.retentionEnd,
-        playbackPosition: target.playbackPosition,
-      }
-      : target.ratio, mode);
-    if (timeline.loading) return;
-    void loadWisCameraTimeline(streamId, origin, mode);
-  };
-  let timelineDragging = false;
-  let timelinePointerId = 0;
-  const stopTimelineWindowCapture = () => {
-    window.removeEventListener("pointermove", moveTimelinePointer, true);
-    window.removeEventListener("pointerup", endTimelinePointer, true);
-    window.removeEventListener("pointercancel", cancelTimelinePointer, true);
-  };
-  const shouldHandleTimelinePointer = (event) => (
-    timelineDragging && (!timelinePointerId || event.pointerId === timelinePointerId)
-  );
-  const moveTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    previewTimelinePointer(event);
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointermove", {
-      reason: "timeline-pointermove",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    logWisCameraMediaEvent("camera.timeline.scrub.preview.sample", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-      ratio: Number(previewTimelineTarget?.ratio || 0),
-      previewProgress: scrubber.style.getPropertyValue("--wis-camera-timeline-preview") || "",
-      elementConnected: scrubber.isConnected !== false,
-    }, { sampleMs: 250 });
-  };
-  const cancelTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    timelineDragging = false;
-    timelinePointerId = 0;
-    stopTimelineWindowCapture();
-    scrubber.classList.remove("is-scrubbing");
-    scrubber.style.removeProperty("--wis-camera-timeline-preview");
-    delete scrubber.dataset.wisTimelinePreviewing;
-    logWisCameraMediaEvent("camera.timeline.scrub.end", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      reason: "timeline-pointercancel",
-      elementConnected: scrubber.isConnected !== false,
-    });
-    resetTimelineTitle();
-  };
-  const endTimelinePointer = (event) => {
-    if (!shouldHandleTimelinePointer(event)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.type !== "lostpointercapture") previewTimelinePointer(event);
-    stopTimelineWindowCapture();
-    try {
-      scrubber.releasePointerCapture(event.pointerId);
-    } catch {
-      // Capture may already be released by the browser.
-    }
-    suppressNextTimelineClick = true;
-    suppressTimelineClickForRender();
-    const commitTarget = previewTimelineTarget;
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerup", {
-      reason: "timeline-pointerup",
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-    });
-    logWisCameraMediaEvent("camera.timeline.scrub.commit_seek", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-      ratio: Number(commitTarget?.ratio || 0),
-    });
-    timelineDragging = false;
-    timelinePointerId = 0;
-    scrubber.classList.remove("is-scrubbing");
-    scrubber.style.removeProperty("--wis-camera-timeline-preview");
-    delete scrubber.dataset.wisTimelinePreviewing;
-    logWisCameraMediaEvent("camera.timeline.scrub.end", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: event.pointerId || 0,
-      timestampMs: Number(commitTarget?.targetTime || commitTarget?.snappedTargetTime || 0),
-      ratio: Number(commitTarget?.ratio || 0),
-      elementConnected: scrubber.isConnected !== false,
-    });
-    commitTimelineFrame(commitTarget);
-  };
-  scrubber.addEventListener("pointerdown", (event) => {
-    if (!frames.length) {
-      event.preventDefault();
-      event.stopPropagation();
-      scrubber.focus({ preventScroll: true });
-      suppressNextTimelineClick = true;
-      suppressTimelineClickForRender();
-      cameraPlaybackController?.recordTimelineUserEvent?.("pointerdown", {
-        reason: "timeline-pointerdown-empty",
-      });
-      loadThenSeekTimelinePointer(event, "scrubber-pointer");
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    timelineDragging = true;
-    timelinePointerId = event.pointerId || 0;
-    scrubber.classList.add("is-scrubbing");
-    scrubber.dataset.wisTimelinePreviewing = "1";
-    scrubber.focus({ preventScroll: true });
-    previewTimelinePointer(event);
-    logWisCameraMediaEvent("camera.timeline.scrub.begin", {
-      streamId,
-      generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      pointerId: timelinePointerId,
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-      ratio: Number(previewTimelineTarget?.ratio || 0),
-      elementConnected: scrubber.isConnected !== false,
-    });
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerdown", {
-      reason: "timeline-pointerdown",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    try {
-      scrubber.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture can be unavailable during rapid touch transitions.
-    }
-    window.addEventListener("pointermove", moveTimelinePointer, true);
-    window.addEventListener("pointerup", endTimelinePointer, true);
-    window.addEventListener("pointercancel", cancelTimelinePointer, true);
-  });
-  scrubber.addEventListener("pointermove", moveTimelinePointer);
-  scrubber.addEventListener("pointerup", endTimelinePointer);
-  scrubber.addEventListener("pointercancel", cancelTimelinePointer);
-  scrubber.addEventListener("lostpointercapture", (event) => {
-    if (timelineDragging) endTimelinePointer(event);
-  });
-  scrubber.addEventListener("click", (event) => {
-    if (suppressNextTimelineClick || shouldSuppressTimelineClickForRender()) {
-      event.preventDefault();
-      event.stopPropagation();
-      suppressNextTimelineClick = false;
-      logWisCameraMediaEvent("camera.timeline.click.suppressed_after_drag", {
-        streamId,
-        generation: Number(recordedWisCameraSession(streamId)?.generation || 0),
-      }, { sampleMs: 1000 });
-      return;
-    }
-    if (!frames.length) {
-      event.preventDefault();
-      event.stopPropagation();
-      loadThenSeekTimelinePointer(event, "scrubber-click");
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    previewTimelinePointer(event);
-    cameraPlaybackController?.recordTimelineUserEvent?.("pointerup", {
-      reason: "timeline-click",
-      timestampMs: Number(previewTimelineTarget?.targetTime || previewTimelineTarget?.snappedTargetTime || 0),
-    });
-    commitTimelineFrame();
-  });
-  scrubber.addEventListener("keydown", (event) => {
-    const keyDeltas = {
-      ArrowLeft: -1,
-      ArrowDown: -1,
-      ArrowRight: 1,
-      ArrowUp: 1,
-      PageDown: -10,
-      PageUp: 10,
-      Home: -Number.MAX_SAFE_INTEGER,
-      End: Number.MAX_SAFE_INTEGER,
-    };
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      event.stopPropagation();
-      commitTimelineFrame();
-      return;
-    }
-    if (!(event.key in keyDeltas) || !frames.length) return;
-    event.preventDefault();
-    event.stopPropagation();
-    const delta = keyDeltas[event.key];
-    previewTimelineFrame(delta === -Number.MAX_SAFE_INTEGER ? 0 : (delta === Number.MAX_SAFE_INTEGER ? maxFrameIndex : previewTimelineIndex + delta));
-    commitTimelineFrame(null);
-  });
   previewTimelineFrame(actualIndex, null, { updateTitle: false });
 
-  const actions = document.createElement("div");
-  actions.className = "wis-camera-timeline-actions";
+  const controlsRow = document.createElement("div");
+  controlsRow.className = "wis-camera-timeline-controls-row";
+  controlsRow.dataset.wisCameraTimelineControls = "1";
+  controlsRow.dataset.streamId = streamId;
+  const activeZoom = Boolean(state.wisCameraZoomSelections.get(streamId)?.rect || state.wisCameraZoomSelections.get(streamId)?.selecting);
+  const playPause = wisCameraToolButton(playPauseState.label, playPauseState.title, (event) => {
+    toggleWisCameraRecordedPlayback({ ...camera, _slot: slot || streamId }, event);
+  }, {
+    icon: playPauseState.icon,
+    control: "play-pause",
+    streamId,
+    slot: slot || streamId,
+    action: playPauseState.action,
+    active: playPauseState.playing,
+    pressed: playPauseState.playing,
+    traceEvent: (kind, button, event) => traceWisCameraPlayPauseButtonEvent(kind, streamId, button, event),
+  });
+  if (playPauseState.disabledReason) {
+    playPause.setAttribute("aria-disabled", "true");
+    playPause.dataset.wisCameraDisabledReason = playPauseState.disabledReason;
+    playPause.classList.add("is-disabled");
+  }
+  traceWisCameraBoundary("controls.playpause.buttonRendered", wisCameraPlaybackTracePayload(streamId, wisCameraPlayPauseTraceContext(playPauseState, {
+    control: "play-pause",
+    action: playPauseState.action,
+    slot: slot || streamId,
+    disabled: Boolean(playPause.disabled),
+    ariaDisabled: cleanText(playPause.getAttribute("aria-disabled"), ""),
+    icon: playPauseState.icon,
+    title: cleanText(playPause.title, ""),
+  })));
+  const zoomButton = wisCameraToolButton(activeZoom ? "Reset" : "Zoom", activeZoom ? "Reset zoom" : "Select zoom area", () => {
+    toggleWisCameraZoom({ ...camera, _slot: slot || streamId });
+  }, { icon: "zoom", control: "zoom", streamId, slot: slot || streamId, action: activeZoom ? "reset" : "select", active: activeZoom, pressed: activeZoom });
+  const snapshotButton = wisCameraToolButton("Snap", "Copy snapshot", () => {
+    void copyWisCameraSnapshot({ ...camera, _slot: slot || streamId });
+  }, { icon: "snapshot", control: "snapshot", streamId, slot: slot || streamId, action: "copy" });
+  const audioAvailable = wisCameraAudioAvailable(slot || streamId, camera);
+  const muted = wisCameraAudioMuted(streamId);
+  const audioButton = wisCameraToolButton(muted ? "Muted" : "Audio", audioAvailable ? (muted ? "Turn audio on" : "Mute audio") : "No audio available", () => {
+    toggleWisCameraAudio({ ...camera, _slot: slot || streamId });
+  }, {
+    icon: muted ? "muted" : "audio",
+    control: "audio",
+    streamId,
+    slot: slot || streamId,
+    action: muted ? "unmute" : "mute",
+    disabled: !audioAvailable,
+    active: audioAvailable && !muted,
+    pressed: audioAvailable && !muted,
+  });
+  const baseStreamId = wisCameraBaseStreamId(slot || streamId, camera);
+  const qualityMode = wisCameraQualityMode(baseStreamId);
+  const qualityButton = wisCameraToolButton(qualityMode === "extra" ? "Extra" : "Main", "Toggle main/extra stream quality", () => {
+    void toggleWisCameraQuality({ ...camera, _slot: slot || streamId });
+  }, { icon: "quality", control: "quality", streamId, slot: slot || streamId, action: qualityMode === "extra" ? "primary" : "extra", active: true, pressed: qualityMode === "extra" });
+  const traceButton = wisCameraToolButton("Trace", "Copy Camera Trace", () => {
+    void copyWisCameraTraceDump(streamId);
+  }, { icon: "trace", control: "copy-trace", streamId, slot: slot || streamId, action: "copy" });
   const live = wisCameraToolButton(recordedSession ? "Return to live" : "Live", recordedSession ? "Return to live camera" : "Use live last 10 minutes", () => {
     returnWisCameraToLive(streamId);
-  }, { active: mode === "live" && !recordedSession, pressed: mode === "live" && !selected && !recordedSession });
+  }, { icon: "live", control: "live", streamId, slot: slot || streamId, action: "live", active: mode === "live" && !recordedSession, pressed: mode === "live" && !selected && !recordedSession });
   const recorded = wisCameraToolButton(timeline.loading && mode === "recorded" ? "Detecting" : "Recorded", "Detect recorded footage range", () => {
     setWisCameraTimelineMode(streamId, "recorded");
-  }, { active: mode === "recorded" || Boolean(recordedSession), pressed: mode === "recorded" || Boolean(recordedSession), disabled: Boolean(timeline.loading && mode === "recorded") });
-  actions.append(live, recorded);
+  }, { icon: "recorded", control: "recorded", streamId, slot: slot || streamId, action: "recorded", active: mode === "recorded" || Boolean(recordedSession), pressed: mode === "recorded" || Boolean(recordedSession), disabled: Boolean(timeline.loading && mode === "recorded") });
+  controlsRow.append(playPause, zoomButton, snapshotButton, qualityButton, audioButton, traceButton, recorded, live);
 
-  footer.replaceChildren(meta, actions, scrubber);
+	  footer.dataset.wisTimelineSignature = footerSignature;
+	  footer.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+	  noteWisCameraPerf(state, streamId, "timelinePatches");
+  footer.replaceChildren(meta, controlsRow, scrubber);
+  cameraPlaybackController?.configure?.({
+    timelineElement: scrubber,
+    timeline,
+    frames,
+    mode,
+  });
 }
 
 function renderWis() {
@@ -6560,6 +7970,777 @@ function activeSharedRoom() {
   return sharedSpaceId ? state.sharedRooms[sharedSpaceId] || null : null;
 }
 
+function sharedSpacePointerKey(event = {}) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  const userId = cleanText(event.sender_user_id || payload.user_id || payload.userId, "");
+  const deviceId = cleanText(payload.device_id || payload.deviceId, "");
+  if (!userId && !deviceId) return "";
+  return `${userId}:${deviceId}`;
+}
+
+function sharedSpacePointerColor(seed = "") {
+  let hash = 0;
+  for (const char of String(seed || "space")) hash = ((hash * 31) + char.charCodeAt(0)) >>> 0;
+  const hue = hash % 360;
+  return `hsl(${hue} 88% 66%)`;
+}
+
+function activeSharedSpacePointerId(room = activeSharedRoom()) {
+  const currentUserId = cleanText(room?.current_user_id || state.authUser?.id, "");
+  const currentDeviceId = cleanText(room?.current_device_id || clientDeviceId(), "");
+  return `${currentUserId}:${currentDeviceId}`;
+}
+
+function currentSharedSpacePointerTarget() {
+  const space = sharedUserSpaceForPanel();
+  const room = space?.shared_space_id ? state.sharedRooms[space.shared_space_id] || null : null;
+  if (!space?.shared_space_id || !room?.id) return null;
+  return { space, room };
+}
+
+function sharedSpacePointerLiveUrl(target = currentSharedSpacePointerTarget()) {
+  if (!target?.space?.shared_space_id) return "";
+  const url = new URL("/spaces/room/live", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("shared_space_id", target.space.shared_space_id);
+  url.searchParams.set("space_id", target.space.id);
+  return url.toString();
+}
+
+function sharedSpacePointerLiveConnected(target = currentSharedSpacePointerTarget()) {
+  if (!("WebSocket" in window)) return false;
+  const sharedSpaceId = cleanText(target?.space?.shared_space_id || "", "");
+  return Boolean(
+    sharedSpaceId
+    && state.sharedSpacePointerLiveSpaceId === sharedSpaceId
+    && state.sharedSpacePointerLiveSocket?.readyState === WebSocket.OPEN
+    && state.sharedSpacePointerLiveReady
+  );
+}
+
+function closeSharedSpacePointerLiveSocket(options = {}) {
+  if (state.sharedSpacePointerLiveReconnectTimer) {
+    window.clearTimeout(state.sharedSpacePointerLiveReconnectTimer);
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+  }
+  const socket = state.sharedSpacePointerLiveSocket;
+  state.sharedSpacePointerLiveSocket = null;
+  state.sharedSpacePointerLiveReady = false;
+  state.sharedSpacePointerLiveSpaceId = "";
+  state.sharedSpacePointerLiveToken += 1;
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    try {
+      socket.close();
+    } catch {
+      // Socket may already be closing.
+    }
+  }
+  if (options.reconnect) scheduleSharedSpacePointerLiveReconnect("close");
+}
+
+function scheduleSharedSpacePointerLiveReconnect(origin = "reconnect") {
+  const target = currentSharedSpacePointerTarget();
+  if (!state.authUser || !target?.space?.shared_space_id || !("WebSocket" in window)) return;
+  if (state.sharedSpacePointerLiveReconnectTimer) return;
+  state.sharedSpacePointerLiveReconnectTimer = window.setTimeout(() => {
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+    startSharedSpacePointerLiveSocket(origin);
+  }, SHARED_SPACE_POINTER_LIVE_RECONNECT_MS);
+}
+
+function handleSharedSpacePointerLiveMessage(message = {}) {
+  const type = cleanText(message.type, "");
+  if (type === "ready") {
+    state.sharedSpacePointerLiveReady = true;
+    return;
+  }
+  if (type === "ping") {
+    try {
+      state.sharedSpacePointerLiveSocket?.send(JSON.stringify({ type: "pong", ts: message.ts || Date.now() }));
+    } catch {
+      // The close handler reconnects if this room is still active.
+    }
+    return;
+  }
+  if (type === "event") {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    const sharedSpaceId = cleanText(message.shared_space_id || event.shared_space_id || state.sharedSpacePointerLiveSpaceId, "");
+    if (event.kind === SHARED_SPACE_POINTER_EVENT_KIND) mergeSharedSpacePointerEvents(sharedSpaceId, [event]);
+  }
+}
+
+function startSharedSpacePointerLiveSocket(origin = "active") {
+  const target = currentSharedSpacePointerTarget();
+  const sharedSpaceId = cleanText(target?.space?.shared_space_id || "", "");
+  if (!state.authUser || !sharedSpaceId || !("WebSocket" in window)) return null;
+  const existing = state.sharedSpacePointerLiveSocket;
+  if (existing && state.sharedSpacePointerLiveSpaceId === sharedSpaceId && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) {
+    return existing;
+  }
+  if (existing) closeSharedSpacePointerLiveSocket();
+  if (state.sharedSpacePointerLiveReconnectTimer) {
+    window.clearTimeout(state.sharedSpacePointerLiveReconnectTimer);
+    state.sharedSpacePointerLiveReconnectTimer = 0;
+  }
+  const url = sharedSpacePointerLiveUrl(target);
+  if (!url) return null;
+  const token = state.sharedSpacePointerLiveToken + 1;
+  state.sharedSpacePointerLiveToken = token;
+  state.sharedSpacePointerLiveReady = false;
+  state.sharedSpacePointerLiveSpaceId = sharedSpaceId;
+  const socket = new WebSocket(url);
+  state.sharedSpacePointerLiveSocket = socket;
+  socket.addEventListener("open", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    try {
+      socket.send(JSON.stringify({ type: "hello", origin }));
+    } catch {
+      // The close handler reconnects if this room is still active.
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    try {
+      handleSharedSpacePointerLiveMessage(JSON.parse(event.data));
+    } catch (error) {
+      recordUserEvent("workspace.shared_space_pointer_live_error", {
+        target: `space:${target.space.id}`,
+        summary: error.message || String(error),
+        data: { shared_space_id: sharedSpaceId, error: error.message || String(error) },
+      });
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    state.sharedSpacePointerLiveSocket = null;
+    state.sharedSpacePointerLiveReady = false;
+    scheduleSharedSpacePointerLiveReconnect("close");
+  });
+  socket.addEventListener("error", () => {
+    if (state.sharedSpacePointerLiveToken !== token) return;
+    state.sharedSpacePointerLiveReady = false;
+  });
+  return socket;
+}
+
+function sendSharedSpacePointerLiveEvent(target, body = {}, options = {}) {
+  const socket = startSharedSpacePointerLiveSocket("pointer-send");
+  if (!socket || !sharedSpacePointerLiveConnected(target)) return false;
+  if (Number(socket.bufferedAmount || 0) > SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES) return options.liveOnly === true;
+  const liveBody = options.liveOnly ? { ...body, live_only: true } : body;
+  try {
+    socket.send(JSON.stringify({
+      type: "event",
+      request_id: remoteControlId("space_ptr"),
+      body: liveBody,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sharedSpacePointerEventSnapshot(event, fallback = event) {
+  return {
+    clientX: Number(event?.clientX ?? fallback?.clientX ?? 0),
+    clientY: Number(event?.clientY ?? fallback?.clientY ?? 0),
+    pointerId: Number(event?.pointerId ?? fallback?.pointerId ?? 0),
+    pointerType: cleanText(event?.pointerType || fallback?.pointerType || "", ""),
+    button: Number(event?.button ?? fallback?.button ?? 0),
+    buttons: Number(event?.buttons ?? fallback?.buttons ?? 0),
+    isPrimary: event?.isPrimary ?? fallback?.isPrimary ?? true,
+  };
+}
+
+function sharedSpacePointerPoint(event) {
+  const viewport = els.spaceViewport;
+  const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
+  if (!viewport || !rect) return null;
+  if (
+    event.clientX < rect.left
+    || event.clientX > rect.right
+    || event.clientY < rect.top
+    || event.clientY > rect.bottom
+  ) return null;
+  const distance = Math.max(SPACE_DISTANCE_MIN, canvasDistance());
+  const x = (viewport.scrollLeft + event.clientX - rect.left) / distance;
+  const y = (viewport.scrollTop + event.clientY - rect.top) / distance;
+  const area = canvasAreaSize();
+  return {
+    x: clamp(Math.round(x), 0, Math.max(1, area.width)),
+    y: clamp(Math.round(y), 0, Math.max(1, area.height)),
+  };
+}
+
+function cleanSharedSpacePointerPoint(point) {
+  const area = canvasAreaSize();
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return {
+    x: clamp(Number(x.toFixed(2)), 0, Math.max(1, area.width)),
+    y: clamp(Number(y.toFixed(2)), 0, Math.max(1, area.height)),
+  };
+}
+
+function sameSharedSpacePointerPoint(first, second, tolerance = 0.35) {
+  return Boolean(
+    first
+    && second
+    && Math.abs(Number(first.x || 0) - Number(second.x || 0)) <= tolerance
+    && Math.abs(Number(first.y || 0) - Number(second.y || 0)) <= tolerance
+  );
+}
+
+function pushSharedSpacePointerPoint(points, point) {
+  const clean = cleanSharedSpacePointerPoint(point);
+  if (!clean) return;
+  if (!points.length || !sameSharedSpacePointerPoint(points[points.length - 1], clean)) points.push(clean);
+}
+
+function compactSharedSpacePointerPath(points) {
+  if (points.length <= SHARED_SPACE_POINTER_PATH_MAX_POINTS) return points;
+  const compacted = [];
+  const lastIndex = points.length - 1;
+  for (let index = 0; index < SHARED_SPACE_POINTER_PATH_MAX_POINTS; index += 1) {
+    const sourceIndex = Math.round((index * lastIndex) / Math.max(1, SHARED_SPACE_POINTER_PATH_MAX_POINTS - 1));
+    pushSharedSpacePointerPoint(compacted, points[sourceIndex]);
+  }
+  pushSharedSpacePointerPoint(compacted, points[lastIndex]);
+  return compacted.slice(-SHARED_SPACE_POINTER_PATH_MAX_POINTS);
+}
+
+function densifySharedSpacePointerPath(points = []) {
+  const source = [];
+  points.forEach((point) => pushSharedSpacePointerPoint(source, point));
+  if (source.length <= 1) return source;
+  const dense = [source[0]];
+  for (let index = 1; index < source.length; index += 1) {
+    const from = source[index - 1];
+    const to = source[index];
+    const distance = Math.hypot(to.x - from.x, to.y - from.y);
+    const steps = Math.max(1, Math.ceil(distance / SHARED_SPACE_POINTER_PATH_STEP_PX));
+    for (let step = 1; step <= steps; step += 1) {
+      const ratio = step / steps;
+      pushSharedSpacePointerPoint(dense, {
+        x: from.x + (to.x - from.x) * ratio,
+        y: from.y + (to.y - from.y) * ratio,
+      });
+    }
+  }
+  return compactSharedSpacePointerPath(dense);
+}
+
+function sharedSpacePointerPathFromSamples(samples = [], finalPoint = null, previousPoint = null) {
+  const points = [];
+  pushSharedSpacePointerPoint(points, previousPoint);
+  if (Array.isArray(samples)) {
+    samples.forEach((sample) => {
+      const point = sharedSpacePointerPoint(sample);
+      if (point) pushSharedSpacePointerPoint(points, point);
+    });
+  }
+  pushSharedSpacePointerPoint(points, finalPoint);
+  return densifySharedSpacePointerPath(points);
+}
+
+function sharedSpacePointerPayloadPath(payload = {}, fallbackPoint = null) {
+  const points = [];
+  const payloadPoints = Array.isArray(payload.points) ? payload.points : [];
+  payloadPoints.forEach((point) => pushSharedSpacePointerPoint(points, point));
+  pushSharedSpacePointerPoint(points, fallbackPoint);
+  return densifySharedSpacePointerPath(points);
+}
+
+function sharedSpacePointerScreenPoint(point) {
+  const clean = cleanSharedSpacePointerPoint(point);
+  if (!clean) return null;
+  return {
+    x: logicalToScreenPx(clean.x),
+    y: logicalToScreenPx(clean.y),
+  };
+}
+
+function sharedSpacePointerTransform(screenX, screenY) {
+  return `translate3d(${screenX}px, ${screenY}px, 0) translate(2px, 2px)`;
+}
+
+function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
+  const id = cleanText(sharedSpaceId, "");
+  if (!id || !Array.isArray(events)) return false;
+  const currentKey = activeSharedSpacePointerId(state.sharedRooms[id]);
+  let changed = false;
+  let latestId = cleanText(state.sharedSpacePointerLastEventIdBySpace[id] || "", "");
+  const pointers = { ...(state.sharedSpacePointers[id] || {}) };
+  for (const event of events) {
+    if (!event || event.kind !== SHARED_SPACE_POINTER_EVENT_KIND) continue;
+    const eventId = cleanText(event.id, "");
+    if (eventId && latestId && eventId <= latestId) continue;
+    if (eventId && (!latestId || eventId > latestId)) latestId = eventId;
+    const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+    const key = sharedSpacePointerKey(event);
+    if (!key || key === currentKey) continue;
+    const pointerEventId = cleanText(payload.pointer_event_id || payload.pointerEventId, "");
+    if (pointerEventId && pointers[key]?.pointer_event_id === pointerEventId) continue;
+    const eventType = cleanText(payload.type || "move", "move");
+    const isPulse = ["down", "click"].includes(eventType);
+    const point = {
+      x: clamp(Number(payload.x || 0), 0, CANVAS_AREA_MAX_PX),
+      y: clamp(Number(payload.y || 0), 0, CANVAS_AREA_MAX_PX),
+    };
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
+    const path = sharedSpacePointerPayloadPath(payload, point);
+    const nextPointer = {
+      key,
+      user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
+      device_id: cleanText(payload.device_id || "", ""),
+      user_label: cleanText(payload.user_label || sharedSpaceUserLabel(event.sender_user_id), "Member"),
+      type: eventType,
+      x: point.x,
+      y: point.y,
+      color: sharedSpacePointerColor(key),
+      event_id: eventId,
+      pointer_event_id: pointerEventId,
+      path,
+      pulse_id: isPulse ? cleanText(pointerEventId || eventId || `${key}-${Date.now()}`, "") : cleanText(pointers[key]?.pulse_id || "", ""),
+      click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
+      last_seen_at: Date.now(),
+    };
+    pointers[key] = nextPointer;
+    state.sharedSpacePointerFollowTarget = { shared_space_id: id, key, x: nextPointer.x, y: nextPointer.y, at: Date.now() };
+    changed = true;
+  }
+  if (latestId) state.sharedSpacePointerLastEventIdBySpace[id] = latestId;
+  state.sharedSpacePointers[id] = pointers;
+  if (changed) {
+    renderSharedSpacePointers();
+    scheduleSharedSpacePointerNavigationFollow();
+  }
+  return changed;
+}
+
+function addSharedSpacePointerTrace(layer, pointer, screenX, screenY) {
+  if (!layer || !pointer) return;
+  const trace = document.createElement("span");
+  trace.className = "shared-space-pointer-trace";
+  trace.setAttribute("aria-hidden", "true");
+  trace.style.setProperty("--shared-pointer-color", pointer.color);
+  trace.style.left = `${screenX + 2}px`;
+  trace.style.top = `${screenY + 2}px`;
+  layer.append(trace);
+  trace.addEventListener("animationend", () => trace.remove(), { once: true });
+  window.setTimeout(() => trace.remove(), 1100);
+  const traces = layer.querySelectorAll(".shared-space-pointer-trace");
+  if (traces.length > SHARED_SPACE_POINTER_TRACE_LIMIT) {
+    Array.from(traces).slice(0, traces.length - SHARED_SPACE_POINTER_TRACE_LIMIT).forEach((node) => node.remove());
+  }
+}
+
+function addSharedSpacePointerTracePath(layer, pointer, fromX, fromY, toX, toY) {
+  const distance = Math.hypot(toX - fromX, toY - fromY);
+  if (!Number.isFinite(distance) || distance < SHARED_SPACE_POINTER_TRACE_MIN_PX) return;
+  const steps = clamp(
+    Math.ceil(distance / SHARED_SPACE_POINTER_TRACE_STEP_PX),
+    1,
+    SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE
+  );
+  for (let index = 0; index < steps; index += 1) {
+    const ratio = index / steps;
+    addSharedSpacePointerTrace(
+      layer,
+      pointer,
+      fromX + (toX - fromX) * ratio,
+      fromY + (toY - fromY) * ratio
+    );
+  }
+}
+
+function addSharedSpacePointerTracePoints(layer, pointer, screenPoints = []) {
+  if (!Array.isArray(screenPoints) || screenPoints.length < 2) return;
+  for (let index = 1; index < screenPoints.length; index += 1) {
+    const from = screenPoints[index - 1];
+    const to = screenPoints[index];
+    if (!from || !to) continue;
+    addSharedSpacePointerTracePath(layer, pointer, from.x, from.y, to.x, to.y);
+  }
+}
+
+function animateSharedSpacePointerNode(node, screenPoints = [], finalTransform = "") {
+  if (!node || typeof node.animate !== "function" || !Array.isArray(screenPoints) || screenPoints.length < 2) return false;
+  const keyframes = [];
+  const activeAnimations = typeof node.getAnimations === "function" ? node.getAnimations() : [];
+  const currentTransform = activeAnimations.length && typeof getComputedStyle === "function"
+    ? getComputedStyle(node).transform
+    : "";
+  activeAnimations.forEach((animation) => animation.cancel());
+  if (currentTransform && currentTransform !== "none") keyframes.push({ transform: currentTransform });
+  const pathPoints = keyframes.length ? screenPoints.slice(1) : screenPoints;
+  pathPoints.forEach((point) => {
+    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
+      keyframes.push({ transform: sharedSpacePointerTransform(point.x, point.y) });
+    }
+  });
+  if (keyframes.length < 2) return false;
+  const duration = clamp(
+    (keyframes.length - 1) * SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
+    SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
+    SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS
+  );
+  try {
+    node.animate(keyframes, { duration, easing: "linear" });
+    node.style.transform = finalTransform;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderSharedSpacePointers() {
+  const target = currentSharedSpacePointerTarget();
+  const board = els.spaceBoard || spaceSurface();
+  if (!board) return;
+  let layer = board.querySelector("[data-shared-space-pointer-layer]");
+  if (!target) {
+    layer?.remove();
+    return;
+  }
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.className = "shared-space-pointer-layer";
+    layer.dataset.sharedSpacePointerLayer = "true";
+    board.append(layer);
+  }
+  const now = Date.now();
+  const pointers = state.sharedSpacePointers[target.room.id] || {};
+  const live = Object.values(pointers).filter((pointer) => now - Number(pointer.last_seen_at || 0) <= SHARED_SPACE_POINTER_TTL_MS);
+  const seen = new Set();
+  for (const pointer of live) {
+    seen.add(pointer.key);
+    let node = layer.querySelector(`[data-shared-space-pointer="${CSS.escape(pointer.key)}"]`);
+    if (!node) {
+      node = document.createElement("div");
+      node.className = "shared-space-pointer";
+      node.dataset.sharedSpacePointer = pointer.key;
+      node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
+      layer.append(node);
+    }
+    const screenX = logicalToScreenPx(pointer.x);
+    const screenY = logicalToScreenPx(pointer.y);
+    const previousX = Number(node.dataset.sharedPointerScreenX || "");
+    const previousY = Number(node.dataset.sharedPointerScreenY || "");
+    const previousTraceAt = Number(node.dataset.sharedPointerTraceAt || 0);
+    const pathEventId = cleanText(pointer.pointer_event_id || pointer.event_id || "", "");
+    const newPointerPath = pathEventId && node.dataset.sharedPointerRenderedEventId !== pathEventId;
+    const pathPoints = Array.isArray(pointer.path) && pointer.path.length ? pointer.path : [{ x: pointer.x, y: pointer.y }];
+    const screenPath = pathPoints.map(sharedSpacePointerScreenPoint).filter(Boolean);
+    if (
+      newPointerPath
+      && Number.isFinite(previousX)
+      && Number.isFinite(previousY)
+      && (!screenPath.length || Math.hypot(screenPath[0].x - previousX, screenPath[0].y - previousY) >= 0.5)
+    ) {
+      screenPath.unshift({ x: previousX, y: previousY });
+    }
+    if (
+      Number.isFinite(previousX)
+      && Number.isFinite(previousY)
+      && now - previousTraceAt >= SHARED_SPACE_POINTER_TRACE_MS
+      && Math.hypot(screenX - previousX, screenY - previousY) >= SHARED_SPACE_POINTER_TRACE_MIN_PX
+    ) {
+      node.dataset.sharedPointerTraceAt = String(now);
+      if (newPointerPath && screenPath.length > 1) addSharedSpacePointerTracePoints(layer, pointer, screenPath);
+      else addSharedSpacePointerTracePath(layer, pointer, previousX, previousY, screenX, screenY);
+    }
+    node.dataset.sharedPointerScreenX = String(screenX);
+    node.dataset.sharedPointerScreenY = String(screenY);
+    const finalTransform = sharedSpacePointerTransform(screenX, screenY);
+    if (!newPointerPath || !animateSharedSpacePointerNode(node, screenPath, finalTransform)) node.style.transform = finalTransform;
+    if (pathEventId) node.dataset.sharedPointerRenderedEventId = pathEventId;
+    node.style.setProperty("--shared-pointer-color", pointer.color);
+    const clicking = now < Number(pointer.click_until || 0);
+    const pulseId = cleanText(pointer.pulse_id || "", "");
+    if (clicking && pulseId && node.dataset.sharedPointerPulseId !== pulseId) {
+      node.dataset.sharedPointerPulseId = pulseId;
+      const ring = document.createElement("i");
+      ring.setAttribute("aria-hidden", "true");
+      node.querySelector("i")?.replaceWith(ring);
+    }
+    node.classList.toggle("is-clicking", clicking);
+    node.querySelector("strong").textContent = pointer.user_label || "Member";
+  }
+  layer.querySelectorAll("[data-shared-space-pointer]").forEach((node) => {
+    if (!seen.has(node.dataset.sharedSpacePointer || "")) node.remove();
+  });
+}
+
+function sharedSpacePointerNavigationBlocked() {
+  return Boolean(
+    state.spacePanActive
+    || state.spacePanMomentumActive
+    || state.spacePinchActive
+    || Boolean(state.activePointers?.size)
+    || performance.now() < state.spacePinchSuppressPanUntil
+    || performance.now() - Number(state.spaceNavigationInputAt || 0) < 120
+  );
+}
+
+function sharedSpacePointerFollowScrollTarget(pointer) {
+  const viewport = els.spaceViewport;
+  const rect = spaceViewportUsableRect() || viewport?.getBoundingClientRect?.();
+  if (!viewport || !rect || !pointer) return null;
+  const visibleWidth = Math.max(1, Number(rect.width || viewport.clientWidth || 1));
+  const visibleHeight = Math.max(1, Number(rect.height || viewport.clientHeight || 1));
+  const margin = Math.min(
+    SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX,
+    Math.max(48, Math.min(visibleWidth, visibleHeight) * 0.28)
+  );
+  const x = logicalToScreenPx(pointer.x);
+  const y = logicalToScreenPx(pointer.y);
+  let left = viewport.scrollLeft;
+  let top = viewport.scrollTop;
+  if (x < viewport.scrollLeft + margin) left = x - margin;
+  else if (x > viewport.scrollLeft + visibleWidth - margin) left = x - visibleWidth + margin;
+  if (y < viewport.scrollTop + margin) top = y - margin;
+  else if (y > viewport.scrollTop + visibleHeight - margin) top = y - visibleHeight + margin;
+  return {
+    left: clamp(left, 0, Math.max(0, viewport.scrollWidth - viewport.clientWidth)),
+    top: clamp(top, 0, Math.max(0, viewport.scrollHeight - viewport.clientHeight)),
+  };
+}
+
+function stepSharedSpacePointerNavigationFollow() {
+  state.sharedSpacePointerFollowFrame = 0;
+  const target = state.sharedSpacePointerFollowTarget;
+  const active = currentSharedSpacePointerTarget();
+  const viewport = els.spaceViewport;
+  if (!target || !active || !viewport || target.shared_space_id !== active.room.id) return;
+  if (Date.now() - Number(target.at || 0) > SHARED_SPACE_POINTER_TTL_MS) return;
+  if (sharedSpacePointerNavigationBlocked()) return;
+  const desired = sharedSpacePointerFollowScrollTarget(target);
+  if (!desired) return;
+  const dx = desired.left - viewport.scrollLeft;
+  const dy = desired.top - viewport.scrollTop;
+  if (Math.abs(dx) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX && Math.abs(dy) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX) return;
+  const stepX = clamp(dx * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
+  const stepY = clamp(dy * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
+  viewport.scrollLeft += Math.abs(stepX) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dx : stepX;
+  viewport.scrollTop += Math.abs(stepY) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dy : stepY;
+  updateSpaceNavigationHints();
+  renderSpaceMiniMap();
+  scheduleSharedSpacePointerNavigationFollow();
+}
+
+function scheduleSharedSpacePointerNavigationFollow() {
+  if (state.sharedSpacePointerFollowFrame || sharedSpacePointerNavigationBlocked()) return;
+  state.sharedSpacePointerFollowFrame = window.requestAnimationFrame(stepSharedSpacePointerNavigationFollow);
+}
+
+function clearSharedSpacePointerMoveQueue() {
+  if (state.sharedSpacePointerMoveFrame) window.cancelAnimationFrame(state.sharedSpacePointerMoveFrame);
+  if (state.sharedSpacePointerMoveTimer) window.clearTimeout(state.sharedSpacePointerMoveTimer);
+  state.sharedSpacePointerMoveFrame = 0;
+  state.sharedSpacePointerMoveTimer = 0;
+  state.sharedSpacePointerMoveEvent = null;
+  state.sharedSpacePointerMoveSamples = [];
+}
+
+function flushSharedSpacePointerMove() {
+  state.sharedSpacePointerMoveFrame = 0;
+  const event = state.sharedSpacePointerMoveEvent;
+  if (!event) return;
+  const dueIn = state.sharedSpacePointerLastSentAt + SHARED_SPACE_POINTER_SEND_MS - performance.now();
+  if (dueIn > 4) {
+    scheduleSharedSpacePointerMoveFlush();
+    return;
+  }
+  state.sharedSpacePointerMoveEvent = null;
+  const samples = state.sharedSpacePointerMoveSamples.slice();
+  state.sharedSpacePointerMoveSamples = [];
+  void sendSharedSpacePointerEvent("move", event, { liveOnly: true, samples });
+}
+
+function scheduleSharedSpacePointerMoveFlush() {
+  if (state.sharedSpacePointerMoveFrame || state.sharedSpacePointerMoveTimer) return;
+  const dueIn = state.sharedSpacePointerLastSentAt + SHARED_SPACE_POINTER_SEND_MS - performance.now();
+  if (dueIn > 4) {
+    state.sharedSpacePointerMoveTimer = window.setTimeout(() => {
+      state.sharedSpacePointerMoveTimer = 0;
+      state.sharedSpacePointerMoveFrame = window.requestAnimationFrame(flushSharedSpacePointerMove);
+    }, dueIn);
+    return;
+  }
+  state.sharedSpacePointerMoveFrame = window.requestAnimationFrame(flushSharedSpacePointerMove);
+}
+
+function isSharedSpacePointerMove(event) {
+  if (event?.isPrimary === false) return false;
+  if (event?.pointerType === "mouse") {
+    const buttons = Number(event.buttons || 0);
+    return !buttons || (buttons & 1) === 1;
+  }
+  return true;
+}
+
+function queueSharedSpacePointerMove(event) {
+  if (!isSharedSpacePointerMove(event)) return;
+  const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
+  const samples = coalesced.length ? coalesced : [event];
+  const latest = samples[samples.length - 1] || event;
+  const snapshots = samples.map((sample) => sharedSpacePointerEventSnapshot(sample, event));
+  state.sharedSpacePointerMoveSamples.push(...snapshots);
+  if (state.sharedSpacePointerMoveSamples.length > SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT) {
+    state.sharedSpacePointerMoveSamples = state.sharedSpacePointerMoveSamples.slice(-SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT);
+  }
+  state.sharedSpacePointerMoveEvent = sharedSpacePointerEventSnapshot(latest, event);
+  scheduleSharedSpacePointerMoveFlush();
+}
+
+async function sendSharedSpacePointerEvent(type, event, options = {}) {
+  const target = currentSharedSpacePointerTarget();
+  if (!target) return;
+  const point = sharedSpacePointerPoint(event);
+  if (!point) return;
+  const now = performance.now();
+  if (type === "move" && !options.force && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
+  state.sharedSpacePointerLastSentAt = now;
+  const pointerEventId = remoteControlId("space_ptr");
+  const path = type === "move"
+    ? sharedSpacePointerPathFromSamples(options.samples, point, state.sharedSpacePointerLastMovePoint)
+    : [];
+  const payload = {
+    type,
+    pointer_event_id: pointerEventId,
+    x: point.x,
+    y: point.y,
+    device_id: clientDeviceId(),
+    user_label: publicUserLabel(state.authUser),
+    distance: Number(canvasDistance().toFixed(2)),
+  };
+  if (path.length > 1) payload.points = path;
+  const body = {
+    action: "event",
+    shared_space_id: target.space.shared_space_id,
+    space_id: target.space.id,
+    kind: SHARED_SPACE_POINTER_EVENT_KIND,
+    payload,
+  };
+  if (type === "move" || type === "down") state.sharedSpacePointerLastMovePoint = point;
+  if (["up", "click"].includes(type)) state.sharedSpacePointerLastMovePoint = null;
+  const durableDue = type !== "move" || now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= SHARED_SPACE_POINTER_DURABLE_MS;
+  const liveOnly = type === "move" && options.liveOnly === true && !durableDue;
+  const liveSent = sendSharedSpacePointerLiveEvent(target, body, { liveOnly });
+  if (liveSent) {
+    if (!liveOnly) state.sharedSpacePointerLastDurableSentAt = now;
+    return;
+  }
+  if (type === "move" && !durableDue) return;
+  state.sharedSpacePointerLastDurableSentAt = now;
+  void fetchJson("/spaces/room", {
+    method: "POST",
+    timeoutMs: 2500,
+    body,
+  }).then((result) => {
+    if (result?.room?.id) {
+      state.sharedRooms[result.room.id] = result.room;
+      mergeSharedSpacePointerEvents(result.room.id, result.room.events);
+    }
+  }).catch(() => {});
+}
+
+async function syncSharedSpacePointers(origin = "pointer-poll") {
+  const target = currentSharedSpacePointerTarget();
+  if (!target || state.sharedSpacePointerSyncBusy) return;
+  state.sharedSpacePointerSyncBusy = true;
+  try {
+    const payload = await fetchJson("/spaces/room", {
+      method: "POST",
+      timeoutMs: 2500,
+      body: {
+        action: "read",
+        shared_space_id: target.space.shared_space_id,
+        space_id: target.space.id,
+      },
+    });
+    const room = payload.room || null;
+    if (room?.id) {
+      state.sharedRooms[room.id] = room;
+      mergeSharedSpacePointerEvents(room.id, room.events);
+      renderSharedSpacePointers();
+    }
+  } catch (error) {
+    if (origin !== "pointer-poll") {
+      recordUserEvent("workspace.shared_space_pointer_sync_error", {
+        target: `space:${target.space.id}`,
+        summary: error.message,
+        data: { shared_space_id: target.space.shared_space_id, error: error.message },
+      });
+    }
+  } finally {
+    state.sharedSpacePointerSyncBusy = false;
+  }
+}
+
+function updateSharedSpacePointerSync() {
+  const shouldRun = Boolean(state.authUser && currentSharedSpacePointerTarget());
+  if (!shouldRun) {
+    closeSharedSpacePointerLiveSocket();
+    clearSharedSpacePointerMoveQueue();
+    state.sharedSpacePointerLastMovePoint = null;
+    if (state.sharedSpacePointerFollowFrame) window.cancelAnimationFrame(state.sharedSpacePointerFollowFrame);
+    state.sharedSpacePointerFollowFrame = 0;
+    state.sharedSpacePointerFollowTarget = null;
+    if (state.sharedSpacePointerSyncInterval) {
+      window.clearInterval(state.sharedSpacePointerSyncInterval);
+      state.sharedSpacePointerSyncInterval = 0;
+    }
+    renderSharedSpacePointers();
+    return;
+  }
+  startSharedSpacePointerLiveSocket("pointer-sync");
+  if (!state.sharedSpacePointerSyncInterval) {
+    state.sharedSpacePointerSyncInterval = window.setInterval(
+      () => void syncSharedSpacePointers("pointer-poll"),
+      SHARED_SPACE_POINTER_POLL_MS
+    );
+    void syncSharedSpacePointers("pointer-start");
+  }
+}
+
+function installSharedSpacePointerAwareness() {
+  document.addEventListener("pointermove", queueSharedSpacePointerMove, { capture: true, passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
+    state.sharedSpacePointerPress = {
+      pointer_id: Number(event.pointerId || 0),
+      x: Number(event.clientX || 0),
+      y: Number(event.clientY || 0),
+      at: performance.now(),
+    };
+    void sendSharedSpacePointerEvent("down", sharedSpacePointerEventSnapshot(event), { force: true });
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerup", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
+    const press = state.sharedSpacePointerPress;
+    state.sharedSpacePointerPress = null;
+    const samePointer = !press?.pointer_id || Number(event.pointerId || 0) === press.pointer_id;
+    const quickTap = Boolean(
+      press
+      && samePointer
+      && performance.now() - Number(press.at || 0) <= 700
+      && Math.hypot(Number(event.clientX || 0) - Number(press.x || 0), Number(event.clientY || 0) - Number(press.y || 0)) <= 14
+    );
+    void sendSharedSpacePointerEvent(quickTap ? "click" : "up", sharedSpacePointerEventSnapshot(event), { force: true });
+  }, { capture: true, passive: true });
+  document.addEventListener("pointercancel", (event) => {
+    if (!isPrimaryPointer(event)) return;
+    clearSharedSpacePointerMoveQueue();
+    state.sharedSpacePointerPress = null;
+    void sendSharedSpacePointerEvent("up", sharedSpacePointerEventSnapshot(event), { force: true });
+  }, { capture: true, passive: true });
+}
+
 function remoteSpaceAreaChanged(before, after) {
   const beforeArea = spaceAreaFromMetadata(before?.space_area);
   const afterArea = spaceAreaFromMetadata(after?.space_area);
@@ -6574,6 +8755,7 @@ function updateSharedSpaceSyncPolling() {
       window.clearInterval(state.sharedSpaceSyncInterval);
       state.sharedSpaceSyncInterval = 0;
     }
+    updateSharedSpacePointerSync();
     return;
   }
   if (!state.sharedSpaceSyncInterval) {
@@ -6583,6 +8765,7 @@ function updateSharedSpaceSyncPolling() {
     );
     void syncSharedSpaceForOpenClient("shared-space-start");
   }
+  updateSharedSpacePointerSync();
 }
 
 async function syncSharedSpaceForOpenClient(origin = "shared-space-poll") {
@@ -6654,10 +8837,12 @@ async function loadSharedSpaceRoom(options = {}) {
   const room = payload.room || null;
   if (room?.id) {
     state.sharedRooms[room.id] = room;
+    mergeSharedSpacePointerEvents(room.id, room.events);
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
     if (state.agentView === "people") renderAgentPeoplePanel();
     queueSharedVoiceRoomProcessing(room);
+    updateSharedSpacePointerSync();
   }
   return room;
 }
@@ -7841,6 +10026,7 @@ function applyLauncherPreference() {
 
 function saveUserSpaces() {
   if (state.authUser) {
+    state.userSpaces = sanitizeUserSpaces(state.userSpaces);
     void fetchJson("/spaces", {
       method: "POST",
       timeoutMs: 8000,
@@ -7869,7 +10055,7 @@ function persistSpaceAreaMetadata(spaceId, spaceArea) {
     },
   }).then((result) => {
     if (Array.isArray(result.spaces)) {
-      state.userSpaces = result.spaces;
+      state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
       renderSpaceLauncher();
       updateSharedSpaceSyncPolling();
     }
@@ -7925,7 +10111,7 @@ async function loadUserSpaces(options = {}) {
   const beforeActiveSpace = userSpaceById(activePanel);
   try {
     const payload = await fetchJson("/spaces", { timeoutMs: 8000 });
-    state.userSpaces = Array.isArray(payload.spaces) ? payload.spaces : [];
+    state.userSpaces = sanitizeUserSpaces(payload.spaces);
     state.userStorage = payload.storage || null;
     state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
     const afterActiveSpace = userSpaceById(activePanel);
@@ -8261,7 +10447,7 @@ function cameraConfigForSnapshot(key, config = {}) {
 function wisCameraRuntimeForSnapshot() {
   const slots = [];
   try {
-    els.wisViewport?.querySelectorAll("[data-wis-camera-slot]")?.forEach((element) => {
+    els.wisViewport?.querySelectorAll(".wis-node-webcam_placeholder[data-wis-camera-slot]")?.forEach((element) => {
       const media = element.querySelector("img, video");
       slots.push({
         slot: cleanText(element.dataset.wisCameraSlot, ""),
@@ -8278,6 +10464,40 @@ function wisCameraRuntimeForSnapshot() {
     // Runtime diagnostics must never make snapshot collection fragile.
   }
   return slots;
+}
+
+function wisCameraPerfForSnapshot() {
+  const keys = new Set();
+  try {
+    if (state.wisCameraPlaybackPerf instanceof Map) {
+      state.wisCameraPlaybackPerf.forEach((_value, key) => {
+        if (key) keys.add(cleanText(key, ""));
+      });
+    }
+    if (state.wisCameraTimeline?.streamId) keys.add(cleanText(state.wisCameraTimeline.streamId, ""));
+    state.wisCameraRecordedSessions?.forEach?.((_session, key) => {
+      if (key) keys.add(cleanText(key, ""));
+    });
+  } catch {
+    // Snapshot diagnostics should stay best-effort.
+  }
+  return Array.from(keys)
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((key) => {
+      const sample = sampleWisCameraPerf(state, key, {}, null, { force: true }) || {};
+      const badSamples = Number(
+        Number(sample.activePlaybackLoops || 0) > 1
+        || Number(sample.activeReaders || 0) > 1
+        || (sample.mode === "live" && Number(sample.activePlaybackLoops || 0) > 0)
+      );
+      return {
+        ...sample,
+        stream_id: key,
+        blink_events: Number(state.wisCameraBlinkEvents?.get?.(key) || 0),
+        bad_samples: badSamples,
+      };
+    });
 }
 
 function wisCameraTimelineFrameForSnapshot(frame = null) {
@@ -8316,6 +10536,8 @@ function wisCameraTimelineForSnapshot() {
     loading: Boolean(timeline.loading),
     error: cleanText(timeline.error, ""),
     loaded_at: Number(timeline.loadedAt || 0),
+    loading_started_at: Number(timeline.loadingStartedAt || timeline.loading_started_at || 0),
+    load_seq: Number(state.wisCameraTimelineLoadSeq || 0),
     frame_count: frames.length,
     range: timeline.range || null,
     available_range: timeline.availableRange || null,
@@ -8370,6 +10592,7 @@ function wisDebugSnapshot() {
     camera_timer_slots: Array.from(state.wisCameraTimers.keys()).slice(0, 40),
     camera_runtime: wisCameraRuntimeForSnapshot(),
     camera_timeline: wisCameraTimelineForSnapshot(),
+    camera_perf: wisCameraPerfForSnapshot(),
     camera_debug_events: Array.from(state.wisCameraDebugEvents.entries())
       .slice(-20)
       .map(([key, event]) => ({ key, ...event })),
@@ -9613,6 +11836,25 @@ function userFleetHarnessForNode(nodeId = "") {
   return state.userFleetHarnesses.find((harness) => agentHarnessNodeId(harness) === target) || null;
 }
 
+function ownedAgentConfigFromFleetHarness(harness = {}) {
+  const infraMode = normalizeAgentHarnessInfraMode(harness?.infra_mode || harness?.infraMode || "");
+  const bridgeUrl = normalizeOwnedAgentBridgeUrl(harness?.bridge_url || harness?.bridgeUrl || "");
+  if (infraMode !== AGENT_HARNESS_OWN_INFRA_MODE || !bridgeUrl) return null;
+  return normalizeAgentOwnedAgentConfig({
+    name: agentHarnessDisplayName(harness),
+    role: cleanText(harness.instructions || harness.metadata?.instructions || "", ""),
+    type: "hermes",
+    bridgeUrl,
+  });
+}
+
+function adoptOwnedAgentFromFleetHarnesses() {
+  if (isAdminUser() || ownedAgentConfigured() || !Array.isArray(state.userFleetHarnesses)) return;
+  const config = state.userFleetHarnesses.map(ownedAgentConfigFromFleetHarness).find(Boolean);
+  if (!config) return;
+  saveAgentOwnedAgentConfig(config);
+}
+
 function userFleetNodeId(node = {}) {
   return cleanText(node?.node_id || node?.nodeId || node?.id, "");
 }
@@ -9733,6 +11975,16 @@ function shouldUseOwnedAgentBridge(session = activeAgentSession()) {
 
 function ownedAgentBridgeUrl(config = state.agentOwnedAgent) {
   return normalizeOwnedAgentBridgeUrl(config?.bridgeUrl || "");
+}
+
+function ownedAgentBridgeIsPrivateUrl(value = ownedAgentBridgeUrl()) {
+  const bridgeUrl = normalizeOwnedAgentBridgeUrl(value);
+  if (!bridgeUrl) return false;
+  try {
+    return isPrivateProviderHostname(new URL(bridgeUrl).hostname);
+  } catch {
+    return false;
+  }
 }
 
 function directProviderConfigFingerprint(config = activeAgentDirectProviderConfig()) {
@@ -9949,7 +12201,8 @@ function nodeFormStatusText(config = nodeFormConfigSource()) {
     return `Wasm-Agent-Cloud based (${cost}◇)`;
   }
   if (harness?.enabled && harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE) {
-    return harness.bridgeUrl ? "Private bridge / probe on create" : "Private bridge URL required";
+    if (!harness.bridgeUrl) return "Private bridge URL required";
+    return ownedAgentBridgeIsPrivateUrl(harness.bridgeUrl) ? "Private bridge / browser probe" : "Private bridge / server probe";
   }
   return directProviderStatusText(config);
 }
@@ -11778,6 +14031,7 @@ function applyCanvasGeometry(options = {}) {
   if (options.drawCanvas !== false) drawCanvas();
   if (options.updateNavigation !== false) updateSpaceNavigationHints();
   if (options.renderMiniMap !== false) renderSpaceMiniMap();
+  renderSharedSpacePointers();
 }
 
 function spaceMapMetrics() {
@@ -13668,6 +15922,8 @@ async function loadAuthSession() {
   loadAgentDirectProviderForUser();
   loadAgentOwnedAgentForUser();
   state.authChecked = true;
+  if (state.authUser) startRemoteControlLiveSocket("auth-session");
+  else closeRemoteControlLiveSocket({ reconnect: false });
   renderLogin();
 }
 
@@ -13734,6 +15990,7 @@ async function logout() {
     window.clearInterval(state.socialSyncInterval);
     state.socialSyncInterval = 0;
   }
+  closeRemoteControlLiveSocket({ reconnect: false });
   if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
   renderAuthGate();
@@ -13798,6 +16055,45 @@ async function fetchJson(path, options = {}) {
     }
     if (!response.ok || payload.ok === false) {
       const error = new Error(payload?.error?.message || `HTTP ${response.status}`);
+      error.payload = payload;
+      error.status = response.status;
+      throw error;
+    }
+    return payload;
+  } finally {
+    window.clearTimeout(timeout);
+    if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function fetchExternalJson(url, options = {}) {
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (options.signal) options.signal.addEventListener("abort", abortFromCaller, { once: true });
+  const timeoutMs = Number(options.timeoutMs || 30000);
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const headers = {
+    "Accept": "application/json",
+    ...(options.body ? { "Content-Type": "application/json" } : {}),
+    ...(options.headers || {}),
+  };
+  try {
+    const response = await fetch(url, {
+      method: options.method || "GET",
+      cache: options.cache || "no-store",
+      headers,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { ok: false, error: { message: text.slice(0, 600) } };
+    }
+    if (!response.ok || payload.ok === false) {
+      const error = new Error(payload?.error?.message || payload?.message || `HTTP ${response.status}`);
       error.payload = payload;
       error.status = response.status;
       throw error;
@@ -15523,6 +17819,43 @@ async function submitNodeForm(event) {
       renderNodesPanel();
       return;
     }
+    if (harness.infraMode === AGENT_HARNESS_OWN_INFRA_MODE && ownedAgentBridgeIsPrivateUrl(harness.bridgeUrl)) {
+      state.agentProvisionBusy = true;
+      state.nodesPanelStatus = "Checking private bridge";
+      setNodeFormStatus("Checking private bridge from this browser");
+      renderNodesPanel();
+      try {
+        await probeOwnedAgentBridge(harness.bridgeUrl);
+        saveAgentOwnedAgentConfig({
+          name: harness.name || config?.nodeName || "My agent",
+          role: harness.instructions || "",
+          type: "hermes",
+          bridgeUrl: harness.bridgeUrl,
+        });
+        state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+        closeNodeForm();
+        state.agentSetupBalloonOpen = false;
+        state.nodesPanelStatus = "Private bridge saved";
+        recordUserEvent("agent.owned_bridge_saved_client", {
+          target: "owned-agent",
+          summary: `Saved ${harness.name || "private Hermes bridge"}`,
+          data: { bridge_host: new URL(harness.bridgeUrl).host, browser_local: true },
+        });
+        renderAgentNodeSelect();
+        renderAgentModelSelect();
+        renderAgentReadinessStatus();
+        renderNodesPanel();
+      } catch (error) {
+        state.nodesPanelStatus = "";
+        setNodeFormStatus(`Private bridge not reachable: ${error.message || String(error)}`, { attention: true });
+        renderAgentReadinessStatus();
+        renderNodesPanel();
+      } finally {
+        state.agentProvisionBusy = false;
+        renderNodesPanel();
+      }
+      return;
+    }
     state.agentProvisionBusy = true;
     state.nodesPanelStatus = harness.infraMode === AGENT_HARNESS_DEFAULT_INFRA_MODE ? "Provisioning sandbox..." : "Checking own bridge";
     setNodeFormStatus(state.nodesPanelStatus);
@@ -15730,36 +18063,212 @@ function compactJsonForPrompt(value, max = 1200) {
   }
 }
 
+function ownedAgentBridgeTimeoutMs() {
+  return Math.min(Number(state.agentTurnTimeoutMs || DEFAULT_AGENT_TURN_TIMEOUT_MS), 120000);
+}
+
+function ownedAgentBridgeTimeoutSec() {
+  return Math.max(60, Math.round(ownedAgentBridgeTimeoutMs() / 1000));
+}
+
+function ownedAgentReplyFromPayload(payload = {}) {
+  if (typeof payload === "string") return cleanText(payload, "");
+  if (!payload || typeof payload !== "object") return "";
+  const result = payload.result && typeof payload.result === "object" ? payload.result : {};
+  const output = payload.output && typeof payload.output === "object" ? payload.output : {};
+  const candidates = [
+    result.response,
+    result.reply,
+    result.message,
+    result.text,
+    result.content,
+    result.output,
+    result.final_response,
+    payload.response,
+    payload.reply,
+    payload.message,
+    payload.text,
+    payload.content,
+    payload.output,
+    payload.final_response,
+    output.text,
+    output.content,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+    if (candidate && typeof candidate === "object") {
+      const nested = ownedAgentReplyFromPayload(candidate);
+      if (nested) return nested;
+    }
+  }
+  const choices = Array.isArray(payload.choices)
+    ? payload.choices
+    : Array.isArray(result.choices) ? result.choices : [];
+  for (const choice of choices) {
+    const message = choice?.message && typeof choice.message === "object" ? choice.message : {};
+    const content = message.content ?? choice?.text ?? choice?.delta?.content;
+    if (typeof content === "string" && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const joined = content.map((part) => {
+        if (typeof part === "string") return part;
+        if (part?.type === "text") return part.text || "";
+        return "";
+      }).join("").trim();
+      if (joined) return joined;
+    }
+  }
+  return "";
+}
+
 function ownedAgentReplyFromTask(task = {}) {
-  const result = task.result && typeof task.result === "object" ? task.result : {};
-  return cleanText(result.response || result.reply || result.message || taskPreview(task), "");
+  return ownedAgentReplyFromPayload(task);
+}
+
+function ownedAgentTaskStatus(task = {}) {
+  return cleanText(task.status || task.state || task.run_status || "", "").toLowerCase();
+}
+
+function ownedAgentTaskId(task = {}) {
+  return cleanText(task.task_id || task.taskId || task.id || "", "");
+}
+
+function ownedAgentRunId(payload = {}) {
+  return cleanText(payload.run_id || payload.runId || payload.id || payload.result?.run_id || "", "");
+}
+
+function ownedAgentTaskActive(task = {}) {
+  return ["running", "queued", "pending", "submitted", "active", "in_progress", "started", "working"].includes(ownedAgentTaskStatus(task));
+}
+
+function ownedAgentBridgePromptBody(prompt) {
+  return {
+    prompt,
+    input: prompt,
+    target_node: "orchestrator",
+    timeout_sec: ownedAgentBridgeTimeoutSec(),
+    stream: false,
+    messages: [{ role: "user", content: prompt }],
+  };
+}
+
+async function pollOwnedAgentTask(baseUrl, initialTask = {}) {
+  let task = initialTask.task || initialTask;
+  const taskId = ownedAgentTaskId(task);
+  const started = Date.now();
+  const timeoutMs = ownedAgentBridgeTimeoutMs();
+  while (taskId && ownedAgentTaskActive(task)) {
+    if (Date.now() - started > timeoutMs) throw new Error("Owned agent bridge timed out.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    const latest = await fetchExternalJson(`${baseUrl}/tasks/${encodeURIComponent(taskId)}`, { timeoutMs: 10000 });
+    task = latest.task || latest;
+  }
+  if (task?.error) throw new Error(task.error.message || task.error || "Owned agent bridge returned an error.");
+  const reply = ownedAgentReplyFromTask(task);
+  if (!reply) throw new Error("Owned agent bridge did not return a reply.");
+  return { reply, task };
+}
+
+async function callOwnedAgentTasksBridge(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/tasks`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: ownedAgentBridgePromptBody(prompt),
+  });
+  return pollOwnedAgentTask(baseUrl, payload.task || payload);
+}
+
+async function callOwnedAgentChatBridge(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/bridge/v1/chat`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: ownedAgentBridgePromptBody(prompt),
+  });
+  const task = payload.task || payload;
+  if (ownedAgentTaskId(task) && ownedAgentTaskActive(task)) return pollOwnedAgentTask(baseUrl, task);
+  const reply = ownedAgentReplyFromPayload(payload);
+  if (!reply) throw new Error("Owned agent bridge chat route did not return a reply.");
+  return { reply, task: payload };
+}
+
+async function callOwnedAgentChatCompletions(baseUrl, prompt) {
+  const payload = await fetchExternalJson(`${baseUrl}/v1/chat/completions`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: {
+      model: state.agentOwnedAgent?.type || "hermes-agent",
+      stream: false,
+      messages: [{ role: "user", content: prompt }],
+      timeout_sec: ownedAgentBridgeTimeoutSec(),
+    },
+  });
+  const reply = ownedAgentReplyFromPayload(payload);
+  if (!reply) throw new Error("Owned agent chat completions route did not return a reply.");
+  return { reply, task: payload };
+}
+
+async function callOwnedAgentRunsApi(baseUrl, prompt) {
+  const created = await fetchExternalJson(`${baseUrl}/v1/runs`, {
+    method: "POST",
+    timeoutMs: ownedAgentBridgeTimeoutMs(),
+    body: {
+      input: prompt,
+      session_id: `wasm-agent-owned-${Date.now().toString(36)}`,
+      timeout_sec: ownedAgentBridgeTimeoutSec(),
+    },
+  });
+  const runId = ownedAgentRunId(created);
+  if (!runId) throw new Error("Owned Hermes Runs API did not return a run id.");
+  let status = created;
+  const started = Date.now();
+  const timeoutMs = ownedAgentBridgeTimeoutMs();
+  while (["", "queued", "pending", "submitted", "running", "active", "in_progress", "started", "working"].includes(ownedAgentTaskStatus(status))) {
+    if (Date.now() - started > timeoutMs) throw new Error("Owned Hermes Runs API timed out.");
+    await new Promise((resolve) => window.setTimeout(resolve, 1200));
+    status = await fetchExternalJson(`${baseUrl}/v1/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 });
+  }
+  if (["failed", "cancelled", "canceled", "error"].includes(ownedAgentTaskStatus(status))) {
+    throw new Error(status.error?.message || status.message || `Owned Hermes run ${ownedAgentTaskStatus(status)}.`);
+  }
+  const reply = ownedAgentReplyFromPayload(status);
+  if (!reply) throw new Error("Owned Hermes Runs API did not return a reply.");
+  return { reply, task: status };
+}
+
+async function probeOwnedAgentBridge(baseUrl) {
+  const health = await fetchExternalJson(`${baseUrl}/health`, { timeoutMs: 8000 });
+  let models = null;
+  let lastError = null;
+  for (const path of ["/bridge/v1/models", "/v1/models"]) {
+    try {
+      models = await fetchExternalJson(`${baseUrl}${path}`, { timeoutMs: 8000 });
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!models) throw lastError || new Error("Owned agent bridge model route is unavailable.");
+  return { health, models };
 }
 
 async function callOwnedAgentBridge(message, transcript = [], observation = {}) {
   const baseUrl = ownedAgentBridgeUrl();
   if (!baseUrl) throw new Error("Missing owned agent bridge URL.");
   const prompt = ownedAgentPrompt(message, transcript, observation);
-  const payload = await fetchJson(`${baseUrl}/tasks`, {
-    method: "POST",
-    timeoutMs: Math.min(state.agentTurnTimeoutMs, 120000),
-    body: {
-      prompt,
-      target_node: "orchestrator",
-      timeout_sec: Math.max(60, Math.round(state.agentTurnTimeoutMs / 1000)),
-    },
-  });
-  let task = payload.task || payload;
-  const started = Date.now();
-  while (task?.task_id && ["running", "queued", "pending", "submitted"].includes(cleanText(task.status, "").toLowerCase())) {
-    if (Date.now() - started > state.agentTurnTimeoutMs) throw new Error("Owned agent bridge timed out.");
-    await new Promise((resolve) => window.setTimeout(resolve, 1200));
-    const latest = await fetchJson(`${baseUrl}/tasks/${encodeURIComponent(task.task_id)}`, { timeoutMs: 10000 });
-    task = latest.task || latest;
+  const callers = [
+    ["bridge chat", () => callOwnedAgentChatBridge(baseUrl, prompt)],
+    ["tasks", () => callOwnedAgentTasksBridge(baseUrl, prompt)],
+    ["Hermes Runs API", () => callOwnedAgentRunsApi(baseUrl, prompt)],
+    ["chat completions", () => callOwnedAgentChatCompletions(baseUrl, prompt)],
+  ];
+  const errors = [];
+  for (const [label, caller] of callers) {
+    try {
+      return await caller();
+    } catch (error) {
+      errors.push(`${label}: ${error.message || String(error)}`);
+    }
   }
-  if (task?.error) throw new Error(task.error.message || "Owned agent bridge returned an error.");
-  const reply = ownedAgentReplyFromTask(task);
-  if (!reply) throw new Error("Owned agent bridge did not return a reply.");
-  return { reply, task };
+  throw new Error(`Owned agent bridge did not answer. ${errors.join("; ")}`);
 }
 
 async function provisionMainWithFlux(agentConfig = {}) {
@@ -16015,6 +18524,2101 @@ async function submitCreditGrant(event) {
   }
 }
 
+function remoteControlId(prefix = "rc") {
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function remoteControlToken() {
+  const bytes = new Uint8Array(16);
+  if (window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 18)}`;
+}
+
+function remoteControlNow() {
+  return Date.now();
+}
+
+function remoteControlExpired(record = {}) {
+  return Number(record.expires_at || record.expiresAt || 0) <= remoteControlNow();
+}
+
+function remoteControlEventMs(event = {}) {
+  const created = Number(event.created_at || event.createdAt || 0);
+  if (!Number.isFinite(created) || created <= 0) return remoteControlNow();
+  return created < 1_000_000_000_000 ? created * 1000 : created;
+}
+
+function pruneRemoteControlRequestResponses() {
+  const now = remoteControlNow();
+  const entries = Object.entries(state.remoteControl.requestResponses || {})
+    .filter(([, response]) => Number(response?.expires_at || response?.expiresAt || 0) > now)
+    .slice(-REMOTE_CONTROL_ACTION_LOG_LIMIT);
+  state.remoteControl.requestResponses = Object.fromEntries(entries);
+}
+
+function remoteControlRequestResponse(requestId = "") {
+  const id = cleanText(requestId, "");
+  if (!id) return null;
+  pruneRemoteControlRequestResponses();
+  return state.remoteControl.requestResponses?.[id] || null;
+}
+
+function rememberRemoteControlRequestResponse(requestId = "", response = {}) {
+  const id = cleanText(requestId, "");
+  if (!id) return null;
+  pruneRemoteControlRequestResponses();
+  const expiresAt = Number(response.expires_at || response.expiresAt || 0)
+    || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const stored = {
+    ...response,
+    request_id: id,
+    expires_at: expiresAt,
+    remembered_at: remoteControlNow(),
+  };
+  state.remoteControl.requestResponses[id] = stored;
+  return stored;
+}
+
+function readRemoteControlAdminCoControlSession() {
+  try {
+    const raw = window.sessionStorage?.getItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY) || "";
+    const session = raw ? JSON.parse(raw) : null;
+    if (!session || typeof session !== "object" || remoteControlExpired(session)) {
+      window.sessionStorage?.removeItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY);
+      return null;
+    }
+    return {
+      controller_user_id: cleanText(session.controller_user_id || session.controllerUserId, ""),
+      controller_device_id: cleanText(session.controller_device_id || session.controllerDeviceId, ""),
+      controller_label: cleanText(session.controller_label || session.controllerLabel, "Admin"),
+      expires_at: Number(session.expires_at || session.expiresAt || 0),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveRemoteControlAdminCoControlSession(session = null) {
+  state.remoteControl.adminCoControlSession = session;
+  try {
+    if (session) window.sessionStorage?.setItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+    else window.sessionStorage?.removeItem(REMOTE_CONTROL_ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // Browser storage can be disabled; in-memory session state still works.
+  }
+}
+
+function remoteControlAdminCoControlSessionActive(userId = "", deviceId = "") {
+  const session = state.remoteControl.adminCoControlSession || readRemoteControlAdminCoControlSession();
+  if (!session || remoteControlExpired(session)) {
+    saveRemoteControlAdminCoControlSession(null);
+    return false;
+  }
+  const controllerDeviceId = cleanText(session.controller_device_id || session.controllerDeviceId, "");
+  const requestedDeviceId = cleanText(deviceId, "");
+  return cleanText(session.controller_user_id, "") === cleanText(userId, "")
+    && (!requestedDeviceId || !controllerDeviceId || controllerDeviceId === requestedDeviceId);
+}
+
+function remoteControlUserById(userId = "") {
+  const id = cleanText(userId, "");
+  if (!id) return null;
+  const friendship = friendshipByUserId(id);
+  return friendship ? friendshipUser(friendship) : activeSharedSpaceMembers().find((member) => member.id === id) || null;
+}
+
+function remoteControlUserLabel(userId = "", fallback = "Someone") {
+  const user = remoteControlUserById(userId);
+  if (user) return socialUserLabel(user, fallback);
+  return userId === cleanText(state.authUser?.id, "") ? publicUserLabel(state.authUser) : cleanText(userId, fallback);
+}
+
+function remoteControlConversationIdForUser(userId = "") {
+  const id = cleanText(userId, "");
+  return id ? directConversationId(id) : "";
+}
+
+function remoteControlCurrentDeviceId() {
+  return cleanText(state.deviceAuthority?.current_device_id || "", "");
+}
+
+function remoteControlDeviceConversationId(deviceId = "") {
+  const userId = cleanText(state.authUser?.id, "");
+  const targetDeviceId = cleanText(deviceId, "");
+  return userId && targetDeviceId ? `rc-device-${userId}-${targetDeviceId}` : "";
+}
+
+function remoteControlKind(kind = "") {
+  return cleanText(kind, "");
+}
+
+function remoteControlIsKind(kind = "") {
+  return [
+    "remote-control-request",
+    "remote-control-response",
+    "remote-control-action",
+    REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    "remote-control-stop",
+  ].includes(remoteControlKind(kind));
+}
+
+function remoteControlRecordAction(direction, detail = "") {
+  const entry = {
+    direction,
+    detail: truncateText(detail, 120),
+    at: new Date().toISOString(),
+  };
+  state.remoteControl.actionLog.push(entry);
+  state.remoteControl.actionLog = state.remoteControl.actionLog.slice(-REMOTE_CONTROL_ACTION_LOG_LIMIT);
+  renderRemoteControlChrome();
+  recordUserEvent("remote_control.action", {
+    target: "remote-control",
+    summary: `${direction}: ${entry.detail}`,
+    data: { direction, detail: entry.detail },
+  });
+}
+
+function remoteControlHasLiveTraffic() {
+  const hasActiveGrant = state.remoteControl.activeGrant && !remoteControlExpired(state.remoteControl.activeGrant);
+  const hasActiveController = state.remoteControl.activeController && !remoteControlExpired(state.remoteControl.activeController);
+  const hasIncoming = Object.values(state.remoteControl.incomingRequests || {}).some((request) => !remoteControlExpired(request));
+  const hasOutgoing = Object.values(state.remoteControl.outgoingRequests || {}).some((request) => !remoteControlExpired(request));
+  return Boolean(hasActiveGrant || hasActiveController || hasIncoming || hasOutgoing);
+}
+
+function stopRemoteControlFastSyncIfIdle() {
+  if (remoteControlHasLiveTraffic()) return;
+  if (state.remoteControl.syncTimer) {
+    window.clearInterval(state.remoteControl.syncTimer);
+    state.remoteControl.syncTimer = 0;
+  }
+}
+
+function remoteControlLiveUrl() {
+  const url = new URL("/remote-control/live", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString();
+}
+
+function remoteControlEventIdNewer(id = "", cursor = "") {
+  const next = cleanText(id, "");
+  const current = cleanText(cursor, "");
+  if (!next) return false;
+  if (!current) return true;
+  try {
+    return BigInt(next) > BigInt(current);
+  } catch {
+    return next > current;
+  }
+}
+
+function advanceRemoteControlSyncCursor(id = "") {
+  if (remoteControlEventIdNewer(id, state.remoteControl.syncCursor)) {
+    state.remoteControl.syncCursor = cleanText(id, state.remoteControl.syncCursor);
+  }
+}
+
+function remoteControlLiveConnected() {
+  if (!("WebSocket" in window)) return false;
+  return Boolean(state.remoteControl.liveSocket?.readyState === WebSocket.OPEN && state.remoteControl.liveSocketReady);
+}
+
+function remoteControlLiveShouldConnect() {
+  return Boolean(state.authUser && ("WebSocket" in window));
+}
+
+function rejectRemoteControlLivePending(error) {
+  const pending = state.remoteControl.livePending || {};
+  state.remoteControl.livePending = {};
+  Object.values(pending).forEach((entry) => {
+    window.clearTimeout(entry.timeout);
+    entry.reject(error);
+  });
+}
+
+function closeRemoteControlLiveSocket(options = {}) {
+  if (state.remoteControl.liveReconnectTimer) {
+    window.clearTimeout(state.remoteControl.liveReconnectTimer);
+    state.remoteControl.liveReconnectTimer = 0;
+  }
+  const socket = state.remoteControl.liveSocket;
+  state.remoteControl.liveSocket = null;
+  state.remoteControl.liveSocketReady = false;
+  state.remoteControl.liveSocketToken += 1;
+  rejectRemoteControlLivePending(new Error("Remote control live channel closed."));
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    try {
+      socket.close();
+    } catch {
+      // Socket may already be closing.
+    }
+  }
+  if (options.reconnect && remoteControlLiveShouldConnect()) scheduleRemoteControlLiveReconnect("close");
+}
+
+function scheduleRemoteControlLiveReconnect(origin = "reconnect") {
+  if (!remoteControlLiveShouldConnect()) return;
+  if (state.remoteControl.liveReconnectTimer) return;
+  state.remoteControl.liveReconnectTimer = window.setTimeout(() => {
+    state.remoteControl.liveReconnectTimer = 0;
+    startRemoteControlLiveSocket(origin);
+  }, 900);
+}
+
+function handleRemoteControlLiveMessage(message = {}) {
+  const type = cleanText(message.type, "");
+  if (type === "ready") {
+    state.remoteControl.liveSocketReady = true;
+    return;
+  }
+  if (type === "ping") {
+    try {
+      state.remoteControl.liveSocket?.send(JSON.stringify({ type: "pong", ts: message.ts || Date.now() }));
+    } catch {
+      // The close handler will reconnect if the live session is still needed.
+    }
+    return;
+  }
+  if (type === "event") {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    if (!remoteControlIsKind(event.kind)) return;
+    if (!event.ephemeral) advanceRemoteControlSyncCursor(event.id);
+    handleRemoteControlSyncEvent(event);
+    return;
+  }
+  if (type !== "ack") return;
+  const requestId = cleanText(message.request_id || message.requestId, "");
+  const pending = requestId ? state.remoteControl.livePending?.[requestId] : null;
+  if (!pending) return;
+  window.clearTimeout(pending.timeout);
+  delete state.remoteControl.livePending[requestId];
+  if (message.ok) {
+    const event = message.event && typeof message.event === "object" ? message.event : {};
+    advanceRemoteControlSyncCursor(event.id);
+    pending.resolve({ ok: true, event });
+    return;
+  }
+  const error = new Error(cleanText(message.error?.message, "Remote control live channel failed."));
+  error.code = cleanText(message.error?.code, "remote_control_live_error");
+  error.payload = message;
+  pending.reject(error);
+}
+
+function startRemoteControlLiveSocket(origin = "active") {
+  if (!remoteControlLiveShouldConnect()) return null;
+  const existing = state.remoteControl.liveSocket;
+  if (existing && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) return existing;
+  if (state.remoteControl.liveReconnectTimer) {
+    window.clearTimeout(state.remoteControl.liveReconnectTimer);
+    state.remoteControl.liveReconnectTimer = 0;
+  }
+  const token = state.remoteControl.liveSocketToken + 1;
+  state.remoteControl.liveSocketToken = token;
+  state.remoteControl.liveSocketReady = false;
+  const socket = new WebSocket(remoteControlLiveUrl());
+  state.remoteControl.liveSocket = socket;
+  socket.addEventListener("open", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    try {
+      socket.send(JSON.stringify({ type: "hello", origin }));
+    } catch {
+      // The close handler will reconnect if the live session is still needed.
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    try {
+      handleRemoteControlLiveMessage(JSON.parse(event.data));
+    } catch (error) {
+      remoteControlRecordAction("error", `live channel: ${error.message || String(error)}`);
+    }
+  });
+  socket.addEventListener("close", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    state.remoteControl.liveSocket = null;
+    state.remoteControl.liveSocketReady = false;
+    rejectRemoteControlLivePending(new Error("Remote control live channel closed."));
+    scheduleRemoteControlLiveReconnect("close");
+  });
+  socket.addEventListener("error", () => {
+    if (state.remoteControl.liveSocketToken !== token) return;
+    state.remoteControl.liveSocketReady = false;
+  });
+  return socket;
+}
+
+function appendRemoteControlLiveEvent(body = {}) {
+  const socket = startRemoteControlLiveSocket("append");
+  if (!socket || !remoteControlLiveConnected()) return null;
+  const requestId = remoteControlId("rc_live");
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      delete state.remoteControl.livePending[requestId];
+      reject(new Error("Remote control live channel timed out."));
+    }, 650);
+    state.remoteControl.livePending[requestId] = { resolve, reject, timeout };
+    try {
+      socket.send(JSON.stringify({ type: "append", request_id: requestId, body }));
+    } catch (error) {
+      window.clearTimeout(timeout);
+      delete state.remoteControl.livePending[requestId];
+      reject(error);
+    }
+  });
+}
+
+function sendRemoteControlLiveFrameEvent(body = {}) {
+  const socket = startRemoteControlLiveSocket("viewport-frame");
+  if (!socket || !remoteControlLiveConnected()) return false;
+  if (Number(socket.bufferedAmount || 0) > REMOTE_CONTROL_LIVE_FRAME_BUFFER_LIMIT_BYTES) return true;
+  try {
+    socket.send(JSON.stringify({
+      type: "frame",
+      request_id: remoteControlId("rc_frame_live"),
+      body,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function syncRemoteControlEvents(origin = "fast-poll") {
+  if (!state.authUser || state.remoteControl.syncBusy) return;
+  if (!remoteControlHasLiveTraffic()) {
+    stopRemoteControlFastSyncIfIdle();
+    return;
+  }
+  state.remoteControl.syncBusy = true;
+  try {
+    const query = new URLSearchParams({ limit: "120" });
+    const cursor = cleanText(state.remoteControl.syncCursor || state.agentPeople?.syncCursor, "");
+    if (cursor) query.set("after_id", cursor);
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    const allEvents = Array.isArray(payload.events) ? payload.events : [];
+    for (const event of allEvents) {
+      if (remoteControlIsKind(event.kind)) handleRemoteControlSyncEvent(event);
+    }
+    state.remoteControl.syncCursor = cleanText(payload.cursor || allEvents.at(-1)?.id || state.remoteControl.syncCursor, "");
+    await syncRemoteControlLatestStopEvent(origin);
+    await syncRemoteControlLatestViewportFrame(origin);
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  } finally {
+    state.remoteControl.syncBusy = false;
+    stopRemoteControlFastSyncIfIdle();
+  }
+}
+
+function remoteControlActiveStopSession() {
+  const controller = state.remoteControl.activeController;
+  if (controller && !remoteControlExpired(controller) && controller.conversation_id) {
+    return {
+      conversation_id: controller.conversation_id,
+      grant_id: controller.grant_id,
+      token: controller.token,
+    };
+  }
+  const grant = state.remoteControl.activeGrant;
+  if (grant && !remoteControlExpired(grant) && grant.conversation_id) {
+    return {
+      conversation_id: grant.conversation_id,
+      grant_id: grant.grant_id,
+      token: grant.token,
+    };
+  }
+  return null;
+}
+
+async function syncRemoteControlLatestStopEvent(origin = "latest-stop") {
+  if (!state.authUser) return;
+  const session = remoteControlActiveStopSession();
+  if (!session?.conversation_id || !session.grant_id || !session.token) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.stopLatestProbeAt < REMOTE_CONTROL_SYNC_POLL_MS * 2) return;
+  state.remoteControl.stopLatestProbeAt = now;
+  try {
+    const query = new URLSearchParams({
+      conversation_id: session.conversation_id,
+      kind: "remote-control-stop",
+      latest: "1",
+      limit: "8",
+    });
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    for (const event of Array.isArray(payload.events) ? payload.events : []) {
+      if (event.kind === "remote-control-stop") handleRemoteControlStop(event);
+    }
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  }
+}
+
+async function syncRemoteControlLatestViewportFrame(origin = "latest-frame") {
+  const controller = state.remoteControl.activeController;
+  if (!state.authUser || !controller || remoteControlExpired(controller) || !controller.conversation_id) return;
+  const now = remoteControlNow();
+  const frameAge = state.remoteControl.viewportFrameReceivedAt
+    ? now - state.remoteControl.viewportFrameReceivedAt
+    : Number.POSITIVE_INFINITY;
+  if (frameAge < REMOTE_CONTROL_VIEWPORT_FRAME_MS * 2) return;
+  if (now - state.remoteControl.viewportLatestProbeAt < REMOTE_CONTROL_VIEWPORT_FRAME_MS) return;
+  state.remoteControl.viewportLatestProbeAt = now;
+  try {
+    const query = new URLSearchParams({
+      conversation_id: controller.conversation_id,
+      kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+      latest: "1",
+      limit: "8",
+    });
+    const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 5000 });
+    for (const event of Array.isArray(payload.events) ? payload.events : []) {
+      if (event.kind === REMOTE_CONTROL_VIEWPORT_FRAME_KIND) handleRemoteControlFrame(event);
+    }
+  } catch (error) {
+    if (origin !== "fast-poll") remoteControlRecordAction("error", error.message || String(error));
+  }
+}
+
+function startRemoteControlFastSync(origin = "active") {
+  if (!state.authUser || !remoteControlHasLiveTraffic()) return;
+  startRemoteControlLiveSocket(origin);
+  if (!state.remoteControl.syncCursor) state.remoteControl.syncCursor = cleanText(state.agentPeople?.syncCursor, "");
+  if (!state.remoteControl.syncTimer) {
+    state.remoteControl.syncTimer = window.setInterval(
+      () => void syncRemoteControlEvents("fast-poll"),
+      REMOTE_CONTROL_SYNC_POLL_MS
+    );
+  }
+  void syncRemoteControlEvents(origin);
+}
+
+function refreshRemoteControlFastSync(origin = "state") {
+  if (remoteControlHasLiveTraffic()) startRemoteControlFastSync(origin);
+  else stopRemoteControlFastSyncIfIdle();
+}
+
+function remoteControlSyncEventBody({ peerUserId, conversationId, kind, payload }) {
+  const peerId = cleanText(peerUserId, "");
+  const convId = cleanText(conversationId || remoteControlConversationIdForUser(peerId), "");
+  if (!convId) throw new Error("Remote control requires a sync conversation.");
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const body = {
+    conversation_id: convId,
+    client_event_id: remoteControlId(kind.replace(/[^a-z0-9_-]/gi, "_")),
+    kind,
+    payload: {
+      schema: REMOTE_CONTROL_SCHEMA,
+      ...payload,
+    },
+  };
+  if (peerId && peerId !== currentUserId) body.peer_user_id = peerId;
+  return body;
+}
+
+async function appendRemoteControlSyncEvent({ peerUserId, conversationId, kind, payload, live = true }) {
+  const body = remoteControlSyncEventBody({ peerUserId, conversationId, kind, payload });
+  const liveResult = remoteControlIsKind(kind) && live
+    ? await appendRemoteControlLiveEvent(body).catch(() => null)
+    : null;
+  if (liveResult?.event) return liveResult;
+  return fetchJson("/sync/events", {
+    method: "POST",
+    timeoutMs: 8000,
+    body,
+  });
+}
+
+async function requestRemoteControl(user, options = {}) {
+  const targetUserId = socialUserId(user);
+  if (!targetUserId || targetUserId === cleanText(state.authUser?.id, "")) return;
+  const friendship = friendshipByUserId(targetUserId);
+  const adminSupport = Boolean(options.adminSupport && isAdminUser());
+  if (friendship?.status !== "accepted" && !adminSupport) {
+    pushSocialToast("error", "Control unavailable", "Accepted friendship required", `remote-control-denied:${targetUserId}`);
+    return;
+  }
+  const requestId = remoteControlId("rc_req");
+  const expiresAt = remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const conversationId = remoteControlConversationIdForUser(targetUserId);
+  state.remoteControl.outgoingRequests[requestId] = {
+    request_id: requestId,
+    target_user_id: targetUserId,
+    target_label: socialUserLabel(user, "friend"),
+    conversation_id: conversationId,
+    expires_at: expiresAt,
+    admin_support: adminSupport,
+  };
+  renderRemoteControlChrome();
+  startRemoteControlFastSync("request");
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: targetUserId,
+      conversationId,
+      kind: "remote-control-request",
+      payload: {
+        request_id: requestId,
+        scope: "app",
+        admin_support: adminSupport,
+        requester_label: publicUserLabel(state.authUser),
+        expires_at: expiresAt,
+        controls: ["viewport", "click", "pointer", "text", "scroll", "keys"],
+      },
+    });
+    pushSocialToast("remote-control", adminSupport ? "Co-control request sent" : "Control request sent", socialUserLabel(user, "friend"), `remote-control-requested:${requestId}`);
+    recordUserEvent("remote_control.requested", {
+      target: `user:${targetUserId}`,
+      summary: `${adminSupport ? "Requested admin co-control of" : "Requested control of"} ${socialUserLabel(user, "friend")}`,
+      data: { conversation_id: conversationId, request_id: requestId, scope: "app", admin_support: adminSupport },
+    });
+  } catch (error) {
+    delete state.remoteControl.outgoingRequests[requestId];
+    renderRemoteControlChrome();
+    refreshRemoteControlFastSync("request-error");
+    pushSocialToast("error", "Control request failed", error.message, `remote-control-error:${requestId}`);
+  }
+}
+
+async function requestRemoteControlDevice(device = {}) {
+  const targetDeviceId = cleanText(device.id || device.device_id || "", "");
+  const fromDeviceId = remoteControlCurrentDeviceId();
+  const currentUserId = cleanText(state.authUser?.id, "");
+  if (!currentUserId || !targetDeviceId || !fromDeviceId || targetDeviceId === fromDeviceId) return;
+  const requestId = remoteControlId("rc_dev_req");
+  const expiresAt = remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS;
+  const conversationId = remoteControlDeviceConversationId(targetDeviceId);
+  const targetLabel = cleanText(device.label, "device");
+  state.remoteControl.outgoingRequests[requestId] = {
+    request_id: requestId,
+    target_user_id: currentUserId,
+    target_device_id: targetDeviceId,
+    from_device_id: fromDeviceId,
+    target_label: targetLabel,
+    conversation_id: conversationId,
+    expires_at: expiresAt,
+    same_account_device: true,
+  };
+  renderRemoteControlChrome();
+  startRemoteControlFastSync("device-request");
+  try {
+    await appendRemoteControlSyncEvent({
+      conversationId,
+      kind: "remote-control-request",
+      payload: {
+        request_id: requestId,
+        scope: "app",
+        same_account_device: true,
+        requester_label: `${publicUserLabel(state.authUser)} / ${remoteControlUserLabel(currentUserId, "desktop")}`,
+        target_device_id: targetDeviceId,
+        from_device_id: fromDeviceId,
+        expires_at: expiresAt,
+        controls: ["viewport", "click", "pointer", "text", "scroll", "keys"],
+      },
+    });
+    pushSocialToast("remote-control", "Device co-control request sent", targetLabel, `remote-control-device-requested:${requestId}`);
+    recordUserEvent("remote_control.device_requested", {
+      target: `device:${targetDeviceId}`,
+      summary: `Requested co-control of ${targetLabel}`,
+      data: { conversation_id: conversationId, request_id: requestId, target_device_id: targetDeviceId, from_device_id: fromDeviceId },
+    });
+  } catch (error) {
+    delete state.remoteControl.outgoingRequests[requestId];
+    renderRemoteControlChrome();
+    refreshRemoteControlFastSync("device-request-error");
+    pushSocialToast("error", "Device control failed", error.message, `remote-control-device-error:${requestId}`);
+  }
+}
+
+function handleRemoteControlRequest(event) {
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const authorId = cleanText(event.author_user_id, "");
+  if (!currentUserId || !authorId) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const adminSupport = Boolean(payload.admin_support && payload.admin_verified);
+  const currentDeviceId = remoteControlCurrentDeviceId();
+  const fromDeviceId = cleanText(payload.from_device_id || payload.fromDeviceId, "");
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  const sameAccountDevice = Boolean(
+    payload.same_account_device
+      && authorId === currentUserId
+      && currentDeviceId
+      && targetDeviceId === currentDeviceId
+      && fromDeviceId
+      && fromDeviceId !== currentDeviceId
+  );
+  if (authorId === currentUserId && !sameAccountDevice) return;
+  if (friendshipByUserId(authorId)?.status !== "accepted" && !adminSupport && !sameAccountDevice) return;
+  const requestId = cleanText(payload.request_id, "");
+  if (!requestId || state.remoteControl.incomingRequests[requestId]) return;
+  const previousResponse = remoteControlRequestResponse(requestId);
+  if (
+    previousResponse
+    && cleanText(previousResponse.conversation_id, "") === cleanText(event.conversation_id, "")
+    && cleanText(previousResponse.requester_user_id, "") === authorId
+  ) return;
+  const request = {
+    request_id: requestId,
+    requester_user_id: authorId,
+    requester_device_id: fromDeviceId,
+    target_device_id: targetDeviceId,
+    requester_label: cleanText(payload.requester_label || remoteControlUserLabel(authorId), "Someone"),
+    admin_support: adminSupport,
+    same_account_device: sameAccountDevice,
+    conversation_id: cleanText(event.conversation_id, ""),
+    expires_at: Number(payload.expires_at || 0) || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS,
+    sync_event_id: cleanText(event.id, ""),
+  };
+  if (remoteControlExpired(request)) return;
+  state.remoteControl.incomingRequests[requestId] = request;
+  startRemoteControlFastSync("incoming-request");
+  if ((adminSupport || sameAccountDevice) && remoteControlAdminCoControlSessionActive(authorId, fromDeviceId)) {
+    void respondRemoteControlRequest(requestId, true, { automatic: true });
+    return;
+  }
+  pushSocialToast("remote-control", adminSupport || sameAccountDevice ? "Co-control request" : "Control request", request.requester_label, `remote-control-in:${requestId}`);
+  renderRemoteControlChrome();
+}
+
+async function respondRemoteControlRequest(requestId, accepted, options = {}) {
+  const request = state.remoteControl.incomingRequests[requestId];
+  if (!request) return;
+  if (remoteControlRequestResponse(requestId)) return;
+  rememberRemoteControlRequestResponse(requestId, {
+    pending: true,
+    accepted: false,
+    requester_user_id: request.requester_user_id,
+    requester_device_id: request.requester_device_id,
+    conversation_id: request.conversation_id,
+    expires_at: request.expires_at,
+  });
+  delete state.remoteControl.incomingRequests[requestId];
+  let grant = null;
+  if (accepted && !remoteControlExpired(request)) {
+    if ((request.admin_support || request.same_account_device) && options.rememberAdmin) {
+      saveRemoteControlAdminCoControlSession({
+        controller_user_id: request.requester_user_id,
+        controller_device_id: request.requester_device_id,
+        controller_label: request.requester_label,
+        expires_at: remoteControlNow() + REMOTE_CONTROL_ADMIN_SESSION_TTL_MS,
+      });
+    }
+    grant = {
+      grant_id: remoteControlId("rc_grant"),
+      token: remoteControlToken(),
+      request_id: request.request_id,
+      controller_user_id: request.requester_user_id,
+      controller_device_id: request.requester_device_id,
+      target_device_id: request.target_device_id,
+      controller_label: request.requester_label,
+      conversation_id: request.conversation_id,
+      expires_at: remoteControlNow() + REMOTE_CONTROL_GRANT_TTL_MS,
+      started_at: remoteControlNow(),
+      scope: "app",
+      admin_support: Boolean(request.admin_support),
+      same_account_device: Boolean(request.same_account_device),
+    };
+    state.remoteControl.activeGrant = grant;
+    rememberRemoteControlRequestResponse(requestId, {
+      pending: true,
+      accepted: true,
+      grant_id: grant.grant_id,
+      token: grant.token,
+      requester_user_id: request.requester_user_id,
+      requester_device_id: request.requester_device_id,
+      conversation_id: request.conversation_id,
+      expires_at: grant.expires_at,
+    });
+    state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES;
+    remoteControlRecordAction(
+      "accepted",
+      request.admin_support || request.same_account_device
+        ? `${options.automatic ? "Session" : "Browser"} co-control granted to ${grant.controller_label}`
+        : `Control granted to ${grant.controller_label}`
+    );
+    if (!options.automatic) await startRemoteControlExactPixelSharing("accept");
+  }
+  renderRemoteControlChrome();
+  refreshRemoteControlFastSync(grant ? "grant-response" : "request-declined");
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: request.requester_user_id,
+      conversationId: request.conversation_id,
+      kind: "remote-control-response",
+      payload: {
+        request_id: request.request_id,
+        accepted: Boolean(grant),
+        grant_id: grant?.grant_id || "",
+        token: grant?.token || "",
+        scope: "app",
+        admin_support: Boolean(request.admin_support),
+        same_account_device: Boolean(request.same_account_device),
+        target_device_id: request.target_device_id || "",
+        from_device_id: remoteControlCurrentDeviceId(),
+        expires_at: grant?.expires_at || remoteControlNow(),
+        responder_label: publicUserLabel(state.authUser),
+      },
+    });
+    rememberRemoteControlRequestResponse(requestId, {
+      pending: false,
+      accepted: Boolean(grant),
+      grant_id: grant?.grant_id || "",
+      token: grant?.token || "",
+      requester_user_id: request.requester_user_id,
+      requester_device_id: request.requester_device_id,
+      conversation_id: request.conversation_id,
+      expires_at: grant?.expires_at || remoteControlNow() + REMOTE_CONTROL_REQUEST_TTL_MS,
+    });
+    if (grant) startRemoteControlViewportStream("grant-accepted");
+    if (!grant) remoteControlRecordAction("declined", `Control request from ${request.requester_label}`);
+  } catch (error) {
+    delete state.remoteControl.requestResponses[requestId];
+    if (grant && state.remoteControl.activeGrant?.grant_id === grant.grant_id) {
+      state.remoteControl.activeGrant = null;
+      stopRemoteControlViewportStream();
+      renderRemoteControlChrome();
+      refreshRemoteControlFastSync("response-error");
+    }
+    pushSocialToast("error", "Control response failed", error.message, `remote-control-response-error:${request.request_id}`);
+  }
+}
+
+function handleRemoteControlResponse(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const requestId = cleanText(payload.request_id, "");
+  const pendingRequest = state.remoteControl.outgoingRequests[requestId] || null;
+  const currentController = state.remoteControl.activeController;
+  const duplicateAcceptedResponse = Boolean(
+    !pendingRequest
+      && payload.accepted
+      && payload.grant_id
+      && payload.token
+      && currentController
+      && cleanText(currentController.request_id || currentController.requestId, "") === requestId
+      && cleanText(currentController.conversation_id, "") === cleanText(event.conversation_id, "")
+      && cleanText(currentController.target_user_id, "") === cleanText(event.author_user_id, "")
+  );
+  const request = pendingRequest || (duplicateAcceptedResponse ? {
+    request_id: currentController.request_id,
+    target_user_id: currentController.target_user_id,
+    target_device_id: currentController.target_device_id,
+    from_device_id: currentController.from_device_id,
+    target_label: currentController.target_label,
+    conversation_id: currentController.conversation_id,
+    admin_support: currentController.admin_support,
+    same_account_device: currentController.same_account_device,
+  } : null);
+  if (!request) return;
+  if (cleanText(event.author_user_id, "") !== request.target_user_id) return;
+  if (request.target_device_id) {
+    const responderDeviceId = cleanText(payload.from_device_id || payload.fromDeviceId, "");
+    if (responderDeviceId && responderDeviceId !== request.target_device_id) return;
+  }
+  if (pendingRequest) delete state.remoteControl.outgoingRequests[requestId];
+  if (payload.accepted && payload.grant_id && payload.token) {
+    const responseEventId = cleanText(event.id, "");
+    const currentEventId = Number(currentController?.response_event_id || 0);
+    const nextEventId = Number(responseEventId || 0);
+    if (duplicateAcceptedResponse && currentEventId && nextEventId && nextEventId <= currentEventId) return;
+    const replacedGrant = Boolean(
+      currentController?.grant_id
+        && currentController.grant_id !== cleanText(payload.grant_id, "")
+    );
+    state.remoteControl.activeController = {
+      grant_id: cleanText(payload.grant_id, ""),
+      token: cleanText(payload.token, ""),
+      request_id: request.request_id,
+      target_user_id: cleanText(event.author_user_id, ""),
+      target_device_id: cleanText(request.target_device_id || payload.from_device_id || payload.fromDeviceId, ""),
+      from_device_id: cleanText(request.from_device_id || remoteControlCurrentDeviceId(), ""),
+      target_label: request.target_label || remoteControlUserLabel(event.author_user_id, "friend"),
+      conversation_id: request.conversation_id,
+      expires_at: Number(payload.expires_at || 0) || remoteControlNow() + REMOTE_CONTROL_GRANT_TTL_MS,
+      started_at: remoteControlNow(),
+      response_event_id: responseEventId,
+      response_event_ms: remoteControlEventMs(event),
+      scope: "app",
+      admin_support: Boolean(request.admin_support || payload.admin_support),
+      same_account_device: Boolean(request.same_account_device || payload.same_account_device),
+    };
+    if (replacedGrant) {
+      state.remoteControl.viewportFrame = null;
+      state.remoteControl.viewportFrameReceivedAt = 0;
+      state.remoteControl.viewportLatestProbeAt = 0;
+      resetRemoteControlViewportPointer();
+    }
+    remoteControlRecordAction(
+      duplicateAcceptedResponse ? "updated" : "started",
+      duplicateAcceptedResponse
+        ? `Synced viewport grant for ${state.remoteControl.activeController.target_label}`
+        : state.remoteControl.activeController.same_account_device
+          ? `Co-controlling ${state.remoteControl.activeController.target_label}`
+          : `Controlling ${state.remoteControl.activeController.target_label}`
+    );
+    installRemoteControlCapture();
+    startRemoteControlFastSync("controller-started");
+    if (!duplicateAcceptedResponse) {
+      pushSocialToast("remote-control", "Control accepted", state.remoteControl.activeController.target_label, `remote-control-ok:${requestId}`);
+    }
+  } else {
+    if (duplicateAcceptedResponse) return;
+    remoteControlRecordAction("declined", `${request.target_label || "Friend"} declined control`);
+    pushSocialToast("remote-control", "Control declined", request.target_label || "Friend", `remote-control-declined:${requestId}`);
+  }
+  refreshRemoteControlFastSync(payload.accepted ? "response" : "response-declined");
+  renderRemoteControlChrome();
+}
+
+function remoteControlStopMatchesSession(event, session, grantId, token, requestId, expectedAuthorId = "") {
+  if (!session) return false;
+  if (session.grant_id === grantId && session.token === token) return true;
+  const eventConversationId = cleanText(event.conversation_id, "");
+  if (!eventConversationId || eventConversationId !== cleanText(session.conversation_id, "")) return false;
+  const authorId = cleanText(event.author_user_id, "");
+  if (expectedAuthorId && authorId !== cleanText(expectedAuthorId, "")) return false;
+  const sessionRequestId = cleanText(session.request_id || session.requestId, "");
+  const stopRequestId = cleanText(requestId, "");
+  if (sessionRequestId && stopRequestId && sessionRequestId !== stopRequestId) return false;
+  const sessionStarted = Number(session.started_at || session.startedAt || 0);
+  const stopMs = remoteControlEventMs(event);
+  if (sessionStarted && stopMs + 1000 < sessionStarted) return false;
+  if (sessionRequestId && stopRequestId && sessionRequestId === stopRequestId) return true;
+  return Boolean(grantId && token);
+}
+
+function handleRemoteControlStop(event) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const grantId = cleanText(payload.grant_id, "");
+  const token = cleanText(payload.token, "");
+  const requestId = cleanText(payload.request_id || payload.requestId, "");
+  const reason = cleanText(payload.reason || "stopped", "stopped");
+  let stopped = false;
+  if (remoteControlStopMatchesSession(event, state.remoteControl.activeGrant, grantId, token, requestId, state.remoteControl.activeGrant?.controller_user_id)) {
+    remoteControlRecordAction("stopped", `${remoteControlUserLabel(event.author_user_id, "Controller")} stopped: ${reason}`);
+    state.remoteControl.activeGrant = null;
+    state.remoteControl.stopLatestProbeAt = 0;
+    stopRemoteControlViewportStream();
+    stopped = true;
+  }
+  if (remoteControlStopMatchesSession(event, state.remoteControl.activeController, grantId, token, requestId, state.remoteControl.activeController?.target_user_id)) {
+    remoteControlRecordAction("stopped", `Stopped controlling ${state.remoteControl.activeController.target_label}`);
+    state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    state.remoteControl.viewportLatestProbeAt = 0;
+    state.remoteControl.stopLatestProbeAt = 0;
+    state.remoteControl.remotePointerTarget = null;
+    resetRemoteControlViewportPointer();
+    stopped = true;
+  }
+  if (!stopped) return;
+  refreshRemoteControlFastSync("stop");
+  renderRemoteControlChrome();
+}
+
+async function stopRemoteControl(reason = "user_stop") {
+  const controller = state.remoteControl.activeController;
+  const grant = state.remoteControl.activeGrant;
+  if (grant?.admin_support || grant?.same_account_device) saveRemoteControlAdminCoControlSession(null);
+  state.remoteControl.activeController = null;
+  state.remoteControl.activeGrant = null;
+  state.remoteControl.viewportFrame = null;
+  state.remoteControl.viewportFrameReceivedAt = 0;
+  state.remoteControl.viewportLatestProbeAt = 0;
+  state.remoteControl.stopLatestProbeAt = 0;
+  state.remoteControl.remotePointerTarget = null;
+  resetRemoteControlViewportPointer();
+  stopRemoteControlViewportStream();
+  renderRemoteControlChrome();
+  refreshRemoteControlFastSync("stop");
+  const target = controller
+    ? {
+      peerUserId: controller.target_user_id,
+      conversationId: controller.conversation_id,
+      grantId: controller.grant_id,
+      token: controller.token,
+      requestId: controller.request_id || "",
+      targetUserId: controller.target_user_id,
+      targetDeviceId: controller.target_device_id || "",
+      controllerUserId: cleanText(state.authUser?.id, ""),
+      controllerDeviceId: controller.from_device_id || remoteControlCurrentDeviceId(),
+    }
+    : grant
+      ? {
+        peerUserId: grant.controller_user_id,
+        conversationId: grant.conversation_id,
+        grantId: grant.grant_id,
+        token: grant.token,
+        requestId: grant.request_id || "",
+        targetUserId: cleanText(state.authUser?.id, ""),
+        targetDeviceId: grant.target_device_id || remoteControlCurrentDeviceId(),
+        controllerUserId: grant.controller_user_id,
+        controllerDeviceId: grant.controller_device_id || "",
+      }
+      : null;
+  if (!target) return;
+  remoteControlRecordAction("stopped", reason);
+  try {
+    await appendRemoteControlSyncEvent({
+      peerUserId: target.peerUserId,
+      conversationId: target.conversationId,
+      kind: "remote-control-stop",
+      payload: {
+        grant_id: target.grantId,
+        token: target.token,
+        request_id: target.requestId,
+        target_user_id: target.targetUserId,
+        target_device_id: target.targetDeviceId,
+        controller_user_id: target.controllerUserId,
+        controller_device_id: target.controllerDeviceId,
+        reason,
+      },
+    });
+  } catch (error) {
+    pushSocialToast("error", "Stop signal failed", error.message, `remote-control-stop-error:${target.grantId}`);
+  }
+}
+
+setRemoteControlViewportPixelCaptureStopHandler((reason) => {
+  if (!state.remoteControl.activeGrant) return;
+  void stopRemoteControl(reason || "display_capture_ended");
+});
+
+function renderRemoteControlChrome() {
+  renderRemoteControlConsent();
+  renderRemoteControlBanner();
+  renderRemoteControlViewportPanel();
+}
+
+function renderRemoteControlConsent() {
+  const requests = Object.values(state.remoteControl.incomingRequests || {})
+    .filter((request) => !remoteControlExpired(request))
+    .sort((a, b) => Number(b.expires_at || 0) - Number(a.expires_at || 0));
+  state.remoteControl.incomingRequests = Object.fromEntries(requests.map((request) => [request.request_id, request]));
+  let panel = document.querySelector("[data-remote-control-consent]");
+  if (!requests.length) {
+    panel?.remove();
+    return;
+  }
+  const request = requests[0];
+  const coControl = Boolean(request.admin_support || request.same_account_device);
+  if (!panel) {
+    panel = document.createElement("section");
+    panel.className = "remote-control-consent";
+    panel.dataset.remoteControl = "true";
+    panel.dataset.remoteControlConsent = "true";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-live", "polite");
+    document.body.append(panel);
+  }
+  const title = document.createElement("strong");
+  title.textContent = coControl
+    ? `${request.requester_label} wants to co-control`
+    : `${request.requester_label} wants control`;
+  const detail = document.createElement("span");
+  detail.textContent = request.same_account_device
+    ? "Same account device, app surface and viewport"
+    : request.admin_support ? "Browser session, app surface and viewport" : "App surface and viewport";
+  const actions = document.createElement("div");
+  actions.className = "remote-control-actions";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.textContent = coControl ? "Accept once" : "Accept";
+  accept.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, true));
+  const decline = document.createElement("button");
+  decline.type = "button";
+  decline.textContent = "Decline";
+  decline.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, false));
+  if (coControl) {
+    const allowSession = document.createElement("button");
+    allowSession.type = "button";
+    allowSession.textContent = "Allow session";
+    allowSession.addEventListener("click", () => void respondRemoteControlRequest(request.request_id, true, { rememberAdmin: true }));
+    actions.append(allowSession, accept, decline);
+  } else {
+    actions.append(accept, decline);
+  }
+  panel.replaceChildren(title, detail, actions);
+}
+
+async function startRemoteControlExactPixelSharing(origin = "button") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) return false;
+  const wasActive = remoteControlViewportPixelCaptureActive();
+  try {
+    const active = wasActive || await startRemoteControlViewportPixelCapture();
+    if (active && !wasActive) remoteControlRecordAction("accepted", "Exact pixel viewport sharing active");
+    if (active) startRemoteControlViewportStream(`exact-pixels:${origin}`);
+    else remoteControlRecordAction("info", "Exact pixel sharing unavailable in this browser");
+    renderRemoteControlChrome();
+    return Boolean(active);
+  } catch (error) {
+    remoteControlRecordAction("info", `Exact pixel sharing unavailable: ${error.message || String(error)}`);
+    renderRemoteControlChrome();
+    return false;
+  }
+}
+
+function renderRemoteControlBanner() {
+  if (state.remoteControl.activeGrant && remoteControlExpired(state.remoteControl.activeGrant)) {
+    state.remoteControl.activeGrant = null;
+    stopRemoteControlViewportStream();
+  }
+  if (state.remoteControl.activeController && remoteControlExpired(state.remoteControl.activeController)) {
+    state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+  }
+  const activeGrant = state.remoteControl.activeGrant;
+  const activeController = state.remoteControl.activeController;
+  let banner = document.querySelector("[data-remote-control-banner]");
+  if (!activeGrant && !activeController) {
+    banner?.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement("section");
+    banner.className = "remote-control-banner";
+    banner.dataset.remoteControl = "true";
+    banner.dataset.remoteControlBanner = "true";
+    banner.setAttribute("aria-live", "polite");
+    document.body.append(banner);
+  }
+  const label = document.createElement("strong");
+  const detail = document.createElement("span");
+  const latest = state.remoteControl.actionLog.at(-1);
+  if (activeGrant) {
+    const coControl = Boolean(activeGrant.admin_support || activeGrant.same_account_device);
+    label.textContent = coControl ? `Co-controlling with ${activeGrant.controller_label}` : `${activeGrant.controller_label} is controlling`;
+    detail.textContent = latest ? latest.detail : coControl ? "Stop revokes this browser session" : "App surface and viewport";
+    banner.dataset.mode = "receiving";
+  } else {
+    const coControl = Boolean(activeController.admin_support || activeController.same_account_device);
+    label.textContent = coControl ? `Co-controlling ${activeController.target_label}` : `Controlling ${activeController.target_label}`;
+    detail.textContent = latest ? latest.detail : coControl ? "Shared app surface and viewport" : "App surface and viewport";
+    banner.dataset.mode = "controlling";
+  }
+  const stop = document.createElement("button");
+  stop.type = "button";
+  stop.textContent = activeGrant?.admin_support || activeGrant?.same_account_device ? "Stop access" : "Stop";
+  stop.addEventListener("click", () => void stopRemoteControl("stop_button"));
+  const actions = document.createElement("div");
+  actions.className = "remote-control-banner-actions";
+  if (activeGrant && !remoteControlViewportPixelCaptureActive()) {
+    const sharePixels = document.createElement("button");
+    sharePixels.type = "button";
+    sharePixels.textContent = "Share pixels";
+    sharePixels.addEventListener("click", () => void startRemoteControlExactPixelSharing("banner"));
+    actions.append(sharePixels);
+  }
+  actions.append(stop);
+  banner.replaceChildren(label, detail, actions);
+}
+
+async function sendRemoteControlViewportStatus(grant, status, message, reason = "status") {
+  if (!grant || remoteControlExpired(grant)) return;
+  await appendRemoteControlSyncEvent({
+    peerUserId: grant.controller_user_id,
+    conversationId: grant.conversation_id,
+    kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    payload: {
+      grant_id: grant.grant_id,
+      token: grant.token,
+      request_id: grant.request_id || "",
+      target_user_id: cleanText(state.authUser?.id, ""),
+      target_device_id: grant.target_device_id || remoteControlCurrentDeviceId(),
+      controller_user_id: grant.controller_user_id,
+      controller_device_id: grant.controller_device_id || "",
+      seq: state.remoteControl.viewportSeq,
+      status,
+      message: truncateText(message, 180),
+      reason,
+      captured_at: new Date().toISOString(),
+    },
+  });
+}
+
+function remoteControlPayloadTooLarge(error) {
+  const text = `${error?.message || ""} ${error?.payload?.error?.message || ""} ${error?.payload?.error?.code || ""}`;
+  return /payload.*too large|sync_payload_too_large|request entity too large|413/i.test(text);
+}
+
+function remoteControlViewportFrameIntervalMs() {
+  return remoteControlViewportPixelCaptureActive()
+    ? REMOTE_CONTROL_VIEWPORT_LIVE_FRAME_MS
+    : REMOTE_CONTROL_VIEWPORT_FRAME_MS;
+}
+
+async function sendRemoteControlViewportFramePayload(grant, payload) {
+  const eventInput = {
+    peerUserId: grant.controller_user_id,
+    conversationId: grant.conversation_id,
+    kind: REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
+    payload,
+  };
+  const body = remoteControlSyncEventBody(eventInput);
+  if (sendRemoteControlLiveFrameEvent(body)) {
+    const now = remoteControlNow();
+    if (now - state.remoteControl.viewportLastDurableFrameAt >= REMOTE_CONTROL_VIEWPORT_DURABLE_FRAME_MS) {
+      state.remoteControl.viewportLastDurableFrameAt = now;
+      void appendRemoteControlSyncEvent({ ...eventInput, live: false }).catch((error) => {
+        if (remoteControlPayloadTooLarge(error)) return;
+        remoteControlRecordAction("error", `viewport keyframe: ${error.message || String(error)}`);
+      });
+    }
+    return { ok: true, live: true };
+  }
+  return appendRemoteControlSyncEvent({ ...eventInput, live: false });
+}
+
+async function sendRemoteControlViewportFrame(reason = "timer") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) {
+    state.remoteControl.activeGrant = null;
+    stopRemoteControlViewportStream();
+    renderRemoteControlChrome();
+    return;
+  }
+  if (state.remoteControl.viewportStreamBusy) return;
+  state.remoteControl.viewportStreamBusy = true;
+  try {
+    const exactPixels = remoteControlViewportPixelCaptureActive();
+    const frame = await captureRemoteControlViewportFrame(reason, {
+      maxBytes: exactPixels
+        ? Math.min(
+          state.remoteControl.viewportFrameMaxBytes || REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+          REMOTE_CONTROL_VIEWPORT_LIVE_MAX_BYTES
+        )
+        : state.remoteControl.viewportFrameMaxBytes || REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
+      fast: exactPixels,
+    });
+    if (!frame) {
+      await sendRemoteControlViewportStatus(
+        grant,
+        "waiting",
+        document.visibilityState === "hidden"
+          ? "Remote tab is backgrounded; waiting for browser capture."
+          : "Remote viewport capture is starting.",
+        reason
+      );
+      return;
+    }
+    state.remoteControl.viewportSeq += 1;
+    await sendRemoteControlViewportFramePayload(grant, {
+      grant_id: grant.grant_id,
+      token: grant.token,
+      request_id: grant.request_id || "",
+      target_user_id: cleanText(state.authUser?.id, ""),
+      target_device_id: grant.target_device_id || remoteControlCurrentDeviceId(),
+      controller_user_id: grant.controller_user_id,
+      controller_device_id: grant.controller_device_id || "",
+      seq: state.remoteControl.viewportSeq,
+      image: frame.data_url,
+      image_type: frame.type,
+      image_bytes: frame.size,
+      width: frame.width,
+      height: frame.height,
+      renderer: frame.renderer || "",
+      viewport_width: frame.viewport_width,
+      viewport_height: frame.viewport_height,
+      layout_width: frame.layout_width,
+      layout_height: frame.layout_height,
+      device_pixel_ratio: frame.device_pixel_ratio,
+      reason: frame.reason,
+      captured_at: new Date().toISOString(),
+    });
+    state.remoteControl.viewportFrameError = "";
+  } catch (error) {
+    const message = error.message || String(error);
+    if (
+      remoteControlPayloadTooLarge(error)
+      && state.remoteControl.viewportFrameMaxBytes > REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES
+    ) {
+      state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES;
+      await sendRemoteControlViewportStatus(
+        grant,
+        "waiting",
+        "Remote viewport frame was too large; retrying with a compact preview.",
+        reason
+      ).catch(() => {});
+      window.setTimeout(() => void sendRemoteControlViewportFrame("payload-retry"), 80);
+      return;
+    }
+    await sendRemoteControlViewportStatus(grant, "error", `Remote viewport capture failed: ${message}`, reason).catch(() => {});
+    if (state.remoteControl.viewportFrameError !== message) {
+      state.remoteControl.viewportFrameError = message;
+      remoteControlRecordAction("error", `viewport frame: ${message}`);
+    }
+  } finally {
+    state.remoteControl.viewportStreamBusy = false;
+  }
+}
+
+function startRemoteControlViewportStream(reason = "start") {
+  if (!state.remoteControl.activeGrant) return;
+  const intervalMs = remoteControlViewportFrameIntervalMs();
+  if (
+    state.remoteControl.viewportStreamTimer
+    && state.remoteControl.viewportStreamIntervalMs
+    && state.remoteControl.viewportStreamIntervalMs !== intervalMs
+  ) {
+    window.clearInterval(state.remoteControl.viewportStreamTimer);
+    state.remoteControl.viewportStreamTimer = 0;
+  }
+  if (!state.remoteControl.viewportStreamTimer) {
+    state.remoteControl.viewportStreamIntervalMs = intervalMs;
+    state.remoteControl.viewportStreamTimer = window.setInterval(
+      () => void sendRemoteControlViewportFrame("timer"),
+      intervalMs
+    );
+  }
+  void sendRemoteControlViewportFrame(reason);
+}
+
+function stopRemoteControlViewportStream() {
+  if (state.remoteControl.viewportStreamTimer) {
+    window.clearInterval(state.remoteControl.viewportStreamTimer);
+    state.remoteControl.viewportStreamTimer = 0;
+  }
+  state.remoteControl.viewportStreamIntervalMs = 0;
+  state.remoteControl.viewportStreamBusy = false;
+  state.remoteControl.viewportFrameMaxBytes = REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES;
+  state.remoteControl.viewportLastDurableFrameAt = 0;
+  stopRemoteControlViewportPixelCapture();
+}
+
+function scheduleRemoteControlViewportRender() {
+  if (state.remoteControl.viewportRenderTimer) return;
+  const schedule = window.requestAnimationFrame || ((callback) => window.setTimeout(callback, 16));
+  state.remoteControl.viewportRenderTimer = schedule(() => {
+    state.remoteControl.viewportRenderTimer = 0;
+    renderRemoteControlViewportPanel();
+  });
+}
+
+function handleRemoteControlFrame(event) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  const grantId = cleanText(payload.grant_id, "");
+  const token = cleanText(payload.token, "");
+  const requestId = cleanText(payload.request_id || payload.requestId, "");
+  const exactGrant = grantId === controller.grant_id && token === controller.token;
+  const siblingGrant = Boolean(
+    !exactGrant
+      && grantId
+      && token
+      && requestId
+      && requestId === cleanText(controller.request_id || controller.requestId, "")
+      && cleanText(event.conversation_id, "") === cleanText(controller.conversation_id, "")
+  );
+  if (!exactGrant && !siblingGrant) return;
+  if (cleanText(event.author_user_id, "") !== controller.target_user_id) return;
+  const currentUserId = cleanText(state.authUser?.id, "");
+  const controllerUserId = cleanText(payload.controller_user_id, "");
+  if (controllerUserId && controllerUserId !== currentUserId) return;
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  if (controller.target_device_id && targetDeviceId && targetDeviceId !== controller.target_device_id) return;
+  const controllerDeviceId = cleanText(payload.controller_device_id || payload.controllerDeviceId, "");
+  if (controller.from_device_id && controllerDeviceId && controllerDeviceId !== controller.from_device_id) return;
+  const incomingSeq = Number(payload.seq || 0);
+  if (siblingGrant) {
+    state.remoteControl.activeController = {
+      ...controller,
+      grant_id: grantId,
+      token,
+      response_event_id: cleanText(event.id, controller.response_event_id || ""),
+      response_event_ms: remoteControlEventMs(event),
+    };
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    resetRemoteControlViewportPointer();
+    remoteControlRecordAction("updated", `Synced viewport frame grant for ${controller.target_label}`);
+  }
+  const previousSeq = Number(state.remoteControl.viewportFrame?.seq || 0);
+  if (incomingSeq && previousSeq && incomingSeq <= previousSeq) return;
+  const image = cleanText(payload.image, "");
+  if (!image.startsWith("data:image/")) {
+    const status = cleanText(payload.status, "");
+    const message = cleanText(payload.message || payload.error, "");
+    if (!status && !message) return;
+    const previous = state.remoteControl.viewportFrame?.image ? state.remoteControl.viewportFrame : {};
+    state.remoteControl.viewportFrame = {
+      ...previous,
+      status: status || "waiting",
+      message: message || "Remote viewport capture is starting.",
+      seq: Number(incomingSeq || previous.seq || 0),
+      captured_at: cleanText(payload.captured_at || payload.capturedAt || previous.captured_at, ""),
+      target_device_id: targetDeviceId || previous.target_device_id || "",
+    };
+    state.remoteControl.viewportFrameReceivedAt = remoteControlNow();
+    scheduleRemoteControlViewportRender();
+    return;
+  }
+  state.remoteControl.viewportFrame = {
+    image,
+    width: Number(payload.width || 0),
+    height: Number(payload.height || 0),
+    viewport_width: Number(payload.viewport_width || payload.viewportWidth || 0),
+    viewport_height: Number(payload.viewport_height || payload.viewportHeight || 0),
+    image_bytes: Number(payload.image_bytes || payload.imageBytes || 0),
+    renderer: cleanText(payload.renderer, ""),
+    status: "ok",
+    message: "",
+    seq: incomingSeq,
+    captured_at: cleanText(payload.captured_at || payload.capturedAt, ""),
+    target_device_id: targetDeviceId,
+  };
+  state.remoteControl.viewportFrameReceivedAt = remoteControlNow();
+  scheduleRemoteControlViewportRender();
+}
+
+function sendRemoteControlViewportPointerAction(event, type) {
+  if (!state.remoteControl.activeController) return false;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const button = Number(event.button);
+  const buttons = Number(event.buttons);
+  sendRemoteControlAction({
+    ...point,
+    type,
+    pointer_id: Number(event.pointerId || state.remoteControl.viewportPointerId || 1),
+    pointer_type: cleanText(event.pointerType || "mouse", "mouse"),
+    button: Number.isFinite(button) ? button : 0,
+    buttons: type === "pointer_up" ? 0 : Number.isFinite(buttons) ? buttons : 1,
+    viewport_width: point.viewport_width || undefined,
+    viewport_height: point.viewport_height || undefined,
+  });
+  return true;
+}
+
+function sendRemoteControlViewportClickAction(event) {
+  if (!state.remoteControl.activeController) return false;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  sendRemoteControlAction({ ...point, type: "click" });
+  return true;
+}
+
+function resetRemoteControlViewportPointer() {
+  state.remoteControl.viewportPointerActive = false;
+  state.remoteControl.viewportPointerMoved = false;
+  state.remoteControl.viewportPointerId = 0;
+  state.remoteControl.viewportPointerStartX = 0;
+  state.remoteControl.viewportPointerStartY = 0;
+}
+
+function handleRemoteControlViewportPointerDown(event) {
+  if (!state.remoteControl.activeController || event.isPrimary === false) return;
+  const button = Number(event.button || 0);
+  if (button > 0) return;
+  state.remoteControl.viewportPointerActive = true;
+  state.remoteControl.viewportPointerMoved = false;
+  state.remoteControl.viewportPointerId = Number(event.pointerId || 1);
+  state.remoteControl.viewportPointerStartX = Number(event.clientX || 0);
+  state.remoteControl.viewportPointerStartY = Number(event.clientY || 0);
+  event.currentTarget?.closest?.("[data-remote-control-viewport]")?.focus?.({ preventScroll: true });
+  try {
+    event.currentTarget?.setPointerCapture?.(event.pointerId);
+  } catch {
+    // Pointer capture can be unavailable after a fast frame refresh.
+  }
+  sendRemoteControlViewportPointerAction(event, "pointer_down");
+}
+
+function handleRemoteControlViewportPointerMove(event) {
+  if (!state.remoteControl.viewportPointerActive) return;
+  if (state.remoteControl.viewportPointerId && Number(event.pointerId || 0) !== state.remoteControl.viewportPointerId) return;
+  const distance = Math.hypot(
+    Number(event.clientX || 0) - state.remoteControl.viewportPointerStartX,
+    Number(event.clientY || 0) - state.remoteControl.viewportPointerStartY
+  );
+  if (distance > 3) state.remoteControl.viewportPointerMoved = true;
+  if (!state.remoteControl.viewportPointerMoved) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastPointerMoveAt < REMOTE_CONTROL_POINTER_MOVE_MIN_MS) return;
+  state.remoteControl.lastPointerMoveAt = now;
+  sendRemoteControlViewportPointerAction(event, "pointer_move");
+}
+
+function handleRemoteControlViewportPointerUp(event) {
+  if (!state.remoteControl.viewportPointerActive) return;
+  if (event.type === "lostpointercapture") {
+    resetRemoteControlViewportPointer();
+    return;
+  }
+  if (state.remoteControl.viewportPointerId && Number(event.pointerId || 0) !== state.remoteControl.viewportPointerId) return;
+  const moved = state.remoteControl.viewportPointerMoved;
+  sendRemoteControlViewportPointerAction(event, "pointer_up");
+  try {
+    event.currentTarget?.releasePointerCapture?.(event.pointerId);
+  } catch {
+    // The browser may release capture before the cleanup handler runs.
+  }
+  if (moved) state.remoteControl.viewportPointerSuppressClickUntil = remoteControlNow() + REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS;
+  else if (sendRemoteControlViewportClickAction(event)) {
+    state.remoteControl.viewportPointerSuppressClickUntil = remoteControlNow() + REMOTE_CONTROL_DRAG_CLICK_SUPPRESS_MS;
+  }
+  resetRemoteControlViewportPointer();
+}
+
+function handleRemoteControlViewportClick(event) {
+  if (!state.remoteControl.activeController) return;
+  if (remoteControlNow() < state.remoteControl.viewportPointerSuppressClickUntil) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+  const point = remoteControlViewportPoint(event);
+  if (!point) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.currentTarget.closest?.("[data-remote-control-viewport]")?.focus?.();
+  sendRemoteControlViewportClickAction(event);
+}
+
+function handleRemoteControlViewportWheel(event) {
+  if (!state.remoteControl.activeController) return;
+  const point = remoteControlViewportPoint(event);
+  if (!point) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastWheelAt < REMOTE_CONTROL_WHEEL_MIN_MS) return;
+  state.remoteControl.lastWheelAt = now;
+  sendRemoteControlAction({
+    ...point,
+    type: "scroll",
+    delta_x: clamp(Number(event.deltaX || 0), -800, 800),
+    delta_y: clamp(Number(event.deltaY || 0), -800, 800),
+  });
+}
+
+function handleRemoteControlViewportKeydown(event) {
+  if (!state.remoteControl.activeController) return;
+  if (event.target?.matches?.("button")) return;
+  const key = cleanText(event.key, "");
+  if (key.length === 1 && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    sendRemoteControlAction({ type: "insert_text", text: key });
+    return;
+  }
+  if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+  event.preventDefault();
+  sendRemoteControlAction({ type: "key", key });
+}
+
+function renderRemoteControlViewportPanel() {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) {
+    if (controller && remoteControlExpired(controller)) state.remoteControl.activeController = null;
+    state.remoteControl.viewportFrame = null;
+    state.remoteControl.viewportFrameReceivedAt = 0;
+    resetRemoteControlViewportPointer();
+    removeRemoteControlViewportPanel();
+    return;
+  }
+  renderRemoteControlViewportSurface({
+    controller,
+    frame: state.remoteControl.viewportFrame,
+    receivedAt: state.remoteControl.viewportFrameReceivedAt,
+    now: remoteControlNow(),
+    onClick: handleRemoteControlViewportClick,
+    onWheel: handleRemoteControlViewportWheel,
+    onKeydown: handleRemoteControlViewportKeydown,
+    onPointerDown: handleRemoteControlViewportPointerDown,
+    onPointerMove: handleRemoteControlViewportPointerMove,
+    onPointerUp: handleRemoteControlViewportPointerUp,
+  });
+}
+
+function remoteControlAppElement(element) {
+  const target = element?.nodeType === 1 ? element : element?.parentElement;
+  if (!target || target.closest?.("[data-remote-control]")) return null;
+  if (!document.body?.contains(target)) return null;
+  return target;
+}
+
+function remoteControlSecretElement(element) {
+  const target = element?.closest?.("input,textarea") || (element?.matches?.("input,textarea") ? element : null);
+  if (!target) return false;
+  const type = cleanText(target.getAttribute("type") || "", "").toLowerCase();
+  const nameBits = [
+    target.id,
+    target.name,
+    target.getAttribute("autocomplete"),
+    target.getAttribute("placeholder"),
+    target.getAttribute("aria-label"),
+  ].join(" ");
+  return REMOTE_CONTROL_BLOCKED_INPUT_TYPES.has(type) || REMOTE_CONTROL_SECRET_RE.test(nameBits);
+}
+
+function remoteControlTargetAllowed(element, actionType = "") {
+  const source = remoteControlAppElement(element);
+  if (!source || remoteControlSecretElement(source)) return null;
+  const target = source.closest?.(REMOTE_CONTROL_INTERACTIVE_SELECTOR);
+  if (!target || target.closest?.("[data-remote-control]")) return null;
+  if (remoteControlSecretElement(target)) return null;
+  if (actionType === "set_value" && target.matches?.("s-select")) return null;
+  return target;
+}
+
+function remoteControlClickTarget(element) {
+  const target = remoteControlTargetAllowed(element, "click");
+  if (target) return target;
+  const source = remoteControlAppElement(element);
+  if (!source || remoteControlSecretElement(source)) return null;
+  return source;
+}
+
+function remoteControlSelectorForElement(element) {
+  const target = remoteControlTargetAllowed(element, "selector");
+  if (!target) return "";
+  const escapeCss = (value) => window.CSS?.escape
+    ? CSS.escape(value)
+    : String(value).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+  if (target.id) return `#${escapeCss(target.id)}`;
+  const parts = [];
+  let node = target;
+  while (node && node.nodeType === 1 && node !== document.body && parts.length < 5) {
+    let part = node.tagName.toLowerCase();
+    if (node.classList?.length) part += `.${Array.from(node.classList).slice(0, 2).map(escapeCss).join(".")}`;
+    const parent = node.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter((item) => item.tagName === node.tagName);
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+    }
+    parts.unshift(part);
+    node = parent;
+  }
+  return parts.join(" > ");
+}
+
+function remoteControlElementFromAction(action = {}) {
+  if (action.selector) {
+    try {
+      const selected = document.querySelector(action.selector);
+      if (selected) return selected;
+    } catch {
+      // Fall through to coordinates.
+    }
+  }
+  const xRatio = Number(action.x_ratio ?? action.xRatio);
+  const yRatio = Number(action.y_ratio ?? action.yRatio);
+  if (Number.isFinite(xRatio) && Number.isFinite(yRatio)) {
+    const point = remoteControlActionPoint(action);
+    if (point) return document.elementFromPoint(point.x, point.y);
+  }
+  return document.activeElement;
+}
+
+function remoteControlActionPoint(action = {}) {
+  const xRatio = Number(action.x_ratio ?? action.xRatio);
+  const yRatio = Number(action.y_ratio ?? action.yRatio);
+  if (!Number.isFinite(xRatio) || !Number.isFinite(yRatio)) return null;
+  const viewport = window.visualViewport;
+  const width = Math.max(1, Number(viewport?.width || action.viewport_width || action.viewportWidth || window.innerWidth || 1));
+  const height = Math.max(1, Number(viewport?.height || action.viewport_height || action.viewportHeight || window.innerHeight || 1));
+  return {
+    x: Number(viewport?.offsetLeft || 0) + clamp(xRatio, 0, 1) * width,
+    y: Number(viewport?.offsetTop || 0) + clamp(yRatio, 0, 1) * height,
+  };
+}
+
+function remoteControlPointerEventName(type = "") {
+  if (type === "pointer_down") return "pointerdown";
+  if (type === "pointer_move") return "pointermove";
+  if (type === "pointer_up") return "pointerup";
+  return "";
+}
+
+function dispatchRemoteControlPointerAction(action = {}, baseElement = null) {
+  const type = cleanText(action.type, "");
+  const eventName = remoteControlPointerEventName(type);
+  const point = remoteControlActionPoint(action);
+  if (!eventName || !point) return false;
+  let target = eventName === "pointerdown" ? remoteControlAppElement(baseElement) : state.remoteControl.remotePointerTarget;
+  if (!target || !document.contains(target)) target = remoteControlAppElement(baseElement);
+  if (!target) return false;
+  const pointerId = Number(action.pointer_id || action.pointerId || 1);
+  const pointerType = cleanText(action.pointer_type || action.pointerType || "mouse", "mouse");
+  const button = Number(action.button || 0);
+  const buttons = eventName === "pointerup" ? 0 : Number(action.buttons || 1);
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: point.x,
+    clientY: point.y,
+    button: Number.isFinite(button) ? button : 0,
+    buttons: Number.isFinite(buttons) ? buttons : eventName === "pointerup" ? 0 : 1,
+  };
+  if (eventName === "pointerdown") {
+    state.remoteControl.remotePointerTarget = target;
+    state.remoteControl.remotePointerStartX = point.x;
+    state.remoteControl.remotePointerStartY = point.y;
+    state.remoteControl.remotePointerMoved = false;
+  } else if (eventName === "pointermove") {
+    const moved = Math.hypot(
+      point.x - Number(state.remoteControl.remotePointerStartX || point.x),
+      point.y - Number(state.remoteControl.remotePointerStartY || point.y)
+    );
+    if (moved > 4) state.remoteControl.remotePointerMoved = true;
+  }
+  if (typeof PointerEvent === "function") {
+    target.dispatchEvent(new PointerEvent(eventName, {
+      ...init,
+      pointerId: Number.isFinite(pointerId) ? pointerId : 1,
+      pointerType,
+      isPrimary: true,
+    }));
+  }
+  const mouseName = eventName === "pointerdown" ? "mousedown" : eventName === "pointermove" ? "mousemove" : "mouseup";
+  target.dispatchEvent(new MouseEvent(mouseName, init));
+  if (eventName === "pointerup") {
+    const clickDistance = Math.hypot(
+      point.x - Number(state.remoteControl.remotePointerStartX || point.x),
+      point.y - Number(state.remoteControl.remotePointerStartY || point.y)
+    );
+    const tapTarget = state.remoteControl.remotePointerTarget || target;
+    if (!state.remoteControl.remotePointerMoved && clickDistance <= 6 && dispatchRemoteControlClick(tapTarget, action, { includePress: false, source: "pointer_tap" })) {
+      state.remoteControl.remoteSyntheticClickUntil = remoteControlNow() + 700;
+      state.remoteControl.remoteSyntheticClickX = point.x;
+      state.remoteControl.remoteSyntheticClickY = point.y;
+    }
+    state.remoteControl.remotePointerTarget = null;
+    state.remoteControl.remotePointerStartX = 0;
+    state.remoteControl.remotePointerStartY = 0;
+    state.remoteControl.remotePointerMoved = false;
+  }
+  return true;
+}
+
+function dispatchRemoteControlClick(element, action = {}, options = {}) {
+  const target = remoteControlClickTarget(element);
+  const point = remoteControlActionPoint(action);
+  if (!target || !point) return false;
+  const init = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    view: window,
+    clientX: point.x,
+    clientY: point.y,
+    button: 0,
+    buttons: 0,
+  };
+  target.focus?.({ preventScroll: true });
+  if (options.includePress !== false) {
+    target.dispatchEvent(new MouseEvent("mousedown", { ...init, buttons: 1 }));
+    target.dispatchEvent(new MouseEvent("mouseup", init));
+  }
+  if (typeof target.click === "function" && target.matches?.(REMOTE_CONTROL_INTERACTIVE_SELECTOR)) {
+    target.click();
+  } else {
+    target.dispatchEvent(new MouseEvent("click", init));
+  }
+  remoteControlRecordAction("received", `${options.source === "pointer_tap" ? "tap" : "click"} ${target.id || target.getAttribute?.("aria-label") || target.tagName?.toLowerCase?.() || "element"}`);
+  return true;
+}
+
+function remoteControlSuppressDuplicateExplicitClick(action = {}) {
+  const until = Number(state.remoteControl.remoteSyntheticClickUntil || 0);
+  if (!until || remoteControlNow() > until) return false;
+  const point = remoteControlActionPoint(action);
+  if (!point) return false;
+  const distance = Math.hypot(
+    point.x - Number(state.remoteControl.remoteSyntheticClickX || 0),
+    point.y - Number(state.remoteControl.remoteSyntheticClickY || 0)
+  );
+  if (distance > 8) return false;
+  state.remoteControl.remoteSyntheticClickUntil = 0;
+  return true;
+}
+
+function setRemoteControlElementValue(element, value) {
+  const target = remoteControlTargetAllowed(element, "set_value");
+  if (!target) return false;
+  state.remoteControl.suppressEvents = true;
+  try {
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      target.focus();
+      target.value = String(value ?? "");
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    if (target.isContentEditable) {
+      target.focus();
+      target.textContent = String(value ?? "");
+      target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: String(value ?? "") }));
+      return true;
+    }
+  } finally {
+    window.setTimeout(() => {
+      state.remoteControl.suppressEvents = false;
+    }, 0);
+  }
+  return false;
+}
+
+function remoteControlEditableTarget(element) {
+  const target = remoteControlTargetAllowed(element, "set_value");
+  if (!target) return null;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target.isContentEditable) return target;
+  return null;
+}
+
+function dispatchRemoteControlEditEvents(target, inputType = "insertText", data = "") {
+  try {
+    target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+  } catch {
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  target.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function insertRemoteControlText(element, text = "") {
+  const target = remoteControlEditableTarget(element);
+  const value = String(text ?? "").slice(0, 200);
+  if (!target || !value) return false;
+  target.focus?.();
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const start = Number.isFinite(target.selectionStart) ? target.selectionStart : target.value.length;
+    const end = Number.isFinite(target.selectionEnd) ? target.selectionEnd : start;
+    if (typeof target.setRangeText === "function") target.setRangeText(value, start, end, "end");
+    else target.value = `${target.value.slice(0, start)}${value}${target.value.slice(end)}`;
+    dispatchRemoteControlEditEvents(target, "insertText", value);
+    return true;
+  }
+  if (target.isContentEditable) {
+    target.textContent = `${target.textContent || ""}${value}`;
+    dispatchRemoteControlEditEvents(target, "insertText", value);
+    return true;
+  }
+  return false;
+}
+
+function applyRemoteControlEditKey(element, key = "") {
+  const target = remoteControlEditableTarget(element);
+  if (!target || !["Backspace", "Delete"].includes(key)) return false;
+  target.focus?.();
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+    const value = target.value || "";
+    let start = Number.isFinite(target.selectionStart) ? target.selectionStart : value.length;
+    let end = Number.isFinite(target.selectionEnd) ? target.selectionEnd : start;
+    if (start === end && key === "Backspace" && start > 0) start -= 1;
+    if (start === end && key === "Delete" && end < value.length) end += 1;
+    target.value = `${value.slice(0, start)}${value.slice(end)}`;
+    target.setSelectionRange?.(start, start);
+    dispatchRemoteControlEditEvents(target, key === "Backspace" ? "deleteContentBackward" : "deleteContentForward", "");
+    return true;
+  }
+  if (target.isContentEditable) {
+    target.textContent = key === "Backspace" ? (target.textContent || "").slice(0, -1) : target.textContent || "";
+    dispatchRemoteControlEditEvents(target, key === "Backspace" ? "deleteContentBackward" : "deleteContentForward", "");
+    return true;
+  }
+  return false;
+}
+
+function scrollableRemoteControlElement(element) {
+  let node = element;
+  while (node && node !== document.body) {
+    const style = window.getComputedStyle(node);
+    const canScroll = /(auto|scroll)/.test(`${style.overflow}${style.overflowY}${style.overflowX}`)
+      && (node.scrollHeight > node.clientHeight || node.scrollWidth > node.clientWidth);
+    if (canScroll) return node;
+    node = node.parentElement;
+  }
+  return document.scrollingElement || document.documentElement;
+}
+
+function remoteControlScrollDeltas(action = {}) {
+  const deltaX = Number(action.delta_x ?? action.deltaX ?? 0);
+  const deltaY = Number(action.delta_y ?? action.deltaY ?? 0);
+  return {
+    x: Number.isFinite(deltaX) ? deltaX : 0,
+    y: Number.isFinite(deltaY) ? deltaY : 0,
+  };
+}
+
+function applyRemoteControlCanvasWheelZoom(action = {}, element = null) {
+  const viewport = els.spaceViewport;
+  const source = remoteControlAppElement(element);
+  if (!viewport || !source || (source !== viewport && !viewport.contains(source))) return false;
+  const deltas = remoteControlScrollDeltas(action);
+  const widget = source.closest?.(".widget");
+  if (widget && widgetWheelScrollableElement(source, widget, deltas)) return false;
+  if (spaceDistanceGestureBlocked(source)) {
+    remoteControlRecordAction("received", "scroll contained");
+    return true;
+  }
+  if (!source.closest?.(".space-viewport,.space-board,#spaceCanvas,.app-layer")) return false;
+  const point = remoteControlActionPoint(action);
+  const anchor = point ? viewportGestureAnchor(point.x, point.y) : null;
+  if (!anchor) return true;
+  const delta = deltas.y;
+  if (Math.abs(delta) < 0.5) return true;
+  stopSpacePanMomentum();
+  const previous = canvasDistance();
+  const next = previous * Math.exp(-delta * 0.0012);
+  const applied = setCanvasDistanceAround(next, anchor, {
+    origin: "remote-wheel",
+    persist: false,
+    render: false,
+    layout: false,
+    renderMiniMap: false,
+    zoomInfo: true,
+  });
+  if (applied !== previous) {
+    setSpaceZoomInfoVisible(true);
+    scheduleCanvasDistanceCommit("remote-wheel");
+    scheduleSpaceZoomMiniMapHide();
+    remoteControlRecordAction("received", "canvas zoom");
+  }
+  return true;
+}
+
+function applyRemoteControlAction(action = {}, eventId = "") {
+  const grant = state.remoteControl.activeGrant;
+  if (!grant || remoteControlExpired(grant)) {
+    state.remoteControl.activeGrant = null;
+    renderRemoteControlChrome();
+    return;
+  }
+  const type = cleanText(action.type, "");
+  const baseElement = remoteControlElementFromAction(action);
+  const target = remoteControlTargetAllowed(baseElement, type);
+  const appElement = remoteControlAppElement(baseElement);
+  const pointerAction = Boolean(remoteControlPointerEventName(type));
+  const clickTarget = type === "click" ? remoteControlClickTarget(baseElement) : null;
+  if ((!target && !clickTarget && type !== "scroll" && type !== "insert_text" && !pointerAction) || (type === "scroll" && !appElement)) return;
+  state.remoteControl.suppressEvents = true;
+  try {
+    if (pointerAction) {
+      if (dispatchRemoteControlPointerAction(action, baseElement) && type !== "pointer_move") remoteControlRecordAction("received", type);
+    } else if (type === "click" && clickTarget) {
+      if (!remoteControlSuppressDuplicateExplicitClick(action)) dispatchRemoteControlClick(baseElement, action);
+    } else if (type === "set_value") {
+      if (setRemoteControlElementValue(target, action.value)) remoteControlRecordAction("received", "text input");
+    } else if (type === "insert_text") {
+      if (insertRemoteControlText(baseElement, action.text)) remoteControlRecordAction("received", "text input");
+    } else if (type === "scroll") {
+      if (applyRemoteControlCanvasWheelZoom(action, appElement)) return;
+      const deltas = remoteControlScrollDeltas(action);
+      const scroller = scrollableRemoteControlElement(appElement);
+      scroller.scrollBy({
+        left: deltas.x,
+        top: deltas.y,
+        behavior: "auto",
+      });
+      remoteControlRecordAction("received", "scroll");
+    } else if (type === "key" && target) {
+      const key = cleanText(action.key, "");
+      if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+      if (applyRemoteControlEditKey(target, key)) {
+        remoteControlRecordAction("received", `key ${key}`);
+        return;
+      }
+      target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      if (key === "Enter" && target.matches?.("button, summary")) target.click?.();
+      remoteControlRecordAction("received", `key ${key}`);
+    }
+  } finally {
+    state.remoteControl.appliedEventIds.add(eventId);
+    window.setTimeout(() => {
+      state.remoteControl.suppressEvents = false;
+    }, 0);
+  }
+}
+
+function handleRemoteControlAction(event) {
+  const eventId = cleanText(event.id, "");
+  if (eventId && state.remoteControl.appliedEventIds.has(eventId)) return;
+  const grant = state.remoteControl.activeGrant;
+  if (!grant) return;
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  if (payload.schema && payload.schema !== REMOTE_CONTROL_SCHEMA) return;
+  if (cleanText(payload.grant_id, "") !== grant.grant_id || cleanText(payload.token, "") !== grant.token) return;
+  if (cleanText(event.author_user_id, "") !== grant.controller_user_id) return;
+  if (grant.controller_device_id && cleanText(payload.from_device_id || payload.fromDeviceId, "") !== grant.controller_device_id) return;
+  const targetUserId = cleanText(payload.target_user_id, "");
+  if (targetUserId && targetUserId !== cleanText(state.authUser?.id, "")) return;
+  const targetDeviceId = cleanText(payload.target_device_id || payload.targetDeviceId, "");
+  if (targetDeviceId && targetDeviceId !== remoteControlCurrentDeviceId()) return;
+  applyRemoteControlAction(payload.action || {}, eventId);
+}
+
+function remoteControlActionBase(event, target = event?.target) {
+  const element = remoteControlTargetAllowed(target, "send");
+  if (!element || element.closest?.("[data-remote-control]")) return null;
+  return {
+    selector: remoteControlSelectorForElement(element),
+    x_ratio: Number.isFinite(event?.clientX) ? clamp(event.clientX / Math.max(1, window.innerWidth), 0, 1) : undefined,
+    y_ratio: Number.isFinite(event?.clientY) ? clamp(event.clientY / Math.max(1, window.innerHeight), 0, 1) : undefined,
+  };
+}
+
+function remoteControlShouldSend(event) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || remoteControlExpired(controller)) {
+    if (controller) state.remoteControl.activeController = null;
+    renderRemoteControlChrome();
+    return false;
+  }
+  if (state.remoteControl.suppressEvents || !event?.isTrusted) return false;
+  if (event.target?.closest?.("[data-remote-control]")) return false;
+  return Boolean(document.querySelector("#app")?.contains(event.target));
+}
+
+function sendRemoteControlAction(action) {
+  const controller = state.remoteControl.activeController;
+  if (!controller || !action?.type) return;
+  state.remoteControl.actionSeq += 1;
+  const seq = state.remoteControl.actionSeq;
+  if (action.type !== "pointer_move") {
+    remoteControlRecordAction("sent", ["set_value", "insert_text"].includes(action.type) ? "text input" : action.type);
+  }
+  state.remoteControl.sendQueue = state.remoteControl.sendQueue
+    .catch(() => {})
+    .then(() => appendRemoteControlSyncEvent({
+      peerUserId: controller.target_user_id,
+      conversationId: controller.conversation_id,
+      kind: "remote-control-action",
+      payload: {
+        grant_id: controller.grant_id,
+        token: controller.token,
+        request_id: controller.request_id || "",
+        target_user_id: controller.target_user_id,
+        target_device_id: controller.target_device_id || "",
+        from_device_id: controller.from_device_id || remoteControlCurrentDeviceId(),
+        seq,
+        action,
+      },
+    }))
+    .catch((error) => {
+      remoteControlRecordAction("error", error.message || String(error));
+    });
+}
+
+function handleRemoteControlLocalClick(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const base = remoteControlActionBase(event);
+  if (!base) return;
+  sendRemoteControlAction({ ...base, type: "click" });
+}
+
+function handleRemoteControlLocalInput(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const target = remoteControlTargetAllowed(event.target, "set_value");
+  if (!target) return;
+  const value = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement
+    ? target.value
+    : target.isContentEditable ? target.textContent || "" : "";
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event, target),
+    type: "set_value",
+    value: String(value).slice(0, 4000),
+  });
+}
+
+function handleRemoteControlLocalWheel(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const now = remoteControlNow();
+  if (now - state.remoteControl.lastWheelAt < REMOTE_CONTROL_WHEEL_MIN_MS) return;
+  state.remoteControl.lastWheelAt = now;
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event),
+    type: "scroll",
+    delta_x: clamp(Number(event.deltaX || 0), -800, 800),
+    delta_y: clamp(Number(event.deltaY || 0), -800, 800),
+  });
+}
+
+function handleRemoteControlLocalKeydown(event) {
+  if (!remoteControlShouldSend(event)) return;
+  const key = cleanText(event.key, "");
+  if (!["Enter", "Escape", "Tab", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(key)) return;
+  sendRemoteControlAction({
+    ...remoteControlActionBase(event),
+    type: "key",
+    key,
+  });
+}
+
+function installRemoteControlCapture() {
+  if (state.remoteControl.captureInstalled) return;
+  state.remoteControl.captureInstalled = true;
+  document.addEventListener("click", handleRemoteControlLocalClick, true);
+  document.addEventListener("input", handleRemoteControlLocalInput, true);
+  document.addEventListener("wheel", handleRemoteControlLocalWheel, { capture: true, passive: true });
+  document.querySelector("#app")?.addEventListener("keydown", handleRemoteControlLocalKeydown, true);
+}
+
+function handleRemoteControlSyncEvent(event) {
+  const kind = remoteControlKind(event.kind);
+  if (kind === "remote-control-request") handleRemoteControlRequest(event);
+  else if (kind === "remote-control-response") handleRemoteControlResponse(event);
+  else if (kind === "remote-control-action") handleRemoteControlAction(event);
+  else if (kind === REMOTE_CONTROL_VIEWPORT_FRAME_KIND) handleRemoteControlFrame(event);
+  else if (kind === "remote-control-stop") handleRemoteControlStop(event);
+}
+
+function hideAgentPersonContextMenu(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("agent-person-menu")) return;
+  document.querySelector("[data-agent-person-context-menu]")?.remove();
+  if (!options.skipStack) closeUiNavigationLayer("agent-person-menu", { skipHistory: true, replaceHistory: true });
+}
+
+function agentPersonContextMenuButton(label, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.setAttribute("role", "menuitem");
+  button.textContent = label;
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    hideAgentPersonContextMenu({ skipHistory: true });
+    handler();
+  });
+  return button;
+}
+
+function showAgentPersonContextMenu(user, event) {
+  event.preventDefault();
+  event.stopPropagation();
+  if (!isAdminUser() || !user || socialUserId(user) === cleanText(state.authUser?.id, "")) return;
+  hideAgentPersonContextMenu({ skipHistory: true, skipStack: true });
+  const menu = document.createElement("div");
+  menu.className = "app-context-menu agent-person-context-menu";
+  menu.dataset.agentPersonContextMenu = "true";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", `${socialUserLabel(user, "User")} actions`);
+  menu.append(
+    agentPersonContextMenuButton("Access interface", () => void requestRemoteControl(user, { adminSupport: true })),
+    agentPersonContextMenuButton("Grant Flux", () => openCreditGrantModal(user))
+  );
+  document.body.append(menu);
+  positionFixedMenu(menu, event);
+  pushUiNavigationLayer("agent-person-menu", () => hideAgentPersonContextMenu({ skipHistory: true, skipStack: true }));
+  recordUserEvent("agent.person_context_menu_requested", {
+    target: `user:${socialUserId(user)}`,
+    summary: `Opened person menu for ${socialUserLabel(user, "user")}`,
+    data: { user_id: socialUserId(user), admin: true },
+  });
+}
+
 function peopleRow(user, options = {}) {
   const id = socialUserId(user);
   const row = document.createElement("article");
@@ -16059,11 +20663,7 @@ function peopleRow(user, options = {}) {
     });
   }
   if (isAdminUser() && id && id !== cleanText(state.authUser?.id, "") && cleanText(user?.role, "user") !== "admin") {
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      openCreditGrantModal(user);
-    });
+    row.addEventListener("contextmenu", (event) => showAgentPersonContextMenu(user, event));
   }
   return row;
 }
@@ -16094,7 +20694,16 @@ function peopleActionGroup(...buttons) {
 
 function renderAgentPeoplePanel() {
   if (!els.agentPeoplePanel || state.agentView !== "people") return;
-  if (els.agentPeopleSearchButton) els.agentPeopleSearchButton.disabled = !state.authUser || state.agentPeople.searchBusy;
+  const admin = isAdminUser();
+  if (els.agentPeopleSearchInput) {
+    els.agentPeopleSearchInput.placeholder = "id or email";
+  }
+  if (els.agentPeopleSearchButton) {
+    els.agentPeopleSearchButton.disabled = !state.authUser || state.agentPeople.searchBusy;
+    const searchTitle = "Add friend";
+    els.agentPeopleSearchButton.title = searchTitle;
+    els.agentPeopleSearchButton.setAttribute("aria-label", searchTitle);
+  }
   if (els.agentPeopleStatus) {
     const count = (state.agentPeople.friendships || []).length + activeSharedSpaceMembers().length;
     els.agentPeopleStatus.textContent = state.agentPeople.busy ? "Loading" : state.agentPeople.status || `${count} people`;
@@ -16151,7 +20760,10 @@ function renderAgentPeoplePanel() {
         kind: "friend",
         meta: unread ? `${unread} unread` : "friend",
         unread,
-        action: peopleActionButton("agent-icon-close", `Remove ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "removed")),
+        action: peopleActionGroup(
+          peopleActionButton("agent-icon-control", `Request control from ${socialUserLabel(user, "friend")}`, () => void requestRemoteControl(user)),
+          peopleActionButton("agent-icon-close", `Remove ${socialUserLabel(user, "friend")}`, () => void respondToFriendship(friendship, "removed"))
+        ),
         openDirect: true,
       }));
     }
@@ -16161,7 +20773,13 @@ function renderAgentPeoplePanel() {
     if (member.current) continue;
     const friendship = friendshipByUserId(member.id);
     if (friendship?.status === "accepted") continue;
-    const action = peopleActionButton("agent-icon-plus", `Add ${socialUserLabel(member, "member")}`, () => void requestFriendshipByUserId(member.id));
+    const addAction = peopleActionButton("agent-icon-plus", `Add ${socialUserLabel(member, "member")}`, () => void requestFriendshipByUserId(member.id));
+    const action = admin
+      ? peopleActionGroup(
+        addAction,
+        peopleActionButton("agent-icon-control", `Request support control from ${socialUserLabel(member, "member")}`, () => void requestRemoteControl(member, { adminSupport: true }))
+      )
+      : addAction;
     members.push(peopleRow(member, { kind: "member", meta: "space member", action }));
   }
   const sections = [
@@ -16252,6 +20870,16 @@ async function loadAgentPeople(origin = "auto", options = {}) {
     state.agentPeople.busy = false;
     renderAgentPeoplePanel();
   }
+}
+
+async function requestAdminSupportControlByQuery(query = "") {
+  const value = cleanText(query, "");
+  if (!value || !isAdminUser()) return;
+  const params = new URLSearchParams({ q: value });
+  const payload = await fetchJson(`/account/users/lookup?${params.toString()}`, { timeoutMs: 8000 });
+  const user = payload.user && typeof payload.user === "object" ? payload.user : null;
+  if (!user || !socialUserId(user)) throw new Error("That user was not found.");
+  await requestRemoteControl(user, { adminSupport: true });
 }
 
 async function submitAgentPeopleSearch(event) {
@@ -16645,6 +21273,10 @@ async function mergeDirectSyncEvents(events = [], options = {}) {
   for (const event of events) {
     const conversationId = cleanText(event.conversation_id, "");
     if (!conversationId) continue;
+    if (remoteControlIsKind(event.kind)) {
+      handleRemoteControlSyncEvent(event);
+      continue;
+    }
     const session = ensureDirectSessionForConversation(conversationId, event);
     session.sync_cursor = String(event.id || session.sync_cursor || "");
     if (event.kind === "reaction") {
@@ -16725,7 +21357,7 @@ async function syncDirectMessages(origin = "poll") {
   try {
     const payload = await fetchJson(`/sync/events?${query.toString()}`, { timeoutMs: 8000 });
     const events = (Array.isArray(payload.events) ? payload.events : [])
-      .filter((event) => cleanText(event.conversation_id, "").startsWith("dm-"));
+      .filter((event) => cleanText(event.conversation_id, "").startsWith("dm-") || remoteControlIsKind(event.kind));
     if (events.length) {
       await mergeDirectSyncEvents(events, { notify: origin !== "startup" && origin !== "cache" });
       state.agentPeople.syncCursor = payload.cursor || events.at(-1)?.id || state.agentPeople.syncCursor;
@@ -16793,6 +21425,7 @@ async function syncSocialLayer(origin = "poll") {
 
 function startSocialSync() {
   if (!state.authUser) return;
+  startRemoteControlLiveSocket("social-start");
   if (!state.socialSyncInterval) {
     state.socialSyncInterval = window.setInterval(() => void syncSocialLayer("poll"), SOCIAL_SYNC_POLL_MS);
   }
@@ -21066,8 +25699,18 @@ function renderDevices() {
         event.stopPropagation();
         void syncDevice(device);
       });
+      const control = document.createElement("button");
+      control.className = "device-control-button icon-button";
+      control.type = "button";
+      control.title = `Access interface on ${cleanText(device.label, "device")}`;
+      control.setAttribute("aria-label", control.title);
+      control.disabled = !state.authUser || Boolean(device.current) || !device.online;
+      control.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void requestRemoteControlDevice(device);
+      });
       copy.append(title, meta, detail);
-      card.append(icon, copy, main, sync);
+      card.append(icon, copy, control, main, sync);
       return card;
     })
   );
@@ -23122,8 +27765,8 @@ function renderArtifacts() {
     render_count: state.wisArtifacts.length,
   });
   const spaceItems = [
-    "space-home",
-    "space-admin",
+    "Home (built-in)",
+    ...(isAdminUser() ? ["Admin (built-in)"] : []),
     ...state.userSpaces.map((space) => `${space.title} (${space.id})`),
   ];
   const appItems = SPACE_APP_DEFINITIONS.map((app) => {
@@ -23223,6 +27866,7 @@ async function loadUserFleet(origin = "auto") {
     state.userFleetNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
     state.userFleetSystemNodes = Array.isArray(payload.system_nodes) ? payload.system_nodes : [];
     state.userFleetHarnesses = Array.isArray(payload.harnesses) ? payload.harnesses : [];
+    adoptOwnedAgentFromFleetHarnesses();
     state.userFleetPolicy = cleanText(payload.server_policy, "");
     state.userFleetMode = cleanText(payload.deployment_mode, "");
     renderUserFleet();
@@ -23716,7 +28360,7 @@ async function joinSpaceFromModal() {
       body: { join_code: joinCode },
     });
     const result = payload.spaces || {};
-    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
     renderSpaceLauncher();
     const shared = payload.shared_space || {};
     const joinedSpace = state.userSpaces.find((space) => space.shared_space_id === shared.id)
@@ -24249,7 +28893,7 @@ async function importStorageBackup(file) {
         device_layouts: {},
       },
     });
-    state.userSpaces = Array.isArray(result.spaces) ? result.spaces : state.userSpaces;
+    state.userSpaces = sanitizeUserSpaces(result.spaces, state.userSpaces);
     state.userStorage = result.storage || state.userStorage;
     state.spaceWidgetLayouts = payload.widget_layouts && typeof payload.widget_layouts === "object"
       ? payload.widget_layouts
@@ -25529,6 +30173,7 @@ function installSpaceDistanceGestures(viewport) {
   viewport.addEventListener("wheel", (event) => {
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
     if (containBlockedSpaceWheel(event, viewport)) return;
+    state.spaceNavigationInputAt = performance.now();
     preventSpaceWheelDefault(event);
     const delta = wheelDeltaPixels(event, viewport);
     if (Math.abs(delta) < 0.5) return;
@@ -25556,6 +30201,7 @@ function installSpaceDistanceGestures(viewport) {
     if (event.pointerType !== "touch") return;
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
     if (spaceDistanceGestureBlocked(event.target)) return;
+    state.spaceNavigationInputAt = performance.now();
     state.spaceGesturePointers.set(event.pointerId, {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -25574,6 +30220,7 @@ function installSpaceDistanceGestures(viewport) {
 
   viewport.addEventListener("pointermove", (event) => {
     if (!state.spaceGesturePointers.has(event.pointerId)) return;
+    state.spaceNavigationInputAt = performance.now();
     state.spaceGesturePointers.set(event.pointerId, {
       pointerId: event.pointerId,
       clientX: event.clientX,
@@ -25633,6 +30280,8 @@ function installSpacePanning() {
     let velocitySamples = [];
     let moved = false;
     let finished = false;
+    state.spacePanActive = true;
+    state.spaceNavigationInputAt = performance.now();
     viewport.classList.add("is-panning");
     setSpaceMiniMapVisible(true);
     try {
@@ -25643,6 +30292,7 @@ function installSpacePanning() {
     const move = (moveEvent) => {
       moveEvent.preventDefault();
       if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
+      state.spaceNavigationInputAt = performance.now();
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
       const now = performance.now();
       const dt = Math.max(1, now - lastTime);
@@ -25665,6 +30315,8 @@ function installSpacePanning() {
     const end = (endEvent) => {
       if (finished) return;
       finished = true;
+      state.spacePanActive = false;
+      state.spaceNavigationInputAt = performance.now();
       viewport.classList.remove("is-panning");
       renderSpaceMiniMap();
       viewport.removeEventListener("pointermove", move);
@@ -26211,6 +30863,7 @@ function wireEvents() {
   installWidgetDragging();
   installWidgetResizing();
   installSpacePanning();
+  installSharedSpacePointerAwareness();
   installAgentDragging();
   installAgentPanelDragging();
   installNodesPanelDragging();

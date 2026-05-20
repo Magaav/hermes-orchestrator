@@ -136,8 +136,15 @@ That keeps the last good frame on screen through short ingest/browser hiccups.
 The camera widget header exposes only zoom, snapshot copy, audio, and
 principal/extra quality controls. Its full-width footer timeline defaults to the
 last 10 minutes and can switch to a detected recorded-footage range from
-`/camera/push-timeline`; selected points show archived JPEGs through
-`/camera/push-archive-frame`. The footer loads its timeline data when it renders
+`/camera/push-timeline`; selected points acquire recorded playback ownership,
+freeze the last good media frame, and swap only after a decoded frame from the
+latest `/camera/push-playback` generation is ready. `/camera/push-archive-frame`
+remains the fallback when the playback stream cannot open. The recorded playback
+path keeps one active reader/scheduler per stream generation, skips repeat
+same-frame applies, and reports aggregate `camera.perf.sample` diagnostics
+instead of noisy per-frame logs by default. Regression coverage now includes six
+rapid recorded seeks settling to the latest generation and live return clearing
+active playback loops/readers. The footer loads its timeline data when it renders
 and on direct footer interaction, so the scrubber does not depend on a separate
 widget focus click. It is scoped to the active WIS camera widget and keeps
 pointer tracking across drag/release transitions so scrubbing can commit an

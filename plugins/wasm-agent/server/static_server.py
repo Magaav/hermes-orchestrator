@@ -122,6 +122,12 @@ CORE_FIRMWARE_PREFIXES = (
 WIS_SPACE_SCHEMA = "hermes.wasm_agent.wis.space.v1"
 WIS_PATCH_SCHEMA = "hermes.wasm_agent.wis.patch.v1"
 WIS_PATCH_RESULT_SCHEMA = "hermes.wasm_agent.wis.patch_result.v1"
+BUILT_IN_SPACE_IDS = {"home", "admin"}
+BUILT_IN_SPACE_ID_ALIASES = {
+    "space-home": "home",
+    "space-admin": "admin",
+}
+RESERVED_USER_SPACE_IDS = BUILT_IN_SPACE_IDS | set(BUILT_IN_SPACE_ID_ALIASES)
 WIS_CURRENT_SPACE_SENTINELS = {
     "active",
     "active-space",
@@ -160,7 +166,18 @@ ACCOUNT_CREDITS_SCHEMA = "hermes.wasm_agent.account_credits.v1"
 FLUX_LEDGER_ROW_SCHEMA = "hermes.wasm_agent.flux_ledger.row.v1"
 FLUX_PROVISION_SCHEMA = "hermes.wasm_agent.fleet.provision_main.v1"
 SYNC_EVENT_PAYLOAD_LIMIT = 24 * 1024
+SYNC_EVENT_REQUEST_MAX_BYTES = 4 * 1024 * 1024
 SYNC_EVENT_PAGE_LIMIT = 120
+REMOTE_CONTROL_FRAME_PAYLOAD_LIMIT = 3 * 1024 * 1024
+REMOTE_CONTROL_FRAME_EVENT_KEEP = 8
+REMOTE_CONTROL_EVENT_KINDS = {
+    "remote-control-request",
+    "remote-control-response",
+    "remote-control-action",
+    "remote-control-frame",
+    "remote-control-stop",
+}
+REMOTE_CONTROL_ADMIN_REPLY_KINDS = {"remote-control-response", "remote-control-frame", "remote-control-stop"}
 FRIENDSHIP_VISIBLE_STATUSES = {"pending", "accepted"}
 FRIENDSHIP_TERMINAL_STATUSES = {"declined", "canceled", "removed"}
 VOICE_LAB_ROOM_SCHEMA = "hermes.wasm_agent.voice_lab.room.v1"
@@ -233,6 +250,10 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.camera_stream_sessions_lock = threading.Lock()
         self.camera_push_processes: dict[str, subprocess.Popen[bytes]] = {}
         self.camera_push_processes_lock = threading.Lock()
+        self.remote_control_live_clients: dict[str, set[Any]] = {}
+        self.remote_control_live_clients_lock = threading.Lock()
+        self.shared_space_live_clients: dict[str, set[Any]] = {}
+        self.shared_space_live_clients_lock = threading.Lock()
 
 
 def endpoint_path(path: str, endpoint: str) -> bool:
@@ -286,6 +307,36 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 return
             serve_browser_stream(self)
             return
+        if path == "/remote-control/live":
+            if not same_origin_websocket(self):
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "origin_rejected",
+                            "message": "WebSocket origin does not match this wasm-agent host.",
+                        },
+                    },
+                )
+                return
+            serve_remote_control_live(self, user)
+            return
+        if path == "/spaces/room/live":
+            if not same_origin_websocket(self):
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "origin_rejected",
+                            "message": "WebSocket origin does not match this wasm-agent host.",
+                        },
+                    },
+                )
+                return
+            serve_shared_space_room_live(self, user)
+            return
         if path == "/camera/stream":
             try:
                 token = parse_qs(urlparse(self.path).query).get("token", [""])[0]
@@ -317,6 +368,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 serve_camera_push_frame(self, stream_id)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception as exc:
                 self._json(
                     HTTPStatus.BAD_GATEWAY,
@@ -396,6 +449,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 serve_camera_push_archive_frame(self, stream_id, frame)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             except Exception as exc:
                 self._json(
                     HTTPStatus.BAD_GATEWAY,
@@ -776,8 +831,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/sync/events":
             try:
-                body = self._read_json(max_bytes=128 * 1024)
-                self._json(HTTPStatus.OK, append_sync_event(self.server, user, body))
+                body = self._read_json(max_bytes=SYNC_EVENT_REQUEST_MAX_BYTES)
+                result = append_sync_event(self.server, user, body)
+                event = result.get("event") if isinstance(result.get("event"), dict) else {}
+                if remote_control_kind_allowed(event.get("kind")):
+                    remote_control_live_broadcast_async(self.server, event)
+                self._json(HTTPStatus.OK, result)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -2942,24 +3001,78 @@ def camera_push_playback_frames_from(
     except (TypeError, ValueError):
         playback_sec = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
     playback_sec = max(5, min(DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC, playback_sec))
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
     end_ms = start_ms + (playback_sec * 1000) if start_ms > 0 else 0
-    frames: list[tuple[float, Path]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0:
-            continue
-        if start_ms > 0 and timestamp_ms < start_ms:
-            continue
-        if end_ms and timestamp_ms > end_ms:
-            continue
-        frames.append((stat.st_mtime, path))
-    return [path for _mtime, path in sorted(frames)]
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        refresh_latest=True,
+    )
+    return [path for _mtime_ns, _source_priority, path, _stat in frames]
+
+
+def camera_push_recorded_frame_candidates(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    start_ms: int = 0,
+    after_mtime_ns: int = -1,
+    end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
+) -> list[tuple[int, int, Path, os.stat_result]]:
+    if refresh_latest:
+        camera_push_playback_latest_frame(server, stream_id)
+    camera_push_prune_playback(server, stream_id)
+    if include_archive:
+        camera_push_prune_archive(server, stream_id)
+    playback_dir = camera_push_playback_dir(server, stream_id)
+    directories: list[tuple[int, Path]] = [(0, playback_dir)]
+    if include_archive:
+        directories.append((1, camera_push_archive_dir(server, stream_id)))
+    by_mtime_ns: dict[int, tuple[int, Path, os.stat_result]] = {}
+    for source_priority, directory in directories:
+        for path in directory.glob("*.jpg"):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            timestamp_ms = int(stat.st_mtime * 1000)
+            if stat.st_size <= 0 or stat.st_mtime_ns <= after_mtime_ns:
+                continue
+            if start_ms > 0 and timestamp_ms < start_ms:
+                continue
+            if end_ms > 0 and timestamp_ms > end_ms:
+                continue
+            existing = by_mtime_ns.get(stat.st_mtime_ns)
+            if existing is not None and existing[0] <= source_priority:
+                continue
+            by_mtime_ns[stat.st_mtime_ns] = (source_priority, path, stat)
+    return [
+        (mtime_ns, source_priority, path, stat)
+        for mtime_ns, (source_priority, path, stat)
+        in sorted(by_mtime_ns.items(), key=lambda item: (item[0], item[1][0]))
+    ]
+
+
+def camera_push_playback_frame_count_from(
+    server: WasmAgentServer,
+    stream_id: str,
+    *,
+    start_ms: int = 0,
+    end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = False,
+) -> int:
+    return len(camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    ))
 
 
 def camera_push_next_playback_frame(
@@ -2969,26 +3082,21 @@ def camera_push_next_playback_frame(
     start_ms: int = 0,
     after_mtime_ns: int = -1,
     end_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
 ) -> tuple[Path, os.stat_result] | None:
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
-    frames: list[tuple[int, Path, os.stat_result]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0 or stat.st_mtime_ns <= after_mtime_ns:
-            continue
-        if start_ms > 0 and timestamp_ms < start_ms:
-            continue
-        if end_ms > 0 and timestamp_ms > end_ms:
-            continue
-        frames.append((stat.st_mtime_ns, path, stat))
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        start_ms=start_ms,
+        after_mtime_ns=after_mtime_ns,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    )
     if not frames:
         return None
-    _mtime_ns, path, stat = sorted(frames, key=lambda item: item[0])[0]
+    _mtime_ns, _source_priority, path, stat = frames[0]
     return path, stat
 
 
@@ -2999,26 +3107,36 @@ def camera_push_nearest_playback_frame(
     target_ms: int = 0,
     end_ms: int = 0,
     max_distance_ms: int = 0,
+    include_archive: bool = True,
+    refresh_latest: bool = True,
 ) -> tuple[Path, os.stat_result] | None:
     if target_ms <= 0:
-        return camera_push_next_playback_frame(server, stream_id, start_ms=0, after_mtime_ns=-1, end_ms=end_ms)
-    camera_push_playback_latest_frame(server, stream_id)
-    camera_push_prune_playback(server, stream_id)
-    frames: list[tuple[int, int, Path, os.stat_result]] = []
-    for path in camera_push_playback_dir(server, stream_id).glob("*.jpg"):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        timestamp_ms = int(stat.st_mtime * 1000)
-        if stat.st_size <= 0:
-            continue
-        if end_ms > 0 and timestamp_ms > end_ms:
-            continue
-        frames.append((abs(timestamp_ms - target_ms), stat.st_mtime_ns, path, stat))
+        return camera_push_next_playback_frame(
+            server,
+            stream_id,
+            start_ms=0,
+            after_mtime_ns=-1,
+            end_ms=end_ms,
+            include_archive=include_archive,
+            refresh_latest=refresh_latest,
+        )
+    frames = camera_push_recorded_frame_candidates(
+        server,
+        stream_id,
+        end_ms=end_ms,
+        include_archive=include_archive,
+        refresh_latest=refresh_latest,
+    )
     if not frames:
         return None
-    distance_ms, _mtime_ns, path, stat = sorted(frames, key=lambda item: (item[0], item[1]))[0]
+    nearest: list[tuple[int, int, Path, os.stat_result]] = []
+    for _mtime_ns, _source_priority, path, stat in frames:
+        try:
+            timestamp_ms = int(stat.st_mtime * 1000)
+        except (OverflowError, ValueError):
+            timestamp_ms = 0
+        nearest.append((abs(timestamp_ms - target_ms), stat.st_mtime_ns, path, stat))
+    distance_ms, _mtime_ns, path, stat = sorted(nearest, key=lambda item: (item[0], item[1]))[0]
     if max_distance_ms > 0 and distance_ms > max_distance_ms:
         return None
     return path, stat
@@ -3363,6 +3481,8 @@ def serve_camera_push_playback(
         end_ms=0 if should_follow else end_ms,
         target_ms=start_ms,
         max_distance_ms=int(DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC * 1000) if start_ms > 0 else 0,
+        include_archive=True,
+        refresh_latest=should_follow,
     )
     if not first:
         raise BrowserError("camera_push_playback_empty", "No smooth camera playback frames are available from that point yet.", status=HTTPStatus.NOT_FOUND)
@@ -3399,6 +3519,8 @@ def serve_camera_push_playback(
                 start_ms=start_ms,
                 after_mtime_ns=last_mtime_ns,
                 end_ms=0 if should_follow else end_ms,
+                include_archive=True,
+                refresh_latest=should_follow,
             )
             if next_frame or not should_follow:
                 break
@@ -4041,6 +4163,14 @@ def user_is_admin(user: dict[str, Any] | None) -> bool:
     return str((user or {}).get("role") or "") == "admin" or is_admin_email(str((user or {}).get("email") or ""))
 
 
+def row_is_admin(row: sqlite3.Row | dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    role = row["role"] if isinstance(row, sqlite3.Row) else row.get("role")
+    email = row["email"] if isinstance(row, sqlite3.Row) else row.get("email")
+    return str(role or "") == "admin" or is_admin_email(str(email or ""))
+
+
 def public_user_label(user: dict[str, Any] | None) -> str:
     if not user:
         return "Guest"
@@ -4220,6 +4350,16 @@ def safe_state_id(raw: str, fallback: str = "space") -> str:
     return base or fallback
 
 
+def canonical_space_storage_id(raw: str, fallback: str = "home") -> str:
+    sid = safe_state_id(raw, fallback)
+    return BUILT_IN_SPACE_ID_ALIASES.get(sid, sid)
+
+
+def is_reserved_user_space_id(raw: str) -> bool:
+    sid = safe_state_id(raw, "")
+    return sid in RESERVED_USER_SPACE_IDS
+
+
 def user_root(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
     path = server.state_dir / "users" / user_id(user)
     path.mkdir(parents=True, exist_ok=True)
@@ -4275,14 +4415,14 @@ def user_spaces_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Pat
 
 
 def user_space_dir(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str) -> Path:
-    sid = safe_state_id(space_id, "home")
+    sid = canonical_space_storage_id(space_id, "home")
     path = user_spaces_dir(server, user) / sid
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def user_timeline_dir(server: WasmAgentServer, user: dict[str, Any] | None, space_id: str = "home") -> Path:
-    path = user_root(server, user) / "timelines" / safe_state_id(space_id, "home")
+    path = user_root(server, user) / "timelines" / canonical_space_storage_id(space_id, "home")
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -4605,11 +4745,11 @@ def extract_agent_wis_patch_payloads(reply: str) -> tuple[str, list[dict[str, An
 
 
 def normalize_wis_patch_space_id(raw: Any, fallback: str) -> str:
-    active_space_id = safe_state_id(str(fallback or ""), "home")
+    active_space_id = canonical_space_storage_id(str(fallback or ""), "home")
     candidate = safe_state_id(str(raw or ""), "")
     if not candidate or candidate in WIS_CURRENT_SPACE_SENTINELS:
         return active_space_id
-    return candidate
+    return canonical_space_storage_id(candidate, active_space_id)
 
 
 def apply_agent_wis_patches_from_reply(
@@ -5261,7 +5401,7 @@ def list_user_spaces(
     user_space_paths = [path for path in sorted(user_spaces_dir(server, user).iterdir()) if path.is_dir()]
     for path in user_space_paths:
         meta = read_json_file(path / "space.json", {})
-        if isinstance(meta, dict) and path.name not in {"home", "admin"}:
+        if isinstance(meta, dict) and meta and not is_reserved_user_space_id(path.name):
             shared_space_id = str(meta.get("shared_space_id") or "")
             space_area = sanitize_space_area(meta.get("space_area"))
             if shared_space_id:
@@ -5302,13 +5442,13 @@ def save_user_spaces(
         raise BrowserError("layout_is_client_local", "Layout is client-local by default; server layout sync requires premium storage.")
     if action == "delete":
         space_id = safe_state_id(str(body.get("space_id") or ""), "")
-        if not space_id or space_id in {"home", "admin"}:
+        if not space_id or is_reserved_user_space_id(space_id):
             raise BrowserError("invalid_space_delete", "Only user-created spaces can be deleted.")
         shutil.rmtree(user_space_dir(server, user, space_id), ignore_errors=True)
         return list_user_spaces(server, user, handler)
     if action in {"area", "space_area"}:
         space_id = safe_state_id(str(body.get("space_id") or ""), "")
-        if not space_id or space_id in {"home", "admin"}:
+        if not space_id or is_reserved_user_space_id(space_id):
             raise BrowserError("invalid_space_area", "Only user-created spaces can store shared area metadata.")
         space_area = sanitize_space_area(body.get("space_area"))
         if not space_area:
@@ -5341,7 +5481,7 @@ def save_user_spaces(
             if not isinstance(item, dict):
                 continue
             space_id = safe_state_id(str(item.get("id") or ""), "")
-            if not space_id or space_id in {"home", "admin"} or space_id in seen:
+            if not space_id or is_reserved_user_space_id(space_id) or space_id in seen:
                 continue
             seen.add(space_id)
             root = user_space_dir(server, user, space_id)
@@ -5377,7 +5517,7 @@ def save_user_spaces(
                     record["updated_at"] = now
                     write_json_file(shared_space_record_path(server, shared_space_id), record)
         for path in user_spaces_dir(server, user).iterdir():
-            if path.is_dir() and path.name not in {"home", "admin"} and path.name not in seen:
+            if path.is_dir() and (path.name in BUILT_IN_SPACE_ID_ALIASES or (not is_reserved_user_space_id(path.name) and path.name not in seen)):
                 shutil.rmtree(path, ignore_errors=True)
         return list_user_spaces(server, user, handler)
     raise BrowserError("invalid_space_action", "Unsupported space action.")
@@ -5612,15 +5752,7 @@ def append_shared_space_room_event(
     body: dict[str, Any],
 ) -> dict[str, Any]:
     events = read_shared_space_events(server, shared_space_id)
-    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
-    event = {
-        "schema": SHARED_SPACE_ROOM_EVENT_SCHEMA,
-        "id": f"room_evt_{next_snowflake_id():x}",
-        "kind": event_kind,
-        "sender_user_id": user_id(user),
-        "created_at": iso_timestamp(),
-        "payload": sanitize_room_event_payload(body.get("payload") if isinstance(body.get("payload"), dict) else {}),
-    }
+    event = build_shared_space_room_event(user, body)
     events.append(event)
     write_json_file(shared_space_events_path(server, shared_space_id), {
         "schema": "hermes.wasm_agent.shared_space.room_events.v1",
@@ -5628,6 +5760,21 @@ def append_shared_space_room_event(
         "events": events[-SHARED_SPACE_EVENT_LIMIT:],
     })
     return event
+
+
+def build_shared_space_room_event(
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
+    return {
+        "schema": SHARED_SPACE_ROOM_EVENT_SCHEMA,
+        "id": f"room_evt_{next_snowflake_id():x}",
+        "kind": event_kind,
+        "sender_user_id": user_id(user),
+        "created_at": iso_timestamp(),
+        "payload": sanitize_room_event_payload(body.get("payload") if isinstance(body.get("payload"), dict) else {}),
+    }
 
 
 def public_shared_space_room(
@@ -5690,12 +5837,26 @@ def shared_space_room(
     return {"ok": True, "room": public_shared_space_room(server, record, user, presence, current_device_id)}
 
 
-def sync_event_payload(raw: Any) -> str:
+def sync_event_payload(raw: Any, kind: str = "") -> str:
     payload = raw if isinstance(raw, dict) else {}
     text = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
-    if len(text.encode("utf-8")) > SYNC_EVENT_PAYLOAD_LIMIT:
+    limit = REMOTE_CONTROL_FRAME_PAYLOAD_LIMIT if kind == "remote-control-frame" else SYNC_EVENT_PAYLOAD_LIMIT
+    if len(text.encode("utf-8")) > limit:
         raise BrowserError("sync_payload_too_large", "Sync event payload is too large.")
     return text
+
+
+def sync_event_kind(raw: Any) -> str:
+    return safe_state_id(str(raw or "message"), "message")
+
+
+def normalize_sync_event_payload(user: dict[str, Any] | None, kind: str, raw: Any) -> dict[str, Any]:
+    payload = dict(raw) if isinstance(raw, dict) else {}
+    if kind in REMOTE_CONTROL_EVENT_KINDS:
+        payload["admin_verified"] = user_is_admin(user)
+        if kind == "remote-control-request" and not user_is_admin(user):
+            payload["admin_support"] = False
+    return payload
 
 
 def user_can_access_conversation(conn: sqlite3.Connection, conversation_id: str, user: dict[str, Any] | None) -> bool:
@@ -5725,12 +5886,34 @@ def direct_conversation_peer_id(conn: sqlite3.Connection, conversation_id: str, 
     return str(peer["user_id"]) if peer else ""
 
 
-def ensure_direct_conversation_send_allowed(conn: sqlite3.Connection, conversation_id: str, user: dict[str, Any] | None) -> None:
+def remote_control_admin_support_allowed(
+    conn: sqlite3.Connection,
+    user: dict[str, Any] | None,
+    peer_id: str,
+    kind: str,
+) -> bool:
+    if kind not in REMOTE_CONTROL_EVENT_KINDS or not peer_id:
+        return False
+    if user_is_admin(user):
+        return True
+    peer = lookup_user_row(conn, peer_id)
+    return row_is_admin(peer) and kind in REMOTE_CONTROL_ADMIN_REPLY_KINDS
+
+
+def ensure_direct_conversation_send_allowed(
+    conn: sqlite3.Connection,
+    conversation_id: str,
+    user: dict[str, Any] | None,
+    kind: str = "message",
+) -> None:
     peer_id = direct_conversation_peer_id(conn, conversation_id, user)
     if not peer_id:
         return
     friendship = existing_friendship(conn, user_id(user), peer_id)
-    if not friendship or str(friendship["status"]) != "accepted":
+    if (
+        (not friendship or str(friendship["status"]) != "accepted")
+        and not remote_control_admin_support_allowed(conn, user, peer_id, kind)
+    ):
         raise BrowserError(
             "direct_peer_not_friend",
             "Direct chat requires an accepted friendship.",
@@ -5745,6 +5928,7 @@ def ensure_sync_conversation(
     body: dict[str, Any],
 ) -> str:
     uid = user_id(user)
+    event_kind = sync_event_kind(body.get("kind"))
     requested = safe_state_id(str(body.get("conversation_id") or body.get("conversation") or ""), "")
     shared_space_id = safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), "")
     space_id = safe_state_id(str(body.get("space_id") or body.get("space") or ""), "")
@@ -5759,7 +5943,10 @@ def ensure_sync_conversation(
         if direct_peer_id == uid:
             raise BrowserError("direct_peer_self", "Direct chat requires another user.")
         friendship = existing_friendship(conn, uid, direct_peer_id)
-        if not friendship or str(friendship["status"]) != "accepted":
+        if (
+            (not friendship or str(friendship["status"]) != "accepted")
+            and not remote_control_admin_support_allowed(conn, user, direct_peer_id, event_kind)
+        ):
             raise BrowserError(
                 "direct_peer_not_friend",
                 "Direct chat requires an accepted friendship.",
@@ -5837,9 +6024,28 @@ def public_sync_event(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def prune_remote_control_frame_events(conn: sqlite3.Connection, conversation_id: str) -> None:
+    rows = conn.execute(
+        """
+        SELECT id FROM sync_event_tb
+         WHERE conversation_id = ? AND kind = 'remote-control-frame'
+         ORDER BY CAST(id AS INTEGER) DESC
+         LIMIT -1 OFFSET ?
+        """,
+        (conversation_id, REMOTE_CONTROL_FRAME_EVENT_KEEP),
+    ).fetchall()
+    ids = [str(row["id"]) for row in rows]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"DELETE FROM sync_event_tb WHERE id IN ({placeholders})", ids)
+
+
 def list_sync_events(server: WasmAgentServer, user: dict[str, Any] | None, query: dict[str, list[str]]) -> dict[str, Any]:
     conversation_id = safe_state_id(str((query.get("conversation_id") or query.get("conversation") or [""])[0] or ""), "")
     shared_space_id = safe_state_id(str((query.get("shared_space_id") or query.get("shared_space") or [""])[0] or ""), "")
+    kind_filter = safe_state_id(str((query.get("kind") or query.get("event_kind") or [""])[0] or ""), "")
+    latest = str((query.get("latest") or [""])[0] or "").strip().lower() in {"1", "true", "yes"}
     after_id = str((query.get("after_id") or query.get("after") or [""])[0] or "").strip()
     try:
         limit = int(str((query.get("limit") or [SYNC_EVENT_PAGE_LIMIT])[0] or SYNC_EVENT_PAGE_LIMIT))
@@ -5868,8 +6074,14 @@ def list_sync_events(server: WasmAgentServer, user: dict[str, Any] | None, query
         if after_id:
             where.append("CAST(id AS INTEGER) > CAST(? AS INTEGER)")
             params.append(after_id)
-        sql = "SELECT * FROM sync_event_tb WHERE " + " AND ".join(where) + " ORDER BY CAST(id AS INTEGER) ASC LIMIT ?"
+        if kind_filter:
+            where.append("kind = ?")
+            params.append(kind_filter)
+        order = "DESC" if latest else "ASC"
+        sql = "SELECT * FROM sync_event_tb WHERE " + " AND ".join(where) + f" ORDER BY CAST(id AS INTEGER) {order} LIMIT ?"
         rows = conn.execute(sql, (*params, limit)).fetchall()
+        if latest:
+            rows = list(reversed(rows))
     events = [public_sync_event(row) for row in rows]
     return {
         "ok": True,
@@ -5884,11 +6096,12 @@ def append_sync_event(server: WasmAgentServer, user: dict[str, Any] | None, body
     client_event_id = safe_state_id(str(body.get("client_event_id") or ""), "")
     if not client_event_id:
         client_event_id = f"client-{next_snowflake_id():x}"
-    kind = safe_state_id(str(body.get("kind") or "message"), "message")
+    kind = sync_event_kind(body.get("kind"))
+    payload = normalize_sync_event_payload(user, kind, body.get("payload"))
     now = int(time.time())
     with auth_connect() as conn:
         conversation_id = ensure_sync_conversation(server, conn, user, body)
-        ensure_direct_conversation_send_allowed(conn, conversation_id, user)
+        ensure_direct_conversation_send_allowed(conn, conversation_id, user, kind)
         row = conn.execute(
             "SELECT * FROM sync_event_tb WHERE author_user_id = ? AND client_event_id = ?",
             (uid, client_event_id),
@@ -5910,11 +6123,13 @@ def append_sync_event(server: WasmAgentServer, user: dict[str, Any] | None, body
                     safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), ""),
                     uid,
                     kind,
-                    sync_event_payload(body.get("payload")),
+                    sync_event_payload(payload, kind),
                     now,
                     now,
                 ),
             )
+            if kind == "remote-control-frame":
+                prune_remote_control_frame_events(conn, conversation_id)
             row = conn.execute("SELECT * FROM sync_event_tb WHERE id = ?", (event_id,)).fetchone()
         event = public_sync_event(row) if row else {}
     return {"ok": True, "event": event}
@@ -6962,7 +7177,7 @@ def probe_custom_bridge_url(base_url: str) -> dict[str, Any]:
         "routes": {
             "health": "/health",
             "models": models_route,
-            "chat": ["/bridge/v1/chat", "/tasks"],
+            "chat": ["/bridge/v1/chat", "/tasks", "/v1/runs", "/v1/chat/completions"],
         },
     }
 
@@ -7731,7 +7946,7 @@ def copy_user_wis_to_shared(server: WasmAgentServer, user: dict[str, Any] | None
 
 def share_user_space(server: WasmAgentServer, user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
     space_id = safe_state_id(str(body.get("space_id") or ""), "")
-    if not space_id or space_id in {"home", "admin"}:
+    if not space_id or is_reserved_user_space_id(space_id):
         raise BrowserError("invalid_space_share", "Only user-created spaces can be shared.")
     space_path = user_spaces_dir(server, user) / space_id / "space.json"
     meta = read_json_file(space_path, {})
@@ -7905,7 +8120,8 @@ def wis_artifact_root(
         path = shared_space_dir(server, sid) / "wis"
         path.mkdir(parents=True, exist_ok=True)
         return path, f"shared:{sid}"
-    return user_wis_dir(server, user, space_id), f"user:{user_id(user)}:{safe_state_id(space_id, 'home')}"
+    storage_id = canonical_space_storage_id(space_id, "home")
+    return user_wis_dir(server, user, storage_id), f"user:{user_id(user)}:{storage_id}"
 
 
 def wis_artifact_file(root: Path, artifact_id: str) -> Path:
@@ -7920,6 +8136,7 @@ def list_wis_artifacts(
     *,
     shared_space_id: str = "",
 ) -> dict[str, Any]:
+    space_id = canonical_space_storage_id(space_id, "home")
     root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
     artifacts = []
     for path in sorted(root.glob("*.json")):
@@ -7950,6 +8167,7 @@ def read_wis_artifact(
     *,
     shared_space_id: str = "",
 ) -> dict[str, Any]:
+    space_id = canonical_space_storage_id(space_id, "home")
     root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
     aid = safe_state_id(artifact_id, "main")
     path = wis_artifact_file(root, aid)
@@ -8187,7 +8405,7 @@ def patch_wis_artifact(server: WasmAgentServer, user: dict[str, Any] | None, bod
     patch = body.get("patch") if isinstance(body.get("patch"), dict) else body
     if not isinstance(patch, dict) or patch.get("schema") != WIS_PATCH_SCHEMA:
         raise BrowserError("invalid_wis_patch", f"WIS patch schema must be {WIS_PATCH_SCHEMA}.")
-    space_id = safe_state_id(str(patch.get("space_id") or body.get("space_id") or "home"), "home")
+    space_id = canonical_space_storage_id(str(patch.get("space_id") or body.get("space_id") or "home"), "home")
     shared_space_id = safe_state_id(str(patch.get("shared_space_id") or body.get("shared_space_id") or ""), "")
     artifact_id = safe_state_id(str(patch.get("artifact_id") or body.get("artifact_id") or "main"), "main")
     root, scope = wis_artifact_root(server, user, space_id, shared_space_id)
@@ -12603,8 +12821,9 @@ def embedded_space_context_from_body(body: dict[str, Any], observation: dict[str
         or workspace.get("active_panel")
         or "home"
     )
-    space_id = safe_state_id(str(raw_space_id or ""), "home")
-    panel = clipped(str(merged_space.get("panel") or workspace.get("active_panel") or space_id).strip(), 120)
+    space_id = canonical_space_storage_id(str(raw_space_id or ""), "home")
+    raw_panel = str(merged_space.get("panel") or workspace.get("active_panel") or space_id).strip()
+    panel = clipped(str(canonical_space_storage_id(raw_panel, space_id) if is_reserved_user_space_id(raw_panel) else raw_panel or space_id), 120)
     name = clipped(str(
         body.get("space_name")
         or merged_space.get("name")
@@ -14099,6 +14318,400 @@ class BrowserClientWebSocket:
                 raise BrowserError("browser_ws_closed", "Browser websocket closed.")
             chunks.extend(chunk)
         return bytes(chunks)
+
+
+def serve_shared_space_room_live(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:
+    if not user:
+        handler._json(
+            HTTPStatus.UNAUTHORIZED,
+            {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
+        )
+        return
+    query = parse_qs(urlparse(handler.path).query)
+    shared_space_id = safe_state_id(str((query.get("shared_space_id") or query.get("shared_space") or [""])[0] or ""), "")
+    if not shared_space_id:
+        handler._json(
+            HTTPStatus.BAD_REQUEST,
+            {"ok": False, "error": {"code": "invalid_shared_space", "message": "shared_space_id is required."}},
+        )
+        return
+    record = read_shared_space_record(handler.server, shared_space_id)
+    if not record:
+        handler._json(
+            HTTPStatus.NOT_FOUND,
+            {"ok": False, "error": {"code": "shared_space_not_found", "message": "That shared space was not found."}},
+        )
+        return
+    if not user_can_access_shared_space(record, user):
+        handler._json(
+            HTTPStatus.FORBIDDEN,
+            {"ok": False, "error": {"code": "shared_space_denied", "message": "You cannot access that shared space."}},
+        )
+        return
+    key = handler.headers.get("Sec-WebSocket-Key", "").strip()
+    upgrade = handler.headers.get("Upgrade", "").lower()
+    if upgrade != "websocket" or not key:
+        handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
+        return
+
+    accept = base64.b64encode(
+        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
+    ).decode("ascii")
+    handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.close_connection = True
+
+    client_ws = BrowserClientWebSocket(handler)
+    shared_space_live_register(handler.server, shared_space_id, client_ws)
+    try:
+        client_ws.send_json({
+            "type": "ready",
+            "schema": "hermes.wasm_agent.shared_space.live.v1",
+            "shared_space_id": shared_space_id,
+            "user_id": user_id(user),
+        })
+        handle_shared_space_room_live(handler.server, client_ws, user, shared_space_id)
+    finally:
+        shared_space_live_unregister(handler.server, shared_space_id, client_ws)
+        client_ws.close()
+
+
+def shared_space_live_register(server: WasmAgentServer, shared_space_id: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.shared_space_live_clients_lock:
+        server.shared_space_live_clients.setdefault(shared_space_id, set()).add(client_ws)
+
+
+def shared_space_live_unregister(server: WasmAgentServer, shared_space_id: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.shared_space_live_clients_lock:
+        clients = server.shared_space_live_clients.get(shared_space_id)
+        if not clients:
+            return
+        clients.discard(client_ws)
+        if not clients:
+            server.shared_space_live_clients.pop(shared_space_id, None)
+
+
+def shared_space_live_broadcast(
+    server: WasmAgentServer,
+    shared_space_id: str,
+    event: dict[str, Any],
+    *,
+    source: BrowserClientWebSocket | None = None,
+) -> None:
+    sid = safe_state_id(shared_space_id, "")
+    if not sid or not event:
+        return
+    payload = {"type": "event", "shared_space_id": sid, "event": event}
+    stale: list[BrowserClientWebSocket] = []
+    with server.shared_space_live_clients_lock:
+        targets = [
+            client
+            for client in server.shared_space_live_clients.get(sid, set())
+            if client is not source
+        ]
+    for client in targets:
+        try:
+            client.send_json(payload)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        shared_space_live_unregister(server, sid, client)
+
+
+def shared_space_live_error(
+    client_ws: BrowserClientWebSocket,
+    request_id: str,
+    code: str,
+    message: str,
+) -> None:
+    client_ws.send_json({
+        "type": "ack",
+        "ok": False,
+        "request_id": request_id,
+        "error": {"code": code, "message": message},
+    })
+
+
+def handle_shared_space_room_live(
+    server: WasmAgentServer,
+    client_ws: BrowserClientWebSocket,
+    user: dict[str, Any],
+    shared_space_id: str,
+) -> None:
+    while True:
+        try:
+            message = client_ws.recv_json(wait=25)
+        except BrowserError as exc:
+            if exc.code == "browser_ws_timeout":
+                client_ws.send_json({"type": "ping", "ts": int(time.time() * 1000)})
+                continue
+            if exc.code == "browser_ws_closed":
+                break
+            raise
+        if not isinstance(message, dict):
+            continue
+        message_type = str(message.get("type") or "").strip()
+        request_id = safe_state_id(str(message.get("request_id") or ""), "")
+        if message_type in {"pong", "hello"}:
+            continue
+        if message_type != "event":
+            shared_space_live_error(client_ws, request_id, "unsupported_shared_space_live_message", "Unsupported shared-space live message.")
+            continue
+        body = message.get("body") if isinstance(message.get("body"), dict) else {}
+        body_sid = safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or shared_space_id), "")
+        if body_sid != shared_space_id:
+            shared_space_live_error(client_ws, request_id, "shared_space_mismatch", "Live shared-space events must target the connected room.")
+            continue
+        record = read_shared_space_record(server, shared_space_id)
+        if not record or not user_can_access_shared_space(record, user):
+            shared_space_live_error(client_ws, request_id, "shared_space_denied", "You cannot access that shared space.")
+            continue
+        try:
+            live_only = body.get("live_only") is True or str(body.get("live_only") or "").strip().lower() in {"1", "true", "yes"}
+            event_kind = safe_state_id(str(body.get("kind") or body.get("event_kind") or "space-event"), "space-event")
+            if live_only and event_kind != "space-pointer":
+                shared_space_live_error(client_ws, request_id, "unsupported_live_only_kind", "Only shared-space pointer events can be live-only.")
+                continue
+            event = build_shared_space_room_event(user, body) if live_only else append_shared_space_room_event(server, user, shared_space_id, body)
+            client_ws.send_json({"type": "ack", "ok": True, "request_id": request_id, "event": event})
+            shared_space_live_broadcast(server, shared_space_id, event, source=client_ws)
+        except BrowserError as exc:
+            shared_space_live_error(client_ws, request_id, exc.code, exc.message)
+        except Exception as exc:
+            shared_space_live_error(client_ws, request_id, "shared_space_live_error", str(exc))
+
+
+def serve_remote_control_live(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:
+    if not user:
+        handler._json(
+            HTTPStatus.UNAUTHORIZED,
+            {"ok": False, "error": {"code": "auth_required", "message": "Account sign-in is required."}},
+        )
+        return
+    key = handler.headers.get("Sec-WebSocket-Key", "").strip()
+    upgrade = handler.headers.get("Upgrade", "").lower()
+    if upgrade != "websocket" or not key:
+        handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
+        return
+
+    accept = base64.b64encode(
+        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
+    ).decode("ascii")
+    handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.close_connection = True
+
+    client_ws = BrowserClientWebSocket(handler)
+    uid = user_id(user)
+    remote_control_live_register(handler.server, uid, client_ws)
+    try:
+        client_ws.send_json({
+            "type": "ready",
+            "schema": "hermes.wasm_agent.remote_control.live.v1",
+            "user_id": uid,
+        })
+        handle_remote_control_live(handler.server, client_ws, user)
+    finally:
+        remote_control_live_unregister(handler.server, uid, client_ws)
+        client_ws.close()
+
+
+def remote_control_live_register(server: WasmAgentServer, uid: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.remote_control_live_clients_lock:
+        server.remote_control_live_clients.setdefault(uid, set()).add(client_ws)
+
+
+def remote_control_live_unregister(server: WasmAgentServer, uid: str, client_ws: BrowserClientWebSocket) -> None:
+    with server.remote_control_live_clients_lock:
+        clients = server.remote_control_live_clients.get(uid)
+        if not clients:
+            return
+        clients.discard(client_ws)
+        if not clients:
+            server.remote_control_live_clients.pop(uid, None)
+
+
+def remote_control_live_conversation_user_ids(conversation_id: str) -> list[str]:
+    conv_id = safe_state_id(conversation_id, "")
+    if not conv_id:
+        return []
+    with auth_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT user_id FROM conversation_member_tb
+             WHERE conversation_id = ?
+             ORDER BY user_id ASC
+            """,
+            (conv_id,),
+        ).fetchall()
+    return [str(row["user_id"]) for row in rows]
+
+
+def remote_control_live_broadcast(
+    server: WasmAgentServer,
+    event: dict[str, Any],
+    *,
+    source: BrowserClientWebSocket | None = None,
+) -> None:
+    if not event or not remote_control_kind_allowed(event.get("kind")):
+        return
+    user_ids = remote_control_live_conversation_user_ids(str(event.get("conversation_id") or ""))
+    author_id = str(event.get("author_user_id") or "")
+    if author_id and author_id not in user_ids:
+        user_ids.append(author_id)
+    payload = {"type": "event", "event": event}
+    stale: list[tuple[str, BrowserClientWebSocket]] = []
+    with server.remote_control_live_clients_lock:
+        targets = [
+            (uid, client)
+            for uid in user_ids
+            for client in server.remote_control_live_clients.get(uid, set())
+            if client is not source
+        ]
+    for uid, client in targets:
+        try:
+            client.send_json(payload)
+        except Exception:
+            stale.append((uid, client))
+    for uid, client in stale:
+        remote_control_live_unregister(server, uid, client)
+
+
+def remote_control_live_broadcast_async(
+    server: WasmAgentServer,
+    event: dict[str, Any],
+    *,
+    source: BrowserClientWebSocket | None = None,
+) -> None:
+    if not event or not remote_control_kind_allowed(event.get("kind")):
+        return
+    worker = threading.Thread(
+        target=remote_control_live_broadcast,
+        args=(server, event),
+        kwargs={"source": source},
+        name="wasm-agent-remote-control-live-broadcast",
+        daemon=True,
+    )
+    worker.start()
+
+
+def remote_control_live_ephemeral_event(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    uid = user_id(user)
+    kind = sync_event_kind(body.get("kind"))
+    if kind != "remote-control-frame":
+        raise BrowserError("unsupported_live_frame_kind", "Only remote-control viewport frames can use the latest-frame live channel.")
+    payload = normalize_sync_event_payload(user, kind, body.get("payload"))
+    # Reuse the durable payload guard so live frames cannot exceed the same relay budget.
+    sync_event_payload(payload, kind)
+    with auth_connect() as conn:
+        conversation_id = ensure_sync_conversation(server, conn, user, body)
+        ensure_direct_conversation_send_allowed(conn, conversation_id, user, kind)
+    now = int(time.time())
+    client_event_id = safe_state_id(str(body.get("client_event_id") or ""), "") or f"client-{next_snowflake_id():x}"
+    return {
+        "schema": SYNC_EVENT_SCHEMA,
+        "id": str(next_snowflake_id()),
+        "client_event_id": client_event_id,
+        "conversation_id": conversation_id,
+        "space_id": safe_state_id(str(body.get("space_id") or body.get("space") or ""), ""),
+        "shared_space_id": safe_state_id(str(body.get("shared_space_id") or body.get("shared_space") or ""), ""),
+        "author_user_id": uid,
+        "kind": kind,
+        "payload": payload,
+        "created_at": now,
+        "updated_at": now,
+        "ephemeral": True,
+    }
+
+
+def remote_control_kind_allowed(kind: Any) -> bool:
+    return sync_event_kind(kind) in REMOTE_CONTROL_EVENT_KINDS
+
+
+def remote_control_live_error(
+    client_ws: BrowserClientWebSocket,
+    request_id: str,
+    code: str,
+    message: str,
+) -> None:
+    client_ws.send_json({
+        "type": "ack",
+        "ok": False,
+        "request_id": request_id,
+        "error": {"code": code, "message": message},
+    })
+
+
+def handle_remote_control_live(
+    server: WasmAgentServer,
+    client_ws: BrowserClientWebSocket,
+    user: dict[str, Any],
+) -> None:
+    while True:
+        try:
+            message = client_ws.recv_json(wait=25)
+        except BrowserError as exc:
+            if exc.code == "browser_ws_timeout":
+                client_ws.send_json({"type": "ping", "ts": int(time.time() * 1000)})
+                continue
+            if exc.code == "browser_ws_closed":
+                break
+            raise
+        if not isinstance(message, dict):
+            continue
+        message_type = str(message.get("type") or "").strip()
+        request_id = safe_state_id(str(message.get("request_id") or ""), "")
+        if message_type in {"pong", "hello"}:
+            continue
+        if message_type == "frame":
+            body = message.get("body") if isinstance(message.get("body"), dict) else {}
+            try:
+                event = remote_control_live_ephemeral_event(server, user, body)
+                if request_id:
+                    client_ws.send_json({
+                        "type": "ack",
+                        "ok": True,
+                        "request_id": request_id,
+                        "event": {
+                            "id": event["id"],
+                            "conversation_id": event["conversation_id"],
+                            "kind": event["kind"],
+                            "ephemeral": True,
+                        },
+                    })
+                remote_control_live_broadcast_async(server, event, source=client_ws)
+            except BrowserError as exc:
+                remote_control_live_error(client_ws, request_id, exc.code, exc.message)
+            except Exception as exc:
+                remote_control_live_error(client_ws, request_id, "remote_control_live_frame_error", str(exc))
+            continue
+        if message_type != "append":
+            remote_control_live_error(client_ws, request_id, "unsupported_live_message", "Unsupported remote-control live message.")
+            continue
+        body = message.get("body") if isinstance(message.get("body"), dict) else {}
+        kind = sync_event_kind(body.get("kind"))
+        if kind not in REMOTE_CONTROL_EVENT_KINDS:
+            remote_control_live_error(client_ws, request_id, "unsupported_live_kind", "Only remote-control events can use the live channel.")
+            continue
+        try:
+            result = append_sync_event(server, user, body)
+            event = result.get("event") if isinstance(result.get("event"), dict) else {}
+            client_ws.send_json({"type": "ack", "ok": True, "request_id": request_id, "event": event})
+            remote_control_live_broadcast(server, event, source=client_ws)
+        except BrowserError as exc:
+            remote_control_live_error(client_ws, request_id, exc.code, exc.message)
+        except Exception as exc:
+            remote_control_live_error(client_ws, request_id, "remote_control_live_error", str(exc))
 
 
 class CdpWebSocket:

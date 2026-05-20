@@ -29,11 +29,119 @@ rendering, agent-readable state, and a cleaner app shell.
 This section is the cross-compaction handoff for active `wasm-agent` work. When
 the next action changes, update this before ending the turn.
 
-Current next action: continue the camera extraction by moving the remaining
-focused camera DOM renderer/header/timeline wiring behind a shareable controller
-adapter in `public/modules/wis/artifacts/camera.js`, leaving `app.js` as the host
-shell. Current evidence: the portable focused-camera artifact factory,
-slot/focus helpers, push-camera config shape, controller contract, push endpoint
+Current next action: reload the real authenticated co-control clients and
+confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
+interface moves past the controller `Requesting remote viewport` state after the
+v129 service worker activates: first by receiving a
+compact bootstrap preview or fallback/status event if the relay rejects a full
+frame, then by using the receiving-side `Share pixels` button for any
+auto-granted co-control session and confirming the controller-side frame status
+reads `exact pixels`, and confirm the controller viewport closes when the
+receiver presses Stop or ends browser screen sharing, including the duplicate
+accepted-grant case where the receiving banner previously stayed on
+`Co-controlling with ...` / `Exact pixel viewport sharing active`; also confirm the
+controller-side viewport expand button fills `100vw` by `100vh`, verify the
+received frame status shows a high-resolution frame up to `1920x1080`, confirm
+tap/click actions reach launcher buttons such as `space-home`, `wasm-agent-chat`,
+and in-surface widget buttons through the live remote-control channel without
+waiting for the social poll, and confirm dragging the remote canvas pans it
+through pointer down/move/up, then confirm scrolling the empty remote canvas
+changes space distance instead of native-scrolling the space viewport;
+then reload two real clients in the same shared space and confirm circular
+moving, pressing, and clicking over the canvas shows each peer's labeled pointer
+following a fluid path and click pulse in the other client without opening chat;
+then reload the real authenticated Zangao client and confirm `/spaces` no
+longer returns or renders `space-home`/`space-admin` as account-owned user
+spaces; then reload the real authenticated Asolaria clients and confirm the
+Asolaria title row shows the shared voice control after
+`HERMES_WASM_AGENT_SHARED_VOICE_ENABLED=1` and the Asolaria `voice-room`
+capability are present, and resume the prior CAM 1 middle-timeline click and
+Live return browser verification so the real client matches the headless
+acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
+`playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
+live on the Live button.
+Current evidence: Remote-control viewport frames now strip URL-backed CSS and
+inline snapshot resources before SVG export, and SVG export failures fall back
+to a canvas-native DOM renderer that avoids drawing untrusted image resources;
+capture errors are relayed to the controller as statused frame events instead
+of leaving the preview at its first empty state, and payload-too-large relay
+failures lower the client frame budget to a compact bootstrap preview before
+retrying. The controller also probes the latest `remote-control-frame` and
+`remote-control-stop` rows for the active conversation so a stale global sync
+cursor cannot leave it pinned at the empty preview or waiting after the receiver
+has closed sharing. Stop events now carry the original request/device context,
+and the receiver retires matching sibling grants from the same controller and
+conversation so duplicate accepted responses cannot leave a stale co-control
+banner after one grant is stopped. The receiving side now remembers handled
+remote-control request ids so duplicate sync processing cannot mint sibling
+grants, and controller responses/frames carry enough request context for the
+viewer to upgrade to the newest accepted grant instead of rejecting all incoming
+pixels as a wrong-token stream. Controller viewport clicks now compensate for `object-fit:
+contain` letterboxing, carry viewport dimensions with actions, and the receiver
+targets consented screen surfaces outside `#app` such as `wasm-agent-chat` while
+still blocking secret fields and remote-control chrome; controller viewport taps
+now synthesize an explicit remote `click` after pointer capture, and the viewed
+browser also converts pointer-only down/up taps into click activation so stale
+viewer clients can still press login, space, and launcher buttons instead of
+only sending pointer down/up. A headless Chromium
+repro with external avatar CSS returned an
+exportable `image/webp` frame. The controller viewport now has an expand/restore
+toggle that persists across frame refreshes and switches the preview panel to
+`100vw` by `100vh`; the frame encoder now captures at source viewport size up
+to full HD, and the server gives remote-control frame events a larger payload
+budget while pruning old frame events. Visible remote-control accepts now try
+browser display capture first so icons/images/video are sent as exact rendered
+pixels; auto-granted sessions expose a receiving-side `Share pixels` button for
+the required browser gesture, frame export can spend a larger 1.5 MiB client
+budget inside a 3 MiB server payload limit, active remote-control sessions poll
+sync events every 180 ms, the exact-pixel capture stream emits a normal
+remote-control stop when the browser sharing control ends it, and the controller
+viewport now streams pointer down/move/up actions so the remote canvas can be
+dragged. Remote scroll actions over the unblocked space canvas now reuse the
+anchored `setCanvasDistanceAround` zoom path with a `remote-wheel` origin before
+falling back to native scroll for scrollable widgets and panels. If the user/browser
+denies exact capture, the sanitized DOM snapshot fallback remains available.
+Signed-in clients now also keep an authenticated same-origin `/remote-control/live`
+WebSocket open. Remote-control appends use that live channel first, still persist
+through `sync_event_tb`, and fall back to HTTP `/sync/events` with the same
+client event id if the socket is not ready; HTTP sync appends now hand live
+broadcast delivery to a background thread after the durable row is written, so a
+stale live socket cannot make the sender see `Control request failed`. Connected
+live clients still receive the first request, accepted grant, action, and stop
+events without waiting for the social or fast poll; the client-first cloud
+regression now opens two signed local `/remote-control/live` WebSocket clients
+and verifies request broadcast plus ephemeral frame relay without durable frame
+rows. Exact-pixel viewport frames now use an ephemeral latest-frame WebSocket
+message that bypasses durable
+`sync_event_tb` writes on the hot path, sends a higher-quality live frame budget
+about every 260 ms while display capture is active, writes only periodic durable
+keyframes for fallback/backfill, drops/coalesces stale frame paints on the
+controller so old pixels cannot repaint behind current actions, reuses the pixel
+capture canvas, encodes exact-pixel frames asynchronously where the browser
+supports it, and keeps the controller preview DOM stable across frame refreshes.
+Shared spaces now publish lightweight `space-pointer` room events while the
+canvas is active, keep a same-origin `/spaces/room/live` WebSocket open for the
+active shared space, and retain the room poll as fallback. Connected clients see
+peer cursor labels and click pulses in logical canvas coordinates without
+waiting for the next room poll, while duplicate durable pointer events are
+deduped by client event id, fast pointer-up taps are promoted to explicit
+`click` pulses, and each pulse carries a fresh pulse id so repeated quick
+clicks/touches restart a larger wave instead of being swallowed by the previous
+animation. Pointer motion now streams through a frame-rate, coalesced live-only
+path at the cursor cadence limit, writes only periodic durable keyframes for
+room-poll fallback, carries a capped densified point path from sender to
+receiver so curved motion does not collapse to one robotic chord per frame,
+fills longer cursor jumps with short capped fading trace segments, and softly
+follows the latest peer cursor when it leaves the comfortable visible viewport.
+The follow loop is clamped per frame and pauses
+while the local user is actively panning, zooming, or holding a pointer down, so
+different zoom/scroll positions still line up without sticky jumps.
+Zangao's account state had stale
+`spaces/space-home/wis` and `spaces/space-admin/wis` directories; the server now
+requires real `space.json` metadata before listing user spaces, reserves
+`space-home` and `space-admin` as display-label ids, and canonicalizes WIS
+patches using those labels back to `home` and `admin`. The portable focused-camera
+artifact factory, slot/focus helpers, push-camera config shape, controller contract, push endpoint
 URL generation, default/normalized push config, stream-quality ids, frame
 polling cadence, pending timeline seeks, timeline load TTL, frame labels, and
 range formatting now live in `public/modules/wis/artifacts/camera.js`; the WIS
@@ -46,13 +154,53 @@ WIS camera now uses retained `/camera/push-frame` polling for the live image,
 minimal camera header controls for zoom/snapshot/audio/quality, and a full-width
 footer timeline that defaults to the last 10 minutes with a detected
 recorded-range mode. The footer is scoped to the active widget and uses robust
-pointer capture for scrubbing; a first click while the timeline range is still
-loading is remembered and applied as soon as retained frames arrive, and scrubber
-clicks no longer trigger a parent footer reload that can rebuild the control
-before the seek commits. Timeline reads use the JSON `POST /camera/push-timeline`
+pointer capture for scrubbing through the shared camera artifact controller;
+`app.js` now only renders the scrubber and attaches it as the controller's
+`timelineElement`. Timeline clicks from the last-10-min Live rail now promote the
+stream into a recorded/seeking owner state instead of being ignored or leaving
+the mode badge live; the app cancels live timers, fences stale live image writes,
+sets the playback anchor from the clicked timestamp, and starts a single
+generation-owned recorded playback session. A first click while the timeline
+range is still loading is remembered and applied as soon as retained frames
+arrive. Scrubber clicks no longer trigger a parent footer reload that can
+rebuild the control before the seek commits. Controller-owned recorded timeline
+seeks now hand the real loaded segment back to the playback controller while the
+visible media surface keeps the last good frame frozen until the latest recorded
+generation decodes a replacement from `/camera/push-playback`; the archive-frame
+URL remains a fallback if the playback stream cannot open. Timeline reads use
+the JSON `POST /camera/push-timeline`
 path so stale service workers cannot return the app shell HTML in place of
-retained-frame metadata, and the server accepts app-route-prefixed camera push
-paths from shared-space pages. The DVR
+retained-frame metadata, stale in-flight timeline loads are timestamped so the
+client can retry instead of leaving the scrubber in a permanent loading state,
+and a client-side watchdog actively clears and retries a stalled timeline load
+without waiting for a later render or interaction. The server accepts
+app-route-prefixed camera push paths from shared-space pages. The recorded
+playback image lifecycle, including
+the last-good-frame placeholder, fallback archive-frame image, and
+`/camera/push-playback` stream handoff, now lives in
+`public/modules/wis/artifacts/camera.js`; `app.js` only assembles host URLs and
+passes shell callbacks into the camera artifact helper. Recorded timeline seeks
+reuse the current media DOM node when possible and seed rebuilt surfaces from
+`wisCameraLastGoodFrames`, so seeking and rebuffering overlay status text on top
+of the frozen frame instead of clearing, hiding, or remounting a black media
+pane. Recorded timeline seeks tag DOM playback segments as media-clocked, so the
+camera artifact controller no longer starts a synthetic RAF image-render loop
+for playback. It keeps the
+desired timeline clock separate from the last displayed frame timestamp, runs a
+timeline-only clock loop after the first recorded frame, and treats
+`/camera/push-playback` as an imperfect DVR evidence stream: bad timestamps are
+normalized, stale queued frames are dropped, burst frames catch up to the clock,
+slow/starved streams show catching-up or rebuffering state, and repeated packet
+stalls restart from the current desired clock before settling into a stalled/gap
+state. Recorded playback also keeps one active stream reader/scheduler per
+stream generation, treats repeat same-frame renders as no-ops, diffs playback
+status/timeline updates before touching DOM or WIS patch state, and emits one
+compact `camera.perf.sample` per second while verbose per-frame camera logging is
+off by default. A headless Chromium retained-frame harness for CAM 1 now shows
+one stable image node, one active playback loop/reader, zero steady DOM
+replacements, and low-cadence source swaps, while the WIS engine regression
+covers six rapid seeks settling to the latest generation and live return
+clearing playback loops/readers. The DVR
 outbound RTMP publisher is active at
 `rtmp://147.15.64.233:1935/live/livestream0` after switching Stream Principal
 from H.265 to H.264/H.264H; the last checked CAM 1 frames were live
@@ -93,7 +241,10 @@ its own module tree.
 The current app is an early browser-view parity surface. It now presents a workspace shell with a left launcher
 rail by default, a visible `space-home` Home space, a hardcoded `space-admin` Admin space
 with a crown icon, and account-owned user spaces. The old header/status chrome,
-canvas label, summary panel, and dock have been removed from the shell. Each
+canvas label, summary panel, and dock have been removed from the shell.
+`space-home` and `space-admin` are display labels only; the server reserves
+those label ids so WIS patches and sync payloads cannot recreate them as
+account-owned user spaces. Each
 working space now has two visual layers: an app layer with draggable app
 buttons, and a widget layer where opened widgets sit above those apps as
 draggable, resizable windows with minimize and maximize controls. Apps are
