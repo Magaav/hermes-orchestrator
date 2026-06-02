@@ -23,10 +23,10 @@ rendering, agent-readable state, and a cleaner app shell.
 - Loads an embedded WebAssembly core in the browser and uses it as the first
   rendering/runtime handshake for the parity shell.
 - Home exposes a Go Native action that detects the current PWA device, enables
-  the optional `native-standby` module locally, and downloads a
-  native-companion manifest for the future companion app. This is a manifest
-  contract; the PWA still cannot provide screen-off wake-word listening by
-  itself.
+  the optional `native-standby` module locally, and downloads a generated
+  native app package ZIP. The ZIP includes platform launcher/install assets and
+  internal companion metadata; signed APK/IPA/MSI-style builders are still a
+  future native build lane.
 - Does not start, stop, copy, or patch Space Agent.
 
 ## Durable Next Step
@@ -37,7 +37,7 @@ the next action changes, update this before ending the turn.
 Current next action: reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
-v137 service worker activates: first by receiving a
+v138 service worker activates: first by receiving a
 compact bootstrap preview or fallback/status event if the relay rejects a full
 frame, then by using the receiving-side `Share pixels` button for any
 auto-granted co-control session and confirming the controller-side frame status
@@ -70,8 +70,10 @@ acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
 `playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
 live on the Live button; then click the Home `Go Native` action on a real phone
 session and confirm it detects the device type, enables `native-standby`, and
-downloads a `hermes.wasm_agent.native_companion_package.v1` manifest while
-making no claim that the PWA itself can listen with the screen off.
+downloads a `.zip` from `/account/devices/native/download` with schema
+`hermes.wasm_agent.native_app_download.v1`, platform install assets, and
+metadata for the future standby companion while making no claim that the PWA
+itself can listen with the screen off.
 Current evidence: Remote-control viewport frames now strip URL-backed CSS and
 inline snapshot resources before SVG export, and SVG export failures fall back
 to a canvas-native DOM renderer that avoids drawing untrusted image resources;
@@ -403,12 +405,16 @@ quickly. Sync currently downloads a device-specific installer manifest with
 planned tunnel and state-sync capabilities; it does not claim a tunnel is live
 yet. The adjacent Go Native action detects the current browser device on click,
 turns on the optional `native-standby` module in browser-local module settings,
-and downloads `/account/devices/native` as an OS-targeted native-companion
-manifest for wake phrase standby, live transcription, and device presence. It
+and downloads `/account/devices/native/download` as an OS-targeted native app
+package ZIP for the current device. The archive includes Linux, macOS, and
+Windows launcher/install assets plus Android/iOS build-lane notes and internal
+standby companion metadata for wake phrase standby, live transcription, and
+device presence. It
 records native-companion requests under
-`state/users/<acc_id>/native-companion/`; no native binary is shipped here, and
-screen-off wake remains a native-companion responsibility rather than PWA
-behavior. On mobile, Home config can switch the launcher from the default left
+`state/users/<acc_id>/native-companion/`; signed mobile/desktop binaries are a
+future build pipeline, and screen-off wake remains a native-companion
+responsibility rather than PWA behavior. On mobile, Home config can switch the
+launcher from the default left
 rail to a top bar so the Home button and account control stay pinned while the
 space list scrolls between them.
 

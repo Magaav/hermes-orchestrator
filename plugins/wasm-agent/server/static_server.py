@@ -22,6 +22,7 @@ import struct
 import threading
 import time
 import uuid
+import zipfile
 from ipaddress import ip_address, ip_network
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -818,6 +819,13 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=256 * 1024)
                 self._json(HTTPStatus.OK, create_native_companion_package(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/devices/native/download":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                serve_native_download_package(self, user, body)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -5476,6 +5484,191 @@ def create_native_companion_package(
         "schema": "hermes.wasm_agent.native_companion_response.v1",
         "package": package,
     }
+
+
+def shell_quote(value: str) -> str:
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def native_package_filename(package: dict[str, Any]) -> str:
+    os_slug = safe_state_id(str(package.get("target_os") or "native").lower(), "native")
+    device_slug = safe_state_id(str(package.get("target_device_id") or "device"), "device")[:48]
+    return f"wasm-agent-native-{os_slug}-{device_slug}.zip"
+
+
+def native_linux_install_script(app_url: str) -> str:
+    quoted_url = shell_quote(app_url)
+    return f"""#!/usr/bin/env sh
+set -eu
+APP_URL={quoted_url}
+APP_DIR="${{XDG_DATA_HOME:-$HOME/.local/share}}/wasm-agent-native"
+BIN_DIR="${{APP_DIR}}/bin"
+DESKTOP_DIR="${{XDG_DATA_HOME:-$HOME/.local/share}}/applications"
+mkdir -p "${{BIN_DIR}}" "${{DESKTOP_DIR}}"
+cat > "${{BIN_DIR}}/wasm-agent-native" <<EOF
+#!/usr/bin/env sh
+APP_URL={quoted_url}
+if command -v chromium >/dev/null 2>&1; then
+  exec chromium --app="$APP_URL"
+fi
+if command -v google-chrome >/dev/null 2>&1; then
+  exec google-chrome --app="$APP_URL"
+fi
+if command -v xdg-open >/dev/null 2>&1; then
+  exec xdg-open "$APP_URL"
+fi
+printf '%s\\n' "$APP_URL"
+EOF
+chmod +x "${{BIN_DIR}}/wasm-agent-native"
+cat > "${{DESKTOP_DIR}}/wasm-agent-native.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=WASM Agent
+Comment=Open WASM Agent as a native desktop app wrapper
+Exec=${{BIN_DIR}}/wasm-agent-native
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
+EOF
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "${{DESKTOP_DIR}}" >/dev/null 2>&1 || true
+fi
+printf 'WASM Agent native launcher installed.\\n'
+"""
+
+
+def native_macos_app_script(app_url: str) -> str:
+    quoted_url = shell_quote(app_url)
+    return f"""#!/bin/sh
+APP_URL={quoted_url}
+if command -v open >/dev/null 2>&1; then
+  open -a "Google Chrome" --args --app="$APP_URL" 2>/dev/null && exit 0
+  open -a "Microsoft Edge" --args --app="$APP_URL" 2>/dev/null && exit 0
+  open "$APP_URL"
+fi
+"""
+
+
+def native_windows_install_script(app_url: str) -> str:
+    escaped_url = app_url.replace("'", "''")
+    return f"""$ErrorActionPreference = "Stop"
+$AppUrl = '{escaped_url}'
+$InstallDir = Join-Path $env:APPDATA 'WASM Agent'
+$StartMenu = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
+$CmdPath = Join-Path $InstallDir 'wasm-agent-native.cmd'
+Set-Content -Path $CmdPath -Encoding ASCII -Value "@echo off`r`nstart \"\" \"$AppUrl\"`r`n"
+$ShortcutPath = Join-Path $StartMenu 'WASM Agent.url'
+Set-Content -Path $ShortcutPath -Encoding ASCII -Value "[InternetShortcut]`r`nURL=$AppUrl`r`n"
+Write-Host "WASM Agent launcher installed in Start Menu."
+"""
+
+
+def native_package_readme(package: dict[str, Any], app_url: str) -> str:
+    return f"""# WASM Agent Native Download
+
+This package was generated for `{package.get("target_label")}`.
+
+App URL: {app_url}
+Target OS: {package.get("target_os")}
+Install channel: {package.get("install_channel")}
+
+## What This Is
+
+This bundle contains platform launcher assets for installing the current
+wasm-agent PWA as an app-like native entry point on the target device. It also
+includes internal package metadata for the future native standby companion.
+
+## Install
+
+- Linux: run `sh linux/install.sh`.
+- macOS: copy `macos/WASM Agent.app` to Applications. The bundle is unsigned.
+- Windows: run `windows/install.ps1` in PowerShell.
+- Android: use `android/README.md` until the APK builder/signing lane is added.
+- iOS: use `ios/README.md` until the IPA/TestFlight lane is added.
+
+The screen-off `hi wasm` standby path still requires a real native companion
+binary. This package prepares the app install/download contract and keeps the
+standby module metadata together with the platform launcher.
+"""
+
+
+def create_native_download_bundle(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> tuple[str, bytes, dict[str, Any]]:
+    response = create_native_companion_package(server, user, body, handler)
+    package = dict(response.get("package") or {})
+    app_url = public_origin() or request_host_origin(handler) or "/"
+    package["app_url"] = app_url
+    package["download_schema"] = "hermes.wasm_agent.native_app_download.v1"
+    filename = native_package_filename(package)
+    metadata = {
+        "schema": "hermes.wasm_agent.native_app_download.v1",
+        "filename": filename,
+        "app_url": app_url,
+        "package": package,
+        "generated_at": iso_timestamp(),
+    }
+    macos_info = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>wasm-agent</string>
+  <key>CFBundleIdentifier</key><string>com.colmeio.wasm-agent</string>
+  <key>CFBundleName</key><string>WASM Agent</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+</dict>
+</plist>
+"""
+    android_readme = """# Android
+
+The generated desktop wrappers are in this ZIP. A real Android installable
+requires an APK/AAB build and signing lane. The intended implementation is a
+native companion or Trusted Web Activity that opens the app URL, registers the
+device, and owns foreground-service wake/transcription behavior.
+"""
+    ios_readme = """# iOS
+
+iOS installables require an Apple build/signing host and TestFlight/App Store or
+enterprise distribution. The PWA can be added to the Home Screen, but screen-off
+wake phrase standby requires a native companion path that is not built here yet.
+"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        def write_executable(name: str, text: str) -> None:
+            info = zipfile.ZipInfo(name)
+            info.external_attr = 0o755 << 16
+            archive.writestr(info, text)
+
+        archive.writestr("README.md", native_package_readme(package, app_url))
+        archive.writestr("metadata/package.json", json.dumps(metadata, indent=2, sort_keys=True))
+        write_executable("linux/install.sh", native_linux_install_script(app_url))
+        archive.writestr("linux/wasm-agent-native.desktop", "[Desktop Entry]\nType=Application\nName=WASM Agent\n")
+        archive.writestr("macos/WASM Agent.app/Contents/Info.plist", macos_info)
+        write_executable("macos/WASM Agent.app/Contents/MacOS/wasm-agent", native_macos_app_script(app_url))
+        archive.writestr("windows/install.ps1", native_windows_install_script(app_url))
+        archive.writestr("android/README.md", android_readme)
+        archive.writestr("ios/README.md", ios_readme)
+    return filename, buffer.getvalue(), metadata
+
+
+def serve_native_download_package(handler: WasmAgentHandler, user: dict[str, Any] | None, body: dict[str, Any]) -> None:
+    filename, data, metadata = create_native_download_bundle(handler.server, user, body, handler)
+    platform = str(metadata.get("package", {}).get("target_os") or "native")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("X-Wasm-Agent-Native-Schema", str(metadata.get("schema") or ""))
+    handler.send_header("X-Wasm-Agent-Native-Platform", clipped(platform, 80))
+    handler.end_headers()
+    handler.wfile.write(data)
 
 
 def export_user_storage(

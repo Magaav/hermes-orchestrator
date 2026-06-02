@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import base64
+import io
 import json
 import os
 import socket
@@ -10,6 +11,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -311,6 +313,31 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertTrue(package["standby"]["native_screen_off_standby"])
             request_path = state_dir / "users" / "101" / "native-companion" / f"{package['token_id']}.json"
             self.assertTrue(request_path.exists())
+
+            filename, bundle, metadata = static_server.create_native_download_bundle(
+                server,
+                owner,
+                {
+                    "device_id": current_device_id,
+                    "standby_module_enabled": True,
+                    "device_profile": {"os": "Android", "browser": "Chrome", "device_type": "phone"},
+                },
+                handler,
+            )
+            self.assertTrue(filename.endswith(".zip"))
+            self.assertEqual(metadata["schema"], "hermes.wasm_agent.native_app_download.v1")
+            with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+                names = set(archive.namelist())
+                self.assertIn("README.md", names)
+                self.assertIn("metadata/package.json", names)
+                self.assertIn("linux/install.sh", names)
+                self.assertIn("macos/WASM Agent.app/Contents/Info.plist", names)
+                self.assertIn("windows/install.ps1", names)
+                self.assertIn("android/README.md", names)
+                self.assertIn("ios/README.md", names)
+                bundled_metadata = json.loads(archive.read("metadata/package.json").decode("utf-8"))
+                self.assertEqual(bundled_metadata["package"]["target_device_id"], current_device_id)
+                self.assertEqual(bundled_metadata["package"]["app_url"], "/")
 
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,9 +23,10 @@ This track is the continuity point for evolving Hermes Orchestrator and `wasm-ag
   account Connected Devices app backed by wasm-agent account state, including a
   main-device pointer, a quick main-device switch action, device-sync installer
   manifests, a Go Native action that detects the current PWA device and
-  downloads a native-companion manifest, and browser-local device layouts that
-  are not retained server-side unless a future premium sync/backup mode is
-  enabled. The optional `native-standby` module is a manifest/event-contract
+  downloads a generated native app package ZIP from
+  `/account/devices/native/download`, and browser-local device layouts that are
+  not retained server-side unless a future premium sync/backup mode is enabled.
+  The optional `native-standby` module is a package-metadata/event-contract
   placeholder for wake phrase standby and live transcription once a real native
   companion exists; the PWA still cannot listen while a phone screen is off.
 - The standalone app/client surface has been pruned from this repo. Product UI,

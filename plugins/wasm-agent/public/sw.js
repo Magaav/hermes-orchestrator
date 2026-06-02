@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v137-go-native";
+const CACHE_NAME = "wasm-agent-v138-native-download";
 const ASSETS = [
   "/",
   "/index.html",

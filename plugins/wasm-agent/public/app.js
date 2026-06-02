@@ -1318,6 +1318,7 @@ const state = {
   nativeInstallBusy: false,
   nativeInstallProfile: null,
   nativeInstallPackage: null,
+  nativeInstallFilename: "",
   nativeInstallError: "",
   userFleetNodes: [],
   userFleetSystemNodes: [],
@@ -27513,7 +27514,63 @@ function nativePackageFilename(payload = state.nativeInstallPackage, profile = s
     .replace(/[^a-z0-9_-]+/gi, "-")
     .slice(0, 48);
   const os = cleanText(profile?.os || payload?.target_os, "native").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
-  return `wasm-agent-native-${os}-${deviceId}.json`;
+  return `wasm-agent-native-${os}-${deviceId}.zip`;
+}
+
+function filenameFromContentDisposition(header = "") {
+  const match = String(header || "").match(/filename\*?=(?:UTF-8''|")?([^";\r\n]+)/i);
+  if (!match) return "";
+  try {
+    return decodeURIComponent(match[1].replace(/^"|"$/g, ""));
+  } catch {
+    return match[1].replace(/^"|"$/g, "");
+  }
+}
+
+function downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+async function fetchNativeDownloadPackage(body) {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch("/account/devices/native/download", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wasm-Agent-Device-Id": clientDeviceId(),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      let message = `Native package failed (${response.status})`;
+      try {
+        const payload = await response.json();
+        message = payload?.error?.message || message;
+      } catch {
+        // Non-JSON errors still surface the status above.
+      }
+      throw new Error(message);
+    }
+    const blob = await response.blob();
+    return {
+      blob,
+      filename: filenameFromContentDisposition(response.headers.get("Content-Disposition") || ""),
+      schema: response.headers.get("X-Wasm-Agent-Native-Schema") || "",
+      platform: response.headers.get("X-Wasm-Agent-Native-Platform") || "",
+    };
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 function renderNativeInstall() {
@@ -27563,14 +27620,14 @@ function renderNativeInstall() {
       ? [
           metric("Channel", cleanText(packagePayload.install_channel, profile.install_channel)),
           metric("Wake", cleanText(packagePayload.standby?.wake_phrase, "hi wasm")),
-          metric("Package", cleanText(packagePayload.token_id, "issued")),
-          metric("Mode", cleanText(packagePayload.mode, "native-companion-bootstrap")),
+          metric("Package", cleanText(state.nativeInstallFilename, "generated")),
+          metric("Mode", cleanText(packagePayload.mode, "native-app-download")),
         ]
       : [
           metric("Channel", cleanText(profile.install_channel, "native-companion")),
           metric("Wake", "hi wasm"),
           metric("Package", state.nativeInstallBusy ? "preparing" : "pending"),
-          metric("Mode", "native-companion-bootstrap"),
+          metric("Mode", "native-app-download"),
         ];
   els.nativePackageSummary.replaceChildren(packageTitle, ...packageRows);
 }
@@ -27616,25 +27673,33 @@ async function startNativeInstall(origin = "manual") {
     setModuleEnabled("native-standby", true);
     await loadDevices("go-native");
     const target = nativeInstallCurrentDevice();
-    const payload = await fetchJson("/account/devices/native", {
-      method: "POST",
-      timeoutMs: 8000,
-      body: {
-        device_id: target?.id || state.deviceAuthority?.current_device_id || "",
-        device_profile: state.nativeInstallProfile,
-        standby_module_enabled: true,
-      },
-    });
-    state.nativeInstallPackage = payload.package || payload;
-    downloadJson(nativePackageFilename(state.nativeInstallPackage, state.nativeInstallProfile), state.nativeInstallPackage);
+    const body = {
+      device_id: target?.id || state.deviceAuthority?.current_device_id || "",
+      device_profile: state.nativeInstallProfile,
+      standby_module_enabled: true,
+    };
+    const payload = await fetchNativeDownloadPackage(body);
+    const filename = payload.filename || nativePackageFilename({ target_device_id: body.device_id }, state.nativeInstallProfile);
+    state.nativeInstallPackage = {
+      schema: payload.schema || "hermes.wasm_agent.native_app_download.v1",
+      target_device_id: body.device_id,
+      target_os: state.nativeInstallProfile.os,
+      install_channel: state.nativeInstallProfile.install_channel,
+      mode: "native-app-download",
+      standby: { wake_phrase: "hi wasm" },
+    };
+    state.nativeInstallFilename = filename;
+    downloadBlob(filename, payload.blob);
     recordUserEvent("account.native_package_downloaded", {
-      target: `device:${state.nativeInstallPackage?.target_device_id || target?.id || "current"}`,
-      summary: `Downloaded native companion manifest for ${state.nativeInstallProfile.os}`,
+      target: `device:${body.device_id || target?.id || "current"}`,
+      summary: `Downloaded wasm-agent native package for ${state.nativeInstallProfile.os}`,
       data: {
         origin,
         os: state.nativeInstallProfile.os,
         device_type: state.nativeInstallProfile.device_type,
-        install_channel: state.nativeInstallPackage?.install_channel || state.nativeInstallProfile.install_channel,
+        install_channel: state.nativeInstallProfile.install_channel,
+        filename,
+        schema: payload.schema,
         standby_module_enabled: true,
       },
     });
