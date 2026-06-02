@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v129-shared-pointer-paths";
+const CACHE_NAME = "wasm-agent-v136-shared-pointer-rtc";
 const ASSETS = [
   "/",
   "/index.html",
@@ -23,6 +23,7 @@ const ASSETS = [
   "/modules/hmr/dev-hmr.js",
   "/modules/hmr/module.js",
   "/modules/spaces/module.js",
+  "/modules/spaces/shared-pointer-renderer.js",
   "/modules/spaces/shared-voice-room.js",
   "/modules/browser/module.js",
   "/modules/wis/module.js",

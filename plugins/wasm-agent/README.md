@@ -32,7 +32,7 @@ the next action changes, update this before ending the turn.
 Current next action: reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
-v129 service worker activates: first by receiving a
+v136 service worker activates: first by receiving a
 compact bootstrap preview or fallback/status event if the relay rejects a full
 frame, then by using the receiving-side `Share pixels` button for any
 auto-granted co-control session and confirming the controller-side frame status
@@ -49,7 +49,11 @@ through pointer down/move/up, then confirm scrolling the empty remote canvas
 changes space distance instead of native-scrolling the space viewport;
 then reload two real clients in the same shared space and confirm circular
 moving, pressing, and clicking over the canvas shows each peer's labeled pointer
-following a fluid path and click pulse in the other client without opening chat;
+following a fluid low-latency path and click pulse in the other client without
+opening chat, with `?shared-pointer-diagnostics=1` showing stable FPS, bounded
+sample counts, the `canvas` layer, net age/buffer/drop diagnostics,
+WebRTC/binary transport diagnostics, and net-buffer/net-latest/path modes instead of endpoint
+jumps;
 then reload the real authenticated Zangao client and confirm `/spaces` no
 longer returns or renders `space-home`/`space-admin` as account-owned user
 spaces; then reload the real authenticated Asolaria clients and confirm the
@@ -127,12 +131,32 @@ waiting for the next room poll, while duplicate durable pointer events are
 deduped by client event id, fast pointer-up taps are promoted to explicit
 `click` pulses, and each pulse carries a fresh pulse id so repeated quick
 clicks/touches restart a larger wave instead of being swallowed by the previous
-animation. Pointer motion now streams through a frame-rate, coalesced live-only
-path at the cursor cadence limit, writes only periodic durable keyframes for
-room-poll fallback, carries a capped densified point path from sender to
-receiver so curved motion does not collapse to one robotic chord per frame,
-fills longer cursor jumps with short capped fading trace segments, and softly
-follows the latest peer cursor when it leaves the comfortable visible viewport.
+animation. Pointer user keys are now canonicalized across raw account ids and
+the compact binary realtime slot, so a high-rate binary move lane cannot hide a
+JSON click pulse for real Snowflake-style account ids. Pointer motion now streams
+through a high-refresh, raw/coalesced
+binary live-only path at the cursor cadence limit, writes only periodic durable
+JSON keyframes for room-poll fallback, carries compact monotonic `[dt,x,y]`
+realtime samples plus a capped densified fallback path from sender to receiver, and hands
+received targets to a canvas-first requestAnimationFrame visual layer with a
+bounded DOM fallback. That layer keeps mutable per-peer visual state, maps sender
+performance timestamps onto the receiver clock, paints the sender's own pointer
+through an immediate local echo with no network round trip or render buffer,
+renders remote peers from a tiny 12ms interpolation buffer, selects one visible
+flag per canonical user/label at paint time so realtime and durable lanes can
+coexist without drawing duplicate same-user flags in the viewer, drops stale queued samples instead of replaying the past,
+keeps legacy prediction off by default, falls back to
+adaptive low-latency/stable path replay for older events, uses faster time-based
+interpolation and device-pixel-ratio-aware drawing, renders fixed-size fading
+trail history without per-frame DOM growth, and exposes an opt-in shared pointer diagnostics HUD
+through
+`?shared-pointer-diagnostics=1`,
+`localStorage["wasmAgent.sharedPointerDiagnostics"] = "1"`, or
+`window.setWasmAgentSharedPointerDiagnostics(true)`. The legacy predictor can be
+temporarily restored with `?shared-pointer-prediction=legacy`,
+`localStorage["wasmAgent.sharedPointerPrediction"] = "1"`, or
+`window.setWasmAgentSharedPointerPrediction(true)`. It softly follows the
+latest peer cursor when it leaves the comfortable visible viewport.
 The follow loop is clamped per frame and pauses
 while the local user is actively panning, zooming, or holding a pointer down, so
 different zoom/scroll positions still line up without sticky jumps.
@@ -709,6 +733,17 @@ counts for the space title, carries the canonical shared `space_area`, and keeps
 a bounded sanitized event feed for future shared chat, WIS co-creation, and
 WebRTC signaling. The title displays the active room as `name online/members`,
 for example `playground 2/2`.
+Shared-space pointers now use that same room event bus only for optional
+datachannel signaling: peers create an unordered unreliable WebRTC data channel
+for hot binary pointer packets when the browser allows it, while the server
+relayed binary WebSocket lane and durable JSON keyframes remain the fallback.
+If those live paths are unavailable during a button-held drag, the sender emits
+a capped 96ms dense drag fallback with coalesced path samples instead of waiting
+for the 720ms durable keyframe, so broken live transport still draws a trajectory
+rather than isolated teleport anchors.
+`?shared-pointer-diagnostics=1` shows input-to-send, wire, paint, prediction state,
+RTC peer, and binary/fallback/local counters so the remaining pointer lag can be separated into input,
+transport, decode, and render costs.
 
 The Observation inspector is the first embedded-agent framework layer. It keeps
 a session-only, in-memory ring buffer of app-local semantic events and renders

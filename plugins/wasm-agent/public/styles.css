@@ -862,6 +862,17 @@ h2 {
   inset: 0;
   z-index: 18;
   pointer-events: none;
+  contain: layout paint style;
+  transform: translateZ(0);
+}
+
+.shared-space-pointer-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  pointer-events: none;
+  transform: translateZ(0);
 }
 
 .shared-space-pointer {
@@ -873,30 +884,34 @@ h2 {
   gap: 5px;
   left: 0;
   top: 0;
-  z-index: 2;
+  z-index: 3;
   transform: translate3d(0, 0, 0) translate(2px, 2px);
   color: #050a12;
-  filter: drop-shadow(0 8px 16px rgba(0, 0, 0, 0.38));
-  transition: transform 48ms linear;
+  contain: layout paint style;
   will-change: transform;
 }
 
-.shared-space-pointer-trace {
+.shared-space-pointer-trail {
   --shared-pointer-color: #7ddcff;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  contain: layout paint style;
+}
+
+.shared-space-pointer-trail span {
   position: absolute;
   left: 0;
   top: 0;
-  z-index: 1;
   width: 7px;
   height: 7px;
   margin-left: -3px;
   margin-top: -3px;
   border-radius: 50%;
   background: var(--shared-pointer-color);
-  box-shadow: 0 0 16px color-mix(in srgb, var(--shared-pointer-color) 72%, transparent);
-  opacity: 0.56;
+  opacity: 0;
   transform: translate3d(0, 0, 0);
-  animation: shared-pointer-trace-fade 640ms ease-out forwards;
   will-change: transform, opacity;
 }
 
@@ -935,29 +950,40 @@ h2 {
 }
 
 .shared-space-pointer.is-clicking i {
-  animation: shared-pointer-click 680ms ease-out;
+  will-change: transform, opacity;
 }
 
-@keyframes shared-pointer-click {
-  0% {
-    opacity: 0.92;
-    transform: scale(0.24);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(2.25);
-  }
+.shared-space-pointer-diagnostics {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 8px;
+  margin: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(124, 228, 176, 0.3);
+  border-radius: 6px;
+  background: rgba(2, 8, 14, 0.82);
+  color: #7ce4b0;
+  font-size: 10px;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
-@keyframes shared-pointer-trace-fade {
-  0% {
-    opacity: 0.56;
-    transform: scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(0.34);
-  }
+.shared-space-pointer-diagnostics dt,
+.shared-space-pointer-diagnostics dd {
+  margin: 0;
+}
+
+.shared-space-pointer-diagnostics dt {
+  color: rgba(167, 243, 208, 0.72);
+}
+
+.shared-space-pointer-diagnostics dd {
+  text-align: right;
 }
 
 #spaceCanvas {

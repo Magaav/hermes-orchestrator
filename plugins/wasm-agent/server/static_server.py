@@ -151,6 +151,10 @@ SHARED_SPACE_LIST_SCHEMA = "hermes.wasm_agent.shared_spaces.v1"
 SHARED_SPACE_ROOM_SCHEMA = "hermes.wasm_agent.shared_space.room.v1"
 SHARED_SPACE_ROOM_EVENT_SCHEMA = "hermes.wasm_agent.shared_space.room_event.v1"
 SHARED_SPACE_PRESENCE_SCHEMA = "hermes.wasm_agent.shared_space.presence.v1"
+SHARED_SPACE_POINTER_BINARY_MAGIC = b"WAPB"
+SHARED_SPACE_POINTER_BINARY_HEADER_BYTES = 36
+SHARED_SPACE_POINTER_BINARY_SAMPLE_BYTES = 10
+SHARED_SPACE_POINTER_BINARY_MAX_SAMPLES = 32
 SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
 SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
@@ -14266,7 +14270,7 @@ class BrowserClientWebSocket:
         with self.send_lock:
             self.sock.sendall(bytes(header) + payload)
 
-    def recv_json(self, *, wait: float | None = None) -> dict[str, Any]:
+    def recv_message(self, *, wait: float | None = None) -> tuple[int, bytes]:
         previous_timeout = self.sock.gettimeout()
         self.sock.settimeout(wait)
         try:
@@ -14279,12 +14283,18 @@ class BrowserClientWebSocket:
                     continue
                 if opcode == 0xA:
                     continue
-                if opcode in {0x1, 0x0}:
-                    return json.loads(payload.decode("utf-8"))
+                if opcode in {0x1, 0x2, 0x0}:
+                    return opcode, payload
         except socket.timeout as exc:
             raise BrowserError("browser_ws_timeout", "Timed out waiting for browser stream input.") from exc
         finally:
             self.sock.settimeout(previous_timeout)
+
+    def recv_json(self, *, wait: float | None = None) -> dict[str, Any]:
+        while True:
+            opcode, payload = self.recv_message(wait=wait)
+            if opcode in {0x1, 0x0}:
+                return json.loads(payload.decode("utf-8"))
 
     def recv_frame(self) -> tuple[int, bytes]:
         first = self._recv_exact(2)
@@ -14421,6 +14431,71 @@ def shared_space_live_broadcast(
         shared_space_live_unregister(server, sid, client)
 
 
+def shared_space_pointer_hash(value: Any) -> int:
+    result = 0x811C9DC5
+    for byte in str(value or "").encode("utf-8"):
+        result ^= byte
+        result = (result * 0x01000193) & 0xFFFFFFFF
+    return result
+
+
+def shared_space_pointer_user_number(user: dict[str, Any] | None) -> int:
+    uid = user_id(user)
+    try:
+        number = int(uid)
+        if 0 <= number <= 0xFFFFFFFF:
+            return number
+    except (TypeError, ValueError):
+        pass
+    return shared_space_pointer_hash(uid)
+
+
+def shared_space_pointer_binary_allowed(payload: bytes, user: dict[str, Any] | None) -> bool:
+    if len(payload) < SHARED_SPACE_POINTER_BINARY_HEADER_BYTES:
+        return False
+    if payload[:4] != SHARED_SPACE_POINTER_BINARY_MAGIC:
+        return False
+    version = payload[4]
+    packet_type = payload[5]
+    count = payload[7]
+    if version != 1 or packet_type != 1 or count > SHARED_SPACE_POINTER_BINARY_MAX_SAMPLES:
+        return False
+    expected_length = SHARED_SPACE_POINTER_BINARY_HEADER_BYTES + count * SHARED_SPACE_POINTER_BINARY_SAMPLE_BYTES
+    if len(payload) != expected_length:
+        return False
+    try:
+        packet_user = struct.unpack_from("<I", payload, 8)[0]
+    except struct.error:
+        return False
+    return packet_user == shared_space_pointer_user_number(user)
+
+
+def shared_space_live_broadcast_binary(
+    server: WasmAgentServer,
+    shared_space_id: str,
+    payload: bytes,
+    *,
+    source: BrowserClientWebSocket | None = None,
+) -> None:
+    sid = safe_state_id(shared_space_id, "")
+    if not sid or not payload:
+        return
+    stale: list[BrowserClientWebSocket] = []
+    with server.shared_space_live_clients_lock:
+        targets = [
+            client
+            for client in server.shared_space_live_clients.get(sid, set())
+            if client is not source
+        ]
+    for client in targets:
+        try:
+            client.send_frame(0x2, payload)
+        except Exception:
+            stale.append(client)
+    for client in stale:
+        shared_space_live_unregister(server, sid, client)
+
+
 def shared_space_live_error(
     client_ws: BrowserClientWebSocket,
     request_id: str,
@@ -14443,7 +14518,12 @@ def handle_shared_space_room_live(
 ) -> None:
     while True:
         try:
-            message = client_ws.recv_json(wait=25)
+            if hasattr(client_ws, "recv_message"):
+                opcode, payload = client_ws.recv_message(wait=25)
+            else:
+                message = client_ws.recv_json(wait=25)
+                opcode = 0x1
+                payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
         except BrowserError as exc:
             if exc.code == "browser_ws_timeout":
                 client_ws.send_json({"type": "ping", "ts": int(time.time() * 1000)})
@@ -14451,6 +14531,18 @@ def handle_shared_space_room_live(
             if exc.code == "browser_ws_closed":
                 break
             raise
+        if opcode == 0x2:
+            record = read_shared_space_record(server, shared_space_id)
+            if record and user_can_access_shared_space(record, user) and shared_space_pointer_binary_allowed(payload, user):
+                shared_space_live_broadcast_binary(server, shared_space_id, payload, source=client_ws)
+            continue
+        if opcode not in {0x1, 0x0}:
+            continue
+        try:
+            message = json.loads(payload.decode("utf-8"))
+        except Exception:
+            shared_space_live_error(client_ws, "", "invalid_shared_space_live_json", "Live shared-space message was not valid JSON.")
+            continue
         if not isinstance(message, dict):
             continue
         message_type = str(message.get("type") or "").strip()

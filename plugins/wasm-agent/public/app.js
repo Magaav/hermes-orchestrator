@@ -78,6 +78,25 @@ import {
   sharedVoiceSignalPayload,
 } from "./modules/spaces/shared-voice-room.js";
 import {
+  SHARED_POINTER_RENDER_DEFAULTS,
+  adaptiveSharedPointerReplayDuration,
+  appendSharedPointerRealtimeSamples,
+  decodeSharedPointerBinaryPacket,
+  decodeSharedPointerRealtimeSamples,
+  encodeSharedPointerBinaryPacket,
+  encodeSharedPointerRealtimeSamples,
+  estimateSharedPointerClockOffset,
+  hashSharedPointerString,
+  numericSharedPointerId,
+  predictSharedPointerPosition,
+  pruneSharedPointerSamples,
+  pushSharedPointerSample,
+  sampleSharedPointerPath,
+  sampleSharedPointerRealtimeBuffer,
+  smoothSharedPointerPosition,
+  snapSharedPointerPixel,
+} from "./modules/spaces/shared-pointer-renderer.js";
+import {
   REMOTE_CONTROL_VIEWPORT_FRAME_BOOTSTRAP_MAX_BYTES,
   REMOTE_CONTROL_VIEWPORT_FRAME_DEFAULT_MAX_BYTES,
   REMOTE_CONTROL_VIEWPORT_FRAME_KIND,
@@ -166,27 +185,54 @@ const SOCIAL_SYNC_POLL_MS = 2500;
 const DIRECT_CHAT_MESSAGE_CAP = 500;
 const SOCIAL_TOAST_TTL_MS = 4200;
 const SHARED_SPACE_POINTER_EVENT_KIND = "space-pointer";
-const SHARED_SPACE_POINTER_SEND_MS = 16;
+const SHARED_SPACE_POINTER_SIGNAL_KIND = "pointer-signal";
+const SHARED_SPACE_POINTER_SIGNAL_SCHEMA = "hermes.wasm_agent.shared_space.pointer_signal.v1";
+const SHARED_SPACE_POINTER_SEND_MS = 8;
 const SHARED_SPACE_POINTER_POLL_MS = 220;
 const SHARED_SPACE_POINTER_TTL_MS = 1800;
 const SHARED_SPACE_POINTER_CLICK_TTL_MS = 720;
 const SHARED_SPACE_POINTER_DURABLE_MS = 720;
-const SHARED_SPACE_POINTER_TRACE_MS = 16;
-const SHARED_SPACE_POINTER_TRACE_MIN_PX = 4;
-const SHARED_SPACE_POINTER_TRACE_STEP_PX = 8;
-const SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE = 10;
-const SHARED_SPACE_POINTER_TRACE_LIMIT = 140;
 const SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT = 48;
-const SHARED_SPACE_POINTER_PATH_STEP_PX = 6;
-const SHARED_SPACE_POINTER_PATH_MAX_POINTS = 18;
-const SHARED_SPACE_POINTER_PATH_ANIMATION_MS = 10;
-const SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS = 120;
+const SHARED_SPACE_POINTER_PATH_STEP_PX = 3;
+const SHARED_SPACE_POINTER_PATH_MAX_POINTS = 48;
+const SHARED_SPACE_POINTER_PENDING_PATH_LIMIT = 96;
+const SHARED_SPACE_POINTER_RENDER_HISTORY_LIMIT = SHARED_POINTER_RENDER_DEFAULTS.historyLimit;
+const SHARED_SPACE_POINTER_RENDER_HISTORY_MAX_AGE_MS = SHARED_POINTER_RENDER_DEFAULTS.historyMaxAgeMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_MIN_MS = SHARED_POINTER_RENDER_DEFAULTS.replayLowLatencyMinMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_MAX_MS = SHARED_POINTER_RENDER_DEFAULTS.replayLowLatencyMaxMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_STABLE_MIN_MS = SHARED_POINTER_RENDER_DEFAULTS.replayStableMinMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_STABLE_MAX_MS = SHARED_POINTER_RENDER_DEFAULTS.replayStableMaxMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_DROPPED_COOLDOWN_MS = SHARED_POINTER_RENDER_DEFAULTS.replayDroppedFrameCooldownMs;
+const SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_POINTS = 24;
+const SHARED_SPACE_POINTER_PREDICTION_MAX_LEAD_MS = SHARED_POINTER_RENDER_DEFAULTS.predictionMaxLeadMs;
+const SHARED_SPACE_POINTER_PREDICTION_MAX_PX = SHARED_POINTER_RENDER_DEFAULTS.predictionMaxDistancePx;
+const SHARED_SPACE_POINTER_PREDICTION_STALE_MS = SHARED_POINTER_RENDER_DEFAULTS.predictionStaleMs;
+const SHARED_SPACE_POINTER_REALTIME_SAMPLE_LIMIT = SHARED_POINTER_RENDER_DEFAULTS.realtimeSampleLimit;
+const SHARED_SPACE_POINTER_REALTIME_BUFFER_LIMIT = SHARED_POINTER_RENDER_DEFAULTS.realtimeBufferLimit;
+const SHARED_SPACE_POINTER_REALTIME_BUFFER_MS = SHARED_POINTER_RENDER_DEFAULTS.realtimeBufferDelayMs;
+const SHARED_SPACE_POINTER_REALTIME_MAX_AGE_MS = SHARED_POINTER_RENDER_DEFAULTS.realtimeMaxAgeMs;
+const SHARED_SPACE_POINTER_REALTIME_PREDICTION_MAX_MS = SHARED_POINTER_RENDER_DEFAULTS.realtimePredictionMaxMs;
+const SHARED_SPACE_POINTER_REALTIME_PREDICTION_MAX_PX = SHARED_POINTER_RENDER_DEFAULTS.realtimePredictionMaxDistancePx;
+const SHARED_SPACE_POINTER_REALTIME_STALE_MS = SHARED_POINTER_RENDER_DEFAULTS.realtimeStaleMs;
+const SHARED_SPACE_POINTER_REALTIME_CLOCK_OFFSET_ALPHA = SHARED_POINTER_RENDER_DEFAULTS.realtimeClockOffsetAlpha;
+const SHARED_SPACE_POINTER_RAW_DEDUPE_MS = 24;
+const SHARED_SPACE_POINTER_BINARY_BUFFER_LIMIT_BYTES = 48 * 1024;
+const SHARED_SPACE_POINTER_DRAG_FALLBACK_MS = 96;
+const SHARED_SPACE_POINTER_VELOCITY_INTERVAL_MAX_MS = 160;
+const SHARED_SPACE_POINTER_RENDER_DROPPED_FRAME_MS = 34;
+const SHARED_SPACE_POINTER_DIAGNOSTICS_STORAGE_KEY = "wasmAgent.sharedPointerDiagnostics";
+const SHARED_SPACE_POINTER_PREDICTION_STORAGE_KEY = "wasmAgent.sharedPointerPrediction";
+const SHARED_SPACE_POINTER_DIAGNOSTICS_UPDATE_MS = 250;
 const SHARED_SPACE_POINTER_FOLLOW_MARGIN_PX = 132;
 const SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX = 72;
 const SHARED_SPACE_POINTER_FOLLOW_EASE = 0.28;
 const SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX = 0.75;
 const SHARED_SPACE_POINTER_LIVE_RECONNECT_MS = 900;
 const SHARED_SPACE_POINTER_LIVE_BUFFER_LIMIT_BYTES = 96 * 1024;
+const SHARED_SPACE_POINTER_RTC_SIGNAL_POLL_MS = 220;
+const SHARED_SPACE_POINTER_RTC_OFFER_RETRY_MS = 3500;
+const SHARED_SPACE_POINTER_RTC_STALE_MS = 45000;
+const SHARED_SPACE_POINTER_RTC_BUFFER_LIMIT_BYTES = 48 * 1024;
 const REMOTE_CONTROL_SCHEMA = "hermes.wasm_agent.remote_control.v1";
 const REMOTE_CONTROL_REQUEST_TTL_MS = 2 * 60 * 1000;
 const REMOTE_CONTROL_GRANT_TTL_MS = 10 * 60 * 1000;
@@ -1201,6 +1247,39 @@ const els = {
   panelViews: document.querySelectorAll(".panel-view"),
 };
 
+function readSharedSpacePointerDiagnosticsPreference() {
+  try {
+    const params = new URL(window.location.href).searchParams;
+    if (["1", "true", "yes"].includes(cleanText(params.get("shared-pointer-diagnostics"), "").toLowerCase())) return true;
+    if (["1", "true", "yes"].includes(cleanText(params.get("pointerDiagnostics"), "").toLowerCase())) return true;
+  } catch {
+    // URL parsing can fail in test harnesses.
+  }
+  try {
+    if (window.__WASM_AGENT_SHARED_POINTER_DIAGNOSTICS__ === true) return true;
+    return localStorage.getItem(SHARED_SPACE_POINTER_DIAGNOSTICS_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readSharedSpacePointerPredictionPreference() {
+  try {
+    const params = new URL(window.location.href).searchParams;
+    const value = cleanText(params.get("shared-pointer-prediction") || params.get("pointerPrediction"), "").toLowerCase();
+    if (["1", "true", "yes", "legacy"].includes(value)) return true;
+    if (["0", "false", "no", "off"].includes(value)) return false;
+  } catch {
+    // URL parsing can fail in test harnesses.
+  }
+  try {
+    if (window.__WASM_AGENT_SHARED_POINTER_LEGACY_PREDICTION__ === true) return true;
+    return localStorage.getItem(SHARED_SPACE_POINTER_PREDICTION_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 const INITIAL_SPACE_WIDGET_LAYOUTS = readLocalSpaceWidgetLayouts();
 
 const state = {
@@ -1512,6 +1591,7 @@ const state = {
   sharedSpacePointerSyncBusy: false,
   sharedSpacePointerLastSentAt: 0,
   sharedSpacePointerLastDurableSentAt: 0,
+  sharedSpacePointerLastDragFallbackSentAt: 0,
   sharedSpacePointerLastEventIdBySpace: {},
   sharedSpacePointerLiveSocket: null,
   sharedSpacePointerLiveSpaceId: "",
@@ -1524,8 +1604,75 @@ const state = {
   sharedSpacePointerMoveFrame: 0,
   sharedSpacePointerMoveTimer: 0,
   sharedSpacePointerLastMovePoint: null,
+  sharedSpacePointerLocalLastPoint: null,
+  sharedSpacePointerSendSeq: 0,
+  sharedSpacePointerLocalSeq: 0,
+  sharedSpacePointerRawInputAt: 0,
+  sharedSpacePointerInputMode: "move",
   sharedSpacePointerFollowTarget: null,
   sharedSpacePointerFollowFrame: 0,
+  sharedSpacePointerPendingPaths: {},
+  sharedSpacePointerPendingRealtimeSamples: {},
+  sharedSpacePointerVisuals: {},
+  sharedSpacePointerVisualRoomId: "",
+  sharedSpacePointerVisualFrame: 0,
+  sharedSpacePointerVisualLastAt: 0,
+  sharedSpacePointerCanvasFailed: false,
+  sharedSpacePointerRenderLayer: "dom",
+  sharedSpacePointerRtc: {
+    roomId: "",
+    peers: {},
+    processedSignalIds: new Set(),
+    signalQueue: Promise.resolve(),
+    signalBusy: false,
+    openCount: 0,
+  },
+  sharedSpacePointerDiagnosticsEnabled: readSharedSpacePointerDiagnosticsPreference(),
+  sharedSpacePointerPredictionEnabled: readSharedSpacePointerPredictionPreference(),
+  sharedSpacePointerDiagnostics: {
+    fps: 0,
+    droppedFrames: 0,
+    eventCount: 0,
+    eventRate: 0,
+    lastEventRateAt: 0,
+    lastEventRateCount: 0,
+    latencyMs: 0,
+    sampleCount: 0,
+    predictionLeadMs: 0,
+    predictionPx: 0,
+    netAgeMs: 0,
+    renderBufferMs: SHARED_SPACE_POINTER_REALTIME_BUFFER_MS,
+    realtimePredictionMs: 0,
+    realtimePredictionPx: 0,
+    realtimeSampleCount: 0,
+    staleDrops: 0,
+    clockOffsetMs: 0,
+    inputMode: "move",
+    transport: "json",
+    binarySent: 0,
+    binaryReceived: 0,
+    binaryBytesSent: 0,
+    binaryBytesReceived: 0,
+    binaryDecodeMs: 0,
+    binaryDrops: 0,
+    inputToSendMs: 0,
+    transportLatencyMs: 0,
+    paintLatencyMs: 0,
+    rtcSent: 0,
+    rtcReceived: 0,
+    rtcBytesSent: 0,
+    rtcBytesReceived: 0,
+    rtcDrops: 0,
+    rtcPeers: 0,
+    rtcOpen: 0,
+    dragFallbackSent: 0,
+    localEchoes: 0,
+    replayMs: 0,
+    replayMode: "idle",
+    lastDroppedFrameAt: 0,
+    mode: "idle",
+    lastRenderAt: 0,
+  },
   configAreaDraft: null,
 };
 
@@ -7970,12 +8117,29 @@ function activeSharedRoom() {
   return sharedSpaceId ? state.sharedRooms[sharedSpaceId] || null : null;
 }
 
+function sharedSpacePointerDeviceSlot(payload = {}) {
+  const rawHash = payload.device_hash ?? payload.deviceHash;
+  if (rawHash !== undefined && rawHash !== null && rawHash !== "") {
+    const value = Number(rawHash);
+    if (Number.isFinite(value)) return `bin-${(value >>> 0).toString(36)}`;
+  }
+  const deviceId = cleanText(payload.device_id || payload.deviceId, "");
+  return deviceId ? `bin-${hashSharedPointerString(deviceId).toString(36)}` : "";
+}
+
+function sharedSpacePointerUserSlot(userId = "") {
+  const clean = cleanText(userId, "");
+  return clean ? String(numericSharedPointerId(clean)) : "";
+}
+
 function sharedSpacePointerKey(event = {}) {
   const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
   const userId = cleanText(event.sender_user_id || payload.user_id || payload.userId, "");
-  const deviceId = cleanText(payload.device_id || payload.deviceId, "");
-  if (!userId && !deviceId) return "";
-  return `${userId}:${deviceId}`;
+  const deviceSlot = sharedSpacePointerDeviceSlot(payload);
+  const userSlot = sharedSpacePointerUserSlot(userId);
+  if (userSlot) return `${userSlot}:user`;
+  if (!userId && !deviceSlot) return "";
+  return `device:${deviceSlot}`;
 }
 
 function sharedSpacePointerColor(seed = "") {
@@ -7987,8 +8151,16 @@ function sharedSpacePointerColor(seed = "") {
 
 function activeSharedSpacePointerId(room = activeSharedRoom()) {
   const currentUserId = cleanText(room?.current_user_id || state.authUser?.id, "");
-  const currentDeviceId = cleanText(room?.current_device_id || clientDeviceId(), "");
-  return `${currentUserId}:${currentDeviceId}`;
+  const userSlot = sharedSpacePointerUserSlot(currentUserId);
+  if (userSlot) return `${userSlot}:user`;
+  return `device:bin-${sharedSpacePointerLocalDeviceHash().toString(36)}`;
+}
+
+function localSharedSpacePointerKey(target = currentSharedSpacePointerTarget()) {
+  const key = activeSharedSpacePointerId(target?.room);
+  if (key) return key;
+  const userId = cleanText(state.authUser?.id, "local");
+  return `${userId}:user`;
 }
 
 function currentSharedSpacePointerTarget() {
@@ -8069,6 +8241,106 @@ function handleSharedSpacePointerLiveMessage(message = {}) {
   }
 }
 
+function sharedSpacePointerLocalUserNumber() {
+  return numericSharedPointerId(state.authUser?.id || "");
+}
+
+function sharedSpacePointerLocalDeviceHash() {
+  return hashSharedPointerString(clientDeviceId());
+}
+
+function sharedSpacePointerBinaryUserLabel(userNumber) {
+  const target = Number(userNumber) >>> 0;
+  const room = activeSharedRoom();
+  const entries = [
+    ...(Array.isArray(room?.members) ? room.members : []),
+    ...(Array.isArray(room?.presence) ? room.presence : []),
+  ];
+  const match = entries.find((entry) => numericSharedPointerId(socialUserId(entry) || entry?.user_id || "") === target);
+  if (match) return socialUserLabel(match, String(target));
+  return target === sharedSpacePointerLocalUserNumber() ? publicUserLabel(state.authUser) : `Member ${target || ""}`.trim();
+}
+
+function noteSharedSpacePointerDiagnosticAverage(name, value, alpha = 0.18) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return;
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  const previous = Number(diagnostics[name] || 0);
+  diagnostics[name] = previous ? previous * (1 - alpha) + number * alpha : number;
+}
+
+function handleSharedSpacePointerLiveBinary(data, options = {}) {
+  const receivedAt = performance.now();
+  const decodedAt = performance.now();
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  const transport = cleanText(options.transport || "binary", "binary");
+  const isRtc = transport === "rtc";
+  const packet = decodeSharedPointerBinaryPacket(data, {
+    receivedAtMs: receivedAt,
+    receiverEpochMs: Date.now(),
+    previousClockOffsetMs: Number(diagnostics.clockOffsetMs || 0),
+    alpha: SHARED_SPACE_POINTER_REALTIME_CLOCK_OFFSET_ALPHA,
+  });
+  diagnostics.binaryDecodeMs = diagnostics.binaryDecodeMs
+    ? diagnostics.binaryDecodeMs * 0.88 + (performance.now() - decodedAt) * 0.12
+    : performance.now() - decodedAt;
+  if (!packet || !packet.samples.length) {
+    if (isRtc) diagnostics.rtcDrops += 1;
+    else diagnostics.binaryDrops += 1;
+    return;
+  }
+  diagnostics.clockOffsetMs = packet.clockOffsetMs;
+  const byteLength = Number(packet.byteLength || data?.byteLength || 0);
+  if (isRtc) {
+    diagnostics.rtcReceived += 1;
+    diagnostics.rtcBytesReceived += byteLength;
+  } else {
+    diagnostics.binaryReceived += 1;
+    diagnostics.binaryBytesReceived += byteLength;
+  }
+  const sentAtReceiverMs = Number(packet.sentPerfMs || 0) + Number(packet.clockOffsetMs || 0);
+  noteSharedSpacePointerDiagnosticAverage("transportLatencyMs", clamp(receivedAt - sentAtReceiverMs, 0, 5000));
+  diagnostics.transport = transport;
+  const localUser = sharedSpacePointerLocalUserNumber();
+  const localDevice = sharedSpacePointerLocalDeviceHash();
+  if (packet.userId === localUser && packet.deviceHash === localDevice) return;
+  const roomId = cleanText(state.sharedSpacePointerLiveSpaceId || currentSharedSpacePointerTarget()?.room?.id || "", "");
+  if (!roomId) return;
+  const latest = packet.samples[packet.samples.length - 1];
+  const key = packet.userId ? `${packet.userId}:user` : `device:bin-${packet.deviceHash.toString(36)}`;
+  const pointers = { ...(state.sharedSpacePointers[roomId] || {}) };
+  if (Number(pointers[key]?.realtime_seq || 0) >= Number(packet.seq || 0)) return;
+  appendSharedSpacePointerPendingRealtime(roomId, key, packet.samples, receivedAt);
+  const point = cleanSharedSpacePointerPoint(latest);
+  if (!point) return;
+  pointers[key] = {
+    key,
+    user_id: String(packet.userId || ""),
+    device_id: `bin-${packet.deviceHash.toString(36)}`,
+    device_hash: packet.deviceHash,
+    user_label: sharedSpacePointerBinaryUserLabel(packet.userId),
+    type: "move",
+    x: point.x,
+    y: point.y,
+    color: sharedSpacePointerColor(key),
+    event_id: `bin-${packet.seq}`,
+    pointer_event_id: `bin-${packet.seq}`,
+    path: [],
+    realtime_seq: packet.seq,
+    realtime_source: transport,
+    realtime_sample_count: packet.samples.length,
+    source_sent_at_ms: packet.sentEpochMs,
+    received_at: receivedAt,
+    pulse_id: cleanText(pointers[key]?.pulse_id || "", ""),
+    click_until: Number(pointers[key]?.click_until || 0),
+    last_seen_at: Date.now(),
+  };
+  state.sharedSpacePointers[roomId] = pointers;
+  state.sharedSpacePointerFollowTarget = { shared_space_id: roomId, key, x: point.x, y: point.y, at: Date.now() };
+  scheduleSharedSpacePointerRender(isRtc ? "pointer-rtc" : "pointer-binary");
+  scheduleSharedSpacePointerNavigationFollow();
+}
+
 function startSharedSpacePointerLiveSocket(origin = "active") {
   const target = currentSharedSpacePointerTarget();
   const sharedSpaceId = cleanText(target?.space?.shared_space_id || "", "");
@@ -8089,6 +8361,7 @@ function startSharedSpacePointerLiveSocket(origin = "active") {
   state.sharedSpacePointerLiveReady = false;
   state.sharedSpacePointerLiveSpaceId = sharedSpaceId;
   const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
   state.sharedSpacePointerLiveSocket = socket;
   socket.addEventListener("open", () => {
     if (state.sharedSpacePointerLiveToken !== token) return;
@@ -8100,6 +8373,14 @@ function startSharedSpacePointerLiveSocket(origin = "active") {
   });
   socket.addEventListener("message", (event) => {
     if (state.sharedSpacePointerLiveToken !== token) return;
+    if (typeof event.data !== "string") {
+      if (event.data instanceof ArrayBuffer) {
+        handleSharedSpacePointerLiveBinary(event.data);
+      } else if (event.data instanceof Blob) {
+        void event.data.arrayBuffer().then((buffer) => handleSharedSpacePointerLiveBinary(buffer)).catch(() => {});
+      }
+      return;
+    }
     try {
       handleSharedSpacePointerLiveMessage(JSON.parse(event.data));
     } catch (error) {
@@ -8140,6 +8421,445 @@ function sendSharedSpacePointerLiveEvent(target, body = {}, options = {}) {
   }
 }
 
+function createSharedSpacePointerBinaryBuffer(samples = [], seq = 0, now = performance.now()) {
+  return encodeSharedPointerBinaryPacket({
+    userId: state.authUser?.id || "",
+    deviceId: clientDeviceId(),
+    seq,
+    sentPerfMs: now,
+    sentEpochMs: Date.now(),
+    samples,
+  }, {
+    limit: SHARED_SPACE_POINTER_REALTIME_SAMPLE_LIMIT,
+  });
+}
+
+function sendSharedSpacePointerBinaryEvent(target, samples = [], seq = 0, now = performance.now(), packetBuffer = null) {
+  const socket = startSharedSpacePointerLiveSocket("pointer-binary-send");
+  if (!socket || !sharedSpacePointerLiveConnected(target)) return false;
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  if (Number(socket.bufferedAmount || 0) > SHARED_SPACE_POINTER_BINARY_BUFFER_LIMIT_BYTES) {
+    diagnostics.binaryDrops += 1;
+    diagnostics.transport = "binary-drop";
+    return true;
+  }
+  const buffer = packetBuffer || createSharedSpacePointerBinaryBuffer(samples, seq, now);
+  if (!buffer) return false;
+  try {
+    socket.send(buffer);
+    diagnostics.binarySent += 1;
+    diagnostics.binaryBytesSent += buffer.byteLength;
+    diagnostics.transport = "binary";
+    return true;
+  } catch {
+    diagnostics.binaryDrops += 1;
+    return false;
+  }
+}
+
+function sharedSpacePointerRtcSupported() {
+  return Boolean(window.isSecureContext && window.RTCPeerConnection);
+}
+
+function sharedSpacePointerRtcLocalDeviceId(room = activeSharedRoom()) {
+  return cleanText(room?.current_device_id || clientDeviceId(), "");
+}
+
+function sharedSpacePointerRtcPeerEntries(room = activeSharedRoom()) {
+  const localDeviceId = sharedSpacePointerRtcLocalDeviceId(room);
+  const entries = Array.isArray(room?.presence) ? room.presence : [];
+  return entries.filter((entry) => entry?.device_id && entry.device_id !== localDeviceId);
+}
+
+function sharedSpacePointerRtcPeerLabel(entry = {}) {
+  const user = cleanText(entry.user_label || entry.user_id || "", "");
+  const device = cleanText(entry.label || entry.device_id || "", "");
+  return user && device ? `${user} / ${device}` : user || device || "peer";
+}
+
+function updateSharedSpacePointerRtcDiagnostics() {
+  const peers = Object.values(state.sharedSpacePointerRtc.peers || {}).filter(Boolean);
+  const open = peers.filter((peer) => peer.channel?.readyState === "open");
+  state.sharedSpacePointerRtc.openCount = open.length;
+  state.sharedSpacePointerDiagnostics.rtcPeers = peers.length;
+  state.sharedSpacePointerDiagnostics.rtcOpen = open.length;
+}
+
+function closeSharedSpacePointerRtcPeer(deviceId) {
+  const rtc = state.sharedSpacePointerRtc;
+  const key = cleanText(deviceId, "");
+  const peer = rtc.peers?.[key];
+  if (!peer) return;
+  try {
+    peer.channel?.close?.();
+  } catch {
+    // Peer teardown is best effort.
+  }
+  try {
+    peer.pc?.close?.();
+  } catch {
+    // Peer teardown is best effort.
+  }
+  delete rtc.peers[key];
+  updateSharedSpacePointerRtcDiagnostics();
+}
+
+function closeSharedSpacePointerRtcPeers() {
+  const rtc = state.sharedSpacePointerRtc;
+  Object.keys(rtc.peers || {}).forEach(closeSharedSpacePointerRtcPeer);
+  Object.assign(rtc, {
+    roomId: "",
+    peers: {},
+    processedSignalIds: new Set(),
+    signalQueue: Promise.resolve(),
+    signalBusy: false,
+    openCount: 0,
+  });
+  updateSharedSpacePointerRtcDiagnostics();
+}
+
+function sharedSpacePointerSignalPayload(event = {}) {
+  const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
+  return payload.pointer_schema === SHARED_SPACE_POINTER_SIGNAL_SCHEMA ? payload : null;
+}
+
+function sharedSpacePointerSignalFresh(event = {}) {
+  const created = Date.parse(cleanText(event.created_at || "", ""));
+  if (!Number.isFinite(created)) return true;
+  return Date.now() - created <= SHARED_SPACE_POINTER_RTC_STALE_MS;
+}
+
+function sharedSpacePointerRtcShouldOffer(room, entry) {
+  const localDeviceId = sharedSpacePointerRtcLocalDeviceId(room);
+  const peerDeviceId = cleanText(entry?.device_id || "", "");
+  if (!localDeviceId || !peerDeviceId || localDeviceId === peerDeviceId) return false;
+  return sharedVoiceShouldInitiateRoomOffer(localDeviceId, peerDeviceId);
+}
+
+function attachSharedSpacePointerRtcChannel(peer, channel) {
+  if (!peer || !channel) return;
+  peer.channel = channel;
+  channel.binaryType = "arraybuffer";
+  channel.bufferedAmountLowThreshold = SHARED_SPACE_POINTER_RTC_BUFFER_LIMIT_BYTES / 2;
+  channel.addEventListener("open", () => {
+    peer.status = "open";
+    peer.openedAt = performance.now();
+    updateSharedSpacePointerRtcDiagnostics();
+  });
+  channel.addEventListener("close", () => {
+    peer.status = "closed";
+    updateSharedSpacePointerRtcDiagnostics();
+  });
+  channel.addEventListener("error", () => {
+    peer.status = "error";
+    state.sharedSpacePointerDiagnostics.rtcDrops += 1;
+    updateSharedSpacePointerRtcDiagnostics();
+  });
+  channel.addEventListener("message", (event) => {
+    if (event.data instanceof ArrayBuffer) {
+      handleSharedSpacePointerLiveBinary(event.data, { transport: "rtc" });
+    } else if (event.data instanceof Blob) {
+      void event.data.arrayBuffer().then((buffer) => handleSharedSpacePointerLiveBinary(buffer, { transport: "rtc" })).catch(() => {
+        state.sharedSpacePointerDiagnostics.rtcDrops += 1;
+      });
+    }
+  });
+}
+
+function createSharedSpacePointerPeerConnection(peer) {
+  const pc = new RTCPeerConnection({
+    iceServers: sharedVoiceIceServers(),
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
+  });
+  pc.addEventListener("icecandidate", (event) => {
+    if (!event.candidate) return;
+    void sendSharedSpacePointerRtcSignal(peer, "ice-candidate", {
+      candidate: JSON.stringify(event.candidate.toJSON ? event.candidate.toJSON() : event.candidate),
+    }).catch(() => {
+      state.sharedSpacePointerDiagnostics.rtcDrops += 1;
+    });
+  });
+  pc.addEventListener("datachannel", (event) => {
+    attachSharedSpacePointerRtcChannel(peer, event.channel);
+  });
+  const update = () => {
+    peer.status = pc.connectionState || pc.iceConnectionState || peer.status || "connecting";
+    updateSharedSpacePointerRtcDiagnostics();
+  };
+  pc.addEventListener("connectionstatechange", update);
+  pc.addEventListener("iceconnectionstatechange", update);
+  return pc;
+}
+
+function ensureSharedSpacePointerRtcPeer(room, entry, options = {}) {
+  if (!sharedSpacePointerRtcSupported() || !room?.id) return null;
+  const deviceId = cleanText(entry?.device_id || options.deviceId || "", "");
+  const localDeviceId = sharedSpacePointerRtcLocalDeviceId(room);
+  if (!deviceId || !localDeviceId || deviceId === localDeviceId) return null;
+  const rtc = state.sharedSpacePointerRtc;
+  if (rtc.roomId && rtc.roomId !== room.id) closeSharedSpacePointerRtcPeers();
+  rtc.roomId = room.id;
+  rtc.peers ||= {};
+  let peer = rtc.peers[deviceId];
+  if (!peer) {
+    peer = {
+      deviceId,
+      userId: cleanText(entry?.user_id || "", ""),
+      label: sharedSpacePointerRtcPeerLabel(entry),
+      callId: cleanText(options.callId || "", ""),
+      pc: null,
+      channel: null,
+      pendingIceCandidates: [],
+      makingOffer: false,
+      ignoreOffer: false,
+      polite: String(localDeviceId) > String(deviceId),
+      createdAt: Date.now(),
+      lastOfferAt: 0,
+      status: "new",
+    };
+    rtc.peers[deviceId] = peer;
+  }
+  peer.userId = cleanText(entry?.user_id || peer.userId || "", "");
+  peer.label = sharedSpacePointerRtcPeerLabel(entry || { device_id: deviceId, user_id: peer.userId, label: peer.label });
+  peer.polite = String(localDeviceId) > String(deviceId);
+  if (options.callId) peer.callId = cleanText(options.callId, peer.callId || "");
+  if (!peer.pc || peer.pc.connectionState === "closed") {
+    peer.pc = createSharedSpacePointerPeerConnection(peer);
+    if (sharedSpacePointerRtcShouldOffer(room, { device_id: deviceId })) {
+      attachSharedSpacePointerRtcChannel(
+        peer,
+        peer.pc.createDataChannel("wasm-agent-pointer", { ordered: false, maxRetransmits: 0 }),
+      );
+    }
+  }
+  updateSharedSpacePointerRtcDiagnostics();
+  return peer;
+}
+
+async function sendSharedSpacePointerRtcSignal(peer, type, details = {}) {
+  const space = sharedUserSpaceForPanel();
+  const room = activeSharedRoom();
+  const fromDeviceId = sharedSpacePointerRtcLocalDeviceId(room);
+  if (!space?.shared_space_id || !room?.id || !peer?.deviceId || !fromDeviceId) return null;
+  if (!peer.callId) peer.callId = `ptr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  const payload = await fetchJson("/spaces/room", {
+    method: "POST",
+    timeoutMs: 7000,
+    body: {
+      action: "signal",
+      kind: SHARED_SPACE_POINTER_SIGNAL_KIND,
+      space_id: space.id,
+      shared_space_id: space.shared_space_id,
+      payload: {
+        pointer_schema: SHARED_SPACE_POINTER_SIGNAL_SCHEMA,
+        call_id: peer.callId,
+        room_id: room.id,
+        type,
+        from_user_id: cleanText(room.current_user_id || state.authUser?.id || "", ""),
+        from_device_id: fromDeviceId,
+        to_device_id: peer.deviceId,
+        ...details,
+      },
+    },
+  });
+  const nextRoom = payload.room || null;
+  if (nextRoom?.id) {
+    state.sharedRooms[nextRoom.id] = nextRoom;
+    mergeSharedSpacePointerEvents(nextRoom.id, nextRoom.events);
+    queueSharedSpacePointerPeerProcessing(nextRoom);
+  }
+  return nextRoom;
+}
+
+async function setSharedSpacePointerRtcLocalDescription(peer, description, timeoutMs = 1200) {
+  const pc = peer?.pc;
+  if (!pc) return description;
+  let settled = false;
+  const pending = pc.setLocalDescription(description);
+  await Promise.race([
+    pending.then(
+      () => {
+        settled = true;
+      },
+      (error) => {
+        settled = true;
+        throw error;
+      },
+    ),
+    new Promise((resolve) => window.setTimeout(resolve, timeoutMs)),
+  ]);
+  if (!settled) pending.catch(() => { state.sharedSpacePointerDiagnostics.rtcDrops += 1; });
+  return pc.localDescription || description;
+}
+
+async function makeSharedSpacePointerRtcOffer(peer) {
+  const pc = peer?.pc;
+  if (!pc || peer.makingOffer) return;
+  try {
+    peer.makingOffer = true;
+    if (!peer.callId) peer.callId = `ptr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+    peer.lastOfferAt = Date.now();
+    const offer = await pc.createOffer();
+    const localOffer = await setSharedSpacePointerRtcLocalDescription(peer, offer);
+    await sendSharedSpacePointerRtcSignal(peer, "offer", { sdp: localOffer?.sdp || offer.sdp || "" });
+  } finally {
+    peer.makingOffer = false;
+  }
+}
+
+async function flushSharedSpacePointerRtcIce(peer) {
+  const pc = peer?.pc;
+  if (!pc?.remoteDescription?.type || !peer.pendingIceCandidates.length) return;
+  const pending = peer.pendingIceCandidates.splice(0);
+  for (const candidate of pending) await pc.addIceCandidate(candidate);
+}
+
+async function addSharedSpacePointerRtcIce(peer, candidate) {
+  const pc = peer?.pc;
+  if (!pc || !candidate) return;
+  if (!pc.remoteDescription?.type) {
+    peer.pendingIceCandidates.push(candidate);
+    if (peer.pendingIceCandidates.length > 80) {
+      peer.pendingIceCandidates.splice(0, peer.pendingIceCandidates.length - 80);
+    }
+    return;
+  }
+  await pc.addIceCandidate(candidate);
+}
+
+async function handleSharedSpacePointerRtcSignal(event, payload, room) {
+  if (!payload || !room?.id || payload.room_id !== room.id) return true;
+  const currentDeviceId = sharedSpacePointerRtcLocalDeviceId(room);
+  if (!currentDeviceId || payload.from_device_id === currentDeviceId) return true;
+  if (payload.to_device_id && payload.to_device_id !== currentDeviceId) return true;
+  const entry = sharedSpacePointerRtcPeerEntries(room).find((item) => item.device_id === payload.from_device_id) || {
+    device_id: payload.from_device_id,
+    user_id: payload.from_user_id || "",
+    label: "Browser",
+  };
+  const peer = ensureSharedSpacePointerRtcPeer(room, entry, { callId: payload.call_id });
+  const pc = peer?.pc;
+  if (!peer || !pc) return false;
+  if (payload.type === "offer" && payload.call_id !== peer.callId) {
+    if (!peer.polite && peer.callId) return true;
+    peer.callId = cleanText(payload.call_id, peer.callId || "");
+  }
+  if (payload.call_id !== peer.callId) return true;
+  if (payload.type === "offer") {
+    const offerCollision = peer.makingOffer || pc.signalingState !== "stable";
+    peer.ignoreOffer = !peer.polite && offerCollision;
+    if (peer.ignoreOffer) return true;
+    if (offerCollision) await pc.setLocalDescription({ type: "rollback" });
+    await pc.setRemoteDescription({ type: "offer", sdp: String(payload.sdp || "") });
+    await flushSharedSpacePointerRtcIce(peer);
+    const answer = await pc.createAnswer();
+    const localAnswer = await setSharedSpacePointerRtcLocalDescription(peer, answer);
+    await sendSharedSpacePointerRtcSignal(peer, "answer", { sdp: localAnswer?.sdp || answer.sdp || "" });
+    return true;
+  }
+  if (payload.type === "answer") {
+    if (pc.signalingState !== "stable") {
+      await pc.setRemoteDescription({ type: "answer", sdp: String(payload.sdp || "") });
+      await flushSharedSpacePointerRtcIce(peer);
+    }
+    return true;
+  }
+  if (payload.type === "ice-candidate") {
+    try {
+      const candidate = typeof payload.candidate === "string" ? JSON.parse(payload.candidate) : payload.candidate;
+      await addSharedSpacePointerRtcIce(peer, candidate);
+    } catch (error) {
+      if (!peer.ignoreOffer) throw error;
+    }
+    return true;
+  }
+  return true;
+}
+
+async function syncSharedSpacePointerRtcPeers(room) {
+  if (!sharedSpacePointerRtcSupported() || !room?.id) return false;
+  const entries = sharedSpacePointerRtcPeerEntries(room);
+  const devices = new Set(entries.map((entry) => entry.device_id));
+  for (const peer of Object.values(state.sharedSpacePointerRtc.peers || {})) {
+    if (!devices.has(peer.deviceId)) closeSharedSpacePointerRtcPeer(peer.deviceId);
+  }
+  for (const entry of entries) {
+    const peer = ensureSharedSpacePointerRtcPeer(room, entry);
+    if (!peer) continue;
+    const channelOpen = peer.channel?.readyState === "open";
+    const shouldOffer = sharedSpacePointerRtcShouldOffer(room, entry);
+    const retryDue = Date.now() - Number(peer.lastOfferAt || 0) > SHARED_SPACE_POINTER_RTC_OFFER_RETRY_MS;
+    if (shouldOffer && !channelOpen && retryDue && !peer.makingOffer) {
+      await makeSharedSpacePointerRtcOffer(peer);
+    }
+  }
+  updateSharedSpacePointerRtcDiagnostics();
+  return entries.length > 0;
+}
+
+async function processSharedSpacePointerRtcRoom(room) {
+  const rtc = state.sharedSpacePointerRtc;
+  if (!sharedSpacePointerRtcSupported() || rtc.signalBusy || !room?.id) return;
+  rtc.signalBusy = true;
+  try {
+    if (rtc.roomId && rtc.roomId !== room.id) closeSharedSpacePointerRtcPeers();
+    rtc.roomId = room.id;
+    const events = Array.isArray(room.events) ? room.events : [];
+    for (const event of events) {
+      if (!event?.id || rtc.processedSignalIds.has(event.id)) continue;
+      if (event.kind !== SHARED_SPACE_POINTER_SIGNAL_KIND || !sharedSpacePointerSignalFresh(event)) continue;
+      const payload = sharedSpacePointerSignalPayload(event);
+      if (!payload) continue;
+      const handled = await handleSharedSpacePointerRtcSignal(event, payload, room);
+      if (handled) rtc.processedSignalIds.add(event.id);
+    }
+    if (rtc.processedSignalIds.size > 180) {
+      rtc.processedSignalIds = new Set(Array.from(rtc.processedSignalIds).slice(-120));
+    }
+    await syncSharedSpacePointerRtcPeers(room);
+  } catch {
+    state.sharedSpacePointerDiagnostics.rtcDrops += 1;
+  } finally {
+    rtc.signalBusy = false;
+  }
+}
+
+function queueSharedSpacePointerPeerProcessing(room) {
+  if (!sharedSpacePointerRtcSupported() || !room?.id) return;
+  const rtc = state.sharedSpacePointerRtc;
+  rtc.signalQueue = rtc.signalQueue
+    .then(() => processSharedSpacePointerRtcRoom(room))
+    .catch(() => {
+      state.sharedSpacePointerDiagnostics.rtcDrops += 1;
+    });
+}
+
+function sendSharedSpacePointerPeerBinaryEvent(_target, packetBuffer) {
+  if (!packetBuffer || !sharedSpacePointerRtcSupported()) return false;
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  let sent = 0;
+  for (const peer of Object.values(state.sharedSpacePointerRtc.peers || {})) {
+    const channel = peer?.channel;
+    if (!channel || channel.readyState !== "open") continue;
+    if (Number(channel.bufferedAmount || 0) > SHARED_SPACE_POINTER_RTC_BUFFER_LIMIT_BYTES) {
+      diagnostics.rtcDrops += 1;
+      continue;
+    }
+    try {
+      channel.send(packetBuffer);
+      sent += 1;
+      diagnostics.rtcSent += 1;
+      diagnostics.rtcBytesSent += packetBuffer.byteLength;
+    } catch {
+      diagnostics.rtcDrops += 1;
+    }
+  }
+  updateSharedSpacePointerRtcDiagnostics();
+  if (sent > 0) diagnostics.transport = "rtc";
+  return sent > 0;
+}
+
 function sharedSpacePointerEventSnapshot(event, fallback = event) {
   return {
     clientX: Number(event?.clientX ?? fallback?.clientX ?? 0),
@@ -8149,6 +8869,7 @@ function sharedSpacePointerEventSnapshot(event, fallback = event) {
     button: Number(event?.button ?? fallback?.button ?? 0),
     buttons: Number(event?.buttons ?? fallback?.buttons ?? 0),
     isPrimary: event?.isPrimary ?? fallback?.isPrimary ?? true,
+    timeStamp: Number(event?.timeStamp ?? fallback?.timeStamp ?? performance.now()),
   };
 }
 
@@ -8167,8 +8888,8 @@ function sharedSpacePointerPoint(event) {
   const y = (viewport.scrollTop + event.clientY - rect.top) / distance;
   const area = canvasAreaSize();
   return {
-    x: clamp(Math.round(x), 0, Math.max(1, area.width)),
-    y: clamp(Math.round(y), 0, Math.max(1, area.height)),
+    x: clamp(Number(x.toFixed(2)), 0, Math.max(1, area.width)),
+    y: clamp(Number(y.toFixed(2)), 0, Math.max(1, area.height)),
   };
 }
 
@@ -8244,6 +8965,94 @@ function sharedSpacePointerPathFromSamples(samples = [], finalPoint = null, prev
   return densifySharedSpacePointerPath(points);
 }
 
+function sharedSpacePointerRealtimeSamplesFromEvents(samples = [], finalEvent = null, sendNow = performance.now()) {
+  const source = Array.isArray(samples) ? samples : [];
+  const realtime = [];
+  source.forEach((sample) => {
+    const point = sharedSpacePointerPoint(sample);
+    const at = Number(sample?.timeStamp || sendNow);
+    if (point && Number.isFinite(at)) realtime.push({ ...point, at });
+  });
+  const finalPoint = sharedSpacePointerPoint(finalEvent);
+  const finalAt = Number(finalEvent?.timeStamp || sendNow);
+  if (finalPoint && Number.isFinite(finalAt)) realtime.push({ ...finalPoint, at: finalAt });
+  const deduped = [];
+  realtime.forEach((sample) => {
+    const last = deduped[deduped.length - 1] || null;
+    if (
+      last
+      && Math.abs(sample.at - last.at) <= 0.05
+      && sameSharedSpacePointerPoint(last, sample, 0.08)
+    ) return;
+    deduped.push(sample);
+  });
+  return deduped.slice(-SHARED_SPACE_POINTER_REALTIME_SAMPLE_LIMIT);
+}
+
+function nextSharedSpacePointerLocalSeq(seq = 0) {
+  const requested = Number(seq || 0);
+  const next = Math.max(Number(state.sharedSpacePointerLocalSeq || 0) + 1, Number.isFinite(requested) ? requested : 0);
+  state.sharedSpacePointerLocalSeq = next;
+  return next;
+}
+
+function echoSharedSpacePointerLocalEvent(type, event, options = {}) {
+  const target = options.target || currentSharedSpacePointerTarget();
+  const roomId = cleanText(target?.room?.id || "", "");
+  if (!roomId) return false;
+  const point = options.point || sharedSpacePointerPoint(event);
+  if (!point) return false;
+  const now = Number(options.now ?? performance.now());
+  const seq = nextSharedSpacePointerLocalSeq(options.seq);
+  const key = localSharedSpacePointerKey(target);
+  if (!key) return false;
+  const previousPoint = type === "move" ? state.sharedSpacePointerLocalLastPoint : null;
+  const realtimeSamples = Array.isArray(options.realtimeSamples)
+    ? options.realtimeSamples
+    : sharedSpacePointerRealtimeSamplesFromEvents(options.samples, event, now);
+  const path = Array.isArray(options.path)
+    ? options.path
+    : type === "move"
+      ? sharedSpacePointerPathFromSamples(options.samples, point, previousPoint)
+      : [];
+  const pointers = { ...(state.sharedSpacePointers[roomId] || {}) };
+  const previous = pointers[key] || {};
+  const pointerEventId = cleanText(options.pointerEventId || options.pointer_event_id || `local-${seq}`, `local-${seq}`);
+  const eventType = cleanText(type || "move", "move");
+  const isPulse = ["down", "click"].includes(eventType);
+  appendSharedSpacePointerPendingPath(roomId, key, path);
+  appendSharedSpacePointerPendingRealtime(roomId, key, realtimeSamples, now);
+  pointers[key] = {
+    key,
+    user_id: cleanText(target.room.current_user_id || state.authUser?.id || "", ""),
+    device_id: clientDeviceId(),
+    device_hash: sharedSpacePointerLocalDeviceHash(),
+    user_label: cleanText(publicUserLabel(state.authUser), "You"),
+    type: eventType,
+    x: point.x,
+    y: point.y,
+    color: sharedSpacePointerColor(key),
+    event_id: pointerEventId,
+    pointer_event_id: pointerEventId,
+    path,
+    realtime_seq: seq,
+    realtime_source: "local",
+    realtime_sample_count: realtimeSamples.length,
+    source_sent_at_ms: Date.now(),
+    received_at: now,
+    pulse_id: isPulse ? pointerEventId : cleanText(previous.pulse_id || "", ""),
+    click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(previous.click_until || 0),
+    last_seen_at: Date.now(),
+  };
+  state.sharedSpacePointers[roomId] = pointers;
+  if (eventType === "move" || eventType === "down") state.sharedSpacePointerLocalLastPoint = point;
+  if (["up", "click"].includes(eventType)) state.sharedSpacePointerLocalLastPoint = null;
+  state.sharedSpacePointerDiagnostics.localEchoes += 1;
+  state.sharedSpacePointerDiagnostics.transport = "local";
+  scheduleSharedSpacePointerRender("pointer-local");
+  return true;
+}
+
 function sharedSpacePointerPayloadPath(payload = {}, fallbackPoint = null) {
   const points = [];
   const payloadPoints = Array.isArray(payload.points) ? payload.points : [];
@@ -8252,13 +9061,47 @@ function sharedSpacePointerPayloadPath(payload = {}, fallbackPoint = null) {
   return densifySharedSpacePointerPath(points);
 }
 
-function sharedSpacePointerScreenPoint(point) {
-  const clean = cleanSharedSpacePointerPoint(point);
-  if (!clean) return null;
-  return {
-    x: logicalToScreenPx(clean.x),
-    y: logicalToScreenPx(clean.y),
-  };
+function sharedSpacePointerPayloadRealtime(payload = {}, fallbackPoint = null, receivedAt = performance.now()) {
+  const rt = payload.rt && typeof payload.rt === "object" ? payload.rt : {};
+  const compact = Array.isArray(rt.samples) ? rt.samples : (Array.isArray(payload.rt_samples) ? payload.rt_samples : []);
+  const sentPerfMs = Number(rt.sent_perf_ms || payload.sent_perf_ms || 0);
+  const senderEpochMs = Number(payload.sent_at_ms || rt.sent_at_ms || 0);
+  const receiverEpochMs = Date.now();
+  const previousOffset = Number(state.sharedSpacePointerDiagnostics.clockOffsetMs || 0);
+  const clockOffsetMs = sentPerfMs > 0 && senderEpochMs > 0
+    ? estimateSharedPointerClockOffset({
+      senderEpochMs,
+      senderPerfMs: sentPerfMs,
+      receiverEpochMs,
+      receiverPerfMs: receivedAt,
+    }, previousOffset, {
+      alpha: SHARED_SPACE_POINTER_REALTIME_CLOCK_OFFSET_ALPHA,
+    })
+    : previousOffset;
+  state.sharedSpacePointerDiagnostics.clockOffsetMs = clockOffsetMs;
+  const fallbackBaseMs = senderEpochMs > 0 ? receivedAt - Math.max(0, receiverEpochMs - senderEpochMs) : receivedAt;
+  const decoded = decodeSharedPointerRealtimeSamples(compact, sentPerfMs, clockOffsetMs, {
+    limit: SHARED_SPACE_POINTER_REALTIME_SAMPLE_LIMIT,
+    receivedAtMs: receivedAt,
+    fallbackBaseMs,
+  });
+  if (decoded.length) {
+    return {
+      samples: decoded,
+      seq: Number(rt.seq || payload.seq || 0),
+      clockOffsetMs,
+      source: "rt",
+    };
+  }
+  if (fallbackPoint) {
+    return {
+      samples: [{ x: fallbackPoint.x, y: fallbackPoint.y, at: receivedAt }],
+      seq: Number(rt.seq || payload.seq || 0),
+      clockOffsetMs,
+      source: "fallback",
+    };
+  }
+  return { samples: [], seq: Number(rt.seq || payload.seq || 0), clockOffsetMs, source: "empty" };
 }
 
 function sharedSpacePointerTransform(screenX, screenY) {
@@ -8273,6 +9116,8 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
   let latestId = cleanText(state.sharedSpacePointerLastEventIdBySpace[id] || "", "");
   const pointers = { ...(state.sharedSpacePointers[id] || {}) };
   for (const event of events) {
+    const receivedAt = performance.now();
+    const receivedEpoch = Date.now();
     if (!event || event.kind !== SHARED_SPACE_POINTER_EVENT_KIND) continue;
     const eventId = cleanText(event.id, "");
     if (eventId && latestId && eventId <= latestId) continue;
@@ -8290,10 +9135,22 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
     };
     if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) continue;
     const path = sharedSpacePointerPayloadPath(payload, point);
+    const realtime = sharedSpacePointerPayloadRealtime(payload, point, receivedAt);
+    if (
+      eventType === "move"
+      && Number(realtime.seq || 0) > 0
+      && Number(pointers[key]?.realtime_seq || 0) >= Number(realtime.seq || 0)
+    ) {
+      continue;
+    }
+    appendSharedSpacePointerPendingPath(id, key, path);
+    appendSharedSpacePointerPendingRealtime(id, key, realtime.samples, receivedAt);
+    noteSharedSpacePointerDiagnosticsEvent(event, payload, receivedAt);
     const nextPointer = {
       key,
       user_id: cleanText(event.sender_user_id || payload.user_id || "", ""),
       device_id: cleanText(payload.device_id || "", ""),
+      device_hash: Number(payload.device_hash ?? payload.deviceHash ?? hashSharedPointerString(payload.device_id || payload.deviceId || "")) >>> 0,
       user_label: cleanText(payload.user_label || sharedSpaceUserLabel(event.sender_user_id), "Member"),
       type: eventType,
       x: point.x,
@@ -8302,9 +9159,15 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
       event_id: eventId,
       pointer_event_id: pointerEventId,
       path,
+      realtime_seq: realtime.seq,
+      realtime_source: realtime.source,
+      realtime_sample_count: realtime.samples.length,
+      created_at: cleanText(event.created_at || "", ""),
+      source_sent_at_ms: sharedSpacePointerEventCreatedMs(event, payload),
+      received_at: receivedAt,
       pulse_id: isPulse ? cleanText(pointerEventId || eventId || `${key}-${Date.now()}`, "") : cleanText(pointers[key]?.pulse_id || "", ""),
       click_until: isPulse ? Date.now() + SHARED_SPACE_POINTER_CLICK_TTL_MS : Number(pointers[key]?.click_until || 0),
-      last_seen_at: Date.now(),
+      last_seen_at: receivedEpoch,
     };
     pointers[key] = nextPointer;
     state.sharedSpacePointerFollowTarget = { shared_space_id: id, key, x: nextPointer.x, y: nextPointer.y, at: Date.now() };
@@ -8313,164 +9176,1045 @@ function mergeSharedSpacePointerEvents(sharedSpaceId, events = []) {
   if (latestId) state.sharedSpacePointerLastEventIdBySpace[id] = latestId;
   state.sharedSpacePointers[id] = pointers;
   if (changed) {
-    renderSharedSpacePointers();
+    scheduleSharedSpacePointerRender("pointer-event");
     scheduleSharedSpacePointerNavigationFollow();
   }
   return changed;
 }
 
-function addSharedSpacePointerTrace(layer, pointer, screenX, screenY) {
-  if (!layer || !pointer) return;
-  const trace = document.createElement("span");
-  trace.className = "shared-space-pointer-trace";
-  trace.setAttribute("aria-hidden", "true");
-  trace.style.setProperty("--shared-pointer-color", pointer.color);
-  trace.style.left = `${screenX + 2}px`;
-  trace.style.top = `${screenY + 2}px`;
-  layer.append(trace);
-  trace.addEventListener("animationend", () => trace.remove(), { once: true });
-  window.setTimeout(() => trace.remove(), 1100);
-  const traces = layer.querySelectorAll(".shared-space-pointer-trace");
-  if (traces.length > SHARED_SPACE_POINTER_TRACE_LIMIT) {
-    Array.from(traces).slice(0, traces.length - SHARED_SPACE_POINTER_TRACE_LIMIT).forEach((node) => node.remove());
+function sharedSpacePointerEventCreatedMs(event = {}, payload = {}) {
+  const sentAt = Number(payload.sent_at_ms || payload.sentAtMs || payload.client_sent_at_ms || payload.clientSentAtMs || 0);
+  if (Number.isFinite(sentAt) && sentAt > 0) return sentAt;
+  const created = Date.parse(cleanText(event.created_at || payload.created_at, ""));
+  return Number.isFinite(created) ? created : 0;
+}
+
+function noteSharedSpacePointerDiagnosticsEvent(event = {}, payload = {}, receivedAt = performance.now()) {
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  diagnostics.eventCount += 1;
+  diagnostics.transport = cleanText(payload.rt?.transport || payload.transport || "json", "json");
+  const sourceMs = sharedSpacePointerEventCreatedMs(event, payload);
+  if (sourceMs > 0) {
+    const latency = clamp(Date.now() - sourceMs, 0, 30000);
+    diagnostics.latencyMs = diagnostics.latencyMs ? diagnostics.latencyMs * 0.82 + latency * 0.18 : latency;
+  } else {
+    diagnostics.latencyMs = diagnostics.latencyMs ? diagnostics.latencyMs * 0.92 : clamp(performance.now() - receivedAt, 0, 30000);
   }
 }
 
-function addSharedSpacePointerTracePath(layer, pointer, fromX, fromY, toX, toY) {
-  const distance = Math.hypot(toX - fromX, toY - fromY);
-  if (!Number.isFinite(distance) || distance < SHARED_SPACE_POINTER_TRACE_MIN_PX) return;
-  const steps = clamp(
-    Math.ceil(distance / SHARED_SPACE_POINTER_TRACE_STEP_PX),
-    1,
-    SHARED_SPACE_POINTER_TRACE_MAX_PER_MOVE
+function sharedSpacePointerDiagnosticsToggle(enabled = true) {
+  state.sharedSpacePointerDiagnosticsEnabled = Boolean(enabled);
+  try {
+    localStorage.setItem(SHARED_SPACE_POINTER_DIAGNOSTICS_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Diagnostics preference is optional.
+  }
+  scheduleSharedSpacePointerRender("diagnostics-toggle");
+  return state.sharedSpacePointerDiagnosticsEnabled;
+}
+
+function sharedSpacePointerPredictionToggle(enabled = true) {
+  state.sharedSpacePointerPredictionEnabled = Boolean(enabled);
+  try {
+    localStorage.setItem(SHARED_SPACE_POINTER_PREDICTION_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Legacy prediction preference is optional.
+  }
+  Object.values(state.sharedSpacePointerVisuals || {}).forEach((visual) => {
+    visual.predictionLeadMs = 0;
+    visual.predictionPx = 0;
+  });
+  state.sharedSpacePointerDiagnostics.predictionLeadMs = 0;
+  state.sharedSpacePointerDiagnostics.predictionPx = 0;
+  state.sharedSpacePointerDiagnostics.realtimePredictionMs = 0;
+  state.sharedSpacePointerDiagnostics.realtimePredictionPx = 0;
+  scheduleSharedSpacePointerRender("prediction-toggle");
+  return state.sharedSpacePointerPredictionEnabled;
+}
+
+try {
+  window.setWasmAgentSharedPointerDiagnostics = sharedSpacePointerDiagnosticsToggle;
+  window.setWasmAgentSharedPointerPrediction = sharedSpacePointerPredictionToggle;
+} catch {
+  // Browser debug hook only.
+}
+
+function sharedSpacePointerDebugSnapshot() {
+  return {
+    layer: state.sharedSpacePointerRenderLayer || "dom",
+    prediction: state.sharedSpacePointerPredictionEnabled ? "legacy" : "off",
+    diagnostics: { ...state.sharedSpacePointerDiagnostics },
+    visuals: Object.values(state.sharedSpacePointerVisuals || {}).map((visual) => ({
+      key: visual.key,
+      x: Number(visual.x || 0),
+      y: Number(visual.y || 0),
+      targetX: Number(visual.targetX || 0),
+      targetY: Number(visual.targetY || 0),
+      historyLength: Array.isArray(visual.history) ? visual.history.length : 0,
+      mode: visual.mode || "",
+      replayMode: visual.replayMode || "",
+      replayMs: Number(visual.pathDurationMs || 0),
+      predictionLeadMs: Number(visual.predictionLeadMs || 0),
+      predictionPx: Number(visual.predictionPx || 0),
+      netAgeMs: Number(visual.netAgeMs || 0),
+      renderBufferMs: Number(visual.renderBufferMs || 0),
+      realtimeSamples: Array.isArray(visual.realtimeSamples) ? visual.realtimeSamples.length : 0,
+      realtimeMode: visual.realtimeMode || "",
+      pulseId: visual.pulseId || "",
+      pulseActive: Boolean(visual.pulseStartedAt && performance.now() - Number(visual.pulseStartedAt || 0) < SHARED_SPACE_POINTER_CLICK_TTL_MS),
+      pulseAgeMs: visual.pulseStartedAt ? Math.max(0, performance.now() - Number(visual.pulseStartedAt || 0)) : 0,
+      label: visual.label || "",
+    })),
+  };
+}
+
+try {
+  window.wasmAgentSharedPointerDebug = sharedSpacePointerDebugSnapshot;
+} catch {
+  // Browser debug hook only.
+}
+
+function sharedSpacePointerSnappedTransform(screenX, screenY) {
+  const dpr = window.devicePixelRatio || 1;
+  return sharedSpacePointerTransform(
+    snapSharedPointerPixel(screenX, dpr),
+    snapSharedPointerPixel(screenY, dpr)
   );
-  for (let index = 0; index < steps; index += 1) {
-    const ratio = index / steps;
-    addSharedSpacePointerTrace(
-      layer,
-      pointer,
-      fromX + (toX - fromX) * ratio,
-      fromY + (toY - fromY) * ratio
-    );
-  }
 }
 
-function addSharedSpacePointerTracePoints(layer, pointer, screenPoints = []) {
-  if (!Array.isArray(screenPoints) || screenPoints.length < 2) return;
-  for (let index = 1; index < screenPoints.length; index += 1) {
-    const from = screenPoints[index - 1];
-    const to = screenPoints[index];
-    if (!from || !to) continue;
-    addSharedSpacePointerTracePath(layer, pointer, from.x, from.y, to.x, to.y);
-  }
+function sharedSpacePointerTargetId(pointer = {}) {
+  return cleanText(pointer.pointer_event_id || pointer.event_id || `${pointer.key}:${pointer.x}:${pointer.y}:${pointer.last_seen_at}`, "");
 }
 
-function animateSharedSpacePointerNode(node, screenPoints = [], finalTransform = "") {
-  if (!node || typeof node.animate !== "function" || !Array.isArray(screenPoints) || screenPoints.length < 2) return false;
-  const keyframes = [];
-  const activeAnimations = typeof node.getAnimations === "function" ? node.getAnimations() : [];
-  const currentTransform = activeAnimations.length && typeof getComputedStyle === "function"
-    ? getComputedStyle(node).transform
-    : "";
-  activeAnimations.forEach((animation) => animation.cancel());
-  if (currentTransform && currentTransform !== "none") keyframes.push({ transform: currentTransform });
-  const pathPoints = keyframes.length ? screenPoints.slice(1) : screenPoints;
-  pathPoints.forEach((point) => {
-    if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-      keyframes.push({ transform: sharedSpacePointerTransform(point.x, point.y) });
+function appendSharedSpacePointerPendingPath(sharedSpaceId, key, path = []) {
+  const roomId = cleanText(sharedSpaceId, "");
+  const pointerKey = cleanText(key, "");
+  if (!roomId || !pointerKey || !Array.isArray(path) || !path.length) return;
+  const roomPaths = state.sharedSpacePointerPendingPaths[roomId] || {};
+  const points = Array.isArray(roomPaths[pointerKey]) ? roomPaths[pointerKey] : [];
+  path.forEach((point) => pushSharedSpacePointerPoint(points, point));
+  roomPaths[pointerKey] = points.slice(-SHARED_SPACE_POINTER_PENDING_PATH_LIMIT);
+  state.sharedSpacePointerPendingPaths[roomId] = roomPaths;
+}
+
+function consumeSharedSpacePointerPendingPath(sharedSpaceId, key, fallbackPath = []) {
+  const roomId = cleanText(sharedSpaceId, "");
+  const pointerKey = cleanText(key, "");
+  const roomPaths = roomId ? state.sharedSpacePointerPendingPaths[roomId] || null : null;
+  const points = Array.isArray(roomPaths?.[pointerKey]) ? roomPaths[pointerKey] : [];
+  if (roomPaths && pointerKey) delete roomPaths[pointerKey];
+  return points.length ? points : fallbackPath;
+}
+
+function appendSharedSpacePointerPendingRealtime(sharedSpaceId, key, samples = [], now = performance.now()) {
+  const roomId = cleanText(sharedSpaceId, "");
+  const pointerKey = cleanText(key, "");
+  if (!roomId || !pointerKey || !Array.isArray(samples) || !samples.length) return;
+  const roomSamples = state.sharedSpacePointerPendingRealtimeSamples[roomId] || {};
+  const existing = Array.isArray(roomSamples[pointerKey]) ? roomSamples[pointerKey] : [];
+  const result = appendSharedPointerRealtimeSamples(existing, samples, {
+    limit: SHARED_SPACE_POINTER_REALTIME_BUFFER_LIMIT,
+    maxAgeMs: SHARED_SPACE_POINTER_REALTIME_MAX_AGE_MS,
+    nowMs: now,
+  });
+  state.sharedSpacePointerDiagnostics.staleDrops += result.dropped;
+  roomSamples[pointerKey] = result.samples;
+  state.sharedSpacePointerPendingRealtimeSamples[roomId] = roomSamples;
+}
+
+function consumeSharedSpacePointerPendingRealtime(sharedSpaceId, key) {
+  const roomId = cleanText(sharedSpaceId, "");
+  const pointerKey = cleanText(key, "");
+  const roomSamples = roomId ? state.sharedSpacePointerPendingRealtimeSamples[roomId] || null : null;
+  const samples = Array.isArray(roomSamples?.[pointerKey]) ? roomSamples[pointerKey] : [];
+  if (roomSamples && pointerKey) delete roomSamples[pointerKey];
+  return samples;
+}
+
+function pushSharedSpacePointerScreenTarget(points, x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+  const last = points[points.length - 1] || null;
+  if (!last || Math.hypot(x - last.x, y - last.y) >= 0.35) points.push({ x, y });
+}
+
+function sharedSpacePointerScreenPath(pointer = {}, targetX = 0, targetY = 0, sourcePath = null) {
+  const points = [];
+  const path = Array.isArray(sourcePath) && sourcePath.length
+    ? sourcePath
+    : (Array.isArray(pointer.path) && pointer.path.length ? pointer.path : [{ x: pointer.x, y: pointer.y }]);
+  path.forEach((point) => {
+    const clean = cleanSharedSpacePointerPoint(point);
+    if (clean) pushSharedSpacePointerScreenTarget(points, logicalToScreenPx(clean.x), logicalToScreenPx(clean.y));
+  });
+  pushSharedSpacePointerScreenTarget(points, targetX, targetY);
+  return points;
+}
+
+function sharedSpacePointerScreenRealtimeSamples(samples = []) {
+  const screenSamples = [];
+  (Array.isArray(samples) ? samples : []).forEach((sample) => {
+    const clean = cleanSharedSpacePointerPoint(sample);
+    const at = Number(sample?.at);
+    if (clean && Number.isFinite(at)) {
+      screenSamples.push({
+        x: logicalToScreenPx(clean.x),
+        y: logicalToScreenPx(clean.y),
+        at,
+      });
     }
   });
-  if (keyframes.length < 2) return false;
-  const duration = clamp(
-    (keyframes.length - 1) * SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
-    SHARED_SPACE_POINTER_PATH_ANIMATION_MS,
-    SHARED_SPACE_POINTER_PATH_ANIMATION_MAX_MS
-  );
-  try {
-    node.animate(keyframes, { duration, easing: "linear" });
-    node.style.transform = finalTransform;
-    return true;
-  } catch {
-    return false;
-  }
+  return screenSamples;
 }
 
-function renderSharedSpacePointers() {
-  const target = currentSharedSpacePointerTarget();
-  const board = els.spaceBoard || spaceSurface();
-  if (!board) return;
-  let layer = board.querySelector("[data-shared-space-pointer-layer]");
-  if (!target) {
-    layer?.remove();
+function sharedSpacePointerDroppedFrameAge(now) {
+  const lastDroppedAt = Number(state.sharedSpacePointerDiagnostics.lastDroppedFrameAt || 0);
+  return lastDroppedAt > 0 ? now - lastDroppedAt : Number.POSITIVE_INFINITY;
+}
+
+function sharedSpacePointerReplayFrame(now) {
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  return {
+    fps: Number(diagnostics.fps || 0),
+    droppedFrameAgeMs: sharedSpacePointerDroppedFrameAge(now),
+  };
+}
+
+function sharedSpacePointerLowLatencyReplayActive(now) {
+  const fps = Number(state.sharedSpacePointerDiagnostics.fps || 0);
+  return (fps <= 0 || fps >= SHARED_POINTER_RENDER_DEFAULTS.replayHealthyMinFps)
+    && sharedSpacePointerDroppedFrameAge(now) >= SHARED_SPACE_POINTER_RENDER_PATH_DROPPED_COOLDOWN_MS;
+}
+
+function sharedSpacePointerFrameProgressCapMs() {
+  const fps = Number(state.sharedSpacePointerDiagnostics.fps || 0);
+  if (!Number.isFinite(fps) || fps <= 0) return 1000 / 60;
+  return clamp(1000 / fps, 1000 / 144, 1000 / 30);
+}
+
+function trimSharedSpacePointerReplayPath(points = [], visual, targetX, targetY, now) {
+  if (!sharedSpacePointerLowLatencyReplayActive(now)) return points;
+  if (!Array.isArray(points) || points.length <= SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_POINTS) return points;
+  const tail = points.slice(-SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_POINTS);
+  const first = tail[0] || null;
+  const x = Number(visual?.x);
+  const y = Number(visual?.y);
+  if (Number.isFinite(x) && Number.isFinite(y) && first && Math.hypot(first.x - x, first.y - y) >= 1.5) {
+    tail.unshift({ x, y });
+  }
+  pushSharedSpacePointerScreenTarget(tail, targetX, targetY);
+  return tail;
+}
+
+function noteSharedSpacePointerVelocity(visual, targetX, targetY, now, previousTargetAt, previousTargetX, previousTargetY) {
+  const fromX = Number(previousTargetX);
+  const fromY = Number(previousTargetY);
+  if (![fromX, fromY, targetX, targetY].every(Number.isFinite)) return;
+  const interval = clamp(now - Number(previousTargetAt || now), SHARED_SPACE_POINTER_SEND_MS, SHARED_SPACE_POINTER_VELOCITY_INTERVAL_MAX_MS);
+  const vx = (targetX - fromX) / Math.max(1, interval);
+  const vy = (targetY - fromY) / Math.max(1, interval);
+  const hadVelocity = Number.isFinite(Number(visual.velocityX)) && Number.isFinite(Number(visual.velocityY));
+  visual.velocityX = hadVelocity ? visual.velocityX * 0.55 + vx * 0.45 : vx;
+  visual.velocityY = hadVelocity ? visual.velocityY * 0.55 + vy * 0.45 : vy;
+  visual.velocityAt = now;
+}
+
+function predictSharedSpacePointerFrameTarget(visual, frameTarget, now) {
+  if (!state.sharedSpacePointerPredictionEnabled) {
+    visual.predictionLeadMs = 0;
+    visual.predictionPx = 0;
+    return { ...frameTarget, predicted: false };
+  }
+  const targetAgeMs = Math.max(0, now - Number(visual.targetReceivedAt || now));
+  const velocityAgeMs = Math.max(0, now - Number(visual.velocityAt || now));
+  const remaining = Math.hypot(Number(visual.targetX || 0) - Number(visual.x || 0), Number(visual.targetY || 0) - Number(visual.y || 0));
+  const staleMs = SHARED_SPACE_POINTER_PREDICTION_STALE_MS;
+  const leadCeiling = velocityAgeMs > staleMs || (!frameTarget.pathActive && remaining < 6)
+    ? 0
+    : SHARED_SPACE_POINTER_PREDICTION_MAX_LEAD_MS;
+  const predicted = predictSharedPointerPosition(frameTarget, {
+    x: Number(visual.velocityX || 0),
+    y: Number(visual.velocityY || 0),
+  }, {
+    maxLeadMs: leadCeiling,
+    maxDistancePx: SHARED_SPACE_POINTER_PREDICTION_MAX_PX,
+    staleMs,
+    targetAgeMs: Math.max(targetAgeMs, velocityAgeMs * 0.35),
+  });
+  visual.predictionLeadMs = predicted.leadMs;
+  visual.predictionPx = predicted.distancePx;
+  return { ...frameTarget, x: predicted.x, y: predicted.y, predicted: predicted.predicted };
+}
+
+function appendSharedSpacePointerVisualRealtime(visual, samples = [], now = performance.now()) {
+  const screenSamples = sharedSpacePointerScreenRealtimeSamples(samples);
+  if (!screenSamples.length) return 0;
+  const result = appendSharedPointerRealtimeSamples(visual.realtimeSamples || [], screenSamples, {
+    limit: SHARED_SPACE_POINTER_REALTIME_BUFFER_LIMIT,
+    maxAgeMs: SHARED_SPACE_POINTER_REALTIME_MAX_AGE_MS,
+    nowMs: now,
+  });
+  visual.realtimeSamples = result.samples;
+  state.sharedSpacePointerDiagnostics.staleDrops += result.dropped;
+  if (screenSamples.length >= 2) {
+    const previous = screenSamples[screenSamples.length - 2];
+    const latest = screenSamples[screenSamples.length - 1];
+    const interval = clamp(latest.at - previous.at, SHARED_SPACE_POINTER_SEND_MS, SHARED_SPACE_POINTER_VELOCITY_INTERVAL_MAX_MS);
+    visual.velocityX = (latest.x - previous.x) / Math.max(1, interval);
+    visual.velocityY = (latest.y - previous.y) / Math.max(1, interval);
+    visual.velocityAt = now;
+  }
+  return screenSamples.length;
+}
+
+function sharedSpacePointerRealtimeFrameTarget(visual, fallbackX, fallbackY, now, pointer = {}) {
+  const local = cleanText(pointer.realtime_source || "", "") === "local";
+  const predictionEnabled = Boolean(state.sharedSpacePointerPredictionEnabled);
+  const result = sampleSharedPointerRealtimeBuffer(visual.realtimeSamples || [], now, {
+    bufferDelayMs: local ? 0 : SHARED_SPACE_POINTER_REALTIME_BUFFER_MS,
+    maxPredictionMs: predictionEnabled ? (local ? 8 : SHARED_SPACE_POINTER_REALTIME_PREDICTION_MAX_MS) : 0,
+    maxPredictionDistancePx: predictionEnabled ? (local ? 18 : SHARED_SPACE_POINTER_REALTIME_PREDICTION_MAX_PX) : 0,
+    staleMs: SHARED_SPACE_POINTER_REALTIME_STALE_MS,
+  });
+  if (!result) return null;
+  visual.predictionLeadMs = result.predictionMs;
+  visual.predictionPx = result.predictionPx;
+  visual.netAgeMs = result.netAgeMs;
+  visual.renderBufferMs = result.bufferDelayMs;
+  visual.realtimeMode = local ? result.mode.replace(/^net/, "local") : result.mode;
+  return {
+    x: Number.isFinite(result.x) ? result.x : fallbackX,
+    y: Number.isFinite(result.y) ? result.y : fallbackY,
+    pathActive: false,
+    realtime: true,
+    predicted: result.mode === "net-predict",
+    mode: local ? visual.realtimeMode : result.mode,
+    netAgeMs: result.netAgeMs,
+    renderBufferMs: result.bufferDelayMs,
+    predictionMs: result.predictionMs,
+    predictionPx: result.predictionPx,
+    sampleCount: result.sampleCount,
+  };
+}
+
+function sharedSpacePointerMotionOptions(frameTarget, now) {
+  if (frameTarget.realtime) {
+    if (cleanText(frameTarget.mode || "", "").startsWith("local")) {
+      return { smoothingMs: 1.5, fastSmoothingMs: 1, fastDistancePx: 18, maxSpeedPxPerSecond: 7200 };
+    }
+    return { smoothingMs: 3, fastSmoothingMs: 2, fastDistancePx: 24, maxSpeedPxPerSecond: 4800 };
+  }
+  if (!frameTarget.pathActive) return undefined;
+  if (sharedSpacePointerLowLatencyReplayActive(now)) {
+    return { smoothingMs: 5, fastSmoothingMs: 3, fastDistancePx: 28, maxSpeedPxPerSecond: 9000 };
+  }
+  return { smoothingMs: 8, fastSmoothingMs: 5, fastDistancePx: 36, maxSpeedPxPerSecond: 5200 };
+}
+
+function startSharedSpacePointerVisualPath(visual, pointer, targetX, targetY, now, previousTargetAt, roomId, previousTargetX, previousTargetY) {
+  const pendingPath = consumeSharedSpacePointerPendingPath(roomId, pointer.key, pointer.path);
+  let points = sharedSpacePointerScreenPath(pointer, targetX, targetY, pendingPath);
+  if (points.length < 2 || Math.hypot(targetX - visual.x, targetY - visual.y) >= SHARED_POINTER_RENDER_DEFAULTS.snapDistancePx) {
+    visual.pathPoints = [];
+    visual.pathStartedAt = 0;
+    visual.pathDurationMs = 0;
+    visual.pathProgress = 0;
+    visual.pathFrameAt = now;
+    visual.replayMode = "snap";
+    noteSharedSpacePointerVelocity(visual, targetX, targetY, now, previousTargetAt, previousTargetX, previousTargetY);
     return;
   }
+  if (Math.hypot(points[0].x - visual.x, points[0].y - visual.y) >= 1.5) {
+    points.unshift({ x: visual.x, y: visual.y });
+  }
+  points = trimSharedSpacePointerReplayPath(points, visual, targetX, targetY, now);
+  const arrivalInterval = Math.max(1, now - Number(previousTargetAt || now));
+  const replay = adaptiveSharedPointerReplayDuration(arrivalInterval, sharedSpacePointerReplayFrame(now), {
+    lowLatencyMinMs: SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_MIN_MS,
+    lowLatencyMaxMs: SHARED_SPACE_POINTER_RENDER_PATH_LOW_LATENCY_MAX_MS,
+    stableMinMs: SHARED_SPACE_POINTER_RENDER_PATH_STABLE_MIN_MS,
+    stableMaxMs: SHARED_SPACE_POINTER_RENDER_PATH_STABLE_MAX_MS,
+    droppedFrameCooldownMs: SHARED_SPACE_POINTER_RENDER_PATH_DROPPED_COOLDOWN_MS,
+  });
+  visual.pathPoints = points;
+  visual.pathStartedAt = now;
+  visual.pathProgress = 0;
+  visual.pathFrameAt = now;
+  visual.pathDurationMs = replay.durationMs;
+  visual.replayMode = replay.mode;
+  noteSharedSpacePointerVelocity(visual, targetX, targetY, now, previousTargetAt, previousTargetX, previousTargetY);
+}
+
+function sharedSpacePointerFrameTarget(visual, fallbackX, fallbackY, now) {
+  if (!Array.isArray(visual.pathPoints) || visual.pathPoints.length < 2 || !visual.pathStartedAt || !visual.pathDurationMs) {
+    return { x: fallbackX, y: fallbackY, pathActive: false };
+  }
+  const frameDt = visual.pathFrameAt ? Math.max(0, now - Number(visual.pathFrameAt || now)) : 1000 / 60;
+  visual.pathFrameAt = now;
+  const progressStep = Math.min(0.34, Math.min(frameDt || 1000 / 60, sharedSpacePointerFrameProgressCapMs()) / Math.max(1, visual.pathDurationMs));
+  const progress = clamp(Number(visual.pathProgress || 0) + progressStep, 0, 1);
+  visual.pathProgress = progress;
+  const point = sampleSharedPointerPath(visual.pathPoints, progress);
+  if (progress >= 1) {
+    visual.pathPoints = [];
+    visual.pathStartedAt = 0;
+    visual.pathDurationMs = 0;
+    visual.pathProgress = 0;
+  }
+  return point ? { ...point, pathActive: progress < 1 } : { x: fallbackX, y: fallbackY, pathActive: false };
+}
+
+function clearSharedSpacePointerVisuals(layer = null) {
+  if (state.sharedSpacePointerVisualFrame) {
+    window.cancelAnimationFrame(state.sharedSpacePointerVisualFrame);
+    state.sharedSpacePointerVisualFrame = 0;
+  }
+  Object.values(state.sharedSpacePointerVisuals || {}).forEach((visual) => {
+    visual.node?.remove();
+    visual.trail?.remove();
+  });
+  state.sharedSpacePointerVisuals = {};
+  state.sharedSpacePointerVisualRoomId = "";
+  state.sharedSpacePointerVisualLastAt = 0;
+  state.sharedSpacePointerPendingPaths = {};
+  state.sharedSpacePointerPendingRealtimeSamples = {};
+  state.sharedSpacePointerRenderLayer = "dom";
+  const board = els.spaceBoard || spaceSurface();
+  (layer || board?.querySelector?.("[data-shared-space-pointer-layer]"))?.remove();
+}
+
+function ensureSharedSpacePointerLayer(board) {
+  if (!board) return null;
+  let layer = board.querySelector("[data-shared-space-pointer-layer]");
   if (!layer) {
     layer = document.createElement("div");
     layer.className = "shared-space-pointer-layer";
     layer.dataset.sharedSpacePointerLayer = "true";
     board.append(layer);
   }
-  const now = Date.now();
+  return layer;
+}
+
+function sharedSpacePointerCanvasDpr(width, height) {
+  const raw = Math.max(1, Number(window.devicePixelRatio || 1));
+  const pixels = Math.max(1, Number(width || 1) * Number(height || 1));
+  const maxPixels = 12_000_000;
+  return Math.max(1, Math.min(raw, Math.sqrt(maxPixels / pixels)));
+}
+
+function ensureSharedSpacePointerCanvas(layer, board) {
+  if (state.sharedSpacePointerCanvasFailed || !layer || !board || !("HTMLCanvasElement" in window)) return null;
+  let canvas = layer.querySelector("[data-shared-space-pointer-canvas]");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    canvas.className = "shared-space-pointer-canvas";
+    canvas.dataset.sharedSpacePointerCanvas = "true";
+    canvas.setAttribute("aria-hidden", "true");
+    layer.prepend(canvas);
+  }
+  let context = canvas.getContext("2d", { alpha: true, desynchronized: true });
+  if (!context) {
+    canvas.remove();
+    state.sharedSpacePointerCanvasFailed = true;
+    return null;
+  }
+  const rect = board.getBoundingClientRect?.();
+  const width = Math.max(1, Math.ceil(board.scrollWidth || board.clientWidth || rect?.width || 1));
+  const height = Math.max(1, Math.ceil(board.scrollHeight || board.clientHeight || rect?.height || 1));
+  const dpr = sharedSpacePointerCanvasDpr(width, height);
+  const pixelWidth = Math.max(1, Math.round(width * dpr));
+  const pixelHeight = Math.max(1, Math.round(height * dpr));
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+  }
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.imageSmoothingEnabled = true;
+  return { canvas, context, width, height, dpr };
+}
+
+function roundedCanvasRect(context, x, y, width, height, radius) {
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+  context.beginPath();
+  context.moveTo(x + r, y);
+  context.lineTo(x + width - r, y);
+  context.quadraticCurveTo(x + width, y, x + width, y + r);
+  context.lineTo(x + width, y + height - r);
+  context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  context.lineTo(x + r, y + height);
+  context.quadraticCurveTo(x, y + height, x, y + height - r);
+  context.lineTo(x, y + r);
+  context.quadraticCurveTo(x, y, x + r, y);
+  context.closePath();
+}
+
+function clippedCanvasLabel(context, label, maxWidth = 140) {
+  const text = cleanText(label, "Member");
+  if (context.measureText(text).width <= maxWidth) return text;
+  let clipped = text;
+  while (clipped.length > 1 && context.measureText(`${clipped}...`).width > maxWidth) {
+    clipped = clipped.slice(0, -1);
+  }
+  return `${clipped || "M"}...`;
+}
+
+function renderSharedSpacePointerCanvas(surface, entries = [], now = performance.now()) {
+  const { context, width, height, dpr } = surface;
+  context.clearRect(0, 0, width, height);
+  for (const { visual } of entries) {
+    const samples = visual.history || [];
+    const maxAge = SHARED_SPACE_POINTER_RENDER_HISTORY_MAX_AGE_MS;
+    for (const sample of samples) {
+      const age = clamp(now - Number(sample.at || 0), 0, maxAge);
+      const life = 1 - age / maxAge;
+      if (life <= 0) continue;
+      context.globalAlpha = life * 0.52;
+      context.fillStyle = visual.color || "#7ddcff";
+      context.beginPath();
+      context.arc(
+        snapSharedPointerPixel(Number(sample.x || 0) + 2, dpr),
+        snapSharedPointerPixel(Number(sample.y || 0) + 2, dpr),
+        2.4 + life * 2.2,
+        0,
+        Math.PI * 2
+      );
+      context.fill();
+    }
+  }
+  context.globalAlpha = 1;
+  context.font = "700 11px system-ui, -apple-system, BlinkMacSystemFont, sans-serif";
+  context.textBaseline = "middle";
+  for (const { visual, pointer, pulseActive } of entries) {
+    const x = snapSharedPointerPixel(visual.x, dpr);
+    const y = snapSharedPointerPixel(visual.y, dpr);
+    if (pulseActive && visual.pulseStartedAt) {
+      const progress = clamp((now - visual.pulseStartedAt) / SHARED_SPACE_POINTER_CLICK_TTL_MS, 0, 1);
+      context.globalAlpha = 0.92 * (1 - progress);
+      context.strokeStyle = visual.color || pointer.color || "#7ddcff";
+      context.lineWidth = 3;
+      context.beginPath();
+      context.arc(x + 2, y + 2, 12 + progress * 48, 0, Math.PI * 2);
+      context.stroke();
+    }
+    context.globalAlpha = 1;
+    context.fillStyle = visual.color || pointer.color || "#7ddcff";
+    context.save();
+    context.translate(x + 2, y + 2);
+    context.rotate(0.59);
+    context.beginPath();
+    context.moveTo(0, -9);
+    context.lineTo(14, 0);
+    context.lineTo(0, 9);
+    context.closePath();
+    context.fill();
+    context.restore();
+    const label = clippedCanvasLabel(context, visual.label || pointer.user_label || "Member", 132);
+    const textWidth = Math.min(132, context.measureText(label).width);
+    const labelX = x + 23;
+    const labelY = y + 2;
+    const pillWidth = textWidth + 16;
+    roundedCanvasRect(context, labelX, labelY - 10, pillWidth, 20, 10);
+    context.fillStyle = visual.color || pointer.color || "#7ddcff";
+    context.fill();
+    context.strokeStyle = "rgba(255, 255, 255, 0.24)";
+    context.lineWidth = 1;
+    context.stroke();
+    context.fillStyle = "#050a12";
+    context.fillText(label, labelX + 8, labelY);
+  }
+  context.globalAlpha = 1;
+}
+
+function createSharedSpacePointerTrail(pointer) {
+  const trail = document.createElement("div");
+  trail.className = "shared-space-pointer-trail";
+  trail.dataset.sharedSpacePointerTrail = pointer.key;
+  trail.style.setProperty("--shared-pointer-color", pointer.color);
+  const fragment = document.createDocumentFragment();
+  for (let index = 0; index < SHARED_SPACE_POINTER_RENDER_HISTORY_LIMIT; index += 1) {
+    const dot = document.createElement("span");
+    dot.setAttribute("aria-hidden", "true");
+    fragment.append(dot);
+  }
+  trail.append(fragment);
+  return trail;
+}
+
+function createSharedSpacePointerNode(pointer) {
+  const node = document.createElement("div");
+  node.className = "shared-space-pointer";
+  node.dataset.sharedSpacePointer = pointer.key;
+  node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
+  return node;
+}
+
+function releaseSharedSpacePointerDom(visual) {
+  visual.node?.remove();
+  visual.trail?.remove();
+  visual.node = null;
+  visual.trail = null;
+  visual.trailDots = [];
+}
+
+function ensureSharedSpacePointerDom(layer, visual, pointer) {
+  if (!visual.trail) {
+    visual.trail = createSharedSpacePointerTrail(pointer);
+    visual.trailDots = Array.from(visual.trail.children);
+  }
+  if (!visual.node) visual.node = createSharedSpacePointerNode(pointer);
+  if (!visual.trail.isConnected || !visual.node.isConnected) layer.append(visual.trail, visual.node);
+}
+
+function ensureSharedSpacePointerVisual(layer, pointer, targetX, targetY, now) {
+  let visual = state.sharedSpacePointerVisuals[pointer.key];
+  if (!visual) {
+    visual = {
+      key: pointer.key,
+      node: null,
+      trail: null,
+      trailDots: [],
+      x: targetX,
+      y: targetY,
+      targetX,
+      targetY,
+      targetId: "",
+      targetReceivedAt: now,
+      pathPoints: [],
+      pathStartedAt: 0,
+      pathDurationMs: 0,
+      pathProgress: 0,
+      pathFrameAt: now,
+      replayMode: "idle",
+      velocityX: 0,
+      velocityY: 0,
+      velocityAt: now,
+      predictionLeadMs: 0,
+      predictionPx: 0,
+      netAgeMs: 0,
+      renderBufferMs: SHARED_SPACE_POINTER_REALTIME_BUFFER_MS,
+      realtimeSamples: [],
+      realtimeMode: "idle",
+      lastSeenAt: now,
+      lastDistance: canvasDistance(),
+      history: [],
+      mode: "settled",
+      pulseId: "",
+      pulseStartedAt: 0,
+      label: "",
+      color: "",
+    };
+    state.sharedSpacePointerVisuals[pointer.key] = visual;
+  }
+  return visual;
+}
+
+function renderSharedSpacePointerTrail(visual, now) {
+  visual.history = pruneSharedPointerSamples(visual.history, now, {
+    limit: SHARED_SPACE_POINTER_RENDER_HISTORY_LIMIT,
+    maxAgeMs: SHARED_SPACE_POINTER_RENDER_HISTORY_MAX_AGE_MS,
+  });
+  const samples = visual.history;
+  const dots = visual.trailDots || [];
+  const maxAge = SHARED_SPACE_POINTER_RENDER_HISTORY_MAX_AGE_MS;
+  for (let index = 0; index < dots.length; index += 1) {
+    const dot = dots[index];
+    const sample = samples[samples.length - 1 - index];
+    if (!sample) {
+      dot.style.opacity = "0";
+      continue;
+    }
+    const age = clamp(now - Number(sample.at || 0), 0, maxAge);
+    const life = 1 - age / maxAge;
+    const dpr = window.devicePixelRatio || 1;
+    dot.style.opacity = String(Number((life * 0.52).toFixed(3)));
+    dot.style.transform = `translate3d(${snapSharedPointerPixel(sample.x + 2, dpr)}px, ${snapSharedPointerPixel(sample.y + 2, dpr)}px, 0) scale(${Number((0.38 + life * 0.62).toFixed(3))})`;
+  }
+}
+
+function updateSharedSpacePointerPulse(visual, pointer, now) {
+  const pulseId = cleanText(pointer.pulse_id || "", "");
+  const clicking = Date.now() < Number(pointer.click_until || 0);
+  if (clicking && pulseId && visual.pulseId !== pulseId) {
+    visual.pulseId = pulseId;
+    visual.pulseStartedAt = now;
+  }
+  return Boolean(clicking && visual.pulseStartedAt && now - visual.pulseStartedAt < SHARED_SPACE_POINTER_CLICK_TTL_MS);
+}
+
+function renderSharedSpacePointerClickPulse(visual, pointer, now) {
+  const ring = visual.node?.querySelector("i");
+  if (!ring) return updateSharedSpacePointerPulse(visual, pointer, now);
+  const active = updateSharedSpacePointerPulse(visual, pointer, now);
+  if (!active) {
+    ring.style.opacity = "0";
+    ring.style.transform = "scale(0.24)";
+    visual.node?.classList.remove("is-clicking");
+    return false;
+  }
+  const progress = clamp((now - visual.pulseStartedAt) / SHARED_SPACE_POINTER_CLICK_TTL_MS, 0, 1);
+  ring.style.opacity = String(Number((0.92 * (1 - progress)).toFixed(3)));
+  ring.style.transform = `scale(${Number((0.24 + progress * 2.01).toFixed(3))})`;
+  visual.node?.classList.add("is-clicking");
+  return progress < 1;
+}
+
+function renderSharedSpacePointerDiagnostics(layer, now, liveCount, activeCount) {
+  const existing = layer?.querySelector?.("[data-shared-space-pointer-diagnostics]");
+  if (!state.sharedSpacePointerDiagnosticsEnabled) {
+    existing?.remove();
+    return;
+  }
+  if (!layer) return;
+  let node = existing;
+  if (!node) {
+    node = document.createElement("dl");
+    node.className = "shared-space-pointer-diagnostics";
+    node.dataset.sharedSpacePointerDiagnostics = "true";
+    layer.append(node);
+  }
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  if (!diagnostics.lastEventRateAt) {
+    diagnostics.lastEventRateAt = now;
+    diagnostics.lastEventRateCount = diagnostics.eventCount;
+  } else if (now - diagnostics.lastEventRateAt >= 1000) {
+    diagnostics.eventRate = (diagnostics.eventCount - diagnostics.lastEventRateCount) * 1000 / Math.max(1, now - diagnostics.lastEventRateAt);
+    diagnostics.lastEventRateAt = now;
+    diagnostics.lastEventRateCount = diagnostics.eventCount;
+  }
+  if (now - Number(diagnostics.lastRenderAt || 0) < SHARED_SPACE_POINTER_DIAGNOSTICS_UPDATE_MS) return;
+  diagnostics.lastRenderAt = now;
+  const queueLength = Number(state.sharedSpacePointerMoveSamples?.length || 0);
+  const rows = [
+    ["FPS", diagnostics.fps ? diagnostics.fps.toFixed(0) : "0"],
+    ["Dropped", String(diagnostics.droppedFrames || 0)],
+    ["Events", `${diagnostics.eventRate.toFixed(1)}/s`],
+    ["Latency", `${Math.round(diagnostics.latencyMs || 0)}ms`],
+    ["Samples", `${diagnostics.sampleCount || 0}/${activeCount}`],
+    ["Queue", String(queueLength)],
+    ["Mode", diagnostics.mode || "idle"],
+    ["Replay", `${diagnostics.replayMode || "idle"} ${Math.round(diagnostics.replayMs || 0)}ms`],
+    ["Lead", `${Math.round(diagnostics.predictionLeadMs || 0)}ms/${Math.round(diagnostics.predictionPx || 0)}px`],
+    ["NetAge", `${Math.round(diagnostics.netAgeMs || 0)}ms`],
+    ["Buffer", `${Math.round(diagnostics.renderBufferMs || 0)}ms`],
+    ["InputSend", `${Math.round(diagnostics.inputToSendMs || 0)}ms`],
+    ["Wire", `${Math.round(diagnostics.transportLatencyMs || 0)}ms`],
+    ["Paint", `${Math.round(diagnostics.paintLatencyMs || 0)}ms`],
+    ["Predict", state.sharedSpacePointerPredictionEnabled ? `${Math.round(diagnostics.realtimePredictionMs || 0)}ms/${Math.round(diagnostics.realtimePredictionPx || 0)}px` : "off"],
+    ["Drops", String(diagnostics.staleDrops || 0)],
+    ["Input", diagnostics.inputMode || "move"],
+    ["Transport", diagnostics.transport || "json"],
+    ["Binary", `${diagnostics.binaryReceived || 0}/${diagnostics.binarySent || 0}`],
+    ["RTC", `${diagnostics.rtcOpen || 0}/${diagnostics.rtcPeers || 0}`],
+    ["Fallback", String(diagnostics.dragFallbackSent || 0)],
+    ["Local", String(diagnostics.localEchoes || 0)],
+    ["BinKB", `${((diagnostics.binaryBytesReceived + diagnostics.binaryBytesSent) / 1024).toFixed(1)}`],
+    ["RtcKB", `${((diagnostics.rtcBytesReceived + diagnostics.rtcBytesSent) / 1024).toFixed(1)}`],
+    ["Layer", state.sharedSpacePointerRenderLayer || "dom"],
+    ["Live", String(liveCount)],
+  ];
+  node.replaceChildren(...rows.flatMap(([term, value]) => {
+    const dt = document.createElement("dt");
+    const dd = document.createElement("dd");
+    dt.textContent = term;
+    dd.textContent = value;
+    return [dt, dd];
+  }));
+}
+
+function sharedSpacePointerVisibleIdentity(pointer = {}) {
+  const userId = cleanText(pointer.user_id || pointer.userId, "");
+  if (userId) return `user:${numericSharedPointerId(userId).toString(36)}`;
+  const label = cleanText(pointer.user_label || pointer.label, "").toLowerCase();
+  if (label) return `label:${label}`;
+  return cleanText(pointer.key || pointer.pointer_event_id || pointer.event_id, "");
+}
+
+function sharedSpacePointerFreshnessRank(pointer = {}) {
+  const source = cleanText(pointer.realtime_source || "", "").toLowerCase();
+  if (source === "local") return 70;
+  if (source === "rtc") return 60;
+  if (source === "binary") return 55;
+  if (source === "rt") return 40;
+  if (source === "fallback") return 20;
+  return 10;
+}
+
+function sharedSpacePointerPreferred(first = {}, second = {}) {
+  const firstRank = sharedSpacePointerFreshnessRank(first);
+  const secondRank = sharedSpacePointerFreshnessRank(second);
+  if (firstRank !== secondRank) return firstRank > secondRank ? first : second;
+  const firstSeq = Number(first.realtime_seq || 0);
+  const secondSeq = Number(second.realtime_seq || 0);
+  if (firstSeq !== secondSeq) return firstSeq > secondSeq ? first : second;
+  const firstAt = Math.max(Number(first.received_at || 0), Number(first.last_seen_at || 0));
+  const secondAt = Math.max(Number(second.received_at || 0), Number(second.last_seen_at || 0));
+  return firstAt >= secondAt ? first : second;
+}
+
+function selectVisibleSharedSpacePointers(pointers = []) {
+  const visibleByIdentity = new Map();
+  const hidden = [];
+  (Array.isArray(pointers) ? pointers : []).forEach((pointer) => {
+    const identity = sharedSpacePointerVisibleIdentity(pointer);
+    if (!identity) {
+      hidden.push(pointer);
+      return;
+    }
+    const existing = visibleByIdentity.get(identity);
+    if (!existing) {
+      visibleByIdentity.set(identity, pointer);
+      return;
+    }
+    const preferred = sharedSpacePointerPreferred(existing, pointer);
+    visibleByIdentity.set(identity, preferred);
+    hidden.push(preferred === existing ? pointer : existing);
+  });
+  return { visible: Array.from(visibleByIdentity.values()), hidden };
+}
+
+function stepSharedSpacePointerVisuals(now = performance.now()) {
+  state.sharedSpacePointerVisualFrame = 0;
+  const target = currentSharedSpacePointerTarget();
+  const board = els.spaceBoard || spaceSurface();
+  if (!target || !board) {
+    clearSharedSpacePointerVisuals();
+    return;
+  }
+  let layer = ensureSharedSpacePointerLayer(board);
+  if (!layer) return;
+  if (state.sharedSpacePointerVisualRoomId && state.sharedSpacePointerVisualRoomId !== target.room.id) {
+    clearSharedSpacePointerVisuals(layer);
+    layer = ensureSharedSpacePointerLayer(board);
+    if (!layer) return;
+  }
+  state.sharedSpacePointerVisualRoomId = target.room.id;
+  const previousFrameAt = Number(state.sharedSpacePointerVisualLastAt || 0);
+  const dt = previousFrameAt ? clamp(now - previousFrameAt, 0, 96) : 1000 / 60;
+  state.sharedSpacePointerVisualLastAt = now;
+  const diagnostics = state.sharedSpacePointerDiagnostics;
+  if (dt > 0) {
+    const instantFps = 1000 / dt;
+    diagnostics.fps = diagnostics.fps ? diagnostics.fps * 0.9 + instantFps * 0.1 : instantFps;
+    if (dt >= SHARED_SPACE_POINTER_RENDER_DROPPED_FRAME_MS) {
+      diagnostics.droppedFrames += Math.max(1, Math.round(dt / (1000 / 60)) - 1);
+      diagnostics.lastDroppedFrameAt = now;
+    }
+  }
+  const epochNow = Date.now();
   const pointers = state.sharedSpacePointers[target.room.id] || {};
-  const live = Object.values(pointers).filter((pointer) => now - Number(pointer.last_seen_at || 0) <= SHARED_SPACE_POINTER_TTL_MS);
+  const livePointers = Object.values(pointers).filter((pointer) => epochNow - Number(pointer.last_seen_at || 0) <= SHARED_SPACE_POINTER_TTL_MS);
+  const selection = selectVisibleSharedSpacePointers(livePointers);
+  const live = selection.visible;
+  selection.hidden.forEach((pointer) => {
+    const key = cleanText(pointer?.key || "", "");
+    if (!key) return;
+    consumeSharedSpacePointerPendingPath(target.room.id, key, []);
+    consumeSharedSpacePointerPendingRealtime(target.room.id, key);
+  });
+  const canvasSurface = ensureSharedSpacePointerCanvas(layer, board);
+  const useCanvas = Boolean(canvasSurface);
+  state.sharedSpacePointerRenderLayer = useCanvas ? "canvas" : "dom";
+  if (!useCanvas) layer.querySelector("[data-shared-space-pointer-canvas]")?.remove();
   const seen = new Set();
+  const canvasEntries = [];
+  let keepAnimating = state.sharedSpacePointerDiagnosticsEnabled;
+  let sampleCount = 0;
+  let mode = "idle";
+  let predictionLeadMs = 0;
+  let predictionPx = 0;
+  let netAgeMs = 0;
+  let renderBufferMs = SHARED_SPACE_POINTER_REALTIME_BUFFER_MS;
+  let realtimePredictionMs = 0;
+  let realtimePredictionPx = 0;
+  let realtimeSampleCount = 0;
+  let replayMs = 0;
+  let replayMode = "idle";
+  let paintLatencyMs = 0;
   for (const pointer of live) {
     seen.add(pointer.key);
-    let node = layer.querySelector(`[data-shared-space-pointer="${CSS.escape(pointer.key)}"]`);
-    if (!node) {
-      node = document.createElement("div");
-      node.className = "shared-space-pointer";
-      node.dataset.sharedSpacePointer = pointer.key;
-      node.innerHTML = '<span class="shared-space-pointer-mark" aria-hidden="true"></span><strong></strong><i aria-hidden="true"></i>';
-      layer.append(node);
+    const targetX = logicalToScreenPx(pointer.x);
+    const targetY = logicalToScreenPx(pointer.y);
+    if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) continue;
+    const visualWasNew = !state.sharedSpacePointerVisuals[pointer.key];
+    const visual = ensureSharedSpacePointerVisual(layer, pointer, targetX, targetY, now);
+    const targetId = sharedSpacePointerTargetId(pointer);
+    const distanceChanged = Math.abs(Number(visual.lastDistance || 1) - canvasDistance()) > 0.001;
+    const pendingRealtime = consumeSharedSpacePointerPendingRealtime(target.room.id, pointer.key);
+    if (visual.targetId !== targetId || distanceChanged) {
+      const previousTargetAt = Number(visual.targetReceivedAt || now);
+      const previousTargetX = Number(visual.targetX);
+      const previousTargetY = Number(visual.targetY);
+      visual.targetX = targetX;
+      visual.targetY = targetY;
+      visual.targetId = targetId;
+      visual.targetReceivedAt = Number(pointer.received_at || now);
+      visual.lastSeenAt = now;
+      if (distanceChanged) {
+        visual.x = targetX;
+        visual.y = targetY;
+        visual.history = [];
+        visual.pathPoints = [];
+        visual.pathStartedAt = 0;
+        visual.pathDurationMs = 0;
+        visual.pathProgress = 0;
+        visual.pathFrameAt = now;
+        visual.replayMode = "reset";
+        visual.velocityX = 0;
+        visual.velocityY = 0;
+        visual.velocityAt = now;
+        visual.predictionLeadMs = 0;
+        visual.predictionPx = 0;
+        visual.netAgeMs = 0;
+        visual.renderBufferMs = SHARED_SPACE_POINTER_REALTIME_BUFFER_MS;
+        visual.realtimeSamples = [];
+        visual.realtimeMode = "reset";
+        consumeSharedSpacePointerPendingPath(target.room.id, pointer.key, []);
+      } else {
+        appendSharedSpacePointerVisualRealtime(visual, pendingRealtime, now);
+        startSharedSpacePointerVisualPath(
+          visual,
+          pointer,
+          targetX,
+          targetY,
+          now,
+          previousTargetAt,
+          target.room.id,
+          previousTargetX,
+          previousTargetY
+        );
+      }
+    } else {
+      visual.targetX = targetX;
+      visual.targetY = targetY;
+      appendSharedSpacePointerVisualRealtime(visual, pendingRealtime, now);
     }
-    const screenX = logicalToScreenPx(pointer.x);
-    const screenY = logicalToScreenPx(pointer.y);
-    const previousX = Number(node.dataset.sharedPointerScreenX || "");
-    const previousY = Number(node.dataset.sharedPointerScreenY || "");
-    const previousTraceAt = Number(node.dataset.sharedPointerTraceAt || 0);
-    const pathEventId = cleanText(pointer.pointer_event_id || pointer.event_id || "", "");
-    const newPointerPath = pathEventId && node.dataset.sharedPointerRenderedEventId !== pathEventId;
-    const pathPoints = Array.isArray(pointer.path) && pointer.path.length ? pointer.path : [{ x: pointer.x, y: pointer.y }];
-    const screenPath = pathPoints.map(sharedSpacePointerScreenPoint).filter(Boolean);
-    if (
-      newPointerPath
-      && Number.isFinite(previousX)
-      && Number.isFinite(previousY)
-      && (!screenPath.length || Math.hypot(screenPath[0].x - previousX, screenPath[0].y - previousY) >= 0.5)
-    ) {
-      screenPath.unshift({ x: previousX, y: previousY });
+    if (visualWasNew && Array.isArray(visual.realtimeSamples) && visual.realtimeSamples.length) {
+      const seed = sampleSharedPointerRealtimeBuffer(visual.realtimeSamples, now, {
+        bufferDelayMs: SHARED_SPACE_POINTER_REALTIME_BUFFER_MS,
+        maxPredictionMs: 0,
+        maxPredictionDistancePx: 0,
+        staleMs: SHARED_SPACE_POINTER_REALTIME_STALE_MS,
+      }) || visual.realtimeSamples[0];
+      if (
+        seed
+        && Number.isFinite(Number(seed.x))
+        && Number.isFinite(Number(seed.y))
+        && Math.hypot(Number(seed.x) - targetX, Number(seed.y) - targetY) < SHARED_POINTER_RENDER_DEFAULTS.snapDistancePx
+      ) {
+        visual.x = Number(seed.x);
+        visual.y = Number(seed.y);
+        visual.history = [];
+      }
     }
-    if (
-      Number.isFinite(previousX)
-      && Number.isFinite(previousY)
-      && now - previousTraceAt >= SHARED_SPACE_POINTER_TRACE_MS
-      && Math.hypot(screenX - previousX, screenY - previousY) >= SHARED_SPACE_POINTER_TRACE_MIN_PX
-    ) {
-      node.dataset.sharedPointerTraceAt = String(now);
-      if (newPointerPath && screenPath.length > 1) addSharedSpacePointerTracePoints(layer, pointer, screenPath);
-      else addSharedSpacePointerTracePath(layer, pointer, previousX, previousY, screenX, screenY);
+    visual.lastDistance = canvasDistance();
+    const realtimeFrameTarget = sharedSpacePointerRealtimeFrameTarget(visual, visual.targetX, visual.targetY, now, pointer);
+    const rawFrameTarget = realtimeFrameTarget || sharedSpacePointerFrameTarget(visual, visual.targetX, visual.targetY, now);
+    const frameTarget = realtimeFrameTarget || predictSharedSpacePointerFrameTarget(visual, rawFrameTarget, now);
+    const next = smoothSharedPointerPosition(
+      { x: visual.x, y: visual.y },
+      { x: frameTarget.x, y: frameTarget.y },
+      dt,
+      sharedSpacePointerMotionOptions(frameTarget, now)
+    );
+    visual.x = next.x;
+    visual.y = next.y;
+    visual.mode = next.mode;
+    if (frameTarget.realtime) mode = frameTarget.mode || "net";
+    else if (frameTarget.predicted) mode = "lead";
+    else if (frameTarget.pathActive) mode = "path";
+    else if (next.mode !== "settled") mode = next.mode;
+    if (next.snapped) {
+      visual.history = [];
+      visual.pathPoints = [];
+      visual.pathStartedAt = 0;
+      visual.pathDurationMs = 0;
+      visual.pathProgress = 0;
+      visual.pathFrameAt = now;
+      visual.replayMode = "snap";
+      visual.realtimeSamples = [];
+      visual.realtimeMode = "snap";
+      visual.predictionLeadMs = 0;
+      visual.predictionPx = 0;
     }
-    node.dataset.sharedPointerScreenX = String(screenX);
-    node.dataset.sharedPointerScreenY = String(screenY);
-    const finalTransform = sharedSpacePointerTransform(screenX, screenY);
-    if (!newPointerPath || !animateSharedSpacePointerNode(node, screenPath, finalTransform)) node.style.transform = finalTransform;
-    if (pathEventId) node.dataset.sharedPointerRenderedEventId = pathEventId;
-    node.style.setProperty("--shared-pointer-color", pointer.color);
-    const clicking = now < Number(pointer.click_until || 0);
-    const pulseId = cleanText(pointer.pulse_id || "", "");
-    if (clicking && pulseId && node.dataset.sharedPointerPulseId !== pulseId) {
-      node.dataset.sharedPointerPulseId = pulseId;
-      const ring = document.createElement("i");
-      ring.setAttribute("aria-hidden", "true");
-      node.querySelector("i")?.replaceWith(ring);
+    const label = pointer.user_label || "Member";
+    visual.label = label;
+    visual.color = pointer.color;
+    pushSharedPointerSample(visual.history, { x: visual.x, y: visual.y, at: now }, {
+      limit: SHARED_SPACE_POINTER_RENDER_HISTORY_LIMIT,
+    });
+    let pulseActive = false;
+    if (useCanvas) {
+      releaseSharedSpacePointerDom(visual);
+      pulseActive = updateSharedSpacePointerPulse(visual, pointer, now);
+      canvasEntries.push({ visual, pointer, pulseActive });
+    } else {
+      ensureSharedSpacePointerDom(layer, visual, pointer);
+      visual.node.style.transform = sharedSpacePointerSnappedTransform(visual.x, visual.y);
+      visual.node.style.setProperty("--shared-pointer-color", pointer.color);
+      visual.trail.style.setProperty("--shared-pointer-color", pointer.color);
+      visual.node.querySelector("strong").textContent = label;
+      renderSharedSpacePointerTrail(visual, now);
+      pulseActive = renderSharedSpacePointerClickPulse(visual, pointer, now);
     }
-    node.classList.toggle("is-clicking", clicking);
-    node.querySelector("strong").textContent = pointer.user_label || "Member";
+    const remaining = Math.hypot(visual.targetX - visual.x, visual.targetY - visual.y);
+    sampleCount += visual.history.length;
+    predictionLeadMs = Math.max(predictionLeadMs, Number(visual.predictionLeadMs || 0));
+    predictionPx = Math.max(predictionPx, Number(visual.predictionPx || 0));
+    netAgeMs = Math.max(netAgeMs, Number(visual.netAgeMs || 0));
+    renderBufferMs = Math.max(renderBufferMs, Number(visual.renderBufferMs || 0));
+    paintLatencyMs = Math.max(paintLatencyMs, clamp(now - Number(visual.targetReceivedAt || now), 0, 5000));
+    if (frameTarget.realtime) {
+      realtimePredictionMs = Math.max(realtimePredictionMs, Number(frameTarget.predictionMs || 0));
+      realtimePredictionPx = Math.max(realtimePredictionPx, Number(frameTarget.predictionPx || 0));
+      realtimeSampleCount += Number(frameTarget.sampleCount || 0);
+    }
+    replayMs = Math.max(replayMs, Number(visual.pathDurationMs || 0));
+    if (visual.replayMode && visual.replayMode !== "idle") replayMode = visual.replayMode;
+    keepAnimating = keepAnimating
+      || remaining > SHARED_POINTER_RENDER_DEFAULTS.settlePx
+      || frameTarget.pathActive
+      || visual.history.length > 0
+      || pulseActive;
   }
-  layer.querySelectorAll("[data-shared-space-pointer]").forEach((node) => {
-    if (!seen.has(node.dataset.sharedSpacePointer || "")) node.remove();
+  if (useCanvas) renderSharedSpacePointerCanvas(canvasSurface, canvasEntries, now);
+  Object.entries(state.sharedSpacePointerVisuals).forEach(([key, visual]) => {
+    if (seen.has(key)) return;
+    visual.node?.remove();
+    visual.trail?.remove();
+    consumeSharedSpacePointerPendingPath(target.room.id, key, []);
+    consumeSharedSpacePointerPendingRealtime(target.room.id, key);
+    delete state.sharedSpacePointerVisuals[key];
   });
+  diagnostics.sampleCount = sampleCount;
+  diagnostics.predictionLeadMs = predictionLeadMs;
+  diagnostics.predictionPx = predictionPx;
+  diagnostics.netAgeMs = netAgeMs;
+  diagnostics.renderBufferMs = renderBufferMs;
+  diagnostics.paintLatencyMs = paintLatencyMs;
+  diagnostics.realtimePredictionMs = realtimePredictionMs;
+  diagnostics.realtimePredictionPx = realtimePredictionPx;
+  diagnostics.realtimeSampleCount = realtimeSampleCount;
+  diagnostics.inputMode = state.sharedSpacePointerInputMode || "move";
+  diagnostics.replayMs = replayMs;
+  diagnostics.replayMode = replayMode;
+  diagnostics.mode = mode;
+  renderSharedSpacePointerDiagnostics(layer, now, live.length, Object.keys(state.sharedSpacePointerVisuals).length);
+  if (keepAnimating) scheduleSharedSpacePointerRender("visual-active");
+}
+
+function scheduleSharedSpacePointerRender(origin = "pointer-render") {
+  const target = currentSharedSpacePointerTarget();
+  if (!target) {
+    clearSharedSpacePointerVisuals();
+    return;
+  }
+  if (state.sharedSpacePointerVisualFrame) return;
+  state.sharedSpacePointerVisualFrame = window.requestAnimationFrame(stepSharedSpacePointerVisuals);
+}
+
+function renderSharedSpacePointers() {
+  scheduleSharedSpacePointerRender("render-request");
 }
 
 function sharedSpacePointerNavigationBlocked() {
@@ -8556,7 +10300,7 @@ function flushSharedSpacePointerMove() {
   state.sharedSpacePointerMoveEvent = null;
   const samples = state.sharedSpacePointerMoveSamples.slice();
   state.sharedSpacePointerMoveSamples = [];
-  void sendSharedSpacePointerEvent("move", event, { liveOnly: true, samples });
+  void sendSharedSpacePointerEvent("move", event, { liveOnly: true, samples, localEcho: false });
 }
 
 function scheduleSharedSpacePointerMoveFlush() {
@@ -8581,8 +10325,21 @@ function isSharedSpacePointerMove(event) {
   return true;
 }
 
-function queueSharedSpacePointerMove(event) {
+function isSharedSpacePointerDragMove(event) {
+  return Number(event?.buttons || 0) !== 0;
+}
+
+function queueSharedSpacePointerMove(event, options = {}) {
   if (!isSharedSpacePointerMove(event)) return;
+  const now = performance.now();
+  if (options.raw) {
+    state.sharedSpacePointerRawInputAt = now;
+    state.sharedSpacePointerInputMode = "raw";
+  } else if (state.sharedSpacePointerRawInputAt && now - state.sharedSpacePointerRawInputAt < SHARED_SPACE_POINTER_RAW_DEDUPE_MS) {
+    return;
+  } else {
+    state.sharedSpacePointerInputMode = "move";
+  }
   const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
   const samples = coalesced.length ? coalesced : [event];
   const latest = samples[samples.length - 1] || event;
@@ -8592,6 +10349,10 @@ function queueSharedSpacePointerMove(event) {
     state.sharedSpacePointerMoveSamples = state.sharedSpacePointerMoveSamples.slice(-SHARED_SPACE_POINTER_SAMPLE_BUFFER_LIMIT);
   }
   state.sharedSpacePointerMoveEvent = sharedSpacePointerEventSnapshot(latest, event);
+  echoSharedSpacePointerLocalEvent("move", state.sharedSpacePointerMoveEvent, {
+    samples: snapshots,
+    source: options.raw ? "local-raw" : "local-move",
+  });
   scheduleSharedSpacePointerMoveFlush();
 }
 
@@ -8603,18 +10364,64 @@ async function sendSharedSpacePointerEvent(type, event, options = {}) {
   const now = performance.now();
   if (type === "move" && !options.force && now - state.sharedSpacePointerLastSentAt < SHARED_SPACE_POINTER_SEND_MS) return;
   state.sharedSpacePointerLastSentAt = now;
+  const realtimeSamples = sharedSpacePointerRealtimeSamplesFromEvents(options.samples, event, now);
+  const latestRealtimeSample = realtimeSamples[realtimeSamples.length - 1] || null;
+  if (latestRealtimeSample) {
+    noteSharedSpacePointerDiagnosticAverage("inputToSendMs", clamp(now - Number(latestRealtimeSample.at || now), 0, 2000));
+  }
+  const seq = state.sharedSpacePointerSendSeq + 1;
+  state.sharedSpacePointerSendSeq = seq;
+  const durableDue = type !== "move" || now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= SHARED_SPACE_POINTER_DURABLE_MS;
+  const liveOnly = type === "move" && options.liveOnly === true && !durableDue;
+  const dragFallbackDue = liveOnly
+    && isSharedSpacePointerDragMove(event)
+    && now - Number(state.sharedSpacePointerLastDragFallbackSentAt || 0) >= SHARED_SPACE_POINTER_DRAG_FALLBACK_MS;
   const pointerEventId = remoteControlId("space_ptr");
   const path = type === "move"
     ? sharedSpacePointerPathFromSamples(options.samples, point, state.sharedSpacePointerLastMovePoint)
     : [];
+  if (options.localEcho !== false) {
+    echoSharedSpacePointerLocalEvent(type, event, {
+      target,
+      point,
+      now,
+      seq,
+      pointerEventId,
+      samples: options.samples,
+      realtimeSamples,
+      path,
+    });
+  }
+  if (liveOnly) {
+    const packetBuffer = createSharedSpacePointerBinaryBuffer(realtimeSamples, seq, now);
+    const peerSent = sendSharedSpacePointerPeerBinaryEvent(target, packetBuffer);
+    const socketSent = sendSharedSpacePointerBinaryEvent(target, realtimeSamples, seq, now, packetBuffer);
+    if (peerSent || socketSent) {
+      state.sharedSpacePointerLastMovePoint = point;
+      return;
+    }
+  }
   const payload = {
     type,
     pointer_event_id: pointerEventId,
     x: point.x,
     y: point.y,
     device_id: clientDeviceId(),
+    device_hash: sharedSpacePointerLocalDeviceHash(),
     user_label: publicUserLabel(state.authUser),
     distance: Number(canvasDistance().toFixed(2)),
+    sent_at_ms: Date.now(),
+    sent_perf_ms: Number(now.toFixed(2)),
+    event_time_ms: Number(event?.timeStamp || now),
+    rt: {
+      v: 1,
+      seq,
+      transport: "json",
+      sent_perf_ms: Number(now.toFixed(2)),
+      samples: encodeSharedPointerRealtimeSamples(realtimeSamples, now, {
+        limit: SHARED_SPACE_POINTER_REALTIME_SAMPLE_LIMIT,
+      }),
+    },
   };
   if (path.length > 1) payload.points = path;
   const body = {
@@ -8626,14 +10433,16 @@ async function sendSharedSpacePointerEvent(type, event, options = {}) {
   };
   if (type === "move" || type === "down") state.sharedSpacePointerLastMovePoint = point;
   if (["up", "click"].includes(type)) state.sharedSpacePointerLastMovePoint = null;
-  const durableDue = type !== "move" || now - Number(state.sharedSpacePointerLastDurableSentAt || 0) >= SHARED_SPACE_POINTER_DURABLE_MS;
-  const liveOnly = type === "move" && options.liveOnly === true && !durableDue;
   const liveSent = sendSharedSpacePointerLiveEvent(target, body, { liveOnly });
   if (liveSent) {
     if (!liveOnly) state.sharedSpacePointerLastDurableSentAt = now;
     return;
   }
-  if (type === "move" && !durableDue) return;
+  if (type === "move" && !durableDue && !dragFallbackDue) return;
+  if (dragFallbackDue) {
+    state.sharedSpacePointerLastDragFallbackSentAt = now;
+    state.sharedSpacePointerDiagnostics.dragFallbackSent += 1;
+  }
   state.sharedSpacePointerLastDurableSentAt = now;
   void fetchJson("/spaces/room", {
     method: "POST",
@@ -8665,6 +10474,7 @@ async function syncSharedSpacePointers(origin = "pointer-poll") {
     if (room?.id) {
       state.sharedRooms[room.id] = room;
       mergeSharedSpacePointerEvents(room.id, room.events);
+      queueSharedSpacePointerPeerProcessing(room);
       renderSharedSpacePointers();
     }
   } catch (error) {
@@ -8686,6 +10496,7 @@ function updateSharedSpacePointerSync() {
     closeSharedSpacePointerLiveSocket();
     clearSharedSpacePointerMoveQueue();
     state.sharedSpacePointerLastMovePoint = null;
+    state.sharedSpacePointerLocalLastPoint = null;
     if (state.sharedSpacePointerFollowFrame) window.cancelAnimationFrame(state.sharedSpacePointerFollowFrame);
     state.sharedSpacePointerFollowFrame = 0;
     state.sharedSpacePointerFollowTarget = null;
@@ -8694,9 +10505,11 @@ function updateSharedSpacePointerSync() {
       state.sharedSpacePointerSyncInterval = 0;
     }
     renderSharedSpacePointers();
+    closeSharedSpacePointerRtcPeers();
     return;
   }
   startSharedSpacePointerLiveSocket("pointer-sync");
+  queueSharedSpacePointerPeerProcessing(currentSharedSpacePointerTarget()?.room);
   if (!state.sharedSpacePointerSyncInterval) {
     state.sharedSpacePointerSyncInterval = window.setInterval(
       () => void syncSharedSpacePointers("pointer-poll"),
@@ -8707,6 +10520,7 @@ function updateSharedSpacePointerSync() {
 }
 
 function installSharedSpacePointerAwareness() {
+  document.addEventListener("pointerrawupdate", (event) => queueSharedSpacePointerMove(event, { raw: true }), { capture: true, passive: true });
   document.addEventListener("pointermove", queueSharedSpacePointerMove, { capture: true, passive: true });
   document.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
@@ -8838,6 +10652,7 @@ async function loadSharedSpaceRoom(options = {}) {
   if (room?.id) {
     state.sharedRooms[room.id] = room;
     mergeSharedSpacePointerEvents(room.id, room.events);
+    queueSharedSpacePointerPeerProcessing(room);
     applySharedRoomArea(room, options.origin || "shared-room");
     renderSharedVoice();
     if (state.agentView === "people") renderAgentPeoplePanel();
