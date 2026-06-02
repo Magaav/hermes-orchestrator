@@ -211,10 +211,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   current browser device on click, enable the optional `native-standby` module
   in local module settings, and download a generated native app package ZIP from
   `/account/devices/native/download`. The package must include a Windows
-  `install.cmd` entry point that creates Start Menu/Desktop app-mode launchers
-  for Edge or Chrome, and may include internal metadata for wake phrase standby
-  and live transcription contracts, but the PWA UI must not imply it can listen
-  while a phone screen is off without a real native companion app.
+  `install.cmd` entry point that installs an Electron-backed `WASM Agent.exe`
+  desktop process with Start Menu/Desktop shortcuts, and may include internal
+  metadata for wake phrase standby and live transcription contracts, but the
+  PWA UI must not imply it can listen while a phone screen is off without a
+  real native companion app.
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
   shareable/backupable/marketplace-ready. App positions, widget positions,

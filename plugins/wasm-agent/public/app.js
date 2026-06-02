@@ -27567,6 +27567,7 @@ async function fetchNativeDownloadPackage(body) {
       filename: filenameFromContentDisposition(response.headers.get("Content-Disposition") || ""),
       schema: response.headers.get("X-Wasm-Agent-Native-Schema") || "",
       platform: response.headers.get("X-Wasm-Agent-Native-Platform") || "",
+      desktop_channel: response.headers.get("X-Wasm-Agent-Native-Desktop-Channel") || "",
     };
   } finally {
     window.clearTimeout(timer);
@@ -27621,7 +27622,7 @@ function renderNativeInstall() {
           metric("Channel", cleanText(packagePayload.install_channel, profile.install_channel)),
           metric("Wake", cleanText(packagePayload.standby?.wake_phrase, "hi wasm")),
           metric("Package", cleanText(state.nativeInstallFilename, "generated")),
-          metric("Mode", cleanText(packagePayload.mode, "native-app-download")),
+          metric("Mode", cleanText(packagePayload.desktop_channel || packagePayload.mode, "native-app-download")),
         ]
       : [
           metric("Channel", cleanText(profile.install_channel, "native-companion")),
@@ -27685,6 +27686,7 @@ async function startNativeInstall(origin = "manual") {
       target_device_id: body.device_id,
       target_os: state.nativeInstallProfile.os,
       install_channel: state.nativeInstallProfile.install_channel,
+      desktop_channel: payload.desktop_channel || "",
       mode: "native-app-download",
       standby: { wake_phrase: "hi wasm" },
     };
@@ -27700,6 +27702,7 @@ async function startNativeInstall(origin = "manual") {
         install_channel: state.nativeInstallProfile.install_channel,
         filename,
         schema: payload.schema,
+        desktop_channel: payload.desktop_channel,
         standby_module_enabled: true,
       },
     });

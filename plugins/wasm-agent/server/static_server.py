@@ -5496,6 +5496,18 @@ def native_package_filename(package: dict[str, Any]) -> str:
     return f"wasm-agent-native-{os_slug}-{device_slug}.zip"
 
 
+NATIVE_WINDOWS_ELECTRON_VERSION = "42.3.2"
+
+
+def native_desktop_channel(package: dict[str, Any]) -> str:
+    os_name = str(package.get("target_os") or "").strip().lower()
+    if os_name == "windows":
+        return "electron-runtime-installer"
+    if os_name in {"macos", "mac os", "mac", "linux"}:
+        return "browser-wrapper"
+    return "native-build-lane-pending"
+
+
 def native_linux_install_script(app_url: str) -> str:
     quoted_url = shell_quote(app_url)
     return f"""#!/usr/bin/env sh
@@ -5551,65 +5563,65 @@ fi
 
 def native_windows_install_script(app_url: str) -> str:
     escaped_url = app_url.replace("'", "''")
+    electron_version = NATIVE_WINDOWS_ELECTRON_VERSION.replace("'", "")
     return """$ErrorActionPreference = "Stop"
 $AppUrl = '{escaped_url}'
-$InstallDir = Join-Path $env:LOCALAPPDATA 'WASM Agent'
+$ElectronVersion = if ($env:WASM_AGENT_ELECTRON_VERSION) { $env:WASM_AGENT_ELECTRON_VERSION } else { '{electron_version}' }
+$InstallDir = Join-Path $env:LOCALAPPDATA 'WASM Agent Native'
 $StartMenu = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'
 $Desktop = [Environment]::GetFolderPath('Desktop')
-$ProfileDir = Join-Path $InstallDir 'browser-profile'
+$RuntimeDir = Join-Path $InstallDir 'runtime'
+$CacheDir = Join-Path $InstallDir 'cache'
+$ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$AppSourceDir = Join-Path $ScriptRoot 'electron-app'
+$AppDestDir = Join-Path $RuntimeDir 'resources\\app'
+$AppExe = Join-Path $RuntimeDir 'WASM Agent.exe'
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
-New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 
-function Resolve-WasmAgentBrowserPath {
-  $commands = @('msedge.exe', 'chrome.exe', 'chromium.exe')
-  foreach ($command in $commands) {
-    $found = Get-Command $command -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found -and $found.Source -and (Test-Path $found.Source)) {
-      return $found.Source
-    }
-  }
-
-  $paths = @(
-    "$env:ProgramFiles\\Microsoft\\Edge\\Application\\msedge.exe",
-    "${env:ProgramFiles(x86)}\\Microsoft\\Edge\\Application\\msedge.exe",
-    "$env:LOCALAPPDATA\\Microsoft\\Edge\\Application\\msedge.exe",
-    "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe",
-    "${env:ProgramFiles(x86)}\\Google\\Chrome\\Application\\chrome.exe",
-    "$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe"
-  )
-  foreach ($path in $paths) {
-    if ($path -and (Test-Path $path)) {
-      return $path
-    }
-  }
-  return ''
+if (!(Test-Path $AppSourceDir)) {
+  throw "Missing electron app payload: $AppSourceDir. Extract the ZIP first, then run windows\\install.cmd."
 }
 
-$BrowserPath = Resolve-WasmAgentBrowserPath
-$CmdPath = Join-Path $InstallDir 'wasm-agent-native.cmd'
-Set-Content -Path $CmdPath -Encoding ASCII -Value @"
-@echo off
-setlocal
-set "APP_URL=$AppUrl"
-set "BROWSER_EXE=$BrowserPath"
-set "PROFILE_DIR=$ProfileDir"
-if defined BROWSER_EXE (
-  if exist "%BROWSER_EXE%" (
-    start "" "%BROWSER_EXE%" --app="%APP_URL%" --user-data-dir="%PROFILE_DIR%" --no-first-run
-    exit /b 0
-  )
-)
-start "" "%APP_URL%"
-"@
+$arch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+$electronArch = if ($arch -eq 'arm64') { 'arm64' } else { 'x64' }
+$RuntimeZip = Join-Path $CacheDir "electron-v$ElectronVersion-win32-$electronArch.zip"
+$RuntimeUrl = "https://github.com/electron/electron/releases/download/v$ElectronVersion/electron-v$ElectronVersion-win32-$electronArch.zip"
+
+if (Test-Path $RuntimeDir) {
+  Remove-Item -Recurse -Force $RuntimeDir
+}
+New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+
+Write-Host "Downloading Electron $ElectronVersion for Windows $electronArch..."
+Invoke-WebRequest -UseBasicParsing -Uri $RuntimeUrl -OutFile $RuntimeZip
+Write-Host "Expanding native runtime..."
+Expand-Archive -LiteralPath $RuntimeZip -DestinationPath $RuntimeDir -Force
+
+if (!(Test-Path (Join-Path $RuntimeDir 'electron.exe'))) {
+  throw "Electron runtime extraction did not produce electron.exe"
+}
+
+New-Item -ItemType Directory -Force -Path $AppDestDir | Out-Null
+Copy-Item -Recurse -Force (Join-Path $AppSourceDir '*') $AppDestDir
+Set-Content -Path (Join-Path $AppDestDir 'native-package.json') -Encoding UTF8 -Value (@{
+  schema = 'hermes.wasm_agent.native_desktop_config.v1'
+  appUrl = $AppUrl
+  installChannel = 'electron-runtime-installer'
+  electronVersion = $ElectronVersion
+  generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+} | ConvertTo-Json -Depth 4)
+
+Rename-Item -LiteralPath (Join-Path $RuntimeDir 'electron.exe') -NewName 'WASM Agent.exe' -Force
 
 $UninstallPath = Join-Path $InstallDir 'uninstall-wasm-agent.cmd'
 Set-Content -Path $UninstallPath -Encoding ASCII -Value @"
 @echo off
 del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\WASM Agent.lnk" >nul 2>nul
 del "%USERPROFILE%\\Desktop\\WASM Agent.lnk" >nul 2>nul
-rmdir /s /q "%LOCALAPPDATA%\\WASM Agent"
-echo WASM Agent native launcher removed.
+rmdir /s /q "%LOCALAPPDATA%\\WASM Agent Native"
+echo WASM Agent native desktop app removed.
 "@
 
 try {
@@ -5620,32 +5632,22 @@ try {
   )
   foreach ($target in $targets) {
     $shortcut = $shell.CreateShortcut($target)
-    $shortcut.TargetPath = $CmdPath
-    $shortcut.WorkingDirectory = $InstallDir
-    $shortcut.Description = 'Open WASM Agent as an app-mode desktop launcher'
-    if ($BrowserPath) {
-      $shortcut.IconLocation = "$BrowserPath,0"
-    } else {
-      $shortcut.IconLocation = "$env:SystemRoot\\System32\\SHELL32.dll,220"
-    }
+    $shortcut.TargetPath = $AppExe
+    $shortcut.WorkingDirectory = $RuntimeDir
+    $shortcut.Description = 'Open WASM Agent native desktop app'
+    $shortcut.IconLocation = "$AppExe,0"
     $shortcut.Save()
   }
 } catch {
-  $ShortcutPath = Join-Path $StartMenu 'WASM Agent.url'
-  Set-Content -Path $ShortcutPath -Encoding ASCII -Value "[InternetShortcut]`r`nURL=$AppUrl`r`n"
-  Write-Warning "Could not create .lnk shortcuts, wrote a URL shortcut instead: $($_.Exception.Message)"
+  Write-Warning "Could not create .lnk shortcuts: $($_.Exception.Message)"
 }
 
-if ($BrowserPath) {
-  Write-Host "WASM Agent installed with app-mode browser: $BrowserPath"
-} else {
-  Write-Warning "Edge/Chrome were not found. The launcher will open the app URL in the default browser."
-}
+Write-Host "WASM Agent native desktop app installed: $AppExe"
 Write-Host "Start Menu: WASM Agent"
 Write-Host "Desktop: WASM Agent"
 Write-Host "Launching WASM Agent now..."
-Start-Process -FilePath $CmdPath
-""".replace("{escaped_url}", escaped_url)
+Start-Process -FilePath $AppExe
+""".replace("{escaped_url}", escaped_url).replace("{electron_version}", electron_version)
 
 
 def native_windows_install_cmd() -> str:
@@ -5664,15 +5666,112 @@ def native_windows_readme() -> str:
     return """# Windows
 
 Extract the ZIP first, then run `install.cmd`. It launches PowerShell with a
-temporary execution-policy bypass, installs a per-user WASM Agent launcher,
-creates Start Menu and Desktop shortcuts, and opens the app once installation
-completes.
+temporary execution-policy bypass, downloads the pinned Electron runtime, builds
+`WASM Agent.exe` under `%LOCALAPPDATA%\\WASM Agent Native`, creates Start Menu
+and Desktop shortcuts, and opens the app once installation completes.
 
-The launcher uses Microsoft Edge or Google Chrome in app mode when available.
-If neither browser is found, it falls back to opening the app URL in the
-default browser.
+This is not an Edge/Chrome PWA shortcut. It is a native desktop process backed
+by Electron. It still loads the wasm-agent app URL until the offline bundled UI
+and signed MSI/EXE build lane are added.
 
 You can also run `install.ps1` directly from PowerShell.
+"""
+
+
+def native_windows_electron_package_json() -> str:
+    return json.dumps({
+        "name": "wasm-agent-native",
+        "version": "0.1.0",
+        "description": "WASM Agent native desktop host",
+        "main": "main.js",
+        "private": True,
+    }, indent=2, sort_keys=True)
+
+
+def native_windows_electron_main_js() -> str:
+    return """const { app, BrowserWindow, Menu, shell } = require("electron");
+const fs = require("fs");
+const path = require("path");
+
+const DEFAULT_APP_URL = "http://127.0.0.1:8877";
+
+function readConfig() {
+  const configPath = path.join(__dirname, "native-package.json");
+  try {
+    return JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function resolvedAppUrl() {
+  const config = readConfig();
+  const raw = process.env.WASM_AGENT_APP_URL || config.appUrl || DEFAULT_APP_URL;
+  if (typeof raw !== "string" || !raw.trim() || raw.trim() === "/") {
+    return DEFAULT_APP_URL;
+  }
+  return raw.trim();
+}
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 960,
+    minHeight: 640,
+    title: "WASM Agent",
+    backgroundColor: "#090d12",
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, "preload.js"),
+    },
+  });
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith(resolvedAppUrl())) {
+      return { action: "allow" };
+    }
+    shell.openExternal(url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    const appUrl = resolvedAppUrl();
+    if (url.startsWith(appUrl)) return;
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      event.preventDefault();
+      shell.openExternal(url);
+    }
+  });
+  win.loadURL(resolvedAppUrl());
+}
+
+app.setName("WASM Agent");
+Menu.setApplicationMenu(null);
+
+app.whenReady().then(() => {
+  createWindow();
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});
+"""
+
+
+def native_windows_electron_preload_js() -> str:
+    return """const { contextBridge } = require("electron");
+
+contextBridge.exposeInMainWorld("wasmAgentNative", {
+  platform: "windows",
+  runtime: "electron",
+  nativeDesktop: true,
+});
 """
 
 
@@ -5687,16 +5786,19 @@ Install channel: {package.get("install_channel")}
 
 ## What This Is
 
-This bundle contains platform launcher assets for installing the current
-wasm-agent PWA as an app-like native entry point on the target device. It also
-includes internal package metadata for the future native standby companion.
+This bundle contains platform install assets for moving wasm-agent out of the
+plain browser. It also includes internal package metadata for the future native
+standby companion. On Windows, `windows/install.cmd` installs an
+Electron-backed `WASM Agent.exe` desktop process instead of opening Edge or
+Chrome.
 
 ## Install
 
 - Linux: run `sh linux/install.sh`.
 - macOS: copy `macos/WASM Agent.app` to Applications. The bundle is unsigned.
-- Windows: extract the ZIP, then run `windows/install.cmd`; it installs Start
-  Menu/Desktop launchers and opens Edge or Chrome in app mode when available.
+- Windows: extract the ZIP, then run `windows/install.cmd`; it downloads the
+  pinned Electron runtime, installs `WASM Agent.exe`, and creates Start
+  Menu/Desktop shortcuts for that executable.
 - Android: use `android/README.md` until the APK builder/signing lane is added.
 - iOS: use `ios/README.md` until the IPA/TestFlight lane is added.
 
@@ -5717,6 +5819,14 @@ def create_native_download_bundle(
     app_url = public_origin() or request_host_origin(handler) or "/"
     package["app_url"] = app_url
     package["download_schema"] = "hermes.wasm_agent.native_app_download.v1"
+    package["desktop_native_channel"] = native_desktop_channel(package)
+    if package["desktop_native_channel"] == "electron-runtime-installer":
+        package["desktop_runtime"] = {
+            "kind": "electron",
+            "version": NATIVE_WINDOWS_ELECTRON_VERSION,
+            "installer": "windows/install.cmd",
+            "app_executable": "WASM Agent.exe",
+        }
     filename = native_package_filename(package)
     metadata = {
         "schema": "hermes.wasm_agent.native_app_download.v1",
@@ -5766,6 +5876,9 @@ wake phrase standby requires a native companion path that is not built here yet.
         archive.writestr("windows/README.md", native_windows_readme())
         archive.writestr("windows/install.cmd", native_windows_install_cmd())
         archive.writestr("windows/install.ps1", native_windows_install_script(app_url))
+        archive.writestr("windows/electron-app/package.json", native_windows_electron_package_json())
+        archive.writestr("windows/electron-app/main.js", native_windows_electron_main_js())
+        archive.writestr("windows/electron-app/preload.js", native_windows_electron_preload_js())
         archive.writestr("android/README.md", android_readme)
         archive.writestr("ios/README.md", ios_readme)
     return filename, buffer.getvalue(), metadata
@@ -5781,6 +5894,7 @@ def serve_native_download_package(handler: WasmAgentHandler, user: dict[str, Any
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("X-Wasm-Agent-Native-Schema", str(metadata.get("schema") or ""))
     handler.send_header("X-Wasm-Agent-Native-Platform", clipped(platform, 80))
+    handler.send_header("X-Wasm-Agent-Native-Desktop-Channel", clipped(str(metadata.get("package", {}).get("desktop_native_channel") or ""), 80))
     handler.end_headers()
     handler.wfile.write(data)
 

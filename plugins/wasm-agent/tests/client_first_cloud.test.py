@@ -320,7 +320,7 @@ class ClientFirstCloudTest(unittest.TestCase):
                 {
                     "device_id": current_device_id,
                     "standby_module_enabled": True,
-                    "device_profile": {"os": "Android", "browser": "Chrome", "device_type": "phone"},
+                    "device_profile": {"os": "Windows", "browser": "Edge", "device_type": "desktop"},
                 },
                 handler,
             )
@@ -335,17 +335,25 @@ class ClientFirstCloudTest(unittest.TestCase):
                 self.assertIn("windows/README.md", names)
                 self.assertIn("windows/install.cmd", names)
                 self.assertIn("windows/install.ps1", names)
+                self.assertIn("windows/electron-app/package.json", names)
+                self.assertIn("windows/electron-app/main.js", names)
+                self.assertIn("windows/electron-app/preload.js", names)
                 self.assertIn("android/README.md", names)
                 self.assertIn("ios/README.md", names)
                 windows_cmd = archive.read("windows/install.cmd").decode("utf-8")
                 windows_ps1 = archive.read("windows/install.ps1").decode("utf-8")
+                windows_main = archive.read("windows/electron-app/main.js").decode("utf-8")
                 self.assertIn("ExecutionPolicy Bypass", windows_cmd)
-                self.assertIn("Resolve-WasmAgentBrowserPath", windows_ps1)
-                self.assertIn("--app=", windows_ps1)
+                self.assertIn("electron-v$ElectronVersion-win32-$electronArch.zip", windows_ps1)
+                self.assertIn("WASM Agent.exe", windows_ps1)
                 self.assertIn("WScript.Shell", windows_ps1)
-                self.assertIn("Start-Process -FilePath $CmdPath", windows_ps1)
+                self.assertIn("Start-Process -FilePath $AppExe", windows_ps1)
+                self.assertIn("BrowserWindow", windows_main)
                 bundled_metadata = json.loads(archive.read("metadata/package.json").decode("utf-8"))
                 self.assertEqual(bundled_metadata["package"]["target_device_id"], current_device_id)
+                self.assertEqual(bundled_metadata["package"]["target_os"], "Windows")
+                self.assertEqual(bundled_metadata["package"]["desktop_native_channel"], "electron-runtime-installer")
+                self.assertEqual(bundled_metadata["package"]["desktop_runtime"]["kind"], "electron")
                 self.assertEqual(bundled_metadata["package"]["app_url"], "/")
 
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
