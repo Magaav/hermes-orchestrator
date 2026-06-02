@@ -36,9 +36,10 @@ tree and workflow.
   settings live in `state/users/<acc_id>/device-settings.json`.
 - `native-standby/`: optional Go Native standby contract; Home can enable it
   locally and download `/account/devices/native/download` ZIP packages with
-  platform install assets plus metadata for a future native companion that owns
-  screen-off wake phrase and live transcription behavior. Request records live
-  under `state/users/<acc_id>/native-companion/`.
+  platform install assets, including a Windows `install.cmd` app-mode launcher
+  installer, plus metadata for a future native companion that owns screen-off
+  wake phrase and live transcription behavior. Request records live under
+  `state/users/<acc_id>/native-companion/`.
 - `artifacts/`: core artifact/storage inventory contract for the home Artifacts
   action and storage import/export boundaries.
 - `config/`: core space configuration contract for the top-right space gear. It

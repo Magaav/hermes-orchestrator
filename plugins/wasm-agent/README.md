@@ -25,8 +25,10 @@ rendering, agent-readable state, and a cleaner app shell.
 - Home exposes a Go Native action that detects the current PWA device, enables
   the optional `native-standby` module locally, and downloads a generated
   native app package ZIP. The ZIP includes platform launcher/install assets and
-  internal companion metadata; signed APK/IPA/MSI-style builders are still a
-  future native build lane.
+  internal companion metadata; the Windows payload includes a double-click
+  `install.cmd` wrapper that creates Start Menu/Desktop app-mode launchers for
+  Edge or Chrome, while signed APK/IPA/MSI-style builders are still a future
+  native build lane.
 - Does not start, stop, copy, or patch Space Agent.
 
 ## Durable Next Step
@@ -73,7 +75,9 @@ session and confirm it detects the device type, enables `native-standby`, and
 downloads a `.zip` from `/account/devices/native/download` with schema
 `hermes.wasm_agent.native_app_download.v1`, platform install assets, and
 metadata for the future standby companion while making no claim that the PWA
-itself can listen with the screen off.
+itself can listen with the screen off; then re-download and extract the ZIP on
+Windows, run `windows/install.cmd`, and confirm it creates Start Menu/Desktop
+`WASM Agent` shortcuts and opens Edge or Chrome in `--app` mode.
 Current evidence: Remote-control viewport frames now strip URL-backed CSS and
 inline snapshot resources before SVG export, and SVG export failures fall back
 to a canvas-native DOM renderer that avoids drawing untrusted image resources;
@@ -409,7 +413,10 @@ and downloads `/account/devices/native/download` as an OS-targeted native app
 package ZIP for the current device. The archive includes Linux, macOS, and
 Windows launcher/install assets plus Android/iOS build-lane notes and internal
 standby companion metadata for wake phrase standby, live transcription, and
-device presence. It
+device presence. After extracting the ZIP, the Windows package entry point is
+`windows/install.cmd`, which runs the PowerShell installer with a temporary
+execution-policy bypass, creates per-user Start Menu/Desktop shortcuts, and
+launches Edge or Chrome in app mode when either browser is available. It
 records native-companion requests under
 `state/users/<acc_id>/native-companion/`; signed mobile/desktop binaries are a
 future build pipeline, and screen-off wake remains a native-companion

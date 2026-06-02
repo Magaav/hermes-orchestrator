@@ -24,8 +24,10 @@ This track is the continuity point for evolving Hermes Orchestrator and `wasm-ag
   main-device pointer, a quick main-device switch action, device-sync installer
   manifests, a Go Native action that detects the current PWA device and
   downloads a generated native app package ZIP from
-  `/account/devices/native/download`, and browser-local device layouts that are
-  not retained server-side unless a future premium sync/backup mode is enabled.
+  `/account/devices/native/download`, a Windows `install.cmd` package entry
+  point that installs Start Menu/Desktop app-mode launchers for Edge or Chrome,
+  and browser-local device layouts that are not retained server-side unless a
+  future premium sync/backup mode is enabled.
   The optional `native-standby` module is a package-metadata/event-contract
   placeholder for wake phrase standby and live transcription once a real native
   companion exists; the PWA still cannot listen while a phone screen is off.

@@ -5551,17 +5551,128 @@ fi
 
 def native_windows_install_script(app_url: str) -> str:
     escaped_url = app_url.replace("'", "''")
-    return f"""$ErrorActionPreference = "Stop"
+    return """$ErrorActionPreference = "Stop"
 $AppUrl = '{escaped_url}'
-$InstallDir = Join-Path $env:APPDATA 'WASM Agent'
+$InstallDir = Join-Path $env:LOCALAPPDATA 'WASM Agent'
 $StartMenu = Join-Path $env:APPDATA 'Microsoft\\Windows\\Start Menu\\Programs'
+$Desktop = [Environment]::GetFolderPath('Desktop')
+$ProfileDir = Join-Path $InstallDir 'browser-profile'
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 New-Item -ItemType Directory -Force -Path $StartMenu | Out-Null
+New-Item -ItemType Directory -Force -Path $ProfileDir | Out-Null
+
+function Resolve-WasmAgentBrowserPath {
+  $commands = @('msedge.exe', 'chrome.exe', 'chromium.exe')
+  foreach ($command in $commands) {
+    $found = Get-Command $command -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($found -and $found.Source -and (Test-Path $found.Source)) {
+      return $found.Source
+    }
+  }
+
+  $paths = @(
+    "$env:ProgramFiles\\Microsoft\\Edge\\Application\\msedge.exe",
+    "${env:ProgramFiles(x86)}\\Microsoft\\Edge\\Application\\msedge.exe",
+    "$env:LOCALAPPDATA\\Microsoft\\Edge\\Application\\msedge.exe",
+    "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe",
+    "${env:ProgramFiles(x86)}\\Google\\Chrome\\Application\\chrome.exe",
+    "$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe"
+  )
+  foreach ($path in $paths) {
+    if ($path -and (Test-Path $path)) {
+      return $path
+    }
+  }
+  return ''
+}
+
+$BrowserPath = Resolve-WasmAgentBrowserPath
 $CmdPath = Join-Path $InstallDir 'wasm-agent-native.cmd'
-Set-Content -Path $CmdPath -Encoding ASCII -Value "@echo off`r`nstart \"\" \"$AppUrl\"`r`n"
-$ShortcutPath = Join-Path $StartMenu 'WASM Agent.url'
-Set-Content -Path $ShortcutPath -Encoding ASCII -Value "[InternetShortcut]`r`nURL=$AppUrl`r`n"
-Write-Host "WASM Agent launcher installed in Start Menu."
+Set-Content -Path $CmdPath -Encoding ASCII -Value @"
+@echo off
+setlocal
+set "APP_URL=$AppUrl"
+set "BROWSER_EXE=$BrowserPath"
+set "PROFILE_DIR=$ProfileDir"
+if defined BROWSER_EXE (
+  if exist "%BROWSER_EXE%" (
+    start "" "%BROWSER_EXE%" --app="%APP_URL%" --user-data-dir="%PROFILE_DIR%" --no-first-run
+    exit /b 0
+  )
+)
+start "" "%APP_URL%"
+"@
+
+$UninstallPath = Join-Path $InstallDir 'uninstall-wasm-agent.cmd'
+Set-Content -Path $UninstallPath -Encoding ASCII -Value @"
+@echo off
+del "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\WASM Agent.lnk" >nul 2>nul
+del "%USERPROFILE%\\Desktop\\WASM Agent.lnk" >nul 2>nul
+rmdir /s /q "%LOCALAPPDATA%\\WASM Agent"
+echo WASM Agent native launcher removed.
+"@
+
+try {
+  $shell = New-Object -ComObject WScript.Shell
+  $targets = @(
+    (Join-Path $StartMenu 'WASM Agent.lnk'),
+    (Join-Path $Desktop 'WASM Agent.lnk')
+  )
+  foreach ($target in $targets) {
+    $shortcut = $shell.CreateShortcut($target)
+    $shortcut.TargetPath = $CmdPath
+    $shortcut.WorkingDirectory = $InstallDir
+    $shortcut.Description = 'Open WASM Agent as an app-mode desktop launcher'
+    if ($BrowserPath) {
+      $shortcut.IconLocation = "$BrowserPath,0"
+    } else {
+      $shortcut.IconLocation = "$env:SystemRoot\\System32\\SHELL32.dll,220"
+    }
+    $shortcut.Save()
+  }
+} catch {
+  $ShortcutPath = Join-Path $StartMenu 'WASM Agent.url'
+  Set-Content -Path $ShortcutPath -Encoding ASCII -Value "[InternetShortcut]`r`nURL=$AppUrl`r`n"
+  Write-Warning "Could not create .lnk shortcuts, wrote a URL shortcut instead: $($_.Exception.Message)"
+}
+
+if ($BrowserPath) {
+  Write-Host "WASM Agent installed with app-mode browser: $BrowserPath"
+} else {
+  Write-Warning "Edge/Chrome were not found. The launcher will open the app URL in the default browser."
+}
+Write-Host "Start Menu: WASM Agent"
+Write-Host "Desktop: WASM Agent"
+Write-Host "Launching WASM Agent now..."
+Start-Process -FilePath $CmdPath
+""".replace("{escaped_url}", escaped_url)
+
+
+def native_windows_install_cmd() -> str:
+    return """@echo off
+setlocal
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1"
+if errorlevel 1 (
+  echo.
+  echo WASM Agent install failed. Keep this window open and share the error above.
+  pause
+)
+"""
+
+
+def native_windows_readme() -> str:
+    return """# Windows
+
+Extract the ZIP first, then run `install.cmd`. It launches PowerShell with a
+temporary execution-policy bypass, installs a per-user WASM Agent launcher,
+creates Start Menu and Desktop shortcuts, and opens the app once installation
+completes.
+
+The launcher uses Microsoft Edge or Google Chrome in app mode when available.
+If neither browser is found, it falls back to opening the app URL in the
+default browser.
+
+You can also run `install.ps1` directly from PowerShell.
 """
 
 
@@ -5584,7 +5695,8 @@ includes internal package metadata for the future native standby companion.
 
 - Linux: run `sh linux/install.sh`.
 - macOS: copy `macos/WASM Agent.app` to Applications. The bundle is unsigned.
-- Windows: run `windows/install.ps1` in PowerShell.
+- Windows: extract the ZIP, then run `windows/install.cmd`; it installs Start
+  Menu/Desktop launchers and opens Edge or Chrome in app mode when available.
 - Android: use `android/README.md` until the APK builder/signing lane is added.
 - iOS: use `ios/README.md` until the IPA/TestFlight lane is added.
 
@@ -5651,6 +5763,8 @@ wake phrase standby requires a native companion path that is not built here yet.
         archive.writestr("linux/wasm-agent-native.desktop", "[Desktop Entry]\nType=Application\nName=WASM Agent\n")
         archive.writestr("macos/WASM Agent.app/Contents/Info.plist", macos_info)
         write_executable("macos/WASM Agent.app/Contents/MacOS/wasm-agent", native_macos_app_script(app_url))
+        archive.writestr("windows/README.md", native_windows_readme())
+        archive.writestr("windows/install.cmd", native_windows_install_cmd())
         archive.writestr("windows/install.ps1", native_windows_install_script(app_url))
         archive.writestr("android/README.md", android_readme)
         archive.writestr("ios/README.md", ios_readme)
