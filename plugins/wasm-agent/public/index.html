@@ -180,6 +180,26 @@
         </article>
       </section>
 
+      <section id="nativeModal" class="modal-backdrop" aria-label="Go Native" hidden>
+        <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="nativeModalTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="nativeModalTitle">Go Native</h2>
+              <p id="nativeModalSubtitle">Native companion</p>
+            </div>
+            <div class="modal-head-actions">
+              <button id="nativeDownloadButton" class="icon-button native-download-button" type="button" title="Download native companion manifest" aria-label="Download native companion manifest"></button>
+              <span id="nativeInstallStatus" class="widget-chip">standby</span>
+              <button id="closeNativeModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+            </div>
+          </header>
+          <div class="native-install-grid">
+            <section id="nativeDeviceSummary" class="native-install-card" aria-label="Detected device"></section>
+            <section id="nativePackageSummary" class="native-install-card" aria-label="Native package"></section>
+          </div>
+        </article>
+      </section>
+
       <section id="fleetModal" class="modal-backdrop" aria-label="Fleet" hidden>
         <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="fleetModalTitle">
           <header class="modal-head">
@@ -355,6 +375,7 @@
                 <button id="joinSpaceButton" class="home-action-button join" type="button" title="Join Space" aria-label="Join Space"><span>Join Space</span></button>
                 <button id="homeFleetButton" class="home-action-button fleet" type="button" title="Fleet" aria-label="Fleet"><span>Fleet</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
+                <button id="homeGoNativeButton" class="home-action-button go-native" type="button" title="Go Native" aria-label="Go Native"><span>Go Native</span></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>

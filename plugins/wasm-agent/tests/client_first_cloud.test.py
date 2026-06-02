@@ -262,6 +262,56 @@ class ClientFirstCloudTest(unittest.TestCase):
                 self.assertEqual(listed_after["nodes"], [])
                 self.assertEqual(len(listed_after["system_nodes"]), 1)
 
+    def test_native_companion_package_targets_current_device_and_standby(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            server = SimpleNamespace(plugin_root=PLUGIN_ROOT, public_root=PLUGIN_ROOT / "public", state_dir=state_dir)
+            owner = user("101", "owner@example.test")
+            handler = SimpleNamespace(
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 Chrome/136.0 Safari/537.36",
+                    "X-Wasm-Agent-Device-Id": "pixel-eight",
+                },
+                client_address=("127.0.0.1", 44770),
+            )
+
+            devices = static_server.list_account_devices(server, owner, handler)
+            current_device_id = devices["current_device_id"]
+            package = static_server.create_native_companion_package(
+                server,
+                owner,
+                {
+                    "device_id": current_device_id,
+                    "standby_module_enabled": True,
+                    "device_profile": {
+                        "schema": "hermes.wasm_agent.native_device_profile.v1",
+                        "os": "Android",
+                        "browser": "Chrome",
+                        "device_type": "phone",
+                        "install_channel": "android-foreground-service",
+                        "pwa_capabilities": {
+                            "microphone": True,
+                            "service_worker": True,
+                            "wake_lock": True,
+                            "screen_off_standby": False,
+                        },
+                    },
+                },
+                handler,
+            )["package"]
+
+            self.assertEqual(package["schema"], "hermes.wasm_agent.native_companion_package.v1")
+            self.assertEqual(package["target_device_id"], current_device_id)
+            self.assertEqual(package["target_os"], "Android")
+            self.assertEqual(package["install_channel"], "android-foreground-service")
+            self.assertEqual(package["standby"]["module_id"], "native-standby")
+            self.assertEqual(package["standby"]["wake_phrase"], "hi wasm")
+            self.assertTrue(package["standby"]["enabled_from_pwa"])
+            self.assertFalse(package["standby"]["pwa_screen_off_standby"])
+            self.assertTrue(package["standby"]["native_screen_off_standby"])
+            request_path = state_dir / "users" / "101" / "native-companion" / f"{package['token_id']}.json"
+            self.assertTrue(request_path.exists())
+
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state" / "db" / "wa.sqlite3"

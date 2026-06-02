@@ -34,6 +34,10 @@ tree and workflow.
 - `devices/`: core account-device contract for the home Connected Devices page;
   device records live under `state/users/<acc_id>/devices/` and main-device
   settings live in `state/users/<acc_id>/device-settings.json`.
+- `native-standby/`: optional Go Native standby contract; Home can enable it
+  locally and download `/account/devices/native` manifests for a future native
+  companion that owns screen-off wake phrase and live transcription behavior.
+  Request records live under `state/users/<acc_id>/native-companion/`.
 - `artifacts/`: core artifact/storage inventory contract for the home Artifacts
   action and storage import/export boundaries.
 - `config/`: core space configuration contract for the top-right space gear. It

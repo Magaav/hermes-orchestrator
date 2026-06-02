@@ -23,6 +23,7 @@ const clientStoreJs = fs.readFileSync(path.join(pluginRoot, "public", "modules",
 const remoteControlModuleJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "remote-control", "module.js"), "utf8");
 const remoteControlViewportJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "remote-control", "viewport.js"), "utf8");
 const sharedPointerRendererJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "spaces", "shared-pointer-renderer.js"), "utf8");
+const nativeStandbyModuleJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "native-standby", "module.js"), "utf8");
 const wisModuleJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "wis", "module.js"), "utf8");
 const wisEngineJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "wis", "engine.js"), "utf8");
 const wisCameraArtifactJs = fs.readFileSync(path.join(pluginRoot, "public", "modules", "wis", "artifacts", "camera.js"), "utf8");
@@ -48,6 +49,7 @@ const moduleFolders = [
   "browser",
   "observation",
   "devices",
+  "native-standby",
   "artifacts",
   "config",
   "module-manager",
@@ -104,6 +106,7 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(indexHtml.includes("addSpaceButton"), "home add-space button is missing");
   assert(indexHtml.includes("homeFleetButton"), "home fleet core-module button is missing");
   assert(indexHtml.includes("homeDevicesButton"), "home devices core-module button is missing");
+  assert(indexHtml.includes("homeGoNativeButton"), "home go-native action is missing");
   assert(indexHtml.includes('home-action-button artifacts'), "home artifacts action is missing");
   assert(!indexHtml.includes("homeConfigButton"), "home config must stay on the space gear, not the home module strip");
   assert(indexHtml.includes("homeModulesButton"), "home modules button is missing");
@@ -648,7 +651,7 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(appJs.includes("shouldStartDevHmr"), "dev HMR automatic startup guard is missing");
   assert(appJs.includes("__WASM_AGENT_DISABLE_HMR__"), "dev HMR escape hatch is missing");
   assert(swJs.includes("/modules/hmr/dev-hmr.js"), "service worker cache must use relocated HMR module path");
-  assert(swJs.includes("wasm-agent-v136-shared-pointer-rtc"), "service worker cache revision must invalidate stale client code");
+  assert(swJs.includes("wasm-agent-v137-go-native"), "service worker cache revision must invalidate stale client code");
   assert(swJs.includes("/modules/chat-composer/chat-composer.js"), "service worker cache must include chat composer module");
   assert(swJs.includes("/provider-model-catalog.js"), "service worker cache must include bundled provider models");
   assert(swJs.includes("/modules/spaces/shared-voice-room.js"), "service worker cache must include shared voice room logic");
@@ -667,6 +670,7 @@ assert(match, "CORE_WASM_BASE64 was not found");
   assert(swJs.includes('url.pathname.startsWith("/security-loop/")'), "service worker must not cache security loop reads");
   assert(swJs.includes("/modules/barcode-reader/module.js"), "service worker cache must include image analyzer modules");
   assert(swJs.includes("/modules/spaces/shared-pointer-renderer.js"), "service worker cache must include shared pointer renderer module");
+  assert(swJs.includes("/modules/native-standby/module.js"), "service worker cache must include native standby module");
   assert(!appJs.includes("WIDGET_LAYOUT_STORAGE_KEY"), "legacy single-layout storage key must stay removed");
   assert(appJs.includes("SPACE_LAYOUT_SCHEMA"), "space layout schema marker is missing");
   assert(appJs.includes("SPACE_WIDGET_LAYOUTS_STORAGE_KEY"), "client-local per-space widget layout storage is missing");
@@ -1261,19 +1265,31 @@ assert(match, "CORE_WASM_BASE64 was not found");
 	  assert(stylesCss.includes(".node-stats-chart"), "topology node statistics chart styles are missing");
   assert(indexHtml.includes("devicesModal"), "home connected devices core page is missing");
   assert(indexHtml.includes("devicesSyncButton"), "connected devices sync button is missing");
+  assert(indexHtml.includes("nativeModal"), "go-native modal is missing");
+  assert(indexHtml.includes("nativeDownloadButton"), "go-native manifest download button is missing");
   assert(modulesIndexJs.includes("./devices/module.js"), "connected devices core module descriptor is missing");
+  assert(modulesIndexJs.includes("./native-standby/module.js"), "native standby module descriptor is missing");
   assert(appJs.includes('fetchJson("/account/devices"'), "connected devices core module must load account devices");
   assert(appJs.includes('fetchJson("/account/devices/sync"'), "connected devices sync installer endpoint call is missing");
+  assert(appJs.includes('fetchJson("/account/devices/native"'), "go-native native companion endpoint call is missing");
   assert(appJs.includes('fetchJson("/account/devices/main"'), "connected devices main-device switch endpoint call is missing");
+  assert(appJs.includes("detectNativeDeviceProfile") && appJs.includes("setModuleEnabled(\"native-standby\", true)") && appJs.includes("downloadJson(nativePackageFilename"), "go-native must detect the current device, enable native standby, and download the native manifest");
   assert(appJs.includes("setMainDevice"), "connected devices main-device switch handler is missing");
   assert(appJs.includes("ensureMainDeviceForEvolution"), "main-device offline guard for artifact evolution is missing");
   assert(stylesCss.includes(".device-main-button"), "connected devices main-device icon styles are missing");
+  assert(stylesCss.includes(".home-actions .home-action-button.go-native::after"), "go-native home action icon styles are missing");
+  assert(stylesCss.includes(".native-install-grid"), "go-native modal layout styles are missing");
   assert(serverPy.includes("create_device_sync_package"), "connected devices sync package backend is missing");
   assert(serverPy.includes("hermes.wasm_agent.device_sync_package.v1"), "connected devices sync package schema is missing");
+  assert(serverPy.includes("create_native_companion_package"), "go-native native package backend is missing");
+  assert(serverPy.includes("hermes.wasm_agent.native_companion_package.v1"), "go-native native package schema is missing");
+  assert(serverPy.includes("/account/devices/native"), "go-native native package endpoint is missing");
+  assert(serverPy.includes("user_native_companion_dir"), "go-native native companion request storage is missing");
   assert(serverPy.includes("/account/devices/main"), "connected devices main-device endpoint is missing");
   assert(serverPy.includes("set_main_account_device"), "connected devices main-device backend is missing");
   assert(serverPy.includes("DEVICE_ONLINE_WINDOW_SEC"), "connected devices online window is missing");
   assert(appJs.includes("deviceOsGlyph"), "connected devices must show an OS icon");
+  assert(nativeStandbyModuleJs.includes('id: "native-standby"') && nativeStandbyModuleJs.includes("wakePhrase") && nativeStandbyModuleJs.includes("/account/devices/native"), "native standby module must advertise the go-native standby contract");
   assert(serverPy.includes("/account/devices"), "account devices endpoint is missing");
   assert(serverPy.includes("list_account_devices"), "account devices listing backend is missing");
   assert(indexHtml.includes("homeArtifactsButton"), "Home Artifacts button is missing");

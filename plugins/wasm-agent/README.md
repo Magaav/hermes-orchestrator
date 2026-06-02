@@ -22,6 +22,11 @@ rendering, agent-readable state, and a cleaner app shell.
   `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside this public repo.
 - Loads an embedded WebAssembly core in the browser and uses it as the first
   rendering/runtime handshake for the parity shell.
+- Home exposes a Go Native action that detects the current PWA device, enables
+  the optional `native-standby` module locally, and downloads a
+  native-companion manifest for the future companion app. This is a manifest
+  contract; the PWA still cannot provide screen-off wake-word listening by
+  itself.
 - Does not start, stop, copy, or patch Space Agent.
 
 ## Durable Next Step
@@ -32,7 +37,7 @@ the next action changes, update this before ending the turn.
 Current next action: reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
-v136 service worker activates: first by receiving a
+v137 service worker activates: first by receiving a
 compact bootstrap preview or fallback/status event if the relay rejects a full
 frame, then by using the receiving-side `Share pixels` button for any
 auto-granted co-control session and confirming the controller-side frame status
@@ -63,7 +68,10 @@ capability are present, and resume the prior CAM 1 middle-timeline click and
 Live return browser verification so the real client matches the headless
 acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
 `playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
-live on the Live button.
+live on the Live button; then click the Home `Go Native` action on a real phone
+session and confirm it detects the device type, enables `native-standby`, and
+downloads a `hermes.wasm_agent.native_companion_package.v1` manifest while
+making no claim that the PWA itself can listen with the screen off.
 Current evidence: Remote-control viewport frames now strip URL-backed CSS and
 inline snapshot resources before SVG export, and SVG export failures fall back
 to a canvas-native DOM renderer that avoids drawing untrusted image resources;
@@ -393,9 +401,16 @@ offline, artifact-evolution actions such as creating spaces and importing
 storage point the user back to Connected Devices so they can switch main devices
 quickly. Sync currently downloads a device-specific installer manifest with
 planned tunnel and state-sync capabilities; it does not claim a tunnel is live
-yet. On mobile, Home config can switch the launcher from the default left rail
-to a top bar so the Home button and account control stay pinned while the space
-list scrolls between them.
+yet. The adjacent Go Native action detects the current browser device on click,
+turns on the optional `native-standby` module in browser-local module settings,
+and downloads `/account/devices/native` as an OS-targeted native-companion
+manifest for wake phrase standby, live transcription, and device presence. It
+records native-companion requests under
+`state/users/<acc_id>/native-companion/`; no native binary is shipped here, and
+screen-off wake remains a native-companion responsibility rather than PWA
+behavior. On mobile, Home config can switch the launcher from the default left
+rail to a top bar so the Home button and account control stay pinned while the
+space list scrolls between them.
 
 Home also exposes a Fleet core module for account-owned agent brain metadata.
 Opening it reads `/fleet`, shows the account's reserved Hermes node records, and
@@ -1077,9 +1092,10 @@ changed-file reporting does not steal the main chat area.
 The Modules panel is a local module management surface for the shadow PWA. It
 shows locked core modules plus optional development, runtime, and
 image-perception modules: Dev HMR, Observation, Host Browser, Embedded
-Assistant, Timeline, Image Card Core, Barcode Reader, OCR, CV Shapes, and
-Semantic Vision. Optional toggles store enable/disable state in browser local
-storage. Toggling a module only changes local UI or analyzer
+Assistant, Remote Control, Timeline, Native Standby, Image Card Core, Barcode
+Reader, OCR, CV Shapes, and Semantic Vision. Optional toggles store
+enable/disable state in browser local storage. Toggling a module only changes
+local UI or analyzer
 availability in `wasm-agent`; it does not install, remove, patch, or restart
 backend components. The versioned module firmware lives under `public/modules/`
 with `public/modules/index.js` as the app-facing registry. Per-user and runtime
@@ -1113,7 +1129,8 @@ button.
 The Home route is the app entrance: `/` and `/home` open the account home
 space and show the `space-home` title. Home exposes a wider `New Space` action,
 `Artifacts`, `Config`, and `Modules` modal actions, and the current account
-storage badge.
+storage badge. `Go Native` is also a Home action and opens the current
+device's native-companion bootstrap flow.
 Standard users are limited to 1 GB under their `state/users/<acc_id>/` root;
 admins are shown as unlimited. Home's config button opens the account-global
 `home` Timeline lane. The launcher also has a fixed `space-admin` space with a
@@ -1122,8 +1139,8 @@ crown icon. New spaces are persisted under
 below Admin. Admin space widgets start minimized as app icons; clicking an app
 opens the widget above the app layer, except Timeline, which stays fixed behind
 the space config flow. User-created spaces start without Admin apps or opened
-widgets. Connected Devices is a Home core module page, so it does
-not appear in Admin or user spaces unless a later porting flow maps it there. The
+widgets. Connected Devices and Go Native are Home core/action surfaces, so they
+do not appear in Admin or user spaces unless a later porting flow maps them there. The
 config modal header identifies the current space while the options list omits a
 duplicate Space card. Each space config includes a minimap-style Space area map:
 the white border shows the current viewport within the configured area, and

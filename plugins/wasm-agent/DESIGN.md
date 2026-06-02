@@ -86,7 +86,8 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Home is the account entrance and must show the `space-home` title. It shows
   home-level controls, account storage, modal launch actions, and the
   account-global Timeline access through the fixed config button. Home also
-  exposes Fleet, Connected Devices, and Artifacts as core module pages. Fleet is
+  exposes Fleet, Connected Devices, Go Native, and Artifacts as account-level
+  pages/actions. Fleet is
   account brain metadata and explicit main-node reservation; it must not spawn a
   backend worker implicitly. Artifacts remains a local inventory of spaces,
   mapped apps/widgets, and browser-local layouts that previews the
@@ -206,6 +207,12 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   The Sync action downloads a device-specific installer manifest that records
   target device, main device, planned tunnel capability, client-local layout
   policy, and shareable artifact policy.
+- Home includes a Go Native action beside Connected Devices. It must detect the
+  current browser device on click, enable the optional `native-standby` module
+  in local module settings, and download a native-companion manifest from
+  `/account/devices/native`. The manifest may describe wake phrase standby and
+  live transcription contracts, but the PWA UI must not imply it can listen
+  while a phone screen is off without a real native companion app.
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
   shareable/backupable/marketplace-ready. App positions, widget positions,

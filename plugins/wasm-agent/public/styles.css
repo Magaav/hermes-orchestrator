@@ -1056,9 +1056,9 @@ h2 {
   top: 50px;
   z-index: 20;
   display: none;
-  width: min(676px, calc(100% - 22px));
+  width: min(778px, calc(100% - 22px));
   max-width: calc(100% - 22px);
-  grid-template-columns: minmax(0, 1.25fr) repeat(6, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.25fr) repeat(7, minmax(0, 1fr));
   align-items: start;
   gap: 5px;
   padding: 5px;
@@ -1199,6 +1199,20 @@ h2 {
   box-shadow: inset 0 -3px 0 -2px currentColor;
 }
 
+.home-actions .home-action-button.go-native::after {
+  width: 15px;
+  height: 15px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 3px rgba(125, 220, 255, 0.12);
+}
+
+.home-actions .home-action-button.go-native::before {
+  background:
+    linear-gradient(currentColor, currentColor) 50% 8px / 2px 9px no-repeat,
+    rgba(8, 14, 25, 0.78);
+}
+
 .home-actions .home-action-button.market::after {
   width: 15px;
   height: 11px;
@@ -1243,6 +1257,62 @@ h2 {
 
   .home-actions .home-action-button::after {
     left: 18px;
+  }
+}
+
+.native-download-button::before {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top: 0;
+  border-radius: 0 0 3px 3px;
+  transform: translateY(2px);
+}
+
+.native-download-button::after {
+  width: 12px;
+  height: 12px;
+  background:
+    linear-gradient(currentColor, currentColor) center 0 / 2px 10px no-repeat,
+    linear-gradient(135deg, transparent 50%, currentColor 50%) 2px 7px / 5px 5px no-repeat,
+    linear-gradient(225deg, transparent 50%, currentColor 50%) 7px 7px / 5px 5px no-repeat;
+}
+
+.native-install-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.native-install-card {
+  min-height: 156px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: var(--radius);
+  background: rgba(7, 13, 24, 0.68);
+}
+
+.native-install-card h3 {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.native-install-card .metric {
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(147, 170, 203, 0.1);
+}
+
+.native-install-card .metric:last-child {
+  border-bottom: 0;
+}
+
+@media (max-width: 720px) {
+  .native-install-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

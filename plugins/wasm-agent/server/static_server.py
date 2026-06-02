@@ -96,6 +96,8 @@ DEFAULT_USER_QUOTA_BYTES = 1024 * 1024 * 1024
 SPACE_AREA_MIN_PX = 1
 SPACE_AREA_MAX_PX = 2000
 DEVICE_ONLINE_WINDOW_SEC = 3 * 60
+NATIVE_COMPANION_PACKAGE_SCHEMA = "hermes.wasm_agent.native_companion_package.v1"
+NATIVE_DEVICE_PROFILE_SCHEMA = "hermes.wasm_agent.native_device_profile.v1"
 SECURITY_LOOP_STALE_AFTER_SEC = 24 * 60 * 60
 WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
 DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
@@ -809,6 +811,13 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=256 * 1024)
                 self._json(HTTPStatus.OK, create_device_sync_package(self.server, user, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/account/devices/native":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, create_native_companion_package(self.server, user, body, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -5009,6 +5018,12 @@ def user_device_sync_dir(server: WasmAgentServer, user: dict[str, Any] | None) -
     return path
 
 
+def user_native_companion_dir(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
+    path = user_root(server, user) / "native-companion"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def user_device_settings_path(server: WasmAgentServer, user: dict[str, Any] | None) -> Path:
     path = user_root(server, user) / "device-settings.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -5325,6 +5340,140 @@ def create_device_sync_package(
     return {
         "ok": True,
         "schema": "hermes.wasm_agent.device_sync_response.v1",
+        "package": package,
+    }
+
+
+def native_install_channel(os_name: str) -> str:
+    normalized = str(os_name or "").strip().lower()
+    if normalized == "android":
+        return "android-foreground-service"
+    if normalized in {"ios", "iphoneos", "ipados"}:
+        return "ios-companion"
+    if normalized == "macos":
+        return "macos-menu-bar-companion"
+    if normalized == "windows":
+        return "windows-tray-companion"
+    if normalized == "linux":
+        return "linux-daemon-companion"
+    return "native-companion"
+
+
+def sanitize_native_device_profile(raw: Any, user_agent: str) -> dict[str, Any]:
+    source = raw if isinstance(raw, dict) else {}
+    os_name = clipped(str(source.get("os") or ""), 40)
+    if not os_name:
+        os_name = browser_label(user_agent).split(" on ", 1)[-1] or "Device"
+    device_type = str(source.get("device_type") or source.get("deviceType") or "").strip().lower()
+    if device_type not in {"phone", "tablet", "desktop", "device"}:
+        device_type = "device"
+    browser = clipped(str(source.get("browser") or browser_label(user_agent).split(" on ", 1)[0] or "Browser"), 40)
+    install_channel = clipped(str(source.get("install_channel") or source.get("installChannel") or native_install_channel(os_name)), 80)
+    capabilities = source.get("pwa_capabilities") if isinstance(source.get("pwa_capabilities"), dict) else {}
+    user_agent_data = source.get("user_agent_data") if isinstance(source.get("user_agent_data"), dict) else {}
+    try:
+        max_touch_points = int(float(source.get("max_touch_points") or source.get("maxTouchPoints") or 0))
+    except (TypeError, ValueError):
+        max_touch_points = 0
+    return {
+        "schema": NATIVE_DEVICE_PROFILE_SCHEMA,
+        "os": os_name,
+        "browser": browser,
+        "device_type": device_type,
+        "install_channel": install_channel,
+        "display_mode": clipped(str(source.get("display_mode") or source.get("displayMode") or "browser"), 40),
+        "platform": clipped(str(source.get("platform") or ""), 80),
+        "max_touch_points": max(0, min(32, max_touch_points)),
+        "user_agent": clipped(str(source.get("user_agent") or user_agent), 360),
+        "user_agent_data": {
+            "architecture": clipped(str(user_agent_data.get("architecture") or ""), 40),
+            "bitness": clipped(str(user_agent_data.get("bitness") or ""), 20),
+            "model": clipped(str(user_agent_data.get("model") or ""), 80),
+            "platform": clipped(str(user_agent_data.get("platform") or ""), 80),
+            "platform_version": clipped(str(user_agent_data.get("platform_version") or user_agent_data.get("platformVersion") or ""), 80),
+            "mobile": bool(user_agent_data.get("mobile")),
+        },
+        "pwa_capabilities": {
+            "microphone": bool(capabilities.get("microphone")),
+            "service_worker": bool(capabilities.get("service_worker") or capabilities.get("serviceWorker")),
+            "wake_lock": bool(capabilities.get("wake_lock") or capabilities.get("wakeLock")),
+            "screen_off_standby": False,
+        },
+    }
+
+
+def create_native_companion_package(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    devices = list_account_devices(server, user, handler)
+    current_device_id = str(devices.get("current_device_id") or request_account_device_id(user, handler))
+    device_id = safe_state_id(str(body.get("device_id") or current_device_id), "")
+    if not device_id:
+        raise BrowserError("invalid_device", "device_id is required.")
+    device = read_json_file(user_devices_dir(server, user) / f"{device_id}.json", {})
+    if not isinstance(device, dict) or str(device.get("id") or device_id) != device_id:
+        raise BrowserError("device_not_found", "That account device was not found.", status=HTTPStatus.NOT_FOUND)
+    now = int(time.time())
+    user_agent = clipped(str(device.get("user_agent") or handler.headers.get("User-Agent") or "Browser"), 360)
+    profile = sanitize_native_device_profile(body.get("device_profile"), user_agent)
+    token_id = uuid.uuid4().hex
+    package = {
+        "schema": NATIVE_COMPANION_PACKAGE_SCHEMA,
+        "artifact_kind": "native-companion-installer",
+        "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+        "token_id": token_id,
+        "account_id": str(user.get("id") or ""),
+        "target_device_id": device_id,
+        "target_label": clipped(str(device.get("label") or browser_label(user_agent)), 80),
+        "target_os": profile["os"],
+        "target_device_type": profile["device_type"],
+        "install_channel": profile["install_channel"],
+        "mode": "native-companion-bootstrap",
+        "standby_module_id": "native-standby",
+        "capabilities": [
+            "register-device",
+            "report-online",
+            "native-microphone",
+            "wake-phrase-standby",
+            "live-transcription",
+            "device-presence",
+        ],
+        "standby": {
+            "module_id": "native-standby",
+            "enabled_from_pwa": bool(body.get("standby_module_enabled")),
+            "wake_phrase": "hi wasm",
+            "pwa_screen_off_standby": False,
+            "native_screen_off_standby": profile["os"].lower() == "android",
+            "transcript_event_schema": "hermes.wasm_agent.native_standby.transcript.v1",
+        },
+        "device_profile": profile,
+        "layout_policy": "client-local",
+        "artifact_policy": "shareable-wasm-artifacts",
+        "transport": {
+            "status": "planned",
+            "preferred": "native-companion-relay",
+            "fallback": "same-origin pwa foreground session",
+        },
+    }
+    write_json_file(user_native_companion_dir(server, user) / f"{token_id}.json", {
+        "schema": "hermes.wasm_agent.native_companion_request.v1",
+        "token_id": token_id,
+        "target_device_id": device_id,
+        "target_os": profile["os"],
+        "install_channel": profile["install_channel"],
+        "standby_module_enabled": bool(body.get("standby_module_enabled")),
+        "status": "installer_manifest_downloaded",
+        "created_at": now,
+        "created_by_device_id": current_device_id,
+    })
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_companion_response.v1",
         "package": package,
     }
 

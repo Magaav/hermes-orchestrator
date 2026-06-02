@@ -2,6 +2,7 @@ import { moduleDefinition as hmr } from "./hmr/module.js";
 import { moduleDefinition as spaces } from "./spaces/module.js";
 import { moduleDefinition as observation } from "./observation/module.js";
 import { moduleDefinition as devices } from "./devices/module.js";
+import { moduleDefinition as nativeStandby } from "./native-standby/module.js";
 import { moduleDefinition as artifacts } from "./artifacts/module.js";
 import { moduleDefinition as config } from "./config/module.js";
 import { moduleDefinition as moduleManager } from "./module-manager/module.js";
@@ -22,6 +23,7 @@ export const MODULE_DEFINITIONS = [
   spaces,
   observation,
   devices,
+  nativeStandby,
   artifacts,
   config,
   moduleManager,

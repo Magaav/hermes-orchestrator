@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v136-shared-pointer-rtc";
+const CACHE_NAME = "wasm-agent-v137-go-native";
 const ASSETS = [
   "/",
   "/index.html",
@@ -33,6 +33,7 @@ const ASSETS = [
   "/modules/client-state/client-store.js",
   "/modules/observation/module.js",
   "/modules/devices/module.js",
+  "/modules/native-standby/module.js",
   "/modules/artifacts/module.js",
   "/modules/config/module.js",
   "/modules/module-manager/module.js",

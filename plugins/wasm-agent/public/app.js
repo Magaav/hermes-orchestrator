@@ -1014,6 +1014,7 @@ const els = {
   joinSpaceButton: document.querySelector("#joinSpaceButton"),
   homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
+  homeGoNativeButton: document.querySelector("#homeGoNativeButton"),
   homeMarketButton: document.querySelector("#homeMarketButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
   fleetModal: document.querySelector("#fleetModal"),
@@ -1111,6 +1112,13 @@ const els = {
   devicesList: document.querySelector("#devicesList"),
   devicesStatus: document.querySelector("#devicesStatus"),
   devicesSyncButton: document.querySelector("#devicesSyncButton"),
+  nativeModal: document.querySelector("#nativeModal"),
+  nativeModalSubtitle: document.querySelector("#nativeModalSubtitle"),
+  nativeDeviceSummary: document.querySelector("#nativeDeviceSummary"),
+  nativePackageSummary: document.querySelector("#nativePackageSummary"),
+  nativeInstallStatus: document.querySelector("#nativeInstallStatus"),
+  nativeDownloadButton: document.querySelector("#nativeDownloadButton"),
+  closeNativeModalButton: document.querySelector("#closeNativeModalButton"),
   homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
   artifactsModal: document.querySelector("#artifactsModal"),
   artifactList: document.querySelector("#artifactList"),
@@ -1307,6 +1315,10 @@ const state = {
   deviceSyncBusy: "",
   deviceMainBusy: "",
   devicesLoadedAt: "",
+  nativeInstallBusy: false,
+  nativeInstallProfile: null,
+  nativeInstallPackage: null,
+  nativeInstallError: "",
   userFleetNodes: [],
   userFleetSystemNodes: [],
   userFleetHarnesses: [],
@@ -27410,6 +27422,236 @@ function syncResourcePolling() {
   }
 }
 
+function detectNativeDeviceProfileSync() {
+  const userAgent = cleanText(navigator.userAgent || "", "Browser");
+  const ua = userAgent.toLowerCase();
+  const platform = cleanText(navigator.platform || "", "");
+  const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
+  const iPadOs = platform === "MacIntel" && maxTouchPoints > 1;
+  const os = ua.includes("android")
+    ? "Android"
+    : (ua.includes("iphone") || ua.includes("ipad") || iPadOs)
+      ? "iOS"
+      : (ua.includes("mac os x") || ua.includes("macintosh"))
+        ? "macOS"
+        : ua.includes("windows")
+          ? "Windows"
+          : ua.includes("linux")
+            ? "Linux"
+            : "Device";
+  const browser = ua.includes("edg/")
+    ? "Edge"
+    : (ua.includes("chrome/") || ua.includes("crios/"))
+      ? "Chrome"
+      : (ua.includes("firefox/") || ua.includes("fxios/"))
+        ? "Firefox"
+        : ua.includes("safari/")
+          ? "Safari"
+          : "Browser";
+  const deviceType = os === "Android" || os === "iOS"
+    ? (ua.includes("ipad") || iPadOs || (os === "Android" && !ua.includes("mobile")) ? "tablet" : "phone")
+    : "desktop";
+  const installChannel = os === "Android"
+    ? "android-foreground-service"
+    : os === "iOS"
+      ? "ios-companion"
+      : os === "macOS"
+        ? "macos-menu-bar-companion"
+        : os === "Windows"
+          ? "windows-tray-companion"
+          : os === "Linux"
+            ? "linux-daemon-companion"
+            : "native-companion";
+  return {
+    schema: "hermes.wasm_agent.native_device_profile.v1",
+    os,
+    browser,
+    device_type: deviceType,
+    install_channel: installChannel,
+    user_agent: userAgent,
+    platform,
+    max_touch_points: Number.isFinite(maxTouchPoints) ? maxTouchPoints : 0,
+    display_mode: window.matchMedia?.("(display-mode: standalone)")?.matches ? "standalone" : "browser",
+    pwa_capabilities: {
+      microphone: Boolean(navigator.mediaDevices?.getUserMedia),
+      service_worker: Boolean(navigator.serviceWorker),
+      wake_lock: Boolean(navigator.wakeLock),
+      screen_off_standby: false,
+    },
+  };
+}
+
+async function detectNativeDeviceProfile() {
+  const profile = detectNativeDeviceProfileSync();
+  const userAgentData = navigator.userAgentData;
+  if (userAgentData?.getHighEntropyValues) {
+    try {
+      const high = await userAgentData.getHighEntropyValues(["architecture", "bitness", "model", "platform", "platformVersion"]);
+      profile.user_agent_data = {
+        architecture: cleanText(high.architecture, ""),
+        bitness: cleanText(high.bitness, ""),
+        model: cleanText(high.model, ""),
+        platform: cleanText(high.platform, ""),
+        platform_version: cleanText(high.platformVersion, ""),
+        mobile: Boolean(userAgentData.mobile),
+      };
+      if (high.platform && profile.os === "Device") profile.os = cleanText(high.platform, profile.os);
+      if (userAgentData.mobile && profile.device_type === "desktop") profile.device_type = "phone";
+    } catch {
+      // User-agent high entropy fields are optional and may be denied.
+    }
+  }
+  return profile;
+}
+
+function nativeInstallCurrentDevice() {
+  return state.devices.find((device) => device.current) || null;
+}
+
+function nativePackageFilename(payload = state.nativeInstallPackage, profile = state.nativeInstallProfile) {
+  const deviceId = cleanText(payload?.target_device_id || nativeInstallCurrentDevice()?.id || state.deviceAuthority?.current_device_id, "device")
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .slice(0, 48);
+  const os = cleanText(profile?.os || payload?.target_os, "native").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
+  return `wasm-agent-native-${os}-${deviceId}.json`;
+}
+
+function renderNativeInstall() {
+  if (!els.nativeDeviceSummary || !els.nativePackageSummary || !els.nativeInstallStatus) return;
+  const profile = state.nativeInstallProfile || detectNativeDeviceProfileSync();
+  const device = nativeInstallCurrentDevice();
+  const standbyEnabled = isModuleEnabled("native-standby");
+  const packagePayload = state.nativeInstallPackage || null;
+  const status = state.nativeInstallBusy
+    ? "sending"
+    : state.nativeInstallError
+      ? "error"
+      : packagePayload
+        ? "ready"
+        : standbyEnabled
+          ? "standby"
+          : "native";
+  els.nativeInstallStatus.textContent = status;
+  els.nativeInstallStatus.className = `widget-chip ${status === "ready" || status === "standby" ? "ok" : status === "error" ? "err" : ""}`;
+  if (els.nativeModalSubtitle) {
+    els.nativeModalSubtitle.textContent = `${profile.os} / ${profile.device_type}`;
+  }
+  if (els.nativeDownloadButton) {
+    els.nativeDownloadButton.disabled = !state.authUser || state.nativeInstallBusy;
+    els.nativeDownloadButton.classList.toggle("is-busy", Boolean(state.nativeInstallBusy));
+  }
+
+  const deviceTitle = document.createElement("h3");
+  deviceTitle.textContent = "Detected Device";
+  els.nativeDeviceSummary.replaceChildren(
+    deviceTitle,
+    metric("Type", `${profile.os} ${profile.device_type}`),
+    metric("Browser", `${profile.browser} / ${profile.display_mode}`),
+    metric("Account", cleanText(device?.id || state.deviceAuthority?.current_device_id, "pending")),
+    metric("PWA mic", profile.pwa_capabilities?.microphone ? "available" : "unavailable"),
+    metric("Standby", standbyEnabled ? "module on" : "module off")
+  );
+
+  const packageTitle = document.createElement("h3");
+  packageTitle.textContent = "Native Package";
+  const packageRows = state.nativeInstallError
+    ? [
+        metric("Status", "error"),
+        metric("Error", truncateText(state.nativeInstallError, 120)),
+      ]
+    : packagePayload
+      ? [
+          metric("Channel", cleanText(packagePayload.install_channel, profile.install_channel)),
+          metric("Wake", cleanText(packagePayload.standby?.wake_phrase, "hi wasm")),
+          metric("Package", cleanText(packagePayload.token_id, "issued")),
+          metric("Mode", cleanText(packagePayload.mode, "native-companion-bootstrap")),
+        ]
+      : [
+          metric("Channel", cleanText(profile.install_channel, "native-companion")),
+          metric("Wake", "hi wasm"),
+          metric("Package", state.nativeInstallBusy ? "preparing" : "pending"),
+          metric("Mode", "native-companion-bootstrap"),
+        ];
+  els.nativePackageSummary.replaceChildren(packageTitle, ...packageRows);
+}
+
+function openNativeModal(options = {}) {
+  setPanel("home", { updateUrl: false });
+  state.nativeInstallProfile = detectNativeDeviceProfileSync();
+  renderNativeInstall();
+  if (els.nativeModal) els.nativeModal.hidden = false;
+  if (!options.skipHistory) {
+    pushUiNavigationLayer("native-modal", () => closeNativeModal({ skipHistory: true, skipStack: true }));
+  }
+  recordUserEvent("home.go_native_opened", {
+    target: "home:go-native",
+    summary: "Opened native companion",
+    data: {
+      os: state.nativeInstallProfile.os,
+      device_type: state.nativeInstallProfile.device_type,
+      install_channel: state.nativeInstallProfile.install_channel,
+    },
+  });
+  if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native").catch(() => {});
+}
+
+function closeNativeModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("native-modal")) return;
+  if (els.nativeModal) els.nativeModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("native-modal", { skipHistory: true, replaceHistory: true });
+  }
+}
+
+async function startNativeInstall(origin = "manual") {
+  if (!state.authUser || state.nativeInstallBusy) {
+    renderNativeInstall();
+    return;
+  }
+  state.nativeInstallBusy = true;
+  state.nativeInstallError = "";
+  renderNativeInstall();
+  try {
+    state.nativeInstallProfile = await detectNativeDeviceProfile();
+    setModuleEnabled("native-standby", true);
+    await loadDevices("go-native");
+    const target = nativeInstallCurrentDevice();
+    const payload = await fetchJson("/account/devices/native", {
+      method: "POST",
+      timeoutMs: 8000,
+      body: {
+        device_id: target?.id || state.deviceAuthority?.current_device_id || "",
+        device_profile: state.nativeInstallProfile,
+        standby_module_enabled: true,
+      },
+    });
+    state.nativeInstallPackage = payload.package || payload;
+    downloadJson(nativePackageFilename(state.nativeInstallPackage, state.nativeInstallProfile), state.nativeInstallPackage);
+    recordUserEvent("account.native_package_downloaded", {
+      target: `device:${state.nativeInstallPackage?.target_device_id || target?.id || "current"}`,
+      summary: `Downloaded native companion manifest for ${state.nativeInstallProfile.os}`,
+      data: {
+        origin,
+        os: state.nativeInstallProfile.os,
+        device_type: state.nativeInstallProfile.device_type,
+        install_channel: state.nativeInstallPackage?.install_channel || state.nativeInstallProfile.install_channel,
+        standby_module_enabled: true,
+      },
+    });
+  } catch (error) {
+    state.nativeInstallError = error.message || String(error);
+    recordUserEvent("account.native_package_error", {
+      target: "devices:native",
+      summary: state.nativeInstallError,
+      data: { origin, error: state.nativeInstallError },
+    });
+  } finally {
+    state.nativeInstallBusy = false;
+    renderNativeInstall();
+    renderModules();
+  }
+}
+
 function devicesPageIsOpen() {
   return Boolean(els.devicesModal && !els.devicesModal.hidden);
 }
@@ -29522,6 +29764,7 @@ function renderAll() {
   if (els.configModal && !els.configModal.hidden) renderConfigModal();
   if (els.artifactsModal && !els.artifactsModal.hidden) renderArtifacts();
   if (devicesPageIsOpen()) renderDevices();
+  if (els.nativeModal && !els.nativeModal.hidden) renderNativeInstall();
 }
 
 function artifactCard(title, meta, items = []) {
@@ -32385,9 +32628,12 @@ function wireEvents() {
   els.sharedVoiceMuteButton?.addEventListener("click", toggleSharedVoiceMute);
   els.homeFleetButton?.addEventListener("click", openFleetModal);
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
+  els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
   els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
+  els.nativeDownloadButton?.addEventListener("click", () => void startNativeInstall("manual"));
+  els.closeNativeModalButton?.addEventListener("click", closeNativeModal);
   els.editSpaceButton?.addEventListener("click", openEditSpaceModal);
   els.copySpaceIdButton?.addEventListener("click", () => void copyActiveSpaceId());
   els.shareSpaceButton?.addEventListener("click", () => void shareActiveSpace());
@@ -32431,6 +32677,7 @@ function wireEvents() {
   installModalBackdropDismiss(els.artifactsModal, closeArtifactsModal);
   els.closeDevicesModalButton?.addEventListener("click", closeDevicesModal);
   installModalBackdropDismiss(els.devicesModal, closeDevicesModal);
+  installModalBackdropDismiss(els.nativeModal, closeNativeModal);
   els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
   els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
   installModalBackdropDismiss(els.fleetModal, closeFleetModal);
