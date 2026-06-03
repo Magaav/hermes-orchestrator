@@ -22,13 +22,15 @@ rendering, agent-readable state, and a cleaner app shell.
   `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside this public repo.
 - Loads an embedded WebAssembly core in the browser and uses it as the first
   rendering/runtime handshake for the parity shell.
-- Home exposes a Go Native action that detects the current PWA device, enables
-  the optional `native-standby` module locally, and downloads a generated
-  native app package ZIP. The ZIP includes platform launcher/install assets and
-  internal companion metadata; the Windows payload includes a double-click
-  `install.cmd` wrapper that downloads pinned Electron `42.3.2`, installs
-  `WASM Agent.exe`, and creates Start Menu/Desktop shortcuts for that executable,
-  while signed APK/IPA/MSI-style builders are still a future native build lane.
+- Home exposes a Go Native action that detects the current device and resolves
+  a platform-specific native installer through `/native/resolve`. The primary
+  product path is never a JSON manifest, generic ZIP, PWA prompt, or
+  Edge/Chrome app-mode shortcut. Windows native means a `.exe`/`.msi` desktop
+  installer, Android native means an `.apk` first with an AAB lane later, macOS
+  means `.dmg`/`.pkg`, Linux means `.AppImage`/`.deb`/`.rpm`, and iOS/iPadOS is
+  TestFlight/App Store/manual development only. If the artifact is missing, the
+  modal says `Native installer not built yet` and shows fallback/status
+  information; PWA install is a separate fallback lane.
 - Does not start, stop, copy, or patch Space Agent.
 
 ## Durable Next Step
@@ -36,7 +38,13 @@ rendering, agent-readable state, and a cleaner app shell.
 This section is the cross-compaction handoff for active `wasm-agent` work. When
 the next action changes, update this before ending the turn.
 
-Current next action: reload the real authenticated co-control clients and
+Current next action: download and install the refreshed Windows native installer
+from the live Go Native / `/native/download?platform=windows&arch=x64` path on a
+real Windows machine. Confirm the installed app opens the validated backend PWA
+`/home?native=electron` instead of `wasm-agent://app` or `file://` UI, DevTools
+`location.origin` is the backend origin, `fetch('/config.json')` reports
+`auth.googleClientIdConfigured: true`, and Google sign-in posts to
+`/auth/google` and receives the backend session cookie; then reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
 v138 service worker activates: first by receiving a
@@ -70,16 +78,82 @@ capability are present, and resume the prior CAM 1 middle-timeline click and
 Live return browser verification so the real client matches the headless
 acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
 `playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
-live on the Live button; then click the Home `Go Native` action on a real phone
-session and confirm it detects the device type, enables `native-standby`, and
-downloads a `.zip` from `/account/devices/native/download` with schema
-`hermes.wasm_agent.native_app_download.v1`, platform install assets, and
-metadata for the future standby companion while making no claim that the PWA
-itself can listen with the screen off; then re-download and extract the ZIP on
-Windows, run `windows/install.cmd`, and confirm it creates Start Menu/Desktop
-`WASM Agent` shortcuts that launch `WASM Agent.exe` through the Electron
-runtime instead of opening Edge or Chrome.
-Current evidence: Remote-control viewport frames now strip URL-backed CSS and
+live on the Live button; then click the Home `Go Native` action on real phone
+and desktop sessions and confirm it detects OS/device type/browser/architecture,
+calls `/native/resolve`, shows `Download Android APK` or
+`Download Windows Installer` as appropriate, never downloads a JSON manifest or
+generic ZIP as the primary action, and shows `Native installer not built yet`
+when the matching artifact is absent. The first Windows x64 installer now
+exists at `/local/native/windows/release/WASM-Agent-Setup-x64.exe`, so run it on
+a real Windows machine next and confirm it installs the Electron-backed `WASM
+Agent.exe`, persists config, creates Desktop/Start Menu shortcuts with the
+bundled PWA-derived icon, validates the wasm-agent backend identity, opens the
+backend's real PWA `/home?native=electron` URL in `remote-pwa` mode when
+reachable, uses the packaged fallback only as a backend-missing screen, and can
+complete the device registration / heartbeat path. Confirm
+Google login works in Electron on the same web origin as the browser PWA, and
+that `/modules/hmr/events`, `Ctrl+R`, and `Ctrl+Shift+R` refresh UI/module edits
+without reinstalling the desktop app. If a Desktop shortcut is still missing
+on Windows, inspect
+`%LOCALAPPDATA%\\WASM Agent Native\\shortcut-report.txt` because the installer
+records the electron-builder shortcut policy used during install. Keep PWA
+install as a separate fallback lane and keep any generic ZIP package as
+developer/debug-only compatibility.
+Current evidence: `scripts/start_wasm_agent.sh` now defaults the PWA/backend
+bind host to `0.0.0.0:8877` so Windows Electron can reach `/config.json` across
+WSL/Linux networking unless `HERMES_WASM_AGENT_HOST` explicitly overrides it.
+Windows native source now probes backend candidates in
+parallel through `/config.json`, rejects unavailable config, prefers backends
+whose config reports `auth.googleClientIdConfigured`, clears stale
+service-worker/Cache Storage data before loading, and opens only the validated
+backend PWA `/home?native=electron` for the real app. Candidate startup logs now
+include `[native] testing backend candidate: <url>`, result lines with success
+or the exact failure reason, and `[native] selected backend: <url>`. The
+Connect WASM Agent fallback shows the tested `/config.json` URL and fetch
+result, lets the user save `http://10.0.0.167:8877`, validates it with
+`GET /config.json` before retrying, and persists it for later launches. On this
+Linux host, `ss` showed the current server listening on `0.0.0.0:8877`, and
+`curl -i http://127.0.0.1:8877/config.json` plus
+`curl -i http://10.0.0.167:8877/config.json` both returned HTTP 200. Real
+Windows Chrome/Electron still needs the same two URL probes before resuming
+Google login work. The packaged fallback is now only the backend-missing screen
+and contains no Google login UI. The PWA auth shell fetches same-origin
+`/config.json` before Google Sign-In
+initialization, reports native `/config.json` failures as `Backend connected
+incorrectly: /config.json unavailable`, and includes `location.origin` when
+Google config is absent. The resolver logic has a focused behavioral Node test
+for rejecting unavailable `/config.json` and preferring Google-configured
+backends. The Windows x64 NSIS installer was rebuilt at `2026-06-03 14:00 UTC`
+at `/local/native/windows/release/WASM-Agent-Setup-x64.exe` with SHA-256
+`9e7fbcf8019f72722bb21da957d79aba2464a0dd0f17889068645e70431da194`; on this
+Linux/ARM64 host the successful command used the prepared local NSIS host and
+skipped Wine executable resource editing with
+`-c.win.signAndEditExecutable=false`. The installer was extracted with bundled
+`7za`; its `resources/app.asar` matched the unpacked Windows `app.asar`, included
+`native-backend-resolver.js`, omitted the old `Google client ID missing` literal
+from both the asar and extracted text resources, contained no Google UI in
+`fallback.html`, and contained the backend resolver, cache cleanup, remote PWA
+load, and native startup log code. Focused checks passed for `wasm-agent`, native
+backend resolver, native shell policy, syntax, native artifact tests, extracted
+installer checks, and refreshed Linux ARM64 unpacked artifact checks.
+The first Windows x64 native installer artifact is built at
+`/local/native/windows/release/WASM-Agent-Setup-x64.exe` from a packaged
+Electron desktop app plus a Space Agent-style electron-builder NSIS installer
+lane. The rebuilt app keeps the PWA `public/` tree available as a fallback
+Electron resource through the secure `wasm-agent://app/` protocol, but its
+primary entrance is the validated backend's real PWA `/home?native=electron`
+origin. It bundles
+a multi-size `icon.ico` generated from the same SVG used by the PWA, uses that
+icon for the native window and shortcuts, normalizes generated server URL
+candidates, reads packaged defaults from `process.resourcesPath`, rejects
+wrong-app origins, and requires wasm-agent identity markers from `/config.json`,
+`/health`, or `/healthz` before selecting a backend. The resolver now reports Windows x64
+`available: true`,
+`/native/download?platform=windows&arch=x64` streams
+`WASM-Agent-Setup-x64-0.1.0-20260603T132803Z.exe` directly with a
+`windows-installer` kind, and the Go Native UI uses the
+resolver-provided direct download URL with `Download Windows Installer` as the
+Windows CTA. Remote-control viewport frames now strip URL-backed CSS and
 inline snapshot resources before SVG export, and SVG export failures fall back
 to a canvas-native DOM renderer that avoids drawing untrusted image resources;
 capture errors are relayed to the controller as statused frame events instead
@@ -408,22 +482,20 @@ offline, artifact-evolution actions such as creating spaces and importing
 storage point the user back to Connected Devices so they can switch main devices
 quickly. Sync currently downloads a device-specific installer manifest with
 planned tunnel and state-sync capabilities; it does not claim a tunnel is live
-yet. The adjacent Go Native action detects the current browser device on click,
-turns on the optional `native-standby` module in browser-local module settings,
-and downloads `/account/devices/native/download` as an OS-targeted native app
-package ZIP for the current device. The archive includes Linux, macOS, and
-Windows launcher/install assets plus Android/iOS build-lane notes and internal
-standby companion metadata for wake phrase standby, live transcription, and
-device presence. After extracting the ZIP, the Windows package entry point is
-`windows/install.cmd`, which runs the PowerShell installer with a temporary
-execution-policy bypass, downloads pinned Electron `42.3.2`, installs
-`WASM Agent.exe` under `%LOCALAPPDATA%\\WASM Agent Native`, creates per-user
-Start Menu/Desktop shortcuts for that executable, and launches the Electron
-desktop app. It
-records native-companion requests under
-`state/users/<acc_id>/native-companion/`; signed mobile/desktop binaries are a
-future build pipeline, and screen-off wake remains a native-companion
-responsibility rather than PWA behavior. On mobile, Home config can switch the
+yet. The adjacent Go Native action detects the current browser device on click
+and resolves a platform-specific installer through `POST /native/resolve`.
+`GET /native/download?platform=<platform>&arch=<arch>` streams only the matching
+native artifact when it exists: Windows `.exe`/`.msi`, Android `.apk`, macOS
+`.dmg`/`.pkg`, or Linux `.AppImage`/`.deb`/`.rpm`. Missing installers report
+`Native installer not built yet`; iOS/iPadOS shows TestFlight/App Store/manual
+development options because direct IPA installation is restricted. Generic ZIP
+packages and `/account/devices/native/download` are developer/debug
+compatibility artifacts only and are not the primary Go Native product path.
+PWA install is separate fallback behavior, and Edge/Chrome app mode must not be
+labeled native. True screen-off `hi wasm` requires Android/iOS native companion
+capabilities; wake-word behavior is not promised until foreground service,
+microphone, transcription, and standby bridge pieces are stable. On mobile,
+Home config can switch the
 launcher from the default left
 rail to a top bar so the Home button and account control stay pinned while the
 space list scrolls between them.
@@ -1145,8 +1217,8 @@ button.
 The Home route is the app entrance: `/` and `/home` open the account home
 space and show the `space-home` title. Home exposes a wider `New Space` action,
 `Artifacts`, `Config`, and `Modules` modal actions, and the current account
-storage badge. `Go Native` is also a Home action and opens the current
-device's native-companion bootstrap flow.
+storage badge. `Go Native` is also a Home action and opens the current device's
+platform-specific native installer resolver.
 Standard users are limited to 1 GB under their `state/users/<acc_id>/` root;
 admins are shown as unlimited. Home's config button opens the account-global
 `home` Timeline lane. The launcher also has a fixed `space-admin` space with a
@@ -1301,11 +1373,13 @@ The app also includes a small dev-only HMR module at
 `public/` and `server/` source files. CSS changes are applied by reloading
 stylesheet links with a cache-busting query string; JavaScript, HTML,
 manifest, module descriptors, and server-source changes trigger a page reload.
-The local dev runtime starts this HMR channel automatically whenever service
-workers are disabled, even if the Dev HMR module was toggled off in older local
-settings. The HMR handshake carries a source fingerprint; if the browser missed
-an update while disconnected or an old client connects without the current HMR
-revision, it receives a one-shot reload into the current client. This is a
+The local dev runtime starts this HMR channel on the auth/native entrance before
+account bootstrap whenever service workers are disabled, even if the Dev HMR
+module was toggled off in older local settings. That keeps Google login, native
+remote-PWA shell routing, and setup/fallback screens live-editable before a user
+session exists. The HMR handshake carries a source fingerprint; if the browser
+missed an update while disconnected or an old client connects without the current
+HMR revision, it receives a one-shot reload into the current client. This is a
 developer convenience module for the local shadow PWA, not a production
 synchronization contract. While this module is active, the app disables and
 clears the service worker cache on load so stale cached JavaScript cannot trap
@@ -1342,11 +1416,12 @@ Start only the PWA script directly:
 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
 ```
 
-In remote IDE or container-backed workspaces, bind outward and use the IDE's
-forwarded port URL:
+The PWA server binds outward by default so the Windows Electron native app can
+reach `/config.json` from the Windows networking context. To force a specific
+bind address, set `HERMES_WASM_AGENT_HOST`:
 
 ```bash
-HERMES_WASM_AGENT_HOST=0.0.0.0 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
+HERMES_WASM_AGENT_HOST=127.0.0.1 /local/plugins/wasm-agent/scripts/start_wasm_agent.sh
 ```
 
 If `http://127.0.0.1:8877` refuses from your desktop browser while the server is
@@ -1485,7 +1560,7 @@ concrete finding exists; until then, `hermes-defense` stays idle by design.
 
 ## Environment
 
-- `HERMES_WASM_AGENT_HOST`: bind host, default `127.0.0.1`.
+- `HERMES_WASM_AGENT_HOST`: bind host, default `0.0.0.0` so Windows native can reach the PWA backend across WSL/Linux networking.
 - `HERMES_WASM_AGENT_PORT`: app port, default `8877`.
 - `HERMES_WASM_AGENT_STATE_DIR`: state/log root, default
   `/local/plugins/wasm-agent/state`.

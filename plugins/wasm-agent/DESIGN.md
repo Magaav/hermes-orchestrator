@@ -208,14 +208,20 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   target device, main device, planned tunnel capability, client-local layout
   policy, and shareable artifact policy.
 - Home includes a Go Native action beside Connected Devices. It must detect the
-  current browser device on click, enable the optional `native-standby` module
-  in local module settings, and download a generated native app package ZIP from
-  `/account/devices/native/download`. The package must include a Windows
-  `install.cmd` entry point that installs an Electron-backed `WASM Agent.exe`
-  desktop process with Start Menu/Desktop shortcuts, and may include internal
-  metadata for wake phrase standby and live transcription contracts, but the
-  PWA UI must not imply it can listen while a phone screen is off without a
-  real native companion app.
+  current browser device on click, show OS, device type, browser, architecture,
+  and installer channel, then call `POST /native/resolve` for platform-specific
+  installer metadata. The primary CTA must be platform-specific: Windows
+  `.exe`/`.msi`, Android `.apk`, macOS `.dmg`/`.pkg`, Linux
+  `.AppImage`/`.deb`/`.rpm`, and iOS/iPadOS TestFlight/App Store/manual
+  development options. If the artifact is missing, the UI must say
+  `Native installer not built yet`. A generic ZIP, JSON manifest, PWA prompt,
+  or Edge/Chrome app-mode shortcut must not be presented as native; PWA install
+  is only a separate fallback lane. Windows Electron native builds must use the
+  packaged `wasm-agent://app/` shell and proxy backend calls instead of loading
+  the server URL as the top-level window. True screen-off `hi wasm` requires
+  Android or iOS native companion capabilities, and wake-word behavior is not
+  promised until foreground service, microphone, transcription, and standby
+  bridge pieces are stable.
 - User-created spaces/apps/widgets/widget-inner-entities should evolve into
   portable `wasm-artifacts`; see `ARTIFACTS.md`. Artifact semantics are
   shareable/backupable/marketplace-ready. App positions, widget positions,

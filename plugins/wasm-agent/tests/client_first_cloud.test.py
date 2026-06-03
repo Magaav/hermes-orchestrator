@@ -11,7 +11,6 @@ import struct
 import tempfile
 import threading
 import unittest
-import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -314,47 +313,95 @@ class ClientFirstCloudTest(unittest.TestCase):
             request_path = state_dir / "users" / "101" / "native-companion" / f"{package['token_id']}.json"
             self.assertTrue(request_path.exists())
 
-            filename, bundle, metadata = static_server.create_native_download_bundle(
+            missing = static_server.resolve_native_installer(
                 server,
                 owner,
                 {
-                    "device_id": current_device_id,
-                    "standby_module_enabled": True,
-                    "device_profile": {"os": "Windows", "browser": "Edge", "device_type": "desktop"},
+                    "platform": "android",
+                    "arch": "arm64",
+                    "deviceType": "phone",
+                    "browser": "chrome",
+                    "userAgent": handler.headers["User-Agent"],
+                    "accountId": "101",
+                    "deviceId": current_device_id,
                 },
-                handler,
             )
-            self.assertTrue(filename.endswith(".zip"))
-            self.assertEqual(metadata["schema"], "hermes.wasm_agent.native_app_download.v1")
-            with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
-                names = set(archive.namelist())
-                self.assertIn("README.md", names)
-                self.assertIn("metadata/package.json", names)
-                self.assertIn("linux/install.sh", names)
-                self.assertIn("macos/WASM Agent.app/Contents/Info.plist", names)
-                self.assertIn("windows/README.md", names)
-                self.assertIn("windows/install.cmd", names)
-                self.assertIn("windows/install.ps1", names)
-                self.assertIn("windows/electron-app/package.json", names)
-                self.assertIn("windows/electron-app/main.js", names)
-                self.assertIn("windows/electron-app/preload.js", names)
-                self.assertIn("android/README.md", names)
-                self.assertIn("ios/README.md", names)
-                windows_cmd = archive.read("windows/install.cmd").decode("utf-8")
-                windows_ps1 = archive.read("windows/install.ps1").decode("utf-8")
-                windows_main = archive.read("windows/electron-app/main.js").decode("utf-8")
-                self.assertIn("ExecutionPolicy Bypass", windows_cmd)
-                self.assertIn("electron-v$ElectronVersion-win32-$electronArch.zip", windows_ps1)
-                self.assertIn("WASM Agent.exe", windows_ps1)
-                self.assertIn("WScript.Shell", windows_ps1)
-                self.assertIn("Start-Process -FilePath $AppExe", windows_ps1)
-                self.assertIn("BrowserWindow", windows_main)
-                bundled_metadata = json.loads(archive.read("metadata/package.json").decode("utf-8"))
-                self.assertEqual(bundled_metadata["package"]["target_device_id"], current_device_id)
-                self.assertEqual(bundled_metadata["package"]["target_os"], "Windows")
-                self.assertEqual(bundled_metadata["package"]["desktop_native_channel"], "electron-runtime-installer")
-                self.assertEqual(bundled_metadata["package"]["desktop_runtime"]["kind"], "electron")
-                self.assertEqual(bundled_metadata["package"]["app_url"], "/")
+            self.assertFalse(missing["available"])
+            self.assertEqual(missing["platform"], "android")
+            self.assertEqual(missing["kind"], "android-apk")
+            self.assertEqual(missing["message"], "Native installer not built yet")
+            self.assertEqual(missing["buildStatus"], "missing")
+            self.assertEqual(missing["fallbacks"][0]["kind"], "pwa")
+
+    def test_native_installer_resolver_and_download_stream_real_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "wasm-agent"
+            artifact = root / "native" / "windows" / "release" / "WASM-Agent-Setup-x64.exe"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_bytes(b"MZ wasm-agent setup")
+            defaults = artifact.parent / "win-unpacked" / "resources" / "native-defaults.json"
+            defaults.parent.mkdir(parents=True)
+            defaults.write_text(
+                json.dumps(
+                    {
+                        "schema": "hermes.wasm_agent.native_defaults.v1",
+                        "wasmAgentVersion": "0.1.0",
+                        "installableVersion": "0.1.0+win-x64-20260603T132803Z",
+                        "buildId": "win-x64-20260603T132803Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            server = SimpleNamespace(plugin_root=plugin_root, public_root=plugin_root / "public", state_dir=root / "state")
+            owner = user("101", "owner@example.test")
+
+            resolved = static_server.resolve_native_installer(
+                server,
+                owner,
+                {
+                    "platform": "windows",
+                    "arch": "x64",
+                    "deviceType": "desktop",
+                    "browser": "edge",
+                    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/136.0",
+                    "accountId": "101",
+                    "deviceId": "windows-device",
+                },
+            )
+            self.assertTrue(resolved["available"])
+            self.assertEqual(resolved["kind"], "windows-installer")
+            self.assertEqual(resolved["filename"], "WASM-Agent-Setup-x64-0.1.0-20260603T132803Z.exe")
+            self.assertEqual(resolved["artifactFilename"], "WASM-Agent-Setup-x64.exe")
+            self.assertEqual(resolved["buildId"], "win-x64-20260603T132803Z")
+            self.assertEqual(resolved["installableVersion"], "0.1.0+win-x64-20260603T132803Z")
+            self.assertEqual(resolved["downloadUrl"], "/native/download?platform=windows&arch=x64")
+
+            class DownloadHandler:
+                def __init__(self) -> None:
+                    self.server = server
+                    self.path = "/native/download?platform=windows&arch=x64"
+                    self.wfile = io.BytesIO()
+                    self.status = None
+                    self.headers = {}
+
+                def send_response(self, status) -> None:
+                    self.status = status
+
+                def send_header(self, key, value) -> None:
+                    self.headers[key] = value
+
+                def end_headers(self) -> None:
+                    pass
+
+            download = DownloadHandler()
+            static_server.serve_native_installer_download(download, owner)
+            self.assertEqual(download.status, static_server.HTTPStatus.OK)
+            self.assertEqual(download.headers["Content-Disposition"], 'attachment; filename="WASM-Agent-Setup-x64-0.1.0-20260603T132803Z.exe"')
+            self.assertEqual(download.headers["X-Wasm-Agent-Native-Kind"], "windows-installer")
+            self.assertEqual(download.headers["X-Wasm-Agent-Native-Build-Id"], "win-x64-20260603T132803Z")
+            self.assertEqual(download.headers["X-Wasm-Agent-Native-Version"], "0.1.0+win-x64-20260603T132803Z")
+            self.assertEqual(download.wfile.getvalue(), b"MZ wasm-agent setup")
 
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

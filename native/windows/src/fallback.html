@@ -1,0 +1,157 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WASM Agent</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, Segoe UI, system-ui, sans-serif;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #070d18;
+      color: #eef6ff;
+    }
+    main {
+      width: min(560px, calc(100vw - 40px));
+      display: grid;
+      gap: 16px;
+    }
+    .mark {
+      width: 86px;
+      height: 86px;
+      object-fit: contain;
+      filter: drop-shadow(0 0 18px rgba(41, 231, 255, .36));
+    }
+    h1 {
+      margin: 0;
+      font-size: 26px;
+    }
+    p {
+      margin: 0;
+      color: #9fb4ce;
+      line-height: 1.5;
+    }
+    .reason {
+      color: #9eefff;
+      overflow-wrap: anywhere;
+    }
+    .diagnostics {
+      display: grid;
+      gap: 6px;
+      padding: 12px;
+      border: 1px solid rgba(151, 178, 210, .2);
+      background: rgba(255, 255, 255, .04);
+      color: #b8cbe2;
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+    .version {
+      color: #7891ad;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    label {
+      display: grid;
+      gap: 8px;
+      color: #cfe5ff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    input {
+      height: 42px;
+      border-radius: 8px;
+      border: 1px solid rgba(151, 178, 210, .28);
+      padding: 0 12px;
+      background: #0d1626;
+      color: #f6fbff;
+      font: inherit;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    button {
+      height: 38px;
+      border-radius: 8px;
+      border: 1px solid rgba(41, 231, 255, .45);
+      background: rgba(41, 231, 255, .12);
+      color: #f6fbff;
+      padding: 0 14px;
+      font: inherit;
+      font-weight: 800;
+    }
+    button.secondary {
+      border-color: rgba(151, 178, 210, .22);
+      background: rgba(255, 255, 255, .06);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <img class="mark" src="./build/icon.svg" alt="" aria-hidden="true">
+    <h1>Connect WASM Agent</h1>
+    <p>The native desktop app is installed, but it could not load the wasm-agent server.</p>
+    <p class="version" id="version">WASM Agent native build loading...</p>
+    <p class="reason" id="reason">Could not reach the configured server.</p>
+    <div class="diagnostics" aria-live="polite">
+      <div>Tested URL: <span id="testedUrl">loading...</span></div>
+      <div>Fetch result: <span id="fetchResult">not tested yet</span></div>
+    </div>
+    <label>Server URL
+      <input id="serverUrl" value="http://127.0.0.1:8877" spellcheck="false">
+    </label>
+    <div class="actions">
+      <button id="saveRetry">Save and Retry</button>
+      <button id="retry" class="secondary">Retry</button>
+    </div>
+  </main>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const serverUrl = params.get("serverUrl") || "http://127.0.0.1:8877";
+    const testedUrl = params.get("testedUrl") || `${serverUrl.replace(/\/+$/, "")}/config.json`;
+    const reason = params.get("reason") || `Could not reach ${serverUrl}.`;
+    const input = document.querySelector("#serverUrl");
+    const reasonNode = document.querySelector("#reason");
+    const versionNode = document.querySelector("#version");
+    const testedUrlNode = document.querySelector("#testedUrl");
+    const fetchResultNode = document.querySelector("#fetchResult");
+    input.value = serverUrl;
+    reasonNode.textContent = reason;
+    testedUrlNode.textContent = testedUrl;
+    fetchResultNode.textContent = reason;
+    function configUrlFor(value) {
+      return `${String(value || "").trim().replace(/\/+$/, "")}/config.json`;
+    }
+    window.wasmAgentNative?.config?.().then((payload) => {
+      const native = payload?.native || payload || {};
+      const version = native.installableVersion || native.wasmAgentVersion || native.nativeShellVersion || payload?.version || "";
+      const build = native.buildId || native.buildGeneratedAt || "";
+      versionNode.textContent = [version ? `WASM Agent ${version}` : "", build ? `build ${build}` : ""].filter(Boolean).join(" / ") || "WASM Agent native build unavailable";
+    }).catch(() => {
+      versionNode.textContent = "WASM Agent native build unavailable";
+    });
+    document.querySelector("#saveRetry").addEventListener("click", async () => {
+      const nextUrl = input.value;
+      testedUrlNode.textContent = configUrlFor(nextUrl);
+      fetchResultNode.textContent = "testing...";
+      const result = await window.wasmAgentNative.testBackend(nextUrl);
+      fetchResultNode.textContent = result?.ok
+        ? "success: HTTP 200 valid JSON"
+        : `failure: ${result?.reason || "unknown error"}`;
+      await window.wasmAgentNative.configure({ serverUrl: nextUrl });
+      if (result?.ok) await window.wasmAgentNative.reload();
+    });
+    document.querySelector("#retry").addEventListener("click", async () => {
+      await window.wasmAgentNative.reload();
+    });
+  </script>
+</body>
+</html>

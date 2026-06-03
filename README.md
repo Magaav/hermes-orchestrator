@@ -224,6 +224,7 @@ Execution discipline for the orchestrator and any shared framework mutation:
 │   ├── public/   # canonical git-tracked script code
 │   └── private/  # canonical local-only script state/entrypoints
 ├── crons/        # canonical node cron roots mounted at /local/agents/nodes/<node>/cron
+├── native/       # wasm-agent native installer lanes; Windows x64 uses electron-builder NSIS and streams via /native/download
 ├── plugins/      # plugins are modifications applyed to each node hermes-agent core
 │   ├── discord-slash-commands/ # canonical host plugin root for Discord slash UX/runtime ownership
 │   ├── exhaust/                # canonical host plugin root for exhaust-mode behavior

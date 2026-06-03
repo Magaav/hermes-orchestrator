@@ -1,0 +1,89 @@
+{
+  "appId": "com.wasmagent.desktop",
+  "productName": "WASM Agent",
+  "copyright": "Copyright © 2026 Hermes Orchestrator",
+  "directories": {
+    "output": "../release",
+    "buildResources": "build"
+  },
+  "extraResources": [
+    {
+      "from": "build/icon.ico",
+      "to": "icon.ico"
+    },
+    {
+      "from": "build/native-defaults.json",
+      "to": "native-defaults.json"
+    },
+    {
+      "from": "../../../plugins/wasm-agent/public",
+      "to": "public"
+    }
+  ],
+  "files": [
+    "main.js",
+    "native-backend-resolver.js",
+    "native-shell-policy.js",
+    "preload.js",
+    "fallback.html",
+    "build/icon.svg",
+    "build/native-defaults.json",
+    "package.json"
+  ],
+  "asar": true,
+  "publish": null,
+  "win": {
+    "icon": "build/icon.ico",
+    "signAndEditExecutable": true,
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "WASM-Agent-Setup-x64.exe",
+    "verifyUpdateCodeSignature": false
+  },
+  "linux": {
+    "icon": "build/icon.svg",
+    "category": "Utility",
+    "target": [
+      {
+        "target": "AppImage",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      }
+    ],
+    "artifactName": "WASM-Agent-${arch}.${ext}"
+  },
+  "mac": {
+    "category": "public.app-category.utilities",
+    "target": [
+      {
+        "target": "dmg",
+        "arch": [
+          "x64",
+          "arm64"
+        ]
+      }
+    ],
+    "artifactName": "WASM-Agent-${arch}.${ext}"
+  },
+  "nsis": {
+    "guid": "8e77a95c-1554-58fc-9852-11d4a9707428",
+    "include": "build/installer.nsh",
+    "script": "build/installer.nsi",
+    "warningsAsErrors": false,
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": "always",
+    "createStartMenuShortcut": true,
+    "shortcutName": "WASM Agent",
+    "deleteAppDataOnUninstall": false
+  }
+}

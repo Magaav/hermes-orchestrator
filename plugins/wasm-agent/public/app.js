@@ -1116,6 +1116,7 @@ const els = {
   nativeModalSubtitle: document.querySelector("#nativeModalSubtitle"),
   nativeDeviceSummary: document.querySelector("#nativeDeviceSummary"),
   nativePackageSummary: document.querySelector("#nativePackageSummary"),
+  nativeManualChooser: document.querySelector("#nativeManualChooser"),
   nativeInstallStatus: document.querySelector("#nativeInstallStatus"),
   nativeDownloadButton: document.querySelector("#nativeDownloadButton"),
   closeNativeModalButton: document.querySelector("#closeNativeModalButton"),
@@ -1298,6 +1299,7 @@ const state = {
   authRedirectMessage: "",
   adminEmail: "",
   googleButtonRenderedFor: "",
+  configChecked: false,
   authUser: null,
   authChecked: false,
   loginOpen: false,
@@ -1320,6 +1322,7 @@ const state = {
   nativeInstallPackage: null,
   nativeInstallFilename: "",
   nativeInstallError: "",
+  nativeInstallerResolution: null,
   userFleetNodes: [],
   userFleetSystemNodes: [],
   userFleetHarnesses: [],
@@ -8185,8 +8188,7 @@ function currentSharedSpacePointerTarget() {
 
 function sharedSpacePointerLiveUrl(target = currentSharedSpacePointerTarget()) {
   if (!target?.space?.shared_space_id) return "";
-  const url = new URL("/spaces/room/live", window.location.href);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const url = appWebSocketUrl("/spaces/room/live");
   url.searchParams.set("shared_space_id", target.space.shared_space_id);
   url.searchParams.set("space_id", target.space.id);
   return url.toString();
@@ -17479,27 +17481,85 @@ function installWidgetResizing() {
   });
 }
 
-async function loadConfig() {
+async function loadNativePreloadConfig() {
+  if (!window.wasmAgentNative?.config) return null;
   try {
-    const response = await fetch("/config.json", { cache: "no-store" });
-    if (response.ok) {
-      const config = await response.json();
-      state.config = config;
-      if (config.bridgeUrl) state.bridgeUrl = String(config.bridgeUrl).replace(/\/$/, "");
-      state.googleClientId = String(config.auth?.googleClientId || "").trim();
-      state.googleLoginUri = String(config.auth?.googleLoginUri || "").trim();
-      state.adminEmail = cleanText(config.auth?.adminEmail, state.adminEmail);
-      const timeoutSec = Number(config.agentTurnTimeoutSec);
-      if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
-        state.agentTurnTimeoutMs = timeoutSec * 1000;
-      }
-      applyModuleVisibility();
-      renderModules();
-    }
+    const payload = await window.wasmAgentNative.config();
+    return payload && typeof payload === "object" ? payload : null;
   } catch {
-    // Keep the local default when the config route is unavailable.
+    return null;
   }
+}
+
+function mergeNativePreloadConfig(config = {}, nativePayload = null) {
+  if (!nativePayload || typeof nativePayload !== "object") return config || {};
+  const nativeMeta = nativePayload.native && typeof nativePayload.native === "object"
+    ? nativePayload.native
+    : nativePayload;
+  const nativeLooksLikeAppConfig = Boolean(nativePayload.appId || nativePayload.service || nativePayload.auth || nativePayload.deployment || nativePayload.features);
+  const merged = {
+    ...(nativeLooksLikeAppConfig ? nativePayload : {}),
+    ...(config || {}),
+  };
+  merged.auth = {
+    ...(nativePayload.auth || {}),
+    ...((config || {}).auth || {}),
+  };
+  merged.native = {
+    ...(nativeMeta || {}),
+    ...((config || {}).native || {}),
+  };
+  if (!cleanText(merged.native.serverUrl, "") && cleanText(nativeMeta?.serverUrl, "")) {
+    merged.native.serverUrl = cleanText(nativeMeta.serverUrl, "");
+  }
+  return merged;
+}
+
+async function loadConfig() {
+  const nativeConfigPromise = loadNativePreloadConfig();
+  let config = {};
+  let configFetchFailed = false;
+  try {
+    config = await fetchJson("/config.json", {
+      timeoutMs: window.wasmAgentNative ? 5000 : 10000,
+    });
+  } catch {
+    configFetchFailed = true;
+    config = {};
+  }
+  const nativeConfig = await nativeConfigPromise;
+  config = window.wasmAgentNative && configFetchFailed
+    ? mergeNativePreloadConfig({ native: nativeConfig?.native || nativeConfig || {} }, nativeConfig && { native: nativeConfig.native || nativeConfig })
+    : mergeNativePreloadConfig(config, nativeConfig);
+  state.config = config;
+  if (config.bridgeUrl) state.bridgeUrl = String(config.bridgeUrl).replace(/\/$/, "");
+  state.googleClientId = String(config.auth?.googleClientId || "").trim();
+  state.googleLoginUri = String(config.auth?.googleLoginUri || "").trim();
+  state.adminEmail = cleanText(config.auth?.adminEmail, state.adminEmail);
+  const timeoutSec = Number(config.agentTurnTimeoutSec);
+  if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
+    state.agentTurnTimeoutMs = timeoutSec * 1000;
+  }
+  state.configChecked = true;
+  if (window.wasmAgentNative && configFetchFailed) {
+    state.loginMessage = "Backend connected incorrectly: /config.json unavailable";
+  } else if (!state.googleClientId && window.wasmAgentNative) {
+    state.loginMessage = nativeBackendUnresolved()
+      ? "No validated wasm-agent backend was selected."
+      : `Google login config was not received from the wasm-agent backend at ${window.location.origin}.`;
+  } else if (state.googleClientId && state.loginMessage === "Google login config was not received from the wasm-agent backend.") {
+    state.loginMessage = "";
+  }
+  applyModuleVisibility();
+  renderModules();
   renderLogin();
+  if (shouldReloadNativeToRemotePwa(config)) {
+    void window.wasmAgentNative.reload();
+    return;
+  }
+  if (!state.authUser) {
+    void renderGoogleSignInButton();
+  }
 }
 
 function publicUserLabel(user) {
@@ -17513,6 +17573,33 @@ function publicUserInitial(user) {
 
 function isAdminUser(user = state.authUser) {
   return String(user?.role || "").toLowerCase() === "admin";
+}
+
+function nativeConfigState() {
+  return state.config?.native && window.wasmAgentNative ? state.config.native : null;
+}
+
+function nativeBackendUnresolved() {
+  const native = nativeConfigState();
+  return Boolean(native) && !cleanText(native.serverUrl, "");
+}
+
+function nativeInstallVersionLabel() {
+  const native = nativeConfigState();
+  if (!native) return "";
+  const version = cleanText(native.installableVersion || native.wasmAgentVersion || native.nativeShellVersion || native.appVersion, "");
+  const buildId = cleanText(native.buildId, "");
+  const builtAt = cleanText(native.buildGeneratedAt, "");
+  const shortBuild = buildId
+    ? buildId.replace(/^win-x64-/, "")
+    : builtAt.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const platform = cleanText(native.buildPlatform || native.platform, "windows");
+  return [platform, version, shortBuild ? `build ${shortBuild}` : ""].filter(Boolean).join(" ");
+}
+
+function shouldReloadNativeToRemotePwa(config = state.config) {
+  const serverUrl = cleanText(config?.native?.serverUrl, "");
+  return Boolean(window.wasmAgentNative?.reload && serverUrl && window.location.protocol === "wasm-agent:");
 }
 
 function setLoginOpen(open) {
@@ -17538,20 +17625,27 @@ function renderAuthGate() {
   const authenticated = Boolean(state.authUser);
   els.app.dataset.auth = authenticated ? "ready" : state.authChecked ? "locked" : "checking";
   if (els.authGateCopy) {
-    els.authGateCopy.textContent = state.googleClientId
+    els.authGateCopy.textContent = nativeBackendUnresolved()
+      ? "Connect this native app to a validated wasm-agent backend to continue."
+      : state.googleClientId
       ? "Sign in with an allowlisted Google account to open wasm-agent."
-      : "Google login is not configured on this server yet.";
+      : `Google login is not configured on this server yet. Origin: ${window.location.origin}`;
   }
   if (els.authGateMessage) {
     els.authGateMessage.textContent = authenticated
       ? ""
-      : state.authChecked ? state.loginMessage || (state.googleClientId ? "" : "Missing GOOGLE_LOGIN_CLIENT_ID") : "";
+      : state.authChecked ? state.loginMessage || (nativeBackendUnresolved() ? "No validated wasm-agent backend was selected." : state.googleClientId ? "" : "Google login is not configured.") : "";
   }
 }
 
 function renderLogin() {
   if (!els.launcherLogin) return;
   const user = state.authUser;
+  const missingGoogleLoginMessage = nativeBackendUnresolved()
+    ? "No validated wasm-agent backend was selected."
+    : state.configChecked || state.authChecked
+      ? `Google login is not configured on this server. Origin: ${window.location.origin}`
+      : "Loading Google login...";
   els.launcherLogin.classList.toggle("signed-in", Boolean(user));
   els.launcherLogin.classList.toggle("needs-config", !state.googleClientId && !user);
   els.launcherLogin.classList.toggle("error", Boolean(state.loginMessage) && !user && Boolean(state.googleClientId));
@@ -17572,7 +17666,12 @@ function renderLogin() {
     els.loginButton.setAttribute("aria-label", user ? `Account ${publicUserLabel(user)}` : "Sign in with Google");
   }
   if (els.loginTitle) els.loginTitle.textContent = user ? publicUserLabel(user) : "Sign in";
-  if (els.loginMeta) els.loginMeta.textContent = user ? cleanText(user.email, "Google account") : "Google";
+  if (els.loginMeta) {
+    const nativeLabel = nativeInstallVersionLabel();
+    els.loginMeta.textContent = user
+      ? cleanText(user.email, "Google account")
+      : nativeLabel ? `Google / ${nativeLabel}` : "Google";
+  }
   if (els.loginFluxBalance) {
     const balance = Number(state.agentCredits?.balance || 0);
     els.loginFluxBalance.hidden = !user || isAdminUser();
@@ -17588,7 +17687,7 @@ function renderLogin() {
     if (user) els.authGateGoogleSignInButton.replaceChildren();
   }
   if (els.authGateLoginButton) {
-    els.authGateLoginButton.hidden = Boolean(user) || !state.authChecked || (
+    els.authGateLoginButton.hidden = Boolean(user) || !state.authChecked || !state.googleClientId || (
       Boolean(state.googleClientId) && Boolean(els.authGateGoogleSignInButton?.childElementCount)
     );
   }
@@ -17596,13 +17695,13 @@ function renderLogin() {
   if (els.loginMessage) {
     els.loginMessage.textContent = user
       ? `${cleanText(user.role, "user")} account ${user.id}`
-      : state.loginMessage || (state.googleClientId ? "Only allowlisted accounts can enter." : "Google client ID missing");
+      : state.loginMessage || (state.googleClientId ? "Only allowlisted accounts can enter." : missingGoogleLoginMessage);
   }
   renderAuthGate();
 }
 
 function loadGoogleIdentityScript() {
-  if (!state.googleClientId) return Promise.reject(new Error("Google client ID missing"));
+  if (!state.googleClientId) return Promise.reject(new Error("Google login is not configured on this server."));
   if (window.google?.accounts?.id) {
     installGoogleStyleOverrides();
     return Promise.resolve();
@@ -17660,6 +17759,19 @@ function googleLoginUri() {
   }
 }
 
+function googleSignInConfig(loginUri) {
+  const config = {
+    client_id: state.googleClientId,
+    callback: handleGoogleCredential,
+  };
+  if (window.wasmAgentNative) return config;
+  return {
+    ...config,
+    ux_mode: "redirect",
+    login_uri: loginUri,
+  };
+}
+
 function authRedirectMessageFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const code = cleanText(params.get("auth_error"), "");
@@ -17690,10 +17802,11 @@ function consumeAuthRedirectMessage() {
 async function renderGoogleSignInButton() {
   const shouldRender = state.loginOpen || (!state.authUser && els.app?.dataset.auth === "locked");
   const slots = [els.googleSignInButton, els.authGateGoogleSignInButton].filter(Boolean);
-  if (!state.authChecked || !shouldRender || state.authUser || !slots.length) return;
+  if (!state.configChecked) return;
+  if (!shouldRender || state.authUser || !slots.length) return;
   if (!state.googleClientId) {
     slots.forEach((slot) => slot.replaceChildren());
-    state.loginMessage = "Set GOOGLE_LOGIN_CLIENT_ID";
+    state.loginMessage = "Google login is not configured.";
     renderLogin();
     return;
   }
@@ -17704,12 +17817,7 @@ async function renderGoogleSignInButton() {
   renderLogin();
   try {
     await loadGoogleIdentityScript();
-    window.google.accounts.id.initialize({
-      client_id: state.googleClientId,
-      callback: handleGoogleCredential,
-      ux_mode: "redirect",
-      login_uri: loginUri,
-    });
+    window.google.accounts.id.initialize(googleSignInConfig(loginUri));
     slots.forEach((slot) => {
       slot.replaceChildren();
       window.google.accounts.id.renderButton(slot, {
@@ -17931,6 +18039,23 @@ async function fetchExternalJson(url, options = {}) {
     window.clearTimeout(timeout);
     if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
   }
+}
+
+function nativeBackendOrigin() {
+  const raw = cleanText(state.config?.native?.serverUrl, "");
+  return raw ? raw.replace(/\/$/, "") : "";
+}
+
+function appHttpOrigin() {
+  return window.location.protocol === "wasm-agent:" && nativeBackendOrigin()
+    ? nativeBackendOrigin()
+    : window.location.origin;
+}
+
+function appWebSocketUrl(path) {
+  const url = new URL(path, `${appHttpOrigin()}/`);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url;
 }
 
 async function bridgeJson(path, options = {}) {
@@ -20526,9 +20651,7 @@ function stopRemoteControlFastSyncIfIdle() {
 }
 
 function remoteControlLiveUrl() {
-  const url = new URL("/remote-control/live", window.location.href);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  return url.toString();
+  return appWebSocketUrl("/remote-control/live").toString();
 }
 
 function remoteControlEventIdNewer(id = "", cursor = "") {
@@ -27429,48 +27552,67 @@ function detectNativeDeviceProfileSync() {
   const platform = cleanText(navigator.platform || "", "");
   const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
   const iPadOs = platform === "MacIntel" && maxTouchPoints > 1;
-  const os = ua.includes("android")
-    ? "Android"
+  const detectedPlatform = ua.includes("android")
+    ? "android"
     : (ua.includes("iphone") || ua.includes("ipad") || iPadOs)
-      ? "iOS"
+      ? "ios"
       : (ua.includes("mac os x") || ua.includes("macintosh"))
-        ? "macOS"
+        ? "macos"
         : ua.includes("windows")
-          ? "Windows"
+          ? "windows"
           : ua.includes("linux")
-            ? "Linux"
-            : "Device";
+            ? "linux"
+            : "unknown";
+  const osLabel = {
+    android: "Android",
+    ios: "iOS/iPadOS",
+    macos: "macOS",
+    windows: "Windows",
+    linux: "Linux",
+    unknown: "Unknown",
+  }[detectedPlatform] || "Unknown";
   const browser = ua.includes("edg/")
-    ? "Edge"
+    ? "edge"
     : (ua.includes("chrome/") || ua.includes("crios/"))
-      ? "Chrome"
+      ? "chrome"
       : (ua.includes("firefox/") || ua.includes("fxios/"))
-        ? "Firefox"
+        ? "firefox"
         : ua.includes("safari/")
-          ? "Safari"
-          : "Browser";
-  const deviceType = os === "Android" || os === "iOS"
-    ? (ua.includes("ipad") || iPadOs || (os === "Android" && !ua.includes("mobile")) ? "tablet" : "phone")
-    : "desktop";
-  const installChannel = os === "Android"
-    ? "android-foreground-service"
-    : os === "iOS"
-      ? "ios-companion"
-      : os === "macOS"
-        ? "macos-menu-bar-companion"
-        : os === "Windows"
-          ? "windows-tray-companion"
-          : os === "Linux"
-            ? "linux-daemon-companion"
-            : "native-companion";
+          ? "safari"
+          : "unknown";
+  const browserLabel = {
+    chrome: "Chrome",
+    edge: "Edge",
+    firefox: "Firefox",
+    safari: "Safari",
+    unknown: "Unknown",
+  }[browser] || "Unknown";
+  const deviceType = detectedPlatform === "android" || detectedPlatform === "ios"
+    ? (ua.includes("ipad") || iPadOs || (detectedPlatform === "android" && !ua.includes("mobile")) ? "tablet" : "phone")
+    : detectedPlatform === "unknown"
+      ? "unknown"
+      : "desktop";
+  const installChannel = {
+    android: "android-apk",
+    ios: "ios-testflight-or-app-store",
+    macos: "macos-installer",
+    windows: "windows-installer",
+    linux: "linux-installer",
+    unknown: "manual-platform-choice",
+  }[detectedPlatform] || "manual-platform-choice";
   return {
     schema: "hermes.wasm_agent.native_device_profile.v1",
-    os,
+    platform: detectedPlatform,
+    arch: "unknown",
+    os: osLabel,
     browser,
+    browser_label: browserLabel,
+    deviceType,
     device_type: deviceType,
+    installChannel: installChannel,
     install_channel: installChannel,
     user_agent: userAgent,
-    platform,
+    navigator_platform: platform,
     max_touch_points: Number.isFinite(maxTouchPoints) ? maxTouchPoints : 0,
     display_mode: window.matchMedia?.("(display-mode: standalone)")?.matches ? "standalone" : "browser",
     pwa_capabilities: {
@@ -27496,8 +27638,11 @@ async function detectNativeDeviceProfile() {
         platform_version: cleanText(high.platformVersion, ""),
         mobile: Boolean(userAgentData.mobile),
       };
-      if (high.platform && profile.os === "Device") profile.os = cleanText(high.platform, profile.os);
+      const arch = cleanText(high.architecture, "").toLowerCase();
+      const bitness = cleanText(high.bitness, "").toLowerCase();
+      profile.arch = arch.includes("arm") ? (bitness === "64" || arch.includes("64") ? "arm64" : "arm") : bitness === "64" ? "x64" : "unknown";
       if (userAgentData.mobile && profile.device_type === "desktop") profile.device_type = "phone";
+      profile.deviceType = profile.device_type;
     } catch {
       // User-agent high entropy fields are optional and may be denied.
     }
@@ -27507,14 +27652,6 @@ async function detectNativeDeviceProfile() {
 
 function nativeInstallCurrentDevice() {
   return state.devices.find((device) => device.current) || null;
-}
-
-function nativePackageFilename(payload = state.nativeInstallPackage, profile = state.nativeInstallProfile) {
-  const deviceId = cleanText(payload?.target_device_id || nativeInstallCurrentDevice()?.id || state.deviceAuthority?.current_device_id, "device")
-    .replace(/[^a-z0-9_-]+/gi, "-")
-    .slice(0, 48);
-  const os = cleanText(profile?.os || payload?.target_os, "native").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
-  return `wasm-agent-native-${os}-${deviceId}.zip`;
 }
 
 function filenameFromContentDisposition(header = "") {
@@ -27538,11 +27675,40 @@ function downloadBlob(filename, blob) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-async function fetchNativeDownloadPackage(body) {
+function downloadUrl(filename, url) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "";
+  link.rel = "noopener";
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function nativePrimaryCtaLabel(resolution = state.nativeInstallerResolution, profile = state.nativeInstallProfile) {
+  const platform = cleanText(resolution?.platform || profile?.platform, "unknown").toLowerCase();
+  if (platform === "windows") return "Download Windows Installer";
+  if (platform === "android") return "Download Android APK";
+  if (platform === "macos") return "Download macOS Installer";
+  if (platform === "linux") return "Download Linux Installer";
+  if (platform === "ios") return "View iOS install options";
+  return "Choose platform manually";
+}
+
+async function resolveNativeInstaller(profile) {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 15000);
+  const timer = window.setTimeout(() => controller.abort(), 10000);
   try {
-    const response = await fetch("/account/devices/native/download", {
+    const body = {
+      platform: profile.platform || "unknown",
+      arch: profile.arch || "unknown",
+      deviceType: profile.deviceType || profile.device_type || "unknown",
+      browser: profile.browser || "unknown",
+      userAgent: profile.user_agent || navigator.userAgent || "",
+      accountId: state.authUser?.id || "",
+      deviceId: nativeInstallCurrentDevice()?.id || state.deviceAuthority?.current_device_id || clientDeviceId(),
+    };
+    const response = await fetch("/native/resolve", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -27551,24 +27717,9 @@ async function fetchNativeDownloadPackage(body) {
       body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!response.ok) {
-      let message = `Native package failed (${response.status})`;
-      try {
-        const payload = await response.json();
-        message = payload?.error?.message || message;
-      } catch {
-        // Non-JSON errors still surface the status above.
-      }
-      throw new Error(message);
-    }
-    const blob = await response.blob();
-    return {
-      blob,
-      filename: filenameFromContentDisposition(response.headers.get("Content-Disposition") || ""),
-      schema: response.headers.get("X-Wasm-Agent-Native-Schema") || "",
-      platform: response.headers.get("X-Wasm-Agent-Native-Platform") || "",
-      desktop_channel: response.headers.get("X-Wasm-Agent-Native-Desktop-Channel") || "",
-    };
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.error?.message || `Native installer resolve failed (${response.status})`);
+    return payload;
   } finally {
     window.clearTimeout(timer);
   }
@@ -27578,24 +27729,24 @@ function renderNativeInstall() {
   if (!els.nativeDeviceSummary || !els.nativePackageSummary || !els.nativeInstallStatus) return;
   const profile = state.nativeInstallProfile || detectNativeDeviceProfileSync();
   const device = nativeInstallCurrentDevice();
-  const standbyEnabled = isModuleEnabled("native-standby");
-  const packagePayload = state.nativeInstallPackage || null;
+  const resolution = state.nativeInstallerResolution || null;
   const status = state.nativeInstallBusy
-    ? "sending"
+    ? "checking"
     : state.nativeInstallError
       ? "error"
-      : packagePayload
-        ? "ready"
-        : standbyEnabled
-          ? "standby"
+      : resolution?.available
+        ? "available"
+        : resolution
+          ? "missing"
           : "native";
   els.nativeInstallStatus.textContent = status;
-  els.nativeInstallStatus.className = `widget-chip ${status === "ready" || status === "standby" ? "ok" : status === "error" ? "err" : ""}`;
+  els.nativeInstallStatus.className = `widget-chip ${status === "available" ? "ok" : status === "error" || status === "missing" ? "err" : ""}`;
   if (els.nativeModalSubtitle) {
-    els.nativeModalSubtitle.textContent = `${profile.os} / ${profile.device_type}`;
+    els.nativeModalSubtitle.textContent = `${profile.os} / ${profile.device_type || profile.deviceType}`;
   }
   if (els.nativeDownloadButton) {
-    els.nativeDownloadButton.disabled = !state.authUser || state.nativeInstallBusy;
+    els.nativeDownloadButton.textContent = nativePrimaryCtaLabel(resolution, profile);
+    els.nativeDownloadButton.disabled = !state.authUser || state.nativeInstallBusy || (resolution && !resolution.available && resolution.platform !== "ios" && resolution.platform !== "unknown");
     els.nativeDownloadButton.classList.toggle("is-busy", Boolean(state.nativeInstallBusy));
   }
 
@@ -27603,39 +27754,88 @@ function renderNativeInstall() {
   deviceTitle.textContent = "Detected Device";
   els.nativeDeviceSummary.replaceChildren(
     deviceTitle,
-    metric("Type", `${profile.os} ${profile.device_type}`),
-    metric("Browser", `${profile.browser} / ${profile.display_mode}`),
+    metric("OS", profile.os),
+    metric("Device type", cleanText(profile.device_type || profile.deviceType, "unknown")),
+    metric("Browser", `${cleanText(profile.browser_label, profile.browser)} / ${profile.display_mode}`),
+    metric("Architecture", cleanText(profile.arch, "unknown")),
+    metric("Installer channel", cleanText(profile.install_channel || profile.installChannel, "manual-platform-choice")),
     metric("Account", cleanText(device?.id || state.deviceAuthority?.current_device_id, "pending")),
-    metric("PWA mic", profile.pwa_capabilities?.microphone ? "available" : "unavailable"),
-    metric("Standby", standbyEnabled ? "module on" : "module off")
   );
 
   const packageTitle = document.createElement("h3");
-  packageTitle.textContent = "Native Package";
+  packageTitle.textContent = "Native Installer";
   const packageRows = state.nativeInstallError
     ? [
         metric("Status", "error"),
         metric("Error", truncateText(state.nativeInstallError, 120)),
       ]
-    : packagePayload
+    : resolution
       ? [
-          metric("Channel", cleanText(packagePayload.install_channel, profile.install_channel)),
-          metric("Wake", cleanText(packagePayload.standby?.wake_phrase, "hi wasm")),
-          metric("Package", cleanText(state.nativeInstallFilename, "generated")),
-          metric("Mode", cleanText(packagePayload.desktop_channel || packagePayload.mode, "native-app-download")),
+          metric("Status", resolution.available ? "available" : cleanText(resolution.message, "Native installer not built yet")),
+          metric("Kind", cleanText(resolution.kind, "native-installer")),
+          metric("File", cleanText(resolution.filename, "not built")),
+          metric("Build", cleanText(resolution.buildStatus, resolution.available ? "built" : "missing")),
+          metric("Fallbacks", Array.isArray(resolution.fallbacks) && resolution.fallbacks.length ? resolution.fallbacks.map((item) => cleanText(item?.label || item?.kind, "")).filter(Boolean).join(", ") : "none"),
         ]
       : [
-          metric("Channel", cleanText(profile.install_channel, "native-companion")),
-          metric("Wake", "hi wasm"),
-          metric("Package", state.nativeInstallBusy ? "preparing" : "pending"),
-          metric("Mode", "native-app-download"),
+          metric("Status", state.nativeInstallBusy ? "checking" : "pending"),
+          metric("Kind", cleanText(profile.install_channel || profile.installChannel, "native-installer")),
+          metric("File", "pending"),
+          metric("Build", "checking"),
         ];
   els.nativePackageSummary.replaceChildren(packageTitle, ...packageRows);
+
+  if (els.nativeManualChooser) {
+    const title = document.createElement("h3");
+    title.textContent = "Manual chooser";
+    const list = document.createElement("div");
+    list.className = "native-choice-list";
+    [
+      ["windows", "Windows"],
+      ["android", "Android"],
+      ["macos", "macOS"],
+      ["linux", "Linux"],
+      ["ios", "iOS/iPadOS"],
+      ["pwa", "Install PWA fallback"],
+    ].forEach(([platformId, label]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", () => chooseNativePlatform(platformId));
+      list.append(button);
+    });
+    els.nativeManualChooser.replaceChildren(title, list);
+  }
+}
+
+function chooseNativePlatform(platform) {
+  if (platform === "pwa") {
+    state.nativeInstallError = "Install PWA is a separate fallback lane; use the browser install control.";
+    renderNativeInstall();
+    return;
+  }
+  state.nativeInstallProfile = {
+    ...(state.nativeInstallProfile || detectNativeDeviceProfileSync()),
+    platform,
+    os: { windows: "Windows", android: "Android", macos: "macOS", linux: "Linux", ios: "iOS/iPadOS" }[platform] || "Unknown",
+    install_channel: {
+      windows: "windows-installer",
+      android: "android-apk",
+      macos: "macos-installer",
+      linux: "linux-installer",
+      ios: "ios-testflight-or-app-store",
+    }[platform] || "manual-platform-choice",
+  };
+  state.nativeInstallProfile.installChannel = state.nativeInstallProfile.install_channel;
+  state.nativeInstallerResolution = null;
+  void startNativeInstall("manual-platform", { keepProfile: true });
 }
 
 function openNativeModal(options = {}) {
   setPanel("home", { updateUrl: false });
   state.nativeInstallProfile = detectNativeDeviceProfileSync();
+  state.nativeInstallerResolution = null;
+  state.nativeInstallError = "";
   renderNativeInstall();
   if (els.nativeModal) els.nativeModal.hidden = false;
   if (!options.skipHistory) {
@@ -27643,14 +27843,14 @@ function openNativeModal(options = {}) {
   }
   recordUserEvent("home.go_native_opened", {
     target: "home:go-native",
-    summary: "Opened native companion",
+    summary: "Opened native installer",
     data: {
       os: state.nativeInstallProfile.os,
       device_type: state.nativeInstallProfile.device_type,
       install_channel: state.nativeInstallProfile.install_channel,
     },
   });
-  if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native").catch(() => {});
+  if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native", { resolveOnly: true }).catch(() => {});
 }
 
 function closeNativeModal(options = {}) {
@@ -27661,7 +27861,7 @@ function closeNativeModal(options = {}) {
   }
 }
 
-async function startNativeInstall(origin = "manual") {
+async function startNativeInstall(origin = "manual", options = {}) {
   if (!state.authUser || state.nativeInstallBusy) {
     renderNativeInstall();
     return;
@@ -27670,40 +27870,31 @@ async function startNativeInstall(origin = "manual") {
   state.nativeInstallError = "";
   renderNativeInstall();
   try {
-    state.nativeInstallProfile = await detectNativeDeviceProfile();
-    setModuleEnabled("native-standby", true);
+    state.nativeInstallProfile = options.keepProfile && state.nativeInstallProfile
+      ? state.nativeInstallProfile
+      : await detectNativeDeviceProfile();
     await loadDevices("go-native");
-    const target = nativeInstallCurrentDevice();
-    const body = {
-      device_id: target?.id || state.deviceAuthority?.current_device_id || "",
-      device_profile: state.nativeInstallProfile,
-      standby_module_enabled: true,
-    };
-    const payload = await fetchNativeDownloadPackage(body);
-    const filename = payload.filename || nativePackageFilename({ target_device_id: body.device_id }, state.nativeInstallProfile);
-    state.nativeInstallPackage = {
-      schema: payload.schema || "hermes.wasm_agent.native_app_download.v1",
-      target_device_id: body.device_id,
-      target_os: state.nativeInstallProfile.os,
-      install_channel: state.nativeInstallProfile.install_channel,
-      desktop_channel: payload.desktop_channel || "",
-      mode: "native-app-download",
-      standby: { wake_phrase: "hi wasm" },
-    };
+    state.nativeInstallerResolution = await resolveNativeInstaller(state.nativeInstallProfile);
+    if (options.resolveOnly || !state.nativeInstallerResolution?.available) {
+      recordUserEvent("account.native_installer_resolved", {
+        target: `native:${state.nativeInstallerResolution?.platform || state.nativeInstallProfile.platform}`,
+        summary: state.nativeInstallerResolution?.available ? "Native installer available" : "Native installer not built yet",
+        data: { origin, resolution: state.nativeInstallerResolution },
+      });
+      return;
+    }
+    const filename = state.nativeInstallerResolution.filename || nativePrimaryCtaLabel(state.nativeInstallerResolution, state.nativeInstallProfile);
     state.nativeInstallFilename = filename;
-    downloadBlob(filename, payload.blob);
-    recordUserEvent("account.native_package_downloaded", {
-      target: `device:${body.device_id || target?.id || "current"}`,
-      summary: `Downloaded wasm-agent native package for ${state.nativeInstallProfile.os}`,
+    downloadUrl(filename, state.nativeInstallerResolution.downloadUrl);
+    recordUserEvent("account.native_installer_downloaded", {
+      target: `native:${state.nativeInstallerResolution.platform}`,
+      summary: `Downloaded wasm-agent native installer for ${state.nativeInstallerResolution.platform}`,
       data: {
         origin,
-        os: state.nativeInstallProfile.os,
-        device_type: state.nativeInstallProfile.device_type,
-        install_channel: state.nativeInstallProfile.install_channel,
+        platform: state.nativeInstallerResolution.platform,
+        arch: state.nativeInstallerResolution.arch,
+        kind: state.nativeInstallerResolution.kind,
         filename,
-        schema: payload.schema,
-        desktop_channel: payload.desktop_channel,
-        standby_module_enabled: true,
       },
     });
   } catch (error) {
@@ -29472,8 +29663,7 @@ function browserViewportSize() {
 }
 
 function browserStreamUrl() {
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/browser/stream`;
+  return appWebSocketUrl("/browser/stream").toString();
 }
 
 function browserUrlHost(url) {
@@ -33011,8 +33201,6 @@ async function bootstrapAuthenticatedApp() {
   state.authenticatedBootstrapped = true;
   applyModuleVisibility();
   renderModules();
-  installDevHmrBridge();
-  if (shouldStartDevHmr()) startDevHmr();
   if ("serviceWorker" in navigator && !window.__WASM_AGENT_DISABLE_SW__) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
@@ -33054,8 +33242,10 @@ async function main() {
   applyLauncherPreference();
   wireEvents();
   consumeAuthRedirectMessage();
+  installDevHmrBridge();
   renderAuthGate();
   await loadConfig();
+  if (shouldStartDevHmr()) startDevHmr();
   await loadAuthSession();
   if (!state.authUser) void renderGoogleSignInButton();
   await bootstrapAuthenticatedApp();

@@ -22,15 +22,22 @@ This track is the continuity point for evolving Hermes Orchestrator and `wasm-ag
   edit/lifecycle actions plus draggable node placement. Home also exposes an
   account Connected Devices app backed by wasm-agent account state, including a
   main-device pointer, a quick main-device switch action, device-sync installer
-  manifests, a Go Native action that detects the current PWA device and
-  downloads a generated native app package ZIP from
-  `/account/devices/native/download`, a Windows `install.cmd` package entry
-  point that installs an Electron-backed `WASM Agent.exe` desktop process with
-  Start Menu/Desktop shortcuts, and browser-local device layouts that are not
-  retained server-side unless a future premium sync/backup mode is enabled.
-  The optional `native-standby` module is a package-metadata/event-contract
-  placeholder for wake phrase standby and live transcription once a real native
-  companion exists; the PWA still cannot listen while a phone screen is off.
+  manifests, a Go Native action that detects the current PWA device and resolves
+  a platform-specific native installer through `/native/resolve`, and
+  browser-local device layouts that are not retained server-side unless a future
+  premium sync/backup mode is enabled. `/native/download` streams only an
+  existing platform artifact from `/local/native/.../release`; missing artifacts
+  show `Native installer not built yet`. Generic ZIP packages and
+  `/account/devices/native/download` are developer/debug compatibility only, PWA
+  install is a separate fallback lane, and Edge/Chrome app mode is not native.
+  Windows native means `.exe`/`.msi`, Android native means `.apk` first with AAB
+  later, macOS means `.dmg`/`.pkg`, Linux means `.AppImage`/`.deb`/`.rpm`, and
+  iOS/iPadOS uses TestFlight/App Store/manual development lanes. True screen-off
+  `hi wasm` requires Android/iOS native companion capabilities; wake-word is not
+  promised until foreground service, microphone, transcription, and standby
+  bridge pieces are stable. The current Windows x64 artifact is an
+  electron-builder NSIS installer that opens the packaged `wasm-agent://app/`
+  shell and proxies backend calls to the configured wasm-agent server.
 - The standalone app/client surface has been pruned from this repo. Product UI,
   client work, and the local bridge now belong under `/local/plugins/wasm-agent`.
 - The old Space Agent customware path is retired from the active runtime path.

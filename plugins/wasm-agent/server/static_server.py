@@ -99,6 +99,8 @@ SPACE_AREA_MAX_PX = 2000
 DEVICE_ONLINE_WINDOW_SEC = 3 * 60
 NATIVE_COMPANION_PACKAGE_SCHEMA = "hermes.wasm_agent.native_companion_package.v1"
 NATIVE_DEVICE_PROFILE_SCHEMA = "hermes.wasm_agent.native_device_profile.v1"
+NATIVE_INSTALLER_PLATFORMS = {"windows", "android", "macos", "linux", "ios", "unknown"}
+NATIVE_INSTALLER_ARCHES = {"x64", "arm64", "arm", "unknown"}
 SECURITY_LOOP_STALE_AFTER_SEC = 24 * 60 * 60
 WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
 DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
@@ -279,6 +281,20 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if os.getenv("HERMES_WASM_AGENT_ACCESS_LOG", "").lower() in {"1", "true", "yes", "on"}:
             super().log_message(fmt, *args)
 
+    def do_HEAD(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path == "/native/download":
+            try:
+                serve_native_installer_download(self, authenticated_request_user(self), body=False)
+            except BrowserError as exc:
+                self.send_response(exc.status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            return
+        super().do_HEAD()
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         user = authenticated_request_user(self)
@@ -293,6 +309,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 HTTPStatus.FORBIDDEN,
                 {"ok": False, "error": {"code": "admin_required", "message": "Admin access is required."}},
             )
+            return
+        if path == "/native/download":
+            try:
+                serve_native_installer_download(self, user)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
         if path == "/browser/stream":
             try:
@@ -497,7 +519,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
+                    "appId": PLUGIN_NAME,
+                    "service": PLUGIN_NAME,
                     "health": {
+                        "appId": PLUGIN_NAME,
+                        "service": PLUGIN_NAME,
                         "name": PLUGIN_NAME,
                         "version": PLUGIN_VERSION,
                         "status": "ok",
@@ -521,6 +547,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             self._json(
                 HTTPStatus.OK,
                 {
+                    "appId": PLUGIN_NAME,
+                    "service": PLUGIN_NAME,
                     "name": PLUGIN_NAME,
                     "version": PLUGIN_VERSION,
                     "bridgeUrl": self.server.bridge_url,
@@ -826,6 +854,13 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=256 * 1024)
                 serve_native_download_package(self, user, body)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/resolve":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, resolve_native_installer(self.server, user, body))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -5410,6 +5445,202 @@ def sanitize_native_device_profile(raw: Any, user_agent: str) -> dict[str, Any]:
     }
 
 
+def normalize_native_platform(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"win", "win32", "windows-desktop"}:
+        return "windows"
+    if raw in {"android-phone", "android-tablet"}:
+        return "android"
+    if raw in {"mac", "mac-os", "macosx", "darwin"}:
+        return "macos"
+    if raw in {"ios", "ipad", "ipados", "iphone"}:
+        return "ios"
+    if raw in {"linux", "gnu-linux"}:
+        return "linux"
+    return raw if raw in NATIVE_INSTALLER_PLATFORMS else "unknown"
+
+
+def normalize_native_arch(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("_", "-")
+    if raw in {"amd64", "x86-64", "x86_64"}:
+        return "x64"
+    if raw in {"aarch64", "arm-v8", "arm64-v8a"}:
+        return "arm64"
+    if raw.startswith("arm") and raw != "arm64":
+        return "arm"
+    return raw if raw in NATIVE_INSTALLER_ARCHES else "unknown"
+
+
+def native_installer_kind(platform: str) -> str:
+    return {
+        "windows": "windows-installer",
+        "android": "android-apk",
+        "macos": "macos-installer",
+        "linux": "linux-installer",
+        "ios": "ios-install-options",
+        "unknown": "native-installer",
+    }.get(platform, "native-installer")
+
+
+def native_installer_channel(platform: str) -> str:
+    return {
+        "windows": "windows-installer",
+        "android": "android-apk",
+        "macos": "macos-installer",
+        "linux": "linux-installer",
+        "ios": "testflight-app-store-development",
+        "unknown": "manual-platform-choice",
+    }.get(platform, "manual-platform-choice")
+
+
+def native_installer_candidates(plugin_root: Path, platform: str, arch: str) -> list[Path]:
+    native_root = plugin_root.parents[1] / "native"
+    if platform == "windows":
+        names = [f"WASM-Agent-Setup-{arch}.exe", f"WASM-Agent-{arch}.msi"] if arch != "unknown" else []
+        names.extend(["WASM-Agent-Setup-x64.exe", "WASM-Agent-x64.msi"])
+        return [native_root / "windows" / "release" / name for name in names]
+    if platform == "android":
+        names = [f"WASM-Agent-{arch}.apk"] if arch != "unknown" else []
+        names.extend(["WASM-Agent-arm64.apk", "WASM-Agent-universal.apk"])
+        return [native_root / "android" / "release" / name for name in names]
+    if platform == "macos":
+        return [
+            native_root / "macos" / "release" / "WASM-Agent.dmg",
+            native_root / "macos" / "release" / "WASM-Agent.pkg",
+        ]
+    if platform == "linux":
+        names = ["WASM-Agent.AppImage", f"WASM-Agent-{arch}.deb", f"WASM-Agent-{arch}.rpm"] if arch != "unknown" else ["WASM-Agent.AppImage"]
+        names.extend(["WASM-Agent-x64.deb", "WASM-Agent-x64.rpm"])
+        return [native_root / "linux" / "release" / name for name in names]
+    return []
+
+
+def find_native_installer(server: WasmAgentServer, platform: str, arch: str) -> Path | None:
+    for candidate in native_installer_candidates(Path(server.plugin_root), platform, arch):
+        try:
+            resolved = candidate.resolve()
+            if resolved.is_file():
+                return resolved
+        except OSError:
+            continue
+    return None
+
+
+def native_installer_metadata(artifact: Path, platform: str) -> dict[str, Any]:
+    if platform != "windows":
+        return {}
+    metadata_path = artifact.parent / "win-unpacked" / "resources" / "native-defaults.json"
+    payload = read_json_file(metadata_path, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def native_download_filename_part(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip(".-_")
+
+
+def native_installer_download_filename(artifact: Path, platform: str) -> str:
+    metadata = native_installer_metadata(artifact, platform)
+    if platform != "windows" or not metadata:
+        return artifact.name
+    version = native_download_filename_part(metadata.get("wasmAgentVersion") or metadata.get("nativeShellVersion") or "")
+    build_id = native_download_filename_part(metadata.get("buildId") or "")
+    build_suffix = build_id.removeprefix("win-x64-") if build_id else ""
+    parts = [item for item in [version, build_suffix] if item]
+    if not parts:
+        return artifact.name
+    stem = artifact.stem
+    suffix = artifact.suffix or ".exe"
+    return f"{stem}-{'-'.join(parts)}{suffix}"
+
+
+def native_installer_fallbacks(platform: str) -> list[dict[str, str]]:
+    fallbacks = [{"kind": "pwa", "label": "Install PWA"}]
+    if platform == "ios":
+        return [
+            {"kind": "testflight", "label": "View iOS install options"},
+            {"kind": "pwa", "label": "Install PWA"},
+        ]
+    return fallbacks
+
+
+def resolve_native_installer(
+    server: WasmAgentServer,
+    user: dict[str, Any] | None,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    if not user:
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    platform = normalize_native_platform(body.get("platform"))
+    arch = normalize_native_arch(body.get("arch"))
+    browser = str(body.get("browser") or "unknown").strip().lower()
+    if browser not in {"chrome", "edge", "firefox", "safari", "unknown"}:
+        browser = "unknown"
+    device_type = str(body.get("deviceType") or body.get("device_type") or "unknown").strip().lower()
+    if device_type not in {"desktop", "phone", "tablet", "unknown"}:
+        device_type = "unknown"
+    artifact = find_native_installer(server, platform, arch)
+    kind = native_installer_kind(platform)
+    response: dict[str, Any] = {
+        "available": bool(artifact),
+        "platform": platform,
+        "arch": arch,
+        "kind": kind,
+        "browser": browser,
+        "deviceType": device_type,
+        "installerChannel": native_installer_channel(platform),
+        "fallbacks": native_installer_fallbacks(platform),
+    }
+    if artifact:
+        download_filename = native_installer_download_filename(artifact, platform)
+        metadata = native_installer_metadata(artifact, platform)
+        response.update({
+            "filename": download_filename,
+            "artifactFilename": artifact.name,
+            "downloadUrl": f"/native/download?{urlencode({'platform': platform, 'arch': arch})}",
+            "buildStatus": "built",
+            "buildId": str(metadata.get("buildId") or ""),
+            "installableVersion": str(metadata.get("installableVersion") or ""),
+        })
+        return response
+    response.update({
+        "message": "Native installer not built yet",
+        "buildStatus": "missing",
+    })
+    if platform == "ios":
+        response["message"] = "Native installer not built yet; use TestFlight, App Store, or a manual development lane."
+    return response
+
+
+def serve_native_installer_download(handler: WasmAgentHandler, user: dict[str, Any] | None = None, *, body: bool = True) -> None:
+    query = parse_qs(urlparse(handler.path).query)
+    platform = normalize_native_platform(query.get("platform", ["unknown"])[0])
+    arch = normalize_native_arch(query.get("arch", ["unknown"])[0])
+    artifact = find_native_installer(handler.server, platform, arch)
+    if not artifact:
+        raise BrowserError("native_installer_missing", "Native installer not built yet.", status=HTTPStatus.NOT_FOUND)
+    content_type = mimetypes.guess_type(str(artifact))[0] or "application/octet-stream"
+    download_filename = native_installer_download_filename(artifact, platform)
+    metadata = native_installer_metadata(artifact, platform)
+    size = artifact.stat().st_size
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Disposition", f'attachment; filename="{download_filename}"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(size))
+    handler.send_header("X-Wasm-Agent-Native-Platform", platform)
+    handler.send_header("X-Wasm-Agent-Native-Arch", arch)
+    handler.send_header("X-Wasm-Agent-Native-Kind", native_installer_kind(platform))
+    if metadata.get("buildId"):
+        handler.send_header("X-Wasm-Agent-Native-Build-Id", str(metadata.get("buildId")))
+    if metadata.get("installableVersion"):
+        handler.send_header("X-Wasm-Agent-Native-Version", str(metadata.get("installableVersion")))
+    handler.end_headers()
+    if not body:
+        return
+    with artifact.open("rb") as source:
+        shutil.copyfileobj(source, handler.wfile)
+
+
 def create_native_companion_package(
     server: WasmAgentServer,
     user: dict[str, Any] | None,
@@ -5506,6 +5737,16 @@ def native_desktop_channel(package: dict[str, Any]) -> str:
     if os_name in {"macos", "mac os", "mac", "linux"}:
         return "browser-wrapper"
     return "native-build-lane-pending"
+
+
+def native_pwa_app_url(origin: str) -> str:
+    raw = str(origin or "").strip()
+    if not raw or raw == "/":
+        return "/home"
+    parsed = urlparse(raw)
+    if parsed.scheme and parsed.netloc:
+        return parsed._replace(path="/home", params="", query="", fragment="").geturl()
+    return raw.rstrip("/") + "/home"
 
 
 def native_linux_install_script(app_url: str) -> str:
@@ -5689,11 +5930,17 @@ def native_windows_electron_package_json() -> str:
 
 
 def native_windows_electron_main_js() -> str:
-    return """const { app, BrowserWindow, Menu, shell } = require("electron");
+    return """const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
 const DEFAULT_APP_URL = "http://127.0.0.1:8877";
+const APP_ID = "wasm-agent";
+const PWA_HOME_PATH = "/home";
+const GOOGLE_AUTH_ORIGINS = new Set([
+  "https://accounts.google.com",
+  "https://oauth2.googleapis.com",
+]);
 
 function readConfig() {
   const configPath = path.join(__dirname, "native-package.json");
@@ -5704,16 +5951,124 @@ function readConfig() {
   }
 }
 
-function resolvedAppUrl() {
-  const config = readConfig();
-  const raw = process.env.WASM_AGENT_APP_URL || config.appUrl || DEFAULT_APP_URL;
-  if (typeof raw !== "string" || !raw.trim() || raw.trim() === "/") {
-    return DEFAULT_APP_URL;
+function normalizeServerUrl(value, fallback = DEFAULT_APP_URL) {
+  const raw = String(value || "").trim();
+  if (!raw || raw === "/") return fallback;
+  const withProtocol = /^https?:\\/\\//i.test(raw) ? raw : `http://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    return url.toString().replace(/\\/$/, "");
+  } catch {
+    return fallback;
   }
-  return raw.trim();
 }
 
-function createWindow() {
+function sameOrigin(appUrl, targetUrl) {
+  try {
+    return new URL(appUrl).origin === new URL(targetUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+function isGoogleAuthUrl(targetUrl) {
+  try {
+    return GOOGLE_AUTH_ORIGINS.has(new URL(targetUrl).origin);
+  } catch {
+    return false;
+  }
+}
+
+function chromeLikeUserAgent(value) {
+  return String(value || "")
+    .replace(/\\sElectron\\/[^\\s]+/gi, "")
+    .replace(/\\sWASM Agent\\/[^\\s]+/gi, "")
+    .trim();
+}
+
+function backendHomeUrl(serverUrl) {
+  try {
+    return new URL(PWA_HOME_PATH, serverUrl).toString();
+  } catch {
+    return "";
+  }
+}
+
+function payloadIdentifiesWrongApp(payload) {
+  const text = JSON.stringify(payload || {}).toLowerCase();
+  return text.includes("colmeio admin") || text.includes("google_login_client_id");
+}
+
+function payloadIdentifiesWasmAgent(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const markers = [
+    payload.appId,
+    payload.service,
+    payload.name,
+    payload.health && payload.health.appId,
+    payload.health && payload.health.service,
+    payload.health && payload.health.name,
+  ].map((value) => String(value || "").toLowerCase());
+  return markers.includes(APP_ID) || markers.includes("wasm agent");
+}
+
+function resolvedServerOrigin() {
+  const config = readConfig();
+  const raw = process.env.WASM_AGENT_APP_URL || config.appUrl || DEFAULT_APP_URL;
+  return normalizeServerUrl(raw);
+}
+
+function logNativeDiagnostic(kind, payload = {}) {
+  console.log(`[wasm-agent:native] ${kind} ${JSON.stringify({ kind, ...payload })}`);
+}
+
+async function validateWasmAgentOrigin(origin) {
+  for (const route of ["/config.json", "/health", "/healthz"]) {
+    try {
+      const response = await fetch(new URL(route, origin).toString(), {
+        headers: { "X-Wasm-Agent-Native-Probe": APP_ID },
+      });
+      const contentType = String(response.headers.get("content-type") || "");
+      const payload = contentType.includes("json") ? await response.json() : { text: await response.text() };
+      if (!response.ok) {
+        logNativeDiagnostic("origin-candidate", { origin, route, accepted: false, reason: `http_${response.status}` });
+        continue;
+      }
+      if (payloadIdentifiesWrongApp(payload)) {
+        logNativeDiagnostic("origin-candidate", { origin, route, accepted: false, reason: "wrong_app_identity" });
+        return "";
+      }
+      if (payloadIdentifiesWasmAgent(payload)) {
+        logNativeDiagnostic("origin-candidate", { origin, route, accepted: true, reason: "wasm_agent_identity" });
+        return origin;
+      }
+      logNativeDiagnostic("origin-candidate", { origin, route, accepted: false, reason: "missing_wasm_agent_identity" });
+    } catch (error) {
+      logNativeDiagnostic("origin-candidate", { origin, route, accepted: false, reason: String(error && error.message ? error.message : error) });
+    }
+  }
+  return "";
+}
+
+function reloadWindow(win, options = {}) {
+  if (!win || win.isDestroyed()) return;
+  if (options.hard) win.webContents.reloadIgnoringCache();
+  else win.webContents.reload();
+}
+
+function unresolvedBackendPage(origin) {
+  return `data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
+<title>WASM Agent</title>
+<body style="margin:0;background:#090d12;color:#f6f8fb;font:16px system-ui;padding:32px">
+  <h1>WASM Agent</h1>
+  <p>No validated wasm-agent backend was selected.</p>
+  <p>Rejected or unavailable origin: ${origin}</p>
+  <button onclick="location.reload()" style="font:inherit;padding:10px 14px">Retry</button>
+</body>`)}`;
+}
+
+async function createWindow() {
+  const candidateOrigin = resolvedServerOrigin();
   const win = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -5729,23 +6084,41 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
     },
   });
+  const userAgent = chromeLikeUserAgent(win.webContents.getUserAgent());
+  if (userAgent) win.webContents.setUserAgent(userAgent);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(resolvedAppUrl())) {
-      return { action: "allow" };
-    }
+    if (sameOrigin(candidateOrigin, url)) return { action: "allow" };
+    if (isGoogleAuthUrl(url)) return { action: "allow" };
     shell.openExternal(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
-    const appUrl = resolvedAppUrl();
-    if (url.startsWith(appUrl)) return;
+    if (sameOrigin(candidateOrigin, url)) return;
+    if (isGoogleAuthUrl(url)) return;
     if (url.startsWith("http://") || url.startsWith("https://")) {
       event.preventDefault();
       shell.openExternal(url);
     }
   });
-  win.loadURL(resolvedAppUrl());
+  win.webContents.on("before-input-event", (event, input) => {
+    const key = String(input.key || "").toLowerCase();
+    if ((input.control || input.meta) && key === "r") {
+      event.preventDefault();
+      reloadWindow(win, { hard: Boolean(input.shift) });
+    }
+  });
+  const selectedOrigin = await validateWasmAgentOrigin(candidateOrigin);
+  const startUrl = selectedOrigin ? backendHomeUrl(selectedOrigin) : unresolvedBackendPage(candidateOrigin);
+  logNativeDiagnostic("startup", {
+    appRoot: __dirname,
+    startUrl,
+    uiSource: selectedOrigin ? "remote-pwa" : "unresolved-backend",
+    candidateOrigins: [candidateOrigin],
+    finalSelectedOrigin: selectedOrigin,
+    configSource: "native-package.json",
+  });
+  win.loadURL(startUrl);
 }
 
 app.setName("WASM Agent");
@@ -5761,16 +6134,34 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+ipcMain.handle("wasm-agent:native-reload", (event) => {
+  reloadWindow(BrowserWindow.fromWebContents(event.sender));
+  return { ok: true };
+});
+
+ipcMain.handle("wasm-agent:native-dev-hmr-reload", (event, paths = []) => {
+  reloadWindow(BrowserWindow.fromWebContents(event.sender), {
+    hard: Array.isArray(paths) && paths.some((item) => String(item || "").includes("boot.js")),
+  });
+  return { ok: true };
+});
 """
 
 
 def native_windows_electron_preload_js() -> str:
-    return """const { contextBridge } = require("electron");
+    return """const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("wasmAgentNative", {
   platform: "windows",
   runtime: "electron",
   nativeDesktop: true,
+  reload: () => ipcRenderer.invoke("wasm-agent:native-reload"),
+  requestReload: (paths) => ipcRenderer.invoke("wasm-agent:native-dev-hmr-reload", Array.isArray(paths) ? paths : []),
+});
+
+contextBridge.exposeInMainWorld("__wasmAgentDevHmr", {
+  requestReload: (paths) => ipcRenderer.invoke("wasm-agent:native-dev-hmr-reload", Array.isArray(paths) ? paths : []),
 });
 """
 
@@ -5816,7 +6207,7 @@ def create_native_download_bundle(
 ) -> tuple[str, bytes, dict[str, Any]]:
     response = create_native_companion_package(server, user, body, handler)
     package = dict(response.get("package") or {})
-    app_url = public_origin() or request_host_origin(handler) or "/"
+    app_url = native_pwa_app_url(public_origin() or request_host_origin(handler) or "/")
     package["app_url"] = app_url
     package["download_schema"] = "hermes.wasm_agent.native_app_download.v1"
     package["desktop_native_channel"] = native_desktop_channel(package)
@@ -9383,6 +9774,8 @@ def is_public_request(method: str, path: str) -> bool:
     if method == "OPTIONS":
         return True
     if method == "GET":
+        if path == "/native/download":
+            return True
         if path in {
             "/",
             "/home",
@@ -9420,6 +9813,8 @@ def is_public_request(method: str, path: str) -> bool:
         return False
     if method == "POST":
         return path in {"/auth/google", "/auth/google/callback", "/auth/logout"}
+    if method == "HEAD":
+        return path == "/native/download"
     return False
 
 

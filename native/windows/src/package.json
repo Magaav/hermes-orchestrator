@@ -1,0 +1,37 @@
+{
+  "name": "wasm-agent-native",
+  "version": "0.1.0",
+  "description": "WASM Agent native desktop host",
+  "main": "main.js",
+  "private": true,
+  "author": "Hermes Orchestrator",
+  "license": "AGPL-3.0-or-later",
+  "scripts": {
+    "prepare:native-assets": "node ../scripts/prepare-native-assets.js",
+    "test:native-backend-resolver": "node native-backend-resolver.test.js",
+    "test:native-policy": "node native-shell-policy.test.js",
+    "test:artifacts": "node native-shell-artifact.test.js",
+    "build:win:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js nsis x64",
+    "pack:win:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js dir x64",
+    "build:linux:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js linux AppImage x64",
+    "pack:linux:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js linux dir x64",
+    "build:linux:arm64": "npm run prepare:native-assets && node ../scripts/build-electron.js linux AppImage arm64",
+    "pack:linux:arm64": "npm run prepare:native-assets && node ../scripts/build-electron.js linux dir arm64",
+    "build:mac:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js mac dmg x64",
+    "pack:mac:x64": "npm run prepare:native-assets && node ../scripts/build-electron.js mac dir x64",
+    "build:mac:arm64": "npm run prepare:native-assets && node ../scripts/build-electron.js mac dmg arm64",
+    "pack:mac:arm64": "npm run prepare:native-assets && node ../scripts/build-electron.js mac dir arm64",
+    "build:sfx:x64": "npm run pack:win:x64 && node ../scripts/build-sfx-installer.js"
+  },
+  "devDependencies": {
+    "@nsis-u/makensis": "^3.3.0",
+    "electron": "42.3.2",
+    "electron-builder": "26.8.1",
+    "maker-7z-sfx": "^1.0.3",
+    "node-7z-archive": "^1.1.7"
+  },
+  "build": {
+    "appId": "com.wasmagent.desktop",
+    "productName": "WASM Agent"
+  }
+}
