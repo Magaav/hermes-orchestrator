@@ -540,6 +540,24 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/native/diagnostics/latest":
+            try:
+                self._json(HTTPStatus.OK, latest_native_diagnostics(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/control/poll":
+            try:
+                self._json(HTTPStatus.OK, poll_native_control_commands(self.server, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/control/clients":
+            try:
+                self._json(HTTPStatus.OK, native_control_clients(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/auth/google/callback":
             self._redirect("/home")
             return
@@ -961,6 +979,54 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 {"ok": True, "authenticated": False, "user": None},
                 headers={"Set-Cookie": auth_cookie("", max_age=0)},
             )
+            return
+        if path == "/native/diagnostics":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_native_diagnostics(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_diagnostics_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/events":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_native_event(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_event_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/control/command":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, create_native_control_command(self.server, body, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_control_command_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/control/result":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_native_control_result(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_control_result_error", "message": str(exc)}},
+                )
             return
         if path == "/observation/latest":
             try:
@@ -5496,9 +5562,14 @@ def native_installer_channel(platform: str) -> str:
 def native_installer_candidates(plugin_root: Path, platform: str, arch: str) -> list[Path]:
     native_root = plugin_root.parents[1] / "native"
     if platform == "windows":
+        release_root = native_root / "windows" / "release"
+        versioned: list[Path] = []
+        if arch != "unknown":
+            versioned.extend(sorted(release_root.glob(f"WASM-Agent-Setup-{arch}-*.exe"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True))
+        versioned.extend(sorted(release_root.glob("WASM-Agent-Setup-x64-*.exe"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True))
         names = [f"WASM-Agent-Setup-{arch}.exe", f"WASM-Agent-{arch}.msi"] if arch != "unknown" else []
         names.extend(["WASM-Agent-Setup-x64.exe", "WASM-Agent-x64.msi"])
-        return [native_root / "windows" / "release" / name for name in names]
+        return versioned + [release_root / name for name in names]
     if platform == "android":
         names = [f"WASM-Agent-{arch}.apk"] if arch != "unknown" else []
         names.extend(["WASM-Agent-arm64.apk", "WASM-Agent-universal.apk"])
@@ -5515,12 +5586,18 @@ def native_installer_candidates(plugin_root: Path, platform: str, arch: str) -> 
     return []
 
 
-def find_native_installer(server: WasmAgentServer, platform: str, arch: str) -> Path | None:
+def find_native_installer(server: WasmAgentServer, platform: str, arch: str, build_id: str = "") -> Path | None:
+    requested_build_id = str(build_id or "").strip()
     for candidate in native_installer_candidates(Path(server.plugin_root), platform, arch):
         try:
             resolved = candidate.resolve()
-            if resolved.is_file():
-                return resolved
+            if not resolved.is_file():
+                continue
+            if requested_build_id:
+                metadata = native_installer_metadata(resolved, platform)
+                if str(metadata.get("buildId") or "") != requested_build_id:
+                    continue
+            return resolved
         except OSError:
             continue
     return None
@@ -5529,9 +5606,17 @@ def find_native_installer(server: WasmAgentServer, platform: str, arch: str) -> 
 def native_installer_metadata(artifact: Path, platform: str) -> dict[str, Any]:
     if platform != "windows":
         return {}
-    metadata_path = artifact.parent / "win-unpacked" / "resources" / "native-defaults.json"
-    payload = read_json_file(metadata_path, {})
-    return payload if isinstance(payload, dict) else {}
+    sidecar_path = artifact.with_name(f"{artifact.stem}.native-defaults.json")
+    metadata_paths = [
+        sidecar_path,
+        artifact.parent / "win-unpacked" / "resources" / "native-defaults.json",
+        artifact.parent.parent / "src" / "build" / "native-defaults.json",
+    ]
+    for metadata_path in metadata_paths:
+        payload = read_json_file(metadata_path, {})
+        if isinstance(payload, dict) and payload:
+            return payload
+    return {}
 
 
 def native_download_filename_part(value: Any) -> str:
@@ -5550,6 +5635,8 @@ def native_installer_download_filename(artifact: Path, platform: str) -> str:
         return artifact.name
     stem = artifact.stem
     suffix = artifact.suffix or ".exe"
+    if build_suffix and build_suffix in stem:
+        return artifact.name
     return f"{stem}-{'-'.join(parts)}{suffix}"
 
 
@@ -5561,6 +5648,258 @@ def native_installer_fallbacks(platform: str) -> list[dict[str, str]]:
             {"kind": "pwa", "label": "Install PWA"},
         ]
     return fallbacks
+
+
+def native_diagnostics_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "native-diagnostics"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def native_events_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "native-events"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def native_control_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "native-control"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def redact_native_diagnostics(value: Any, depth: int = 0) -> Any:
+    if depth > 6:
+        return "[depth-limit]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return clipped_verbatim(value, 120_000)
+    if isinstance(value, list):
+        return [redact_native_diagnostics(item, depth + 1) for item in value[:80]]
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in list(value.items())[:160]:
+            clean_key = str(key)
+            if re.search(r"credential|token|cookie|secret|authorization|password", clean_key, re.I):
+                redacted[clean_key] = "[redacted]"
+            else:
+                redacted[clean_key] = redact_native_diagnostics(item, depth + 1)
+        return redacted
+    return clipped_verbatim(str(value), 2000)
+
+
+NATIVE_CONTROL_COMMAND_TYPES = {
+    "upload_diagnostics",
+    "write_runtime_diagnostics",
+    "clear_web_cache",
+    "reload",
+    "hard_reload",
+    "status",
+}
+
+
+def native_device_id_from_value(value: Any, fallback: str = "unknown") -> str:
+    return safe_state_id(str(value or fallback), fallback)
+
+
+def native_control_operator_allowed(handler: WasmAgentHandler, user: dict[str, Any] | None) -> bool:
+    if user_is_admin(user):
+        return True
+    control_key = os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY", "")
+    header_key = handler.headers.get("X-Wasm-Agent-Native-Control-Key", "")
+    if control_key and hmac.compare_digest(control_key, header_key):
+        return True
+    host = str(handler.headers.get("Host", "")).split(":", 1)[0].strip("[]").lower()
+    try:
+        remote_addr = ip_address(str(handler.client_address[0] if handler.client_address else ""))
+    except ValueError:
+        return False
+    return remote_addr.is_loopback and host in {"127.0.0.1", "localhost", "::1"}
+
+
+def save_native_event(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BrowserError("invalid_native_event", "Native event payload must be an object.")
+    device_id = native_device_id_from_value(body.get("device_id") or handler.headers.get("X-Wasm-Agent-Native-Device-Id"))
+    payload = redact_native_diagnostics(body)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_event_record.v1",
+        "received_at": iso_timestamp(),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "device_id": device_id,
+        "kind": clipped_verbatim(str(body.get("kind") or "unknown"), 120),
+        "payload": payload,
+    }
+    root = native_events_dir(server)
+    target = root / f"{device_id}.json"
+    existing = read_json_file(target, {})
+    events = existing.get("events") if isinstance(existing, dict) else []
+    if not isinstance(events, list):
+        events = []
+    events.append(record)
+    bundled = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_event_bundle.v1",
+        "device_id": device_id,
+        "updated_at": record["received_at"],
+        "latest": record,
+        "events": events[-80:],
+    }
+    write_json_file(target, bundled)
+    write_json_file(root / "latest.json", record)
+    return {"ok": True, "stored": True, "deviceId": device_id, "receivedAt": record["received_at"]}
+
+
+def native_control_command_path(server: WasmAgentServer, device_id: str, command_id: str) -> Path:
+    root = native_control_dir(server) / "commands" / device_id
+    root.mkdir(parents=True, exist_ok=True)
+    return root / f"{command_id}.json"
+
+
+def create_native_control_command(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not native_control_operator_allowed(handler, user):
+        raise BrowserError("native_control_forbidden", "Native control commands require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
+    device_id = native_device_id_from_value(body.get("device_id"))
+    command_type = clipped_verbatim(str(body.get("type") or body.get("command") or ""), 80)
+    if command_type not in NATIVE_CONTROL_COMMAND_TYPES:
+        raise BrowserError("invalid_native_control_command", f"Unsupported native control command: {command_type}")
+    command_id = safe_state_id(str(body.get("command_id") or f"cmd-{uuid.uuid4().hex[:16]}"), f"cmd-{uuid.uuid4().hex[:16]}")
+    payload = redact_native_diagnostics(body.get("payload") if isinstance(body.get("payload"), dict) else {})
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_control_command.v1",
+        "id": command_id,
+        "device_id": device_id,
+        "type": command_type,
+        "payload": payload,
+        "status": "pending",
+        "created_at": iso_timestamp(),
+        "created_by": "admin" if user_is_admin(user) else "localhost",
+    }
+    write_json_file(native_control_command_path(server, device_id, command_id), record)
+    return {"ok": True, "queued": True, "deviceId": device_id, "command": record}
+
+
+def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
+    query = parse_qs(urlparse(handler.path).query)
+    device_id = native_device_id_from_value((query.get("device_id") or ["unknown"])[0])
+    build_id = clipped_verbatim(str((query.get("build_id") or [""])[0]), 120)
+    route = clipped_verbatim(str((query.get("route") or [""])[0]), 600)
+    now = iso_timestamp()
+    heartbeat = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_control_heartbeat.v1",
+        "device_id": device_id,
+        "build_id": build_id,
+        "route": route,
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "received_at": now,
+    }
+    root = native_control_dir(server)
+    write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
+    command_root = root / "commands" / device_id
+    commands: list[dict[str, Any]] = []
+    if command_root.exists():
+        for path in sorted(command_root.glob("*.json"), key=lambda item: item.stat().st_mtime):
+            command = read_json_file(path, {})
+            if not isinstance(command, dict) or command.get("status") != "pending":
+                continue
+            command["status"] = "delivered"
+            command["delivered_at"] = now
+            write_json_file(path, command)
+            commands.append(command)
+            if len(commands) >= 8:
+                break
+    return {"ok": True, "deviceId": device_id, "commands": commands, "serverTime": now}
+
+
+def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BrowserError("invalid_native_control_result", "Native control result payload must be an object.")
+    device_id = native_device_id_from_value(body.get("device_id") or handler.headers.get("X-Wasm-Agent-Native-Device-Id"))
+    command_id = safe_state_id(str(body.get("command_id") or "unknown"), "unknown")
+    now = iso_timestamp()
+    result = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_control_result.v1",
+        "device_id": device_id,
+        "command_id": command_id,
+        "received_at": now,
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "result": redact_native_diagnostics(body.get("result") if isinstance(body.get("result"), dict) else body),
+    }
+    root = native_control_dir(server)
+    write_json_file(root / "results" / device_id / f"{command_id}.json", result)
+    command_path = native_control_command_path(server, device_id, command_id)
+    command = read_json_file(command_path, {})
+    if isinstance(command, dict) and command:
+        command["status"] = "finished"
+        command["finished_at"] = now
+        command["result"] = result["result"]
+        write_json_file(command_path, command)
+    return {"ok": True, "stored": True, "deviceId": device_id, "commandId": command_id, "receivedAt": now}
+
+
+def native_control_clients(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    if not native_control_operator_allowed(handler, user):
+        raise BrowserError("native_control_forbidden", "Native control clients require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
+    root = native_control_dir(server)
+    clients: list[dict[str, Any]] = []
+    for path in sorted((root / "heartbeats").glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:80]:
+        heartbeat = read_json_file(path, {})
+        if isinstance(heartbeat, dict):
+            device_id = native_device_id_from_value(heartbeat.get("device_id"), path.stem)
+            diagnostics = read_json_file(native_diagnostics_dir(server) / f"{device_id}.json", {})
+            event_bundle = read_json_file(native_events_dir(server) / f"{device_id}.json", {})
+            clients.append({
+                "device_id": device_id,
+                "heartbeat": heartbeat,
+                "diagnostics_received_at": diagnostics.get("received_at") if isinstance(diagnostics, dict) else "",
+                "latest_event": event_bundle.get("latest") if isinstance(event_bundle, dict) else None,
+            })
+    return {"ok": True, "clients": clients, "count": len(clients)}
+
+
+def save_native_diagnostics(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BrowserError("invalid_native_diagnostics", "Native diagnostics payload must be an object.")
+    device_id = safe_state_id(str(body.get("device_id") or handler.headers.get("X-Wasm-Agent-Native-Device-Id") or "unknown"), "unknown")
+    build_id = safe_state_id(str(body.get("build_id") or "unknown"), "unknown")
+    payload = redact_native_diagnostics(body)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_diagnostics_record.v1",
+        "received_at": iso_timestamp(),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "device_id": device_id,
+        "build_id": build_id,
+        "payload": payload,
+    }
+    root = native_diagnostics_dir(server)
+    target = root / f"{device_id}.json"
+    write_json_file(target, record)
+    write_json_file(root / "latest.json", record)
+    return {
+        "ok": True,
+        "stored": True,
+        "deviceId": device_id,
+        "buildId": build_id,
+        "receivedAt": record["received_at"],
+    }
+
+
+def latest_native_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
+    payload = read_json_file(native_diagnostics_dir(server) / "latest.json", {})
+    if not isinstance(payload, dict) or not payload:
+        return {"ok": True, "available": False, "diagnostics": None}
+    return {"ok": True, "available": True, "diagnostics": payload}
 
 
 def resolve_native_installer(
@@ -5593,10 +5932,13 @@ def resolve_native_installer(
     if artifact:
         download_filename = native_installer_download_filename(artifact, platform)
         metadata = native_installer_metadata(artifact, platform)
+        download_params = {"platform": platform, "arch": arch}
+        if metadata.get("buildId"):
+            download_params["buildId"] = str(metadata.get("buildId"))
         response.update({
             "filename": download_filename,
             "artifactFilename": artifact.name,
-            "downloadUrl": f"/native/download?{urlencode({'platform': platform, 'arch': arch})}",
+            "downloadUrl": f"/native/download?{urlencode(download_params)}",
             "buildStatus": "built",
             "buildId": str(metadata.get("buildId") or ""),
             "installableVersion": str(metadata.get("installableVersion") or ""),
@@ -5615,7 +5957,8 @@ def serve_native_installer_download(handler: WasmAgentHandler, user: dict[str, A
     query = parse_qs(urlparse(handler.path).query)
     platform = normalize_native_platform(query.get("platform", ["unknown"])[0])
     arch = normalize_native_arch(query.get("arch", ["unknown"])[0])
-    artifact = find_native_installer(handler.server, platform, arch)
+    build_id = str(query.get("buildId", [""])[0] or "")
+    artifact = find_native_installer(handler.server, platform, arch, build_id)
     if not artifact:
         raise BrowserError("native_installer_missing", "Native installer not built yet.", status=HTTPStatus.NOT_FOUND)
     content_type = mimetypes.guess_type(str(artifact))[0] or "application/octet-stream"
@@ -5934,7 +6277,7 @@ def native_windows_electron_main_js() -> str:
 const fs = require("fs");
 const path = require("path");
 
-const DEFAULT_APP_URL = "http://127.0.0.1:8877";
+const DEFAULT_APP_URL = "https://wa.colmeio.com";
 const APP_ID = "wasm-agent";
 const PWA_HOME_PATH = "/home";
 const GOOGLE_AUTH_ORIGINS = new Set([
@@ -5988,7 +6331,9 @@ function chromeLikeUserAgent(value) {
 
 function backendHomeUrl(serverUrl) {
   try {
-    return new URL(PWA_HOME_PATH, serverUrl).toString();
+    const url = new URL(PWA_HOME_PATH, serverUrl);
+    url.searchParams.set("native", "electron");
+    return url.toString();
   } catch {
     return "";
   }
@@ -9803,6 +10148,9 @@ def is_public_request(method: str, path: str) -> bool:
             "/sw.js",
             "/config.json",
             "/auth/session",
+            "/native/diagnostics/latest",
+            "/native/control/poll",
+            "/native/control/clients",
             "/auth/google/callback",
         }:
             return True
@@ -9812,7 +10160,15 @@ def is_public_request(method: str, path: str) -> bool:
             return True
         return False
     if method == "POST":
-        return path in {"/auth/google", "/auth/google/callback", "/auth/logout"}
+        return path in {
+            "/auth/google",
+            "/auth/google/callback",
+            "/auth/logout",
+            "/native/diagnostics",
+            "/native/events",
+            "/native/control/command",
+            "/native/control/result",
+        }
     if method == "HEAD":
         return path == "/native/download"
     return False

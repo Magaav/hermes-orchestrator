@@ -375,12 +375,12 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertEqual(resolved["artifactFilename"], "WASM-Agent-Setup-x64.exe")
             self.assertEqual(resolved["buildId"], "win-x64-20260603T132803Z")
             self.assertEqual(resolved["installableVersion"], "0.1.0+win-x64-20260603T132803Z")
-            self.assertEqual(resolved["downloadUrl"], "/native/download?platform=windows&arch=x64")
+            self.assertEqual(resolved["downloadUrl"], "/native/download?platform=windows&arch=x64&buildId=win-x64-20260603T132803Z")
 
             class DownloadHandler:
                 def __init__(self) -> None:
                     self.server = server
-                    self.path = "/native/download?platform=windows&arch=x64"
+                    self.path = "/native/download?platform=windows&arch=x64&buildId=win-x64-20260603T132803Z"
                     self.wfile = io.BytesIO()
                     self.status = None
                     self.headers = {}
@@ -402,6 +402,62 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertEqual(download.headers["X-Wasm-Agent-Native-Build-Id"], "win-x64-20260603T132803Z")
             self.assertEqual(download.headers["X-Wasm-Agent-Native-Version"], "0.1.0+win-x64-20260603T132803Z")
             self.assertEqual(download.wfile.getvalue(), b"MZ wasm-agent setup")
+
+    def test_native_installer_resolver_prefers_versioned_windows_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "wasm-agent"
+            release = root / "native" / "windows" / "release"
+            release.mkdir(parents=True)
+            static_artifact = release / "WASM-Agent-Setup-x64.exe"
+            versioned_artifact = release / "WASM-Agent-Setup-x64-0.1.0-20260603T160102Z.exe"
+            static_artifact.write_bytes(b"old setup")
+            versioned_artifact.write_bytes(b"new setup")
+            (release / "WASM-Agent-Setup-x64-0.1.0-20260603T160102Z.native-defaults.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "hermes.wasm_agent.native_defaults.v1",
+                        "wasmAgentVersion": "0.1.0",
+                        "installableVersion": "0.1.0+win-x64-20260603T160102Z",
+                        "buildId": "win-x64-20260603T160102Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            server = SimpleNamespace(plugin_root=plugin_root, public_root=plugin_root / "public", state_dir=root / "state")
+            owner = user("101", "owner@example.test")
+
+            resolved = static_server.resolve_native_installer(
+                server,
+                owner,
+                {"platform": "windows", "arch": "x64", "deviceType": "desktop", "browser": "edge"},
+            )
+            self.assertEqual(resolved["artifactFilename"], versioned_artifact.name)
+            self.assertEqual(resolved["filename"], versioned_artifact.name)
+            self.assertEqual(resolved["downloadUrl"], "/native/download?platform=windows&arch=x64&buildId=win-x64-20260603T160102Z")
+
+            class DownloadHandler:
+                def __init__(self) -> None:
+                    self.server = server
+                    self.path = "/native/download?platform=windows&arch=x64&buildId=win-x64-20260603T160102Z"
+                    self.wfile = io.BytesIO()
+                    self.status = None
+                    self.headers = {}
+
+                def send_response(self, status) -> None:
+                    self.status = status
+
+                def send_header(self, key, value) -> None:
+                    self.headers[key] = value
+
+                def end_headers(self) -> None:
+                    pass
+
+            download = DownloadHandler()
+            static_server.serve_native_installer_download(download, owner)
+            self.assertEqual(download.status, static_server.HTTPStatus.OK)
+            self.assertEqual(download.headers["Content-Disposition"], f'attachment; filename="{versioned_artifact.name}"')
+            self.assertEqual(download.wfile.getvalue(), b"new setup")
 
     def test_friend_lifecycle_is_realtime_poll_safe_and_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

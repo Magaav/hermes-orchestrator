@@ -68,6 +68,7 @@ Usage:
   horc update [help]
   horc update all [--force]
   horc update node <name> [--force]
+  horc build [win-x64-prod]
   horc space start
   horc space stop
   horc space status
@@ -91,6 +92,7 @@ Examples:
   horc update all --force
   horc update node orchestrator
   horc update node colmeio --force
+  horc build
   horc space start
   horc space stop
   horc space backup
@@ -103,6 +105,7 @@ Notes:
   - `horc update all` refreshes /local/hermes-agent and reseeds every node.
   - `horc update node <name>` refreshes /local/hermes-agent and reseeds only that node.
   - Add `--force` to discard local `/local/hermes-agent` checkout changes during the refresh.
+  - `horc build` creates the Windows wasm-agent native installer and writes a trust manifest.
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
   - `horc space start` starts wasm-agent on localhost:8877 and its Hermes bridge on localhost:8790.
@@ -134,6 +137,930 @@ Behavior:
   - `--force` discards local `/local/hermes-agent` checkout changes before mirroring upstream.
   - Registry metadata is reconciled at /local/agents/registry.json.
 TXT
+}
+
+build_usage() {
+  cat <<'TXT'
+horc build — Release artifacts
+
+Usage:
+  horc build
+  horc build win-x64-prod
+  horc build prepare-docker
+  horc build doctor
+  horc build --doctor
+
+Behavior:
+  - Builds the Windows 11 x64 wasm-agent Electron/NSIS installer.
+  - Native Windows builds are production-trusted.
+  - Linux x86_64 builds use Wine/NSIS directly and require a Windows smoke test.
+  - Linux aarch64 builds use a Docker linux/amd64 Wine builder by default and
+    require a Windows smoke test.
+
+Environment:
+  HORC_WIN_BUILD_MODE=auto|native|wine|docker  default: auto
+  HORC_ALLOW_CROSS_WIN_BUILD=1                 allow Linux aarch64 direct Wine
+  HORC_TARGET_WIN_ARCH=x64                     default: x64
+  HORC_REQUIRE_VERIFIED_INSTALLER=1            default: 1
+  HORC_DOCKER_IMAGE=electronuserland/builder:wine
+  HORC_PREPARED_DOCKER_IMAGE=horc/electron-builder-wine-nsis:jammy
+  HORC_DOCKER_AMD64_PROBE_IMAGE=alpine:3.20
+  HORC_AUTO_INSTALL_BINFMT=1                   default on Linux aarch64 auto/docker
+  HORC_NO_AUTO_INSTALL_BINFMT=1                disable binfmt self-healing
+TXT
+}
+
+repo_root() {
+  local root="${HERMES_ORCHESTRATOR_ROOT:-}"
+  if [[ -n "${root}" ]]; then
+    printf '%s\n' "${root}"
+    return
+  fi
+
+  if [[ -d "${SCRIPT_DIR}/../../../native/windows/src" ]]; then
+    (cd "${SCRIPT_DIR}/../../.." && pwd)
+    return
+  fi
+
+  printf '%s\n' "/local"
+}
+
+host_kernel() {
+  uname -s 2>/dev/null || printf 'unknown\n'
+}
+
+host_machine() {
+  uname -m 2>/dev/null || printf 'unknown\n'
+}
+
+canonical_host_arch() {
+  local arch
+  arch="$(host_machine)"
+  case "${arch}" in
+    x86_64|amd64)
+      printf '%s\n' "x86_64"
+      ;;
+    aarch64|arm64)
+      printf '%s\n' "aarch64"
+      ;;
+    *)
+      printf '%s\n' "${arch}"
+      ;;
+  esac
+}
+
+is_native_windows_shell() {
+  if [[ "${OS:-}" == "Windows_NT" ]]; then
+    return 0
+  fi
+
+  local kernel
+  kernel="$(uname -s 2>/dev/null || true)"
+  case "${kernel}" in
+    CYGWIN*|MINGW*|MSYS*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_linux_shell() {
+  [[ "$(host_kernel)" == "Linux" ]]
+}
+
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_falsey() {
+  case "${1:-}" in
+    0|false|FALSE|no|NO|off|OFF)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+build_fail() {
+  echo "horc build: $*" >&2
+  exit 2
+}
+
+release_build_lock() {
+  if [[ -z "${HORC_BUILD_LOCK_DIR:-}" || ! -d "${HORC_BUILD_LOCK_DIR}" ]]; then
+    return
+  fi
+  local pid_file="${HORC_BUILD_LOCK_DIR}/pid"
+  if [[ -f "${pid_file}" && "$(cat "${pid_file}" 2>/dev/null || true)" == "$$" ]]; then
+    rm -rf "${HORC_BUILD_LOCK_DIR}"
+  fi
+}
+
+build_lock_pid_alive() {
+  local pid="$1"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "${pid}" 2>/dev/null
+}
+
+acquire_build_lock() {
+  local native_src="$1"
+  local windows_root
+  local lock_dir
+  local pid_file
+  local owner_pid=""
+
+  windows_root="$(cd "${native_src}/.." && pwd)"
+  lock_dir="${windows_root}/.horc-build.lock"
+  pid_file="${lock_dir}/pid"
+
+  if mkdir "${lock_dir}" 2>/dev/null; then
+    printf '%s\n' "$$" > "${pid_file}"
+    HORC_BUILD_LOCK_DIR="${lock_dir}"
+    trap release_build_lock EXIT
+    echo "horc build: acquired build lock ${lock_dir}"
+    return
+  fi
+
+  if [[ -f "${pid_file}" ]]; then
+    owner_pid="$(cat "${pid_file}" 2>/dev/null || true)"
+  fi
+  if build_lock_pid_alive "${owner_pid}"; then
+    echo "horc build: another Windows build is already running with pid ${owner_pid}." >&2
+    echo "horc build: wait for it to finish, or remove stale lock ${lock_dir} only after confirming that process is gone." >&2
+    exit 2
+  fi
+
+  echo "horc build: removing stale build lock ${lock_dir}"
+  rm -rf "${lock_dir}"
+  if ! mkdir "${lock_dir}" 2>/dev/null; then
+    echo "horc build: could not acquire build lock ${lock_dir}; another build may have started." >&2
+    exit 2
+  fi
+  printf '%s\n' "$$" > "${pid_file}"
+  HORC_BUILD_LOCK_DIR="${lock_dir}"
+  trap release_build_lock EXIT
+  echo "horc build: acquired build lock ${lock_dir}"
+}
+
+require_command() {
+  local command_name="$1"
+  local install_hint="${2:-}"
+  if command -v "${command_name}" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "horc build: missing prerequisite: ${command_name}" >&2
+  if [[ -n "${install_hint}" ]]; then
+    echo "horc build: ${install_hint}" >&2
+  fi
+  exit 2
+}
+
+require_local_node_bin() {
+  local native_src="$1"
+  local bin_name="$2"
+  local bin_root="${native_src}/node_modules/.bin"
+  if [[ -x "${bin_root}/${bin_name}" || -x "${bin_root}/${bin_name}.cmd" || -x "${bin_root}/${bin_name}.ps1" ]]; then
+    return
+  fi
+
+  echo "horc build: missing local Node build tool: ${bin_name}" >&2
+  echo "horc build: run 'cd ${native_src} && npm ci' before direct native/Wine builds." >&2
+  exit 2
+}
+
+require_npm_prereqs() {
+  local native_src="$1"
+  require_command node "Install Node.js for the build host."
+  require_command npm "Install npm for the build host."
+  require_command npx "Install npm/npx for app.asar inspection."
+  require_local_node_bin "${native_src}" "electron-builder"
+  require_local_node_bin "${native_src}" "asar"
+}
+
+require_wine_prereqs() {
+  require_command makensis "Install NSIS/makensis, or use HORC_WIN_BUILD_MODE=docker."
+  if command -v wine >/dev/null 2>&1 || command -v wine64 >/dev/null 2>&1; then
+    return
+  fi
+  echo "horc build: missing prerequisite: wine" >&2
+  echo "horc build: Install Wine for direct Linux Windows builds, or use HORC_WIN_BUILD_MODE=docker." >&2
+  exit 2
+}
+
+docker_permission_hint() {
+  cat >&2 <<'TXT'
+horc build: remediation commands:
+  sudo docker info
+  sudo usermod -aG docker "$USER"
+  newgrp docker
+TXT
+}
+
+binfmt_remediation_hint() {
+  cat >&2 <<'TXT'
+horc build: remediation commands:
+  sudo docker run --privileged --rm tonistiigi/binfmt --install amd64
+  docker run --rm --platform linux/amd64 alpine:3.20 uname -m
+TXT
+}
+
+select_windows_build_mode() {
+  local requested_mode="$1"
+  local arch="$2"
+  case "${requested_mode}" in
+    auto|native|wine|docker)
+      ;;
+    *)
+      build_fail "HORC_WIN_BUILD_MODE must be auto, native, wine, or docker; got '${requested_mode}'."
+      ;;
+  esac
+
+  if is_native_windows_shell; then
+    case "${requested_mode}" in
+      auto|native)
+        printf '%s\n' "native"
+        return
+        ;;
+      *)
+        build_fail "HORC_WIN_BUILD_MODE=${requested_mode} is for Linux hosts; use auto or native on Windows."
+        ;;
+    esac
+  fi
+
+  if ! is_linux_shell; then
+    build_fail "unsupported build host: $(host_kernel) $(host_machine). Use native Windows or Linux x86_64/aarch64."
+  fi
+
+  case "${requested_mode}" in
+    native)
+      build_fail "HORC_WIN_BUILD_MODE=native requires a Windows shell; current host is $(host_kernel) $(host_machine)."
+      ;;
+    docker)
+      printf '%s\n' "docker"
+      return
+      ;;
+    wine)
+      if [[ "${arch}" == "aarch64" ]] && ! is_truthy "${HORC_ALLOW_CROSS_WIN_BUILD:-}"; then
+        echo "horc build: Linux aarch64 direct Wine is debug-only and may hang in rcedit." >&2
+        echo "horc build: use HORC_WIN_BUILD_MODE=docker, or set HORC_ALLOW_CROSS_WIN_BUILD=1 to force direct Wine." >&2
+        exit 2
+      fi
+      printf '%s\n' "wine"
+      return
+      ;;
+    auto)
+      case "${arch}" in
+        x86_64)
+          printf '%s\n' "wine"
+          return
+          ;;
+        aarch64)
+          printf '%s\n' "docker"
+          return
+          ;;
+        *)
+          build_fail "auto mode does not know how to cross-build from Linux ${arch}; use HORC_WIN_BUILD_MODE=docker if Docker supports linux/amd64."
+          ;;
+      esac
+      ;;
+  esac
+}
+
+docker_amd64_probe() {
+  local probe_image="${1:-alpine:3.20}"
+  local output
+  if ! output="$(docker run --rm --platform linux/amd64 "${probe_image}" uname -m 2>&1)"; then
+    printf '%s\n' "${output}"
+    return 1
+  fi
+  output="$(printf '%s\n' "${output}" | tail -n 1 | tr -d '\r')"
+  printf '%s\n' "${output}"
+  [[ "${output}" == "x86_64" ]]
+}
+
+auto_install_binfmt_enabled() {
+  local requested_mode="$1"
+  local host_arch="$2"
+  if is_truthy "${HORC_NO_AUTO_INSTALL_BINFMT:-}"; then
+    return 1
+  fi
+  if [[ -n "${HORC_AUTO_INSTALL_BINFMT:-}" ]]; then
+    is_truthy "${HORC_AUTO_INSTALL_BINFMT:-}"
+    return
+  fi
+  [[ "${host_arch}" == "aarch64" && ( "${requested_mode}" == "auto" || "${requested_mode}" == "docker" ) ]]
+}
+
+install_docker_binfmt() {
+  echo "horc build: amd64 emulation missing; attempting QEMU binfmt registration..."
+  if docker run --privileged --rm tonistiigi/binfmt --install amd64; then
+    echo "horc build: QEMU binfmt registered successfully"
+    return 0
+  fi
+
+  echo "horc build: automatic QEMU binfmt registration failed." >&2
+  echo "horc build: Docker may require sudo, rootless Docker may block privileged containers, or this host may forbid privileged containers." >&2
+  binfmt_remediation_hint
+  return 1
+}
+
+ensure_docker_available() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "horc build: missing prerequisite: docker" >&2
+    echo "horc build: Install Docker, start the daemon, and enable linux/amd64 emulation for ARM hosts." >&2
+    return 1
+  fi
+
+  if ! docker info >/tmp/horc-docker-info.log 2>&1; then
+    echo "horc build: Docker is installed, but the daemon is not reachable." >&2
+    cat /tmp/horc-docker-info.log >&2 || true
+    echo "horc build: start Docker or add this user to the docker group, then retry." >&2
+    docker_permission_hint
+    return 1
+  fi
+}
+
+ensure_docker_amd64_emulation() {
+  local requested_mode="$1"
+  local host_arch="$2"
+  local probe_image="${HORC_DOCKER_AMD64_PROBE_IMAGE:-alpine:3.20}"
+  local probe_output
+
+  echo "horc build: checking Docker linux/amd64 emulation..."
+  if probe_output="$(docker_amd64_probe "${probe_image}")"; then
+    echo "horc build: linux/amd64 check returned ${probe_output}"
+    return 0
+  fi
+
+  printf '%s\n' "${probe_output}" >&2
+  echo "horc build: Docker is running, but linux/amd64 containers cannot execute on this host." >&2
+  if ! auto_install_binfmt_enabled "${requested_mode}" "${host_arch}"; then
+    echo "horc build: automatic QEMU binfmt registration is disabled." >&2
+    binfmt_remediation_hint
+    return 1
+  fi
+
+  install_docker_binfmt || return 1
+
+  echo "horc build: re-checking Docker linux/amd64 emulation..."
+  if probe_output="$(docker_amd64_probe "${probe_image}")"; then
+    echo "horc build: linux/amd64 check returned ${probe_output}"
+    return 0
+  fi
+
+  printf '%s\n' "${probe_output}" >&2
+  echo "horc build: linux/amd64 emulation still does not execute after QEMU binfmt registration." >&2
+  binfmt_remediation_hint
+  return 1
+}
+
+docker_image_pullable() {
+  local image="$1"
+  if docker_image_exists_locally "${image}"; then
+    return 0
+  fi
+  docker manifest inspect "${image}" >/tmp/horc-docker-image.log 2>&1
+}
+
+docker_image_exists_locally() {
+  local image="$1"
+  docker image inspect "${image}" >/dev/null 2>&1
+}
+
+prepared_docker_image_name() {
+  printf '%s\n' "${HORC_PREPARED_DOCKER_IMAGE:-horc/electron-builder-wine-nsis:jammy}"
+}
+
+select_docker_builder_image() {
+  local requested="${HORC_DOCKER_IMAGE:-}"
+  local prepared
+  if [[ -n "${requested}" ]]; then
+    printf '%s\n' "${requested}"
+    return
+  fi
+  prepared="$(prepared_docker_image_name)"
+  if command -v docker >/dev/null 2>&1 && docker_image_exists_locally "${prepared}"; then
+    printf '%s\n' "${prepared}"
+    return
+  fi
+  printf '%s\n' "electronuserland/builder:wine"
+}
+
+prepare_docker_builder_image() {
+  local root
+  local dockerfile
+  local image
+  root="$(repo_root)"
+  dockerfile="${root}/native/windows/docker/builder-wine-nsis.Dockerfile"
+  image="$(prepared_docker_image_name)"
+  ensure_docker_available || exit 2
+  [[ -f "${dockerfile}" ]] || build_fail "prepared Dockerfile not found: ${dockerfile}"
+  echo "horc build: preparing Docker builder image ${image}"
+  echo "horc build: this pays the nsis/unar apt cost once so future builds can skip it"
+  docker build --platform linux/amd64 -t "${image}" -f "${dockerfile}" "${root}/native/windows"
+  echo "horc build: prepared ${image}"
+  echo "horc build: future runs will auto-use it, or set HORC_DOCKER_IMAGE=${image}"
+}
+
+docker_builder_bootstrap_script() {
+  cat <<'TXT'
+ensure_makensis() {
+  if command -v makensis >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "horc build: makensis missing in Docker builder; attempting apt-get install nsis"
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "horc build: Docker builder image lacks makensis and apt-get; use HORC_DOCKER_IMAGE with NSIS installed." >&2
+    return 2
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends nsis
+}
+
+ensure_makensis
+TXT
+}
+
+docker_builder_preflight_script() {
+  cat <<'TXT'
+set -e
+printf "builder arch=%s\n" "$(uname -m)"
+command -v npm
+command -v npx
+command -v wine || command -v wine64
+if command -v makensis >/dev/null 2>&1; then
+  command -v makensis
+else
+  echo "horc build: makensis is not preinstalled in Docker builder; the build step will install nsis if Docker remains selected."
+fi
+TXT
+}
+
+native_electron_version() {
+  local native_src="$1"
+  node -e "const fs=require('fs'); const path=require('path'); const modulePkg=path.join('${native_src}', 'node_modules/electron/package.json'); if (fs.existsSync(modulePkg)) { process.stdout.write(require(modulePkg).version); } else { const pkg=require(path.join('${native_src}', 'package.json')); process.stdout.write(String((pkg.devDependencies && pkg.devDependencies.electron) || (pkg.dependencies && pkg.dependencies.electron) || '').replace(/^[^0-9]*/, '')); }"
+}
+
+native_electron_checksum() {
+  local native_src="$1"
+  local file_name="$2"
+  node -e "const fs=require('fs'); const path=require('path'); const checks=path.join('${native_src}', 'node_modules/electron/checksums.json'); if (!fs.existsSync(checks)) process.exit(0); const c=require(checks); process.stdout.write(String(c['${file_name}'] || ''))"
+}
+
+sha256_file() {
+  local file_path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${file_path}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${file_path}" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+ensure_host_electron_cache() {
+  local native_src="$1"
+  local electron_cache="${HORC_ELECTRON_CACHE_DIR:-${HOME}/.cache/electron}"
+  local electron_version
+  local file_name
+  local cache_path
+  local expected_sha
+  local actual_sha
+  local url
+  local tmp_path
+
+  require_command node "Install Node.js so horc can inspect the Electron package version."
+  electron_version="$(native_electron_version "${native_src}")"
+  file_name="electron-v${electron_version}-win32-x64.zip"
+  cache_path="${electron_cache}/${file_name}"
+  expected_sha="$(native_electron_checksum "${native_src}" "${file_name}")"
+  mkdir -p "${electron_cache}"
+
+  if [[ -f "${cache_path}" ]]; then
+    if [[ -n "${expected_sha}" ]]; then
+      actual_sha="$(sha256_file "${cache_path}")" || build_fail "sha256 tool not found for Electron cache validation."
+      if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+        echo "horc build: cached ${file_name} checksum mismatch; refreshing"
+        rm -f "${cache_path}"
+      else
+        echo "horc build: Electron win32-x64 cache ready: ${cache_path}"
+        return 0
+      fi
+    else
+      echo "horc build: Electron win32-x64 cache ready: ${cache_path}"
+      return 0
+    fi
+  fi
+
+  require_command curl "Install curl, or pre-populate ${cache_path}."
+  url="https://github.com/electron/electron/releases/download/v${electron_version}/${file_name}"
+  tmp_path="${cache_path}.tmp"
+  echo "horc build: downloading ${url}"
+  curl -fL --retry 3 --retry-delay 2 -o "${tmp_path}" "${url}"
+  if [[ -n "${expected_sha}" ]]; then
+    actual_sha="$(sha256_file "${tmp_path}")" || build_fail "sha256 tool not found for Electron cache validation."
+    if [[ "${actual_sha}" != "${expected_sha}" ]]; then
+      rm -f "${tmp_path}"
+      build_fail "downloaded ${file_name} checksum mismatch."
+    fi
+  fi
+  mv "${tmp_path}" "${cache_path}"
+  echo "horc build: Electron win32-x64 cache ready: ${cache_path}"
+}
+
+docker_builder_preflight() {
+  local image="$1"
+  local requested_mode="$2"
+  local host_arch="$3"
+  local bootstrap
+  local preflight_status
+  ensure_docker_available || return 1
+  ensure_docker_amd64_emulation "${requested_mode}" "${host_arch}" || return 1
+
+  bootstrap="$(docker_builder_bootstrap_script)"
+  echo "horc build: checking Docker linux/amd64 builder prerequisites in ${image}"
+  set +e
+  docker run --rm --platform linux/amd64 "${image}" bash -lc \
+    "$(docker_builder_preflight_script)" 2>&1 | tee /tmp/horc-docker-preflight.log
+  preflight_status="${PIPESTATUS[0]}"
+  set -e
+  if [[ "${preflight_status}" -ne 0 ]]; then
+    echo "horc build: Docker linux/amd64 builder preflight failed." >&2
+    echo "horc build: ensure the builder can run npm, npx, Wine, and makensis; or set HORC_DOCKER_IMAGE to a prepared builder image." >&2
+    return 1
+  fi
+}
+
+build_doctor() {
+  local native_src="${HERMES_WASM_AGENT_NATIVE_SRC:-}"
+  local root
+  local target_arch="${HORC_TARGET_WIN_ARCH:-x64}"
+  local requested_mode="${HORC_WIN_BUILD_MODE:-auto}"
+  local host_os
+  local host_arch
+  local build_mode
+  local expected_mode
+  local docker_available="no"
+  local docker_permission="no"
+  local amd64_binfmt="no"
+  local image_pullable="no"
+  local docker_image
+  local probe_image="${HORC_DOCKER_AMD64_PROBE_IMAGE:-alpine:3.20}"
+  local probe_output
+
+  root="$(repo_root)"
+  native_src="${native_src:-${root}/native/windows/src}"
+  docker_image="$(select_docker_builder_image)"
+  host_os="$(host_kernel)"
+  host_arch="$(canonical_host_arch)"
+  if is_native_windows_shell; then
+    host_os="Windows"
+  fi
+
+  build_mode="$(select_windows_build_mode "${requested_mode}" "${host_arch}")"
+  expected_mode="${build_mode}"
+  if [[ "${build_mode}" == "docker" ]]; then
+    expected_mode="docker-amd64-wine"
+  fi
+
+  if command -v docker >/dev/null 2>&1; then
+    docker_available="yes"
+    if docker info >/tmp/horc-docker-info.log 2>&1; then
+      docker_permission="yes"
+      if probe_output="$(docker_amd64_probe "${probe_image}")"; then
+        amd64_binfmt="yes (${probe_output})"
+      else
+        amd64_binfmt="no"
+      fi
+      if docker_image_pullable "${docker_image}"; then
+        image_pullable="yes"
+      else
+        image_pullable="no"
+      fi
+    fi
+  fi
+
+  echo "horc build doctor"
+  echo "  host OS/arch: ${host_os} ${host_arch}"
+  echo "  target: win32-${target_arch}"
+  echo "  expected build mode: ${expected_mode}"
+  echo "  native source: ${native_src}"
+  echo "  Docker available: ${docker_available}"
+  echo "  Docker user permission: ${docker_permission}"
+  echo "  amd64 binfmt available: ${amd64_binfmt}"
+  echo "  Wine builder image pullable: ${image_pullable}"
+  echo "  auto binfmt install: $(auto_install_binfmt_enabled "${requested_mode}" "${host_arch}" && echo yes || echo no)"
+
+  if [[ "${docker_available}" != "yes" ]]; then
+    echo "  remediation: install Docker and start the Docker daemon"
+  elif [[ "${docker_permission}" != "yes" ]]; then
+    echo "  remediation:"
+    echo "    sudo docker info"
+    echo "    sudo usermod -aG docker \"\$USER\""
+    echo "    newgrp docker"
+  elif [[ "${expected_mode}" == "docker-amd64-wine" && "${amd64_binfmt}" == "no" ]]; then
+    echo "  remediation:"
+    echo "    sudo docker run --privileged --rm tonistiigi/binfmt --install amd64"
+    echo "    docker run --rm --platform linux/amd64 ${probe_image} uname -m"
+  elif [[ "${expected_mode}" == "docker-amd64-wine" && "${image_pullable}" != "yes" ]]; then
+    echo "  remediation:"
+    echo "    docker pull --platform linux/amd64 ${docker_image}"
+  else
+    echo "  remediation: none"
+  fi
+}
+
+run_direct_windows_release() {
+  local native_src="$1"
+  echo "horc build: cd ${native_src} && npm run release:win:x64:prod"
+  (cd "${native_src}" && npm run release:win:x64:prod)
+}
+
+run_linux_arm64_native_nsis_no_rcedit_release() {
+  local native_src="$1"
+  echo "horc build: Docker amd64 Wine builder failed under QEMU; falling back to Linux ARM64 native NSIS without rcedit."
+  echo "horc build: this fallback skips Windows executable resource editing and requires a Windows smoke test."
+  echo "horc build: cd ${native_src} && WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1 npm run release:win:x64:prod"
+  (cd "${native_src}" && WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1 npm run release:win:x64:prod)
+}
+
+run_docker_windows_release() {
+  local root="$1"
+  local native_src="$2"
+  local image="$3"
+  local bootstrap
+  local build_script
+  local electron_cache="${HORC_ELECTRON_CACHE_DIR:-${HOME}/.cache/electron}"
+  local electron_builder_cache="${HORC_ELECTRON_BUILDER_CACHE_DIR:-${HOME}/.cache/electron-builder}"
+  local host_uid
+  local host_gid
+  local docker_status
+  bootstrap="$(docker_builder_bootstrap_script)"
+  ensure_host_electron_cache "${native_src}"
+  mkdir -p "${electron_cache}" "${electron_builder_cache}"
+  build_script="$(cat <<'TXT'
+set -euo pipefail
+cleanup_owner() {
+  if [[ -n "${HORC_HOST_UID:-}" && -n "${HORC_HOST_GID:-}" ]] && command -v chown >/dev/null 2>&1; then
+    for path in ../release ../dist build node_modules /root/.cache/electron /root/.cache/electron-builder; do
+      [[ -e "${path}" ]] && chown -R "${HORC_HOST_UID}:${HORC_HOST_GID}" "${path}" 2>/dev/null || true
+    done
+  fi
+}
+trap cleanup_owner EXIT
+npm ci
+test -x node_modules/.bin/electron-builder || { echo "missing electron-builder after npm ci" >&2; exit 2; }
+test -x node_modules/.bin/asar || { echo "missing asar after npm ci" >&2; exit 2; }
+npm run release:win:x64:prod
+TXT
+)"
+  host_uid="$(id -u 2>/dev/null || true)"
+  host_gid="$(id -g 2>/dev/null || true)"
+
+  echo "horc build: starting Docker Wine builder..."
+  echo "horc build: docker ${image} --platform linux/amd64"
+  docker_status=0
+  docker run --rm \
+    --platform linux/amd64 \
+    -e WASM_AGENT_DEFAULT_SERVER_URL="https://wa.colmeio.com" \
+    -e WASM_AGENT_ALLOW_LOCAL_DEV="" \
+    -e ELECTRON_CACHE="/root/.cache/electron" \
+    -e ELECTRON_BUILDER_CACHE="/root/.cache/electron-builder" \
+    -e HORC_HOST_UID="${host_uid}" \
+    -e HORC_HOST_GID="${host_gid}" \
+    -v "${root}:${root}" \
+    -v "${electron_cache}:/root/.cache/electron" \
+    -v "${electron_builder_cache}:/root/.cache/electron-builder" \
+    -w "${native_src}" \
+    "${image}" \
+    bash -lc "${bootstrap}
+${build_script}" || docker_status=$?
+  if [[ "${docker_status}" -ne 0 ]]; then
+    echo "horc build: Docker Wine builder exited with status ${docker_status}" >&2
+    return "${docker_status}"
+  fi
+  return 0
+}
+
+select_installer_path() {
+  local release_root="$1"
+  local target_arch="$2"
+  local -a versioned_installers=()
+  local -a installers=()
+
+  if [[ -d "${release_root}" ]]; then
+    mapfile -t versioned_installers < <(find "${release_root}" -maxdepth 1 -type f -name "WASM-Agent-Setup-${target_arch}-*.exe" -print | sort)
+    if [[ ${#versioned_installers[@]} -gt 0 ]]; then
+      printf '%s\n' "${versioned_installers[$((${#versioned_installers[@]} - 1))]}"
+      return
+    fi
+
+    if [[ -f "${release_root}/WASM-Agent-Setup-${target_arch}.exe" ]]; then
+      printf '%s\n' "${release_root}/WASM-Agent-Setup-${target_arch}.exe"
+      return
+    fi
+
+    mapfile -t installers < <(find "${release_root}" -maxdepth 1 -type f -name "*.exe" -print | sort)
+    if [[ ${#installers[@]} -gt 0 ]]; then
+      printf '%s\n' "${installers[$((${#installers[@]} - 1))]}"
+      return
+    fi
+  fi
+}
+
+post_build_verify_and_manifest() {
+  local native_src="$1"
+  local build_mode="$2"
+  local target_arch="$3"
+  local trusted_production="$4"
+  local requires_windows_smoke_test="$5"
+  local host_os="$6"
+  local host_arch="$7"
+  local windows_root
+  local release_root
+  local unpacked_exe
+  local app_asar
+  local installer_path
+  local manifest_path
+  local asar_listing
+
+  windows_root="$(cd "${native_src}/.." && pwd)"
+  release_root="${windows_root}/release"
+  unpacked_exe="${release_root}/win-unpacked/WASM Agent.exe"
+  app_asar="${release_root}/win-unpacked/resources/app.asar"
+  installer_path="$(select_installer_path "${release_root}" "${target_arch}")"
+  manifest_path="${release_root}/horc-build-manifest.json"
+
+  if [[ "${HORC_REQUIRE_VERIFIED_INSTALLER:-1}" != "0" ]]; then
+    [[ -f "${unpacked_exe}" ]] || build_fail "missing packaged app executable: ${unpacked_exe}"
+    [[ -f "${app_asar}" ]] || build_fail "missing packaged app.asar: ${app_asar}"
+    [[ -n "${installer_path}" && -f "${installer_path}" ]] || build_fail "missing Windows installer under ${release_root}/*.exe"
+  fi
+
+  require_command npx "Install npm/npx so horc can inspect resources/app.asar."
+  asar_listing="$(mktemp)"
+  if ! (cd "${native_src}" && npx --no-install asar list "${app_asar}" > "${asar_listing}"); then
+    rm -f "${asar_listing}"
+    build_fail "could not inspect app.asar with npx --no-install asar; run 'cd ${native_src} && npm ci'."
+  fi
+
+  echo "horc build: app.asar first 80 entries"
+  sed -n '1,80p' "${asar_listing}"
+  for expected in "/main.js" "/fallback.html" "/native-defaults.json" "/package.json"; do
+    if ! grep -Fxq "${expected}" "${asar_listing}"; then
+      rm -f "${asar_listing}"
+      build_fail "app.asar is missing expected entry: ${expected}"
+    fi
+  done
+  rm -f "${asar_listing}"
+
+  require_command node "Install Node.js so horc can write the build manifest."
+  HORC_MANIFEST_PATH="${manifest_path}" \
+  HORC_MANIFEST_HOST_OS="${host_os}" \
+  HORC_MANIFEST_HOST_ARCH="${host_arch}" \
+  HORC_MANIFEST_TARGET="win32-${target_arch}" \
+  HORC_MANIFEST_MODE="${build_mode}" \
+  HORC_MANIFEST_TRUSTED="${trusted_production}" \
+  HORC_MANIFEST_SMOKE="${requires_windows_smoke_test}" \
+  HORC_MANIFEST_INSTALLER="${installer_path}" \
+  HORC_MANIFEST_ASAR="${app_asar}" \
+  node <<'NODE'
+const fs = require("fs");
+
+const manifest = {
+  host_os: process.env.HORC_MANIFEST_HOST_OS || "",
+  host_arch: process.env.HORC_MANIFEST_HOST_ARCH || "",
+  target: process.env.HORC_MANIFEST_TARGET || "win32-x64",
+  mode: process.env.HORC_MANIFEST_MODE || "",
+  trusted_production: process.env.HORC_MANIFEST_TRUSTED === "true",
+  requires_windows_smoke_test: process.env.HORC_MANIFEST_SMOKE === "true",
+  installer_path: process.env.HORC_MANIFEST_INSTALLER || "",
+  app_asar_path: process.env.HORC_MANIFEST_ASAR || "",
+  timestamp: new Date().toISOString(),
+};
+
+fs.writeFileSync(process.env.HORC_MANIFEST_PATH, `${JSON.stringify(manifest, null, 2)}\n`);
+NODE
+
+  echo "horc build: wrote ${manifest_path}"
+  echo "horc build: mode=${build_mode} trusted_production=${trusted_production} requires_windows_smoke_test=${requires_windows_smoke_test}"
+}
+
+build_windows_native_release() {
+  local native_src="${HERMES_WASM_AGENT_NATIVE_SRC:-}"
+  local root
+  local target_arch="${HORC_TARGET_WIN_ARCH:-x64}"
+  local requested_mode="${HORC_WIN_BUILD_MODE:-auto}"
+  local host_os
+  local host_arch
+  local build_mode
+  local trusted_production="false"
+  local requires_windows_smoke_test="true"
+  local docker_image
+
+  if [[ -z "${native_src}" ]]; then
+    root="$(repo_root)"
+    native_src="${root}/native/windows/src"
+  else
+    root="$(repo_root)"
+  fi
+  docker_image="$(select_docker_builder_image)"
+
+  if [[ ! -f "${native_src}/package.json" ]]; then
+    echo "horc build: native Windows package not found: ${native_src}" >&2
+    echo "set HERMES_WASM_AGENT_NATIVE_SRC to override" >&2
+    exit 2
+  fi
+
+  if [[ "${target_arch}" != "x64" ]]; then
+    build_fail "HORC_TARGET_WIN_ARCH=${target_arch} is not supported yet; the Windows 11 target is x64."
+  fi
+
+  acquire_build_lock "${native_src}"
+
+  host_os="$(host_kernel)"
+  host_arch="$(canonical_host_arch)"
+  if is_native_windows_shell; then
+    host_os="Windows"
+  fi
+  build_mode="$(select_windows_build_mode "${requested_mode}" "${host_arch}")"
+  echo "horc build: host ${host_os} ${host_arch}, target win32-${target_arch}"
+  if [[ "${build_mode}" == "docker" ]]; then
+    echo "horc build: selected mode docker-amd64-wine"
+  else
+    echo "horc build: selected mode ${build_mode}"
+  fi
+
+  case "${build_mode}" in
+    native)
+      trusted_production="true"
+      requires_windows_smoke_test="false"
+      require_npm_prereqs "${native_src}"
+      run_direct_windows_release "${native_src}"
+      ;;
+    wine)
+      trusted_production="false"
+      requires_windows_smoke_test="true"
+      if [[ "${host_arch}" == "aarch64" ]]; then
+        echo "horc build: WARNING Linux aarch64 direct Wine mode is debug-only and may hang." >&2
+        echo "horc build: WARNING resulting artifact is cross-built and requires a Windows smoke test." >&2
+      else
+        echo "horc build: Linux x86_64 Wine cross-build selected; Windows smoke test required."
+      fi
+      require_npm_prereqs "${native_src}"
+      require_wine_prereqs
+      run_direct_windows_release "${native_src}"
+      ;;
+    docker)
+      trusted_production="false"
+      requires_windows_smoke_test="true"
+      if ! docker_builder_preflight "${docker_image}" "${requested_mode}" "${host_arch}"; then
+        if [[ "${requested_mode}" == "auto" && "${host_arch}" == "aarch64" ]] && is_truthy "${HORC_ALLOW_CROSS_WIN_BUILD:-}"; then
+          echo "horc build: Docker/QEMU unavailable; HORC_ALLOW_CROSS_WIN_BUILD is set, falling back to direct Wine debug mode." >&2
+          require_npm_prereqs "${native_src}"
+          require_wine_prereqs
+          build_mode="wine"
+          run_direct_windows_release "${native_src}"
+      else
+        echo "horc build: cannot use Docker linux/amd64 builder from $(host_kernel) $(host_machine)." >&2
+        echo "horc build: remediation: install/start Docker and register QEMU amd64 binfmt, or run on Linux x86_64/Windows." >&2
+        exit 2
+        fi
+      else
+        build_mode="docker-amd64-wine"
+        echo "horc build: Docker amd64 Wine cross-build selected; Windows smoke test required."
+        if run_docker_windows_release "${root}" "${native_src}" "${docker_image}"; then
+          :
+        elif [[ "${requested_mode}" == "auto" && "${host_arch}" == "aarch64" ]]; then
+          echo "horc build: Docker/QEMU builder failed; falling back to Linux ARM64 native NSIS without rcedit." >&2
+          require_npm_prereqs "${native_src}"
+          require_command makensis "Install NSIS/makensis for the Linux ARM64 native NSIS fallback."
+          build_mode="linux-arm64-native-nsis-no-rcedit"
+          run_linux_arm64_native_nsis_no_rcedit_release "${native_src}"
+        else
+          return 1
+        fi
+      fi
+      ;;
+    *)
+      build_fail "internal error: unsupported selected build mode ${build_mode}"
+      ;;
+  esac
+
+  post_build_verify_and_manifest "${native_src}" "${build_mode}" "${target_arch}" "${trusted_production}" "${requires_windows_smoke_test}" "${host_os}" "${host_arch}"
 }
 
 resolve_name_and_exec() {
@@ -419,6 +1346,46 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
+  build)
+    SUBACTION="${1:-win-x64-prod}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "${SUBACTION}" in
+      help|-h|--help)
+        build_usage
+        ;;
+      doctor|--doctor)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build doctor: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_doctor
+        ;;
+      prepare-docker|docker-prepare|prepare-builder)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build prepare-docker: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        prepare_docker_builder_image
+        ;;
+      win|windows|win-x64|win-x64-prod|native|wasm-agent|wasm-agent-native)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_windows_native_release
+        ;;
+      *)
+        echo "horc build: unknown target '${SUBACTION}'" >&2
+        build_usage >&2
+        exit 2
+        ;;
+    esac
+    ;;
   space)
     SUBACTION="${1:-help}"
     if [[ $# -gt 0 ]]; then

@@ -12,6 +12,8 @@ const appStage = path.join(stageRoot, "app");
 const archivePath = path.join(releaseRoot, "WASM-Agent-Setup-x64.7z");
 const configPath = path.join(releaseRoot, "WASM-Agent-Setup-x64.sfxconfig");
 const outputPath = path.join(releaseRoot, "WASM-Agent-Setup-x64.exe");
+const nativeDefaultsPath = path.join(srcRoot, "build", "native-defaults.json");
+const verifyWindowsInstaller = path.join(windowsRoot, "scripts", "verify-windows-installer.js");
 const sevenZip = path.join(srcRoot, "node_modules", "7zip-bin", "linux", "arm64", "7za");
 const sfxStub = path.join(srcRoot, "node_modules", "maker-7z-sfx", "7zsd_extra_162_3888", "7zsd_All_x64.sfx");
 
@@ -28,6 +30,25 @@ function write(file, text) {
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { stdio: "inherit", ...options });
   if (result.status !== 0) fail(`Command failed (${result.status}): ${command} ${args.join(" ")}`);
+}
+
+function readJson(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function safeFilenamePart(value) {
+  return String(value || "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[._-]+|[._-]+$/g, "");
+}
+
+function versionedInstallerName(defaults) {
+  const version = safeFilenamePart(defaults.wasmAgentVersion || defaults.nativeShellVersion || "0.1.0");
+  const buildId = safeFilenamePart(defaults.buildId || "");
+  const buildSuffix = buildId.startsWith("win-x64-") ? buildId.slice("win-x64-".length) : buildId.replace(/^win-[^-]+-/, "");
+  return `WASM-Agent-Setup-x64-${[version, buildSuffix].filter(Boolean).join("-")}.exe`;
 }
 
 if (!fs.existsSync(path.join(unpackedRoot, "WASM Agent.exe"))) {
@@ -97,7 +118,20 @@ if (Test-Path $ConfigPath) {
     }
   } catch { $existing = @{} }
 }
-$serverUrl = if ($env:WASM_AGENT_SERVER_URL) { $env:WASM_AGENT_SERVER_URL } elseif ($existing.serverUrl) { $existing.serverUrl } else { "http://127.0.0.1:8877" }
+$DefaultsPath = Join-Path $AppDir "resources\\native-defaults.json"
+$defaults = @{}
+if (Test-Path $DefaultsPath) {
+  try {
+    $parsedDefaults = Get-Content -Raw -Path $DefaultsPath | ConvertFrom-Json
+    if ($parsedDefaults) {
+      foreach ($property in $parsedDefaults.PSObject.Properties) {
+        $defaults[$property.Name] = $property.Value
+      }
+    }
+  } catch { $defaults = @{} }
+}
+$defaultServerUrl = if ($defaults.serverUrl) { $defaults.serverUrl } else { "https://wa.colmeio.com" }
+$serverUrl = if ($env:WASM_AGENT_SERVER_URL) { $env:WASM_AGENT_SERVER_URL } elseif ($existing.userExplicit -eq $true -and $existing.serverUrl) { $existing.serverUrl } else { $defaultServerUrl }
 $deviceId = if ($existing.deviceId) { $existing.deviceId } else { "win-$([Environment]::MachineName)-$([Guid]::NewGuid().ToString('N').Substring(0, 12))" }
 $config = [ordered]@{
   schema = "hermes.wasm_agent.windows_native_config.v1"
@@ -106,6 +140,7 @@ $config = [ordered]@{
   accountId = if ($existing.accountId) { $existing.accountId } else { "" }
   deviceToken = if ($existing.deviceToken) { $existing.deviceToken } else { "" }
   installer = "WASM-Agent-Setup-x64.exe"
+  userExplicit = if ($existing.userExplicit -eq $true) { $true } else { $false }
   installedAt = (Get-Date).ToUniversalTime().ToString("o")
   deviceRegistrationReady = $true
   heartbeatReady = $true
@@ -217,6 +252,16 @@ fs.writeFileSync(
   Buffer.concat([fs.readFileSync(sfxStub), fs.readFileSync(configPath), fs.readFileSync(archivePath)])
 );
 fs.chmodSync(outputPath, 0o644);
+const defaults = readJson(nativeDefaultsPath);
+let versionedPath = "";
+if (defaults && defaults.buildId) {
+  versionedPath = path.join(releaseRoot, versionedInstallerName(defaults));
+  fs.copyFileSync(outputPath, versionedPath);
+  fs.writeFileSync(path.join(releaseRoot, `${path.basename(versionedPath, ".exe")}.native-defaults.json`), `${JSON.stringify(defaults, null, 2)}\n`);
+  console.log(`Built ${versionedPath}`);
+}
+run(process.execPath, [verifyWindowsInstaller, outputPath]);
+if (versionedPath) run(process.execPath, [verifyWindowsInstaller, versionedPath]);
 fs.rmSync(stageRoot, { recursive: true, force: true });
 fs.rmSync(archivePath, { force: true });
 fs.rmSync(configPath, { force: true });

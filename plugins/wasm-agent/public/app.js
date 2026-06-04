@@ -1290,6 +1290,10 @@ function readSharedSpacePointerPredictionPreference() {
 }
 
 const INITIAL_SPACE_WIDGET_LAYOUTS = readLocalSpaceWidgetLayouts();
+const AUTH_DIAGNOSTIC_BUFFER_LIMIT = 120;
+const authDiagnosticBuffer = [];
+let authDiagnosticUploadTimer = 0;
+let nativeAuthDiagnosticHeartbeat = 0;
 
 const state = {
   bridgeUrl: "http://127.0.0.1:8790",
@@ -1299,6 +1303,7 @@ const state = {
   authRedirectMessage: "",
   adminEmail: "",
   googleButtonRenderedFor: "",
+  configLoadPromise: null,
   configChecked: false,
   authUser: null,
   authChecked: false,
@@ -17483,12 +17488,141 @@ function installWidgetResizing() {
 
 async function loadNativePreloadConfig() {
   if (!window.wasmAgentNative?.config) return null;
+  let timeout = 0;
+  const startedAt = performance.now();
   try {
-    const payload = await window.wasmAgentNative.config();
+    const payload = await Promise.race([
+      window.wasmAgentNative.config(),
+      new Promise((resolve) => {
+        timeout = window.setTimeout(() => resolve({ __timeout: true }), 2500);
+      }),
+    ]);
+    if (payload?.__timeout) {
+      nativeAuthDiagnostic("native_config_timeout", {
+        elapsed_ms: Math.round(performance.now() - startedAt),
+      });
+      return null;
+    }
+    nativeAuthDiagnostic("native_config_resolved", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      has_auth: Boolean(payload?.auth),
+      has_native: Boolean(payload?.native || payload?.serverUrl),
+    });
     return payload && typeof payload === "object" ? payload : null;
-  } catch {
+  } catch (error) {
+    nativeAuthDiagnostic("native_config_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
     return null;
+  } finally {
+    if (timeout) window.clearTimeout(timeout);
   }
+}
+
+function errorMessage(error) {
+  return String(error?.message || error || "").slice(0, 500);
+}
+
+function authDiagnosticDeviceId() {
+  return cleanText(state.config?.native?.deviceId, "") || cleanText(localStorage.getItem(CLIENT_DEVICE_STORAGE_KEY), "") || "renderer-unknown";
+}
+
+function authDiagnosticBuildId() {
+  return cleanText(state.config?.native?.buildId, "") || cleanText(state.config?.native?.installableVersion, "") || "renderer-live";
+}
+
+function authDiagnosticTail() {
+  return authDiagnosticBuffer
+    .slice(-AUTH_DIAGNOSTIC_BUFFER_LIMIT)
+    .map((entry) => JSON.stringify(entry))
+    .join("\n");
+}
+
+function scheduleRendererAuthDiagnosticUpload(reason = "renderer-auth-diagnostic") {
+  if (authDiagnosticUploadTimer) window.clearTimeout(authDiagnosticUploadTimer);
+  authDiagnosticUploadTimer = window.setTimeout(() => {
+    authDiagnosticUploadTimer = 0;
+    void uploadRendererAuthDiagnostics(reason);
+  }, 250);
+}
+
+async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic") {
+  if (!authDiagnosticBuffer.length) return;
+  try {
+    await fetch("/native/diagnostics", {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        schema: "hermes.wasm_agent.renderer_auth_diagnostics.v1",
+        device_id: authDiagnosticDeviceId(),
+        build_id: authDiagnosticBuildId(),
+        reason,
+        href: window.location.href,
+        renderer_auth_diagnostics_tail: authDiagnosticTail(),
+      }),
+    });
+  } catch {
+    // Upload is best-effort; local/native diagnostics still continue.
+  }
+}
+
+function nativeAuthDiagnostic(kind, payload = {}) {
+  const diagnostic = {
+    href: window.location.href,
+    origin: window.location.origin,
+    protocol: window.location.protocol,
+    has_native_bridge: Boolean(window.wasmAgentNative),
+    config_checked: Boolean(state.configChecked),
+    auth_checked: Boolean(state.authChecked),
+    has_google_client_id: Boolean(state.googleClientId),
+    google_login_uri: state.googleLoginUri || "",
+    login_message: state.loginMessage || "",
+    google_button_rendered_for: state.googleButtonRenderedFor || "",
+    ...payload,
+  };
+  const entry = {
+    timestamp: new Date().toISOString(),
+    kind,
+    payload: diagnostic,
+  };
+  authDiagnosticBuffer.push(entry);
+  while (authDiagnosticBuffer.length > AUTH_DIAGNOSTIC_BUFFER_LIMIT) authDiagnosticBuffer.shift();
+  if (/error|timeout|rendered|finished|skipped|started|resolved/i.test(kind)) {
+    scheduleRendererAuthDiagnosticUpload(kind);
+  }
+  if (!window.wasmAgentNative?.logAuthDiagnostic) return;
+  try {
+    void window.wasmAgentNative.logAuthDiagnostic(kind, diagnostic);
+    if (
+      window.wasmAgentNative.uploadAuthDiagnostics
+      && /error|timeout|rendered|finished|skipped/i.test(kind)
+    ) {
+      void window.wasmAgentNative.uploadAuthDiagnostics();
+    }
+  } catch {
+    // Diagnostics must never affect login.
+  }
+}
+
+function startNativeAuthDiagnosticHeartbeat() {
+  if (!window.wasmAgentNative || nativeAuthDiagnosticHeartbeat) return;
+  nativeAuthDiagnostic("native_auth_diagnostic_heartbeat_started");
+  nativeAuthDiagnosticHeartbeat = window.setInterval(() => {
+    if (state.configChecked && state.authChecked) {
+      window.clearInterval(nativeAuthDiagnosticHeartbeat);
+      nativeAuthDiagnosticHeartbeat = 0;
+      nativeAuthDiagnostic("native_auth_diagnostic_heartbeat_stopped");
+      return;
+    }
+    nativeAuthDiagnostic("native_auth_diagnostic_heartbeat", {
+      config_load_pending: Boolean(state.configLoadPromise),
+    });
+  }, 5000);
 }
 
 function mergeNativePreloadConfig(config = {}, nativePayload = null) {
@@ -17516,16 +17650,37 @@ function mergeNativePreloadConfig(config = {}, nativePayload = null) {
 }
 
 async function loadConfig() {
+  if (state.configLoadPromise) return state.configLoadPromise;
+  state.configLoadPromise = loadConfigOnce();
+  try {
+    return await state.configLoadPromise;
+  } finally {
+    state.configLoadPromise = null;
+  }
+}
+
+async function loadConfigOnce() {
+  nativeAuthDiagnostic("config_load_started");
   const nativeConfigPromise = loadNativePreloadConfig();
   let config = {};
   let configFetchFailed = false;
+  const startedAt = performance.now();
   try {
     config = await fetchJson("/config.json", {
       timeoutMs: window.wasmAgentNative ? 5000 : 10000,
     });
-  } catch {
+    nativeAuthDiagnostic("config_fetch_resolved", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      has_google_client_id: Boolean(config.auth?.googleClientId),
+      google_login_uri: String(config.auth?.googleLoginUri || ""),
+    });
+  } catch (error) {
     configFetchFailed = true;
     config = {};
+    nativeAuthDiagnostic("config_fetch_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
   }
   const nativeConfig = await nativeConfigPromise;
   config = window.wasmAgentNative && configFetchFailed
@@ -17541,6 +17696,12 @@ async function loadConfig() {
     state.agentTurnTimeoutMs = timeoutSec * 1000;
   }
   state.configChecked = true;
+  nativeAuthDiagnostic("config_load_finished", {
+    config_fetch_failed: configFetchFailed,
+    has_google_client_id: Boolean(state.googleClientId),
+    google_login_uri: state.googleLoginUri,
+    native_server_url: cleanText(config?.native?.serverUrl, ""),
+  });
   if (window.wasmAgentNative && configFetchFailed) {
     state.loginMessage = "Backend connected incorrectly: /config.json unavailable";
   } else if (!state.googleClientId && window.wasmAgentNative) {
@@ -17560,6 +17721,7 @@ async function loadConfig() {
   if (!state.authUser) {
     void renderGoogleSignInButton();
   }
+  return state.config;
 }
 
 function publicUserLabel(user) {
@@ -17704,19 +17866,41 @@ function loadGoogleIdentityScript() {
   if (!state.googleClientId) return Promise.reject(new Error("Google login is not configured on this server."));
   if (window.google?.accounts?.id) {
     installGoogleStyleOverrides();
+    nativeAuthDiagnostic("google_identity_script_already_loaded");
     return Promise.resolve();
   }
   if (window.__wasmAgentGoogleIdentityPromise) return window.__wasmAgentGoogleIdentityPromise;
   window.__wasmAgentGoogleIdentityPromise = new Promise((resolve, reject) => {
+    let timeout = 0;
+    const startedAt = performance.now();
     const script = document.createElement("script");
     script.src = "https://accounts.google.com/gsi/client";
     script.async = true;
     script.defer = true;
     script.onload = () => {
+      if (timeout) window.clearTimeout(timeout);
       installGoogleStyleOverrides();
+      nativeAuthDiagnostic("google_identity_script_loaded", {
+        elapsed_ms: Math.round(performance.now() - startedAt),
+      });
       resolve();
     };
-    script.onerror = () => reject(new Error("Google Identity failed to load"));
+    script.onerror = () => {
+      if (timeout) window.clearTimeout(timeout);
+      nativeAuthDiagnostic("google_identity_script_error", {
+        elapsed_ms: Math.round(performance.now() - startedAt),
+      });
+      reject(new Error("Google Identity failed to load"));
+    };
+    timeout = window.setTimeout(() => {
+      nativeAuthDiagnostic("google_identity_script_timeout", {
+        elapsed_ms: Math.round(performance.now() - startedAt),
+      });
+      reject(new Error("Google Identity timed out while loading"));
+    }, 10000);
+    nativeAuthDiagnostic("google_identity_script_append", {
+      src: script.src,
+    });
     document.head.append(script);
   });
   return window.__wasmAgentGoogleIdentityPromise;
@@ -17764,7 +17948,7 @@ function googleSignInConfig(loginUri) {
     client_id: state.googleClientId,
     callback: handleGoogleCredential,
   };
-  if (window.wasmAgentNative) return config;
+  if (window.wasmAgentNative && window.location.protocol === "wasm-agent:") return config;
   return {
     ...config,
     ux_mode: "redirect",
@@ -17802,21 +17986,43 @@ function consumeAuthRedirectMessage() {
 async function renderGoogleSignInButton() {
   const shouldRender = state.loginOpen || (!state.authUser && els.app?.dataset.auth === "locked");
   const slots = [els.googleSignInButton, els.authGateGoogleSignInButton].filter(Boolean);
-  if (!state.configChecked) return;
-  if (!shouldRender || state.authUser || !slots.length) return;
+  nativeAuthDiagnostic("google_button_render_requested", {
+    should_render: shouldRender,
+    slot_count: slots.length,
+    auth_user: Boolean(state.authUser),
+  });
+  if (!state.configChecked) {
+    nativeAuthDiagnostic("google_button_render_skipped", { reason: "config_not_checked" });
+    void loadConfig();
+    return;
+  }
+  if (!shouldRender || state.authUser || !slots.length) {
+    nativeAuthDiagnostic("google_button_render_skipped", {
+      reason: !shouldRender ? "not_visible" : state.authUser ? "already_authenticated" : "missing_slots",
+    });
+    return;
+  }
   if (!state.googleClientId) {
     slots.forEach((slot) => slot.replaceChildren());
     state.loginMessage = "Google login is not configured.";
+    nativeAuthDiagnostic("google_button_render_skipped", { reason: "missing_google_client_id" });
     renderLogin();
     return;
   }
   const loginUri = googleLoginUri();
   const renderKey = `${state.googleClientId}|${loginUri}`;
-  if (state.googleButtonRenderedFor === renderKey && slots.every((slot) => slot.childElementCount)) return;
+  if (state.googleButtonRenderedFor === renderKey && slots.every((slot) => slot.childElementCount)) {
+    nativeAuthDiagnostic("google_button_render_skipped", { reason: "already_rendered", render_key: renderKey });
+    return;
+  }
   if (!state.authRedirectMessage) state.loginMessage = "";
   renderLogin();
   try {
     await loadGoogleIdentityScript();
+    nativeAuthDiagnostic("google_button_initialize", {
+      login_uri: loginUri,
+      mode: window.wasmAgentNative && window.location.protocol === "wasm-agent:" ? "native-callback" : "redirect",
+    });
     window.google.accounts.id.initialize(googleSignInConfig(loginUri));
     slots.forEach((slot) => {
       slot.replaceChildren();
@@ -17832,19 +18038,32 @@ async function renderGoogleSignInButton() {
     });
     installGoogleStyleOverrides();
     state.googleButtonRenderedFor = renderKey;
+    nativeAuthDiagnostic("google_button_rendered", {
+      render_key: renderKey,
+      slot_child_counts: slots.map((slot) => slot.childElementCount),
+    });
     if (els.authGateLoginButton && els.authGateGoogleSignInButton?.childElementCount) {
       els.authGateLoginButton.hidden = true;
     }
   } catch (error) {
-    state.loginMessage = error.message;
+    state.loginMessage = errorMessage(error);
+    nativeAuthDiagnostic("google_button_render_error", {
+      message: errorMessage(error),
+    });
     renderLogin();
   }
 }
 
 async function loadAuthSession() {
+  nativeAuthDiagnostic("auth_session_load_started");
+  const startedAt = performance.now();
   try {
     const payload = await fetchJson("/auth/session", { timeoutMs: 8000 });
     state.authUser = payload.user || null;
+    nativeAuthDiagnostic("auth_session_load_finished", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      authenticated: Boolean(state.authUser),
+    });
     if (state.authUser) {
       state.loginMessage = "";
       state.authRedirectMessage = "";
@@ -17853,6 +18072,10 @@ async function loadAuthSession() {
     }
   } catch (error) {
     state.authUser = null;
+    nativeAuthDiagnostic("auth_session_load_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
     if (!state.authRedirectMessage) state.loginMessage = error.message;
   }
   loadAgentDirectProviderForUser();
@@ -33239,14 +33462,22 @@ async function bootstrapAuthenticatedApp() {
 }
 
 async function main() {
+  nativeAuthDiagnostic("main_started");
+  startNativeAuthDiagnosticHeartbeat();
   applyLauncherPreference();
+  nativeAuthDiagnostic("main_apply_launcher_finished");
   wireEvents();
+  nativeAuthDiagnostic("main_wire_events_finished");
   consumeAuthRedirectMessage();
   installDevHmrBridge();
   renderAuthGate();
+  nativeAuthDiagnostic("main_before_load_config");
   await loadConfig();
+  nativeAuthDiagnostic("main_after_load_config");
   if (shouldStartDevHmr()) startDevHmr();
+  nativeAuthDiagnostic("main_before_load_auth_session");
   await loadAuthSession();
+  nativeAuthDiagnostic("main_after_load_auth_session");
   if (!state.authUser) void renderGoogleSignInButton();
   await bootstrapAuthenticatedApp();
 }

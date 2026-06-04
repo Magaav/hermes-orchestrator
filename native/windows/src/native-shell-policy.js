@@ -1,5 +1,5 @@
 const APP_ID = "wasm-agent";
-const DEFAULT_SERVER_URL = "http://127.0.0.1:8877";
+const DEFAULT_SERVER_URL = "https://wa.colmeio.com";
 const PWA_HOME_PATH = "/home";
 const GOOGLE_AUTH_ORIGINS = new Set([
   "https://accounts.google.com",

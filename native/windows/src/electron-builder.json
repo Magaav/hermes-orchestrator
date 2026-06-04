@@ -26,8 +26,8 @@
     "native-shell-policy.js",
     "preload.js",
     "fallback.html",
+    "native-defaults.json",
     "build/icon.svg",
-    "build/native-defaults.json",
     "package.json"
   ],
   "asar": true,
@@ -75,6 +75,8 @@
   },
   "nsis": {
     "guid": "8e77a95c-1554-58fc-9852-11d4a9707428",
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico",
     "include": "build/installer.nsh",
     "script": "build/installer.nsi",
     "warningsAsErrors": false,

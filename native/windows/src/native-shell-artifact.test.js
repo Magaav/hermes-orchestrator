@@ -23,12 +23,25 @@ for (const artifact of artifacts) {
   const policyJs = asar.extractFile(artifact, "native-shell-policy.js").toString("utf8");
   const resolverJs = asar.extractFile(artifact, "native-backend-resolver.js").toString("utf8");
   const fallbackHtml = files.includes("/fallback.html") ? asar.extractFile(artifact, "fallback.html").toString("utf8") : "";
+  const nativeDefaultsEntry = files.includes("/native-defaults.json") ? "native-defaults.json" : files.includes("/build/native-defaults.json") ? "build/native-defaults.json" : "";
+  const nativeDefaults = nativeDefaultsEntry ? JSON.parse(asar.extractFile(artifact, nativeDefaultsEntry).toString("utf8")) : {};
   const packageText = files
     .filter((file) => /\.(html|js|css|json)$/i.test(file))
     .map((file) => asar.extractFile(artifact, file.replace(/^\//, "")).toString("utf8"))
     .join("\n");
 
   assert(mainJs.includes('"remote-pwa"'), `${artifact} must prefer the validated remote PWA entrance`);
+  assert(policyJs.includes('DEFAULT_SERVER_URL = "https://wa.colmeio.com"'), `${artifact} must ship the cloud default backend`);
+  assert(fallbackHtml.includes("Tested URL:") && fallbackHtml.includes("fetchResult") && fallbackHtml.includes("reason"), `${artifact} fallback shell must show tested URL and failure reason`);
+  assert(fallbackHtml.includes("Packaged default:") && fallbackHtml.includes("Build timestamp:") && fallbackHtml.includes("Resolver candidates:") && fallbackHtml.includes("App package:") && fallbackHtml.includes("Saved config source:"), `${artifact} fallback shell must expose build stamp, saved config source, and resolver diagnostics`);
+  assert(fallbackHtml.includes("native-defaults.json serverUrl:") && fallbackHtml.includes("Saved config raw JSON:") && fallbackHtml.includes("Env WASM_AGENT_ALLOW_LOCAL_DEV:") && fallbackHtml.includes("Selected/tested source:"), `${artifact} fallback shell must print native defaults, raw saved config, env, and candidate source diagnostics`);
+  assert(fallbackHtml.includes("fallbackInputDefault") && fallbackHtml.includes("isLocalDevUrl") && fallbackHtml.includes("https://wa.colmeio.com/config.json"), `${artifact} fallback shell must independently refuse localhost defaults in production`);
+  assert.strictEqual(nativeDefaults.serverUrl, "https://wa.colmeio.com", `${artifact} packaged defaults must use the cloud backend`);
+  assert.deepStrictEqual(nativeDefaults.serverUrlCandidates, ["https://wa.colmeio.com"], `${artifact} production packaged defaults must not include localhost/LAN candidates`);
+  assert.strictEqual(nativeDefaults.mode, "production", `${artifact} packaged defaults must identify production mode`);
+  assert.strictEqual(nativeDefaults.allowLocalDev, false, `${artifact} packaged defaults must disable local-dev candidates`);
+  assert(!packageText.includes("127.0.0.1:8877") && !packageText.includes("localhost:8877"), `${artifact} production app.asar must not contain exact localhost backend defaults`);
+  assert(!packageText.includes("WASM Agent native build loading") && !packageText.includes("No backend with an available /config.json"), `${artifact} production app.asar must not contain stale fallback copy`);
   assert(mainJs.includes("validateWasmAgentOrigin") && resolverJs.includes("validateWasmAgentOrigin"), `${artifact} must validate backend identity`);
   assert(!packageText.includes("Google client ID missing"), `${artifact} must not ship the old misleading Google client id literal`);
   assert(!fallbackHtml.includes("googleSignInButton") && !fallbackHtml.includes("authGateGoogleSignInButton") && !fallbackHtml.includes("accounts.google.com"), `${artifact} fallback shell must not contain Google login UI`);
@@ -41,6 +54,10 @@ for (const artifact of artifacts) {
     assert(mainJs.includes("installableVersion") && mainJs.includes("buildGeneratedAt"), `${artifact} must expose installable version metadata`);
     assert(mainJs.includes('ipcMain.handle("wasm-agent:native-config", async () => nativeConfigPayload())'), `${artifact} must expose full native/backend config through preload`);
     assert(mainJs.includes("recoverReachableServerUrl") && mainJs.includes("googleClientId"), `${artifact} must recover backend Google login config after startup`);
+    assert(mainJs.includes("migrateLegacyNativeConfig") && mainJs.includes("legacy-local-config-migrated") && mainJs.includes("userExplicit"), `${artifact} must migrate stale auto-saved localhost config unless explicitly user-saved`);
+    assert(mainJs.includes("appAsarFingerprint") && mainJs.includes("packagedDefaultServerUrl"), `${artifact} must expose build/package diagnostics to fallback`);
+    assert(mainJs.includes("WASM_AGENT_ALLOW_LOCAL_DEV") && mainJs.includes("allowLocalDevCandidates") && mainJs.includes("discarded local dev backend in production") && mainJs.includes("candidateSourceEntries"), `${artifact} must gate localhost candidates behind WASM_AGENT_ALLOW_LOCAL_DEV and trace candidate sources`);
+    assert(mainJs.includes("startupDiagnostics.savedConfigRawJson"), `${artifact} must preserve pre-migration raw saved config for fallback diagnostics`);
   }
   assert(mainJs.includes("payloadIdentifiesWrongApp"), `${artifact} must reject wrong app identity`);
   assert(mainJs.includes("setUserAgent"), `${artifact} must set a browser-like user agent`);

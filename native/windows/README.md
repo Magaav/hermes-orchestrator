@@ -19,18 +19,69 @@ Contract:
 
 Build:
 
-```powershell
-cd native/windows
-./scripts/build-installer.ps1
+```bash
+horc build
 ```
 
-On non-Windows build hosts with PowerShell unavailable, run the equivalent from
-`native/windows/src`:
+Or run the underlying release script directly:
 
 ```bash
-npm install
-npm run build:win:x64
+cd native/windows/src
+npm run release:win:x64:prod
 ```
+
+Native Windows is the preferred and trusted production build host. Linux x86_64
+with Wine/NSIS is a supported CI cross-build path, but the resulting installer
+must pass a real Windows smoke test before release. Linux aarch64 uses a Docker
+`--platform linux/amd64` Wine builder by default and is an experimental
+cross-build path that also requires a Windows smoke test. Linux aarch64 direct
+Wine is debug-only and requires `HORC_ALLOW_CROSS_WIN_BUILD=1`.
+
+On Linux aarch64, `horc build` checks whether Docker can execute
+`linux/amd64` containers. If QEMU/binfmt is missing and automatic repair is not
+disabled, it runs:
+
+```bash
+docker run --privileged --rm tonistiigi/binfmt --install amd64
+```
+
+Then it re-tests `docker run --rm --platform linux/amd64 alpine:3.20 uname -m`
+and proceeds only when the result is `x86_64`. Use `horc build doctor` to print
+the host/build readiness report without starting the installer build.
+If the amd64 Docker builder itself fails under QEMU, `horc build` in `auto`
+mode can fall back to a Linux ARM64 native NSIS build with Windows executable
+resource editing disabled. That fallback is labeled
+`linux-arm64-native-nsis-no-rcedit` and requires a Windows smoke test.
+
+For repeated Linux ARM64 release builds, prepare the reusable amd64 Wine builder
+once:
+
+```bash
+horc build prepare-docker
+```
+
+That creates `horc/electron-builder-wine-nsis:jammy` with NSIS and `unar`
+preinstalled. Future `horc build` runs auto-use the local prepared image when
+`HORC_DOCKER_IMAGE` is unset, so the disposable build container does not fetch
+Ubuntu package indexes and install NSIS on every release attempt.
+
+`horc build` writes `/local/native/windows/release/horc-build-manifest.json`
+with the host OS/arch, target, build mode, installer path, app.asar path,
+`trusted_production`, and `requires_windows_smoke_test`.
+
+Installed Windows verification:
+
+1. Install the exact `release/WASM-Agent-Setup-x64-*.exe` artifact on Windows.
+2. Start the installed `WASM Agent` app and wait until it loads the cloud PWA
+   or shows native diagnostics.
+3. Run the verifier from PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File native\windows\scripts\verify-installed-app.ps1 -Pause
+```
+
+Or double-click `native\windows\scripts\verify-installed-app.cmd`. The wrapper
+keeps the console open so pass/fail output remains visible.
 
 Build status: Electron plus Windows x64 NSIS installer lane is present. The
 primary artifact is built by electron-builder, matching the Space Agent-style
@@ -57,6 +108,18 @@ changes can be picked up without reinstalling the desktop app. Google auth URLs
 remain inside the Electron session, and the shell strips Electron-specific user
 agent markers before loading the PWA so the installed app behaves like a browser
 PWA for login.
-On Linux/aarch64 build hosts, `scripts/prepare-native-assets.js` prepares a
-local NSIS shim around system `makensis` so electron-builder can still produce
-the Windows x64 NSIS artifact.
+The native shell now writes renderer auth diagnostics, runtime diagnostics, and
+native upload attempts, and the source includes a bounded native control poller.
+After the next installer build/install, the app can receive server-queued
+diagnostics commands from `/native/control/poll` and report command results to
+`/native/control/result`, making client-log fetches possible without asking the
+Windows user to manually refresh.
+On Linux build hosts, `scripts/prepare-native-assets.js` prepares a local NSIS
+shim around system `makensis` for the Wine/electron-builder path. On Linux
+aarch64, `horc build` prefers Docker amd64 emulation over direct Wine.
+
+Durable Next Step: Build and install the next Windows artifact containing the
+native control poller, then from localhost queue a `status` or
+`upload_diagnostics` command through `/native/control/command` for the installed
+device and verify the result through `/native/control/clients` and
+`/native/diagnostics/latest`.

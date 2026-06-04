@@ -1,7 +1,5 @@
-const CACHE_NAME = "wasm-agent-v140-native-google-login";
+const CACHE_NAME = "wasm-agent-v144-native-auth-heartbeat";
 const ASSETS = [
-  "/",
-  "/index.html",
   "/composer-lab",
   "/composer-lab.html",
   "/composer-lab.js",
@@ -9,8 +7,6 @@ const ASSETS = [
   "/voice-lab.html",
   "/voice-lab.css",
   "/voice-lab.js",
-  "/styles.css",
-  "/app.js",
   "/provider-model-catalog.js",
   "/modules/chat-composer/chat-composer.css",
   "/modules/chat-composer/chat-composer.js",
@@ -69,6 +65,12 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
   if (
+    url.pathname === "/" ||
+    url.pathname === "/home" ||
+    url.pathname === "/index.html" ||
+    url.pathname === "/app.js" ||
+    url.pathname === "/styles.css" ||
+    url.pathname === "/sw.js" ||
     url.pathname === "/config.json" ||
     url.pathname === "/auth/session" ||
     url.pathname === "/account/friends" ||

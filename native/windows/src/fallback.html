@@ -99,14 +99,29 @@
     <img class="mark" src="./build/icon.svg" alt="" aria-hidden="true">
     <h1>Connect WASM Agent</h1>
     <p>The native desktop app is installed, but it could not load the wasm-agent server.</p>
-    <p class="version" id="version">WASM Agent native build loading...</p>
+    <p class="version" id="version">Build details loading...</p>
     <p class="reason" id="reason">Could not reach the configured server.</p>
     <div class="diagnostics" aria-live="polite">
       <div>Tested URL: <span id="testedUrl">loading...</span></div>
       <div>Fetch result: <span id="fetchResult">not tested yet</span></div>
+      <div>Packaged default: <span id="packagedDefault">loading...</span></div>
+      <div>Build timestamp: <span id="buildTimestamp">loading...</span></div>
+      <div>App package: <span id="appPackage">loading...</span></div>
+      <div>Saved config source: <span id="savedConfigSource">loading...</span></div>
+      <div>Selected/tested source: <span id="selectedTestedSource">loading...</span></div>
+      <div>native-defaults.json serverUrl: <span id="nativeDefaultsServerUrl">loading...</span></div>
+      <div>native-defaults.json candidates: <span id="nativeDefaultsCandidates">loading...</span></div>
+      <div>Saved config path: <span id="savedConfigPath">loading...</span></div>
+      <div>Saved config userExplicit: <span id="savedConfigUserExplicit">loading...</span></div>
+      <div>Env WASM_AGENT_DEFAULT_SERVER_URL: <span id="envDefaultServerUrl">loading...</span></div>
+      <div>Env WASM_AGENT_ALLOW_LOCAL_DEV: <span id="envAllowLocalDev">loading...</span></div>
+      <div>Resolver candidates: <span id="resolverCandidates">loading...</span></div>
+      <div>Discarded candidates: <span id="discardedCandidates">loading...</span></div>
+      <div>Saved config raw JSON: <span id="savedConfigRawJson">loading...</span></div>
     </div>
+    <pre class="diagnostics" id="diagnosticsBlock" aria-label="Runtime diagnostics">loading...</pre>
     <label>Server URL
-      <input id="serverUrl" value="http://127.0.0.1:8877" spellcheck="false">
+      <input id="serverUrl" value="https://wa.colmeio.com" spellcheck="false">
     </label>
     <div class="actions">
       <button id="saveRetry">Save and Retry</button>
@@ -115,18 +130,69 @@
   </main>
   <script>
     const params = new URLSearchParams(window.location.search);
-    const serverUrl = params.get("serverUrl") || "http://127.0.0.1:8877";
-    const testedUrl = params.get("testedUrl") || `${serverUrl.replace(/\/+$/, "")}/config.json`;
+    let diagnostics = {};
+    try {
+      diagnostics = JSON.parse(params.get("diagnostics") || "{}");
+    } catch {
+      diagnostics = {};
+    }
+    const isProd = String(diagnostics.envWasmAgentAllowLocalDev || "") !== "1";
+    function isLocalDevUrl(value) {
+      return /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/i.test(String(value || ""));
+    }
+    const localDevFallbackUrl = ["http://127.0.0.1:", "8877"].join("");
+    const candidateUrl = params.get("serverUrl") || "";
+    const fallbackInputDefault = isProd && isLocalDevUrl(candidateUrl)
+      ? "https://wa.colmeio.com"
+      : candidateUrl || (isProd ? "https://wa.colmeio.com" : localDevFallbackUrl);
+    const serverUrl = fallbackInputDefault;
+    const testedUrl = isProd && isLocalDevUrl(params.get("testedUrl"))
+      ? "https://wa.colmeio.com/config.json"
+      : params.get("testedUrl") || `${serverUrl.replace(/\/+$/, "")}/config.json`;
     const reason = params.get("reason") || `Could not reach ${serverUrl}.`;
     const input = document.querySelector("#serverUrl");
     const reasonNode = document.querySelector("#reason");
     const versionNode = document.querySelector("#version");
     const testedUrlNode = document.querySelector("#testedUrl");
     const fetchResultNode = document.querySelector("#fetchResult");
+    const packagedDefaultNode = document.querySelector("#packagedDefault");
+    const buildTimestampNode = document.querySelector("#buildTimestamp");
+    const appPackageNode = document.querySelector("#appPackage");
+    const savedConfigSourceNode = document.querySelector("#savedConfigSource");
+    const selectedTestedSourceNode = document.querySelector("#selectedTestedSource");
+    const nativeDefaultsServerUrlNode = document.querySelector("#nativeDefaultsServerUrl");
+    const nativeDefaultsCandidatesNode = document.querySelector("#nativeDefaultsCandidates");
+    const savedConfigPathNode = document.querySelector("#savedConfigPath");
+    const savedConfigUserExplicitNode = document.querySelector("#savedConfigUserExplicit");
+    const envDefaultServerUrlNode = document.querySelector("#envDefaultServerUrl");
+    const envAllowLocalDevNode = document.querySelector("#envAllowLocalDev");
+    const resolverCandidatesNode = document.querySelector("#resolverCandidates");
+    const discardedCandidatesNode = document.querySelector("#discardedCandidates");
+    const savedConfigRawJsonNode = document.querySelector("#savedConfigRawJson");
+    const diagnosticsBlockNode = document.querySelector("#diagnosticsBlock");
     input.value = serverUrl;
     reasonNode.textContent = reason;
     testedUrlNode.textContent = testedUrl;
     fetchResultNode.textContent = reason;
+    packagedDefaultNode.textContent = diagnostics.packagedDefaultServerUrl || "https://wa.colmeio.com";
+    buildTimestampNode.textContent = diagnostics.buildGeneratedAt || diagnostics.buildId || "unavailable";
+    appPackageNode.textContent = diagnostics.appAsarFingerprint || diagnostics.installableVersion || "unavailable";
+    savedConfigSourceNode.textContent = diagnostics.savedConfigSource || "unavailable";
+    selectedTestedSourceNode.textContent = diagnostics.selectedTestedCandidateSource || "fallback-html-default";
+    nativeDefaultsServerUrlNode.textContent = diagnostics.nativeDefaultsServerUrl || "unavailable";
+    nativeDefaultsCandidatesNode.textContent = Array.isArray(diagnostics.nativeDefaultsServerUrlCandidates) ? diagnostics.nativeDefaultsServerUrlCandidates.join(", ") : "unavailable";
+    savedConfigPathNode.textContent = diagnostics.savedConfigPath || "unavailable";
+    savedConfigUserExplicitNode.textContent = String(diagnostics.savedConfigUserExplicit);
+    envDefaultServerUrlNode.textContent = diagnostics.envWasmAgentDefaultServerUrl || "";
+    envAllowLocalDevNode.textContent = diagnostics.envWasmAgentAllowLocalDev || "";
+    resolverCandidatesNode.textContent = Array.isArray(diagnostics.serverUrlCandidates) && diagnostics.serverUrlCandidates.length
+      ? diagnostics.serverUrlCandidates.join(", ")
+      : "unavailable";
+    discardedCandidatesNode.textContent = Array.isArray(diagnostics.discardedCandidateOrigins) && diagnostics.discardedCandidateOrigins.length
+      ? diagnostics.discardedCandidateOrigins.map((entry) => `${entry.serverUrl} (${entry.source})`).join(", ")
+      : "none";
+    savedConfigRawJsonNode.textContent = diagnostics.savedConfigRawJson || "";
+    if (diagnosticsBlockNode) diagnosticsBlockNode.textContent = JSON.stringify(diagnostics, null, 2);
     function configUrlFor(value) {
       return `${String(value || "").trim().replace(/\/+$/, "")}/config.json`;
     }
@@ -135,6 +201,27 @@
       const version = native.installableVersion || native.wasmAgentVersion || native.nativeShellVersion || payload?.version || "";
       const build = native.buildId || native.buildGeneratedAt || "";
       versionNode.textContent = [version ? `WASM Agent ${version}` : "", build ? `build ${build}` : ""].filter(Boolean).join(" / ") || "WASM Agent native build unavailable";
+      packagedDefaultNode.textContent = native.packagedDefaultServerUrl || packagedDefaultNode.textContent;
+      buildTimestampNode.textContent = native.buildGeneratedAt || native.buildId || buildTimestampNode.textContent;
+      appPackageNode.textContent = native.appAsarFingerprint || native.installableVersion || appPackageNode.textContent;
+      savedConfigSourceNode.textContent = native.savedConfigSource || savedConfigSourceNode.textContent;
+      selectedTestedSourceNode.textContent = native.selectedTestedCandidateSource || selectedTestedSourceNode.textContent;
+      nativeDefaultsServerUrlNode.textContent = native.nativeDefaultsServerUrl || nativeDefaultsServerUrlNode.textContent;
+      if (Array.isArray(native.nativeDefaultsServerUrlCandidates)) nativeDefaultsCandidatesNode.textContent = native.nativeDefaultsServerUrlCandidates.join(", ");
+      savedConfigPathNode.textContent = native.savedConfigPath || savedConfigPathNode.textContent;
+      savedConfigUserExplicitNode.textContent = String(native.savedConfigUserExplicit);
+      envDefaultServerUrlNode.textContent = native.envWasmAgentDefaultServerUrl || envDefaultServerUrlNode.textContent;
+      envAllowLocalDevNode.textContent = native.envWasmAgentAllowLocalDev || envAllowLocalDevNode.textContent;
+      if (Array.isArray(native.discardedCandidateOrigins)) {
+        discardedCandidatesNode.textContent = native.discardedCandidateOrigins.length
+          ? native.discardedCandidateOrigins.map((entry) => `${entry.serverUrl} (${entry.source})`).join(", ")
+          : "none";
+      }
+      savedConfigRawJsonNode.textContent = native.savedConfigRawJson || savedConfigRawJsonNode.textContent;
+      if (diagnosticsBlockNode) diagnosticsBlockNode.textContent = JSON.stringify(native, null, 2);
+      if (Array.isArray(native.serverUrlCandidates) && native.serverUrlCandidates.length) {
+        resolverCandidatesNode.textContent = native.serverUrlCandidates.join(", ");
+      }
     }).catch(() => {
       versionNode.textContent = "WASM Agent native build unavailable";
     });

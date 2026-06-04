@@ -27,6 +27,28 @@ the `wasm-agent` workspace/bridge integration, and the embedded agent. A powerfu
 should feel calm: idle when nothing changed, precise when context is needed,
 and explicit about what it is spending or doing.
 
+## Current WASM Agent Native Status
+
+The production Windows Electron app is cloud-only and loads
+`https://wa.colmeio.com/home?native=electron`. Google login now works through
+the remote PWA/browser-style redirect flow instead of a bundled native fallback:
+the cloud app loads `/config.json`, recovers if Google rendering races ahead of
+config readiness, and keeps the main app shell/script network-fresh so auth
+fixes are not trapped behind stale service-worker cache.
+
+Native observability is now part of the runtime contract. Renderer auth
+diagnostics upload directly to `/native/diagnostics`, the Windows shell persists
+renderer auth logs and runtime diagnostics locally, and the backend stores native
+events through `/native/events`. The Windows native source also polls
+`/native/control/poll` for bounded operator commands such as diagnostics upload,
+runtime diagnostics write, web-cache clear, reload, hard reload, and status; the
+operator command queue is restricted to admin or localhost/control-key access.
+
+Durable Next Step: build and install the next Windows artifact that contains the
+native control poller, then queue a localhost `status` or `upload_diagnostics`
+command against that installed device and verify the result via
+`/native/control/clients` and `/native/diagnostics/latest`.
+
 ## Prompt Guidelines
 
 Use these rules before evolving this project:

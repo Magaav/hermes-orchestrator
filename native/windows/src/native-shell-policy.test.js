@@ -11,6 +11,7 @@ const {
 } = require("./native-shell-policy");
 
 assert.strictEqual(APP_ID, "wasm-agent");
+assert.strictEqual(require("./native-shell-policy").DEFAULT_SERVER_URL, "https://wa.colmeio.com");
 assert.strictEqual(normalizeServerUrl("localhost:8877"), "http://localhost:8877");
 assert.strictEqual(normalizeServerUrl("https://wa.example.test/"), "https://wa.example.test");
 assert.strictEqual(backendHomeUrl("https://wa.example.test/base"), "https://wa.example.test/home");

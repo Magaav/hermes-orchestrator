@@ -1,4 +1,4 @@
-const { APP_ID, payloadIdentifiesWasmAgent, payloadIdentifiesWrongApp } = require("./native-shell-policy");
+const { APP_ID, DEFAULT_SERVER_URL, payloadIdentifiesWasmAgent, payloadIdentifiesWrongApp } = require("./native-shell-policy");
 
 async function fetchJsonProbe(serverUrl, probePath, timeoutMs = 900, fetchImpl = fetch) {
   const controller = new AbortController();
@@ -49,7 +49,25 @@ async function validateWasmAgentOrigin(serverUrl, current = {}, timeoutMs = 900,
     if (wrongApp) return { ok: false, serverUrl, reason: "wrong_app_identity", checks, googleClientIdConfigured };
     if (googleClientIdConfigured) return { ok: true, serverUrl, checks, googleClientIdConfigured, preference: 0 };
     if (validConfig && wasmAgent) return { ok: true, serverUrl, checks, googleClientIdConfigured, preference: 1 };
-    if (validConfig) return { ok: true, serverUrl, checks, googleClientIdConfigured, preference: 2 };
+    if (validConfig) {
+      for (const healthPath of ["/health", "/healthz"]) {
+        const health = await fetchJsonProbe(serverUrl, healthPath, timeoutMs, fetchImpl);
+        const healthPayload = health.payload && typeof health.payload === "object" ? health.payload : null;
+        const healthWrongApp = payloadIdentifiesWrongApp(healthPayload);
+        const healthWasmAgent = payloadIdentifiesWasmAgent(healthPayload);
+        checks.push({
+          path: healthPath,
+          status: health.status,
+          ok: health.ok,
+          wasmAgent: healthWasmAgent,
+          wrongApp: healthWrongApp,
+          reason: health.reason || "",
+        });
+        if (healthWrongApp) return { ok: false, serverUrl, reason: "wrong_app_identity", checks, googleClientIdConfigured };
+        if (health.ok && healthWasmAgent) return { ok: true, serverUrl, checks, googleClientIdConfigured, preference: 2 };
+      }
+      return { ok: false, serverUrl, reason: "missing_wasm_agent_identity", checks, googleClientIdConfigured };
+    }
     return { ok: false, serverUrl, reason: "invalid_config_json", checks, googleClientIdConfigured: false };
   } catch (error) {
     const message = String(error && error.message ? error.message : error);
@@ -62,7 +80,13 @@ async function validateWasmAgentOrigin(serverUrl, current = {}, timeoutMs = 900,
 function selectPreferredBackendResult(results = []) {
   return results
     .filter((result) => result && result.ok)
-    .sort((a, b) => (a.preference ?? 99) - (b.preference ?? 99))[0] || null;
+    .sort((a, b) => {
+      const preference = (a.preference ?? 99) - (b.preference ?? 99);
+      if (preference) return preference;
+      if (String(a.serverUrl || "").toLowerCase() === DEFAULT_SERVER_URL.toLowerCase()) return -1;
+      if (String(b.serverUrl || "").toLowerCase() === DEFAULT_SERVER_URL.toLowerCase()) return 1;
+      return 0;
+    })[0] || null;
 }
 
 module.exports = {

@@ -12,12 +12,14 @@ const pwaIcon = path.join(repoRoot, "plugins", "wasm-agent", "public", "icons", 
 const nativeIconSvg = path.join(buildRoot, "icon.svg");
 const nativeIconIco = path.join(buildRoot, "icon.ico");
 const nativeDefaults = path.join(buildRoot, "native-defaults.json");
+const nativeDefaultsApp = path.join(srcRoot, "native-defaults.json");
 const nativeUninstaller = path.join(buildRoot, "wasm-agent-uninstaller.exe");
 const nativeUninstallerScript = path.join(buildRoot, "uninstaller.nsi");
 const hostNsisRoot = path.join(buildRoot, "nsis-host");
 const packageJsonPath = path.join(srcRoot, "package.json");
 const staticServerPath = path.join(repoRoot, "plugins", "wasm-agent", "server", "static_server.py");
 const waEnvPath = path.join(repoRoot, "plugins", "wasm-agent", "conf", "wa.env");
+const defaultServerUrl = normalizeUrl(process.env.WASM_AGENT_DEFAULT_SERVER_URL || "https://wa.colmeio.com");
 
 function normalizeUrl(value) {
   const raw = String(value || "").trim();
@@ -44,6 +46,27 @@ function networkCandidateUrls(port) {
     addUrl(urls, `http://${entry.address}:${port}`);
   });
   return urls;
+}
+
+function allowLocalDevCandidates() {
+  return String(process.env.WASM_AGENT_ALLOW_LOCAL_DEV || "").trim() === "1";
+}
+
+function isLocalDevUrl(value) {
+  const url = normalizeUrl(value);
+  if (!url) return false;
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    if (hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::1" || hostname === "[::1]") return true;
+    if (hostname === "host.docker.internal" || hostname.endsWith(".local")) return true;
+    if (hostname.startsWith("127.")) return true;
+    if (hostname.startsWith("10.")) return true;
+    if (hostname.startsWith("192.168.")) return true;
+    const match = hostname.match(/^172\.(\d+)\./);
+    return Boolean(match && Number(match[1]) >= 16 && Number(match[1]) <= 31);
+  } catch {
+    return false;
+  }
 }
 
 function readJsonFile(filePath) {
@@ -146,19 +169,29 @@ function main() {
   const port = String(process.env.HERMES_WASM_AGENT_PORT || "8877").trim() || "8877";
   const host = String(process.env.HERMES_WASM_AGENT_HOST || "").trim();
   const urls = [];
-  [
+  const allowLocal = allowLocalDevCandidates();
+  const candidateValues = [
+    defaultServerUrl,
     process.env.HERMES_WASM_AGENT_NATIVE_SERVER_URL,
     process.env.HERMES_WASM_AGENT_PUBLIC_URL,
     process.env.WASM_AGENT_PUBLIC_URL,
     process.env.WASM_AGENT_SERVER_URL,
-    host ? `http://${host}:${port}` : "",
+  ];
+  if (allowLocal) {
+    candidateValues.push(
+      host ? `http://${host}:${port}` : "",
     ...networkCandidateUrls(port),
-    `http://${os.hostname()}:${port}`,
-    `http://${os.hostname()}.local:${port}`,
-    `http://host.docker.internal:${port}`,
-    `http://localhost:${port}`,
-    `http://127.0.0.1:${port}`,
-  ].forEach((value) => addUrl(urls, value));
+      `http://${os.hostname()}:${port}`,
+      `http://${os.hostname()}.local:${port}`,
+      `http://host.docker.internal:${port}`,
+      `http://localhost:${port}`,
+      `http://127.0.0.1:${port}`,
+    );
+  }
+  candidateValues.forEach((value) => {
+    if (!allowLocal && isLocalDevUrl(value)) return;
+    addUrl(urls, value);
+  });
 
   const builtAt = new Date();
   const nativePackage = readJsonFile(packageJsonPath);
@@ -175,6 +208,8 @@ function main() {
     schema: "hermes.wasm_agent.native_defaults.v1",
     appId: "wasm-agent",
     service: "wasm-agent",
+    mode: allowLocal ? "development" : "production",
+    allowLocalDev: allowLocal,
     generatedAt: builtAt.toISOString(),
     wasmAgentVersion,
     nativeShellVersion,
@@ -184,12 +219,15 @@ function main() {
     buildArch: "x64",
     buildChannel: "nsis",
     googleClientId,
-    serverUrl: urls[0] || "http://127.0.0.1:8877",
+    serverUrl: urls[0] || defaultServerUrl,
     serverUrlCandidates: urls,
   };
-  fs.writeFileSync(nativeDefaults, `${JSON.stringify(payload, null, 2)}\n`);
+  const payloadText = `${JSON.stringify(payload, null, 2)}\n`;
+  fs.writeFileSync(nativeDefaults, payloadText);
+  fs.writeFileSync(nativeDefaultsApp, payloadText);
   console.log(`Prepared ${path.relative(windowsRoot, nativeIconSvg)}`);
   console.log(`Prepared ${path.relative(windowsRoot, nativeDefaults)}`);
+  console.log(`Prepared ${path.relative(windowsRoot, nativeDefaultsApp)}`);
   if (fs.existsSync(path.join(hostNsisRoot, "linux", "makensis"))) {
     console.log(`Prepared ${path.relative(windowsRoot, hostNsisRoot)}`);
   }
