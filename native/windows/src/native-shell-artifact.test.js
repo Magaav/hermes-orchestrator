@@ -48,9 +48,12 @@ for (const artifact of artifacts) {
   if (artifact.includes(`${path.sep}win-unpacked${path.sep}`)) {
     assert(mainJs.includes("Promise.all(candidates.map"), `${artifact} must probe backend candidates in parallel for fast first paint`);
     assert(mainJs.includes("clearNativeWebShellCache"), `${artifact} must clear stale service-worker shell caches on startup`);
+    assert(mainJs.includes("nativeAuthCookieStatus") && mainJs.includes("cookies.flushStore") && mainJs.includes("wasm-agent:native-flush-auth-cookies"), `${artifact} must expose native auth cookie status and flush persistent cookies after login`);
+    assert(mainJs.includes("function readJsonFile"), `${artifact} must keep native diagnostics upload working when reading runtime diagnostics`);
     assert(resolverJs.includes('"config_json_unavailable"'), `${artifact} must reject backend candidates whose /config.json is unavailable`);
     assert(resolverJs.includes("googleClientIdConfigured") && resolverJs.includes("preference: 0"), `${artifact} must prefer backend candidates configured for Google login`);
     assert(mainJs.includes('url.searchParams.set("native", "electron")'), `${artifact} must load the remote PWA with native=electron`);
+    assert(mainJs.includes('if (isGoogleAuthUrl(url)) return { action: "allow" };') && mainJs.includes("win.loadURL(url)") && mainJs.includes("Could not route auth popup in main window"), `${artifact} must keep Google popups out of the primary native window while routing same-origin auth completions back into it`);
     assert(mainJs.includes("installableVersion") && mainJs.includes("buildGeneratedAt"), `${artifact} must expose installable version metadata`);
     assert(mainJs.includes('ipcMain.handle("wasm-agent:native-config", async () => nativeConfigPayload())'), `${artifact} must expose full native/backend config through preload`);
     assert(mainJs.includes("recoverReachableServerUrl") && mainJs.includes("googleClientId"), `${artifact} must recover backend Google login config after startup`);

@@ -104,22 +104,30 @@ origin. Origins that expose the old Colmeio Admin identity or unavailable/invali
 remote-PWA mode, normal PWA dev-HMR
 comes from the backend through `/modules/hmr/events`; the native shell adds
 browser-like `Ctrl+R` refresh and `Ctrl+Shift+R` hard refresh so UI/module
-changes can be picked up without reinstalling the desktop app. Google auth URLs
-remain inside the Electron session, and the shell strips Electron-specific user
-agent markers before loading the PWA so the installed app behaves like a browser
-PWA for login.
+changes can be picked up without reinstalling the desktop app. Remote HTTPS
+Google login uses the registered browser redirect flow; the JS credential
+callback is reserved for the bundled `wasm-agent://` fallback only. Google popup
+URLs are allowed as popup windows instead of replacing the primary app window,
+same-origin auth completions are routed back into the primary window, and the
+auth-code preloader flushes Electron's cookie store after redemption so restart
+persistence can be verified. The shell strips Electron-specific user agent
+markers before loading the PWA so the installed app behaves like a browser PWA
+for login.
 The native shell now writes renderer auth diagnostics, runtime diagnostics, and
 native upload attempts, and the source includes a bounded native control poller.
-After the next installer build/install, the app can receive server-queued
-diagnostics commands from `/native/control/poll` and report command results to
-`/native/control/result`, making client-log fetches possible without asking the
-Windows user to manually refresh.
+After installing the verified `win-x64-20260605T115715Z` artifact, the app can
+receive server-queued diagnostics commands from `/native/control/poll` and
+report command results to `/native/control/result`, making client-log fetches
+possible without asking the Windows user to manually refresh.
 On Linux build hosts, `scripts/prepare-native-assets.js` prepares a local NSIS
 shim around system `makensis` for the Wine/electron-builder path. On Linux
 aarch64, `horc build` prefers Docker amd64 emulation over direct Wine.
 
-Durable Next Step: Build and install the next Windows artifact containing the
-native control poller, then from localhost queue a `status` or
-`upload_diagnostics` command through `/native/control/command` for the installed
-device and verify the result through `/native/control/clients` and
-`/native/diagnostics/latest`.
+Durable Next Step: Install
+`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T115715Z.exe`
+on Windows, sign in with Google, then from localhost queue `status` and
+`upload_diagnostics` commands through `/native/control/command` for the
+installed device. Verify the installed `app.asar` hash, route
+`https://wa.colmeio.com/home?native=electron`, `authCookie.hasWaUid: true`,
+authenticated `/auth/session` after close/reopen, and command results through
+`/native/control/clients` and `/native/diagnostics/latest`.

@@ -71,6 +71,7 @@ Usage:
   horc build [win-x64-prod]
   horc space start
   horc space stop
+  horc space restart
   horc space status
   horc space backup
 
@@ -95,6 +96,7 @@ Examples:
   horc build
   horc space start
   horc space stop
+  horc space restart
   horc space backup
 
 Notes:
@@ -109,6 +111,7 @@ Notes:
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
   - `horc space start` starts wasm-agent on localhost:8877 and its Hermes bridge on localhost:8790.
+  - `horc space restart` stops then starts the wasm-agent workspace.
   - `horc space backup` archives wasm-agent private app state without source/caches/logs.
   - Compatibility alias: 'hord' runs the same commands as 'horc'.
 TXT
@@ -1227,12 +1230,14 @@ horc space — wasm-agent workspace
 Usage:
   horc space start
   horc space stop
+  horc space restart
   horc space status
   horc space backup
 
 Behavior:
   - Starts wasm-agent PWA on http://127.0.0.1:8877.
   - Starts the wasm-agent-owned Hermes bridge on http://127.0.0.1:8790.
+  - Restarts by stopping the workspace and starting it again.
   - Backs up wasm-agent app/private state with `horc space backup`.
 TXT
 }
@@ -1307,6 +1312,14 @@ space_stop() {
   fi
 
   "${stop_script}"
+}
+
+space_restart() {
+  echo "horc space: restarting wasm-agent workspace"
+  space_stop
+  space_kill_port "${HERMES_WASM_AGENT_PORT:-8877}"
+  space_kill_port "${HERMES_WASM_AGENT_BRIDGE_PORT:-8790}"
+  space_start
 }
 
 space_status() {
@@ -1397,6 +1410,9 @@ case "${ACTION}" in
         ;;
       stop)
         space_stop "$@"
+        ;;
+      restart)
+        space_restart "$@"
         ;;
       status)
         space_status "$@"

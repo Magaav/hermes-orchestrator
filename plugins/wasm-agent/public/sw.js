@@ -1,5 +1,6 @@
-const CACHE_NAME = "wasm-agent-v144-native-auth-heartbeat";
+const CACHE_NAME = "wasm-agent-v145-native-auth-preload";
 const ASSETS = [
+  "/auth-redirect.js",
   "/composer-lab",
   "/composer-lab.html",
   "/composer-lab.js",

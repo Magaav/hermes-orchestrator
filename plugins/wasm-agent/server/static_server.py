@@ -954,7 +954,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_json(max_bytes=32 * 1024)
                 payload = google_auth_login(self.server, body)
-                self._json(HTTPStatus.OK, payload, headers={"Set-Cookie": auth_cookie(payload["user"]["id"])})
+                self._json(HTTPStatus.OK, payload, headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -967,17 +967,34 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             try:
                 body = self._read_form(max_bytes=32 * 1024)
                 payload = google_auth_login(self.server, body)
-                self._redirect("/home", headers={"Set-Cookie": auth_cookie(payload["user"]["id"])})
+                auth_code = create_auth_redirect_code(payload["user"]["id"])
+                self._redirect(
+                    f"/home?auth_code={quote(auth_code, safe='')}",
+                    headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)},
+                )
             except BrowserError as exc:
                 self._redirect(f"/home?auth_error={quote(exc.code, safe='')}&message={quote(exc.message, safe='')}")
             except Exception as exc:
                 self._redirect(f"/home?auth_error=auth_error&message={quote(str(exc), safe='')}")
             return
+        if path == "/auth/redeem":
+            try:
+                body = self._read_json(max_bytes=8 * 1024)
+                payload = redeem_auth_redirect_code(str(body.get("code") or "").strip())
+                self._json(HTTPStatus.OK, payload, headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)})
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "auth_redeem_error", "message": str(exc)}},
+                )
+            return
         if path == "/auth/logout":
             self._json(
                 HTTPStatus.OK,
                 {"ok": True, "authenticated": False, "user": None},
-                headers={"Set-Cookie": auth_cookie("", max_age=0)},
+                headers={"Set-Cookie": auth_cookie("", max_age=0, handler=self)},
             )
             return
         if path == "/native/diagnostics":
@@ -1392,6 +1409,10 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Endpoint was not found")
 
     def end_headers(self) -> None:
+        path = self.path.split("?", 1)[0]
+        if path in {"/", "/home", "/index.html", "/app.js", "/auth-redirect.js", "/boot.js", "/sw.js", "/config.json", "/auth/session"}:
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -4091,6 +4112,17 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS auth_redirect_code_tb (
+          code TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL,
+          redeemed_at INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS friendship_tb (
           id TEXT PRIMARY KEY,
           requester_user_id TEXT NOT NULL,
@@ -5184,9 +5216,18 @@ def verified_auth_user_id(value: str) -> str:
     return user_id if hmac.compare_digest(signature, expected) else ""
 
 
-def auth_cookie(user_id: str, *, max_age: int = AUTH_COOKIE_MAX_AGE_SEC) -> str:
+def secure_cookie_required(handler: WasmAgentHandler | None = None) -> bool:
+    origins = [public_origin()]
+    if handler is not None:
+        origins.append(request_host_origin(handler))
+    if any(str(origin or "").lower().startswith("https://") for origin in origins):
+        return True
+    return os.getenv("HERMES_WASM_AGENT_SECURE_COOKIES", "").lower() in {"1", "true", "yes", "on"}
+
+
+def auth_cookie(user_id: str, *, max_age: int = AUTH_COOKIE_MAX_AGE_SEC, handler: WasmAgentHandler | None = None) -> str:
     value = signed_auth_value(str(user_id)) if user_id else ""
-    secure = " Secure;" if public_origin().lower().startswith("https://") or os.getenv("HERMES_WASM_AGENT_SECURE_COOKIES", "").lower() in {"1", "true", "yes", "on"} else ""
+    secure = " Secure;" if secure_cookie_required(handler) else ""
     return f"wa_uid={value}; Path=/; Max-Age={max_age}; SameSite=Lax;{secure} HttpOnly"
 
 
@@ -5203,6 +5244,46 @@ def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
     if user and not is_allowed_account_email(str(user.get("email") or "")):
         user = None
     return {"ok": True, "authenticated": bool(user), "user": user}
+
+
+def create_auth_redirect_code(user_id: str, *, ttl_sec: int = 120) -> str:
+    code = secrets.token_urlsafe(32)
+    now = int(time.time())
+    with auth_connect() as conn:
+        conn.execute(
+            "DELETE FROM auth_redirect_code_tb WHERE expires_at < ? OR redeemed_at > 0",
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO auth_redirect_code_tb (code, user_id, created_at, expires_at, redeemed_at)
+            VALUES (?, ?, ?, ?, 0)
+            """,
+            (code, int(user_id), now, now + int(ttl_sec)),
+        )
+    return code
+
+
+def redeem_auth_redirect_code(code: str) -> dict[str, Any]:
+    if not code:
+        raise BrowserError("missing_auth_code", "Auth redirect code is required.")
+    now = int(time.time())
+    with auth_connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM auth_redirect_code_tb WHERE code = ?",
+            (code,),
+        ).fetchone()
+        if not row or int(row["redeemed_at"] or 0) or int(row["expires_at"] or 0) < now:
+            raise BrowserError("invalid_auth_code", "Auth redirect code is invalid or expired.", status=HTTPStatus.UNAUTHORIZED)
+        conn.execute(
+            "UPDATE auth_redirect_code_tb SET redeemed_at = ? WHERE code = ?",
+            (now, code),
+        )
+        user_row = conn.execute("SELECT * FROM user_tb WHERE id = ?", (int(row["user_id"]),)).fetchone()
+    user = public_user(user_row)
+    if not user or not is_allowed_account_email(str(user.get("email") or "")):
+        raise BrowserError("auth_code_account_not_allowed", "This account is not allowed to access wasm-agent.", status=HTTPStatus.FORBIDDEN)
+    return {"ok": True, "authenticated": True, "user": user}
 
 
 def authenticated_request_user(handler: WasmAgentHandler) -> dict[str, Any] | None:
@@ -10142,6 +10223,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/index.html",
             "/styles.css",
             "/boot.js",
+            "/auth-redirect.js",
             "/app.js",
             "/provider-model-catalog.js",
             "/manifest.webmanifest",
@@ -10163,6 +10245,7 @@ def is_public_request(method: str, path: str) -> bool:
         return path in {
             "/auth/google",
             "/auth/google/callback",
+            "/auth/redeem",
             "/auth/logout",
             "/native/diagnostics",
             "/native/events",

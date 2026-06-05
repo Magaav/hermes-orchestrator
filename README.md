@@ -31,10 +31,13 @@ and explicit about what it is spending or doing.
 
 The production Windows Electron app is cloud-only and loads
 `https://wa.colmeio.com/home?native=electron`. Google login now works through
-the remote PWA/browser-style redirect flow instead of a bundled native fallback:
-the cloud app loads `/config.json`, recovers if Google rendering races ahead of
-config readiness, and keeps the main app shell/script network-fresh so auth
-fixes are not trapped behind stale service-worker cache.
+the remote PWA/browser-style redirect flow instead of an Electron popup
+credential callback. The callback path is reserved for the bundled
+`wasm-agent://` fallback only. The cloud app loads `/config.json`, recovers if
+Google rendering races ahead of config readiness, keeps the main app
+shell/script network-fresh so auth fixes are not trapped behind stale
+service-worker cache, and flushes Electron's cookie store after auth-code
+redemption so the `wa_uid` cookie can survive restart.
 
 Native observability is now part of the runtime contract. Renderer auth
 diagnostics upload directly to `/native/diagnostics`, the Windows shell persists
@@ -44,9 +47,14 @@ events through `/native/events`. The Windows native source also polls
 runtime diagnostics write, web-cache clear, reload, hard reload, and status; the
 operator command queue is restricted to admin or localhost/control-key access.
 
-Durable Next Step: build and install the next Windows artifact that contains the
-native control poller, then queue a localhost `status` or `upload_diagnostics`
-command against that installed device and verify the result via
+Durable Next Step: install
+`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T115715Z.exe`
+on Windows, then sign in with Google in the installed app and verify the
+installed `app.asar`, route, cookie, and restart behavior. Queue localhost
+`status` and `upload_diagnostics` commands against that installed device and
+confirm the route is back on `https://wa.colmeio.com/home?native=electron`,
+`authCookie.hasWaUid` is true after login, `/auth/session` remains
+authenticated after closing and reopening, and the results are visible through
 `/native/control/clients` and `/native/diagnostics/latest`.
 
 ## Prompt Guidelines

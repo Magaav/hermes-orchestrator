@@ -17943,17 +17943,41 @@ function googleLoginUri() {
   }
 }
 
+function googleSignInUsesCredentialCallback() {
+  return Boolean(window.wasmAgentNative && window.location.protocol === "wasm-agent:");
+}
+
 function googleSignInConfig(loginUri) {
   const config = {
     client_id: state.googleClientId,
     callback: handleGoogleCredential,
   };
-  if (window.wasmAgentNative && window.location.protocol === "wasm-agent:") return config;
+  if (googleSignInUsesCredentialCallback()) return config;
   return {
     ...config,
     ux_mode: "redirect",
     login_uri: loginUri,
   };
+}
+
+async function flushNativeAuthCookies(reason) {
+  if (!window.wasmAgentNative?.flushAuthCookies) return null;
+  try {
+    const result = await window.wasmAgentNative.flushAuthCookies({ reason });
+    nativeAuthDiagnostic("native_auth_cookie_flush_finished", {
+      ok: Boolean(result?.ok),
+      has_wa_uid: Boolean(result?.hasWaUid),
+      cookie_count: Number(result?.cookieCount || 0),
+      reason,
+    });
+    return result;
+  } catch (error) {
+    nativeAuthDiagnostic("native_auth_cookie_flush_error", {
+      message: errorMessage(error),
+      reason,
+    });
+    return null;
+  }
 }
 
 function authRedirectMessageFromUrl() {
@@ -17980,6 +18004,54 @@ function consumeAuthRedirectMessage() {
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
   } catch {
     // Leaving the URL untouched is better than hiding the original auth error.
+  }
+}
+
+function authRedirectCodeFromUrl() {
+  try {
+    return cleanText(new URL(window.location.href).searchParams.get("auth_code"), "");
+  } catch {
+    return "";
+  }
+}
+
+function removeAuthRedirectCodeFromUrl() {
+  try {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("auth_code");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Leaving the URL untouched is better than breaking auth bootstrap.
+  }
+}
+
+async function redeemAuthRedirectCode() {
+  const code = authRedirectCodeFromUrl();
+  if (!code) return false;
+  nativeAuthDiagnostic("auth_redirect_code_redeem_started");
+  try {
+    const payload = await fetchJson("/auth/redeem", {
+      method: "POST",
+      body: { code },
+      timeoutMs: 8000,
+    });
+    state.authUser = payload.user || null;
+    state.authRedirectMessage = "";
+    state.loginMessage = "";
+    await flushNativeAuthCookies("auth_redirect_redeem");
+    removeAuthRedirectCodeFromUrl();
+    nativeAuthDiagnostic("auth_redirect_code_redeem_finished", {
+      authenticated: Boolean(state.authUser),
+    });
+    return Boolean(state.authUser);
+  } catch (error) {
+    removeAuthRedirectCodeFromUrl();
+    state.authRedirectMessage = errorMessage(error);
+    state.loginMessage = state.authRedirectMessage;
+    nativeAuthDiagnostic("auth_redirect_code_redeem_error", {
+      message: errorMessage(error),
+    });
+    return false;
   }
 }
 
@@ -18019,9 +18091,10 @@ async function renderGoogleSignInButton() {
   renderLogin();
   try {
     await loadGoogleIdentityScript();
+    const signInMode = googleSignInUsesCredentialCallback() ? "native-callback" : "redirect";
     nativeAuthDiagnostic("google_button_initialize", {
       login_uri: loginUri,
-      mode: window.wasmAgentNative && window.location.protocol === "wasm-agent:" ? "native-callback" : "redirect",
+      mode: signInMode,
     });
     window.google.accounts.id.initialize(googleSignInConfig(loginUri));
     slots.forEach((slot) => {
@@ -18102,6 +18175,7 @@ async function handleGoogleCredential(response) {
     loadAgentOwnedAgentForUser();
     state.loginMessage = "";
     state.authRedirectMessage = "";
+    await flushNativeAuthCookies("google_credential_callback");
     setLoginOpen(false);
     await bootstrapAuthenticatedApp();
     recordUserEvent("auth.google_login_finished", {
@@ -18197,6 +18271,7 @@ async function fetchJson(path, options = {}) {
     const response = await fetch(path, {
       method: options.method || "GET",
       cache: options.cache || "no-store",
+      credentials: options.credentials || "include",
       headers: {
         "Accept": "application/json",
         "Content-Type": "application/json",
@@ -33464,6 +33539,25 @@ async function bootstrapAuthenticatedApp() {
 async function main() {
   nativeAuthDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
+  if (window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
+    nativeAuthDiagnostic("main_auth_redirect_preload_wait_started");
+    await window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__;
+    if (window.__WASM_AGENT_AUTH_REDIRECT_USER__) {
+      state.authUser = window.__WASM_AGENT_AUTH_REDIRECT_USER__;
+      state.authRedirectMessage = "";
+      state.loginMessage = "";
+      nativeAuthDiagnostic("main_auth_redirect_preload_user_loaded", {
+        authenticated: true,
+      });
+      await flushNativeAuthCookies("auth_redirect_preload");
+    } else if (window.__WASM_AGENT_AUTH_REDIRECT_ERROR__) {
+      state.authRedirectMessage = String(window.__WASM_AGENT_AUTH_REDIRECT_ERROR__);
+      state.loginMessage = state.authRedirectMessage;
+      nativeAuthDiagnostic("main_auth_redirect_preload_error_seen", {
+        message: state.authRedirectMessage,
+      });
+    }
+  }
   applyLauncherPreference();
   nativeAuthDiagnostic("main_apply_launcher_finished");
   wireEvents();
@@ -33475,6 +33569,7 @@ async function main() {
   await loadConfig();
   nativeAuthDiagnostic("main_after_load_config");
   if (shouldStartDevHmr()) startDevHmr();
+  await redeemAuthRedirectCode();
   nativeAuthDiagnostic("main_before_load_auth_session");
   await loadAuthSession();
   nativeAuthDiagnostic("main_after_load_auth_session");

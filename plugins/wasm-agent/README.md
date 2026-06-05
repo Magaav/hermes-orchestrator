@@ -38,13 +38,26 @@ rendering, agent-readable state, and a cleaner app shell.
 This section is the cross-compaction handoff for active `wasm-agent` work. When
 the next action changes, update this before ending the turn.
 
-Current next action: download and install the refreshed Windows native installer
+Current next action: download and install
+`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T115715Z.exe`
 from the live Go Native / `/native/download?platform=windows&arch=x64` path on a
-real Windows machine. Confirm the installed app opens the validated backend PWA
-`/home?native=electron` instead of `wasm-agent://app` or `file://` UI, DevTools
-`location.origin` is the backend origin, `fetch('/config.json')` reports
-`auth.googleClientIdConfigured: true`, and Google sign-in posts to
-`/auth/google` and receives the backend session cookie; then reload the real authenticated co-control clients and
+real Windows machine. Do not use `win-x64-20260605T111652Z` because it changed
+the Google callback URI and triggered `redirect_uri_mismatch`; do not use
+`win-x64-20260605T113515Z` because it forced Google's popup credential callback
+inside remote Electron and the native heartbeat showed the primary window stuck
+on `https://accounts.google.com/gsi/select?...ux_mode=popup...`. The corrected
+build restores the registered redirect flow for remote HTTPS Electron, keeps the
+JS credential callback only for the bundled `wasm-agent://` fallback, allows
+Google popup URLs without replacing the primary app window, redeems
+`/home?auth_code=...` through the credentialed preloader, and flushes Electron's
+cookie store after preloader redemption. Confirm the installed app opens the
+validated backend PWA `/home?native=electron` instead of `wasm-agent://app` or
+`file://` UI, DevTools `location.origin` is the backend origin,
+`fetch('/config.json')` reports `auth.googleClientIdConfigured: true`, Google
+button diagnostics report `mode:"redirect"`, the final auth-code redemption
+stays in the Electron session, native status reports `authCookie.hasWaUid:
+true`, and closing and reopening the installed app keeps `/auth/session`
+authenticated; then reload the real authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
 v138 service worker activates: first by receiving a
@@ -102,6 +115,24 @@ developer/debug-only compatibility.
 Current evidence: `scripts/start_wasm_agent.sh` now defaults the PWA/backend
 bind host to `0.0.0.0:8877` so Windows Electron can reach `/config.json` across
 WSL/Linux networking unless `HERMES_WASM_AGENT_HOST` explicitly overrides it.
+The auth cookie helper now also derives the `Secure` attribute from the live
+request origin, including `X-Forwarded-Proto: https`, so HTTPS reverse-proxy
+deployments keep secure `wa_uid` cookies even if
+`HERMES_WASM_AGENT_PUBLIC_ORIGIN` is unset.
+The June 5 Windows Electron diagnostics showed the backend Google login and
+one-time auth-code redemption succeeded, but the actual redirect-preloader path
+could still leave Electron's `wa_uid` cookie unflushed before restart. A later
+callback-mode build proved worse: the native heartbeat route became Google's
+`gsi/select` popup URL, the backend `last_login_at` did not advance, and the main
+Electron window looked black because it had been replaced by the popup surface.
+The durable fix is to keep the registered Google callback URI unchanged, use
+redirect mode on the remote HTTPS PWA, reserve the JS credential callback for the
+bundled `wasm-agent://` fallback only, allow Google popup URLs without loading
+them into the primary window, and flush Electron's cookie store after
+`/auth/redeem` on the actual auth-redirect preloader path before relying on
+restart persistence. The auth redirect preloader remains
+public/no-store/cache-busted as
+`/auth-redirect.js?v=20260604-auth-preload` for browser redirect recovery.
 Windows native source now probes backend candidates in
 parallel through `/config.json`, rejects unavailable config, prefers backends
 whose config reports `auth.googleClientIdConfigured`, clears stale

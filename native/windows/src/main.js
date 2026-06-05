@@ -113,6 +113,15 @@ function sha256File(filePath) {
   }
 }
 
+function readJsonFile(filePath, fallback = {}) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function nativeDefaultsDiagnostics(defaults = readNativeDefaults()) {
   return {
     path: nativeDefaultsPath(),
@@ -385,6 +394,67 @@ function readTextTail(filePath, maxBytes = 128 * 1024) {
   } catch {
     return "";
   }
+}
+
+async function nativeAuthCookieStatus() {
+  const config = ensureConfig();
+  const serverUrl = selectedBackendOrigin || config.serverUrl || DEFAULT_SERVER_URL;
+  const normalized = normalizeServerUrl(serverUrl, DEFAULT_SERVER_URL);
+  try {
+    const cookies = await session.defaultSession.cookies.get({ url: normalized, name: "wa_uid" });
+    return {
+      ok: true,
+      serverUrl: normalized,
+      hasWaUid: cookies.length > 0,
+      cookieCount: cookies.length,
+      cookieMeta: cookies.map((cookie) => ({
+        domain: cookie.domain,
+        path: cookie.path,
+        secure: Boolean(cookie.secure),
+        httpOnly: Boolean(cookie.httpOnly),
+        session: Boolean(cookie.session),
+        expirationDate: cookie.expirationDate || 0,
+      })),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      serverUrl: normalized,
+      error: String(error && error.message ? error.message : error),
+      hasWaUid: false,
+      cookieCount: 0,
+      cookieMeta: [],
+    };
+  }
+}
+
+async function flushNativeAuthCookies(options = {}) {
+  let flushed = false;
+  try {
+    await session.defaultSession.cookies.flushStore();
+    flushed = true;
+  } catch (error) {
+    const status = await nativeAuthCookieStatus();
+    return {
+      ...status,
+      ok: false,
+      flushed: false,
+      reason: String(options.reason || ""),
+      error: String(error && error.message ? error.message : error),
+    };
+  }
+  const status = await nativeAuthCookieStatus();
+  logNativeDiagnostic("native-auth-cookie-flushed", {
+    reason: String(options.reason || ""),
+    ok: status.ok,
+    hasWaUid: status.hasWaUid,
+    cookieCount: status.cookieCount,
+  });
+  return {
+    ...status,
+    flushed,
+    reason: String(options.reason || ""),
+  };
 }
 
 function recordNativeAuthUploadAttempt(entry = {}) {
@@ -943,12 +1013,14 @@ async function executeNativeControlCommand(command = {}) {
     return { ok: true, reloaded: true, hard: true, route: currentRendererUrl() };
   }
   if (type === "status") {
+    const authCookie = await nativeAuthCookieStatus();
     return {
       ok: true,
       status: "online",
       appVersion: app.getVersion(),
       arch: os.arch(),
       route: currentRendererUrl(),
+      authCookie,
       diagnosticsPath: runtimeDiagnosticsPath(),
       rendererAuthDiagnosticsPath: rendererAuthDiagnosticsPath(),
     };
@@ -1152,9 +1224,13 @@ function createWindow() {
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isPackagedFallbackUrl(url)) return { action: "allow" };
-    if (selectedBackendOrigin && sameOrigin(selectedBackendOrigin, url)) return { action: "allow" };
-    if (sameOrigin(NATIVE_APP_HOME_URL, url)) return { action: "allow" };
     if (isGoogleAuthUrl(url)) return { action: "allow" };
+    if ((selectedBackendOrigin && sameOrigin(selectedBackendOrigin, url)) || sameOrigin(NATIVE_APP_HOME_URL, url)) {
+      win.loadURL(url).catch((error) => {
+        if (!isNavigationAbort(error)) console.warn(`Could not route auth popup in main window: ${error.message || error}`);
+      });
+      return { action: "deny" };
+    }
     shell.openExternal(url);
     return { action: "deny" };
   });
@@ -1267,6 +1343,8 @@ ipcMain.handle("wasm-agent:native-auth-diagnostic", (_event, kind, payload = {})
 
 ipcMain.handle("wasm-agent:native-upload-auth-diagnostics", () => uploadRendererAuthDiagnostics({ reason: "manual" }));
 
+ipcMain.handle("wasm-agent:native-flush-auth-cookies", (_event, options = {}) => flushNativeAuthCookies(options || {}));
+
 ipcMain.handle("wasm-agent:native-reload", (event) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (win) loadConfiguredServer(win);
@@ -1307,6 +1385,10 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on("before-quit", () => {
+  void flushNativeAuthCookies({ reason: "before_quit" });
 });
 
 app.on("window-all-closed", () => {
