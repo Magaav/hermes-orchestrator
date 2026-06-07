@@ -35,7 +35,7 @@ function shouldReloadPage(paths) {
 
 function reloadPage(paths, revision = "") {
   writeStoredRevision(revision);
-  const hmrBridge = window.__wasmAgentDevHmr;
+  const hmrBridge = window.__wasmAgentAppDevHmr || window.__wasmAgentNativeDevHmr || window.__wasmAgentDevHmr;
   if (hmrBridge?.requestReload?.(paths)) return;
   window.location.reload();
 }

@@ -4,6 +4,15 @@ contextBridge.exposeInMainWorld("wasmAgentNative", {
   platform: "windows",
   runtime: "electron",
   nativeDesktop: true,
+  nativeDiagnostics: {
+    run: (operation) => ipcRenderer.invoke("wasm-agent:native-diagnostics-operation", String(operation || "")),
+    onEvent: (callback) => {
+      if (typeof callback !== "function") return () => {};
+      const handler = (_event, payload) => callback(payload || {});
+      ipcRenderer.on("wasm-agent:native-diagnostics-event", handler);
+      return () => ipcRenderer.removeListener("wasm-agent:native-diagnostics-event", handler);
+    },
+  },
   config: () => ipcRenderer.invoke("wasm-agent:native-config"),
   configure: (update) => ipcRenderer.invoke("wasm-agent:native-configure", update || {}),
   testBackend: (serverUrl) => ipcRenderer.invoke("wasm-agent:native-test-backend", serverUrl),

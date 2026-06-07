@@ -3,6 +3,20 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+def envOrDefault = { name, fallback ->
+    def value = System.getenv(name)
+    return value == null || value.trim().isEmpty() ? fallback : value
+}
+
+def androidVersionName = envOrDefault("WASM_AGENT_ANDROID_VERSION", "0.1.0")
+def androidVersionCode = envOrDefault("WASM_AGENT_ANDROID_VERSION_CODE", "1").toInteger()
+def androidBuildId = envOrDefault("WASM_AGENT_ANDROID_BUILD_ID", "android-dev")
+def androidBuildGeneratedAt = envOrDefault("WASM_AGENT_ANDROID_BUILD_GENERATED_AT", "")
+def androidKeystore = envOrDefault("WASM_AGENT_ANDROID_KEYSTORE", "${rootProject.projectDir}/signing/wasm-agent-sideload.jks")
+def androidKeystorePassword = envOrDefault("WASM_AGENT_ANDROID_KEYSTORE_PASSWORD", "wasm-agent-sideload")
+def androidKeyAlias = envOrDefault("WASM_AGENT_ANDROID_KEY_ALIAS", "wasm-agent-sideload")
+def androidKeyPassword = envOrDefault("WASM_AGENT_ANDROID_KEY_PASSWORD", androidKeystorePassword)
+
 android {
     namespace = "com.colmeio.wasmagent"
     compileSdk = 35
@@ -11,11 +25,54 @@ android {
         applicationId = "com.colmeio.wasmagent"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = androidVersionCode
+        versionName = androidVersionName
+        manifestPlaceholders = [usesCleartextTraffic: "false"]
+        buildConfigField("String", "DEFAULT_SERVER_URL", "\"https://wa.colmeio.com\"")
+        buildConfigField("String", "LOCAL_DEV_SERVER_URLS", "\"\"")
+        buildConfigField("String", "NATIVE_BUILD_ID", "\"${androidBuildId}\"")
+        buildConfigField("String", "BUILD_GENERATED_AT", "\"${androidBuildGeneratedAt}\"")
+        buildConfigField("boolean", "ALLOW_LOCAL_DEV", "false")
+    }
+
+    buildFeatures {
+        buildConfig = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    signingConfigs {
+        sideload {
+            storeFile = file(androidKeystore)
+            storePassword = androidKeystorePassword
+            keyAlias = androidKeyAlias
+            keyPassword = androidKeyPassword
+        }
+    }
+
+    buildTypes {
+        debug {
+            manifestPlaceholders = [usesCleartextTraffic: "true"]
+            buildConfigField("String", "LOCAL_DEV_SERVER_URLS", "\"http://10.0.2.2:8877,http://127.0.0.1:8877\"")
+            buildConfigField("boolean", "ALLOW_LOCAL_DEV", "true")
+        }
+        release {
+            signingConfig = signingConfigs.sideload
+            minifyEnabled = false
+            shrinkResources = false
+            manifestPlaceholders = [usesCleartextTraffic: "false"]
+            buildConfigField("String", "LOCAL_DEV_SERVER_URLS", "\"\"")
+            buildConfigField("boolean", "ALLOW_LOCAL_DEV", "false")
+        }
     }
 }
 
 dependencies {
-    implementation("androidx.browser:browser:1.8.0")
 }

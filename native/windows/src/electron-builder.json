@@ -18,6 +18,30 @@
     {
       "from": "../../../plugins/wasm-agent/public",
       "to": "public"
+    },
+    {
+      "from": "../../../tools/horc-local/horc-local.js",
+      "to": "horc/horc-local.js"
+    },
+    {
+      "from": "../../../tools/app-simulator",
+      "to": "horc/app-simulator",
+      "filter": [
+        "simulate.js",
+        "android.js",
+        "skeleton.js",
+        "package.json",
+        "core/**",
+        "fixtures/android/**"
+      ]
+    },
+    {
+      "from": "../../../native/android/release/WASM-Agent-arm64.apk",
+      "to": "android/WASM-Agent-arm64.apk"
+    },
+    {
+      "from": "../../../native/android/release/WASM-Agent-arm64.native-defaults.json",
+      "to": "android/WASM-Agent-arm64.native-defaults.json"
     }
   ],
   "files": [

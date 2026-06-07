@@ -604,6 +604,82 @@ button:disabled {
   background: rgba(18, 35, 48, 0.98) !important;
 }
 
+.native-google-button {
+  width: min(100%, 320px);
+  min-height: 42px;
+  border-color: rgba(125, 220, 255, 0.34);
+  background: rgba(10, 18, 30, 0.96);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.native-google-button:hover,
+.native-google-button:focus-visible {
+  border-color: var(--accent);
+  background: rgba(18, 58, 74, 0.96);
+}
+
+html[data-native-shell="android"] #homeGoNativeButton,
+html[data-native-shell="android"] #nativeModal {
+  display: none !important;
+}
+
+.native-debug-card {
+  max-height: min(860px, calc(100vh - 28px));
+}
+
+.native-debug-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.native-debug-actions button {
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.native-debug-state {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.32fr) minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0 0 12px;
+  padding: 10px;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: var(--radius);
+  background: rgba(5, 12, 22, 0.76);
+}
+
+.native-debug-state dt,
+.native-debug-state dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.native-debug-state dt {
+  color: var(--muted);
+  font-weight: 750;
+}
+
+.native-debug-output {
+  min-height: 260px;
+  max-height: min(460px, 46vh);
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: var(--radius);
+  background: rgba(2, 8, 15, 0.86);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
 .auth-google-slot {
   width: min(260px, 100%);
   justify-items: center;
@@ -1056,9 +1132,9 @@ h2 {
   top: 50px;
   z-index: 20;
   display: none;
-  width: min(778px, calc(100% - 22px));
+  width: min(872px, calc(100% - 22px));
   max-width: calc(100% - 22px);
-  grid-template-columns: minmax(0, 1.25fr) repeat(7, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1.25fr) repeat(8, minmax(0, 1fr));
   align-items: start;
   gap: 5px;
   padding: 5px;
@@ -1234,6 +1310,18 @@ h2 {
   border-radius: 2px;
   background: currentColor;
   box-shadow: 8px 0 0 currentColor, 0 8px 0 currentColor, 8px 8px 0 currentColor;
+}
+
+.home-actions .home-action-button.diagnostics::after {
+  width: 15px;
+  height: 15px;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+  box-shadow:
+    0 -6px 0 -4px currentColor,
+    0 6px 0 -4px currentColor,
+    6px 0 0 -4px currentColor,
+    -6px 0 0 -4px currentColor;
 }
 
 .os-shell[data-panel="home"] .home-actions {
@@ -4527,7 +4615,7 @@ textarea:focus {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: 46px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   border-left: 1px solid var(--line);
   background: rgba(9, 15, 26, 0.86);
   backdrop-filter: blur(14px);
@@ -4535,7 +4623,8 @@ textarea:focus {
 
 .panel-tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(62px, 1fr));
+  grid-auto-rows: 30px;
   gap: 4px;
   padding: 7px;
   border-bottom: 1px solid var(--line);
@@ -4605,6 +4694,121 @@ textarea:focus {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.native-diagnostics-console {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.native-diagnostics-console > header,
+.native-diagnostics-report {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.native-diagnostics-console h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.native-primary-button {
+  min-height: 34px;
+  padding: 0 10px;
+  border-color: rgba(125, 220, 255, 0.38);
+  background: rgba(16, 58, 74, 0.88);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.native-primary-button:disabled {
+  opacity: 0.55;
+}
+
+.native-diagnostics-status,
+.native-diagnostics-report {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: var(--radius);
+  background: rgba(4, 10, 19, 0.58);
+}
+
+.native-diagnostics-status {
+  display: grid;
+  gap: 4px;
+}
+
+.native-diagnostics-status strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.native-diagnostics-status span,
+.native-diagnostics-report span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.native-diagnostics-report > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.native-diagnostics-report code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.native-diagnostics-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: end;
+  gap: 6px;
+}
+
+.native-diagnostics-report-actions button {
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.native-diagnostics-summary,
+.native-diagnostics-output {
+  min-width: 0;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: var(--radius);
+  background: rgba(2, 8, 15, 0.86);
+  color: var(--text);
+  font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+.native-diagnostics-summary {
+  min-height: 96px;
+  max-height: 220px;
+}
+
+.native-diagnostics-output {
+  min-height: 180px;
+  max-height: 38vh;
 }
 
 .summary-list,

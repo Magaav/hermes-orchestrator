@@ -6,6 +6,7 @@ agents/registry.json
 skills/**
 !skills/.gitignore
 logs/
+reports/
 wiki/
 memory/
 server/
@@ -66,6 +67,17 @@ plugins/wasm-agent/conf/wa.env
 **/.ruff_cache/
 **/.cache/
 **/node_modules/
+
+# Native build/release outputs
+native/*/release/*
+!native/*/release/.gitkeep
+native/windows/release/win-unpacked/
+native/android/.gradle/
+native/android/.kotlin/
+native/android/app/build/
+native/android/build/
+native/windows/dist/
+native/windows/out/
 
 # Local virtual environments
 .venv/

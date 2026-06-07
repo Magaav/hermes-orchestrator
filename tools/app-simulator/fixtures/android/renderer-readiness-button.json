@@ -1,0 +1,121 @@
+{
+  "schema": "hermes.app_simulator.android_fixture.v1",
+  "name": "renderer-readiness-button",
+  "description": "Regression fixture: UIAutomator exposes no button text, but Android native renderer readiness proves the login screen, Google button, and tap target.",
+  "expectedPostAuthRedirectClassification": "native_return_received_and_authenticated",
+  "device": {
+    "serial": "fixture",
+    "manufacturer": "Fixture",
+    "model": "Android Renderer Readiness",
+    "androidVersion": "fixture"
+  },
+  "apk": {
+    "path": "/local/native/android/release/WASM-Agent-arm64.apk",
+    "buildId": "fixture-renderer-readiness-button",
+    "sha256": "fixture"
+  },
+  "firstScreen": {
+    "uiText": "",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.colmeio.wasmagent/.MainActivity t1}",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.colmeio.wasmagent/com.colmeio.wasmagent.MainActivity}",
+    "nativeDiagnostics": {
+      "ok": true,
+      "payload": {
+        "webview": {
+          "current_url": "https://wa.colmeio.com/home?native=android&shell=android-webview&android_auth_session=fixture-session-000000000000000004",
+          "page_commit_visible": true,
+          "page_finished": true,
+          "metrics": {
+            "screen_x_px": 0,
+            "screen_y_px": 80,
+            "width_px": 1080,
+            "height_px": 2160,
+            "display_width_px": 1080,
+            "display_height_px": 2340
+          },
+          "renderer_readiness": {
+            "event_name": "first_screen_readiness",
+            "timestamp": 1780777892378,
+            "payload": {
+              "native_android_shell": true,
+              "login_screen_visible": true,
+              "google_signin_button_visible": true,
+              "current_route": "home",
+              "current_url": "https://wa.colmeio.com/home?native=android&shell=android-webview&android_auth_session=fixture-session-000000000000000004",
+              "auth_state": "anonymous",
+              "config_checked": true,
+              "auth_checked": true,
+              "google_client_configured": true,
+              "google_signin_tap_target": {
+                "tag": "button",
+                "testid": "google-signin-button",
+                "aria_label": "Sign in with Google",
+                "native_oauth": "google-signin",
+                "rect": {
+                  "left": 120,
+                  "top": 520,
+                  "right": 960,
+                  "bottom": 616,
+                  "width": 840,
+                  "height": 96,
+                  "center_x": 540,
+                  "center_y": 568
+                },
+                "viewport": {
+                  "inner_width": 1080,
+                  "inner_height": 2160,
+                  "device_pixel_ratio": 1
+                },
+                "native_webview_metrics": {
+                  "screen_x_px": 0,
+                  "screen_y_px": 80,
+                  "width_px": 1080,
+                  "height_px": 2160,
+                  "display_width_px": 1080,
+                  "display_height_px": 2340
+                },
+                "adb_tap_target": {
+                  "x": 540,
+                  "y": 648,
+                  "source": "renderer_readiness_google_signin_tap_target"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "firstTap": {
+    "uiText": "Sign in - Google Accounts Use your Google Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity t1}\nIntent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000004 cmp=com.android.chrome/.Main }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000004}"
+  },
+  "cancelRetry": {
+    "attempted": true,
+    "returnedToApp": true,
+    "buttonRetryable": true,
+    "staleOpeningMessage": false,
+    "passed": true,
+    "reason": ""
+  },
+  "postAuth": {
+    "status": "passed",
+    "session": "fixture-session-000000000000000004",
+    "uiText": "WASM Agent Home Recent activity Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.colmeio.wasmagent/.MainActivity t1}\nIntent { act=android.intent.action.VIEW dat=wasm-agent://android-auth-return?session=fixture-session-000000000000000004 cmp=com.colmeio.wasmagent/.MainActivity }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.colmeio.wasmagent/com.colmeio.wasmagent.MainActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=wasm-agent://android-auth-return?session=fixture-session-000000000000000004 pkg=com.colmeio.wasmagent}",
+    "serverDebug": {
+      "ok": true,
+      "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+      "session": "fixture-session-000000000000000004",
+      "state": "redeemed",
+      "completed_at": "2026-06-06T00:00:00Z",
+      "delivered_at": "2026-06-06T00:00:02Z",
+      "redeemed_at": "2026-06-06T00:00:04Z",
+      "has_auth_code": true
+    }
+  }
+}

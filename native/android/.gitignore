@@ -1,0 +1,11 @@
+.gradle/
+.gradle-dist/
+.gradle-home/
+.android-sdk/
+.android-sdk-qemu-root/
+build/
+app/build/
+signing/
+release/*.apk
+release/*.json
+!release/.gitkeep

@@ -64,13 +64,21 @@ Every implemented native shell should log or expose:
 - Config source: bundled native config or validated remote server config.
 - Reason when a candidate origin is rejected.
 
+Native shells that expose host diagnostics must keep the bridge operation-based
+and platform-gated. The Windows Android OAuth verifier is allowed only in the
+native Windows Electron shell, resolves its bundled local horc runner and APK
+from app resources before any development fallback, and runs fixed simulator
+arguments only after `adb devices` reports an authorized USB phone. Browser,
+PWA, and cloud-only modes must not receive arbitrary local command execution.
+
 ## Platform Status
 
 - Windows: Electron implementation exists and follows this contract.
 - Android: Custom Tabs entrance exists for browser-compatible Google login after
   backend identity validation, with a WebView fallback for development/backup
-  hosting. Graduate to Trusted Web Activity when production install-surface
-  integration needs it.
+  hosting. Release APKs are cloud-only and package `https://wa.colmeio.com` as
+  the candidate backend; emulator/local candidates are debug-only. Graduate to
+  Trusted Web Activity when production install-surface integration needs it.
 - macOS: shared Electron packaging lane is configured; release artifact
   verification still needs a macOS-capable builder.
 - Linux: shared Electron implementation exists and an ARM64 unpacked package has

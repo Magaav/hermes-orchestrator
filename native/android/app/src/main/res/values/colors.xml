@@ -1,0 +1,7 @@
+<resources>
+  <color name="wasm_agent_shell_bg">#050A12</color>
+  <color name="wasm_agent_panel">#0E1726</color>
+  <color name="wasm_agent_accent">#7DDCFF</color>
+  <color name="wasm_agent_mint">#7CE4B0</color>
+  <color name="wasm_agent_icon_background">#050A12</color>
+</resources>

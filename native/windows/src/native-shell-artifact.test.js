@@ -48,7 +48,11 @@ for (const artifact of artifacts) {
   if (artifact.includes(`${path.sep}win-unpacked${path.sep}`)) {
     assert(mainJs.includes("Promise.all(candidates.map"), `${artifact} must probe backend candidates in parallel for fast first paint`);
     assert(mainJs.includes("clearNativeWebShellCache"), `${artifact} must clear stale service-worker shell caches on startup`);
-    assert(mainJs.includes("nativeAuthCookieStatus") && mainJs.includes("cookies.flushStore") && mainJs.includes("wasm-agent:native-flush-auth-cookies"), `${artifact} must expose native auth cookie status and flush persistent cookies after login`);
+    assert(mainJs.includes("nativeAuthCookieStatus") && mainJs.includes("waitForNativeAuthCookie") && mainJs.includes("cookies.flushStore") && mainJs.includes("wasm-agent:native-flush-auth-cookies"), `${artifact} must wait for and flush persistent cookies after login`);
+    assert(mainJs.includes("session.defaultSession.fetch") && mainJs.includes("nativeAuthSessionStatus") && mainJs.includes("auth-persistence-status"), `${artifact} must verify /auth/session through the Electron cookie jar after reopen`);
+    assert(mainJs.includes("expirationDate") && mainJs.includes("session: Boolean(cookie.session)") && mainJs.includes("cookieMeta"), `${artifact} must report durable wa_uid cookie metadata`);
+    assert(mainJs.includes("collectNativeDiagnosticsBundle") && mainJs.includes("captureNativeScreenshot") && mainJs.includes("controlledNativeReload") && mainJs.includes("frontier_operator_commands_ready"), `${artifact} must include the Frontier operator command layer`);
+    assert(mainJs.includes("rendererConsoleDiagnosticsPath") && mainJs.includes("nativeControlAuditPath") && mainJs.includes("nativeFatalDiagnosticsPath"), `${artifact} must persist renderer console, native control audit, and fatal diagnostics`);
     assert(mainJs.includes("function readJsonFile"), `${artifact} must keep native diagnostics upload working when reading runtime diagnostics`);
     assert(resolverJs.includes('"config_json_unavailable"'), `${artifact} must reject backend candidates whose /config.json is unavailable`);
     assert(resolverJs.includes("googleClientIdConfigured") && resolverJs.includes("preference: 0"), `${artifact} must prefer backend candidates configured for Google login`);

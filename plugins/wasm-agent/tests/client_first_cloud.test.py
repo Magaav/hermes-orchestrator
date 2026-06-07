@@ -265,8 +265,11 @@ class ClientFirstCloudTest(unittest.TestCase):
 
     def test_native_companion_package_targets_current_device_and_standby(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            state_dir = Path(tmp) / "state"
-            server = SimpleNamespace(plugin_root=PLUGIN_ROOT, public_root=PLUGIN_ROOT / "public", state_dir=state_dir)
+            root = Path(tmp)
+            plugin_root = root / "plugins" / "wasm-agent"
+            plugin_root.mkdir(parents=True)
+            state_dir = root / "state"
+            server = SimpleNamespace(plugin_root=plugin_root, public_root=plugin_root / "public", state_dir=state_dir)
             owner = user("101", "owner@example.test")
             handler = SimpleNamespace(
                 headers={

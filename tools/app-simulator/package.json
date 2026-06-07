@@ -1,0 +1,13 @@
+{
+  "name": "horc-app-simulator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runtime simulation engines for WASM Agent.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "simulate": "node simulate.js"
+  },
+  "dependencies": {
+    "playwright-core": "1.60.0"
+  }
+}

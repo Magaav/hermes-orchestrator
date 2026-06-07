@@ -1,0 +1,64 @@
+{
+  "schema": "hermes.app_simulator.android_fixture.v1",
+  "name": "post-auth-pwa-redirect",
+  "description": "Regression fixture: first tap opens Google correctly, but OAuth completion opens wa.colmeio.com/home in Chrome/PWA instead of returning to WASM Agent.",
+  "expectedPostAuthRedirectClassification": "auth_completed_but_landed_on_pwa_home",
+  "device": {
+    "serial": "fixture",
+    "manufacturer": "Fixture",
+    "model": "Android Browser Redirect",
+    "androidVersion": "fixture"
+  },
+  "apk": {
+    "path": "/local/native/android/release/WASM-Agent-arm64.apk",
+    "buildId": "fixture-post-auth-pwa-redirect",
+    "sha256": "fixture"
+  },
+  "firstScreen": {
+    "uiText": "WASM Agent Sign in with Google",
+    "loginButton": {
+      "text": "Sign in with Google",
+      "bounds": {
+        "left": 90,
+        "top": 600,
+        "right": 990,
+        "bottom": 690,
+        "centerX": 540,
+        "centerY": 645
+      }
+    }
+  },
+  "firstTap": {
+    "uiText": "Sign in - Google Accounts Use your Google Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity t1}\nIntent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000002 cmp=com.android.chrome/.Main }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000002}"
+  },
+  "cancelRetry": {
+    "attempted": true,
+    "returnedToApp": true,
+    "buttonRetryable": true,
+    "staleOpeningMessage": false,
+    "passed": true,
+    "reason": ""
+  },
+  "postAuth": {
+    "status": "failed",
+    "session": "fixture-session-000000000000000002",
+    "reason": "OAuth completion opened browser/PWA home",
+    "uiText": "WASM Agent Home opened in browser",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity t1}\nIntent { act=android.intent.action.VIEW dat=https://wa.colmeio.com/home?auth_code=fixture cmp=com.android.chrome/.Main }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://wa.colmeio.com/home?auth_code=fixture cmp=com.android.chrome/.Main}",
+    "serverDebug": {
+      "ok": true,
+      "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+      "session": "fixture-session-000000000000000002",
+      "state": "completed",
+      "completed_at": "2026-06-06T00:00:00Z",
+      "delivered_at": "",
+      "redeemed_at": "",
+      "has_auth_code": true
+    }
+  }
+}

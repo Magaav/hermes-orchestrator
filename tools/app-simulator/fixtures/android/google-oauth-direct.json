@@ -1,0 +1,63 @@
+{
+  "schema": "hermes.app_simulator.android_fixture.v1",
+  "name": "google-oauth-direct",
+  "description": "Passing classifier fixture: Sign in with Google opens accounts.google.com directly with no resolver chooser.",
+  "expectedPostAuthRedirectClassification": "native_return_received_and_authenticated",
+  "device": {
+    "serial": "fixture",
+    "manufacturer": "Fixture",
+    "model": "Android Google OAuth",
+    "androidVersion": "fixture"
+  },
+  "apk": {
+    "path": "/local/native/android/release/WASM-Agent-arm64.apk",
+    "buildId": "fixture-google-oauth-direct",
+    "sha256": "fixture"
+  },
+  "firstScreen": {
+    "uiText": "WASM Agent Sign in with Google",
+    "loginButton": {
+      "text": "Sign in with Google",
+      "bounds": {
+        "left": 90,
+        "top": 600,
+        "right": 990,
+        "bottom": 690,
+        "centerX": 540,
+        "centerY": 645
+      }
+    }
+  },
+  "firstTap": {
+    "uiText": "Sign in - Google Accounts Use your Google Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity t1}\nIntent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture cmp=com.android.chrome/.Main }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture}"
+  },
+  "cancelRetry": {
+    "attempted": true,
+    "returnedToApp": true,
+    "buttonRetryable": true,
+    "staleOpeningMessage": false,
+    "passed": true,
+    "reason": ""
+  },
+  "postAuth": {
+    "status": "passed",
+    "session": "fixture-session-000000000000000001",
+    "uiText": "WASM Agent Home Recent activity Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.colmeio.wasmagent/.MainActivity t1}\nIntent { act=android.intent.action.VIEW dat=wasm-agent://android-auth-return?session=fixture-session-000000000000000001 cmp=com.colmeio.wasmagent/.MainActivity }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.colmeio.wasmagent/com.colmeio.wasmagent.MainActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://wa.colmeio.com/native/android/auth/return?session=fixture-session-000000000000000001}\nActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=wasm-agent://android-auth-return?session=fixture-session-000000000000000001 pkg=com.colmeio.wasmagent}",
+    "serverDebug": {
+      "ok": true,
+      "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+      "session": "fixture-session-000000000000000001",
+      "state": "redeemed",
+      "completed_at": "2026-06-06T00:00:00Z",
+      "delivered_at": "2026-06-06T00:00:02Z",
+      "redeemed_at": "2026-06-06T00:00:04Z",
+      "has_auth_code": true
+    }
+  }
+}

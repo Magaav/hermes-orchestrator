@@ -1,0 +1,60 @@
+{
+  "schema": "hermes.app_simulator.android_fixture.v1",
+  "name": "stale-cancel-retry",
+  "description": "Regression fixture: Google opens directly, but cancel/return leaves the WebView stuck on Opening Google sign-in and the button is not retryable.",
+  "device": {
+    "serial": "fixture",
+    "manufacturer": "Fixture",
+    "model": "Android Stale Retry",
+    "androidVersion": "fixture"
+  },
+  "apk": {
+    "path": "/local/native/android/release/WASM-Agent-arm64.apk",
+    "buildId": "fixture-stale-cancel-retry",
+    "sha256": "fixture"
+  },
+  "firstScreen": {
+    "uiText": "WASM Agent Sign in with Google",
+    "loginButton": {
+      "text": "Sign in with Google",
+      "bounds": {
+        "left": 90,
+        "top": 600,
+        "right": 990,
+        "bottom": 690,
+        "centerX": 540,
+        "centerY": 645
+      }
+    }
+  },
+  "firstTap": {
+    "uiText": "Sign in - Google Accounts Use your Google Account",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity t1}\nIntent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000003 cmp=com.android.chrome/.Main }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.chrome/org.chromium.chrome.browser.ChromeTabbedActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&state=fixture-session-000000000000000003}"
+  },
+  "cancelRetry": {
+    "attempted": true,
+    "returnedToApp": true,
+    "buttonRetryable": false,
+    "staleOpeningMessage": true,
+    "passed": false,
+    "reason": "fixture remains on Opening Google sign-in after cancel"
+  },
+  "postAuth": {
+    "status": "pending",
+    "session": "fixture-session-000000000000000003",
+    "reason": "cancel/retry bug prevented post-auth proof",
+    "uiText": "Opening Google sign-in...",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.colmeio.wasmagent/.MainActivity t1}",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.colmeio.wasmagent/com.colmeio.wasmagent.MainActivity}",
+    "logcatText": "",
+    "serverDebug": {
+      "ok": true,
+      "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+      "session": "fixture-session-000000000000000003",
+      "state": "pending",
+      "has_auth_code": false
+    }
+  }
+}

@@ -63,14 +63,19 @@ horc update node <name> [--force]
 ## Build Commands
 
 ```bash
-horc build
-horc build win-x64-prod
+horc build win
+horc build android
+horc build all
 horc build prepare-docker
 horc build doctor
 horc build --doctor
+horc simulate web
+horc simulate android [--device|--emulator|--local-report PATH]
+horc simulate windows
+horc simulate all
 ```
 
-`horc build` builds the Windows 11 x64 wasm-agent Electron/NSIS installer. The
+`horc build win` builds the Windows 11 x64 wasm-agent Electron/NSIS installer. The
 underlying release command still runs from `native/windows/src`:
 
 ```bash
@@ -79,10 +84,26 @@ npm run release:win:x64:prod
 
 The release script cleans stale output, regenerates production native defaults,
 builds the Windows x64 NSIS installer, extracts the final artifact, and verifies
-that the packaged app is cloud-backed by default. After it returns, `horc build`
+that the packaged app is cloud-backed by default. After it returns, `horc build win`
 checks the unpacked executable, `resources/app.asar`, and the final installer,
 prints the first 80 `app.asar` entries, and writes
 `/local/native/windows/release/horc-build-manifest.json`.
+
+`horc build android` builds only the Android APK lane. In `auto` mode it
+uses local Java/Gradle/Android SDK when available; otherwise it uses the cached
+Docker amd64 Android SDK builder and persists Gradle caches under
+`native/android/.gradle-*`. It runs `native/android/scripts/release-android.js`,
+generates a local sideload signing key if no signing environment is provided,
+verifies the signed release APK with `apksigner`, rejects production APKs that
+contain localhost backend literals, and promotes the APKs to:
+
+- `/local/native/android/release/WASM-Agent-universal.apk`
+- `/local/native/android/release/WASM-Agent-arm64.apk`
+
+The APK sidecars and `release-manifest.json` let `/native/resolve` and
+`/native/download` expose the Android artifact through Home `Go Native` when the
+file exists. `horc build all` explicitly runs the Windows lane first and then the
+Android APK lane.
 
 Build trust lanes:
 
@@ -114,8 +135,119 @@ preinstalled. Future `horc build` runs auto-use that local image when
 installs inside each disposable builder container.
 
 `horc build doctor` prints host OS/arch, Docker availability, Docker user
-permission, amd64 binfmt status, Wine builder image pullability, expected build
-mode, and exact remediation commands for missing prerequisites.
+permission, amd64 binfmt status, Wine builder image pullability, Android
+Java/Gradle/SDK availability, expected Windows build mode, and exact remediation
+commands for missing prerequisites.
+
+## Simulation Commands
+
+```bash
+horc simulate web
+horc simulate android --emulator
+horc simulate android --device
+horc simulate android --local-report reports/sim/android/latest/result.json
+horc simulate windows
+horc simulate all
+```
+
+`horc simulate web` uses Playwright to verify the wasm-agent PWA/browser brain at
+runtime. It defaults to `http://127.0.0.1:8877/home` when reachable, or uses
+`WASM_AGENT_SIM_URL` when set. The web simulator always adds Android shell query
+mode:
+
+```text
+native=android&shell=android-webview&buildId=playwright-sim
+```
+
+The web simulator verifies that the app loads, Android native shell mode is
+detected, Go Native/native-desktop install prompts are hidden, visible UI does
+not leak browser/native-install placeholder text, and renderer diagnostics
+confirm the shell mode. It captures screenshots, redacted console logs, redacted
+network failures, and failure-only Playwright trace/video artifacts.
+
+Every simulator run writes:
+
+```text
+reports/sim/<platform>/latest/result.json
+reports/sim/<platform>/latest/summary.md
+```
+
+The simulator lifecycle is `boot -> observe -> act -> assert -> collect evidence
+-> score -> report`. The JSON result schema and Markdown summary are written for
+both Frontier and human operators.
+
+`horc simulate android` verifies the Android APK through explicit backends:
+`--emulator`, `--device`, and `--local-report <path>`. The default remains an
+ADB auto lane for compatibility, but any OAuth/app-link/chooser claim should use
+the narrow backend that produced the evidence.
+
+`horc simulate android --emulator` is for cloud/CI regression. It detects
+`/dev/kvm`, nested virtualization, CPU architecture, Android SDK/emulator
+binaries, existing AVDs, and Docker. If host emulator setup is not viable, it
+checks whether Docker is available and whether Docker can access the required
+device/virtualization features. Docker is reported honestly: it cannot
+magically replace missing KVM/nested virtualization.
+
+`horc simulate android --device` is the required real-device proof path for
+Android OAuth return, app-link/deep-link ownership, chooser, Chrome handoff, and
+WebView session claims. It discovers `adb` from `PATH`, `WASM_AGENT_SIM_ADB`,
+`ANDROID_HOME` / `ANDROID_SDK_ROOT`, or the repo-local Android SDK, requires a
+connected physical device in `device` state, installs
+`/local/native/android/release/WASM-Agent-arm64.apk` by default, launches
+`com.colmeio.wasmagent/.MainActivity`, waits for the WebView/PWA boot, captures
+screenshots, redacted logcat, UIAutomator XML, and `dumpsys` activity/window
+evidence, taps `Sign in with Google`, and observes what opens.
+
+On Windows, the preferred real-device path is the installed native diagnostics
+console: `Open wasm-agent Windows app -> Diagnostics -> Verify Android OAuth`.
+That flow exposes only allowlisted native diagnostics operations, streams
+redacted `adb`/local verifier output to the UI, resolves the bundled local horc
+runner from Electron resources before any development PATH fallback, and runs
+`simulate android --device --interactive-oauth` only after `adb devices` reports
+an authorized phone. If the installed app cannot be launched, use
+`tools/windows/verify-android-oauth.cmd` or
+`tools/windows/verify-android-oauth.ps1` as fallbacks.
+
+`horc simulate android --local-report <path>` validates a report copied from a
+local USB-phone run, which is the current bridge when Frontier cloud cannot see
+Victor's phone. Pass a copied `result.json` or the report directory containing
+it. The validator checks schema, Android platform, APK build id, APK SHA-256,
+device info, screenshot/log/activity artifacts, and required assertions.
+
+The Android pass condition is intentionally narrow: the first tap must open
+Google directly, must not show an `Open with` / `Complete action using`
+resolver, must not show Chrome or WASM Agent as chooser options, must not
+externally open `wa.colmeio.com/native/android/auth/start` or
+`wa.colmeio.com/home`, OAuth completion must redirect to the native return path,
+the installed app must resume, the WebView must redeem the native auth session
+and become authenticated, and cancel/retry must not remain stuck on
+`Opening Google sign-in...`. If a run only proves the first Google launch and
+does not include post-authorization return/authenticated-WebView evidence, the
+OAuth-completion assertions remain pending.
+
+Set `WASM_AGENT_ANDROID_APK` or `WASM_AGENT_SIM_ANDROID_APK` to test another
+APK. Set `WASM_AGENT_SIM_ADB` to test with a specific `adb`. Classifier fixtures
+for simulator development live under `tools/app-simulator/fixtures/android/`;
+`WASM_AGENT_SIM_ANDROID_FIXTURE=external-auth-start horc simulate android` must
+fail because it models the old resolver chooser bug.
+`WASM_AGENT_SIM_ANDROID_FIXTURE=post-auth-pwa-redirect horc simulate android`
+must fail because it models the post-auth browser/PWA redirect bug.
+`WASM_AGENT_SIM_ANDROID_FIXTURE=stale-cancel-retry horc simulate android` must
+fail because it models the stale cancel/retry bug. Set
+`WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS=180000` or pass `--interactive-oauth` on a
+local device run when a human will finish Google login during the simulator run.
+
+`horc simulate windows` is a pending skeleton only. Its future engine is
+Playwright Electron + Windows smoke/PowerShell scripts. It does not verify
+Windows installed-app behavior yet.
+
+`horc simulate all` runs web normally and runs the Android auto lane. Windows
+remains pending until its installed-app simulator exists. Build success is not
+runtime verification. Frontier should prefer the relevant simulator before
+claiming a UI/native fix: web = PWA/browser proof, emulator = CI/regression
+proof, device/local-report = Android OAuth/app-link/chooser proof, all = broad
+proof. The proof loop is `boot -> observe -> act -> assert -> evidence -> score
+-> report -> patch`.
 
 ## wasm-agent Space Commands
 
@@ -141,6 +273,8 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 - `horc update node <name>` reseeds only the named node and leaves others untouched.
 - Add `--force` to discard local `/local/hermes-agent` checkout changes when the upstream refresh would otherwise fail on a dirty working tree.
 - `horc build` is the shortcut for the Windows wasm-agent native release artifact.
+- Prefer the explicit native build targets for releases: `horc build win`,
+  `horc build android`, and `horc build all`.
 - Nodes that were already running are restarted through the normal lifecycle; stopped nodes keep their stopped state.
 - `NODE_RESEED=true` in `/local/agents/envs/<node>.env` forces a one-shot reseed from `/local/hermes-agent` on the next start/restart.
 - Update reports are written under `/local/logs/update/<run-id>/`.
@@ -175,6 +309,33 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 - `HORC_ALLOW_CROSS_WIN_BUILD=1`: allow Linux aarch64 direct Wine debug builds.
 - `WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1`: internal fallback switch used to skip
   Windows executable resource editing on Linux ARM64 native NSIS builds.
+- `HERMES_WASM_AGENT_ANDROID_ROOT`: override Android native project root;
+  default `/local/native/android`.
+- `HORC_ANDROID_BUILD_MODE`: `auto`, `local`, or `docker`; default `auto`.
+- `HORC_ANDROID_DOCKER_IMAGE`: Docker image for the Android SDK builder;
+  default `ghcr.io/cirruslabs/android-sdk:35`.
+- `HORC_ANDROID_GRADLE_VERSION`: Gradle distribution version cached under
+  `native/android/.gradle-dist`; default `8.9`.
+- `WASM_AGENT_SIM_URL`: optional `horc simulate web` target URL override.
+- `WASM_AGENT_SIM_CHROMIUM`: optional Chromium/Chrome executable path for
+  `horc simulate web`; otherwise the simulator searches common local browser
+  commands.
+- `WASM_AGENT_SIM_HEADED=1`: run the Playwright web simulator headed.
+- `WASM_AGENT_SIM_ADB`: optional `adb` executable path for
+  `horc simulate android`.
+- `WASM_AGENT_ANDROID_APK` / `WASM_AGENT_SIM_ANDROID_APK`: optional Android APK
+  path override for `horc simulate android`.
+- `WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS`: optional local-device wait window for
+  a human to finish Google OAuth so the simulator can capture native return and
+  authenticated-WebView proof.
+- `HORC_SIM_SKIP_FFMPEG_INSTALL=1`: skip the Playwright ffmpeg helper download;
+  failure traces still run, but failure video artifacts are skipped.
+- `GRADLE_BIN`: optional Android Gradle executable override.
+- `ANDROID_HOME` / `ANDROID_SDK_ROOT`: Android SDK root used by Gradle and
+  `apksigner`.
+- `WASM_AGENT_ANDROID_KEYSTORE`, `WASM_AGENT_ANDROID_KEYSTORE_PASSWORD`,
+  `WASM_AGENT_ANDROID_KEY_ALIAS`, `WASM_AGENT_ANDROID_KEY_PASSWORD`: optional
+  production signing key configuration for the APK lane.
 
 ## Governance
 

@@ -1,0 +1,44 @@
+{
+  "schema": "hermes.app_simulator.android_fixture.v1",
+  "name": "external-auth-start",
+  "description": "Historical Android bug: Sign in with Google launches wa.colmeio.com/native/android/auth/start externally, producing a resolver chooser with Chrome and WASM Agent.",
+  "device": {
+    "serial": "fixture",
+    "manufacturer": "Fixture",
+    "model": "Android Resolver",
+    "androidVersion": "fixture"
+  },
+  "apk": {
+    "path": "/local/native/android/release/WASM-Agent-arm64.apk",
+    "buildId": "fixture-external-auth-start",
+    "sha256": "fixture"
+  },
+  "firstScreen": {
+    "uiText": "WASM Agent Sign in with Google",
+    "loginButton": {
+      "text": "Sign in with Google",
+      "bounds": {
+        "left": 90,
+        "top": 600,
+        "right": 990,
+        "bottom": 690,
+        "centerX": 540,
+        "centerY": 645
+      }
+    }
+  },
+  "firstTap": {
+    "uiText": "Complete action using Chrome WASM Agent Just once Always",
+    "activityText": "mResumedActivity: ActivityRecord{fixture u0 com.android.intentresolver/.ChooserActivity t1}\nIntent { act=android.intent.action.VIEW cat=[android.intent.category.BROWSABLE] dat=https://wa.colmeio.com/native/android/auth/start?session=fixture cmp=com.android.intentresolver/.ChooserActivity }",
+    "windowText": "mCurrentFocus=Window{fixture u0 com.android.intentresolver/com.android.intentresolver.ChooserActivity}",
+    "logcatText": "ActivityTaskManager: START u0 {act=android.intent.action.VIEW dat=https://wa.colmeio.com/native/android/auth/start?session=fixture} from uid 10123"
+  },
+  "cancelRetry": {
+    "attempted": true,
+    "returnedToApp": true,
+    "buttonRetryable": false,
+    "staleOpeningMessage": true,
+    "passed": false,
+    "reason": "fixture remains on Opening Google sign-in after cancel"
+  }
+}

@@ -31,33 +31,92 @@ rendering, agent-readable state, and a cleaner app shell.
   TestFlight/App Store/manual development only. If the artifact is missing, the
   modal says `Native installer not built yet` and shows fallback/status
   information; PWA install is a separate fallback lane.
+- Runtime simulation is available through `horc simulate web`,
+  `horc simulate android`, and `horc simulate all`. Web is PWA/browser proof
+  only. Android has explicit `--emulator`, `--device`, and `--local-report`
+  backends. Full Android OAuth proof requires post-authorization native return
+  and authenticated WebView/session evidence, not merely Google opening.
+  `all` runs web and Android when a usable `adb device` exists. Windows
+  installed-app behavior remains unverified until its simulator engine exists
+  and passes.
 - Does not start, stop, copy, or patch Space Agent.
+
+## Frontier Operator Loop
+
+Native/cloud operations expose a scoped Frontier capability layer instead of a
+global remote-control endpoint. `GET /native/frontier/status` returns compact
+health JSON for app/auth/frontend/native/backend state and the recommended next
+action. `POST /native/frontier/command` accepts only the narrow command set
+`status`, `screenshot`, `collect_logs`, `collect_adb_diagnostics`, `reload`,
+`reload_ignore_cache`, `clear_cache`, `restart_app`, `verify_session`,
+`verify_installed_app`, `open_devtools`, and `export_diagnostics`.
+
+Both routes require an admin session, localhost operator access, or
+`X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY`; unauthorized
+requests return HTTP 403. `clear_cache` and `restart_app` also require an
+explicit destructive gate. Server-side audit records are written under
+`state/native-control/`, while exported bundles with `bundle.json`, `SUMMARY.md`,
+and a zip copy are written under `state/native-diagnostics/`.
+Windows native source now includes a bounded Android phone diagnostics bridge
+for operator sessions. The `collect_adb_diagnostics` native command discovers
+`adb` from PATH or common SDK locations, runs only fixed read-only ADB
+diagnostic commands, filters Android auth/WebAPK/activity evidence, stores a
+local bundle, and uploads the redacted result through `/native/diagnostics`.
+It does not expose arbitrary shell execution.
 
 ## Durable Next Step
 
 This section is the cross-compaction handoff for active `wasm-agent` work. When
 the next action changes, update this before ending the turn.
 
-Current next action: download and install
-`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T115715Z.exe`
-from the live Go Native / `/native/download?platform=windows&arch=x64` path on a
-real Windows machine. Do not use `win-x64-20260605T111652Z` because it changed
-the Google callback URI and triggered `redirect_uri_mismatch`; do not use
-`win-x64-20260605T113515Z` because it forced Google's popup credential callback
-inside remote Electron and the native heartbeat showed the primary window stuck
-on `https://accounts.google.com/gsi/select?...ux_mode=popup...`. The corrected
-build restores the registered redirect flow for remote HTTPS Electron, keeps the
-JS credential callback only for the bundled `wasm-agent://` fallback, allows
-Google popup URLs without replacing the primary app window, redeems
-`/home?auth_code=...` through the credentialed preloader, and flushes Electron's
-cookie store after preloader redemption. Confirm the installed app opens the
-validated backend PWA `/home?native=electron` instead of `wasm-agent://app` or
-`file://` UI, DevTools `location.origin` is the backend origin,
-`fetch('/config.json')` reports `auth.googleClientIdConfigured: true`, Google
-button diagnostics report `mode:"redirect"`, the final auth-code redemption
-stays in the Electron session, native status reports `authCookie.hasWaUid:
-true`, and closing and reopening the installed app keeps `/auth/session`
-authenticated; then reload the real authenticated co-control clients and
+Current next action: rebuild/deploy the patched cloud backend and rebuild/install
+the Windows native app so the new `collect_adb_diagnostics` bridge is present,
+then queue `collect_adb_diagnostics` for Victor's Windows client while the
+Xiaomi phone is connected over ADB and use the uploaded diagnostics to verify
+Android Google login returns to the installed APK instead of the Chrome PWA/WebAPK.
+Then run `horc simulate android --emulator` in Frontier cloud,
+then collect real-device proof from Victor's machine with
+`horc simulate android --device --interactive-oauth` or validate a copied report
+with `horc simulate android --local-report <path>`. Frontier cloud cannot see
+Victor's USB phone directly without a bridge. Use
+`reports/sim/android/latest/result.json` and `summary.md` as the Android APK
+source of truth: the installed app must render the validated cloud PWA at
+`https://wa.colmeio.com/home`, the first Google sign-in tap must open
+Google/account evidence directly with no Android resolver chooser or external
+`wa.colmeio.com/native/android/auth/start` handoff, OAuth completion must return
+to the installed app instead of Chrome/PWA `/home`, the WebView must redeem the
+native auth session and become authenticated, cancel/return must make the button
+retryable instead of leaving `Opening Google sign-in...`, and the report must
+include screenshots/logcat/UIAutomator/activity/window evidence. An Android
+browser Home `Go Native` click should stream the current arm64 APK from
+`/native/download`.
+The APK was built by `horc build android-apk` with build id
+`android-universal-20260606T222747Z`, SHA-256
+`5b956284bd2a300593e725a17e31b7eeb029fdb956dc05f2dae511b4e71409e0`, v2
+signature verification, no localhost production backend literals, and the
+native shell now refuses to redeem/reload an Android auth code until the matching
+`wasm-agent://android-auth-return` intent has reached `MainActivity`.
+Then install
+`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T160851Z.exe`
+on a real Windows host and run
+`native\windows\scripts\verify-installed-app.ps1 -Launch -InteractiveLogin`.
+The Linux ARM64 no-rcedit NSIS artifact was rebuilt and extracted-verified in
+`/local/native/windows/release/VERIFY.json`, but do not claim the Windows login
+persistence fix is complete until the installed app passes Google login, full
+close/reopen, route `https://wa.colmeio.com/home?native=electron`,
+`authCookie.hasWaUid: true`, durable cookie expiration metadata, and
+authenticated `/auth/session`. Do not use `win-x64-20260605T111652Z` because it changed the Google callback URI
+and triggered `redirect_uri_mismatch`; do not use `win-x64-20260605T113515Z`
+because it forced Google's popup credential callback inside remote Electron and
+the native heartbeat showed the primary window stuck on
+`https://accounts.google.com/gsi/select?...ux_mode=popup...`. The source now
+restores the registered redirect flow for remote HTTPS Electron, keeps the JS
+credential callback only for the bundled `wasm-agent://` fallback, allows Google
+popup URLs without replacing the primary app window, redeems
+`/home?auth_code=...` through the credentialed preloader, waits briefly for the
+durable `wa_uid` cookie, and flushes Electron's cookie store after preloader
+redemption. After the real Windows installed-app verifier passes, reload the real
+authenticated co-control clients and
 confirm the signed-in clients open `/remote-control/live` and Victor Genaro's
 interface moves past the controller `Requesting remote viewport` state after the
 v138 service worker activates: first by receiving a
@@ -125,6 +184,13 @@ could still leave Electron's `wa_uid` cookie unflushed before restart. A later
 callback-mode build proved worse: the native heartbeat route became Google's
 `gsi/select` popup URL, the backend `last_login_at` did not advance, and the main
 Electron window looked black because it had been replaced by the popup surface.
+The 2026-06-05 `win-x64-20260605T150628Z` diagnostics showed auth-code
+redemption and `native_auth_cookie_flush_finished` with `has_wa_uid: true`, but
+the PWA then threw `Cannot assign to read only property '__wasmAgentDevHmr'`
+before `loadAuthSession()` could run after reopen. The source now preserves the
+read-only Electron preload bridge, installs the app-owned deferral hook as
+`__wasmAgentAppDevHmr`, and lets dev HMR prefer that app hook before falling
+back to the native bridge.
 The durable fix is to keep the registered Google callback URI unchanged, use
 redirect mode on the remote HTTPS PWA, reserve the JS credential callback for the
 bundled `wasm-agent://` fallback only, allow Google popup URLs without loading
@@ -1475,6 +1541,7 @@ Run checks:
 
 ```bash
 /local/plugins/wasm-agent/scripts/doctor.sh
+horc simulate web
 ```
 
 The doctor runs the source smoke test, wasm-agent bridge route coverage,
@@ -1493,6 +1560,34 @@ it into `scripts/doctor.sh` when it belongs in the default gate, and keep it
 fast enough to run before every local checkpoint. The auth/login shell is guarded
 by `tests/auth_shell_boot_regression.test.js`; any auth-shell or top-level module
 change must keep that test green.
+
+`horc simulate web` is the runtime evidence pass for the PWA/browser brain. It
+requires a reachable wasm-agent server or `WASM_AGENT_SIM_URL`, adds
+`native=android&shell=android-webview&buildId=playwright-sim`, verifies Android
+shell UI suppression and diagnostics hooks, and writes redacted artifacts under
+`reports/sim/web/latest/`. It does not verify the Android APK or Windows
+installed app.
+
+`horc simulate android` is the runtime evidence pass for the Android APK and now
+has explicit backends. `--emulator` checks cloud host KVM/nested virtualization,
+Android SDK/AVD state, and Docker viability for CI/regression. `--device`
+installs `/local/native/android/release/WASM-Agent-arm64.apk` by default on a
+physical ADB device, launches the installed app, captures UIAutomator XML,
+screenshots, logcat, and `dumpsys` activity/window artifacts under
+`reports/sim/android/latest/`, taps `Sign in with Google`, fails chooser and
+external URL handoff bugs, checks cancel/retry, and can wait for manual Google
+authorization with `--interactive-oauth` or
+`WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS=180000`. `--local-report <path>` validates
+a copied report from Victor's local phone when Frontier cloud cannot see the USB
+device. Full Android OAuth pass requires first-tap Google evidence, no chooser,
+post-auth native return, and authenticated WebView/session redemption. Build
+pass is not runtime proof; simulator reports are the source of truth.
+
+Frontier should use the narrowest relevant simulator before claiming UI/native
+fixes: web = PWA/browser proof, emulator = CI/regression proof,
+device/local-report = Android OAuth/app-link/chooser proof, all = broad proof.
+The loop is `boot -> observe -> act -> assert -> evidence -> score -> report ->
+patch`.
 
 The heavier private-cloud People/DM/shared-chat acceptance pass is
 `python3 plugins/wasm-agent/tests/people_chat_browser_acceptance.test.py`. It

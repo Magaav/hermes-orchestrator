@@ -5,8 +5,10 @@ const path = require("path");
 const pluginRoot = path.resolve(__dirname, "..");
 const publicRoot = path.join(pluginRoot, "public");
 const appPath = path.join(publicRoot, "app.js");
+const devHmrPath = path.join(publicRoot, "modules", "hmr", "dev-hmr.js");
 const serverPath = path.join(pluginRoot, "server", "static_server.py");
 const appJs = fs.readFileSync(appPath, "utf8");
+const devHmrJs = fs.readFileSync(devHmrPath, "utf8");
 const serverPy = fs.readFileSync(serverPath, "utf8");
 
 function staticImports(source) {
@@ -83,6 +85,17 @@ assert(
 assert(
   serverPy.includes('"/provider-model-catalog.js"'),
   "server should still expose the lazy provider model snapshot publicly once provider setup requests it"
+);
+assert(
+  appJs.includes("__wasmAgentAppDevHmr")
+    && appJs.includes("dev_hmr_legacy_bridge_preserved")
+    && !appJs.includes("window.__wasmAgentDevHmr = {"),
+  "auth shell must not overwrite Electron's read-only native HMR preload bridge during login bootstrap"
+);
+assert(
+  devHmrJs.includes("__wasmAgentAppDevHmr")
+    && devHmrJs.indexOf("__wasmAgentAppDevHmr") < devHmrJs.indexOf("__wasmAgentDevHmr"),
+  "dev HMR must prefer the app-owned deferral bridge before the legacy native bridge"
 );
 
 console.log("auth shell boot regression ok");

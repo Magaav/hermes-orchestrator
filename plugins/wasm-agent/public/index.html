@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
@@ -34,7 +34,7 @@
               <span id="loginMeta">Google</span>
             </div>
             <div id="loginFluxBalance" class="login-flux-balance" hidden></div>
-            <div id="googleSignInButton" class="google-signin-slot"></div>
+            <div id="googleSignInButton" class="google-signin-slot" aria-label="Sign in with Google" data-testid="google-signin-slot"></div>
             <p id="loginMessage" class="login-message"></p>
             <button id="logoutButton" class="login-secondary-button" type="button" hidden>Sign out</button>
           </aside>
@@ -201,6 +201,30 @@
         </article>
       </section>
 
+      <section id="nativeDebugModal" class="modal-backdrop" aria-label="Android native debug" hidden>
+        <article class="modal-card wide native-debug-card" role="dialog" aria-modal="true" aria-labelledby="nativeDebugTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="nativeDebugTitle">Android Native Debug</h2>
+              <p id="nativeDebugMeta">diagnostics</p>
+            </div>
+            <div class="modal-head-actions">
+              <button id="nativeDebugCopyButton" class="native-primary-button" type="button">Copy</button>
+              <button id="nativeDebugShareButton" class="native-primary-button" type="button">Share</button>
+              <button id="closeNativeDebugButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+            </div>
+          </header>
+          <div class="native-debug-actions">
+            <button id="nativeDebugRetryButton" type="button">Retry Google login</button>
+            <button id="nativeDebugResetAuthButton" type="button">Reset auth</button>
+            <button id="nativeDebugClearWebViewButton" type="button">Clear WebView</button>
+            <button id="nativeDebugClearDiagnosticsButton" type="button">Clear diagnostics</button>
+          </div>
+          <dl id="nativeDebugState" class="native-debug-state"></dl>
+          <pre id="nativeDebugOutput" class="native-debug-output"></pre>
+        </article>
+      </section>
+
       <section id="fleetModal" class="modal-backdrop" aria-label="Fleet" hidden>
         <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="fleetModalTitle">
           <header class="modal-head">
@@ -360,8 +384,8 @@
           </span>
           <h1>WASM Agent</h1>
           <p id="authGateCopy">Sign in with an allowlisted Google account to open wasm-agent.</p>
-          <button id="authGateLoginButton" class="home-action-button primary" type="button">Sign in with Google</button>
-          <div id="authGateGoogleSignInButton" class="google-signin-slot auth-google-slot"></div>
+          <button id="authGateLoginButton" class="home-action-button primary" type="button" aria-label="Sign in with Google" data-testid="google-signin-button">Sign in with Google</button>
+          <div id="authGateGoogleSignInButton" class="google-signin-slot auth-google-slot" aria-label="Sign in with Google" data-testid="auth-gate-google-signin-slot"></div>
           <p id="authGateMessage" class="auth-message"></p>
         </article>
       </section>
@@ -380,6 +404,7 @@
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
+                <button id="homeDiagnosticsButton" class="home-action-button diagnostics" type="button" title="Diagnostics" aria-label="Diagnostics"><span>Diagnostics</span></button>
               </div>
               <div class="space-title">
                 <button id="spaceOrganizeButton" class="space-organize-button icon-button" type="button" title="Organize canvas apps" aria-label="Organize canvas apps"></button>
@@ -595,6 +620,7 @@
               <button class="panel-tab" type="button" data-panel="timeline" data-module-target="timeline">Timeline</button>
               <button class="panel-tab" type="button" data-panel="modules">Modules</button>
               <button class="panel-tab" type="button" data-panel="security">Security</button>
+              <button class="panel-tab" type="button" data-panel="diagnostics">Diagnostics</button>
             </div>
             <section class="panel-view active" data-view="home" aria-label="Homespace"></section>
             <section class="panel-view" data-view="fleet">
@@ -641,10 +667,39 @@
                 <span id="securityPanelStatus" class="widget-chip">loop</span>
               </div>
 	              <div id="securityPanelSummary" class="security-summary"></div>
-	              <div id="securityPanelRun" class="security-run"></div>
-	              <div id="securityPanelRuns" class="security-run-history"></div>
-	              <div id="securityPanelFindingQueue" class="security-finding-queue panel-security-queue"></div>
-            </section>
+		              <div id="securityPanelRun" class="security-run"></div>
+		              <div id="securityPanelRuns" class="security-run-history"></div>
+		              <div id="securityPanelFindingQueue" class="security-finding-queue panel-security-queue"></div>
+	            </section>
+	            <section class="panel-view" data-view="diagnostics">
+	              <div class="panel-headline">
+	                <h2>Diagnostics</h2>
+	                <span id="androidOAuthPanelStatus" class="widget-chip">standby</span>
+	              </div>
+	              <section class="native-diagnostics-console" aria-label="Verify Android OAuth on real phone">
+	                <header>
+	                  <h3>Verify Android OAuth on real phone</h3>
+	                  <button id="androidOAuthStartButton" class="native-primary-button" type="button">Start Android OAuth verification</button>
+	                </header>
+	                <div class="native-diagnostics-status">
+	                  <strong id="androidOAuthStatus">idle</strong>
+	                  <span id="androidOAuthHint">Windows native app required.</span>
+	                </div>
+	                <div class="native-diagnostics-report">
+	                  <div>
+	                    <span>Latest report</span>
+	                    <code id="androidOAuthReportPath">none</code>
+	                  </div>
+	                  <div class="native-diagnostics-report-actions">
+	                    <button id="androidOAuthRefreshReportButton" type="button">Refresh</button>
+	                    <button id="androidOAuthOpenReportButton" type="button">Open</button>
+	                    <button id="androidOAuthUpdateAppButton" type="button" hidden>Update App</button>
+	                  </div>
+	                </div>
+	                <pre id="androidOAuthReportSummary" class="native-diagnostics-summary"></pre>
+	                <pre id="androidOAuthOutput" class="native-diagnostics-output"></pre>
+	              </section>
+	            </section>
           </aside>
         </main>
       </section>

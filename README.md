@@ -36,8 +36,9 @@ credential callback. The callback path is reserved for the bundled
 `wasm-agent://` fallback only. The cloud app loads `/config.json`, recovers if
 Google rendering races ahead of config readiness, keeps the main app
 shell/script network-fresh so auth fixes are not trapped behind stale
-service-worker cache, and flushes Electron's cookie store after auth-code
-redemption so the `wa_uid` cookie can survive restart.
+service-worker cache, waits briefly for the durable `wa_uid` cookie after
+auth-code redemption, and flushes Electron's cookie store so the cookie can
+survive restart.
 
 Native observability is now part of the runtime contract. Renderer auth
 diagnostics upload directly to `/native/diagnostics`, the Windows shell persists
@@ -46,16 +47,117 @@ events through `/native/events`. The Windows native source also polls
 `/native/control/poll` for bounded operator commands such as diagnostics upload,
 runtime diagnostics write, web-cache clear, reload, hard reload, and status; the
 operator command queue is restricted to admin or localhost/control-key access.
+Runtime/status diagnostics now include `authCookie.hasWaUid`, cookie session and
+expiration metadata, domain/path, current route, and an Electron-session-backed
+`/auth/session` result after reopen.
+The cloud PWA also preserves Electron's read-only native preload HMR bridge
+during bootstrap and uses an app-owned HMR deferral hook so auth/session loading
+cannot be stopped by native bridge collisions.
+
+## Frontier Operator Loop
+
+Frontier operator visibility now has a narrow, audited control surface for the
+cloud-backed Windows native app. The loop is:
+
+observe -> diagnose -> reload/verify -> collect bundle -> patch -> rebuild ->
+installed-app verify.
+
+Use `GET /native/frontier/status` to read compact JSON for the latest or a
+specific native device:
+
+```bash
+curl -H "X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY" \
+  "https://wa.colmeio.com/native/frontier/status?device_id=<device-id>"
+```
+
+The response includes `appHealth`, `authHealth`, `frontendHealth`,
+`nativeHealth`, `backendHealth`, `lastReload`, `lastFatalError`,
+`currentBuildIds`, `failureClassification`, and `recommendedNextAction`.
+Frontier should use that state to decide whether to queue `reload`,
+`reload_ignore_cache`, `clear_cache`, `verify_session`, `collect_logs`,
+`export_diagnostics`, or an installed-app verifier run.
+
+Use `POST /native/frontier/command` to queue a scoped command for one device or
+an explicitly listed/test cohort. Required authorization is either an admin
+session, localhost operator access, or
+`X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY`. Missing or
+invalid authorization returns HTTP 403. Unknown commands are refused. Commands
+that clear cache or restart the shell require `enable_destructive: true` or
+`X-Wasm-Agent-Destructive-Allowed: 1`.
+
+```bash
+curl -X POST "https://wa.colmeio.com/native/frontier/command" \
+  -H "Content-Type: application/json" \
+  -H "X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY" \
+  --data '{
+    "device_id": "<device-id>",
+    "command": "reload_ignore_cache",
+    "reason": "Frontier verifying fresh cloud asset build"
+  }'
+```
+
+Expected success is HTTP 200 with `queuedCount: 1`. Expected unauthorized
+behavior is HTTP 403 with `native_frontier_forbidden` or
+`frontier_destructive_command_disabled`. To safely target one device, always
+provide a single `device_id`. To target a test cohort, first inspect
+`/native/control/clients`, then call `/native/frontier/command` with
+`device_ids: [...]`; alternatively pass `allow_cohort: true` with a cohort
+filter such as `build_id` or `route_contains`. There is no global
+unauthenticated reload endpoint.
+
+Every queued command and command result is written to
+`plugins/wasm-agent/state/native-control/audit.jsonl`. `collect_logs` and
+`export_diagnostics` also write a timestamped bundle under
+`plugins/wasm-agent/state/native-diagnostics/` containing `bundle.json`,
+`SUMMARY.md`, and a zip copy. Native-side bundles include current URL/title,
+loading state, auth cookie/session summary, Electron/native versions, app and
+cloud asset build ids, visible error text, frontend fatal errors, renderer
+console/preload/main logs, config discovery, `/config.json`, `/auth/session`,
+app.asar/package metadata, and optional redacted screenshots.
 
 Durable Next Step: install
-`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260605T115715Z.exe`
-on Windows, then sign in with Google in the installed app and verify the
-installed `app.asar`, route, cookie, and restart behavior. Queue localhost
-`status` and `upload_diagnostics` commands against that installed device and
-confirm the route is back on `https://wa.colmeio.com/home?native=electron`,
-`authCookie.hasWaUid` is true after login, `/auth/session` remains
-authenticated after closing and reopening, and the results are visible through
-`/native/control/clients` and `/native/diagnostics/latest`.
+`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260606T195700Z.exe`
+on the Windows host, then use
+`Open wasm-agent Windows app -> Diagnostics -> Verify Android OAuth` to run the
+real Android phone proof without opening a terminal. That verified installer
+bundles the local horc runner and Android APK build
+`android-universal-20260606T195530Z`; the diagnostics console checks `adb`,
+waits for an authorized USB phone, then runs fixed arguments
+`simulate android --device --interactive-oauth` from Electron resources using
+an app-owned diagnostics report directory. The Android shell and verifier now
+capture first-screen screenshot, UIAutomator XML, WebView/native diagnostics,
+logcat, final URL, page-finished state, and classify launch readiness before
+attempting the OAuth tap. It links the latest report. If the app cannot be launched, use
+`tools/windows/verify-android-oauth.cmd` or
+`tools/windows/verify-android-oauth.ps1` as fallbacks. Frontier cloud can still
+run `horc simulate android --emulator` to record whether host KVM/nested
+virtualization, Android SDK/AVD setup, or Docker emulator access is viable.
+Frontier cloud cannot see Victor's USB phone without a bridge, so real Android
+OAuth proof must come from Victor's machine or from a copied report validated
+with `horc simulate android --local-report <path>`. Treat
+`reports/sim/android/latest/result.json` and `summary.md` as the Android APK
+source of truth: the installed app must render the validated cloud PWA at
+`https://wa.colmeio.com/home`, the first Google sign-in tap must open
+Google/account evidence directly with no Android resolver chooser or external
+`wa.colmeio.com/native/android/auth/start` handoff, OAuth completion must return
+to the installed app through the native return path instead of opening
+`wa.colmeio.com/home` in Chrome/PWA, the WebView must redeem the native auth
+session and become authenticated, cancel/return must make the button retryable
+instead of leaving `Opening Google sign-in...`, and the report must include
+screenshots/logcat/UIAutomator/activity/window evidence. An Android browser Home
+`Go Native` click should stream the current arm64 APK from `/native/download`.
+The APK was built by `horc build android-apk` with build id
+`android-universal-20260606T222747Z`, SHA-256
+`5b956284bd2a300593e725a17e31b7eeb029fdb956dc05f2dae511b4e71409e0`, v2
+signature verification, no localhost production backend literals, and the
+native shell now refuses to redeem/reload an Android auth code until the matching
+`wasm-agent://android-auth-return` intent has reached `MainActivity`.
+The Linux ARM64 no-rcedit NSIS build was extracted and verified in
+`/local/native/windows/release/VERIFY.json`, but do not claim the Windows login
+persistence fix is complete until the installed app itself passes Google login,
+full close/reopen, route `https://wa.colmeio.com/home?native=electron`,
+`authCookie.hasWaUid: true`, durable cookie expiration metadata, and
+authenticated `/auth/session`.
 
 ## Prompt Guidelines
 
@@ -363,6 +465,51 @@ horc logs clean node2
 horc stop node2
 horc delete node2
 ```
+
+## Runtime Simulation
+
+```bash
+horc simulate web
+horc simulate android --emulator
+horc simulate android --device
+horc simulate android --device --interactive-oauth
+horc simulate android --local-report reports/sim/android/latest/result.json
+horc simulate all
+```
+
+`horc simulate web` runs Playwright against the wasm-agent PWA/browser runtime,
+defaults to `http://127.0.0.1:8877/home` when reachable, and writes runtime
+evidence under `reports/sim/web/latest/`. Set `WASM_AGENT_SIM_URL` to target a
+different server. It is browser/PWA proof only.
+
+`horc simulate android` is the Android APK proof lane. Use `--emulator` for
+cloud/CI regression setup, `--device` for a connected physical ADB device, and
+`--local-report <path>` to validate a copied report from Victor's local phone.
+On Windows, the preferred real-phone path is the installed app diagnostics
+console: `Open wasm-agent Windows app -> Diagnostics -> Verify Android OAuth`.
+It exposes only allowlisted native diagnostics operations, resolves the bundled
+local horc runner from Electron resources before any dev fallback, and runs the
+interactive device command after `adb devices` reports an authorized phone.
+Use `tools/windows/verify-android-oauth.cmd` or
+`tools/windows/verify-android-oauth.ps1` only when the Windows app cannot be
+launched.
+The emulator backend detects `/dev/kvm`, nested virtualization, CPU arch,
+Android SDK/emulator binaries, existing AVDs, and Docker; Docker is reported
+honestly and cannot replace missing KVM/nested virtualization. The device
+backend installs `/local/native/android/release/WASM-Agent-arm64.apk` by
+default, launches the installed app, captures
+screenshots/logcat/UIAutomator/activity/window evidence, taps `Sign in with
+Google`, checks chooser and Google-host evidence, verifies cancel/retry, and
+only proves full Android OAuth when post-authorization native return plus
+authenticated WebView/session evidence are present. Build pass is not runtime
+proof.
+
+`horc simulate all` runs web normally, runs Android when a usable `adb device`
+exists, and keeps Windows pending until its installed-app engine exists. Build
+success is not runtime verification. Frontier should prefer the relevant
+simulator before claiming fixes: web = PWA/browser proof, android = real APK
+proof, all = broad proof. The operator loop is `boot -> observe -> act -> assert
+-> evidence -> score -> report -> patch`.
 
 ## Logging Topology
 - Node management/runtime/Hermes logs are centralized at `/local/logs/nodes/<node>/`.

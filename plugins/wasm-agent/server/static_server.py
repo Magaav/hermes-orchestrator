@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from html import escape as html_escape
 import hashlib
 import hmac
 import io
@@ -40,6 +41,8 @@ except Exception:  # pragma: no cover - optional runtime guard
 
 PLUGIN_NAME = "wasm-agent"
 PLUGIN_VERSION = "0.1.0"
+ANDROID_PACKAGE_NAME = "com.colmeio.wasmagent"
+ANDROID_SIGNING_CERT_SHA256 = "70:6F:93:2F:4A:1E:F8:95:FD:73:76:D9:97:06:F7:87:12:D0:F5:CC:00:43:71:7A:FA:0B:8A:95:86:19:B1:CE"
 DEPLOYMENT_MODE_LOCAL = "local"
 DEPLOYMENT_MODE_CLOUD = "cloud"
 IMAGE_CARD_ANALYZER_REVISION = "image-card-text-v2"
@@ -316,6 +319,9 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/.well-known/assetlinks.json":
+            self._json(HTTPStatus.OK, android_asset_links(), headers={"Cache-Control": "no-store"})
+            return
         if path == "/browser/stream":
             try:
                 require_browser_feature_enabled(self)
@@ -558,7 +564,55 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/native/android/auth/poll":
+            try:
+                self._json(HTTPStatus.OK, poll_native_android_auth(self.server, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/auth/start":
+            try:
+                start_native_android_auth(self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/auth/debug":
+            try:
+                self._json(HTTPStatus.OK, debug_native_android_auth(self.server, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/auth/return":
+            try:
+                serve_native_android_auth_return(self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/frontier/status":
+            try:
+                self._json(HTTPStatus.OK, native_frontier_status(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/auth/google/callback":
+            query = parse_qs(urlparse(self.path).query)
+            error_code = str((query.get("error") or [""])[0] or "").strip()
+            state_session = str((query.get("state") or [""])[0] or "").strip()
+            if state_session:
+                try:
+                    native_android_auth_append(
+                        self.server,
+                        state_session,
+                        "oauth_callback_get",
+                        updates={"state": "error" if error_code else "callback_get"},
+                        path="/auth/google/callback",
+                        status_code=400 if error_code else 303,
+                        error=error_code,
+                    )
+                    self._redirect(native_android_auth_return_path(state_session))
+                    return
+                except BrowserError:
+                    pass
             self._redirect("/home")
             return
         if path == "/config.json":
@@ -966,21 +1020,104 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/auth/google/callback":
             try:
                 body = self._read_form(max_bytes=32 * 1024)
+                try:
+                    callback_android_session_id = native_android_auth_session_from_request(self, body=body)
+                except BrowserError:
+                    callback_android_session_id = ""
+                if callback_android_session_id:
+                    native_android_auth_append(
+                        self.server,
+                        callback_android_session_id,
+                        "oauth_callback_received",
+                        updates={
+                            "state": "callback_received",
+                            "callback_at": int(time.time()),
+                            "callback_at_iso": native_android_auth_iso(),
+                        },
+                        path="/auth/google/callback",
+                        status_code=200,
+                    )
                 payload = google_auth_login(self.server, body)
                 auth_code = create_auth_redirect_code(payload["user"]["id"])
+                android_session_id = callback_android_session_id
+                if android_session_id:
+                    write_native_android_auth_record(self.server, android_session_id, str(payload["user"]["id"]), auth_code, ttl_sec=180)
+                query = {"auth_code": auth_code}
+                if android_session_id:
+                    query["android_auth_session"] = android_session_id
+                    self._redirect(
+                        native_android_auth_return_path(android_session_id),
+                        headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)},
+                    )
+                    native_android_auth_append(
+                        self.server,
+                        android_session_id,
+                        "cookie_set",
+                        path="/auth/google/callback",
+                        status_code=303,
+                    )
+                    return
                 self._redirect(
-                    f"/home?auth_code={quote(auth_code, safe='')}",
+                    f"/home?{urlencode(query)}",
                     headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)},
                 )
             except BrowserError as exc:
+                error_session_id = ""
+                try:
+                    body_for_error = locals().get("body") if isinstance(locals().get("body"), dict) else {}
+                    error_session_id = native_android_auth_session_from_request(self, body=body_for_error)
+                    if error_session_id:
+                        native_android_auth_append(
+                            self.server,
+                            error_session_id,
+                            "oauth_callback_error",
+                            updates={"state": "error"},
+                            path="/auth/google/callback",
+                            status_code=int(exc.status),
+                            error=exc.code,
+                        )
+                except Exception:
+                    pass
+                if error_session_id:
+                    self._redirect(native_android_auth_return_path(error_session_id))
+                    return
                 self._redirect(f"/home?auth_error={quote(exc.code, safe='')}&message={quote(exc.message, safe='')}")
             except Exception as exc:
+                error_session_id = ""
+                try:
+                    body_for_error = locals().get("body") if isinstance(locals().get("body"), dict) else {}
+                    error_session_id = native_android_auth_session_from_request(self, body=body_for_error)
+                    if error_session_id:
+                        native_android_auth_append(
+                            self.server,
+                            error_session_id,
+                            "oauth_callback_exception",
+                            updates={"state": "error"},
+                            path="/auth/google/callback",
+                            status_code=500,
+                            error=str(exc),
+                        )
+                except Exception:
+                    pass
+                if error_session_id:
+                    self._redirect(native_android_auth_return_path(error_session_id))
+                    return
                 self._redirect(f"/home?auth_error=auth_error&message={quote(str(exc), safe='')}")
             return
         if path == "/auth/redeem":
             try:
                 body = self._read_json(max_bytes=8 * 1024)
                 payload = redeem_auth_redirect_code(str(body.get("code") or "").strip())
+                redeem_session_id = str(body.get("android_auth_session") or body.get("session") or "").strip()
+                if redeem_session_id:
+                    mark_native_android_auth_redeemed(self.server, redeem_session_id)
+                    native_android_auth_append(
+                        self.server,
+                        redeem_session_id,
+                        "cookie_set",
+                        path="/auth/redeem",
+                        status_code=200,
+                    )
                 self._json(HTTPStatus.OK, payload, headers={"Set-Cookie": auth_cookie(payload["user"]["id"], handler=self)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
@@ -988,6 +1125,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "auth_redeem_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/auth/complete":
+            try:
+                body = self._read_json(max_bytes=8 * 1024)
+                self._json(HTTPStatus.OK, complete_native_android_auth(self.server, user, body))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_auth_error", "message": str(exc)}},
                 )
             return
         if path == "/auth/logout":
@@ -1031,6 +1180,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "native_control_command_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/frontier/command":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, create_frontier_native_command(self.server, body, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_frontier_command_error", "message": str(exc)}},
                 )
             return
         if path == "/native/control/result":
@@ -5231,6 +5392,12 @@ def auth_cookie(user_id: str, *, max_age: int = AUTH_COOKIE_MAX_AGE_SEC, handler
     return f"wa_uid={value}; Path=/; Max-Age={max_age}; SameSite=Lax;{secure} HttpOnly"
 
 
+def native_android_auth_cookie(session_id: str, *, max_age: int = 600, handler: WasmAgentHandler | None = None) -> str:
+    session = native_android_auth_session_id(session_id) if session_id else ""
+    secure = " Secure;" if secure_cookie_required(handler) else ""
+    return f"wa_android_auth_session={session}; Path=/; Max-Age={max_age}; SameSite=None;{secure} HttpOnly"
+
+
 def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
     user_id = verified_auth_user_id(parse_cookies(cookie_header).get("wa_uid", ""))
     if not user_id:
@@ -5284,6 +5451,529 @@ def redeem_auth_redirect_code(code: str) -> dict[str, Any]:
     if not user or not is_allowed_account_email(str(user.get("email") or "")):
         raise BrowserError("auth_code_account_not_allowed", "This account is not allowed to access wasm-agent.", status=HTTPStatus.FORBIDDEN)
     return {"ok": True, "authenticated": True, "user": user}
+
+
+def native_android_auth_session_id(value: str) -> str:
+    session_id = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{24,128}", session_id):
+        raise BrowserError("invalid_android_auth_session", "Android auth session is invalid.", status=HTTPStatus.BAD_REQUEST)
+    return session_id
+
+
+def native_android_auth_dir(server: WasmAgentServer) -> Path:
+    path = server.state_dir / "native-android-auth"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def native_android_auth_record_path(server: WasmAgentServer, session_id: str) -> Path:
+    return native_android_auth_dir(server) / f"{native_android_auth_session_id(session_id)}.json"
+
+
+def native_android_auth_iso(epoch: int | float | None = None) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(epoch or time.time())))
+
+
+def native_android_auth_public_record(record: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        record = {}
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+        "session": clipped_verbatim(str(record.get("session") or ""), 140),
+        "android_auth_session": clipped_verbatim(str(record.get("session") or ""), 140),
+        "native_correlation_id": clipped_verbatim(str(record.get("native_correlation_id") or ""), 180),
+        "build_id": clipped_verbatim(str(record.get("build_id") or ""), 120),
+        "install_device_hash": clipped_verbatim(str(record.get("install_device_hash") or record.get("device_hash") or ""), 120),
+        "state": clipped_verbatim(str(record.get("state") or "pending"), 40),
+        "created_at": str(record.get("created_at_iso") or ""),
+        "started_at": str(record.get("started_at_iso") or ""),
+        "callback_at": str(record.get("callback_at_iso") or ""),
+        "completed_at": str(record.get("completed_at_iso") or ""),
+        "delivered_at": str(record.get("delivered_at_iso") or ""),
+        "redeemed_at": str(record.get("redeemed_at_iso") or ""),
+        "expires_at": str(record.get("expires_at_iso") or ""),
+        "last_poll_at": str(record.get("last_poll_at_iso") or ""),
+        "last_error": clipped_verbatim(str(record.get("last_error") or ""), 500),
+        "last_status_code": int(record.get("last_status_code") or 0),
+        "has_auth_code": bool(record.get("auth_code")),
+        "cookie_set": bool(record.get("cookie_set")),
+        "final_status": clipped_verbatim(str(record.get("final_status") or record.get("state") or "pending"), 80),
+        "events": record.get("events") if isinstance(record.get("events"), list) else [],
+    }
+
+
+def native_android_auth_request_metadata(handler: WasmAgentHandler) -> dict[str, str]:
+    query = parse_qs(urlparse(handler.path).query)
+    return {
+        "native_correlation_id": clipped_verbatim(str((query.get("native_correlation_id") or query.get("correlation_id") or [""])[0] or ""), 180),
+        "build_id": clipped_verbatim(str((query.get("build_id") or query.get("buildId") or [""])[0] or ""), 120),
+        "install_device_hash": clipped_verbatim(str((query.get("install_device_hash") or query.get("device_hash") or [""])[0] or ""), 120),
+    }
+
+
+def native_android_auth_append(
+    server: WasmAgentServer,
+    session_id: str,
+    event: str,
+    *,
+    updates: dict[str, Any] | None = None,
+    path: str = "",
+    status_code: int = 0,
+    error: str = "",
+) -> dict[str, Any]:
+    session_id = native_android_auth_session_id(session_id)
+    now = int(time.time())
+    now_iso = native_android_auth_iso(now)
+    record_path = native_android_auth_record_path(server, session_id)
+    record = read_json_file(record_path, {})
+    if not isinstance(record, dict):
+        record = {}
+    if not record:
+        record = {
+            "schema": "hermes.wasm_agent.native_android_auth.v1",
+            "session": session_id,
+            "android_auth_session": session_id,
+            "state": "pending",
+            "created_at": now,
+            "created_at_iso": now_iso,
+            "expires_at": now + 600,
+            "expires_at_iso": native_android_auth_iso(now + 600),
+            "events": [],
+        }
+    events = record.get("events") if isinstance(record.get("events"), list) else []
+    entry = {
+        "event": clipped_verbatim(event, 120),
+        "at": now_iso,
+        "path": clipped_verbatim(path, 240),
+        "status_code": int(status_code or 0),
+        "error": clipped_verbatim(error, 500),
+        "native_correlation_id": clipped_verbatim(str(record.get("native_correlation_id") or ""), 180),
+    }
+    events.append(entry)
+    record["events"] = events[-80:]
+    record["updated_at"] = now
+    record["updated_at_iso"] = now_iso
+    if error:
+        record["last_error"] = clipped_verbatim(error, 500)
+    if status_code:
+        record["last_status_code"] = int(status_code)
+    if updates:
+        record.update(updates)
+    write_json_file(record_path, record)
+    return record
+
+
+def write_native_android_auth_record(server: WasmAgentServer, session_id: str, user_id_value: str, auth_code: str, *, ttl_sec: int = 180) -> None:
+    session_id = native_android_auth_session_id(session_id)
+    now = int(time.time())
+    native_android_auth_append(
+        server,
+        session_id,
+        "handoff_completed",
+        updates={
+            "state": "completed",
+            "final_status": "auth_code_created",
+            "user_id": str(user_id_value),
+            "auth_code": auth_code,
+            "completed_at": now,
+            "completed_at_iso": native_android_auth_iso(now),
+            "expires_at": now + int(ttl_sec),
+            "expires_at_iso": native_android_auth_iso(now + int(ttl_sec)),
+        },
+        path="/auth/google/callback",
+        status_code=303,
+    )
+
+
+def native_android_auth_session_from_request(handler: WasmAgentHandler, *, body: dict[str, Any] | None = None) -> str:
+    session_id = ""
+    if body is not None:
+        session_id = str(body.get("session") or body.get("android_auth_session") or body.get("state") or "").strip()
+    if not session_id:
+        try:
+            query = parse_qs(urlparse(handler.path).query)
+            session_id = str((query.get("android_auth_session") or query.get("session") or [""])[0] or "").strip()
+        except Exception:
+            session_id = ""
+    if not session_id:
+        session_id = parse_cookies(handler.headers.get("Cookie", "")).get("wa_android_auth_session", "")
+    return native_android_auth_session_id(session_id) if session_id else ""
+
+
+def native_android_auth_return_path(session_id: str) -> str:
+    return f"/native/android/auth/return?{urlencode({'session': native_android_auth_session_id(session_id)})}"
+
+
+def native_android_auth_return_uri(session_id: str, native_correlation_id: str = "") -> str:
+    query = {"session": native_android_auth_session_id(session_id)}
+    if native_correlation_id:
+        query["native_correlation_id"] = clipped_verbatim(native_correlation_id, 180)
+    return f"wasm-agent://android-auth-return?{urlencode(query)}"
+
+
+def android_asset_links() -> list[dict[str, Any]]:
+    return [
+        {
+            "relation": [
+                "delegate_permission/common.handle_all_urls",
+            ],
+            "target": {
+                "namespace": "android_app",
+                "package_name": ANDROID_PACKAGE_NAME,
+                "sha256_cert_fingerprints": [
+                    ANDROID_SIGNING_CERT_SHA256,
+                ],
+            },
+        },
+    ]
+
+
+def native_android_auth_return_https(handler: WasmAgentHandler, session_id: str, native_correlation_id: str = "") -> str:
+    query = {"session": native_android_auth_session_id(session_id)}
+    if native_correlation_id:
+        query["native_correlation_id"] = clipped_verbatim(native_correlation_id, 180)
+    origin = public_origin() or "https://wa.colmeio.com"
+    return f"{origin.rstrip('/')}/native/android/auth/return?{urlencode(query)}&native_return=1"
+
+
+def native_android_auth_return_intent(handler: WasmAgentHandler, session_id: str) -> str:
+    session_id = native_android_auth_session_id(session_id)
+    record = read_json_file(native_android_auth_record_path(handler.server, session_id), {})
+    native_correlation_id = str(record.get("native_correlation_id") or "") if isinstance(record, dict) else ""
+    fallback_url = native_android_auth_return_uri(session_id, native_correlation_id)
+    query = {"session": session_id}
+    if native_correlation_id:
+        query["native_correlation_id"] = native_correlation_id
+    return (
+        "intent://android-auth-return?"
+        f"{urlencode(query)}"
+        "#Intent;scheme=wasm-agent;package=com.colmeio.wasmagent;"
+        "component=com.colmeio.wasmagent/.MainActivity;"
+        "launchFlags=0x14000000;end"
+    )
+
+
+def native_android_auth_return_https_intent(handler: WasmAgentHandler, session_id: str) -> str:
+    session_id = native_android_auth_session_id(session_id)
+    record = read_json_file(native_android_auth_record_path(handler.server, session_id), {})
+    native_correlation_id = str(record.get("native_correlation_id") or "") if isinstance(record, dict) else ""
+    fallback_url = native_android_auth_return_uri(session_id, native_correlation_id)
+    https_return = native_android_auth_return_https(handler, session_id, native_correlation_id)
+    parsed = urlparse(https_return)
+    path_query = parsed.path.lstrip("/")
+    if parsed.query:
+        path_query = f"{path_query}?{parsed.query}"
+    return (
+        f"intent://{parsed.netloc}/{path_query}"
+        "#Intent;scheme=https;package=com.colmeio.wasmagent;"
+        "component=com.colmeio.wasmagent/.MainActivity;"
+        f"S.browser_fallback_url={quote(fallback_url, safe='')};end"
+    )
+
+
+def start_native_android_auth(handler: WasmAgentHandler) -> None:
+    session_id = native_android_auth_session_from_request(handler)
+    request_metadata = native_android_auth_request_metadata(handler)
+    client_id = google_client_id()
+    if not client_id:
+        native_android_auth_append(
+            handler.server,
+            session_id,
+            "oauth_start_error",
+            path="/native/android/auth/start",
+            status_code=500,
+            error="google_login_not_configured",
+        )
+        raise BrowserError("google_login_not_configured", "Google login is not configured on this server.")
+    target = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": google_login_uri(handler),
+            "response_type": "id_token",
+            "response_mode": "form_post",
+            "scope": "openid email profile",
+            "nonce": secrets.token_urlsafe(18),
+            "state": session_id,
+            "prompt": "select_account",
+        }
+    )
+    native_android_auth_append(
+        handler.server,
+        session_id,
+        "session_created",
+        updates={
+            "state": "started",
+            **{key: value for key, value in request_metadata.items() if value},
+            "user_id": "",
+            "auth_code": "",
+            "completed_at": 0,
+            "completed_at_iso": "",
+            "delivered_at": 0,
+            "delivered_at_iso": "",
+            "redeemed_at": 0,
+            "redeemed_at_iso": "",
+            "last_error": "",
+            "started_at": int(time.time()),
+            "started_at_iso": native_android_auth_iso(),
+            "expires_at": int(time.time()) + 600,
+            "expires_at_iso": native_android_auth_iso(int(time.time()) + 600),
+            "oauth_path": "/o/oauth2/v2/auth",
+            "redirect_uri": google_login_uri(handler),
+            "callback_path": "/auth/google/callback",
+            "completion_return_path": "/native/android/auth/return",
+            "native_return_scheme": "wasm-agent://android-auth-return",
+        },
+        path="/native/android/auth/start",
+        status_code=303,
+    )
+    native_android_auth_append(
+        handler.server,
+        session_id,
+        "oauth_redirect_generated",
+        path="/native/android/auth/start",
+        status_code=303,
+    )
+    handler._redirect(target, headers={"Set-Cookie": native_android_auth_cookie(session_id, handler=handler)})
+
+
+def complete_native_android_auth(server: WasmAgentServer, user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    session_id = native_android_auth_session_id(str(body.get("session") or ""))
+    native_android_auth_append(
+        server,
+        session_id,
+        "browser_complete_started",
+        path="/native/android/auth/complete",
+        status_code=200,
+    )
+    native_android_auth_append(
+        server,
+        session_id,
+        "browser_complete_rejected",
+        updates={"final_status": "browser_complete_rejected"},
+        path="/native/android/auth/complete",
+        status_code=HTTPStatus.GONE,
+        error="native_return_required",
+    )
+    raise BrowserError(
+        "native_return_required",
+        "Android native auth must return through the installed app before the session can be consumed.",
+        status=HTTPStatus.GONE,
+    )
+    if not user:
+        native_android_auth_append(
+            server,
+            session_id,
+            "browser_complete_error",
+            updates={"state": "error", "final_status": "browser_complete_auth_required"},
+            path="/native/android/auth/complete",
+            status_code=HTTPStatus.UNAUTHORIZED,
+            error="auth_required",
+        )
+        raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
+    auth_code = create_auth_redirect_code(str(user["id"]), ttl_sec=180)
+    write_native_android_auth_record(server, session_id, str(user["id"]), auth_code, ttl_sec=180)
+    native_android_auth_append(
+        server,
+        session_id,
+        "final_status",
+        updates={"final_status": "browser_complete_authenticated"},
+        path="/native/android/auth/complete",
+        status_code=200,
+    )
+    return {"ok": True, "authenticated": True}
+
+
+def poll_native_android_auth(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
+    query = parse_qs(urlparse(handler.path).query)
+    session_id = native_android_auth_session_id(str((query.get("session") or [""])[0] or ""))
+    path = native_android_auth_record_path(server, session_id)
+    record = read_json_file(path, {})
+    now = int(time.time())
+    if not isinstance(record, dict) or not record:
+        native_android_auth_append(
+            server,
+            session_id,
+            "poll_pending_missing_record",
+            updates={"last_poll_at": now, "last_poll_at_iso": native_android_auth_iso(now), "final_status": "pending"},
+            path="/native/android/auth/poll",
+            status_code=200,
+        )
+        return {"ok": True, "authenticated": False, "pending": True}
+    if int(record.get("expires_at") or 0) < now:
+        native_android_auth_append(
+            server,
+            session_id,
+            "poll_expired",
+            updates={"state": "expired", "last_poll_at": now, "last_poll_at_iso": native_android_auth_iso(now), "final_status": "expired"},
+            path="/native/android/auth/poll",
+            status_code=200,
+            error="expired",
+        )
+        return {"ok": True, "authenticated": False, "pending": False, "expired": True}
+    if str(record.get("state") or "").strip().lower() == "error":
+        native_android_auth_append(
+            server,
+            session_id,
+            "poll_error",
+            updates={"last_poll_at": now, "last_poll_at_iso": native_android_auth_iso(now), "final_status": "error"},
+            path="/native/android/auth/poll",
+            status_code=200,
+            error=str(record.get("last_error") or "auth_error"),
+        )
+        return {
+            "ok": True,
+            "authenticated": False,
+            "pending": False,
+            "error": str(record.get("last_error") or "auth_error"),
+        }
+    auth_code = str(record.get("auth_code") or "")
+    if not auth_code:
+        native_android_auth_append(
+            server,
+            session_id,
+            "poll_pending",
+            updates={"last_poll_at": now, "last_poll_at_iso": native_android_auth_iso(now), "final_status": "pending"},
+            path="/native/android/auth/poll",
+            status_code=200,
+        )
+        return {"ok": True, "authenticated": False, "pending": True}
+    if not int(record.get("delivered_at") or 0):
+        record = native_android_auth_append(
+            server,
+            session_id,
+            "poll_delivered",
+            updates={
+                "state": "delivered",
+                "final_status": "delivered",
+                "delivered_at": now,
+                "delivered_at_iso": native_android_auth_iso(now),
+                "last_poll_at": now,
+                "last_poll_at_iso": native_android_auth_iso(now),
+            },
+            path="/native/android/auth/poll",
+            status_code=200,
+        )
+    else:
+        native_android_auth_append(
+            server,
+            session_id,
+            "poll_delivered_repeat",
+            updates={"last_poll_at": now, "last_poll_at_iso": native_android_auth_iso(now), "final_status": "delivered_repeat"},
+            path="/native/android/auth/poll",
+            status_code=200,
+        )
+    return {
+        "ok": True,
+        "authenticated": True,
+        "auth_code": auth_code,
+        "android_auth_session": session_id,
+        "native_correlation_id": clipped_verbatim(str(record.get("native_correlation_id") or ""), 180),
+    }
+
+
+def mark_native_android_auth_redeemed(server: WasmAgentServer, session_id: str) -> None:
+    now = int(time.time())
+    native_android_auth_append(
+        server,
+        session_id,
+        "auth_redeemed",
+        updates={"state": "redeemed", "final_status": "redeemed", "redeemed_at": now, "redeemed_at_iso": native_android_auth_iso(now)},
+        path="/auth/redeem",
+        status_code=200,
+    )
+
+
+def debug_native_android_auth(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
+    query = parse_qs(urlparse(handler.path).query)
+    session_id = native_android_auth_session_id(str((query.get("session") or [""])[0] or ""))
+    requested_correlation = str((query.get("native_correlation_id") or query.get("correlation_id") or [""])[0] or "").strip()
+    record = read_json_file(native_android_auth_record_path(server, session_id), {})
+    if not isinstance(record, dict) or not record:
+        return {
+            "ok": True,
+            "schema": "hermes.wasm_agent.native_android_auth_debug.v1",
+            "session": session_id,
+            "state": "missing",
+            "created_at": "",
+            "completed_at": "",
+            "redeemed_at": "",
+            "last_error": "",
+            "events": [],
+        }
+    if requested_correlation and requested_correlation != str(record.get("native_correlation_id") or ""):
+        raise BrowserError("native_android_auth_not_found", "No Android auth record matches this correlation.", status=HTTPStatus.NOT_FOUND)
+    return native_android_auth_public_record(record)
+
+
+def serve_native_android_auth_return(handler: WasmAgentHandler) -> None:
+    session_id = native_android_auth_session_from_request(handler)
+    query = parse_qs(urlparse(handler.path).query)
+    native_android_auth_append(
+        handler.server,
+        session_id,
+        "native_return_visited",
+        updates={"native_return_visited_at_iso": native_android_auth_iso(), "final_status": "native_return_visited"},
+        path="/native/android/auth/return",
+        status_code=200,
+    )
+    record = read_json_file(native_android_auth_record_path(handler.server, session_id), {})
+    debug = native_android_auth_public_record(record if isinstance(record, dict) else {})
+    state = clipped_verbatim(str(debug.get("state") or "pending"), 40)
+    native_correlation_id = clipped_verbatim(str(debug.get("native_correlation_id") or ""), 180)
+    return_uri = native_android_auth_return_uri(session_id, native_correlation_id)
+    intent_uri = native_android_auth_return_intent(handler, session_id)
+    https_intent_uri = native_android_auth_return_https_intent(handler, session_id)
+    native_android_auth_append(
+        handler.server,
+        session_id,
+        "intent_url_generated",
+        updates={"intent_url_generated_at_iso": native_android_auth_iso(), "native_return_intent_location": intent_uri},
+        path="/native/android/auth/return",
+        status_code=200,
+    )
+    if "page" not in query:
+        handler._redirect(
+            intent_uri,
+            headers={
+                "Cache-Control": "no-store",
+                "X-Wasm-Agent-Android-Return": "intent",
+                "X-Wasm-Agent-Android-Return-Fallback": return_uri,
+            },
+        )
+        return
+    safe_return_uri = html_escape(return_uri, quote=True)
+    safe_intent_uri = html_escape(intent_uri, quote=True)
+    safe_https_intent_uri = html_escape(https_intent_uri, quote=True)
+    safe_state = html_escape(state, quote=False)
+    safe_session = html_escape(clipped_verbatim(session_id, 140), quote=False)
+    body = f"""<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Return to WASM Agent</title>
+<script>
+(() => {{
+  const intentUri = {json.dumps(intent_uri)};
+  window.location.replace(intentUri);
+}})();
+</script></head>
+<body style="font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#101317;color:#eef2f6;margin:0;padding:32px;">
+<h1 style="font-size:22px;margin:0 0 12px;">Return to WASM Agent</h1>
+<p style="font-size:16px;line-height:1.45;margin:0 0 18px;">Google sign-in status: <strong>{safe_state}</strong>.</p>
+<p style="font-size:16px;line-height:1.45;margin:0 0 18px;">Returning to the WASM Agent app...</p>
+<p style="font-size:16px;line-height:1.45;margin:0 0 18px;"><a href="{safe_intent_uri}" style="color:#7ddcff;">Open WASM Agent</a></p>
+<p style="font-size:13px;opacity:.72;margin:0 0 12px;"><a href="{safe_https_intent_uri}" style="color:#7ddcff;">Use package-targeted HTTPS return</a></p>
+<p style="font-size:13px;opacity:.72;margin:0 0 12px;"><a href="{safe_return_uri}" style="color:#7ddcff;">Use custom-scheme fallback</a></p>
+<p style="font-size:13px;opacity:.72;margin:0;">Session: {safe_session}</p>
+</body></html>""".encode("utf-8")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError):
+        return
 
 
 def authenticated_request_user(handler: WasmAgentHandler) -> dict[str, Any] | None:
@@ -5685,14 +6375,17 @@ def find_native_installer(server: WasmAgentServer, platform: str, arch: str, bui
 
 
 def native_installer_metadata(artifact: Path, platform: str) -> dict[str, Any]:
-    if platform != "windows":
-        return {}
     sidecar_path = artifact.with_name(f"{artifact.stem}.native-defaults.json")
-    metadata_paths = [
-        sidecar_path,
-        artifact.parent / "win-unpacked" / "resources" / "native-defaults.json",
-        artifact.parent.parent / "src" / "build" / "native-defaults.json",
-    ]
+    metadata_paths = [sidecar_path]
+    if platform == "windows":
+        metadata_paths.extend([
+            artifact.parent / "win-unpacked" / "resources" / "native-defaults.json",
+            artifact.parent.parent / "src" / "build" / "native-defaults.json",
+        ])
+    elif platform == "android":
+        metadata_paths.extend([
+            artifact.parent / "release-manifest.json",
+        ])
     for metadata_path in metadata_paths:
         payload = read_json_file(metadata_path, {})
         if isinstance(payload, dict) and payload:
@@ -5706,11 +6399,15 @@ def native_download_filename_part(value: Any) -> str:
 
 def native_installer_download_filename(artifact: Path, platform: str) -> str:
     metadata = native_installer_metadata(artifact, platform)
-    if platform != "windows" or not metadata:
+    if not metadata:
         return artifact.name
     version = native_download_filename_part(metadata.get("wasmAgentVersion") or metadata.get("nativeShellVersion") or "")
     build_id = native_download_filename_part(metadata.get("buildId") or "")
-    build_suffix = build_id.removeprefix("win-x64-") if build_id else ""
+    build_suffix = build_id
+    if platform == "windows":
+        build_suffix = build_suffix.removeprefix("win-x64-")
+    elif platform == "android":
+        build_suffix = build_suffix.removeprefix("android-universal-").removeprefix("android-arm64-").removeprefix("android-")
     parts = [item for item in [version, build_suffix] if item]
     if not parts:
         return artifact.name
@@ -5755,14 +6452,31 @@ def redact_native_diagnostics(value: Any, depth: int = 0) -> Any:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        return clipped_verbatim(value, 120_000)
+        redacted = re.sub(
+            r"([?&#;\s\"'<>]|\b)((?:access_token|auth_code|client_secret|code|credential|id_token|password|refresh_token|secret|token|wa_uid)=)[^&\s\"'<>;#]+",
+            lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+            value,
+            flags=re.I,
+        )
+        redacted = re.sub(r"(Bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[redacted]", redacted, flags=re.I)
+        redacted = re.sub(r"((?:Cookie|Set-Cookie):\s*)[^\r\n]+", r"\1[redacted]", redacted, flags=re.I)
+        return clipped_verbatim(redacted, 120_000)
     if isinstance(value, list):
         return [redact_native_diagnostics(item, depth + 1) for item in value[:80]]
     if isinstance(value, dict):
         redacted: dict[str, Any] = {}
         for key, item in list(value.items())[:160]:
             clean_key = str(key)
-            if re.search(r"credential|token|cookie|secret|authorization|password", clean_key, re.I):
+            normalized_key = clean_key.lower()
+            safe_cookie_key = normalized_key in {
+                "safe_cookie_session_summary",
+                "cookie_count",
+                "cookie_names",
+                "has_wa_uid",
+                "has_android_auth_session_cookie",
+                "cookie_set",
+            }
+            if re.search(r"credential|token|cookie|secret|authorization|password|saved.*config.*raw|raw.*config", clean_key, re.I) and not safe_cookie_key:
                 redacted[clean_key] = "[redacted]"
             else:
                 redacted[clean_key] = redact_native_diagnostics(item, depth + 1)
@@ -5774,14 +6488,73 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "upload_diagnostics",
     "write_runtime_diagnostics",
     "clear_web_cache",
+    "clear_cache",
+    "collect_logs",
+    "collect_adb_diagnostics",
+    "read_latest_android_report",
+    "verify_android_oauth",
+    "export_diagnostics",
+    "open_devtools",
     "reload",
     "hard_reload",
+    "reload_ignore_cache",
+    "restart_app",
+    "screenshot",
     "status",
+    "verify_installed_app",
+    "verify_session",
+}
+
+FRONTIER_OPERATOR_COMMAND_TYPES = {
+    "status",
+    "screenshot",
+    "collect_logs",
+    "collect_adb_diagnostics",
+    "read_latest_android_report",
+    "verify_android_oauth",
+    "reload",
+    "reload_ignore_cache",
+    "clear_cache",
+    "restart_app",
+    "verify_session",
+    "verify_installed_app",
+    "open_devtools",
+    "export_diagnostics",
+}
+
+FRONTIER_OPERATOR_DESTRUCTIVE_COMMANDS = {"clear_cache", "restart_app"}
+
+FRONTIER_OPERATOR_NATIVE_COMMAND = {
+    "status": "status",
+    "screenshot": "screenshot",
+    "collect_logs": "collect_logs",
+    "collect_adb_diagnostics": "collect_adb_diagnostics",
+    "read_latest_android_report": "read_latest_android_report",
+    "verify_android_oauth": "verify_android_oauth",
+    "reload": "reload",
+    "reload_ignore_cache": "reload_ignore_cache",
+    "clear_cache": "clear_cache",
+    "restart_app": "restart_app",
+    "verify_session": "verify_session",
+    "verify_installed_app": "verify_installed_app",
+    "open_devtools": "open_devtools",
+    "export_diagnostics": "export_diagnostics",
 }
 
 
 def native_device_id_from_value(value: Any, fallback: str = "unknown") -> str:
     return safe_state_id(str(value or fallback), fallback)
+
+
+def native_control_operator_actor(handler: WasmAgentHandler, user: dict[str, Any] | None) -> str:
+    if user_is_admin(user):
+        label = str(user.get("email") or user.get("id") or "admin").strip() if isinstance(user, dict) else "admin"
+        return f"admin:{safe_state_id(label, 'admin')}"
+    control_key = os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY", "")
+    header_key = handler.headers.get("X-Wasm-Agent-Native-Control-Key", "")
+    if control_key and hmac.compare_digest(control_key, header_key):
+        return "control-key"
+    return "localhost"
 
 
 def native_control_operator_allowed(handler: WasmAgentHandler, user: dict[str, Any] | None) -> bool:
@@ -5797,6 +6570,21 @@ def native_control_operator_allowed(handler: WasmAgentHandler, user: dict[str, A
     except ValueError:
         return False
     return remote_addr.is_loopback and host in {"127.0.0.1", "localhost", "::1"}
+
+
+def append_native_control_audit(server: WasmAgentServer, event: dict[str, Any]) -> dict[str, Any]:
+    record = {
+        "schema": "hermes.wasm_agent.native_control_audit.v1",
+        "timestamp": iso_timestamp(),
+        **redact_native_diagnostics(event),
+    }
+    root = native_control_dir(server)
+    root.mkdir(parents=True, exist_ok=True)
+    audit_path = root / "audit.jsonl"
+    with audit_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n")
+    write_json_file(root / "latest-audit.json", record)
+    return record
 
 
 def save_native_event(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
@@ -5847,12 +6635,14 @@ def create_native_control_command(
 ) -> dict[str, Any]:
     if not native_control_operator_allowed(handler, user):
         raise BrowserError("native_control_forbidden", "Native control commands require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
+    actor = native_control_operator_actor(handler, user)
     device_id = native_device_id_from_value(body.get("device_id"))
     command_type = clipped_verbatim(str(body.get("type") or body.get("command") or ""), 80)
     if command_type not in NATIVE_CONTROL_COMMAND_TYPES:
         raise BrowserError("invalid_native_control_command", f"Unsupported native control command: {command_type}")
     command_id = safe_state_id(str(body.get("command_id") or f"cmd-{uuid.uuid4().hex[:16]}"), f"cmd-{uuid.uuid4().hex[:16]}")
     payload = redact_native_diagnostics(body.get("payload") if isinstance(body.get("payload"), dict) else {})
+    reason = clipped_verbatim(str(body.get("reason") or payload.get("reason") or ""), 600)
     record = {
         "ok": True,
         "schema": "hermes.wasm_agent.native_control_command.v1",
@@ -5862,9 +6652,19 @@ def create_native_control_command(
         "payload": payload,
         "status": "pending",
         "created_at": iso_timestamp(),
-        "created_by": "admin" if user_is_admin(user) else "localhost",
+        "created_by": actor,
+        "reason": reason,
     }
     write_json_file(native_control_command_path(server, device_id, command_id), record)
+    append_native_control_audit(server, {
+        "action": "command_queued",
+        "actor": actor,
+        "device_id": device_id,
+        "command_id": command_id,
+        "command_type": command_type,
+        "reason": reason,
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+    })
     return {"ok": True, "queued": True, "deviceId": device_id, "command": record}
 
 
@@ -5925,12 +6725,19 @@ def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], ha
         command["finished_at"] = now
         command["result"] = result["result"]
         write_json_file(command_path, command)
+    append_native_control_audit(server, {
+        "action": "command_result",
+        "device_id": device_id,
+        "command_id": command_id,
+        "command_type": clipped_verbatim(str(body.get("command_type") or (command.get("type") if isinstance(command, dict) else "") or "unknown"), 80),
+        "result_ok": bool(result["result"].get("ok")) if isinstance(result.get("result"), dict) else None,
+        "result": result["result"],
+        "remote_addr": result["remote_addr"],
+    })
     return {"ok": True, "stored": True, "deviceId": device_id, "commandId": command_id, "receivedAt": now}
 
 
-def native_control_clients(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
-    if not native_control_operator_allowed(handler, user):
-        raise BrowserError("native_control_forbidden", "Native control clients require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
+def native_control_clients_payload(server: WasmAgentServer) -> dict[str, Any]:
     root = native_control_dir(server)
     clients: list[dict[str, Any]] = []
     for path in sorted((root / "heartbeats").glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:80]:
@@ -5946,6 +6753,12 @@ def native_control_clients(server: WasmAgentServer, handler: WasmAgentHandler, u
                 "latest_event": event_bundle.get("latest") if isinstance(event_bundle, dict) else None,
             })
     return {"ok": True, "clients": clients, "count": len(clients)}
+
+
+def native_control_clients(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    if not native_control_operator_allowed(handler, user):
+        raise BrowserError("native_control_forbidden", "Native control clients require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
+    return native_control_clients_payload(server)
 
 
 def save_native_diagnostics(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
@@ -5981,6 +6794,324 @@ def latest_native_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
     if not isinstance(payload, dict) or not payload:
         return {"ok": True, "available": False, "diagnostics": None}
     return {"ok": True, "available": True, "diagnostics": payload}
+
+
+def latest_native_diagnostics_for_device(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
+    safe_device = native_device_id_from_value(device_id, "")
+    if safe_device:
+        payload = read_json_file(native_diagnostics_dir(server) / f"{safe_device}.json", {})
+        if isinstance(payload, dict) and payload:
+            return payload
+    payload = read_json_file(native_diagnostics_dir(server) / "latest.json", {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def nested_get(payload: Any, keys: list[str], fallback: Any = None) -> Any:
+    current = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return fallback
+        current = current.get(key)
+    return fallback if current is None else current
+
+
+def latest_native_control_result(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
+    root = native_control_dir(server) / "results"
+    candidates: list[Path] = []
+    safe_device = native_device_id_from_value(device_id, "")
+    if safe_device and (root / safe_device).exists():
+        candidates = list((root / safe_device).glob("*.json"))
+    if not candidates and root.exists():
+        candidates = list(root.glob("*/*.json"))
+    if not candidates:
+        return {}
+    latest = max(candidates, key=lambda item: item.stat().st_mtime)
+    payload = read_json_file(latest, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def latest_native_control_command(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
+    root = native_control_dir(server) / "commands"
+    candidates: list[Path] = []
+    safe_device = native_device_id_from_value(device_id, "")
+    if safe_device and (root / safe_device).exists():
+        candidates = list((root / safe_device).glob("*.json"))
+    if not candidates and root.exists():
+        candidates = list(root.glob("*/*.json"))
+    if not candidates:
+        return {}
+    latest = max(candidates, key=lambda item: item.stat().st_mtime)
+    payload = read_json_file(latest, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def native_frontier_failure_classification(diagnostics: dict[str, Any]) -> str:
+    payload = diagnostics.get("payload") if isinstance(diagnostics.get("payload"), dict) else diagnostics
+    runtime = payload.get("runtime_diagnostics") if isinstance(payload, dict) and isinstance(payload.get("runtime_diagnostics"), dict) else payload
+    auth_cookie = nested_get(runtime, ["authCookie"], {})
+    auth_session = nested_get(runtime, ["authSession"], {})
+    fatal = nested_get(payload, ["last_frontend_fatal_error"], None) or nested_get(runtime, ["last_frontend_fatal_error"], None)
+    last_failure = str(nested_get(runtime, ["lastFailureReason"], "") or "")
+    route = str(nested_get(runtime, ["currentRoute"], "") or payload.get("href") or "")
+    if fatal:
+        return "frontend bootstrap crash"
+    if "config_json" in last_failure or "/config.json" in last_failure:
+        return "backend/config discovery failure"
+    if isinstance(auth_cookie, dict) and not auth_cookie.get("hasWaUid"):
+        return "cookie missing"
+    cookie_meta = auth_cookie.get("cookieMeta") if isinstance(auth_cookie, dict) else []
+    first_cookie = cookie_meta[0] if isinstance(cookie_meta, list) and cookie_meta and isinstance(cookie_meta[0], dict) else {}
+    if first_cookie:
+        domain = str(first_cookie.get("domain") or "")
+        if domain and "wa.colmeio.com" not in domain:
+            return "cookie wrong domain"
+    if isinstance(auth_session, dict) and auth_session.get("status") and not auth_session.get("authenticated"):
+        return "cookie wrong partition"
+    if "auth_error" in route or "auth_code" in route:
+        return "Google redirect/code redemption failure"
+    if "frontierReload" in route or "cache" in last_failure.lower():
+        return "cloud asset stale/cache issue"
+    if route and "wa.colmeio.com/home?native=electron" not in route and route.startswith(("file:", "wasm-agent:")):
+        return "native shell issue"
+    if nested_get(runtime, ["appAsarSha256"], "") and not nested_get(runtime, ["buildId"], ""):
+        return "installer packaging issue"
+    return "unknown"
+
+
+def native_frontier_status_payload(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
+    clients_payload = native_control_clients_payload(server)
+    clients = clients_payload.get("clients") if isinstance(clients_payload.get("clients"), list) else []
+    selected_device = native_device_id_from_value(device_id, "")
+    selected_client = None
+    if selected_device:
+        selected_client = next((client for client in clients if client.get("device_id") == selected_device), None)
+    if selected_client is None and clients:
+        selected_client = clients[0]
+        selected_device = str(selected_client.get("device_id") or "")
+    diagnostics = latest_native_diagnostics_for_device(server, selected_device)
+    payload = diagnostics.get("payload") if isinstance(diagnostics.get("payload"), dict) else diagnostics
+    runtime = payload.get("runtime_diagnostics") if isinstance(payload, dict) and isinstance(payload.get("runtime_diagnostics"), dict) else payload
+    heartbeat = selected_client.get("heartbeat") if isinstance(selected_client, dict) and isinstance(selected_client.get("heartbeat"), dict) else {}
+    auth_cookie = nested_get(runtime, ["authCookie"], {})
+    auth_session = nested_get(runtime, ["authSession"], {})
+    fatal = nested_get(payload, ["last_frontend_fatal_error"], None) or nested_get(runtime, ["last_frontend_fatal_error"], None)
+    route = str(nested_get(runtime, ["currentRoute"], "") or heartbeat.get("route") or payload.get("href") or "")
+    app_running = bool(selected_client)
+    cookie_ok = isinstance(auth_cookie, dict) and bool(auth_cookie.get("hasWaUid"))
+    session_ok = isinstance(auth_session, dict) and bool(auth_session.get("authenticated"))
+    frontend_ok = not bool(fatal)
+    native_ok = app_running and route.startswith("https://wa.colmeio.com/")
+    backend_ok = True
+    last_command = latest_native_control_command(server, selected_device)
+    last_result = latest_native_control_result(server, selected_device)
+    last_reload = {}
+    if isinstance(last_command, dict) and last_command.get("type") in {"reload", "hard_reload", "reload_ignore_cache", "clear_cache", "restart_app"}:
+        last_reload = {
+            "commandId": last_command.get("id") or "",
+            "type": last_command.get("type") or "",
+            "createdAt": last_command.get("created_at") or "",
+            "finishedAt": last_command.get("finished_at") or "",
+            "result": last_command.get("result") or {},
+        }
+    classification = native_frontier_failure_classification(diagnostics) if diagnostics else "unknown"
+    if not app_running:
+        recommended = "verify_installed_app"
+    elif not native_ok:
+        recommended = "collect_logs"
+    elif fatal:
+        recommended = "collect_logs"
+    elif not cookie_ok or not session_ok:
+        recommended = "verify_session"
+    elif classification == "cloud asset stale/cache issue":
+        recommended = "reload_ignore_cache"
+    else:
+        recommended = "status"
+    build_ids = {
+        "nativeBuildId": str(heartbeat.get("build_id") or nested_get(runtime, ["buildId"], "") or nested_get(payload, ["build_id"], "")),
+        "nativeAppVersion": str(heartbeat.get("app_version") or nested_get(runtime, ["packageVersion"], "")),
+        "cloudAssetBuildId": str(nested_get(payload, ["cloud_asset_build_id"], "") or PLUGIN_VERSION),
+        "serverVersion": PLUGIN_VERSION,
+    }
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.frontier_status.v1",
+        "generatedAt": iso_timestamp(),
+        "deviceId": selected_device,
+        "appHealth": {"running": app_running, "route": route, "healthy": app_running and native_ok and frontend_ok},
+        "authHealth": {"cookiePresent": cookie_ok, "sessionAuthenticated": session_ok, "healthy": cookie_ok and session_ok},
+        "frontendHealth": {"healthy": frontend_ok, "lastFatalError": fatal},
+        "nativeHealth": {"healthy": native_ok, "heartbeat": heartbeat, "diagnosticsReceivedAt": diagnostics.get("received_at") if isinstance(diagnostics, dict) else ""},
+        "backendHealth": {"healthy": backend_ok, "origin": "https://wa.colmeio.com"},
+        "lastReload": last_reload,
+        "lastFatalError": fatal,
+        "currentBuildIds": build_ids,
+        "failureClassification": classification,
+        "recommendedNextAction": recommended,
+    }
+
+
+def native_frontier_status(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    if not native_control_operator_allowed(handler, user):
+        raise BrowserError("native_frontier_forbidden", "Frontier status requires admin, localhost, or native control-key access.", status=HTTPStatus.FORBIDDEN)
+    query = parse_qs(urlparse(handler.path).query)
+    device_id = str((query.get("device_id") or [""])[0] or "")
+    return native_frontier_status_payload(server, device_id)
+
+
+def native_frontier_bundle_summary(device_id: str, status: dict[str, Any], diagnostics: dict[str, Any]) -> str:
+    lines = [
+        "# WASM Agent Native Diagnostics",
+        "",
+        f"- Generated: {iso_timestamp()}",
+        f"- Device: {device_id or 'latest'}",
+        f"- Route: {status.get('appHealth', {}).get('route', '')}",
+        f"- App health: {status.get('appHealth', {}).get('healthy')}",
+        f"- Auth health: {status.get('authHealth', {}).get('healthy')}",
+        f"- Frontend health: {status.get('frontendHealth', {}).get('healthy')}",
+        f"- Native build: {status.get('currentBuildIds', {}).get('nativeBuildId', '')}",
+        f"- Recommended next action: {status.get('recommendedNextAction', '')}",
+        f"- Failure classification: {status.get('failureClassification', '')}",
+    ]
+    received_at = diagnostics.get("received_at") if isinstance(diagnostics, dict) else ""
+    if received_at:
+        lines.append(f"- Latest diagnostics received: {received_at}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def make_native_diagnostics_bundle_export(server: WasmAgentServer, device_id: str = "", reason: str = "frontier") -> dict[str, Any]:
+    safe_device = native_device_id_from_value(device_id, "latest")
+    root = native_diagnostics_dir(server)
+    timestamp = iso_timestamp().replace(":", "").replace("-", "")
+    bundle_stem = f"wasm-agent-native-diagnostics-{timestamp}-{safe_device}"
+    bundle_dir = root / bundle_stem
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    diagnostics = latest_native_diagnostics_for_device(server, "" if safe_device == "latest" else safe_device)
+    status = native_frontier_status_payload(server, "" if safe_device == "latest" else safe_device)
+    bundle = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_diagnostics_bundle.v1",
+        "generated_at": iso_timestamp(),
+        "reason": clipped_verbatim(reason, 600),
+        "device_id": safe_device,
+        "status": status,
+        "diagnostics": diagnostics,
+        "native_control": {
+            "latest_command": latest_native_control_command(server, "" if safe_device == "latest" else safe_device),
+            "latest_result": latest_native_control_result(server, "" if safe_device == "latest" else safe_device),
+            "clients": native_control_clients_payload(server),
+            "latest_audit": read_json_file(native_control_dir(server) / "latest-audit.json", {}),
+        },
+        "native_events": read_json_file(native_events_dir(server) / f"{safe_device}.json", {}) if safe_device != "latest" else read_json_file(native_events_dir(server) / "latest.json", {}),
+    }
+    summary = native_frontier_bundle_summary(safe_device, status, diagnostics)
+    bundle_path = bundle_dir / "bundle.json"
+    summary_path = bundle_dir / "SUMMARY.md"
+    write_json_file(bundle_path, bundle)
+    summary_path.write_text(summary, encoding="utf-8")
+    zip_path = root / f"{bundle_stem}.zip"
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(bundle_path, "bundle.json")
+        archive.write(summary_path, "SUMMARY.md")
+    exported = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_diagnostics_export.v1",
+        "deviceId": safe_device,
+        "reason": clipped_verbatim(reason, 600),
+        "generatedAt": bundle["generated_at"],
+        "bundleDir": str(bundle_dir),
+        "bundleJson": str(bundle_path),
+        "summaryPath": str(summary_path),
+        "zipPath": str(zip_path),
+        "summary": summary,
+    }
+    write_json_file(root / "latest-export.json", exported)
+    return exported
+
+
+def frontier_command_targets(server: WasmAgentServer, body: dict[str, Any]) -> list[str]:
+    target = body.get("target") if isinstance(body.get("target"), dict) else {}
+    raw_ids: list[Any] = []
+    for key in ("device_id", "deviceId"):
+        if body.get(key):
+            raw_ids.append(body.get(key))
+        if target.get(key):
+            raw_ids.append(target.get(key))
+    for key in ("device_ids", "deviceIds"):
+        values = body.get(key)
+        if isinstance(values, list):
+            raw_ids.extend(values)
+        values = target.get(key)
+        if isinstance(values, list):
+            raw_ids.extend(values)
+    cohort = body.get("cohort") if isinstance(body.get("cohort"), dict) else target.get("cohort") if isinstance(target.get("cohort"), dict) else {}
+    if cohort and body.get("allow_cohort") is True:
+        build_id = str(cohort.get("build_id") or cohort.get("buildId") or "")
+        route_contains = str(cohort.get("route_contains") or cohort.get("routeContains") or "")
+        for client in native_control_clients_payload(server).get("clients", []):
+            heartbeat = client.get("heartbeat") if isinstance(client.get("heartbeat"), dict) else {}
+            if build_id and str(heartbeat.get("build_id") or "") != build_id:
+                continue
+            if route_contains and route_contains not in str(heartbeat.get("route") or ""):
+                continue
+            raw_ids.append(client.get("device_id"))
+    targets: list[str] = []
+    for value in raw_ids:
+        device_id = native_device_id_from_value(value, "")
+        if device_id and device_id not in targets:
+            targets.append(device_id)
+    return targets[:25]
+
+
+def create_frontier_native_command(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not native_control_operator_allowed(handler, user):
+        raise BrowserError("native_frontier_forbidden", "Frontier commands require admin, localhost, or native control-key access.", status=HTTPStatus.FORBIDDEN)
+    if not isinstance(body, dict):
+        raise BrowserError("invalid_frontier_command", "Frontier command payload must be an object.")
+    command = clipped_verbatim(str(body.get("command") or body.get("type") or ""), 80)
+    if command not in FRONTIER_OPERATOR_COMMAND_TYPES:
+        raise BrowserError("invalid_frontier_command", f"Unsupported Frontier command: {command}")
+    if command in FRONTIER_OPERATOR_DESTRUCTIVE_COMMANDS:
+        enabled = body.get("enable_destructive") is True or handler.headers.get("X-Wasm-Agent-Destructive-Allowed", "") == "1"
+        if not enabled:
+            raise BrowserError("frontier_destructive_command_disabled", f"{command} requires enable_destructive=true.", status=HTTPStatus.FORBIDDEN)
+    targets = frontier_command_targets(server, body)
+    if not targets:
+        raise BrowserError("frontier_target_required", "Frontier commands require an explicit device_id, device_ids, or allow_cohort=true target.")
+    reason = clipped_verbatim(str(body.get("reason") or ""), 600)
+    payload = redact_native_diagnostics(body.get("payload") if isinstance(body.get("payload"), dict) else {})
+    native_type = FRONTIER_OPERATOR_NATIVE_COMMAND[command]
+    queued = []
+    for device_id in targets:
+        queued.append(create_native_control_command(server, {
+            "device_id": device_id,
+            "command_id": body.get("command_id") or body.get("commandId") or f"frontier-{uuid.uuid4().hex[:16]}",
+            "type": native_type,
+            "reason": reason,
+            "payload": {
+                **(payload if isinstance(payload, dict) else {}),
+                "frontier_command": command,
+                "reason": reason,
+                "requested_by": native_control_operator_actor(handler, user),
+            },
+        }, handler, user)["command"])
+    export = None
+    if command in {"collect_logs", "export_diagnostics"}:
+        export = make_native_diagnostics_bundle_export(server, targets[0], reason or command)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.frontier_command_result.v1",
+        "command": command,
+        "nativeCommand": native_type,
+        "queued": queued,
+        "queuedCount": len(queued),
+        "export": export,
+    }
 
 
 def resolve_native_installer(
@@ -6043,6 +7174,8 @@ def serve_native_installer_download(handler: WasmAgentHandler, user: dict[str, A
     if not artifact:
         raise BrowserError("native_installer_missing", "Native installer not built yet.", status=HTTPStatus.NOT_FOUND)
     content_type = mimetypes.guess_type(str(artifact))[0] or "application/octet-stream"
+    if platform == "android":
+        content_type = "application/vnd.android.package-archive"
     download_filename = native_installer_download_filename(artifact, platform)
     metadata = native_installer_metadata(artifact, platform)
     size = artifact.stat().st_size
@@ -6616,7 +7749,8 @@ Chrome.
 - Windows: extract the ZIP, then run `windows/install.cmd`; it downloads the
   pinned Electron runtime, installs `WASM Agent.exe`, and creates Start
   Menu/Desktop shortcuts for that executable.
-- Android: use `android/README.md` until the APK builder/signing lane is added.
+- Android: use Home `Go Native` or `/native/download?platform=android&arch=arm64`
+  when `native/android/release/WASM-Agent-arm64.apk` is present.
 - iOS: use `ios/README.md` until the IPA/TestFlight lane is added.
 
 The screen-off `hi wasm` standby path still requires a real native companion
@@ -6666,10 +7800,12 @@ def create_native_download_bundle(
 """
     android_readme = """# Android
 
-The generated desktop wrappers are in this ZIP. A real Android installable
-requires an APK/AAB build and signing lane. The intended implementation is a
-native companion or Trusted Web Activity that opens the app URL, registers the
-device, and owns foreground-service wake/transcription behavior.
+The primary Android installable is the APK served by Home Go Native through
+`/native/resolve` and `/native/download` when
+`native/android/release/WASM-Agent-arm64.apk` or
+`native/android/release/WASM-Agent-universal.apk` exists. Build it with
+`horc build android-apk`. This legacy ZIP keeps only compatibility notes; it is
+not the primary Android product download.
 """
     ios_readme = """# iOS
 
@@ -10202,6 +11338,8 @@ def is_public_request(method: str, path: str) -> bool:
     if method == "GET":
         if path == "/native/download":
             return True
+        if path == "/.well-known/assetlinks.json":
+            return True
         if path in {
             "/",
             "/home",
@@ -10231,8 +11369,14 @@ def is_public_request(method: str, path: str) -> bool:
             "/config.json",
             "/auth/session",
             "/native/diagnostics/latest",
+            "/native/debug",
             "/native/control/poll",
             "/native/control/clients",
+            "/native/android/auth/poll",
+            "/native/android/auth/start",
+            "/native/android/auth/debug",
+            "/native/android/auth/return",
+            "/native/frontier/status",
             "/auth/google/callback",
         }:
             return True
@@ -10250,6 +11394,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/native/diagnostics",
             "/native/events",
             "/native/control/command",
+            "/native/frontier/command",
             "/native/control/result",
         }
     if method == "HEAD":
@@ -10408,7 +11553,7 @@ def verify_google_id_token(credential: str, client_id: str) -> dict[str, Any]:
 
 
 def google_auth_login(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
-    claims = verify_google_id_token(str(body.get("credential") or "").strip(), google_client_id())
+    claims = verify_google_id_token(str(body.get("credential") or body.get("id_token") or "").strip(), google_client_id())
     now = int(time.time())
     provider_sub = str(claims.get("sub") or "").strip()
     email = str(claims.get("email") or "").strip().lower()

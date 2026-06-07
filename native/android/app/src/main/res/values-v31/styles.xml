@@ -1,0 +1,16 @@
+<resources>
+  <style name="AppTheme" parent="android:style/Theme.Material.NoActionBar">
+    <item name="android:fontFamily">sans</item>
+    <item name="android:windowNoTitle">true</item>
+    <item name="android:windowActionBar">false</item>
+    <item name="android:windowBackground">@color/wasm_agent_shell_bg</item>
+    <item name="android:colorAccent">@color/wasm_agent_accent</item>
+    <item name="android:statusBarColor">@color/wasm_agent_shell_bg</item>
+    <item name="android:navigationBarColor">@color/wasm_agent_shell_bg</item>
+    <item name="android:windowLightStatusBar">false</item>
+    <item name="android:windowLightNavigationBar">false</item>
+    <item name="android:windowSplashScreenBackground">@color/wasm_agent_shell_bg</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+    <item name="android:windowSplashScreenIconBackgroundColor">@color/wasm_agent_panel</item>
+  </style>
+</resources>

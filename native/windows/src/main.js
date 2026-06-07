@@ -3,6 +3,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
+const { execFile, spawn } = require("child_process");
 const {
   APP_ID,
   DEFAULT_SERVER_URL,
@@ -21,10 +22,21 @@ const {
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NATIVE_CONTROL_POLL_INTERVAL_MS = 15_000;
+const AUTH_COOKIE_WAIT_TIMEOUT_MS = 5000;
+const AUTH_COOKIE_WAIT_INTERVAL_MS = 200;
 const NATIVE_APP_ORIGIN = "wasm-agent://app";
 const NATIVE_APP_HOME_URL = `${NATIVE_APP_ORIGIN}/home`;
+const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
+  "adb_version",
+  "adb_devices",
+  "verify_android_oauth",
+  "read_latest_android_report",
+  "open_latest_android_report",
+]);
 let selectedBackendOrigin = "";
 let nativeControlPollBusy = false;
+let lastReloadCommand = null;
+let activeAndroidOAuthVerification = null;
 const startupDiagnostics = {
   appRoot: "",
   resourcesPath: "",
@@ -246,8 +258,13 @@ function productionSafeServerUrl(value, fallback = DEFAULT_SERVER_URL, source = 
 }
 
 function logNativeDiagnostic(kind, payload = {}) {
-  const entry = { kind, ...payload };
+  const entry = { timestamp: new Date().toISOString(), kind, ...sanitizeRendererDiagnosticValue(payload) };
+  appendJsonLine(nativeMainLogPath(), entry);
   console.log(`[wasm-agent:native] ${kind} ${JSON.stringify(entry)}`);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function writeConfig(next) {
@@ -290,6 +307,861 @@ function appAsarFingerprint() {
   }
 }
 
+function nativeAppDataDir() {
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(localAppData, "WASM Agent Native");
+}
+
+function nativeMainLogPath() {
+  return path.join(nativeAppDataDir(), "main.log");
+}
+
+function rendererConsoleDiagnosticsPath() {
+  return path.join(nativeAppDataDir(), "renderer-console.log");
+}
+
+function nativeControlAuditPath() {
+  return path.join(nativeAppDataDir(), "native-control-audit.log");
+}
+
+function nativeFatalDiagnosticsPath() {
+  return path.join(nativeAppDataDir(), "fatal-diagnostics.log");
+}
+
+function nativeDiagnosticsBundleRoot() {
+  return path.join(nativeAppDataDir(), "native-diagnostics");
+}
+
+function appendJsonLine(filePath, payload = {}) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`);
+  } catch {
+    // Diagnostics must not interfere with app startup or command execution.
+  }
+}
+
+function timestampForFilename() {
+  return new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function writeNativeControlAudit(event = {}) {
+  const entry = {
+    schema: "hermes.wasm_agent.native_control_local_audit.v1",
+    timestamp: new Date().toISOString(),
+    ...sanitizeRendererDiagnosticValue(event),
+  };
+  appendJsonLine(nativeControlAuditPath(), entry);
+  return entry;
+}
+
+function execFileBounded(command, args = [], options = {}) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    execFile(command, args, {
+      timeout: Number(options.timeoutMs || 8000),
+      maxBuffer: Number(options.maxBuffer || 512 * 1024),
+      cwd: options.cwd || undefined,
+      env: options.env || process.env,
+      windowsHide: true,
+    }, (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        command: [command, ...args].join(" "),
+        exitCode: typeof error?.code === "number" ? error.code : error ? 1 : 0,
+        signal: error?.signal || "",
+        timedOut: Boolean(error?.killed),
+        elapsedMs: Date.now() - startedAt,
+        stdout: clipDiagnosticText(stdout),
+        stderr: clipDiagnosticText(stderr),
+        error: error ? redactSensitiveText(String(error.message || error)) : "",
+      });
+    });
+  });
+}
+
+function redactSensitiveText(value) {
+  return String(value || "")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[redacted]")
+    .replace(/\b(ya29\.[A-Za-z0-9._-]+)/g, "[redacted-token]")
+    .replace(/\b(eyJ[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+)\b/g, "[redacted-token]")
+    .replace(/((?:^|[?&#\s"'])(?:id_token|access_token|refresh_token|credential|auth_code|code|state|nonce|session|android_auth_session|native_correlation_id)=)[^&#\s"'<>)]*/gi, "$1[redacted]")
+    .replace(/\b((?:Cookie|Set-Cookie|Authorization):\s*)[^\r\n]+/gi, "$1[redacted]");
+}
+
+function clipDiagnosticText(value, maxLength = 120_000) {
+  const text = redactSensitiveText(value);
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, 2000)}\n...[clipped ${text.length - maxLength} chars]...\n${text.slice(-maxLength)}`;
+}
+
+function filterDiagnosticLines(text, pattern, maxLines = 300) {
+  const regex = pattern instanceof RegExp ? pattern : /./;
+  return String(text || "")
+    .split(/\r?\n/)
+    .filter((line) => regex.test(line))
+    .slice(-maxLines)
+    .join("\n");
+}
+
+async function findAdbExecutable() {
+  const explicit = String(process.env.WASM_AGENT_ADB_PATH || "").trim();
+  const candidates = [];
+  if (explicit) candidates.push(explicit);
+  try {
+    const where = await execFileBounded(process.platform === "win32" ? "where.exe" : "which", ["adb"], { timeoutMs: 3000, maxBuffer: 64 * 1024 });
+    if (where.ok) {
+      String(where.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => candidates.push(line));
+    }
+  } catch {
+    // Fall through to common paths.
+  }
+  candidates.push(
+    path.join(os.homedir(), "Downloads", "platform-tools-latest-windows", "platform-tools", "adb.exe"),
+    path.join(os.homedir(), "AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"),
+    "adb",
+  );
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (candidate === "adb") return candidate;
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Ignore inaccessible paths.
+    }
+  }
+  return "adb";
+}
+
+async function runAdbDiagnosticCommand(adbPath, args, options = {}) {
+  const result = await execFileBounded(adbPath, args, {
+    timeoutMs: options.timeoutMs || 8000,
+    maxBuffer: options.maxBuffer || 1024 * 1024,
+  });
+  return sanitizeRendererDiagnosticValue(result);
+}
+
+async function collectAdbDiagnostics(options = {}) {
+  const generatedAt = new Date().toISOString();
+  const adbPath = await findAdbExecutable();
+  const commandResults = {};
+  commandResults.version = await runAdbDiagnosticCommand(adbPath, ["version"], { timeoutMs: 4000, maxBuffer: 128 * 1024 });
+  commandResults.devices = await runAdbDiagnosticCommand(adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const hasDevice = /\bdevice\b/.test(commandResults.devices?.stdout || "");
+  if (hasDevice) {
+    commandResults.packageWasmAgent = await runAdbDiagnosticCommand(adbPath, ["shell", "dumpsys", "package", "com.colmeio.wasmagent"], { timeoutMs: 8000 });
+    commandResults.activity = await runAdbDiagnosticCommand(adbPath, ["shell", "dumpsys", "activity", "activities"], { timeoutMs: 8000, maxBuffer: 2 * 1024 * 1024 });
+    commandResults.window = await runAdbDiagnosticCommand(adbPath, ["shell", "dumpsys", "window"], { timeoutMs: 8000, maxBuffer: 1024 * 1024 });
+    commandResults.packages = await runAdbDiagnosticCommand(adbPath, ["shell", "pm", "list", "packages"], { timeoutMs: 8000, maxBuffer: 512 * 1024 });
+    commandResults.logcat = await runAdbDiagnosticCommand(adbPath, ["logcat", "-d", "-v", "time"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  }
+  const interestingLogPattern = /com\.colmeio\.wasmagent|wasmagent|WASM Agent|wa\.colmeio\.com|android-auth-return|native\/android\/auth|accounts\.google\.com|ActivityTaskManager|START u0|ChromeTabbedActivity|webapk|MIUILOG|Permission Denied/i;
+  const activityPattern = /mResumedActivity|mFocusedRootTask|Hist #|Intent|dat=|cmp=com\.colmeio|cmp=com\.android\.chrome|webapk|wa\.colmeio|android-auth-return/i;
+  const packagePattern = /android-auth-return|wasm-agent|intent|VIEW|BROWSABLE|com\.colmeio\.wasmagent/i;
+  const payload = {
+    schema: "hermes.wasm_agent.windows_adb_diagnostics.v1",
+    generated_at: generatedAt,
+    reason: String(options.reason || "collect_adb_diagnostics").slice(0, 160),
+    platform: "windows",
+    device_bridge: "adb",
+    adbPath,
+    hasDevice,
+    commands: commandResults,
+    filtered: {
+      logcat: filterDiagnosticLines(commandResults.logcat?.stdout || "", interestingLogPattern, 300),
+      activity: filterDiagnosticLines(commandResults.activity?.stdout || "", activityPattern, 180),
+      packageWasmAgent: filterDiagnosticLines(commandResults.packageWasmAgent?.stdout || "", packagePattern, 220),
+      webApkPackages: filterDiagnosticLines(commandResults.packages?.stdout || "", /webapk|colmeio|wasm/i, 120),
+    },
+  };
+  const bundleDir = path.join(nativeDiagnosticsBundleRoot(), `adb-${timestampForFilename()}`);
+  fs.mkdirSync(bundleDir, { recursive: true });
+  const bundlePath = path.join(bundleDir, "adb-diagnostics.json");
+  const summaryPath = path.join(bundleDir, "SUMMARY.md");
+  fs.writeFileSync(bundlePath, `${JSON.stringify(payload, null, 2)}\n`);
+  fs.writeFileSync(summaryPath, [
+    "# WASM Agent ADB Diagnostics",
+    "",
+    `- Generated: ${generatedAt}`,
+    `- ADB path: ${adbPath}`,
+    `- Device detected: ${hasDevice}`,
+    `- Reason: ${payload.reason}`,
+    "",
+    "## Filtered Logcat",
+    "",
+    "```text",
+    payload.filtered.logcat || "",
+    "```",
+    "",
+  ].join("\n"));
+  return { ok: true, bundlePath, summaryPath, payload };
+}
+
+function windowsAndroidOAuthStatePath() {
+  return path.join(nativeAppDataDir(), "android-oauth-verification-state.json");
+}
+
+function readWindowsAndroidOAuthState() {
+  return readJsonFile(windowsAndroidOAuthStatePath(), {});
+}
+
+function writeWindowsAndroidOAuthState(update = {}) {
+  const current = readWindowsAndroidOAuthState();
+  const next = {
+    schema: "hermes.wasm_agent.windows_android_oauth_verification.v1",
+    ...current,
+    ...sanitizeRendererDiagnosticValue(update),
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    fs.mkdirSync(path.dirname(windowsAndroidOAuthStatePath()), { recursive: true });
+    fs.writeFileSync(windowsAndroidOAuthStatePath(), `${JSON.stringify(next, null, 2)}\n`);
+  } catch {
+    // The UI still receives live status events if persistence fails.
+  }
+  return next;
+}
+
+function emitWindowsDiagnosticEvent(sender, event = {}) {
+  const payload = sanitizeRendererDiagnosticValue({
+    schema: "hermes.wasm_agent.windows_native_diagnostics_event.v1",
+    timestamp: new Date().toISOString(),
+    ...event,
+  });
+  try {
+    sender.send("wasm-agent:native-diagnostics-event", payload);
+  } catch {
+    // Renderer may have navigated while an operation was running.
+  }
+  return payload;
+}
+
+function commandLineDisplay(command, args = []) {
+  return [command, ...args].join(" ");
+}
+
+function windowsCommandArg(value) {
+  const text = String(value || "");
+  if (/^[A-Za-z0-9_./:=+-]+$/.test(text)) return text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function spawnInvocation(command, args = []) {
+  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", [windowsCommandArg(command), ...args.map(windowsCommandArg)].join(" ")],
+    };
+  }
+  return { command, args };
+}
+
+function spawnStreamingCommand(sender, opId, operation, command, args = [], options = {}) {
+  return new Promise((resolve) => {
+    const startedAt = new Date().toISOString();
+    const startedMs = Date.now();
+    const displayCommand = options.displayCommand || commandLineDisplay(path.basename(command), args);
+    const invocation = spawnInvocation(command, args);
+    let stdout = "";
+    let stderr = "";
+    let finished = false;
+    let timeout = 0;
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      if (timeout) clearTimeout(timeout);
+      const payload = {
+        ok: result.exitCode === 0 && !result.error,
+        operation,
+        opId,
+        command: displayCommand,
+        exitCode: Number.isFinite(result.exitCode) ? result.exitCode : 1,
+        signal: result.signal || "",
+        timedOut: Boolean(result.timedOut),
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        elapsedMs: Date.now() - startedMs,
+        stdout: clipDiagnosticText(stdout, 256 * 1024),
+        stderr: clipDiagnosticText(stderr, 256 * 1024),
+        error: result.error || "",
+      };
+      writeNativeControlAudit({ action: "local_diagnostics_command_finished", operation, opId, result: sanitizeRendererDiagnosticValue(payload) });
+      emitWindowsDiagnosticEvent(sender, { type: "command_finished", operation, opId, result: sanitizeRendererDiagnosticValue(payload) });
+      resolve(payload);
+    };
+    writeNativeControlAudit({ action: "local_diagnostics_command_started", operation, opId, command: displayCommand, startedAt });
+    emitWindowsDiagnosticEvent(sender, { type: "command_started", operation, opId, command: displayCommand, startedAt });
+    let child = null;
+    try {
+      child = spawn(invocation.command, invocation.args, {
+        cwd: options.cwd || undefined,
+        env: options.env || process.env,
+        windowsHide: true,
+        shell: false,
+      });
+    } catch (error) {
+      finish({ exitCode: 1, error: redactSensitiveText(String(error && error.message ? error.message : error)) });
+      return;
+    }
+    child.stdout?.on("data", (chunk) => {
+      const text = clipDiagnosticText(chunk.toString("utf8"), 64 * 1024);
+      stdout = clipDiagnosticText(`${stdout}${text}`, 256 * 1024);
+      emitWindowsDiagnosticEvent(sender, { type: "stdout", operation, opId, text });
+    });
+    child.stderr?.on("data", (chunk) => {
+      const text = clipDiagnosticText(chunk.toString("utf8"), 64 * 1024);
+      stderr = clipDiagnosticText(`${stderr}${text}`, 256 * 1024);
+      emitWindowsDiagnosticEvent(sender, { type: "stderr", operation, opId, text });
+    });
+    child.on("error", (error) => {
+      finish({ exitCode: 1, error: redactSensitiveText(String(error && error.message ? error.message : error)) });
+    });
+    child.on("close", (exitCode, signal) => {
+      finish({ exitCode: Number(exitCode || 0), signal: signal || "" });
+    });
+    const timeoutMs = Number(options.timeoutMs || 15 * 60 * 1000);
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {
+          // Process may have already exited.
+        }
+        finish({ exitCode: 1, timedOut: true, error: `timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+      timeout.unref?.();
+    }
+  });
+}
+
+async function findCommandExecutable(commandName, envName, commonPaths = []) {
+  const explicit = String(process.env[envName] || "").trim();
+  const candidates = [];
+  if (explicit) candidates.push(explicit);
+  const lookup = process.platform === "win32"
+    ? await execFileBounded("where.exe", [commandName], { timeoutMs: 3000, maxBuffer: 64 * 1024 })
+    : await execFileBounded("which", [commandName], { timeoutMs: 3000, maxBuffer: 64 * 1024 });
+  if (lookup.ok) {
+    String(lookup.stdout || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean).forEach((line) => candidates.push(line));
+  }
+  candidates.push(...commonPaths, commandName);
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    if (candidate === commandName) return candidate;
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // Ignore inaccessible candidates.
+    }
+  }
+  return commandName;
+}
+
+async function findWindowsAdbExecutable() {
+  return findCommandExecutable("adb", "WASM_AGENT_ADB_PATH", [
+    path.join(os.homedir(), "AppData", "Local", "Android", "Sdk", "platform-tools", "adb.exe"),
+    path.join(os.homedir(), "Downloads", "platform-tools", "adb.exe"),
+    path.join(os.homedir(), "Downloads", "platform-tools-latest-windows", "platform-tools", "adb.exe"),
+  ]);
+}
+
+async function findHorcExecutable() {
+  const explicit = String(process.env.WASM_AGENT_HORC_PATH || "").trim();
+  const resolved = await findCommandExecutable("horc", "WASM_AGENT_HORC_PATH", []);
+  if (resolved === "horc" && !explicit) return "";
+  return resolved;
+}
+
+function fileExists(filePath = "") {
+  try {
+    return Boolean(filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile());
+  } catch {
+    return false;
+  }
+}
+
+function resourcePath(...segments) {
+  return path.join(process.resourcesPath || "", ...segments);
+}
+
+function bundledHorcRunnerPath() {
+  return resourcePath("horc", "horc-local.js");
+}
+
+function bundledAndroidApkPath() {
+  return resourcePath("android", "WASM-Agent-arm64.apk");
+}
+
+function bundledAndroidApkDefaultsPath() {
+  return resourcePath("android", "WASM-Agent-arm64.native-defaults.json");
+}
+
+function androidSimulatorStateRoot() {
+  try {
+    return path.join(app.getPath("userData"), "native-diagnostics", "android-oauth-verifier");
+  } catch {
+    return path.join(os.tmpdir(), "wasm-agent-android-oauth-verifier");
+  }
+}
+
+function ensureAndroidSimulatorStateRoot() {
+  const root = androidSimulatorStateRoot();
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+async function resolveLocalHorcRunner() {
+  const bundledRunner = bundledHorcRunnerPath();
+  if (fileExists(bundledRunner)) {
+    return {
+      ok: true,
+      source: "bundled",
+      command: process.execPath,
+      argsPrefix: [bundledRunner],
+      cwd: path.dirname(bundledRunner),
+      usesElectronRunAsNode: true,
+      runnerPath: bundledRunner,
+      displayName: "bundled-horc",
+    };
+  }
+
+  const horcRoot = resolveHorcWorkingDirectory();
+  const devRunner = path.join(horcRoot, "tools", "horc-local", "horc-local.js");
+  if (allowLocalDevCandidates() && fileExists(devRunner)) {
+    return {
+      ok: true,
+      source: "dev-local",
+      command: process.execPath,
+      argsPrefix: [devRunner],
+      cwd: path.dirname(devRunner),
+      usesElectronRunAsNode: true,
+      runnerPath: devRunner,
+      displayName: "dev-horc-local",
+    };
+  }
+
+  if (allowLocalDevCandidates()) {
+    const pathHorc = await findHorcExecutable();
+    if (pathHorc) {
+      return {
+        ok: true,
+        source: "path",
+        command: pathHorc,
+        argsPrefix: [],
+        cwd: horcRoot,
+        usesElectronRunAsNode: false,
+        runnerPath: pathHorc,
+        displayName: "path-horc",
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    source: "missing",
+    error: "bundled_horc_runner_missing",
+    runnerPath: bundledRunner,
+    message: allowLocalDevCandidates()
+      ? "Bundled/dev horc runner was not found, and no PATH horc fallback is available."
+      : "The installed Windows app is missing its bundled Android verifier. Update WASM Agent and try again.",
+  };
+}
+
+function androidSimulatorEnvironment(adbPath = "", runner = {}) {
+  const rootDir = ensureAndroidSimulatorStateRoot();
+  const apkPath = fileExists(bundledAndroidApkPath())
+    ? bundledAndroidApkPath()
+    : String(process.env.WASM_AGENT_ANDROID_APK || process.env.WASM_AGENT_SIM_ANDROID_APK || "");
+  const env = {
+    ...process.env,
+    WASM_AGENT_SIM_ROOT_DIR: rootDir,
+    WASM_AGENT_SIM_URL: selectedBackendOrigin || DEFAULT_SERVER_URL,
+  };
+  if (adbPath) env.WASM_AGENT_SIM_ADB = adbPath;
+  if (apkPath) env.WASM_AGENT_ANDROID_APK = apkPath;
+  if (runner.usesElectronRunAsNode) env.ELECTRON_RUN_AS_NODE = "1";
+  return {
+    env,
+    rootDir,
+    apkPath,
+    apkDefaultsPath: fileExists(bundledAndroidApkDefaultsPath()) ? bundledAndroidApkDefaultsPath() : "",
+  };
+}
+
+function looksLikeHorcRoot(candidate) {
+  try {
+    return Boolean(candidate && fs.existsSync(path.join(candidate, "tools", "app-simulator", "simulate.js")));
+  } catch {
+    return false;
+  }
+}
+
+function resolveHorcWorkingDirectory() {
+  const candidates = [
+    process.env.WASM_AGENT_HORC_ROOT,
+    process.env.HERMES_ORCHESTRATOR_ROOT,
+    process.env.HORC_ROOT,
+    process.cwd(),
+    path.resolve(__dirname, "..", "..", ".."),
+    path.join(os.homedir(), "hermes-orchestrator"),
+    path.join(os.homedir(), "local"),
+    "/local",
+  ].filter(Boolean);
+  return candidates.find(looksLikeHorcRoot) || process.cwd();
+}
+
+function parseAdbDevices(stdout = "") {
+  return String(stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^List of devices attached/i.test(line))
+    .map((line) => {
+      const match = line.match(/^(\S+)\s+(\S+)(?:\s+(.*))?$/);
+      if (!match) return null;
+      return { serial: match[1], state: match[2], detail: match[3] || "" };
+    })
+    .filter(Boolean);
+}
+
+function classifyAdbDevices(stdout = "") {
+  const devices = parseAdbDevices(stdout);
+  const authorized = devices.filter((device) => device.state === "device");
+  const unauthorized = devices.filter((device) => device.state === "unauthorized");
+  const offline = devices.filter((device) => device.state === "offline");
+  const status = authorized.length
+    ? "device_authorized"
+    : unauthorized.length
+      ? "unauthorized"
+      : offline.length
+        ? "offline"
+        : "waiting_for_phone";
+  return {
+    status,
+    devices,
+    authorizedCount: authorized.length,
+    unauthorizedCount: unauthorized.length,
+    offlineCount: offline.length,
+    hasAuthorizedDevice: authorized.length > 0,
+  };
+}
+
+function adbMissingInstructions() {
+  return "Install Android SDK Platform Tools, add platform-tools to PATH, then restart WASM Agent.";
+}
+
+function isAdbMissingResult(result = {}) {
+  return !result.ok && /ENOENT|not recognized|cannot find|not found|where\.exe.*adb/i.test(`${result.stderr || ""}\n${result.error || ""}`);
+}
+
+async function runWindowsDiagnosticExec(sender, opId, operation, command, args = [], options = {}) {
+  const startedAt = new Date().toISOString();
+  const displayCommand = commandLineDisplay(path.basename(command), args);
+  writeNativeControlAudit({ action: "local_diagnostics_command_started", operation, opId, command: displayCommand, startedAt });
+  emitWindowsDiagnosticEvent(sender, { type: "command_started", operation, opId, command: displayCommand, startedAt });
+  const result = sanitizeRendererDiagnosticValue(await execFileBounded(command, args, options));
+  writeNativeControlAudit({ action: "local_diagnostics_command_finished", operation, opId, result });
+  emitWindowsDiagnosticEvent(sender, { type: "command_finished", operation, opId, result });
+  return result;
+}
+
+async function runAdbVersionDiagnostics(sender, opId) {
+  emitWindowsDiagnosticEvent(sender, { type: "status", operation: "adb_version", opId, status: "checking_adb", label: "checking adb" });
+  const adbPath = await findWindowsAdbExecutable();
+  const result = await runWindowsDiagnosticExec(sender, opId, "adb_version", adbPath, ["version"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  if (isAdbMissingResult(result)) {
+    emitWindowsDiagnosticEvent(sender, {
+      type: "status",
+      operation: "adb_version",
+      opId,
+      status: "adb_missing",
+      label: "adb missing",
+      message: adbMissingInstructions(),
+    });
+  }
+  return { ...result, adbPath, adbMissing: isAdbMissingResult(result), instructions: isAdbMissingResult(result) ? adbMissingInstructions() : "" };
+}
+
+async function runAdbDevicesDiagnostics(sender, opId, adbPath = "") {
+  const resolvedAdbPath = adbPath || await findWindowsAdbExecutable();
+  emitWindowsDiagnosticEvent(sender, { type: "status", operation: "adb_devices", opId, status: "waiting_for_phone", label: "waiting for phone" });
+  const result = await runWindowsDiagnosticExec(sender, opId, "adb_devices", resolvedAdbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const devices = classifyAdbDevices(result.stdout || "");
+  const label = devices.status === "device_authorized"
+    ? "device authorized"
+    : devices.status === "unauthorized"
+      ? "unauthorized: unlock phone and tap Allow"
+      : devices.status === "offline"
+        ? "phone offline"
+        : "waiting for phone";
+  emitWindowsDiagnosticEvent(sender, {
+    type: "status",
+    operation: "adb_devices",
+    opId,
+    status: devices.status,
+    label,
+    message: devices.status === "unauthorized" ? "Unlock your phone and tap Allow USB debugging." : "",
+    devices,
+  });
+  return { ...result, adbPath: resolvedAdbPath, devices };
+}
+
+function reportDirFromPath(value = "") {
+  const input = String(value || "").trim().replace(/^file:\/+/i, "");
+  if (!input) return "";
+  try {
+    const stat = fs.statSync(input);
+    if (stat.isDirectory()) return input;
+    return path.dirname(input);
+  } catch {
+    if (/[\\/]result\.json$|[\\/]summary\.md$/i.test(input)) return path.dirname(input);
+    return input;
+  }
+}
+
+function parseReportPathFromOutput(output = "") {
+  const match = String(output || "").match(/^\s*report:\s*(.+?)\s*$/im);
+  return match ? reportDirFromPath(match[1]) : "";
+}
+
+function latestAndroidReportCandidateDirs(preferredPath = "") {
+  const state = readWindowsAndroidOAuthState();
+  const horcRoot = resolveHorcWorkingDirectory();
+  const simulatorRoot = androidSimulatorStateRoot();
+  return [
+    reportDirFromPath(preferredPath),
+    reportDirFromPath(state.latestReportDir || state.latestReportPath || ""),
+    reportDirFromPath(process.env.WASM_AGENT_ANDROID_SIM_REPORT_DIR || ""),
+    path.join(simulatorRoot, "reports", "sim", "android", "latest"),
+    path.join(horcRoot, "reports", "sim", "android", "latest"),
+    path.join(process.cwd(), "reports", "sim", "android", "latest"),
+    "/local/reports/sim/android/latest",
+  ].filter(Boolean);
+}
+
+function reportStatusFrom(summary = "", result = {}) {
+  const resultStatus = String(result.status || "").trim().toLowerCase();
+  if (resultStatus) return resultStatus;
+  const match = String(summary || "").match(/-\s*Status:\s*([A-Z]+)/i);
+  return match ? match[1].toLowerCase() : "";
+}
+
+function readLatestAndroidSimulatorReport(options = {}) {
+  for (const reportDir of latestAndroidReportCandidateDirs(options.preferredPath || "")) {
+    const summaryPath = path.join(reportDir, "summary.md");
+    const resultPath = path.join(reportDir, "result.json");
+    const hasSummary = fs.existsSync(summaryPath);
+    const hasResult = fs.existsSync(resultPath);
+    if (!hasSummary && !hasResult) continue;
+    const summary = hasSummary ? clipDiagnosticText(fs.readFileSync(summaryPath, "utf8"), 160 * 1024) : "";
+    const result = hasResult ? sanitizeRendererDiagnosticValue(readJsonFile(resultPath, {})) : {};
+    const status = reportStatusFrom(summary, result);
+    return {
+      ok: true,
+      reportDir,
+      summaryPath: hasSummary ? summaryPath : "",
+      resultPath: hasResult ? resultPath : "",
+      status,
+      passed: status === "passed",
+      pending: status === "pending",
+      failed: status === "failed" || status === "fail",
+      summary,
+      result,
+    };
+  }
+  return {
+    ok: false,
+    status: "missing",
+    reportDir: "",
+    summaryPath: "",
+    resultPath: "",
+    summary: "",
+    result: {},
+  };
+}
+
+async function waitForAuthorizedAndroidDevice(sender, opId, adbPath) {
+  const deadline = Date.now() + Number(process.env.WASM_AGENT_ANDROID_OAUTH_DEVICE_WAIT_MS || 180_000);
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await runAdbDevicesDiagnostics(sender, opId, adbPath);
+    if (latest.devices?.hasAuthorizedDevice) return latest;
+    await sleep(2000);
+  }
+  return latest || { ok: false, devices: { status: "waiting_for_phone", hasAuthorizedDevice: false } };
+}
+
+async function runWindowsAndroidOAuthVerification(sender, opId) {
+  if (activeAndroidOAuthVerification) {
+    return { ok: false, status: "busy", error: "verification_already_running", opId: activeAndroidOAuthVerification };
+  }
+  activeAndroidOAuthVerification = opId;
+  try {
+    writeWindowsAndroidOAuthState({ opId, status: "checking_adb", startedAt: new Date().toISOString() });
+    const adbVersion = await runAdbVersionDiagnostics(sender, opId);
+    if (adbVersion.adbMissing || !adbVersion.ok) {
+      const result = {
+        ok: false,
+        opId,
+        status: "adb_missing",
+        label: "adb missing",
+        instructions: adbVersion.instructions || adbMissingInstructions(),
+        adbVersion,
+      };
+      writeWindowsAndroidOAuthState(result);
+      return result;
+    }
+    const devices = await waitForAuthorizedAndroidDevice(sender, opId, adbVersion.adbPath);
+    if (!devices.devices?.hasAuthorizedDevice) {
+      const pendingStatus = devices.devices?.status || "waiting_for_phone";
+      const result = {
+        ok: false,
+        opId,
+        status: "pending",
+        label: pendingStatus === "unauthorized" ? "unauthorized: unlock phone and tap Allow" : "waiting for phone",
+        message: pendingStatus === "unauthorized"
+          ? "Unlock your phone and tap Allow USB debugging."
+          : "Plug Android phone by USB and enable USB debugging.",
+        devices,
+      };
+      emitWindowsDiagnosticEvent(sender, { type: "status", operation: "verify_android_oauth", opId, status: pendingStatus, label: result.label, message: result.message });
+      writeWindowsAndroidOAuthState(result);
+      return result;
+    }
+    const runner = await resolveLocalHorcRunner();
+    if (!runner.ok) {
+      const result = {
+        ok: false,
+        opId,
+        status: "FAIL",
+        label: "FAIL",
+        message: runner.message || "Bundled Android verifier is missing.",
+        error: runner.error || "horc_runner_missing",
+        runner,
+        adbVersion,
+        devices,
+        report: readLatestAndroidSimulatorReport(),
+      };
+      writeWindowsAndroidOAuthState({
+        status: "FAIL",
+        latestReportDir: result.report.reportDir || "",
+        latestReportPath: result.report.summaryPath || result.report.resultPath || "",
+        lastExitCode: 1,
+        finishedAt: new Date().toISOString(),
+        error: result.error,
+      });
+      emitWindowsDiagnosticEvent(sender, { type: "status", operation: "verify_android_oauth", opId, status: "FAIL", label: "FAIL", message: result.message });
+      return result;
+    }
+    const simulator = androidSimulatorEnvironment(adbVersion.adbPath, runner);
+    emitWindowsDiagnosticEvent(sender, {
+      type: "status",
+      operation: "verify_android_oauth",
+      opId,
+      status: "running_horc",
+      label: "running horc simulate android --device --interactive-oauth",
+      runner: { source: runner.source, runnerPath: runner.runnerPath, apkPath: simulator.apkPath, reportRoot: simulator.rootDir },
+    });
+    const horcArgs = ["simulate", "android", "--device", "--interactive-oauth"];
+    const horcResult = await spawnStreamingCommand(sender, opId, "verify_android_oauth", runner.command, [...runner.argsPrefix, ...horcArgs], {
+      cwd: runner.cwd || simulator.rootDir,
+      env: simulator.env,
+      displayCommand: "horc simulate android --device --interactive-oauth",
+      timeoutMs: Number(process.env.WASM_AGENT_ANDROID_OAUTH_VERIFY_TIMEOUT_MS || 15 * 60 * 1000),
+    });
+    const reportDir = parseReportPathFromOutput(`${horcResult.stdout || ""}\n${horcResult.stderr || ""}`);
+    const report = readLatestAndroidSimulatorReport({ preferredPath: reportDir });
+    const proofPassed = horcResult.exitCode === 0 && report.passed;
+    const finalStatus = proofPassed
+      ? "PASS"
+      : report.pending
+        ? "PENDING"
+        : "FAIL";
+    const result = {
+      ok: proofPassed,
+      opId,
+      status: finalStatus,
+      label: finalStatus,
+      message: proofPassed
+        ? "Android OAuth real-device proof passed."
+        : report.pending
+          ? "Real-device proof is still pending."
+          : "Android OAuth real-device proof failed.",
+      horcResult: sanitizeRendererDiagnosticValue({
+        ...horcResult,
+        runner: { source: runner.source, runnerPath: runner.runnerPath, apkPath: simulator.apkPath, reportRoot: simulator.rootDir },
+        stdout: clipDiagnosticText(horcResult.stdout || "", 8000),
+        stderr: clipDiagnosticText(horcResult.stderr || "", 8000),
+      }),
+      report,
+    };
+    writeWindowsAndroidOAuthState({
+      status: finalStatus,
+      latestReportDir: report.reportDir || reportDir || "",
+      latestReportPath: report.summaryPath || report.resultPath || "",
+      lastExitCode: horcResult.exitCode,
+      finishedAt: new Date().toISOString(),
+    });
+    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "verify_android_oauth", opId, status: finalStatus, label: finalStatus, message: result.message, report });
+    return result;
+  } finally {
+    activeAndroidOAuthVerification = null;
+  }
+}
+
+function isWindowsNativeDiagnosticsAllowed(event) {
+  if (process.platform !== "win32") return { ok: false, error: "windows_native_shell_required" };
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed() || win !== currentNativeWindow()) return { ok: false, error: "native_window_required" };
+  const currentUrl = event.sender.getURL();
+  if (currentUrl.startsWith(NATIVE_APP_ORIGIN)) return { ok: true };
+  try {
+    const parsed = new URL(currentUrl);
+    if (selectedBackendOrigin && sameOrigin(selectedBackendOrigin, currentUrl) && parsed.searchParams.get("native") === "electron") return { ok: true };
+  } catch {
+    // Fall through to denial.
+  }
+  return { ok: false, error: "native_electron_route_required" };
+}
+
+async function handleWindowsNativeDiagnosticsOperation(event, operation) {
+  const opName = String(operation || "");
+  const opId = `win-android-oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  if (!WINDOWS_ANDROID_OAUTH_OPERATIONS.has(opName)) {
+    writeNativeControlAudit({ action: "local_diagnostics_command_refused", operation: opName, opId, reason: "operation_not_allowlisted" });
+    return { ok: false, opId, error: "operation_not_allowlisted" };
+  }
+  const allowed = isWindowsNativeDiagnosticsAllowed(event);
+  if (!allowed.ok) {
+    writeNativeControlAudit({ action: "local_diagnostics_command_refused", operation: opName, opId, reason: allowed.error });
+    return { ok: false, opId, error: allowed.error, windowsNativeShellRequired: true };
+  }
+  if (opName === "read_latest_android_report") {
+    const report = readLatestAndroidSimulatorReport();
+    writeNativeControlAudit({ action: "local_diagnostics_report_read", operation: opName, opId, reportPath: report.summaryPath || report.resultPath || "" });
+    return { ok: report.ok, opId, report };
+  }
+  if (opName === "open_latest_android_report") {
+    const report = readLatestAndroidSimulatorReport();
+    const target = report.summaryPath || report.resultPath || "";
+    if (!target) return { ok: false, opId, error: "latest_report_missing", report };
+    const openError = await shell.openPath(target);
+    const result = { ok: !openError, opId, path: target, error: openError || "", report };
+    writeNativeControlAudit({ action: "local_diagnostics_report_opened", operation: opName, opId, result });
+    return result;
+  }
+  if (opName === "adb_version") {
+    return runAdbVersionDiagnostics(event.sender, opId);
+  }
+  if (opName === "adb_devices") {
+    return runAdbDevicesDiagnostics(event.sender, opId);
+  }
+  if (opName === "verify_android_oauth") {
+    return runWindowsAndroidOAuthVerification(event.sender, opId);
+  }
+  return { ok: false, opId, error: "operation_not_implemented" };
+}
+
 function runtimeDiagnosticsPayload(overrides = {}) {
   const config = readConfig();
   const defaults = readNativeDefaults();
@@ -306,6 +1178,13 @@ function runtimeDiagnosticsPayload(overrides = {}) {
     userData: app.getPath("userData"),
     appAsarPath: asarPath,
     appAsarSha256: sha256File(asarPath),
+    androidOAuthVerifier: {
+      bundledHorcRunnerPath: bundledHorcRunnerPath(),
+      bundledHorcRunnerPresent: fileExists(bundledHorcRunnerPath()),
+      bundledAndroidApkPath: bundledAndroidApkPath(),
+      bundledAndroidApkPresent: fileExists(bundledAndroidApkPath()),
+      reportRoot: androidSimulatorStateRoot(),
+    },
     packageVersion: app.getVersion(),
     buildId: String(config.buildId || defaults.buildId || ""),
     mode: allowLocalDevCandidates() ? "development" : "production",
@@ -326,31 +1205,33 @@ function runtimeDiagnosticsPayload(overrides = {}) {
     nativeDefaultsServerUrlCandidates: nativeDefaults.serverUrlCandidates,
     finalSelectedOrigin: startupDiagnostics.finalSelectedOrigin,
     currentRoute: startupDiagnostics.currentRoute,
+    lastReload: lastReloadCommand,
     ...overrides,
   };
 }
 
 function runtimeDiagnosticsPath() {
-  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-  return path.join(localAppData, "WASM Agent Native", "runtime-diagnostics.json");
+  return path.join(nativeAppDataDir(), "runtime-diagnostics.json");
 }
 
 function rendererAuthDiagnosticsPath() {
-  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-  return path.join(localAppData, "WASM Agent Native", "renderer-auth-diagnostics.log");
+  return path.join(nativeAppDataDir(), "renderer-auth-diagnostics.log");
 }
 
 function sanitizeRendererDiagnosticValue(value, depth = 0) {
   if (depth > 4) return "[depth-limit]";
-  if (value === null || ["string", "number", "boolean"].includes(typeof value)) {
-    const text = String(value);
-    return text.length > 600 ? `${text.slice(0, 600)}...` : value;
+  if (typeof value === "string") {
+    const text = redactSensitiveText(value);
+    return text.length > 600 ? `${text.slice(0, 600)}...` : text;
+  }
+  if (value === null || ["number", "boolean"].includes(typeof value)) {
+    return value;
   }
   if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitizeRendererDiagnosticValue(item, depth + 1));
   if (!value || typeof value !== "object") return "";
   const redacted = {};
   Object.entries(value).slice(0, 80).forEach(([key, item]) => {
-    if (/credential|token|cookie|secret|authorization|password/i.test(key)) {
+    if (/credential|token|cookie|secret|authorization|password|saved.*config.*raw|raw.*config/i.test(key)) {
       redacted[key] = "[redacted]";
       return;
     }
@@ -428,8 +1309,23 @@ async function nativeAuthCookieStatus() {
   }
 }
 
+async function waitForNativeAuthCookie(timeoutMs = AUTH_COOKIE_WAIT_TIMEOUT_MS) {
+  const started = Date.now();
+  let status = await nativeAuthCookieStatus();
+  while (!status.hasWaUid && Date.now() - started < timeoutMs) {
+    await sleep(AUTH_COOKIE_WAIT_INTERVAL_MS);
+    status = await nativeAuthCookieStatus();
+  }
+  return {
+    ...status,
+    waitMs: Date.now() - started,
+  };
+}
+
 async function flushNativeAuthCookies(options = {}) {
   let flushed = false;
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) ? Number(options.timeoutMs) : AUTH_COOKIE_WAIT_TIMEOUT_MS;
+  const preFlushStatus = await waitForNativeAuthCookie(timeoutMs);
   try {
     await session.defaultSession.cookies.flushStore();
     flushed = true;
@@ -449,12 +1345,73 @@ async function flushNativeAuthCookies(options = {}) {
     ok: status.ok,
     hasWaUid: status.hasWaUid,
     cookieCount: status.cookieCount,
+    waitMs: preFlushStatus.waitMs,
+    cookieMeta: status.cookieMeta,
   });
   return {
     ...status,
     flushed,
     reason: String(options.reason || ""),
+    waitMs: preFlushStatus.waitMs,
+    preFlushHasWaUid: preFlushStatus.hasWaUid,
   };
+}
+
+async function nativeAuthSessionStatus() {
+  const config = ensureConfig();
+  const serverUrl = selectedBackendOrigin || config.serverUrl || DEFAULT_SERVER_URL;
+  const normalized = normalizeServerUrl(serverUrl, DEFAULT_SERVER_URL);
+  const endpoint = new URL("/auth/session", normalized).toString();
+  try {
+    const fetchFromSession = typeof session.defaultSession.fetch === "function"
+      ? session.defaultSession.fetch.bind(session.defaultSession)
+      : fetchWithTimeout;
+    const response = await fetchFromSession(endpoint, {
+      method: "GET",
+      credentials: "include",
+      headers: { "X-Wasm-Agent-Native-Device-Id": config.deviceId },
+    });
+    let authenticated = false;
+    try {
+      const payload = await response.clone().json();
+      authenticated = Boolean(payload && payload.authenticated);
+    } catch {
+      authenticated = false;
+    }
+    return {
+      ok: true,
+      url: endpoint,
+      status: response.status,
+      authenticated,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url: endpoint,
+      status: 0,
+      authenticated: false,
+      error: String(error && error.message ? error.message : error),
+    };
+  }
+}
+
+async function writeAuthPersistenceDiagnostics(reason = "auth-persistence") {
+  const authCookie = await nativeAuthCookieStatus();
+  const authSession = await nativeAuthSessionStatus();
+  const payload = {
+    authCookie,
+    authSession,
+    currentRoute: currentRendererUrl(),
+    authPersistenceReason: reason,
+  };
+  writeRuntimeDiagnostics(payload);
+  logNativeDiagnostic("auth-persistence-status", {
+    reason,
+    currentRoute: payload.currentRoute,
+    authCookie,
+    authSession,
+  });
+  return payload;
 }
 
 function recordNativeAuthUploadAttempt(entry = {}) {
@@ -957,6 +1914,329 @@ function currentRendererUrl() {
   }
 }
 
+async function rendererVisualState() {
+  const win = currentNativeWindow();
+  const config = ensureConfig();
+  const base = {
+    ok: Boolean(win && !win.isDestroyed()),
+    currentUrl: currentRendererUrl(),
+    title: win && !win.isDestroyed() ? win.getTitle() : "",
+    readyState: "",
+    loading: win && !win.isDestroyed() ? win.webContents.isLoading() : false,
+    loadingMainFrame: win && !win.isDestroyed() ? win.webContents.isLoadingMainFrame() : false,
+    authSessionStateSummary: {},
+    native: {
+      runtime: "electron",
+      electronVersion: process.versions.electron,
+      chromeVersion: process.versions.chrome,
+      nodeVersion: process.versions.node,
+      appVersion: app.getVersion(),
+      buildId: String(config.buildId || ""),
+      appAsarFingerprint: config.appAsarFingerprint || appAsarFingerprint(),
+    },
+    appBuildId: String(config.buildId || ""),
+    cloudAssetBuildId: "",
+    visibleErrorBannerText: "",
+    lastFrontendFatalError: null,
+  };
+  if (!win || win.isDestroyed()) return base;
+  try {
+    const renderer = await win.webContents.executeJavaScript(`(() => {
+      const clean = (value, limit = 800) => String(value || "").replace(/\\s+/g, " ").trim().slice(0, limit);
+      const visible = (node) => {
+        if (!node) return false;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0 && rect.width > 0 && rect.height > 0;
+      };
+      const selectors = [
+        "[role='alert']",
+        ".login-message",
+        ".modal-message",
+        ".agent-toast.is-error",
+        ".error",
+        "[data-error]",
+        "#nodeFormStatus"
+      ];
+      const visibleErrorBannerText = selectors
+        .flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+        .filter(visible)
+        .map((node) => clean(node.textContent, 300))
+        .filter(Boolean)
+        .slice(0, 4)
+        .join(" | ");
+      const app = document.querySelector("#app");
+      const script = Array.from(document.scripts)
+        .map((item) => item.src || "")
+        .find((src) => src.includes("/app.js"));
+      let cloudAssetBuildId = "";
+      try {
+        const url = new URL(script || "", window.location.href);
+        cloudAssetBuildId = url.searchParams.get("v") || "";
+      } catch {}
+      const frontierState = typeof window.__wasmAgentFrontierState === "function"
+        ? window.__wasmAgentFrontierState()
+        : {};
+      const lastFrontendFatalError = window.__wasmAgentLastFatalError || frontierState.lastFatalError || null;
+      return {
+        href: window.location.href,
+        title: document.title,
+        readyState: document.readyState,
+        appDataset: app ? { ...app.dataset } : {},
+        authSessionStateSummary: {
+          appAuth: app?.dataset?.auth || "",
+          configChecked: Boolean(frontierState.configChecked),
+          authChecked: Boolean(frontierState.authChecked),
+          authenticated: Boolean(frontierState.authenticated),
+          authSessionLoadPhase: frontierState.authSessionLoadPhase || "",
+          loadAuthSessionReached: Boolean(frontierState.loadAuthSessionReached),
+        },
+        cloudAssetBuildId,
+        visibleErrorBannerText,
+        lastFrontendFatalError,
+        frontierState,
+      };
+    })()`, true);
+    return {
+      ...base,
+      currentUrl: renderer.href || base.currentUrl,
+      title: renderer.title || base.title,
+      readyState: renderer.readyState || "",
+      authSessionStateSummary: renderer.authSessionStateSummary || {},
+      cloudAssetBuildId: renderer.cloudAssetBuildId || "",
+      visibleErrorBannerText: renderer.visibleErrorBannerText || "",
+      lastFrontendFatalError: renderer.lastFrontendFatalError || null,
+      frontendState: renderer.frontierState || {},
+      appDataset: renderer.appDataset || {},
+    };
+  } catch (error) {
+    return {
+      ...base,
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    };
+  }
+}
+
+async function withScreenshotRedaction(win, callback) {
+  if (!win || win.isDestroyed()) return callback();
+  const styleId = `frontier-redaction-${Date.now()}`;
+  try {
+    await win.webContents.executeJavaScript(`(() => {
+      const style = document.createElement("style");
+      style.id = ${JSON.stringify(styleId)};
+      style.textContent = [
+        "input, textarea, [contenteditable='true'], [data-sensitive], [data-secret], .login-popover { filter: blur(12px) !important; }",
+        "[data-sensitive], [data-secret] { color: transparent !important; text-shadow: 0 0 12px rgba(0,0,0,.7) !important; }"
+      ].join("\\n");
+      document.documentElement.appendChild(style);
+    })()`, true);
+    await sleep(75);
+  } catch {
+    // Redaction is best-effort; capture metadata still records the redaction attempt.
+  }
+  try {
+    return await callback();
+  } finally {
+    try {
+      await win.webContents.executeJavaScript(`document.getElementById(${JSON.stringify(styleId)})?.remove()`, true);
+    } catch {
+      // Ignore cleanup failure.
+    }
+  }
+}
+
+async function captureNativeScreenshot(options = {}) {
+  const win = currentNativeWindow();
+  if (!win || win.isDestroyed()) return { ok: false, error: "window_unavailable" };
+  const redacted = options.redacted !== false;
+  try {
+    const image = redacted
+      ? await withScreenshotRedaction(win, () => win.webContents.capturePage())
+      : await win.webContents.capturePage();
+    const timestamp = timestampForFilename();
+    const target = path.join(nativeDiagnosticsBundleRoot(), `screenshot-${timestamp}.png`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, image.toPNG());
+    const size = image.getSize();
+    return {
+      ok: true,
+      path: target,
+      sha256: sha256File(target),
+      width: size.width,
+      height: size.height,
+      redacted,
+    };
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error), redacted };
+  }
+}
+
+async function fetchNativeBackendJson(pathname) {
+  const config = ensureConfig();
+  const serverUrl = selectedBackendOrigin || config.serverUrl || DEFAULT_SERVER_URL;
+  const normalized = normalizeServerUrl(serverUrl, DEFAULT_SERVER_URL);
+  const endpoint = new URL(pathname, normalized).toString();
+  try {
+    const fetchFromSession = typeof session.defaultSession.fetch === "function"
+      ? session.defaultSession.fetch.bind(session.defaultSession)
+      : fetchWithTimeout;
+    const response = await fetchFromSession(endpoint, {
+      method: "GET",
+      credentials: "include",
+      headers: { "X-Wasm-Agent-Native-Device-Id": config.deviceId },
+    });
+    let body = null;
+    try {
+      body = await response.clone().json();
+    } catch {
+      body = null;
+    }
+    return {
+      ok: response.ok,
+      url: endpoint,
+      status: response.status,
+      body: sanitizeRendererDiagnosticValue(body),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      url: endpoint,
+      status: 0,
+      error: String(error && error.message ? error.message : error),
+    };
+  }
+}
+
+function diagnosticSummaryMarkdown(payload = {}) {
+  const visual = payload.visualState || {};
+  const authCookie = payload.authCookie || {};
+  const authSession = payload.authSession || {};
+  const lines = [
+    "# WASM Agent Native Diagnostics",
+    "",
+    `- Generated: ${payload.generated_at || new Date().toISOString()}`,
+    `- Route: ${visual.currentUrl || ""}`,
+    `- Title: ${visual.title || ""}`,
+    `- Ready: ${visual.readyState || ""}`,
+    `- Loading: ${Boolean(visual.loading)}`,
+    `- Native build: ${payload.build_id || ""}`,
+    `- Cloud asset build: ${payload.cloud_asset_build_id || ""}`,
+    `- authCookie.hasWaUid: ${Boolean(authCookie.hasWaUid)}`,
+    `- /auth/session authenticated: ${Boolean(authSession.authenticated)}`,
+    `- Last fatal error: ${visual.lastFrontendFatalError ? JSON.stringify(visual.lastFrontendFatalError).slice(0, 300) : ""}`,
+    `- Visible error banner: ${visual.visibleErrorBannerText || ""}`,
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+async function uploadNativeDiagnosticsPayload(payload = {}) {
+  const config = ensureConfig();
+  const serverUrl = selectedBackendOrigin || await recoverReachableServerUrl(config);
+  if (!serverUrl) return { ok: false, error: "backend_identity_unresolved" };
+  try {
+    const response = await fetchWithTimeout(new URL("/native/diagnostics", serverUrl).toString(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wasm-Agent-Native-Device-Id": config.deviceId,
+        "X-Wasm-Agent-Native-Runtime": "electron",
+      },
+      body: JSON.stringify(payload),
+    }, 8000);
+    if (!response.ok) return { ok: false, error: `HTTP ${response.status}` };
+    return await response.json();
+  } catch (error) {
+    return { ok: false, error: String(error && error.message ? error.message : error) };
+  }
+}
+
+async function collectNativeDiagnosticsBundle(options = {}) {
+  const config = ensureConfig();
+  const generatedAt = new Date().toISOString();
+  const visualState = await rendererVisualState();
+  const authCookie = await nativeAuthCookieStatus();
+  const authSession = await nativeAuthSessionStatus();
+  const configJson = await fetchNativeBackendJson("/config.json");
+  const sessionJson = await fetchNativeBackendJson("/auth/session");
+  const runtimeDiagnostics = sanitizeRendererDiagnosticValue(runtimeDiagnosticsPayload({
+    currentRoute: currentRendererUrl(),
+    authCookie,
+    authSession,
+    last_frontend_fatal_error: visualState.lastFrontendFatalError || null,
+  }));
+  const screenshot = options.includeScreenshot ? await captureNativeScreenshot({ redacted: options.redacted !== false }) : null;
+  const payload = {
+    schema: "hermes.wasm_agent.native_full_diagnostic_bundle.v1",
+    generated_at: generatedAt,
+    reason: String(options.reason || "frontier").slice(0, 120),
+    platform: "windows",
+    runtime: "electron",
+    device_id: config.deviceId,
+    account_id: config.accountId,
+    app_version: app.getVersion(),
+    build_id: String(config.buildId || ""),
+    cloud_asset_build_id: visualState.cloudAssetBuildId || "",
+    app_asar_fingerprint: config.appAsarFingerprint || appAsarFingerprint(),
+    selected_backend_origin: selectedBackendOrigin,
+    visualState,
+    authCookie,
+    authSession,
+    configJson,
+    sessionJson,
+    nativeBackendResolver: {
+      candidateOrigins: startupDiagnostics.candidateOrigins,
+      originChecks: startupDiagnostics.originChecks,
+      finalSelectedOrigin: startupDiagnostics.finalSelectedOrigin,
+      lastFailureReason: startupDiagnostics.lastFailureReason,
+    },
+    packageMetadata: {
+      execPath: process.execPath || "",
+      resourcesPath: process.resourcesPath || "",
+      appAsarPath: appAsarPath(),
+      appAsarSha256: sha256File(appAsarPath()),
+      packageJson: readJsonFile(path.join(__dirname, "package.json"), {}),
+      nativeDefaults: readNativeDefaults(),
+      nativeDefaultsPath: nativeDefaultsPath(),
+    },
+    runtime_diagnostics: runtimeDiagnostics,
+    logs: {
+      mainLogPath: nativeMainLogPath(),
+      mainLogTail: readTextTail(nativeMainLogPath(), 32 * 1024),
+      preloadLogPath: rendererAuthDiagnosticsPath(),
+      preloadLogTail: readTextTail(rendererAuthDiagnosticsPath(), 32 * 1024),
+      rendererConsoleLogPath: rendererConsoleDiagnosticsPath(),
+      rendererConsoleLogTail: readTextTail(rendererConsoleDiagnosticsPath(), 32 * 1024),
+      fatalLogPath: nativeFatalDiagnosticsPath(),
+      fatalLogTail: readTextTail(nativeFatalDiagnosticsPath(), 16 * 1024),
+      nativeControlAuditPath: nativeControlAuditPath(),
+      nativeControlAuditTail: readTextTail(nativeControlAuditPath(), 16 * 1024),
+    },
+    screenshot,
+  };
+  payload.summary_markdown = diagnosticSummaryMarkdown(payload);
+  const bundleDir = path.join(nativeDiagnosticsBundleRoot(), `bundle-${timestampForFilename()}`);
+  fs.mkdirSync(bundleDir, { recursive: true });
+  const bundlePath = path.join(bundleDir, "bundle.json");
+  const summaryPath = path.join(bundleDir, "SUMMARY.md");
+  fs.writeFileSync(bundlePath, `${JSON.stringify(payload, null, 2)}\n`);
+  fs.writeFileSync(summaryPath, payload.summary_markdown);
+  writeRuntimeDiagnostics({
+    authCookie,
+    authSession,
+    last_frontend_fatal_error: visualState.lastFrontendFatalError || null,
+    latestDiagnosticBundlePath: bundlePath,
+    latestDiagnosticSummaryPath: summaryPath,
+    cloud_asset_build_id: visualState.cloudAssetBuildId || "",
+  });
+  return {
+    ok: true,
+    bundlePath,
+    summaryPath,
+    payload,
+  };
+}
+
 async function postNativeControlResult(command, result = {}) {
   const config = ensureConfig();
   if (!selectedBackendOrigin) return { ok: false, error: "backend_identity_unresolved" };
@@ -985,13 +2265,89 @@ async function postNativeControlResult(command, result = {}) {
 
 async function executeNativeControlCommand(command = {}) {
   const type = String(command.type || "");
+  const payload = command && typeof command.payload === "object" ? command.payload : {};
   const win = currentNativeWindow();
   logNativeDiagnostic("native-control-command", {
     id: command.id || "",
     type,
+    reason: command.reason || payload.reason || "",
+  });
+  writeNativeControlAudit({
+    action: "command_started",
+    id: command.id || "",
+    type,
+    actor: command.created_by || payload.requested_by || "",
+    reason: command.reason || payload.reason || "",
   });
   if (type === "upload_diagnostics") {
-    return uploadRendererAuthDiagnostics({ reason: `control:${command.id || type}` });
+    const result = await uploadRendererAuthDiagnostics({ reason: `control:${command.id || type}` });
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "collect_logs" || type === "export_diagnostics") {
+    const bundle = await collectNativeDiagnosticsBundle({
+      reason: command.reason || payload.reason || `control:${command.id || type}`,
+      includeScreenshot: Boolean(payload.includeScreenshot || payload.include_screenshot),
+      redacted: payload.redacted !== false,
+    });
+    const upload = await uploadNativeDiagnosticsPayload(bundle.payload);
+    const result = {
+      ok: true,
+      bundlePath: bundle.bundlePath,
+      summaryPath: bundle.summaryPath,
+      uploaded: upload,
+    };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "collect_adb_diagnostics") {
+    const adbBundle = await collectAdbDiagnostics({
+      reason: command.reason || payload.reason || `control:${command.id || type}`,
+    });
+    const nativeBundle = await collectNativeDiagnosticsBundle({
+      reason: command.reason || payload.reason || `control:${command.id || type}`,
+      includeScreenshot: Boolean(payload.includeScreenshot || payload.include_screenshot),
+      redacted: payload.redacted !== false,
+    });
+    nativeBundle.payload.adbDiagnostics = adbBundle.payload;
+    const upload = await uploadNativeDiagnosticsPayload(nativeBundle.payload);
+    const result = {
+      ok: true,
+      adbBundlePath: adbBundle.bundlePath,
+      adbSummaryPath: adbBundle.summaryPath,
+      nativeBundlePath: nativeBundle.bundlePath,
+      nativeSummaryPath: nativeBundle.summaryPath,
+      deviceDetected: Boolean(adbBundle.payload.hasDevice),
+      uploaded: upload,
+    };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "read_latest_android_report") {
+    const report = readLatestAndroidSimulatorReport();
+    const result = {
+      ok: report.ok,
+      report,
+    };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "verify_android_oauth") {
+    if (process.platform !== "win32") {
+      const result = { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+      writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+      return result;
+    }
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-android-oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runWindowsAndroidOAuthVerification(sender, opId);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "screenshot") {
+    const result = await captureNativeScreenshot({ redacted: payload.redacted !== false });
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
   if (type === "write_runtime_diagnostics") {
     const pathWritten = writeRuntimeDiagnostics({
@@ -999,33 +2355,113 @@ async function executeNativeControlCommand(command = {}) {
       nativeControlCommandType: type,
       currentRoute: currentRendererUrl(),
     });
-    return { ok: Boolean(pathWritten), path: pathWritten };
+    const result = { ok: Boolean(pathWritten), path: pathWritten };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
-  if (type === "clear_web_cache") {
-    return clearNativeWebShellCache();
+  if (type === "clear_web_cache" || type === "clear_cache") {
+    const clearResult = await clearNativeWebShellCache();
+    const reloadResult = await controlledNativeReload(win, {
+      mode: "clear_cache",
+      reason: command.reason || payload.reason || "",
+      cacheBust: true,
+    });
+    const result = { ok: clearResult.ok && reloadResult.ok, clearCache: clearResult, reload: reloadResult };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
   if (type === "reload") {
-    reloadWindow(win);
-    return { ok: true, reloaded: true, hard: false, route: currentRendererUrl() };
+    const result = await controlledNativeReload(win, { mode: "reload", reason: command.reason || payload.reason || "" });
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
-  if (type === "hard_reload") {
-    reloadWindow(win, { hard: true });
-    return { ok: true, reloaded: true, hard: true, route: currentRendererUrl() };
+  if (type === "hard_reload" || type === "reload_ignore_cache") {
+    const result = await controlledNativeReload(win, {
+      mode: "reload_ignore_cache",
+      reason: command.reason || payload.reason || "",
+      hard: true,
+      cacheBust: true,
+    });
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "restart_app") {
+    const result = {
+      ok: true,
+      restarting: true,
+      route: currentRendererUrl(),
+      scheduledInMs: 2000,
+    };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    setTimeout(() => {
+      app.relaunch();
+      app.exit(0);
+    }, 2000).unref();
+    return result;
+  }
+  if (type === "open_devtools") {
+    if (win && !win.isDestroyed()) win.webContents.openDevTools({ mode: "detach" });
+    const result = { ok: Boolean(win && !win.isDestroyed()), opened: Boolean(win && !win.isDestroyed()) };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "verify_session") {
+    const authCookie = await nativeAuthCookieStatus();
+    const authSession = await nativeAuthSessionStatus();
+    const visualState = await rendererVisualState();
+    const result = {
+      ok: Boolean(authCookie.hasWaUid && authSession.authenticated),
+      authCookie,
+      authSession,
+      visualState,
+      failureClassification: classifyNativeSessionFailure(authCookie, authSession, visualState),
+    };
+    writeRuntimeDiagnostics({ authCookie, authSession, last_frontend_fatal_error: visualState.lastFrontendFatalError || null });
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "verify_installed_app") {
+    const bundle = await collectNativeDiagnosticsBundle({
+      reason: command.reason || payload.reason || "verify_installed_app",
+      includeScreenshot: Boolean(payload.includeScreenshot || payload.include_screenshot),
+    });
+    const result = {
+      ok: Boolean(bundle.payload.authCookie?.hasWaUid && bundle.payload.authSession?.authenticated),
+      currentSessionVerified: Boolean(bundle.payload.authCookie?.hasWaUid && bundle.payload.authSession?.authenticated),
+      requiresExternalCloseReopenVerifier: true,
+      verifierScript: "native/windows/scripts/verify-installed-app.ps1",
+      bundlePath: bundle.bundlePath,
+      summaryPath: bundle.summaryPath,
+      failureClassification: classifyNativeSessionFailure(bundle.payload.authCookie, bundle.payload.authSession, bundle.payload.visualState),
+    };
+    await uploadNativeDiagnosticsPayload(bundle.payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
   if (type === "status") {
-    const authCookie = await nativeAuthCookieStatus();
-    return {
+    const authDiagnostics = await writeAuthPersistenceDiagnostics("native-control-status");
+    const visualState = await rendererVisualState();
+    const result = {
       ok: true,
       status: "online",
       appVersion: app.getVersion(),
       arch: os.arch(),
       route: currentRendererUrl(),
-      authCookie,
+      authCookie: authDiagnostics.authCookie,
+      authSession: authDiagnostics.authSession,
+      visualState,
+      lastReload: lastReloadCommand,
       diagnosticsPath: runtimeDiagnosticsPath(),
       rendererAuthDiagnosticsPath: rendererAuthDiagnosticsPath(),
+      rendererConsoleDiagnosticsPath: rendererConsoleDiagnosticsPath(),
+      nativeControlAuditPath: nativeControlAuditPath(),
     };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
   }
-  return { ok: false, error: `unsupported_command:${type}` };
+  const result = { ok: false, error: `unsupported_command:${type}` };
+  writeNativeControlAudit({ action: "command_refused", id: command.id || "", type, result });
+  return result;
 }
 
 async function pollNativeControl(reason = "interval") {
@@ -1169,16 +2605,88 @@ function reloadWindow(win, options = {}) {
   win.webContents.reload();
 }
 
+function classifyNativeSessionFailure(authCookie = {}, authSession = {}, visualState = {}) {
+  if (visualState.lastFrontendFatalError) return "frontend bootstrap crash";
+  if (!authCookie.hasWaUid) return "cookie missing";
+  const cookieMeta = Array.isArray(authCookie.cookieMeta) ? authCookie.cookieMeta : [];
+  const firstCookie = cookieMeta[0] || {};
+  if (firstCookie.domain && !String(firstCookie.domain).includes("wa.colmeio.com")) return "cookie wrong domain";
+  if (authSession.status && !authSession.authenticated) return "cookie wrong partition";
+  const route = String(visualState.currentUrl || currentRendererUrl() || "");
+  if (/auth_error|auth_code/.test(route)) return "Google redirect/code redemption failure";
+  if (route.startsWith("file:") || route.startsWith("wasm-agent:")) return "native shell issue";
+  return "unknown";
+}
+
+async function controlledNativeReload(win, options = {}) {
+  if (!win || win.isDestroyed()) return { ok: false, error: "window_unavailable" };
+  const config = ensureConfig();
+  const reason = String(options.reason || "").slice(0, 240);
+  const mode = String(options.mode || (options.hard ? "reload_ignore_cache" : "reload"));
+  const beforeRoute = currentRendererUrl();
+  const startedAt = new Date().toISOString();
+  if (options.clearCache) await clearNativeWebShellCache();
+  let targetUrl = "";
+  try {
+    if (options.cacheBust) {
+      const base = beforeRoute && beforeRoute.startsWith("http")
+        ? beforeRoute
+        : selectedBackendOrigin
+          ? backendHomeElectronUrl(selectedBackendOrigin)
+          : "";
+      if (base) {
+        const url = new URL(base);
+        if (selectedBackendOrigin && sameOrigin(selectedBackendOrigin, url.toString())) {
+          url.searchParams.set("native", "electron");
+          url.searchParams.set("frontierReload", String(config.buildId || Date.now()));
+          targetUrl = url.toString();
+          await win.loadURL(targetUrl);
+        }
+      }
+    }
+    if (!targetUrl) reloadWindow(win, { hard: Boolean(options.hard) });
+    lastReloadCommand = {
+      schema: "hermes.wasm_agent.native_reload.v1",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      mode,
+      reason,
+      beforeRoute,
+      targetUrl,
+      reloadIgnoringCache: Boolean(options.hard),
+      cacheBust: Boolean(options.cacheBust),
+      buildId: String(config.buildId || ""),
+    };
+    writeRuntimeDiagnostics({ lastReload: lastReloadCommand, currentRoute: currentRendererUrl() });
+    logNativeDiagnostic("native-reload", lastReloadCommand);
+    return { ok: true, reloaded: true, mode, hard: Boolean(options.hard), cacheBust: Boolean(options.cacheBust), beforeRoute, targetUrl, route: currentRendererUrl() };
+  } catch (error) {
+    lastReloadCommand = {
+      schema: "hermes.wasm_agent.native_reload.v1",
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      mode,
+      reason,
+      beforeRoute,
+      targetUrl,
+      ok: false,
+      error: String(error && error.message ? error.message : error),
+    };
+    writeRuntimeDiagnostics({ lastReload: lastReloadCommand, currentRoute: currentRendererUrl() });
+    return { ok: false, error: lastReloadCommand.error, beforeRoute, targetUrl };
+  }
+}
+
 async function clearNativeWebShellCache() {
   try {
     await session.defaultSession.clearCache();
     await session.defaultSession.clearStorageData({
-      storages: ["serviceworkers", "cachestorage"],
+      storages: ["serviceworkers", "cachestorage", "localstorage"],
     });
     logNativeDiagnostic("web-cache-cleared", {
-      storages: ["serviceworkers", "cachestorage"],
+      storages: ["http", "serviceworkers", "cachestorage", "localstorage"],
     });
-    return { ok: true, storages: ["serviceworkers", "cachestorage"] };
+    return { ok: true, storages: ["http", "serviceworkers", "cachestorage", "localstorage"] };
   } catch (error) {
     const reason = String(error && error.message ? error.message : error);
     logNativeDiagnostic("web-cache-clear-failed", { reason });
@@ -1250,6 +2758,14 @@ function createWindow() {
   });
   win.webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     const failedUrl = String(validatedURL || "");
+    appendJsonLine(nativeFatalDiagnosticsPath(), {
+      timestamp: new Date().toISOString(),
+      kind: "did-fail-load",
+      errorCode,
+      errorDescription,
+      validatedURL: failedUrl,
+      isMainFrame: Boolean(isMainFrame),
+    });
     if (isMainFrame && !failedUrl.startsWith("file:") && errorCode !== -3) {
       if (selectedBackendOrigin && sameOrigin(selectedBackendOrigin, failedUrl)) {
         logNativeDiagnostic("remote-pwa-fallback", {
@@ -1263,6 +2779,42 @@ function createWindow() {
       showFallback(win, errorDescription || `Connection failed (${errorCode})`);
     }
   });
+  win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    appendJsonLine(rendererConsoleDiagnosticsPath(), {
+      timestamp: new Date().toISOString(),
+      level,
+      message: String(message || "").slice(0, 2000),
+      line,
+      sourceId: String(sourceId || "").slice(0, 600),
+      route: currentRendererUrl(),
+    });
+  });
+  win.webContents.on("render-process-gone", (_event, details) => {
+    appendJsonLine(nativeFatalDiagnosticsPath(), {
+      timestamp: new Date().toISOString(),
+      kind: "render-process-gone",
+      details: sanitizeRendererDiagnosticValue(details || {}),
+      route: currentRendererUrl(),
+    });
+    writeRuntimeDiagnostics({ last_frontend_fatal_error: { kind: "render-process-gone", details: sanitizeRendererDiagnosticValue(details || {}) } });
+  });
+  win.webContents.on("preload-error", (_event, preloadPath, error) => {
+    appendJsonLine(nativeFatalDiagnosticsPath(), {
+      timestamp: new Date().toISOString(),
+      kind: "preload-error",
+      preloadPath: String(preloadPath || ""),
+      error: String(error && error.message ? error.message : error),
+      stack: String(error && error.stack ? error.stack : "").slice(0, 1800),
+      route: currentRendererUrl(),
+    });
+  });
+  win.on("unresponsive", () => {
+    appendJsonLine(nativeFatalDiagnosticsPath(), {
+      timestamp: new Date().toISOString(),
+      kind: "window-unresponsive",
+      route: currentRendererUrl(),
+    });
+  });
   win.webContents.on("did-navigate", (_event, url) => {
     startupDiagnostics.currentRoute = url;
     logNativeDiagnostic("route", {
@@ -1274,6 +2826,7 @@ function createWindow() {
   win.webContents.on("did-finish-load", () => {
     startupDiagnostics.currentRoute = win.webContents.getURL();
     void uploadRendererAuthDiagnostics({ reason: "native-did-finish-load" });
+    void writeAuthPersistenceDiagnostics("native-did-finish-load");
   });
   win.webContents.on("before-input-event", (event, input) => {
     const key = String(input.key || "").toLowerCase();
@@ -1364,6 +2917,8 @@ ipcMain.handle("wasm-agent:native-status", () => postNativeEvent("device.status"
   arch: os.arch(),
 }));
 
+ipcMain.handle("wasm-agent:native-diagnostics-operation", (event, operation) => handleWindowsNativeDiagnosticsOperation(event, operation));
+
 app.whenReady().then(async () => {
   registerNativeAppProtocol();
   await clearNativeWebShellCache();
@@ -1376,7 +2931,11 @@ app.whenReady().then(async () => {
     heartbeat_ready: true,
     native_control_poll_ready: true,
     native_diagnostics_upload_ready: true,
-  });
+	    frontier_operator_commands_ready: true,
+	    frontier_visual_state_ready: true,
+	    frontier_diagnostic_bundle_ready: true,
+	    windows_android_oauth_verification_ready: process.platform === "win32",
+	  });
   void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch() });
   startNativeControlPolling();
   setInterval(() => {

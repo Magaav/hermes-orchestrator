@@ -370,6 +370,7 @@ const IMAGE_ANALYZER_CACHE = new Map();
 const SCRIPT_RUNTIME_CACHE = new Map();
 const AGENT_DEFAULT_MESSAGE_CONTENT = "I can see this workspace snapshot and help evolve the app from here.";
 const ADMIN_PANEL_IDS = new Set(["admin", "fleet", "tasks", "logs", "observe", "timeline", "modules", "security"]);
+const SIDE_PANEL_IDS = new Set([...ADMIN_PANEL_IDS, "diagnostics"]);
 const GLOBAL_AGENT_NODE_IDS = new Set(["admin-orchestrator", "hermes-orchestrator", "orchestrator"]);
 const AGENT_SANDBOX_NODE_ID = "account-sandbox";
 const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
@@ -1015,8 +1016,10 @@ const els = {
   homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeGoNativeButton: document.querySelector("#homeGoNativeButton"),
+  homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
   homeMarketButton: document.querySelector("#homeMarketButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
+  homeDiagnosticsButton: document.querySelector("#homeDiagnosticsButton"),
   fleetModal: document.querySelector("#fleetModal"),
   closeFleetModalButton: document.querySelector("#closeFleetModalButton"),
   fleetEnsureMainButton: document.querySelector("#fleetEnsureMainButton"),
@@ -1120,7 +1123,28 @@ const els = {
   nativeInstallStatus: document.querySelector("#nativeInstallStatus"),
   nativeDownloadButton: document.querySelector("#nativeDownloadButton"),
   closeNativeModalButton: document.querySelector("#closeNativeModalButton"),
-  homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
+  nativeDebugModal: document.querySelector("#nativeDebugModal"),
+  nativeDebugMeta: document.querySelector("#nativeDebugMeta"),
+  nativeDebugState: document.querySelector("#nativeDebugState"),
+  nativeDebugOutput: document.querySelector("#nativeDebugOutput"),
+  nativeDebugCopyButton: document.querySelector("#nativeDebugCopyButton"),
+  nativeDebugShareButton: document.querySelector("#nativeDebugShareButton"),
+  nativeDebugRetryButton: document.querySelector("#nativeDebugRetryButton"),
+	  nativeDebugResetAuthButton: document.querySelector("#nativeDebugResetAuthButton"),
+	  nativeDebugClearWebViewButton: document.querySelector("#nativeDebugClearWebViewButton"),
+	  nativeDebugClearDiagnosticsButton: document.querySelector("#nativeDebugClearDiagnosticsButton"),
+	  closeNativeDebugButton: document.querySelector("#closeNativeDebugButton"),
+  androidOAuthPanelStatus: document.querySelector("#androidOAuthPanelStatus"),
+  androidOAuthStartButton: document.querySelector("#androidOAuthStartButton"),
+  androidOAuthStatus: document.querySelector("#androidOAuthStatus"),
+  androidOAuthHint: document.querySelector("#androidOAuthHint"),
+  androidOAuthReportPath: document.querySelector("#androidOAuthReportPath"),
+  androidOAuthRefreshReportButton: document.querySelector("#androidOAuthRefreshReportButton"),
+  androidOAuthOpenReportButton: document.querySelector("#androidOAuthOpenReportButton"),
+  androidOAuthUpdateAppButton: document.querySelector("#androidOAuthUpdateAppButton"),
+  androidOAuthReportSummary: document.querySelector("#androidOAuthReportSummary"),
+  androidOAuthOutput: document.querySelector("#androidOAuthOutput"),
+	  homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
   artifactsModal: document.querySelector("#artifactsModal"),
   artifactList: document.querySelector("#artifactList"),
   closeArtifactsModalButton: document.querySelector("#closeArtifactsModalButton"),
@@ -1291,9 +1315,17 @@ function readSharedSpacePointerPredictionPreference() {
 
 const INITIAL_SPACE_WIDGET_LAYOUTS = readLocalSpaceWidgetLayouts();
 const AUTH_DIAGNOSTIC_BUFFER_LIMIT = 120;
+const ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY = "wasmAgent.androidNativeAuthSession";
 const authDiagnosticBuffer = [];
 let authDiagnosticUploadTimer = 0;
 let nativeAuthDiagnosticHeartbeat = 0;
+let nativeShellUiApplied = false;
+let nativeAppReadyNotified = false;
+const frontierRuntimeState = {
+  authSessionLoadPhase: "not_started",
+  loadAuthSessionReached: false,
+  lastFatalError: window.__wasmAgentLastFatalError || null,
+};
 
 const state = {
   bridgeUrl: "http://127.0.0.1:8790",
@@ -1303,6 +1335,8 @@ const state = {
   authRedirectMessage: "",
   adminEmail: "",
   googleButtonRenderedFor: "",
+  androidNativeAuthDoneFor: "",
+  androidNativeAuthStartedFor: "",
   configLoadPromise: null,
   configChecked: false,
   authUser: null,
@@ -1327,8 +1361,23 @@ const state = {
   nativeInstallPackage: null,
   nativeInstallFilename: "",
   nativeInstallError: "",
-  nativeInstallerResolution: null,
-  userFleetNodes: [],
+	  nativeInstallerResolution: null,
+	  nativeDebugOpen: false,
+	  nativeDebugStatus: "",
+  androidOAuthVerification: {
+    available: false,
+    busy: false,
+    opId: "",
+    status: "idle",
+    label: "idle",
+    message: "",
+    output: [],
+    report: null,
+    latestReportPath: "",
+    needsAppUpdate: false,
+  },
+  androidOAuthDiagnosticsUnsubscribe: null,
+	  userFleetNodes: [],
   userFleetSystemNodes: [],
   userFleetHarnesses: [],
   userFleetBusy: false,
@@ -17486,6 +17535,286 @@ function installWidgetResizing() {
   });
 }
 
+function parseNativeBridgePayload(payload) {
+  if (!payload) return payload;
+  if (typeof payload === "object") return payload;
+  if (typeof payload !== "string") return payload;
+  try {
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+function nativeBridgePayload(payload = {}) {
+  try {
+    return JSON.stringify(payload || {});
+  } catch {
+    return "{}";
+  }
+}
+
+function androidDiagnosticsBridge() {
+  const bridge = window.WasmAgentAndroidDiagnostics;
+  return bridge && typeof bridge === "object" ? bridge : null;
+}
+
+function recordAndroidNativeDiagnostic(eventName, payload = {}) {
+  const bridge = androidDiagnosticsBridge();
+  if (!bridge?.record) return null;
+  try {
+    return parseNativeBridgePayload(bridge.record(String(eventName || "event"), nativeBridgePayload(payload)));
+  } catch {
+    return null;
+  }
+}
+
+function androidElementVisibleRect(element) {
+  if (!element || element.hidden) return null;
+  const rects = Array.from(element.getClientRects?.() || []);
+  const rect = rects.find((item) => item.width > 1 && item.height > 1) || element.getBoundingClientRect?.();
+  if (!rect || rect.width <= 1 || rect.height <= 1) return null;
+  const style = window.getComputedStyle ? window.getComputedStyle(element) : null;
+  if (style && (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0)) return null;
+  return rect;
+}
+
+function androidGoogleSignInTapTarget() {
+  const candidates = [
+    ...(document.querySelectorAll?.('[data-native-android-oauth="google-signin"], [data-testid="google-signin-button"], [aria-label="Sign in with Google"]') || []),
+    els.authGateLoginButton,
+    els.authGateGoogleSignInButton?.firstElementChild,
+    els.googleSignInButton?.firstElementChild,
+    els.authGateGoogleSignInButton,
+    els.googleSignInButton,
+  ].filter(Boolean);
+  const seen = new Set();
+  for (const element of candidates) {
+    if (seen.has(element)) continue;
+    seen.add(element);
+    const rect = androidElementVisibleRect(element);
+    if (!rect) continue;
+    const viewport = window.visualViewport;
+    return {
+      tag: cleanText(element.tagName, "").toLowerCase(),
+      id: cleanText(element.id, ""),
+      testid: cleanText(element.getAttribute?.("data-testid"), ""),
+      aria_label: cleanText(element.getAttribute?.("aria-label"), ""),
+      native_oauth: cleanText(element.getAttribute?.("data-native-android-oauth"), ""),
+      rect: {
+        left: Number(rect.left.toFixed(2)),
+        top: Number(rect.top.toFixed(2)),
+        right: Number(rect.right.toFixed(2)),
+        bottom: Number(rect.bottom.toFixed(2)),
+        width: Number(rect.width.toFixed(2)),
+        height: Number(rect.height.toFixed(2)),
+        center_x: Number((rect.left + rect.width / 2).toFixed(2)),
+        center_y: Number((rect.top + rect.height / 2).toFixed(2)),
+      },
+      viewport: {
+        inner_width: Number(window.innerWidth || 0),
+        inner_height: Number(window.innerHeight || 0),
+        device_pixel_ratio: Number(window.devicePixelRatio || 1),
+        screen_width: Number(window.screen?.width || 0),
+        screen_height: Number(window.screen?.height || 0),
+        visual_width: Number(viewport?.width || 0),
+        visual_height: Number(viewport?.height || 0),
+        visual_offset_left: Number(viewport?.offsetLeft || 0),
+        visual_offset_top: Number(viewport?.offsetTop || 0),
+        visual_scale: Number(viewport?.scale || 1),
+      },
+    };
+  }
+  return null;
+}
+
+function androidNativeReadinessState(extra = {}) {
+  const authenticated = Boolean(state.authUser);
+  const authGateVisible = Boolean(els.app?.dataset.auth === "locked" || (!authenticated && state.authChecked));
+  const googleButtonVisible = [
+    els.authGateLoginButton,
+    els.authGateGoogleSignInButton,
+    els.googleSignInButton,
+  ].some((item) => Boolean(item && !item.hidden && item.getClientRects?.().length));
+  return {
+    native_android_shell: isAndroidNativeShell(),
+    login_screen_visible: Boolean(!authenticated && authGateVisible),
+    google_signin_button_visible: Boolean(!authenticated && googleButtonVisible),
+    current_route: cleanText(state.activePanel || "", ""),
+    current_url: window.location.href,
+    auth_state: authenticated ? "authenticated" : state.authChecked ? "anonymous" : "checking",
+    config_checked: Boolean(state.configChecked),
+    auth_checked: Boolean(state.authChecked),
+    google_client_configured: Boolean(state.googleClientId),
+    login_message: cleanText(state.loginMessage, ""),
+    google_button_rendered_for: cleanText(state.googleButtonRenderedFor, ""),
+    google_signin_tap_target: androidGoogleSignInTapTarget(),
+    ...extra,
+  };
+}
+
+function reportAndroidNativeReadiness(reason = "readiness", extra = {}) {
+  if (!isAndroidNativeShell()) return null;
+  const payload = androidNativeReadinessState({
+    reason: cleanText(reason, ""),
+    ...extra,
+  });
+  nativeShellDiagnostic("first_screen_readiness", payload);
+  recordAndroidNativeDiagnostic("first_screen_readiness", payload);
+  if (payload.login_screen_visible) {
+    recordAndroidNativeDiagnostic("login_screen_visible", payload);
+  }
+  if (payload.google_signin_button_visible) {
+    recordAndroidNativeDiagnostic("google_signin_button_visible", payload);
+  }
+  return payload;
+}
+
+function getAndroidNativeState() {
+  const bridge = androidDiagnosticsBridge();
+  if (!bridge?.getNativeState) return null;
+  try {
+    return parseNativeBridgePayload(bridge.getNativeState());
+  } catch {
+    return null;
+  }
+}
+
+function exportAndroidNativeDiagnostics() {
+  const bridge = androidDiagnosticsBridge();
+  if (!bridge?.exportLatest) return "";
+  try {
+    const exported = bridge.exportLatest();
+    return typeof exported === "string" ? exported : JSON.stringify(exported || {}, null, 2);
+  } catch {
+    return "";
+  }
+}
+
+function androidNativeShellInfo() {
+  let params = null;
+  try {
+    params = new URL(window.location.href).searchParams;
+  } catch {
+    params = new URLSearchParams();
+  }
+  let bridgeInfo = null;
+  if (window.wasmAgentAndroid?.shellInfo) {
+    try {
+      bridgeInfo = parseNativeBridgePayload(window.wasmAgentAndroid.shellInfo());
+    } catch {
+      bridgeInfo = null;
+    }
+  }
+  const native = cleanText(params.get("native"), "").toLowerCase();
+  const shell = cleanText(params.get("shell") || bridgeInfo?.shell || bridgeInfo?.nativeShell, "").toLowerCase();
+  const platform = cleanText(bridgeInfo?.platform || bridgeInfo?.buildPlatform, "").toLowerCase();
+  const isAndroid = native === "android"
+    || shell === "android-webview"
+    || platform === "android"
+    || Boolean(window.wasmAgentAndroid)
+    || Boolean(androidDiagnosticsBridge());
+  return {
+    isAndroidNativeShell: isAndroid,
+    native,
+    shell: shell || (isAndroid ? "android-webview" : ""),
+    platform: platform || (isAndroid ? "android" : ""),
+    buildId: cleanText(params.get("buildId") || bridgeInfo?.buildId, ""),
+    androidAuthSession: cleanText(params.get("android_auth_session") || bridgeInfo?.androidAuthSession, ""),
+    nativeCorrelationId: cleanText(params.get("native_correlation_id") || bridgeInfo?.nativeCorrelationId, ""),
+    installDeviceHash: cleanText(params.get("install_device_hash") || bridgeInfo?.installDeviceHash, ""),
+    diagnosticsPath: cleanText(bridgeInfo?.diagnosticsPath, ""),
+    hasBridge: Boolean(window.wasmAgentAndroid),
+    hasDiagnosticsBridge: Boolean(androidDiagnosticsBridge()),
+  };
+}
+
+function isAndroidNativeShell() {
+  return androidNativeShellInfo().isAndroidNativeShell;
+}
+
+function nativeShellDiagnostic(kind, payload = {}) {
+  const shell = androidNativeShellInfo();
+  const diagnostic = {
+    href: window.location.href,
+    origin: window.location.origin,
+    timestamp: new Date().toISOString(),
+    shell,
+    ...payload,
+  };
+  try {
+    if (window.wasmAgentAndroid?.logDiagnostic) {
+      window.wasmAgentAndroid.logDiagnostic(kind, nativeBridgePayload(diagnostic));
+    } else if (window.wasmAgentNative?.logDiagnostic) {
+      window.wasmAgentNative.logDiagnostic(kind, diagnostic);
+    }
+  } catch {
+    // Native shell diagnostics are best effort.
+  }
+  return diagnostic;
+}
+
+function applyNativeShellUi() {
+  if (isWindowsNativeShellHost() && els.homeGoNativeButton) {
+    const label = els.homeGoNativeButton.querySelector("span");
+    const needsUpdate = nativeInstallerUpdateAvailable();
+    const text = needsUpdate ? "Update App" : "Go Native";
+    if (label) label.textContent = text;
+    els.homeGoNativeButton.title = text;
+    els.homeGoNativeButton.setAttribute("aria-label", text);
+  }
+  if (nativeShellUiApplied) return;
+  if (!isAndroidNativeShell()) return;
+  nativeShellUiApplied = true;
+  document.documentElement.dataset.nativeShell = "android";
+  if (els.app) els.app.dataset.nativeShell = "android";
+  if (els.homeGoNativeButton) els.homeGoNativeButton.hidden = true;
+  if (els.nativeModal) els.nativeModal.hidden = true;
+  nativeShellDiagnostic("android_native_shell_detected", {
+    user_agent: navigator.userAgent || "",
+  });
+}
+
+function installAndroidNativeShellEventDiagnostics() {
+  if (!isAndroidNativeShell()) return;
+  window.addEventListener("load", () => nativeShellDiagnostic("window_load"));
+  window.addEventListener("pageshow", (event) => nativeShellDiagnostic("page_show", {
+    persisted: Boolean(event.persisted),
+  }));
+  window.addEventListener("wasm-agent:native-back", (event) => nativeShellDiagnostic("native_back_event", event.detail || {}));
+  window.addEventListener("wasm-agent:native-page-finished", (event) => nativeShellDiagnostic("native_page_finished", event.detail || {}));
+  window.addEventListener("wasm-agent:native-external-url", (event) => nativeShellDiagnostic("native_external_url_event", event.detail || {}));
+  window.addEventListener("wasm-agent:native-permission", (event) => nativeShellDiagnostic("native_permission_event", event.detail || {}));
+  window.addEventListener("wasm-agent:native-configuration", (event) => nativeShellDiagnostic("native_configuration_event", event.detail || {}));
+  window.addEventListener("wasm-agent:native-android-auth-canceled", (event) => {
+    nativeShellDiagnostic("native_android_auth_canceled_event", event.detail || {});
+    resetAndroidNativeGoogleLogin("native-cancel-event", "Google sign-in was canceled. Try again.");
+  });
+}
+
+function notifyNativeAppReady(reason = "app-ready", payload = {}) {
+  if (nativeAppReadyNotified && reason !== "authenticated-app-ready") return;
+  nativeAppReadyNotified = true;
+  const diagnostic = nativeShellDiagnostic("app_ready", {
+    reason,
+    authenticated: Boolean(state.authUser),
+    auth_checked: Boolean(state.authChecked),
+    config_checked: Boolean(state.configChecked),
+    active_panel: state.activePanel,
+    ...payload,
+  });
+  if (reason === "authenticated-app-ready" && state.authUser) {
+    recordAndroidNativeDiagnostic("authenticated_ui_visible", diagnostic);
+  }
+  if (window.wasmAgentAndroid?.appReady) {
+    try {
+      window.wasmAgentAndroid.appReady(nativeBridgePayload(diagnostic));
+    } catch {
+      // App-ready is a visibility hint only.
+    }
+  }
+}
+
 async function loadNativePreloadConfig() {
   if (!window.wasmAgentNative?.config) return null;
   let timeout = 0;
@@ -17503,12 +17832,13 @@ async function loadNativePreloadConfig() {
       });
       return null;
     }
+    const parsedPayload = parseNativeBridgePayload(payload);
     nativeAuthDiagnostic("native_config_resolved", {
       elapsed_ms: Math.round(performance.now() - startedAt),
-      has_auth: Boolean(payload?.auth),
-      has_native: Boolean(payload?.native || payload?.serverUrl),
+      has_auth: Boolean(parsedPayload?.auth),
+      has_native: Boolean(parsedPayload?.native || parsedPayload?.serverUrl),
     });
-    return payload && typeof payload === "object" ? payload : null;
+    return parsedPayload && typeof parsedPayload === "object" ? parsedPayload : null;
   } catch (error) {
     nativeAuthDiagnostic("native_config_error", {
       elapsed_ms: Math.round(performance.now() - startedAt),
@@ -17522,6 +17852,33 @@ async function loadNativePreloadConfig() {
 
 function errorMessage(error) {
   return String(error?.message || error || "").slice(0, 500);
+}
+
+function cleanStack(error) {
+  return cleanText(error?.stack || "", "").slice(0, 1800);
+}
+
+function exposeFrontierRendererState() {
+  try {
+    window.__wasmAgentFrontierState = () => ({
+      href: window.location.href,
+      buildId: authDiagnosticBuildId(),
+      cloudAssetBuildId: Array.from(document.scripts)
+        .map((item) => item.src || "")
+        .find((src) => src.includes("/app.js"))?.split("?v=")[1] || "",
+      configChecked: Boolean(state.configChecked),
+      authChecked: Boolean(state.authChecked),
+      authenticated: Boolean(state.authUser),
+      authSessionLoadPhase: frontierRuntimeState.authSessionLoadPhase,
+      loadAuthSessionReached: Boolean(frontierRuntimeState.loadAuthSessionReached),
+      loginMessage: cleanText(state.loginMessage, ""),
+      authRedirectMessage: cleanText(state.authRedirectMessage, ""),
+      lastError: cleanText(state.lastError, ""),
+      lastFatalError: frontierRuntimeState.lastFatalError,
+    });
+  } catch {
+    // Frontier state must never affect the app path.
+  }
 }
 
 function authDiagnosticDeviceId() {
@@ -17549,6 +17906,7 @@ function scheduleRendererAuthDiagnosticUpload(reason = "renderer-auth-diagnostic
 
 async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic") {
   if (!authDiagnosticBuffer.length) return;
+  const shell = androidNativeShellInfo();
   try {
     await fetch("/native/diagnostics", {
       method: "POST",
@@ -17561,6 +17919,9 @@ async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic"
         schema: "hermes.wasm_agent.renderer_auth_diagnostics.v1",
         device_id: authDiagnosticDeviceId(),
         build_id: authDiagnosticBuildId(),
+        android_auth_session: shell.androidAuthSession,
+        native_correlation_id: shell.nativeCorrelationId,
+        install_device_hash: shell.installDeviceHash,
         reason,
         href: window.location.href,
         renderer_auth_diagnostics_tail: authDiagnosticTail(),
@@ -17572,17 +17933,23 @@ async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic"
 }
 
 function nativeAuthDiagnostic(kind, payload = {}) {
+  const nativeShell = androidNativeShellInfo();
   const diagnostic = {
     href: window.location.href,
     origin: window.location.origin,
     protocol: window.location.protocol,
     has_native_bridge: Boolean(window.wasmAgentNative),
+    has_android_native_bridge: Boolean(window.wasmAgentAndroid),
+    native_shell: nativeShell,
     config_checked: Boolean(state.configChecked),
     auth_checked: Boolean(state.authChecked),
     has_google_client_id: Boolean(state.googleClientId),
     google_login_uri: state.googleLoginUri || "",
     login_message: state.loginMessage || "",
     google_button_rendered_for: state.googleButtonRenderedFor || "",
+    auth_session_load_phase: frontierRuntimeState.authSessionLoadPhase,
+    load_auth_session_reached: Boolean(frontierRuntimeState.loadAuthSessionReached),
+    build_id: authDiagnosticBuildId(),
     ...payload,
   };
   const entry = {
@@ -17595,9 +17962,12 @@ function nativeAuthDiagnostic(kind, payload = {}) {
   if (/error|timeout|rendered|finished|skipped|started|resolved/i.test(kind)) {
     scheduleRendererAuthDiagnosticUpload(kind);
   }
+  if (nativeShell.isAndroidNativeShell) {
+    recordAndroidNativeDiagnostic(kind, diagnostic);
+  }
   if (!window.wasmAgentNative?.logAuthDiagnostic) return;
   try {
-    void window.wasmAgentNative.logAuthDiagnostic(kind, diagnostic);
+    void window.wasmAgentNative.logAuthDiagnostic(kind, nativeShell.isAndroidNativeShell ? nativeBridgePayload(diagnostic) : diagnostic);
     if (
       window.wasmAgentNative.uploadAuthDiagnostics
       && /error|timeout|rendered|finished|skipped/i.test(kind)
@@ -17607,6 +17977,45 @@ function nativeAuthDiagnostic(kind, payload = {}) {
   } catch {
     // Diagnostics must never affect login.
   }
+}
+
+function reportRendererFatalError(kind, error, extra = {}) {
+  const fatal = {
+    kind,
+    message: errorMessage(error),
+    name: cleanText(error?.name, ""),
+    stack: cleanStack(error),
+    href: window.location.href,
+    buildId: authDiagnosticBuildId(),
+    authSessionLoadPhase: frontierRuntimeState.authSessionLoadPhase,
+    loadAuthSessionReached: Boolean(frontierRuntimeState.loadAuthSessionReached),
+    configChecked: Boolean(state.configChecked),
+    authChecked: Boolean(state.authChecked),
+    ...extra,
+  };
+  frontierRuntimeState.lastFatalError = fatal;
+  try {
+    window.__wasmAgentLastFatalError = fatal;
+  } catch {
+    // Keep reporting best-effort.
+  }
+  nativeAuthDiagnostic(kind, fatal);
+  void uploadRendererAuthDiagnostics(kind);
+  return fatal;
+}
+
+function installRendererFatalTrap() {
+  exposeFrontierRendererState();
+  window.addEventListener("error", (event) => {
+    reportRendererFatalError("renderer_global_error", event.error || event.message, {
+      source: cleanText(event.filename, ""),
+      line: event.lineno || 0,
+      column: event.colno || 0,
+    });
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    reportRendererFatalError("renderer_unhandled_rejection", event.reason || "Unhandled promise rejection");
+  });
 }
 
 function startNativeAuthDiagnosticHeartbeat() {
@@ -17741,6 +18150,46 @@ function nativeConfigState() {
   return state.config?.native && window.wasmAgentNative ? state.config.native : null;
 }
 
+function isWindowsNativeShellHost() {
+  const native = nativeConfigState();
+  const platform = cleanText(window.wasmAgentNative?.platform || native?.platform || native?.buildPlatform, "").toLowerCase();
+  return Boolean(window.wasmAgentNative) && (platform === "windows" || platform === "win32" || platform.startsWith("win"));
+}
+
+function windowsNativeShellNeedsDiagnosticsUpdate() {
+  return isWindowsNativeShellHost() && !window.wasmAgentNative?.nativeDiagnostics;
+}
+
+function nativeInstalledBuildId() {
+  return cleanText(nativeConfigState()?.buildId || window.wasmAgentNative?.buildId, "");
+}
+
+function nativeResolutionBuildId(resolution = state.nativeInstallerResolution) {
+  return cleanText(resolution?.buildId || resolution?.nativeBuildId, "");
+}
+
+function nativeInstallerUpdateAvailable(resolution = state.nativeInstallerResolution) {
+  if (!isWindowsNativeShellHost()) return false;
+  if (windowsNativeShellNeedsDiagnosticsUpdate()) return true;
+  const installed = nativeInstalledBuildId();
+  const latest = nativeResolutionBuildId(resolution);
+  return Boolean(resolution?.available && installed && latest && installed !== latest);
+}
+
+function nativeInstallProfileForContext(profile = null) {
+  const base = profile || detectNativeDeviceProfileSync();
+  if (!windowsNativeShellNeedsDiagnosticsUpdate() && !nativeInstallerUpdateAvailable()) return base;
+  return {
+    ...base,
+    platform: "windows",
+    os: "Windows",
+    device_type: "desktop",
+    deviceType: "desktop",
+    install_channel: "windows-installer",
+    installChannel: "windows-installer",
+  };
+}
+
 function nativeBackendUnresolved() {
   const native = nativeConfigState();
   return Boolean(native) && !cleanText(native.serverUrl, "");
@@ -17841,14 +18290,20 @@ function renderLogin() {
     els.loginFluxBalance.title = state.agentCredits ? "Available Flux balance" : "Flux balance not loaded yet";
   }
   if (els.googleSignInButton) {
+    els.googleSignInButton.setAttribute("aria-label", "Sign in with Google");
+    els.googleSignInButton.dataset.testid = "google-signin-slot";
     els.googleSignInButton.hidden = Boolean(user);
     if (user) els.googleSignInButton.replaceChildren();
   }
   if (els.authGateGoogleSignInButton) {
+    els.authGateGoogleSignInButton.setAttribute("aria-label", "Sign in with Google");
+    els.authGateGoogleSignInButton.dataset.testid = "auth-gate-google-signin-slot";
     els.authGateGoogleSignInButton.hidden = Boolean(user) || !state.googleClientId;
     if (user) els.authGateGoogleSignInButton.replaceChildren();
   }
   if (els.authGateLoginButton) {
+    els.authGateLoginButton.setAttribute("aria-label", "Sign in with Google");
+    els.authGateLoginButton.dataset.testid = "google-signin-button";
     els.authGateLoginButton.hidden = Boolean(user) || !state.authChecked || !state.googleClientId || (
       Boolean(state.googleClientId) && Boolean(els.authGateGoogleSignInButton?.childElementCount)
     );
@@ -17860,6 +18315,7 @@ function renderLogin() {
       : state.loginMessage || (state.googleClientId ? "Only allowlisted accounts can enter." : missingGoogleLoginMessage);
   }
   renderAuthGate();
+  reportAndroidNativeReadiness("render_login");
 }
 
 function loadGoogleIdentityScript() {
@@ -17960,11 +18416,158 @@ function googleSignInConfig(loginUri) {
   };
 }
 
+function androidNativeAuthSessionId() {
+  let sessionId = "";
+  try {
+    sessionId = cleanText(new URL(window.location.href).searchParams.get("android_auth_session"), "");
+  } catch {
+    sessionId = "";
+  }
+  if (!sessionId && window.wasmAgentAndroid?.authSessionId) {
+    try {
+      sessionId = cleanText(window.wasmAgentAndroid.authSessionId(), "");
+    } catch {
+      sessionId = "";
+    }
+  }
+  if (!sessionId) {
+    try {
+      sessionId = cleanText(window.localStorage.getItem(ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY), "");
+    } catch {
+      sessionId = "";
+    }
+  }
+  if (sessionId) {
+    try {
+      window.localStorage.setItem(ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY, sessionId);
+    } catch {
+      // Losing this only forces the user to retry Android native auth.
+    }
+  }
+  return sessionId;
+}
+
+function startAndroidNativeGoogleLoginIfAvailable(reason = "") {
+  const sessionId = androidNativeAuthSessionId();
+  if (!sessionId || !window.wasmAgentAndroid?.startGoogleLogin) return false;
+  recordAndroidNativeDiagnostic("login_clicked", {
+    reason: cleanText(reason, ""),
+    android_auth_session: sessionId,
+  });
+  if (state.androidNativeAuthStartedFor === sessionId) {
+    recordAndroidNativeDiagnostic("retry", {
+      reason: cleanText(reason, ""),
+      android_auth_session: sessionId,
+    });
+    nativeAuthDiagnostic("android_native_google_login_retry_after_stale_start", {
+      reason: cleanText(reason, ""),
+      session: sessionId,
+    });
+  }
+  state.androidNativeAuthStartedFor = sessionId;
+  state.loginMessage = "Opening Google sign-in...";
+  nativeAuthDiagnostic("android_native_google_login_start_requested", {
+    reason: cleanText(reason, ""),
+    session: sessionId,
+  });
+  recordAndroidNativeDiagnostic("oauth_start", {
+    reason: cleanText(reason, ""),
+    android_auth_session: sessionId,
+  });
+  renderLogin();
+  try {
+    window.wasmAgentAndroid.startGoogleLogin();
+    return true;
+  } catch (error) {
+    state.androidNativeAuthStartedFor = "";
+    state.loginMessage = errorMessage(error);
+    nativeAuthDiagnostic("android_native_google_login_start_error", {
+      message: errorMessage(error),
+    });
+    renderLogin();
+    return false;
+  }
+}
+
+function resetAndroidNativeGoogleLogin(reason = "", message = "") {
+  if (!state.androidNativeAuthStartedFor && state.loginMessage !== "Opening Google sign-in...") return false;
+  recordAndroidNativeDiagnostic("reset", {
+    reason: cleanText(reason, ""),
+    previous_session: state.androidNativeAuthStartedFor,
+  });
+  nativeAuthDiagnostic("android_native_google_login_reset", {
+    reason: cleanText(reason, ""),
+    previous_session: state.androidNativeAuthStartedFor,
+  });
+  state.androidNativeAuthStartedFor = "";
+  if (!state.authRedirectMessage && state.loginMessage === "Opening Google sign-in...") {
+    state.loginMessage = cleanText(message, "");
+  }
+  renderLogin();
+  void renderGoogleSignInButton();
+  return true;
+}
+
+function renderAndroidNativeGoogleSignIn(slots, renderKey, reason = "") {
+  const sessionId = androidNativeAuthSessionId();
+  if (!sessionId || !window.wasmAgentAndroid?.startGoogleLogin) return false;
+  slots.forEach((slot) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "native-google-button";
+    button.textContent = "Sign in with Google";
+    button.setAttribute("aria-label", "Sign in with Google");
+    button.setAttribute("data-testid", "google-signin-button");
+    button.setAttribute("data-native-android-oauth", "google-signin");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startAndroidNativeGoogleLoginIfAvailable("android-native-google-button");
+    });
+    slot.replaceChildren(button);
+    slot.hidden = false;
+  });
+  state.googleButtonRenderedFor = renderKey;
+  state.loginMessage = state.loginMessage === "Loading Google login..." ? "" : state.loginMessage;
+  nativeAuthDiagnostic("android_native_google_button_rendered", {
+    render_key: renderKey,
+    session: sessionId,
+    reason: cleanText(reason, ""),
+    slot_count: slots.length,
+  });
+  reportAndroidNativeReadiness("android_native_google_button_rendered", {
+    render_key: renderKey,
+    session: sessionId,
+    slot_count: slots.length,
+  });
+  if (els.authGateLoginButton) els.authGateLoginButton.hidden = true;
+  return true;
+}
+
+async function completeAndroidNativeAuthIfNeeded(reason = "") {
+  const sessionId = androidNativeAuthSessionId();
+  if (!sessionId || state.androidNativeAuthDoneFor === sessionId) return false;
+  state.androidNativeAuthDoneFor = sessionId;
+  nativeAuthDiagnostic("android_native_browser_completion_blocked", {
+    reason: cleanText(reason, ""),
+    session: sessionId,
+  });
+  return false;
+}
+
 async function flushNativeAuthCookies(reason) {
   if (!window.wasmAgentNative?.flushAuthCookies) return null;
   try {
-    const result = await window.wasmAgentNative.flushAuthCookies({ reason });
+    const result = parseNativeBridgePayload(await window.wasmAgentNative.flushAuthCookies(isAndroidNativeShell()
+      ? nativeBridgePayload({ reason })
+      : { reason }));
     nativeAuthDiagnostic("native_auth_cookie_flush_finished", {
+      ok: Boolean(result?.ok),
+      has_wa_uid: Boolean(result?.hasWaUid),
+      cookie_count: Number(result?.cookieCount || 0),
+      reason,
+    });
+    recordAndroidNativeDiagnostic("cookie_flush", {
       ok: Boolean(result?.ok),
       has_wa_uid: Boolean(result?.hasWaUid),
       cookie_count: Number(result?.cookieCount || 0),
@@ -17973,6 +18576,11 @@ async function flushNativeAuthCookies(reason) {
     return result;
   } catch (error) {
     nativeAuthDiagnostic("native_auth_cookie_flush_error", {
+      message: errorMessage(error),
+      reason,
+    });
+    recordAndroidNativeDiagnostic("error", {
+      stage: "cookie_flush",
       message: errorMessage(error),
       reason,
     });
@@ -18028,11 +18636,16 @@ function removeAuthRedirectCodeFromUrl() {
 async function redeemAuthRedirectCode() {
   const code = authRedirectCodeFromUrl();
   if (!code) return false;
+  const androidAuthSession = androidNativeAuthSessionId();
   nativeAuthDiagnostic("auth_redirect_code_redeem_started");
+  recordAndroidNativeDiagnostic("auth_polling", {
+    reason: "auth_redirect_code_redeem_started",
+    android_auth_session: androidAuthSession,
+  });
   try {
     const payload = await fetchJson("/auth/redeem", {
       method: "POST",
-      body: { code },
+      body: { code, android_auth_session: androidAuthSession },
       timeoutMs: 8000,
     });
     state.authUser = payload.user || null;
@@ -18043,6 +18656,12 @@ async function redeemAuthRedirectCode() {
     nativeAuthDiagnostic("auth_redirect_code_redeem_finished", {
       authenticated: Boolean(state.authUser),
     });
+    recordAndroidNativeDiagnostic("authenticated_ui_visible", {
+      reason: "auth_redirect_code_redeem_finished",
+      authenticated: Boolean(state.authUser),
+      android_auth_session: androidAuthSession,
+    });
+    void completeAndroidNativeAuthIfNeeded("auth_redirect_code_redeemed");
     return Boolean(state.authUser);
   } catch (error) {
     removeAuthRedirectCodeFromUrl();
@@ -18050,6 +18669,11 @@ async function redeemAuthRedirectCode() {
     state.loginMessage = state.authRedirectMessage;
     nativeAuthDiagnostic("auth_redirect_code_redeem_error", {
       message: errorMessage(error),
+    });
+    recordAndroidNativeDiagnostic("error", {
+      stage: "auth_redirect_code_redeem",
+      message: errorMessage(error),
+      android_auth_session: androidAuthSession,
     });
     return false;
   }
@@ -18089,6 +18713,9 @@ async function renderGoogleSignInButton() {
   }
   if (!state.authRedirectMessage) state.loginMessage = "";
   renderLogin();
+  if (isAndroidNativeShell() && renderAndroidNativeGoogleSignIn(slots, renderKey, "android-native-shell")) {
+    return;
+  }
   try {
     await loadGoogleIdentityScript();
     const signInMode = googleSignInUsesCredentialCallback() ? "native-callback" : "redirect";
@@ -18115,6 +18742,10 @@ async function renderGoogleSignInButton() {
       render_key: renderKey,
       slot_child_counts: slots.map((slot) => slot.childElementCount),
     });
+    reportAndroidNativeReadiness("google_button_rendered", {
+      render_key: renderKey,
+      slot_child_counts: slots.map((slot) => slot.childElementCount),
+    });
     if (els.authGateLoginButton && els.authGateGoogleSignInButton?.childElementCount) {
       els.authGateLoginButton.hidden = true;
     }
@@ -18123,31 +18754,52 @@ async function renderGoogleSignInButton() {
     nativeAuthDiagnostic("google_button_render_error", {
       message: errorMessage(error),
     });
+    if (startAndroidNativeGoogleLoginIfAvailable(errorMessage(error))) return;
     renderLogin();
   }
 }
 
 async function loadAuthSession() {
+  frontierRuntimeState.loadAuthSessionReached = true;
+  frontierRuntimeState.authSessionLoadPhase = "started";
   nativeAuthDiagnostic("auth_session_load_started");
+  recordAndroidNativeDiagnostic("auth_polling", {
+    reason: "auth_session_load_started",
+    android_auth_session: androidNativeAuthSessionId(),
+  });
   const startedAt = performance.now();
   try {
     const payload = await fetchJson("/auth/session", { timeoutMs: 8000 });
     state.authUser = payload.user || null;
+    frontierRuntimeState.authSessionLoadPhase = payload.user ? "authenticated" : "anonymous";
     nativeAuthDiagnostic("auth_session_load_finished", {
       elapsed_ms: Math.round(performance.now() - startedAt),
       authenticated: Boolean(state.authUser),
     });
     if (state.authUser) {
+      recordAndroidNativeDiagnostic("authenticated_ui_visible", {
+        reason: "auth_session_load_finished",
+        android_auth_session: androidNativeAuthSessionId(),
+      });
+    }
+    if (state.authUser) {
       state.loginMessage = "";
       state.authRedirectMessage = "";
+      void completeAndroidNativeAuthIfNeeded("auth_session_loaded");
     } else if (!state.authRedirectMessage) {
       state.loginMessage = "";
     }
   } catch (error) {
     state.authUser = null;
+    frontierRuntimeState.authSessionLoadPhase = "error";
     nativeAuthDiagnostic("auth_session_load_error", {
       elapsed_ms: Math.round(performance.now() - startedAt),
       message: errorMessage(error),
+    });
+    recordAndroidNativeDiagnostic("error", {
+      stage: "auth_session_load",
+      message: errorMessage(error),
+      android_auth_session: androidNativeAuthSessionId(),
     });
     if (!state.authRedirectMessage) state.loginMessage = error.message;
   }
@@ -18176,6 +18828,7 @@ async function handleGoogleCredential(response) {
     state.loginMessage = "";
     state.authRedirectMessage = "";
     await flushNativeAuthCookies("google_credential_callback");
+    void completeAndroidNativeAuthIfNeeded("google_credential_callback");
     setLoginOpen(false);
     await bootstrapAuthenticatedApp();
     recordUserEvent("auth.google_login_finished", {
@@ -26435,9 +27088,35 @@ function stopAgentMessage() {
 }
 
 function installDevHmrBridge() {
-  window.__wasmAgentDevHmr = {
+  const bridge = {
     requestReload(paths = []) {
-      if (!state.agentBusy) return false;
+      if (!state.agentBusy) {
+        const nativeBridge = (window.__wasmAgentNativeDevHmr && window.__wasmAgentNativeDevHmr !== bridge)
+          ? window.__wasmAgentNativeDevHmr
+          : (window.__wasmAgentDevHmr && window.__wasmAgentDevHmr !== bridge)
+            ? window.__wasmAgentDevHmr
+            : null;
+        try {
+          const reloadResult = nativeBridge?.requestReload?.(paths);
+          if (reloadResult) {
+            if (typeof reloadResult.catch === "function") {
+              reloadResult.catch((error) => {
+                nativeAuthDiagnostic("dev_hmr_native_bridge_reload_error", {
+                  message: errorMessage(error),
+                  name: cleanText(error?.name, ""),
+                });
+              });
+            }
+            return true;
+          }
+        } catch (error) {
+          nativeAuthDiagnostic("dev_hmr_native_bridge_reload_error", {
+            message: errorMessage(error),
+            name: cleanText(error?.name, ""),
+          });
+        }
+        return false;
+      }
       state.agentDeferredHmrReload = {
         paths: Array.isArray(paths) ? paths : [],
         requested_at: Date.now(),
@@ -26467,6 +27146,28 @@ function installDevHmrBridge() {
       return true;
     },
   };
+  try {
+    window.__wasmAgentAppDevHmr = bridge;
+  } catch (error) {
+    nativeAuthDiagnostic("dev_hmr_app_bridge_install_error", {
+      message: errorMessage(error),
+      name: cleanText(error?.name, ""),
+    });
+  }
+  try {
+    if (!window.__wasmAgentDevHmr) {
+      window.__wasmAgentDevHmr = bridge;
+    } else if (window.__wasmAgentDevHmr !== bridge) {
+      nativeAuthDiagnostic("dev_hmr_legacy_bridge_preserved", {
+        has_request_reload: Boolean(window.__wasmAgentDevHmr?.requestReload),
+      });
+    }
+  } catch (error) {
+    nativeAuthDiagnostic("dev_hmr_legacy_bridge_install_error", {
+      message: errorMessage(error),
+      name: cleanText(error?.name, ""),
+    });
+  }
 }
 
 function flushDeferredHmrReload() {
@@ -27846,6 +28547,7 @@ function syncResourcePolling() {
 
 function detectNativeDeviceProfileSync() {
   const userAgent = cleanText(navigator.userAgent || "", "Browser");
+  const shell = androidNativeShellInfo();
   const ua = userAgent.toLowerCase();
   const platform = cleanText(navigator.platform || "", "");
   const maxTouchPoints = Number(navigator.maxTouchPoints || 0);
@@ -27869,7 +28571,9 @@ function detectNativeDeviceProfileSync() {
     linux: "Linux",
     unknown: "Unknown",
   }[detectedPlatform] || "Unknown";
-  const browser = ua.includes("edg/")
+  const browser = shell.isAndroidNativeShell
+    ? "android-webview"
+    : ua.includes("edg/")
     ? "edge"
     : (ua.includes("chrome/") || ua.includes("crios/"))
       ? "chrome"
@@ -27883,6 +28587,7 @@ function detectNativeDeviceProfileSync() {
     edge: "Edge",
     firefox: "Firefox",
     safari: "Safari",
+    "android-webview": "Android WebView",
     unknown: "Unknown",
   }[browser] || "Unknown";
   const deviceType = detectedPlatform === "android" || detectedPlatform === "ios"
@@ -27890,7 +28595,9 @@ function detectNativeDeviceProfileSync() {
     : detectedPlatform === "unknown"
       ? "unknown"
       : "desktop";
-  const installChannel = {
+  const installChannel = shell.isAndroidNativeShell
+    ? "android-native-shell"
+    : {
     android: "android-apk",
     ios: "ios-testflight-or-app-store",
     macos: "macos-installer",
@@ -27912,7 +28619,10 @@ function detectNativeDeviceProfileSync() {
     user_agent: userAgent,
     navigator_platform: platform,
     max_touch_points: Number.isFinite(maxTouchPoints) ? maxTouchPoints : 0,
-    display_mode: window.matchMedia?.("(display-mode: standalone)")?.matches ? "standalone" : "browser",
+    display_mode: shell.isAndroidNativeShell
+      ? "android-native-shell"
+      : window.matchMedia?.("(display-mode: standalone)")?.matches ? "standalone" : "browser",
+    native_shell: shell.isAndroidNativeShell ? shell : null,
     pwa_capabilities: {
       microphone: Boolean(navigator.mediaDevices?.getUserMedia),
       service_worker: Boolean(navigator.serviceWorker),
@@ -27974,6 +28684,12 @@ function downloadBlob(filename, blob) {
 }
 
 function downloadUrl(filename, url) {
+  if (isAndroidNativeShell()) {
+    nativeShellDiagnostic("renderer_download_url_requested", {
+      filename: cleanText(filename, ""),
+      url: cleanText(url, ""),
+    });
+  }
   const link = document.createElement("a");
   link.href = url;
   link.download = filename || "";
@@ -27985,7 +28701,7 @@ function downloadUrl(filename, url) {
 
 function nativePrimaryCtaLabel(resolution = state.nativeInstallerResolution, profile = state.nativeInstallProfile) {
   const platform = cleanText(resolution?.platform || profile?.platform, "unknown").toLowerCase();
-  if (platform === "windows") return "Download Windows Installer";
+  if (platform === "windows") return nativeInstallerUpdateAvailable(resolution) ? "Update App" : "Download Windows Installer";
   if (platform === "android") return "Download Android APK";
   if (platform === "macos") return "Download macOS Installer";
   if (platform === "linux") return "Download Linux Installer";
@@ -28025,22 +28741,27 @@ async function resolveNativeInstaller(profile) {
 
 function renderNativeInstall() {
   if (!els.nativeDeviceSummary || !els.nativePackageSummary || !els.nativeInstallStatus) return;
-  const profile = state.nativeInstallProfile || detectNativeDeviceProfileSync();
+  const profile = nativeInstallProfileForContext(state.nativeInstallProfile || detectNativeDeviceProfileSync());
   const device = nativeInstallCurrentDevice();
   const resolution = state.nativeInstallerResolution || null;
+  const updateAvailable = nativeInstallerUpdateAvailable(resolution);
+  const installedBuildId = nativeInstalledBuildId();
+  const latestBuildId = nativeResolutionBuildId(resolution);
   const status = state.nativeInstallBusy
     ? "checking"
     : state.nativeInstallError
       ? "error"
       : resolution?.available
-        ? "available"
+        ? updateAvailable ? "update" : "available"
         : resolution
           ? "missing"
           : "native";
   els.nativeInstallStatus.textContent = status;
-  els.nativeInstallStatus.className = `widget-chip ${status === "available" ? "ok" : status === "error" || status === "missing" ? "err" : ""}`;
+  els.nativeInstallStatus.className = `widget-chip ${status === "available" ? "ok" : status === "update" ? "warn" : status === "error" || status === "missing" ? "err" : ""}`;
   if (els.nativeModalSubtitle) {
-    els.nativeModalSubtitle.textContent = `${profile.os} / ${profile.device_type || profile.deviceType}`;
+    els.nativeModalSubtitle.textContent = updateAvailable
+      ? "Windows app update required"
+      : `${profile.os} / ${profile.device_type || profile.deviceType}`;
   }
   if (els.nativeDownloadButton) {
     els.nativeDownloadButton.textContent = nativePrimaryCtaLabel(resolution, profile);
@@ -28069,12 +28790,16 @@ function renderNativeInstall() {
       ]
     : resolution
       ? [
-          metric("Status", resolution.available ? "available" : cleanText(resolution.message, "Native installer not built yet")),
+          metric("Status", updateAvailable ? "update available" : resolution.available ? "available" : cleanText(resolution.message, "Native installer not built yet")),
           metric("Kind", cleanText(resolution.kind, "native-installer")),
           metric("File", cleanText(resolution.filename, "not built")),
           metric("Build", cleanText(resolution.buildStatus, resolution.available ? "built" : "missing")),
+          isWindowsNativeShellHost() ? metric("Installed", installedBuildId || "unknown") : null,
+          isWindowsNativeShellHost() ? metric("Latest", latestBuildId || "unknown") : null,
+          windowsNativeShellNeedsDiagnosticsUpdate() ? metric("Reason", "Diagnostics bridge missing") : null,
+          updateAvailable && !windowsNativeShellNeedsDiagnosticsUpdate() ? metric("Reason", "New Windows build available") : null,
           metric("Fallbacks", Array.isArray(resolution.fallbacks) && resolution.fallbacks.length ? resolution.fallbacks.map((item) => cleanText(item?.label || item?.kind, "")).filter(Boolean).join(", ") : "none"),
-        ]
+        ].filter(Boolean)
       : [
           metric("Status", state.nativeInstallBusy ? "checking" : "pending"),
           metric("Kind", cleanText(profile.install_channel || profile.installChannel, "native-installer")),
@@ -28130,8 +28855,15 @@ function chooseNativePlatform(platform) {
 }
 
 function openNativeModal(options = {}) {
+  if (isAndroidNativeShell()) {
+    applyNativeShellUi();
+    nativeShellDiagnostic("native_install_prompt_suppressed", {
+      origin: cleanText(options.origin, "home-go-native"),
+    });
+    return;
+  }
   setPanel("home", { updateUrl: false });
-  state.nativeInstallProfile = detectNativeDeviceProfileSync();
+  state.nativeInstallProfile = nativeInstallProfileForContext(detectNativeDeviceProfileSync());
   state.nativeInstallerResolution = null;
   state.nativeInstallError = "";
   renderNativeInstall();
@@ -28146,6 +28878,7 @@ function openNativeModal(options = {}) {
       os: state.nativeInstallProfile.os,
       device_type: state.nativeInstallProfile.device_type,
       install_channel: state.nativeInstallProfile.install_channel,
+      update_required: windowsNativeShellNeedsDiagnosticsUpdate(),
     },
   });
   if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native", { resolveOnly: true }).catch(() => {});
@@ -28159,7 +28892,397 @@ function closeNativeModal(options = {}) {
   }
 }
 
+function shouldOpenNativeDebugFromLocation() {
+  return window.location.pathname === "/native/debug";
+}
+
+function nativeDebugRows(nativeState = null) {
+  const shell = androidNativeShellInfo();
+  const oauth = nativeState?.oauth || {};
+  return [
+    ["Native", shell.isAndroidNativeShell ? "android-webview" : "not detected"],
+    ["URL", cleanText(nativeState?.current_webview_url || window.location.href, "")],
+    ["Auth", state.authUser ? `authenticated ${state.authUser.id || ""}`.trim() : state.authChecked ? "locked" : "checking"],
+    ["OAuth", cleanText(oauth.stage || "", "unknown")],
+    ["Result", cleanText(oauth.result || "", "")],
+    ["Session", cleanText(nativeState?.android_auth_session || shell.androidAuthSession, "")],
+    ["Correlation", cleanText(nativeState?.native_correlation_id || "", "")],
+    ["Build", cleanText(nativeState?.build?.build_id || shell.buildId, "")],
+    ["Cookies", nativeState?.safe_cookie_session_summary
+      ? `wa_uid=${Boolean(nativeState.safe_cookie_session_summary.has_wa_uid)} count=${Number(nativeState.safe_cookie_session_summary.cookie_count || 0)}`
+      : "unknown"],
+  ];
+}
+
+function renderNativeDebugModal() {
+  if (!els.nativeDebugModal) return;
+  const nativeState = getAndroidNativeState();
+  const latest = exportAndroidNativeDiagnostics();
+  if (els.nativeDebugMeta) {
+    els.nativeDebugMeta.textContent = state.nativeDebugStatus || (isAndroidNativeShell() ? "android-webview" : "not android native");
+  }
+  if (els.nativeDebugState) {
+    els.nativeDebugState.replaceChildren(...nativeDebugRows(nativeState).flatMap(([label, value]) => {
+      const dt = document.createElement("dt");
+      dt.textContent = label;
+      const dd = document.createElement("dd");
+      dd.textContent = cleanText(value, "");
+      return [dt, dd];
+    }));
+  }
+  if (els.nativeDebugOutput) {
+    els.nativeDebugOutput.textContent = latest || JSON.stringify({
+      ok: false,
+      reason: isAndroidNativeShell() ? "native diagnostics bridge unavailable" : "not Android native shell",
+      href: window.location.href,
+    }, null, 2);
+  }
+}
+
+function openNativeDebugModal(options = {}) {
+  applyNativeShellUi();
+  state.nativeDebugOpen = true;
+  state.nativeDebugStatus = "";
+  renderNativeDebugModal();
+  if (els.nativeDebugModal) els.nativeDebugModal.hidden = false;
+  recordAndroidNativeDiagnostic("native_debug_opened", {
+    href: window.location.href,
+    reason: cleanText(options.reason, "route"),
+  });
+  if (!options.skipHistory) {
+    pushUiNavigationLayer("native-debug-modal", () => closeNativeDebugModal({ skipHistory: true, skipStack: true }));
+  }
+}
+
+function closeNativeDebugModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("native-debug-modal")) return;
+  state.nativeDebugOpen = false;
+  if (els.nativeDebugModal) els.nativeDebugModal.hidden = true;
+  if (!options.skipStack) {
+    closeUiNavigationLayer("native-debug-modal", { skipHistory: true, replaceHistory: true });
+  }
+  if (window.location.pathname === "/native/debug") {
+    window.history.replaceState(window.history.state, "", "/home");
+  }
+}
+
+async function copyNativeDebugDiagnostics() {
+  const latest = exportAndroidNativeDiagnostics();
+  try {
+    await navigator.clipboard.writeText(latest || "");
+    state.nativeDebugStatus = "copied";
+  } catch {
+    state.nativeDebugStatus = "copy failed";
+  }
+  recordAndroidNativeDiagnostic("native_debug_copy", { ok: state.nativeDebugStatus === "copied" });
+  renderNativeDebugModal();
+}
+
+async function shareNativeDebugDiagnostics() {
+  const bridge = androidDiagnosticsBridge();
+  if (bridge?.shareLatest) {
+    try {
+      bridge.shareLatest();
+      state.nativeDebugStatus = "share opened";
+    } catch {
+      state.nativeDebugStatus = "share failed";
+    }
+  } else if (navigator.share) {
+    try {
+      await navigator.share({ title: "WASM Agent Android diagnostics", text: exportAndroidNativeDiagnostics() });
+      state.nativeDebugStatus = "shared";
+    } catch {
+      state.nativeDebugStatus = "share canceled";
+    }
+  } else {
+    await copyNativeDebugDiagnostics();
+    state.nativeDebugStatus = "copied";
+  }
+  recordAndroidNativeDiagnostic("native_debug_share", { status: state.nativeDebugStatus });
+  renderNativeDebugModal();
+}
+
+function callNativeDebugBridge(methodName, statusLabel) {
+  const bridge = androidDiagnosticsBridge();
+  try {
+    if (!bridge?.[methodName]) throw new Error("bridge method unavailable");
+    bridge[methodName]();
+    state.nativeDebugStatus = statusLabel;
+  } catch (error) {
+    state.nativeDebugStatus = errorMessage(error);
+  }
+  recordAndroidNativeDiagnostic(methodName, { status: state.nativeDebugStatus });
+  window.setTimeout(renderNativeDebugModal, 250);
+  renderNativeDebugModal();
+}
+
+function windowsNativeDiagnosticsBridge() {
+  return window.wasmAgentNative?.platform === "windows" && window.wasmAgentNative?.nativeDiagnostics
+    ? window.wasmAgentNative.nativeDiagnostics
+    : null;
+}
+
+function isWindowsNativeShell() {
+  return Boolean(windowsNativeDiagnosticsBridge());
+}
+
+function androidOAuthStatusLabel(status = "") {
+  const normalized = cleanText(status, "idle");
+  return {
+    checking_adb: "checking adb",
+    adb_missing: "adb missing",
+    waiting_for_phone: "waiting for phone",
+    unauthorized: "unauthorized: unlock phone and tap Allow",
+    offline: "phone offline",
+    device_authorized: "device authorized",
+    running_horc: "running horc simulate android --device --interactive-oauth",
+    PASS: "PASS",
+    PENDING: "PENDING",
+    FAIL: "FAIL",
+    pending: "PENDING",
+    failed: "FAIL",
+    passed: "PASS",
+  }[normalized] || normalized;
+}
+
+function androidOAuthReportPath(report = null) {
+  return cleanText(report?.summaryPath || report?.resultPath || report?.reportDir, "");
+}
+
+function androidOAuthResultDiagnosticText(result = {}) {
+  return [
+    result.error,
+    result.message,
+    result.instructions,
+    result.runner?.error,
+    result.runner?.message,
+    result.horcResult?.error,
+    result.horcResult?.stderr,
+    result.horcResult?.stdout,
+  ].map((value) => cleanText(value, "")).filter(Boolean).join("\n");
+}
+
+function androidOAuthNeedsWindowsAppUpdateText(text = "") {
+  return /spawn\s+horc\s+ENOENT|bundled_horc_runner_missing|horc_runner_missing|bundled Android verifier is missing|missing its bundled Android verifier|no PATH horc fallback/i.test(cleanText(text, ""));
+}
+
+function androidOAuthNeedsWindowsAppUpdate() {
+  const verification = state.androidOAuthVerification;
+  return Boolean(verification.needsAppUpdate || androidOAuthNeedsWindowsAppUpdateText([
+    verification.message,
+    verification.output.join("\n"),
+  ].join("\n")));
+}
+
+function appendAndroidOAuthOutput(kind, text) {
+  const prefix = kind ? `[${kind}] ` : "";
+  const lines = cleanText(text, "")
+    .split(/\r?\n/)
+    .map((line) => `${prefix}${line}`.trim())
+    .filter(Boolean);
+  if (!lines.length) return;
+  state.androidOAuthVerification.output.push(...lines);
+  state.androidOAuthVerification.output = state.androidOAuthVerification.output.slice(-260);
+}
+
+function applyAndroidOAuthReport(report = null) {
+  if (!report) return;
+  state.androidOAuthVerification.report = report;
+  state.androidOAuthVerification.latestReportPath = androidOAuthReportPath(report);
+}
+
+function applyAndroidOAuthResult(result = {}) {
+  if (result.opId) state.androidOAuthVerification.opId = cleanText(result.opId, "");
+  if (result.report) applyAndroidOAuthReport(result.report);
+  const diagnosticText = androidOAuthResultDiagnosticText(result);
+  if (androidOAuthNeedsWindowsAppUpdateText(diagnosticText)) {
+    state.androidOAuthVerification.needsAppUpdate = true;
+    state.androidOAuthVerification.message = "Update the Windows app to install the bundled Android verifier.";
+    appendAndroidOAuthOutput("update", "Bundled Android verifier is missing. Download and install the latest Windows app.");
+  }
+  if (result.status) {
+    state.androidOAuthVerification.status = cleanText(result.status, "");
+    state.androidOAuthVerification.label = androidOAuthStatusLabel(result.status);
+  }
+  if (result.label) state.androidOAuthVerification.label = cleanText(result.label, "");
+  if (!state.androidOAuthVerification.needsAppUpdate) {
+    if (result.message) state.androidOAuthVerification.message = cleanText(result.message, "");
+    if (result.instructions) state.androidOAuthVerification.message = cleanText(result.instructions, "");
+    if (result.error && !result.message && !result.instructions) state.androidOAuthVerification.message = cleanText(result.error, "");
+  }
+}
+
+function renderAndroidOAuthDiagnosticsPanel() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  const verification = state.androidOAuthVerification;
+  verification.available = Boolean(bridge);
+  const report = verification.report || {};
+  const reportPath = verification.latestReportPath || androidOAuthReportPath(report);
+  const status = verification.label || androidOAuthStatusLabel(verification.status);
+  const needsAppUpdate = androidOAuthNeedsWindowsAppUpdate();
+  if (els.androidOAuthPanelStatus) {
+    els.androidOAuthPanelStatus.textContent = status || "standby";
+    els.androidOAuthPanelStatus.className = `widget-chip ${verification.status === "PASS" || verification.status === "passed" ? "ok" : verification.status === "FAIL" || verification.status === "failed" || verification.status === "adb_missing" ? "err" : ""}`;
+  }
+  if (els.androidOAuthStartButton) {
+    els.androidOAuthStartButton.disabled = !bridge || verification.busy;
+  }
+  if (els.androidOAuthStatus) {
+    els.androidOAuthStatus.textContent = verification.busy ? status || "running" : status || (bridge ? "ready" : "unavailable");
+  }
+  if (els.androidOAuthHint) {
+    els.androidOAuthHint.textContent = bridge
+      ? verification.message || (verification.status === "idle" ? "Connect an Android phone with USB debugging enabled." : "")
+      : "Open the installed Windows app to run local Android OAuth verification.";
+  }
+  if (els.androidOAuthReportPath) {
+    els.androidOAuthReportPath.textContent = reportPath || "none";
+  }
+  if (els.androidOAuthOpenReportButton) {
+    els.androidOAuthOpenReportButton.disabled = !bridge || !reportPath;
+  }
+  if (els.androidOAuthRefreshReportButton) {
+    els.androidOAuthRefreshReportButton.disabled = !bridge;
+  }
+  if (els.androidOAuthUpdateAppButton) {
+    els.androidOAuthUpdateAppButton.hidden = !needsAppUpdate;
+    els.androidOAuthUpdateAppButton.disabled = state.nativeInstallBusy;
+  }
+  if (els.androidOAuthReportSummary) {
+    els.androidOAuthReportSummary.textContent = report?.summary || (reportPath ? "Report summary unavailable." : "");
+  }
+  if (els.androidOAuthOutput) {
+    els.androidOAuthOutput.textContent = verification.output.join("\n");
+    els.androidOAuthOutput.scrollTop = els.androidOAuthOutput.scrollHeight;
+  }
+}
+
+function handleAndroidOAuthDiagnosticsEvent(event = {}) {
+  const incomingOpId = cleanText(event.opId, "");
+  if (incomingOpId && !state.androidOAuthVerification.opId) {
+    state.androidOAuthVerification.opId = incomingOpId;
+  }
+  if (incomingOpId && state.androidOAuthVerification.opId && incomingOpId !== state.androidOAuthVerification.opId) return;
+  if (event.type === "status") {
+    state.androidOAuthVerification.status = cleanText(event.status, "");
+    state.androidOAuthVerification.label = cleanText(event.label, androidOAuthStatusLabel(event.status));
+    state.androidOAuthVerification.message = cleanText(event.message, "");
+    if (event.report) applyAndroidOAuthReport(event.report);
+    appendAndroidOAuthOutput("status", state.androidOAuthVerification.label);
+  } else if (event.type === "stdout" || event.type === "stderr") {
+    appendAndroidOAuthOutput(event.type, event.text);
+  } else if (event.type === "command_started") {
+    appendAndroidOAuthOutput("run", event.command || event.operation || "command");
+  } else if (event.type === "command_finished") {
+    if (androidOAuthNeedsWindowsAppUpdateText(androidOAuthResultDiagnosticText(event.result || {}))) {
+      state.androidOAuthVerification.needsAppUpdate = true;
+      state.androidOAuthVerification.message = "Update the Windows app to install the bundled Android verifier.";
+      appendAndroidOAuthOutput("update", "Bundled Android verifier is missing. Download and install the latest Windows app.");
+    }
+    appendAndroidOAuthOutput("exit", `code ${event.result?.exitCode ?? ""}`.trim());
+  }
+  renderAndroidOAuthDiagnosticsPanel();
+}
+
+async function refreshAndroidOAuthReport() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  if (!bridge?.run) {
+    renderAndroidOAuthDiagnosticsPanel();
+    return null;
+  }
+  try {
+    const result = await bridge.run("read_latest_android_report");
+    if (result?.report) applyAndroidOAuthReport(result.report);
+    renderAndroidOAuthDiagnosticsPanel();
+    return result;
+  } catch (error) {
+    state.androidOAuthVerification.message = errorMessage(error);
+    renderAndroidOAuthDiagnosticsPanel();
+    return null;
+  }
+}
+
+async function openAndroidOAuthLatestReport() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  if (!bridge?.run) return;
+  try {
+    const result = await bridge.run("open_latest_android_report");
+    if (result?.report) applyAndroidOAuthReport(result.report);
+    if (!result?.ok) state.androidOAuthVerification.message = cleanText(result?.error, "Latest report is unavailable.");
+  } catch (error) {
+    state.androidOAuthVerification.message = errorMessage(error);
+  }
+  renderAndroidOAuthDiagnosticsPanel();
+}
+
+async function updateWindowsAppForAndroidOAuthVerifier() {
+  state.nativeInstallProfile = nativeInstallProfileForContext({
+    ...detectNativeDeviceProfileSync(),
+    platform: "windows",
+    os: "Windows",
+    install_channel: "windows-installer",
+  });
+  state.nativeInstallProfile.installChannel = state.nativeInstallProfile.install_channel;
+  await startNativeInstall("diagnostics-android-oauth-update", { keepProfile: true });
+  renderAndroidOAuthDiagnosticsPanel();
+}
+
+async function startAndroidOAuthVerification() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  if (!bridge?.run || state.androidOAuthVerification.busy) {
+    renderAndroidOAuthDiagnosticsPanel();
+    return;
+  }
+  state.androidOAuthVerification.busy = true;
+  state.androidOAuthVerification.opId = "";
+  state.androidOAuthVerification.status = "checking_adb";
+  state.androidOAuthVerification.label = "checking adb";
+  state.androidOAuthVerification.message = "";
+  state.androidOAuthVerification.output = [];
+  state.androidOAuthVerification.needsAppUpdate = false;
+  renderAndroidOAuthDiagnosticsPanel();
+  try {
+    const result = await bridge.run("verify_android_oauth");
+    applyAndroidOAuthResult(result || {});
+    if (result?.status === "PASS" && result?.ok) {
+      appendAndroidOAuthOutput("proof", "PASS");
+    } else if (result?.status === "PENDING" || result?.status === "pending") {
+      appendAndroidOAuthOutput("proof", "real-device proof is still pending");
+    } else if (result?.status) {
+      appendAndroidOAuthOutput("proof", androidOAuthStatusLabel(result.status));
+    }
+    await refreshAndroidOAuthReport();
+  } catch (error) {
+    state.androidOAuthVerification.status = "FAIL";
+    state.androidOAuthVerification.label = "FAIL";
+    state.androidOAuthVerification.message = errorMessage(error);
+    appendAndroidOAuthOutput("error", state.androidOAuthVerification.message);
+  } finally {
+    state.androidOAuthVerification.busy = false;
+    renderAndroidOAuthDiagnosticsPanel();
+  }
+}
+
+function installWindowsAndroidOAuthDiagnostics() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  if (state.androidOAuthDiagnosticsUnsubscribe) return;
+  if (bridge?.onEvent) {
+    state.androidOAuthDiagnosticsUnsubscribe = bridge.onEvent(handleAndroidOAuthDiagnosticsEvent);
+  }
+  state.androidOAuthVerification.available = Boolean(bridge);
+  renderAndroidOAuthDiagnosticsPanel();
+  if (bridge?.run) void refreshAndroidOAuthReport();
+}
+
 async function startNativeInstall(origin = "manual", options = {}) {
+  if (isAndroidNativeShell()) {
+    applyNativeShellUi();
+    nativeShellDiagnostic("native_install_download_suppressed", {
+      origin,
+      reason: "already_android_native_shell",
+    });
+    return;
+  }
   if (!state.authUser || state.nativeInstallBusy) {
     renderNativeInstall();
     return;
@@ -28168,9 +29291,9 @@ async function startNativeInstall(origin = "manual", options = {}) {
   state.nativeInstallError = "";
   renderNativeInstall();
   try {
-    state.nativeInstallProfile = options.keepProfile && state.nativeInstallProfile
+    state.nativeInstallProfile = nativeInstallProfileForContext(options.keepProfile && state.nativeInstallProfile
       ? state.nativeInstallProfile
-      : await detectNativeDeviceProfile();
+      : await detectNativeDeviceProfile());
     await loadDevices("go-native");
     state.nativeInstallerResolution = await resolveNativeInstaller(state.nativeInstallProfile);
     if (options.resolveOnly || !state.nativeInstallerResolution?.available) {
@@ -28179,6 +29302,7 @@ async function startNativeInstall(origin = "manual", options = {}) {
         summary: state.nativeInstallerResolution?.available ? "Native installer available" : "Native installer not built yet",
         data: { origin, resolution: state.nativeInstallerResolution },
       });
+      applyNativeShellUi();
       return;
     }
     const filename = state.nativeInstallerResolution.filename || nativePrimaryCtaLabel(state.nativeInstallerResolution, state.nativeInstallProfile);
@@ -32098,14 +33222,14 @@ function panelFromPath() {
   const panel = normalizePanel(window.location.pathname.replace(/^\/+/, "") || "home");
   const spaceMatch = panel.match(/^spaces\/([^/]+)$/);
   if (spaceMatch && isUserSpacePanel(spaceMatch[1])) return spaceMatch[1];
-  if (panel === "home" || ADMIN_PANEL_IDS.has(panel)) return panel;
+  if (panel === "home" || SIDE_PANEL_IDS.has(panel)) return panel;
   return "home";
 }
 
 function panelPath(panel) {
   panel = normalizePanel(panel);
   if (isUserSpacePanel(panel)) return `/spaces/${panel}`;
-  if (ADMIN_PANEL_IDS.has(panel)) return `/${panel}`;
+  if (SIDE_PANEL_IDS.has(panel)) return `/${panel}`;
   return "/home";
 }
 
@@ -32150,6 +33274,10 @@ function setPanel(panel, options = {}) {
   updateSharedSpaceSyncPolling();
   syncResourcePolling();
   syncSecurityPolling();
+  if (panel === "diagnostics") {
+    installWindowsAndroidOAuthDiagnostics();
+    if (!state.androidOAuthVerification.busy) void refreshAndroidOAuthReport();
+  }
   if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
   if (options.updateUrl !== false) syncPanelUrl(panel);
   if (previous !== panel) {
@@ -33044,11 +34172,7 @@ function wireEvents() {
 	  window.addEventListener("resize", () => hideAppContextMenu({ skipHistory: true, replaceHistory: true }));
   const refreshViewportLayout = () => {
     syncVisualViewportSize();
-    applyCanvasGeometry({
-      drawCanvas: options.drawCanvas,
-      renderMiniMap: options.renderMiniMap,
-      updateNavigation: options.updateNavigation,
-    });
+    applyCanvasGeometry();
 	    applyWidgetLayout();
     placeNodesPanel();
 	  };
@@ -33187,9 +34311,29 @@ function wireEvents() {
   els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
+  els.homeDiagnosticsButton?.addEventListener("click", () => setPanel("diagnostics"));
   els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
   els.nativeDownloadButton?.addEventListener("click", () => void startNativeInstall("manual"));
   els.closeNativeModalButton?.addEventListener("click", closeNativeModal);
+  els.closeNativeDebugButton?.addEventListener("click", closeNativeDebugModal);
+  els.nativeDebugCopyButton?.addEventListener("click", () => void copyNativeDebugDiagnostics());
+  els.nativeDebugShareButton?.addEventListener("click", () => void shareNativeDebugDiagnostics());
+  els.nativeDebugRetryButton?.addEventListener("click", () => {
+    callNativeDebugBridge("retryGoogleLogin", "retry requested");
+  });
+  els.nativeDebugResetAuthButton?.addEventListener("click", () => {
+    callNativeDebugBridge("resetAuth", "auth reset");
+  });
+  els.nativeDebugClearWebViewButton?.addEventListener("click", () => {
+    callNativeDebugBridge("clearWebViewData", "WebView cleared");
+  });
+  els.nativeDebugClearDiagnosticsButton?.addEventListener("click", () => {
+    callNativeDebugBridge("clearDiagnostics", "diagnostics cleared");
+  });
+  els.androidOAuthStartButton?.addEventListener("click", () => void startAndroidOAuthVerification());
+  els.androidOAuthRefreshReportButton?.addEventListener("click", () => void refreshAndroidOAuthReport());
+  els.androidOAuthOpenReportButton?.addEventListener("click", () => void openAndroidOAuthLatestReport());
+  els.androidOAuthUpdateAppButton?.addEventListener("click", () => void updateWindowsAppForAndroidOAuthVerifier());
   els.editSpaceButton?.addEventListener("click", openEditSpaceModal);
   els.copySpaceIdButton?.addEventListener("click", () => void copyActiveSpaceId());
   els.shareSpaceButton?.addEventListener("click", () => void shareActiveSpace());
@@ -33234,6 +34378,7 @@ function wireEvents() {
   els.closeDevicesModalButton?.addEventListener("click", closeDevicesModal);
   installModalBackdropDismiss(els.devicesModal, closeDevicesModal);
   installModalBackdropDismiss(els.nativeModal, closeNativeModal);
+  installModalBackdropDismiss(els.nativeDebugModal, closeNativeDebugModal);
   els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
   els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
   installModalBackdropDismiss(els.fleetModal, closeFleetModal);
@@ -33260,6 +34405,7 @@ function wireEvents() {
   });
   els.authGateLoginButton?.addEventListener("click", (event) => {
     event.stopPropagation();
+    if (isAndroidNativeShell() && startAndroidNativeGoogleLoginIfAvailable("auth-gate-login-button")) return;
     setLoginOpen(true);
   });
   els.loginPopover?.addEventListener("click", (event) => event.stopPropagation());
@@ -33490,10 +34636,12 @@ function wireEvents() {
 async function bootstrapAuthenticatedApp() {
   if (!state.authUser) {
     renderLogin();
+    notifyNativeAppReady("auth-gate-ready");
     return;
   }
   if (state.authenticatedBootstrapped) {
     renderAuthGate();
+    notifyNativeAppReady("authenticated-app-ready");
     return;
   }
   state.authenticatedBootstrapped = true;
@@ -33534,10 +34682,14 @@ async function bootstrapAuthenticatedApp() {
   syncClientSnapshotRequestPolling();
   await refresh("startup");
   if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
+  notifyNativeAppReady("authenticated-app-ready", {
+    refresh_interval: Boolean(state.refreshInterval),
+  });
 }
 
 async function main() {
   nativeAuthDiagnostic("main_started");
+  nativeShellDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
   if (window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
     nativeAuthDiagnostic("main_auth_redirect_preload_wait_started");
@@ -33559,12 +34711,24 @@ async function main() {
     }
   }
   applyLauncherPreference();
+  applyNativeShellUi();
+  installAndroidNativeShellEventDiagnostics();
   nativeAuthDiagnostic("main_apply_launcher_finished");
   wireEvents();
+  installWindowsAndroidOAuthDiagnostics();
   nativeAuthDiagnostic("main_wire_events_finished");
+  if (shouldOpenNativeDebugFromLocation()) {
+    openNativeDebugModal({ reason: "route", skipHistory: true });
+  }
+  nativeAuthDiagnostic("main_before_consume_auth_redirect_message");
   consumeAuthRedirectMessage();
+  nativeAuthDiagnostic("main_after_consume_auth_redirect_message");
+  nativeAuthDiagnostic("main_before_install_dev_hmr_bridge");
   installDevHmrBridge();
+  nativeAuthDiagnostic("main_after_install_dev_hmr_bridge");
+  nativeAuthDiagnostic("main_before_render_auth_gate");
   renderAuthGate();
+  nativeAuthDiagnostic("main_after_render_auth_gate");
   nativeAuthDiagnostic("main_before_load_config");
   await loadConfig();
   nativeAuthDiagnostic("main_after_load_config");
@@ -33577,9 +34741,28 @@ async function main() {
   await bootstrapAuthenticatedApp();
 }
 
+installRendererFatalTrap();
+
 main().catch((error) => {
-  state.lastError = error.message;
-  renderAll();
+  const message = errorMessage(error);
+  state.lastError = message;
+  reportRendererFatalError("main_bootstrap_error", error);
+  nativeAuthDiagnostic("main_bootstrap_error", {
+    message,
+    name: cleanText(error?.name, ""),
+    stack: cleanText(error?.stack, "").slice(0, 1800),
+  });
+  void uploadRendererAuthDiagnostics("main_bootstrap_error");
+  try {
+    renderAll();
+  } catch (renderError) {
+    nativeAuthDiagnostic("main_bootstrap_error_render_failed", {
+      message: errorMessage(renderError),
+      name: cleanText(renderError?.name, ""),
+      stack: cleanText(renderError?.stack, "").slice(0, 1800),
+    });
+    void uploadRendererAuthDiagnostics("main_bootstrap_error_render_failed");
+  }
 });
 
 export { CORE_WASM_BASE64 };

@@ -68,7 +68,13 @@ Usage:
   horc update [help]
   horc update all [--force]
   horc update node <name> [--force]
-  horc build [win-x64-prod]
+  horc build win
+  horc build android
+  horc build all
+  horc simulate web
+  horc simulate android [--device|--emulator|--local-report PATH]
+  horc simulate windows
+  horc simulate all
   horc space start
   horc space stop
   horc space restart
@@ -93,7 +99,9 @@ Examples:
   horc update all --force
   horc update node orchestrator
   horc update node colmeio --force
-  horc build
+  horc build win
+  horc simulate web
+  horc simulate all
   horc space start
   horc space stop
   horc space restart
@@ -107,7 +115,13 @@ Notes:
   - `horc update all` refreshes /local/hermes-agent and reseeds every node.
   - `horc update node <name>` refreshes /local/hermes-agent and reseeds only that node.
   - Add `--force` to discard local `/local/hermes-agent` checkout changes during the refresh.
-  - `horc build` creates the Windows wasm-agent native installer and writes a trust manifest.
+  - `horc build win` creates the Windows wasm-agent native installer and writes a trust manifest.
+  - `horc build android` creates Android APK artifacts for Go Native.
+  - `horc simulate web` runs Playwright browser/PWA runtime evidence and writes reports/sim/web/latest/.
+  - `horc simulate android --device` installs and drives the real APK on a connected USB/ADB device.
+  - `horc simulate android --emulator` attempts cloud host/Docker emulator setup and reports exact blockers.
+  - `horc simulate android --local-report PATH` validates a copied real-device report from another machine.
+  - `horc simulate all` runs web, runs Android when adb has a usable device, and leaves Windows pending until implemented.
   - Backups are written under /local/backups.
   - Restore accepts either an absolute path or a filename under /local/backups.
   - `horc space start` starts wasm-agent on localhost:8877 and its Hermes bridge on localhost:8790.
@@ -142,20 +156,54 @@ Behavior:
 TXT
 }
 
+simulate_usage() {
+  cat <<'TXT'
+horc simulate — WASM Agent runtime simulators
+
+Usage:
+  horc simulate web
+  horc simulate android [--device|--emulator|--local-report PATH]
+  horc simulate windows
+  horc simulate all
+
+Behavior:
+  - `web` uses Playwright to verify PWA/browser behavior only.
+  - `web` defaults to http://127.0.0.1:8877/home when reachable.
+  - Set WASM_AGENT_SIM_URL to override the web target.
+  - Web simulation adds native=android&shell=android-webview&buildId=playwright-sim.
+  - `android --device` installs and drives the real APK with ADB + UIAutomator on a physical device.
+  - `android --emulator` tries host emulator support, Android SDK/AVD setup, then Docker emulator viability.
+  - `android --local-report PATH` validates a copied/uploaded report from a local USB phone.
+  - `windows` is a pending skeleton for Playwright Electron + Windows smoke/PowerShell scripts.
+  - `all` runs implemented simulators and reports pending ones.
+  - Build success is not runtime verification.
+  - Full Android OAuth proof requires post-authorization native return plus authenticated WebView evidence.
+
+Reports:
+  reports/sim/<platform>/latest/result.json
+  reports/sim/<platform>/latest/summary.md
+TXT
+}
+
 build_usage() {
   cat <<'TXT'
 horc build — Release artifacts
 
 Usage:
-  horc build
-  horc build win-x64-prod
+  horc build win
+  horc build android
+  horc build all
   horc build prepare-docker
   horc build doctor
   horc build --doctor
 
 Behavior:
-  - Builds the Windows 11 x64 wasm-agent Electron/NSIS installer.
+  - `horc build win` builds the Windows 11 x64 wasm-agent Electron/NSIS installer.
+  - `horc build android` builds the Android sideload APK lane only.
+  - `horc build all` builds Windows, then Android.
   - Native Windows builds are production-trusted.
+  - Android release builds are cloud-only, signed for sideload install, and
+    promoted to native/android/release/WASM-Agent-{arm64,universal}.apk.
   - Linux x86_64 builds use Wine/NSIS directly and require a Windows smoke test.
   - Linux aarch64 builds use a Docker linux/amd64 Wine builder by default and
     require a Windows smoke test.
@@ -170,6 +218,12 @@ Environment:
   HORC_DOCKER_AMD64_PROBE_IMAGE=alpine:3.20
   HORC_AUTO_INSTALL_BINFMT=1                   default on Linux aarch64 auto/docker
   HORC_NO_AUTO_INSTALL_BINFMT=1                disable binfmt self-healing
+  HORC_ANDROID_BUILD_MODE=auto|local|docker    default: auto
+  HORC_ANDROID_DOCKER_IMAGE=ghcr.io/cirruslabs/android-sdk:35
+  HORC_ANDROID_GRADLE_VERSION=8.9
+  HERMES_WASM_AGENT_ANDROID_ROOT=/local/native/android
+  GRADLE_BIN=/path/to/gradle                   optional Android Gradle override
+  WASM_AGENT_ANDROID_KEYSTORE=/path/to/key.jks optional Android signing key
 TXT
 }
 
@@ -268,6 +322,7 @@ release_build_lock() {
   if [[ -f "${pid_file}" && "$(cat "${pid_file}" 2>/dev/null || true)" == "$$" ]]; then
     rm -rf "${HORC_BUILD_LOCK_DIR}"
   fi
+  HORC_BUILD_LOCK_DIR=""
 }
 
 build_lock_pid_alive() {
@@ -278,6 +333,7 @@ build_lock_pid_alive() {
 
 acquire_build_lock() {
   local native_src="$1"
+  local build_label="${2:-Windows}"
   local windows_root
   local lock_dir
   local pid_file
@@ -299,7 +355,7 @@ acquire_build_lock() {
     owner_pid="$(cat "${pid_file}" 2>/dev/null || true)"
   fi
   if build_lock_pid_alive "${owner_pid}"; then
-    echo "horc build: another Windows build is already running with pid ${owner_pid}." >&2
+    echo "horc build: another ${build_label} build is already running with pid ${owner_pid}." >&2
     echo "horc build: wait for it to finish, or remove stale lock ${lock_dir} only after confirming that process is gone." >&2
     exit 2
   fi
@@ -328,6 +384,68 @@ require_command() {
     echo "horc build: ${install_hint}" >&2
   fi
   exit 2
+}
+
+simulate_fail() {
+  echo "horc simulate: $*" >&2
+  exit 2
+}
+
+app_simulator_dir() {
+  local root
+  root="$(repo_root)"
+  printf '%s\n' "${HORC_APP_SIMULATOR_DIR:-${root}/tools/app-simulator}"
+}
+
+ensure_app_simulator_deps() {
+  local sim_dir="$1"
+  if [[ ! -f "${sim_dir}/simulate.js" || ! -f "${sim_dir}/package.json" ]]; then
+    simulate_fail "app simulator not found under ${sim_dir}"
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    simulate_fail "missing prerequisite: node"
+  fi
+  if (cd "${sim_dir}" && node -e "require.resolve('playwright-core')" >/dev/null 2>&1); then
+    return
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    simulate_fail "missing prerequisite: npm; run 'cd ${sim_dir} && npm install --ignore-scripts' manually"
+  fi
+  echo "horc simulate: installing app simulator Node dependencies in ${sim_dir}"
+  if [[ -f "${sim_dir}/package-lock.json" ]]; then
+    (cd "${sim_dir}" && npm ci --ignore-scripts --no-audit --no-fund)
+  else
+    (cd "${sim_dir}" && npm install --ignore-scripts --no-audit --no-fund)
+  fi
+}
+
+ensure_app_simulator_ffmpeg() {
+  local sim_dir="$1"
+  if (cd "${sim_dir}" && node -e "const { playwrightFfmpegExecutablePath } = require('./web'); process.exit(playwrightFfmpegExecutablePath() ? 0 : 1)" >/dev/null 2>&1); then
+    return
+  fi
+  if is_truthy "${HORC_SIM_SKIP_FFMPEG_INSTALL:-}"; then
+    echo "horc simulate: Playwright ffmpeg is not installed; failure video artifacts will be skipped." >&2
+    return
+  fi
+  echo "horc simulate: installing Playwright ffmpeg helper for failure video artifacts"
+  if ! (cd "${sim_dir}" && npx playwright-core install ffmpeg); then
+    echo "horc simulate: warning: could not install Playwright ffmpeg; failure video artifacts will be skipped." >&2
+  fi
+}
+
+run_app_simulator() {
+  local target="$1"
+  shift
+  local sim_dir
+  sim_dir="$(app_simulator_dir)"
+  ensure_app_simulator_deps "${sim_dir}"
+  case "${target}" in
+    web|all)
+      ensure_app_simulator_ffmpeg "${sim_dir}"
+      ;;
+  esac
+  (cd "$(repo_root)" && node "${sim_dir}/simulate.js" "${target}" "$@")
 }
 
 require_local_node_bin() {
@@ -720,12 +838,17 @@ build_doctor() {
   local docker_permission="no"
   local amd64_binfmt="no"
   local image_pullable="no"
+  local android_root
+  local java_available="no"
+  local gradle_available="no"
+  local android_sdk_available="no"
   local docker_image
   local probe_image="${HORC_DOCKER_AMD64_PROBE_IMAGE:-alpine:3.20}"
   local probe_output
 
   root="$(repo_root)"
   native_src="${native_src:-${root}/native/windows/src}"
+  android_root="${HERMES_WASM_AGENT_ANDROID_ROOT:-${root}/native/android}"
   docker_image="$(select_docker_builder_image)"
   host_os="$(host_kernel)"
   host_arch="$(canonical_host_arch)"
@@ -755,12 +878,25 @@ build_doctor() {
       fi
     fi
   fi
+  if command -v java >/dev/null 2>&1; then
+    java_available="yes"
+  fi
+  if [[ -n "${GRADLE_BIN:-}" && -x "${GRADLE_BIN}" ]] || [[ -x "${android_root}/gradlew" ]] || [[ -x "${android_root}/.gradle-dist/gradle-${HORC_ANDROID_GRADLE_VERSION:-8.9}/bin/gradle" ]] || command -v gradle >/dev/null 2>&1; then
+    gradle_available="yes"
+  fi
+  if [[ -n "${ANDROID_HOME:-}" && -d "${ANDROID_HOME}" ]] || [[ -n "${ANDROID_SDK_ROOT:-}" && -d "${ANDROID_SDK_ROOT}" ]] || [[ -d "${android_root}/.android-sdk" ]]; then
+    android_sdk_available="yes"
+  fi
 
   echo "horc build doctor"
   echo "  host OS/arch: ${host_os} ${host_arch}"
   echo "  target: win32-${target_arch}"
   echo "  expected build mode: ${expected_mode}"
   echo "  native source: ${native_src}"
+  echo "  Android source: ${android_root}"
+  echo "  Android Java available: ${java_available}"
+  echo "  Android Gradle available: ${gradle_available}"
+  echo "  Android SDK available: ${android_sdk_available}"
   echo "  Docker available: ${docker_available}"
   echo "  Docker user permission: ${docker_permission}"
   echo "  amd64 binfmt available: ${amd64_binfmt}"
@@ -1064,6 +1200,177 @@ build_windows_native_release() {
   esac
 
   post_build_verify_and_manifest "${native_src}" "${build_mode}" "${target_arch}" "${trusted_production}" "${requires_windows_smoke_test}" "${host_os}" "${host_arch}"
+}
+
+android_local_tools_available() {
+  local android_root="$1"
+  local gradle_ok="no"
+  local cached_gradle="${android_root}/.gradle-dist/gradle-${HORC_ANDROID_GRADLE_VERSION:-8.9}/bin/gradle"
+  local sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${android_root}/.android-sdk}}"
+  [[ -x "${android_root}/gradlew" ]] && gradle_ok="yes"
+  [[ -x "${cached_gradle}" ]] && gradle_ok="yes"
+  [[ -n "${GRADLE_BIN:-}" && -x "${GRADLE_BIN}" ]] && gradle_ok="yes"
+  command -v gradle >/dev/null 2>&1 && gradle_ok="yes"
+
+  command -v java >/dev/null 2>&1 || return 1
+  [[ "${gradle_ok}" == "yes" ]] || return 1
+  [[ -d "${sdk_root}" ]] || return 1
+}
+
+select_android_build_mode() {
+  local requested_mode="$1"
+  local android_root="$2"
+  case "${requested_mode}" in
+    auto|local|docker)
+      ;;
+    *)
+      build_fail "HORC_ANDROID_BUILD_MODE must be auto, local, or docker; got '${requested_mode}'."
+      ;;
+  esac
+
+  case "${requested_mode}" in
+    local)
+      printf '%s\n' "local"
+      ;;
+    docker)
+      printf '%s\n' "docker"
+      ;;
+    auto)
+      if android_local_tools_available "${android_root}"; then
+        printf '%s\n' "local"
+      else
+        printf '%s\n' "docker"
+      fi
+      ;;
+  esac
+}
+
+android_docker_build_script() {
+  cat <<'TXT'
+set -euo pipefail
+cleanup_owner() {
+  if [[ -n "${HORC_HOST_UID:-}" && -n "${HORC_HOST_GID:-}" ]] && command -v chown >/dev/null 2>&1; then
+    for path in app/build release signing .gradle .gradle-home .gradle-dist; do
+      [[ -e "${path}" ]] && chown -R "${HORC_HOST_UID}:${HORC_HOST_GID}" "${path}" 2>/dev/null || true
+    done
+  fi
+}
+trap cleanup_owner EXIT
+
+ensure_tool() {
+  local tool="$1"
+  local package_name="$2"
+  if command -v "${tool}" >/dev/null 2>&1; then
+    return
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "horc build android-apk: missing ${tool} and no apt-get in Android builder" >&2
+    exit 2
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends "${package_name}"
+}
+
+ensure_gradle() {
+  local version="${HORC_ANDROID_GRADLE_VERSION:-8.9}"
+  local gradle_home="${PWD}/.gradle-dist"
+  local gradle_bin="${gradle_home}/gradle-${version}/bin/gradle"
+  if [[ ! -x "${gradle_bin}" ]]; then
+    ensure_tool curl curl
+    ensure_tool unzip unzip
+    mkdir -p "${gradle_home}"
+    local zip_path="/tmp/gradle-${version}-bin.zip"
+    echo "horc build android-apk: downloading Gradle ${version}"
+    curl -fL --retry 3 --retry-delay 2 -o "${zip_path}" "https://services.gradle.org/distributions/gradle-${version}-bin.zip"
+    unzip -q -o "${zip_path}" -d "${gradle_home}"
+  fi
+  export GRADLE_BIN="${gradle_bin}"
+}
+
+ensure_gradle
+ensure_tool node nodejs
+export GRADLE_USER_HOME="${PWD}/.gradle-home"
+export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk-linux}"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+export APKSIGNER_BIN="${APKSIGNER_BIN:-${ANDROID_HOME}/build-tools/35.0.0/apksigner}"
+node scripts/release-android.js
+TXT
+}
+
+run_docker_android_release() {
+  local root="$1"
+  local android_root="$2"
+  local image="${HORC_ANDROID_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
+  local host_arch
+  local host_uid
+  local host_gid
+  local docker_status
+  host_arch="$(canonical_host_arch)"
+  ensure_docker_available || exit 2
+  if [[ "${host_arch}" == "aarch64" ]]; then
+    ensure_docker_amd64_emulation "${HORC_ANDROID_BUILD_MODE:-auto}" "${host_arch}" || exit 2
+  fi
+  mkdir -p "${android_root}/.gradle-home" "${android_root}/.gradle-dist"
+  host_uid="$(id -u 2>/dev/null || true)"
+  host_gid="$(id -g 2>/dev/null || true)"
+  echo "horc build android-apk: starting Docker Android builder..."
+  echo "horc build android-apk: docker ${image} --platform linux/amd64"
+  docker_status=0
+  docker run --rm \
+    --platform linux/amd64 \
+    -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
+    -e HORC_HOST_UID="${host_uid}" \
+    -e HORC_HOST_GID="${host_gid}" \
+    -v "${root}:${root}" \
+    -w "${android_root}" \
+    "${image}" \
+    bash -lc "$(android_docker_build_script)" || docker_status=$?
+  if [[ "${docker_status}" -ne 0 ]]; then
+    echo "horc build android-apk: Docker Android builder exited with status ${docker_status}" >&2
+    return "${docker_status}"
+  fi
+}
+
+build_android_native_release() {
+  local root
+  local android_root="${HERMES_WASM_AGENT_ANDROID_ROOT:-}"
+  local release_script
+  local requested_mode="${HORC_ANDROID_BUILD_MODE:-auto}"
+  local build_mode
+  root="$(repo_root)"
+  android_root="${android_root:-${root}/native/android}"
+  release_script="${android_root}/scripts/release-android.js"
+
+  if [[ ! -f "${android_root}/app/build.gradle" || ! -f "${release_script}" ]]; then
+    echo "horc build android-apk: Android native project not found: ${android_root}" >&2
+    echo "set HERMES_WASM_AGENT_ANDROID_ROOT to override" >&2
+    exit 2
+  fi
+
+  acquire_build_lock "${android_root}/app" "Android"
+  require_command node "Install Node.js so horc can run the Android release promoter."
+  echo "horc build android-apk: host $(host_kernel) $(canonical_host_arch), target android-apk"
+  build_mode="$(select_android_build_mode "${requested_mode}" "${android_root}")"
+  echo "horc build android-apk: selected mode ${build_mode}"
+  case "${build_mode}" in
+    local)
+      echo "horc build android-apk: cd ${android_root} && node scripts/release-android.js"
+      (cd "${android_root}" && node scripts/release-android.js)
+      ;;
+    docker)
+      run_docker_android_release "${root}" "${android_root}"
+      ;;
+    *)
+      build_fail "internal error: unsupported Android build mode ${build_mode}"
+      ;;
+  esac
+}
+
+build_all_native_release() {
+  build_windows_native_release
+  release_build_lock
+  build_android_native_release
 }
 
 resolve_name_and_exec() {
@@ -1392,9 +1699,44 @@ case "${ACTION}" in
         fi
         build_windows_native_release
         ;;
+      android|android-apk|apk|wasm-agent-android)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build android-apk: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_android_native_release
+        ;;
+      all|native-all|wasm-agent-native-all)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build all: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_all_native_release
+        ;;
       *)
         echo "horc build: unknown target '${SUBACTION}'" >&2
         build_usage >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  simulate)
+    SUBACTION="${1:-help}"
+    if [[ $# -gt 0 ]]; then
+      shift
+    fi
+    case "${SUBACTION}" in
+      help|-h|--help)
+        simulate_usage
+        ;;
+      web|android|windows|all)
+        run_app_simulator "${SUBACTION}" "$@"
+        ;;
+      *)
+        echo "horc simulate: unknown target '${SUBACTION}'" >&2
+        simulate_usage >&2
         exit 2
         ;;
     esac
