@@ -418,8 +418,8 @@ async function runWebSimulation(options = {}) {
       `html=${observed.htmlNativeShell || "unset"} app=${observed.appNativeShell || "unset"}`,
     );
     ctx.addAssertion(
-      "install/browser/native-desktop prompts hidden",
-      !observed.homeGoNativeButton.visible && !observed.nativeModal.visible && !observed.nativeDownloadButton.visible,
+      "home Native is visible without opening installer prompt",
+      observed.homeGoNativeButton.visible && !observed.nativeModal.visible && !observed.nativeDownloadButton.visible,
       `homeGoNative visible=${observed.homeGoNativeButton.visible}; nativeModal visible=${observed.nativeModal.visible}; nativeDownload visible=${observed.nativeDownloadButton.visible}`,
     );
     ctx.addAssertion(

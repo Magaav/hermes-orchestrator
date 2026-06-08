@@ -22,7 +22,7 @@ rendering, agent-readable state, and a cleaner app shell.
   `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` outside this public repo.
 - Loads an embedded WebAssembly core in the browser and uses it as the first
   rendering/runtime handshake for the parity shell.
-- Home exposes a Go Native action that detects the current device and resolves
+- Home exposes a Native action that detects the current device and resolves
   a platform-specific native installer through `/native/resolve`. The primary
   product path is never a JSON manifest, generic ZIP, PWA prompt, or
   Edge/Chrome app-mode shortcut. Windows native means a `.exe`/`.msi` desktop
@@ -30,7 +30,11 @@ rendering, agent-readable state, and a cleaner app shell.
   means `.dmg`/`.pkg`, Linux means `.AppImage`/`.deb`/`.rpm`, and iOS/iPadOS is
   TestFlight/App Store/manual development only. If the artifact is missing, the
   modal says `Native installer not built yet` and shows fallback/status
-  information; PWA install is a separate fallback lane.
+  information; PWA install is a separate fallback lane. Android browser/PWA
+  sessions must keep their Android profile even if a previous Windows native
+  update state is present. The installed Android shell also shows the Home
+  Native action on `space-home`; before tap it must not leak installer modal or
+  download text, and after tap it resolves the Android APK/update lane.
 - Runtime simulation is available through `horc simulate web`,
   `horc simulate android`, and `horc simulate all`. Web is PWA/browser proof
   only. Android has explicit `--emulator`, `--device`, and `--local-report`
@@ -88,7 +92,7 @@ to the installed app instead of Chrome/PWA `/home`, the WebView must redeem the
 native auth session and become authenticated, cancel/return must make the button
 retryable instead of leaving `Opening Google sign-in...`, and the report must
 include screenshots/logcat/UIAutomator/activity/window evidence. An Android
-browser Home `Go Native` click should stream the current arm64 APK from
+browser Home `Native` click should stream the current arm64 APK from
 `/native/download`.
 The APK was built by `horc build android-apk` with build id
 `android-universal-20260606T222747Z`, SHA-256
@@ -150,7 +154,7 @@ capability are present, and resume the prior CAM 1 middle-timeline click and
 Live return browser verification so the real client matches the headless
 acceptance snapshot: `mode: recorded`, `playback_mode: recorded`,
 `playback_rate: 1`, `blink_events: 0`, `bad_samples: 0`, and clean return to
-live on the Live button; then click the Home `Go Native` action on real phone
+live on the Live button; then click the Home `Native` action on real phone
 and desktop sessions and confirm it detects OS/device type/browser/architecture,
 calls `/native/resolve`, shows `Download Android APK` or
 `Download Windows Installer` as appropriate, never downloads a JSON manifest or
@@ -248,7 +252,7 @@ wrong-app origins, and requires wasm-agent identity markers from `/config.json`,
 `available: true`,
 `/native/download?platform=windows&arch=x64` streams
 `WASM-Agent-Setup-x64-0.1.0-20260603T132803Z.exe` directly with a
-`windows-installer` kind, and the Go Native UI uses the
+`windows-installer` kind, and the Native UI uses the
 resolver-provided direct download URL with `Download Windows Installer` as the
 Windows CTA. Remote-control viewport frames now strip URL-backed CSS and
 inline snapshot resources before SVG export, and SVG export failures fall back
@@ -579,7 +583,7 @@ offline, artifact-evolution actions such as creating spaces and importing
 storage point the user back to Connected Devices so they can switch main devices
 quickly. Sync currently downloads a device-specific installer manifest with
 planned tunnel and state-sync capabilities; it does not claim a tunnel is live
-yet. The adjacent Go Native action detects the current browser device on click
+yet. The adjacent Native action detects the current browser device on click
 and resolves a platform-specific installer through `POST /native/resolve`.
 `GET /native/download?platform=<platform>&arch=<arch>` streams only the matching
 native artifact when it exists: Windows `.exe`/`.msi`, Android `.apk`, macOS
@@ -587,7 +591,15 @@ native artifact when it exists: Windows `.exe`/`.msi`, Android `.apk`, macOS
 `Native installer not built yet`; iOS/iPadOS shows TestFlight/App Store/manual
 development options because direct IPA installation is restricted. Generic ZIP
 packages and `/account/devices/native/download` are developer/debug
-compatibility artifacts only and are not the primary Go Native product path.
+compatibility artifacts only and are not the primary Native product path.
+`horc build all` now also writes the local release/update feed at
+`public/native/releases/latest.json`, served as `/native/releases/latest.json`.
+Native compares embedded current client metadata with that feed before
+showing Update states. Windows Update is currently a guided installer update.
+Android sideload Update means download, SHA-256 verification, package/version
+guards, then Android package-installer handoff with OS confirmation; silent APK
+replacement is not implemented. Web/PWA Update means service-worker/cache
+refresh and reload.
 PWA install is separate fallback behavior, and Edge/Chrome app mode must not be
 labeled native. True screen-off `hi wasm` requires Android/iOS native companion
 capabilities; wake-word behavior is not promised until foreground service,
@@ -1314,7 +1326,7 @@ button.
 The Home route is the app entrance: `/` and `/home` open the account home
 space and show the `space-home` title. Home exposes a wider `New Space` action,
 `Artifacts`, `Config`, and `Modules` modal actions, and the current account
-storage badge. `Go Native` is also a Home action and opens the current device's
+storage badge. `Native` is also a Home action and opens the current device's
 platform-specific native installer resolver.
 Standard users are limited to 1 GB under their `state/users/<acc_id>/` root;
 admins are shown as unlimited. Home's config button opens the account-global
@@ -1324,7 +1336,7 @@ crown icon. New spaces are persisted under
 below Admin. Admin space widgets start minimized as app icons; clicking an app
 opens the widget above the app layer, except Timeline, which stays fixed behind
 the space config flow. User-created spaces start without Admin apps or opened
-widgets. Connected Devices and Go Native are Home core/action surfaces, so they
+widgets. Connected Devices and Native are Home core/action surfaces, so they
 do not appear in Admin or user spaces unless a later porting flow maps them there. The
 config modal header identifies the current space while the options list omits a
 duplicate Space card. Each space config includes a minimap-style Space area map:

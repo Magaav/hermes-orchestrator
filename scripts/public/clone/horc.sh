@@ -72,7 +72,7 @@ Usage:
   horc build android
   horc build all
   horc simulate web
-  horc simulate android [--device|--emulator|--local-report PATH]
+  horc simulate android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
   horc simulate windows
   horc simulate all
   horc space start
@@ -162,7 +162,7 @@ horc simulate — WASM Agent runtime simulators
 
 Usage:
   horc simulate web
-  horc simulate android [--device|--emulator|--local-report PATH]
+  horc simulate android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
   horc simulate windows
   horc simulate all
 
@@ -174,6 +174,7 @@ Behavior:
   - `android --device` installs and drives the real APK with ADB + UIAutomator on a physical device.
   - `android --emulator` tries host emulator support, Android SDK/AVD setup, then Docker emulator viability.
   - `android --local-report PATH` validates a copied/uploaded report from a local USB phone.
+  - `android --voice-wake fixture-hermes-command.wav` verifies Hermes native voice wake fixture evidence.
   - `windows` is a pending skeleton for Playwright Electron + Windows smoke/PowerShell scripts.
   - `all` runs implemented simulators and reports pending ones.
   - Build success is not runtime verification.
@@ -221,6 +222,8 @@ Environment:
   HORC_ANDROID_BUILD_MODE=auto|local|docker    default: auto
   HORC_ANDROID_DOCKER_IMAGE=ghcr.io/cirruslabs/android-sdk:35
   HORC_ANDROID_GRADLE_VERSION=8.9
+  HORC_ANDROID_RUN_UNIT_TESTS=1                 run Android JVM tests before release assembly
+  WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS=600000
   HERMES_WASM_AGENT_ANDROID_ROOT=/local/native/android
   GRADLE_BIN=/path/to/gradle                   optional Android Gradle override
   WASM_AGENT_ANDROID_KEYSTORE=/path/to/key.jks optional Android signing key
@@ -243,10 +246,18 @@ repo_root() {
 }
 
 host_kernel() {
+  if [[ -n "${HORC_TEST_HOST_KERNEL:-}" ]]; then
+    printf '%s\n' "${HORC_TEST_HOST_KERNEL}"
+    return
+  fi
   uname -s 2>/dev/null || printf 'unknown\n'
 }
 
 host_machine() {
+  if [[ -n "${HORC_TEST_HOST_MACHINE:-}" ]]; then
+    printf '%s\n' "${HORC_TEST_HOST_MACHINE}"
+    return
+  fi
   uname -m 2>/dev/null || printf 'unknown\n'
 }
 
@@ -839,10 +850,10 @@ build_doctor() {
   local amd64_binfmt="no"
   local image_pullable="no"
   local android_root
-  local java_available="no"
-  local gradle_available="no"
-  local android_sdk_available="no"
+  local android_requested_mode="${HORC_ANDROID_BUILD_MODE:-auto}"
+  local android_selected_mode
   local docker_image
+  local android_docker_image="${HORC_ANDROID_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
   local probe_image="${HORC_DOCKER_AMD64_PROBE_IMAGE:-alpine:3.20}"
   local probe_output
 
@@ -878,15 +889,8 @@ build_doctor() {
       fi
     fi
   fi
-  if command -v java >/dev/null 2>&1; then
-    java_available="yes"
-  fi
-  if [[ -n "${GRADLE_BIN:-}" && -x "${GRADLE_BIN}" ]] || [[ -x "${android_root}/gradlew" ]] || [[ -x "${android_root}/.gradle-dist/gradle-${HORC_ANDROID_GRADLE_VERSION:-8.9}/bin/gradle" ]] || command -v gradle >/dev/null 2>&1; then
-    gradle_available="yes"
-  fi
-  if [[ -n "${ANDROID_HOME:-}" && -d "${ANDROID_HOME}" ]] || [[ -n "${ANDROID_SDK_ROOT:-}" && -d "${ANDROID_SDK_ROOT}" ]] || [[ -d "${android_root}/.android-sdk" ]]; then
-    android_sdk_available="yes"
-  fi
+  android_evaluate_local_tools "${android_root}" || true
+  android_selected_mode="$(select_android_build_mode "${android_requested_mode}" "${android_root}")"
 
   echo "horc build doctor"
   echo "  host OS/arch: ${host_os} ${host_arch}"
@@ -894,9 +898,13 @@ build_doctor() {
   echo "  expected build mode: ${expected_mode}"
   echo "  native source: ${native_src}"
   echo "  Android source: ${android_root}"
-  echo "  Android Java available: ${java_available}"
-  echo "  Android Gradle available: ${gradle_available}"
-  echo "  Android SDK available: ${android_sdk_available}"
+  echo "  Android selected build mode: ${android_selected_mode}"
+  echo "  Android Java available: ${ANDROID_JAVA_AVAILABLE}"
+  echo "  Android Gradle available: ${ANDROID_GRADLE_AVAILABLE}${ANDROID_GRADLE_PATH:+ (${ANDROID_GRADLE_PATH})}"
+  echo "  Android SDK path: ${ANDROID_SDK_PATH:-not found}"
+  echo "  Android AAPT2 path: ${ANDROID_AAPT2_PATH:-not found}"
+  echo "  Android AAPT2 runnable: ${ANDROID_AAPT2_RUNNABLE}${ANDROID_AAPT2_OUTPUT:+ (${ANDROID_AAPT2_OUTPUT})}"
+  echo "  Android Docker image: ${android_docker_image}"
   echo "  Docker available: ${docker_available}"
   echo "  Docker user permission: ${docker_permission}"
   echo "  amd64 binfmt available: ${amd64_binfmt}"
@@ -917,6 +925,17 @@ build_doctor() {
   elif [[ "${expected_mode}" == "docker-amd64-wine" && "${image_pullable}" != "yes" ]]; then
     echo "  remediation:"
     echo "    docker pull --platform linux/amd64 ${docker_image}"
+  elif [[ "${android_requested_mode}" == "local" && "${ANDROID_AAPT2_RUNNABLE}" != "yes" ]]; then
+    echo "  remediation:"
+    echo "    HORC_ANDROID_BUILD_MODE=auto horc build android"
+    echo "    HORC_ANDROID_BUILD_MODE=docker horc build android"
+    if [[ -n "${ANDROID_AAPT2_PATH}" ]]; then
+      echo "    AAPT2 failed: ${ANDROID_AAPT2_OUTPUT}"
+    fi
+  elif [[ "${android_selected_mode}" == "docker" && "${docker_available}" == "yes" && "${docker_permission}" == "yes" && "${amd64_binfmt}" == "no" ]]; then
+    echo "  remediation:"
+    echo "    sudo docker run --privileged --rm tonistiigi/binfmt --install amd64"
+    echo "    docker run --rm --platform linux/amd64 ${probe_image} uname -m"
   else
     echo "  remediation: none"
   fi
@@ -1204,17 +1223,121 @@ build_windows_native_release() {
 
 android_local_tools_available() {
   local android_root="$1"
-  local gradle_ok="no"
-  local cached_gradle="${android_root}/.gradle-dist/gradle-${HORC_ANDROID_GRADLE_VERSION:-8.9}/bin/gradle"
-  local sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${android_root}/.android-sdk}}"
-  [[ -x "${android_root}/gradlew" ]] && gradle_ok="yes"
-  [[ -x "${cached_gradle}" ]] && gradle_ok="yes"
-  [[ -n "${GRADLE_BIN:-}" && -x "${GRADLE_BIN}" ]] && gradle_ok="yes"
-  command -v gradle >/dev/null 2>&1 && gradle_ok="yes"
+  android_evaluate_local_tools "${android_root}" >/dev/null 2>&1
+}
 
-  command -v java >/dev/null 2>&1 || return 1
-  [[ "${gradle_ok}" == "yes" ]] || return 1
-  [[ -d "${sdk_root}" ]] || return 1
+android_gradle_path() {
+  local android_root="$1"
+  local cached_gradle="${android_root}/.gradle-dist/gradle-${HORC_ANDROID_GRADLE_VERSION:-8.9}/bin/gradle"
+  if [[ -n "${GRADLE_BIN:-}" && -x "${GRADLE_BIN}" ]]; then
+    printf '%s\n' "${GRADLE_BIN}"
+  elif [[ -x "${android_root}/gradlew" ]]; then
+    printf '%s\n' "${android_root}/gradlew"
+  elif [[ -x "${cached_gradle}" ]]; then
+    printf '%s\n' "${cached_gradle}"
+  elif command -v gradle >/dev/null 2>&1; then
+    command -v gradle
+  fi
+}
+
+android_sdk_root() {
+  local android_root="$1"
+  if [[ -n "${ANDROID_HOME:-}" && -d "${ANDROID_HOME}" ]]; then
+    printf '%s\n' "${ANDROID_HOME}"
+  elif [[ -n "${ANDROID_SDK_ROOT:-}" && -d "${ANDROID_SDK_ROOT}" ]]; then
+    printf '%s\n' "${ANDROID_SDK_ROOT}"
+  elif [[ -d "${android_root}/.android-sdk" ]]; then
+    printf '%s\n' "${android_root}/.android-sdk"
+  fi
+}
+
+find_android_aapt2() {
+  local android_root="$1"
+  local sdk_root="$2"
+  if [[ -n "${AAPT2_BIN:-}" && -x "${AAPT2_BIN}" ]]; then
+    printf '%s\n' "${AAPT2_BIN}"
+    return
+  fi
+
+  if [[ -n "${sdk_root}" && -d "${sdk_root}/build-tools" ]]; then
+    local sdk_aapt2
+    sdk_aapt2="$(find "${sdk_root}/build-tools" -mindepth 2 -maxdepth 2 -type f -name aapt2 -perm -111 -print 2>/dev/null | sort -V | tail -n 1)"
+    if [[ -n "${sdk_aapt2}" ]]; then
+      printf '%s\n' "${sdk_aapt2}"
+      return
+    fi
+  fi
+
+  find "${android_root}/.gradle-home" "${android_root}/.gradle" \
+    -type f -name aapt2 -perm -111 -print 2>/dev/null | sort -V | tail -n 1 || true
+}
+
+android_aapt2_runnable() {
+  local aapt2_path="$1"
+  local output
+  [[ -n "${aapt2_path}" && -x "${aapt2_path}" ]] || return 1
+  if output="$("${aapt2_path}" version 2>&1)"; then
+    ANDROID_AAPT2_OUTPUT="$(printf '%s\n' "${output}" | head -n 1 | tr -d '\r')"
+    return 0
+  fi
+  ANDROID_AAPT2_OUTPUT="${output}"
+  return 1
+}
+
+android_evaluate_local_tools() {
+  local android_root="$1"
+  ANDROID_JAVA_AVAILABLE="no"
+  ANDROID_GRADLE_AVAILABLE="no"
+  ANDROID_GRADLE_PATH=""
+  ANDROID_SDK_AVAILABLE="no"
+  ANDROID_SDK_PATH=""
+  ANDROID_AAPT2_PATH=""
+  ANDROID_AAPT2_RUNNABLE="no"
+  ANDROID_AAPT2_OUTPUT=""
+  ANDROID_LOCAL_DIAGNOSIS=""
+
+  if command -v java >/dev/null 2>&1; then
+    ANDROID_JAVA_AVAILABLE="yes"
+  else
+    ANDROID_LOCAL_DIAGNOSIS="Java is not available on PATH."
+  fi
+
+  ANDROID_GRADLE_PATH="$(android_gradle_path "${android_root}")"
+  if [[ -n "${ANDROID_GRADLE_PATH}" ]]; then
+    ANDROID_GRADLE_AVAILABLE="yes"
+  elif [[ -z "${ANDROID_LOCAL_DIAGNOSIS}" ]]; then
+    ANDROID_LOCAL_DIAGNOSIS="Gradle is not available; set GRADLE_BIN or install/cache Gradle ${HORC_ANDROID_GRADLE_VERSION:-8.9}."
+  fi
+
+  ANDROID_SDK_PATH="$(android_sdk_root "${android_root}")"
+  if [[ -n "${ANDROID_SDK_PATH}" ]]; then
+    ANDROID_SDK_AVAILABLE="yes"
+  elif [[ -z "${ANDROID_LOCAL_DIAGNOSIS}" ]]; then
+    ANDROID_LOCAL_DIAGNOSIS="Android SDK is not available; set ANDROID_HOME or ANDROID_SDK_ROOT."
+  fi
+
+  ANDROID_AAPT2_PATH="$(find_android_aapt2 "${android_root}" "${ANDROID_SDK_PATH}")"
+  if [[ -n "${ANDROID_AAPT2_PATH}" ]] && android_aapt2_runnable "${ANDROID_AAPT2_PATH}"; then
+    ANDROID_AAPT2_RUNNABLE="yes"
+  elif [[ -z "${ANDROID_AAPT2_PATH}" ]]; then
+    [[ -z "${ANDROID_LOCAL_DIAGNOSIS}" ]] && ANDROID_LOCAL_DIAGNOSIS="AAPT2 was not found in the Android SDK build-tools or Gradle cache."
+  else
+    [[ -z "${ANDROID_LOCAL_DIAGNOSIS}" ]] && ANDROID_LOCAL_DIAGNOSIS="AAPT2 cannot execute on this host: ${ANDROID_AAPT2_OUTPUT}"
+  fi
+
+  [[ "${ANDROID_JAVA_AVAILABLE}" == "yes" && "${ANDROID_GRADLE_AVAILABLE}" == "yes" && "${ANDROID_SDK_AVAILABLE}" == "yes" && "${ANDROID_AAPT2_RUNNABLE}" == "yes" ]]
+}
+
+android_local_failure_hint() {
+  local diagnosis="${ANDROID_LOCAL_DIAGNOSIS:-local Android toolchain is not usable}"
+  echo "horc build android-apk: local Android build mode is unavailable: ${diagnosis}" >&2
+  if [[ -n "${ANDROID_AAPT2_PATH:-}" ]]; then
+    echo "horc build android-apk: AAPT2 path: ${ANDROID_AAPT2_PATH}" >&2
+    echo "horc build android-apk: AAPT2 output: ${ANDROID_AAPT2_OUTPUT:-<none>}" >&2
+  fi
+  echo "horc build android-apk: remediation: use HORC_ANDROID_BUILD_MODE=auto or HORC_ANDROID_BUILD_MODE=docker so horc can build inside ${HORC_ANDROID_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}." >&2
+  echo "horc build android-apk: on ARM hosts, enable linux/amd64 Docker emulation with:" >&2
+  echo "horc build android-apk:   sudo docker run --privileged --rm tonistiigi/binfmt --install amd64" >&2
 }
 
 select_android_build_mode() {
@@ -1294,6 +1417,7 @@ export GRADLE_USER_HOME="${PWD}/.gradle-home"
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk-linux}"
 export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
 export APKSIGNER_BIN="${APKSIGNER_BIN:-${ANDROID_HOME}/build-tools/35.0.0/apksigner}"
+export HORC_ANDROID_KOTLIN_IN_PROCESS="${HORC_ANDROID_KOTLIN_IN_PROCESS:-1}"
 node scripts/release-android.js
 TXT
 }
@@ -1320,6 +1444,9 @@ run_docker_android_release() {
   docker run --rm \
     --platform linux/amd64 \
     -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
+    -e HORC_ANDROID_RUN_UNIT_TESTS="${HORC_ANDROID_RUN_UNIT_TESTS:-0}" \
+    -e WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS="${WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS:-600000}" \
+    -e WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY="${WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY:-0}" \
     -e HORC_HOST_UID="${host_uid}" \
     -e HORC_HOST_GID="${host_gid}" \
     -v "${root}:${root}" \
@@ -1355,6 +1482,10 @@ build_android_native_release() {
   echo "horc build android-apk: selected mode ${build_mode}"
   case "${build_mode}" in
     local)
+      if ! android_evaluate_local_tools "${android_root}"; then
+        android_local_failure_hint
+        exit 2
+      fi
       echo "horc build android-apk: cd ${android_root} && node scripts/release-android.js"
       (cd "${android_root}" && node scripts/release-android.js)
       ;;
@@ -1365,12 +1496,55 @@ build_android_native_release() {
       build_fail "internal error: unsupported Android build mode ${build_mode}"
       ;;
   esac
+
+  if [[ -x "${android_root}/scripts/verify-launcher-icon.py" || -f "${android_root}/scripts/verify-launcher-icon.py" ]]; then
+    echo "horc build android-apk: verifying launcher icon resources"
+    (cd "${root}" && python3 "${android_root}/scripts/verify-launcher-icon.py")
+  fi
+
+  [[ -f "${android_root}/release/WASM-Agent-arm64.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-arm64.apk"
+  [[ -f "${android_root}/release/WASM-Agent-universal.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-universal.apk"
+  echo "horc build android-apk: APK artifacts ready:"
+  echo "horc build android-apk:   ${android_root}/release/WASM-Agent-arm64.apk"
+  echo "horc build android-apk:   ${android_root}/release/WASM-Agent-universal.apk"
 }
 
 build_all_native_release() {
+  local root
+  root="$(repo_root)"
   build_windows_native_release
   release_build_lock
   build_android_native_release
+  release_build_lock
+  echo "horc build all: generating native release feed"
+  require_command node "Install Node.js so horc can generate the native release feed."
+  (cd "${root}" && node plugins/wasm-agent/scripts/generate-native-release-feed.js)
+  echo "horc build all: target matrix"
+  (cd "${root}" && node <<'NODE'
+const fs = require("fs");
+const path = require("path");
+const manifestPath = path.join("plugins", "wasm-agent", "public", "native", "releases", "latest.json");
+const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+const rows = [];
+for (const [platform, byArch] of Object.entries(manifest.artifacts || {})) {
+  for (const [arch, artifact] of Object.entries(byArch || {})) {
+    if (!artifact || typeof artifact !== "object") continue;
+    rows.push({
+      target: `${platform}-${arch}`,
+      mode: artifact.updateMode || artifact.kind || "",
+      path: artifact.path || artifact.url || "",
+      sha256: artifact.sha256 || "-",
+      status: artifact.url ? "published" : "missing",
+      runtime: artifact.runtimeProofStatus || "unknown",
+    });
+  }
+}
+console.log("target\tbuild mode\tartifact path/url\tsha256\tstatus\truntime proof");
+for (const row of rows) {
+  console.log(`${row.target}\t${row.mode}\t${row.path}\t${row.sha256}\t${row.status}\t${row.runtime}`);
+}
+NODE
+  )
 }
 
 resolve_name_and_exec() {

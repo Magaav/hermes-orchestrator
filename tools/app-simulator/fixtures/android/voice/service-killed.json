@@ -1,0 +1,35 @@
+{
+  "description": "Negative fixture: service killed before capture finishes.",
+  "expected": {
+    "wakeDetected": true,
+    "transcriptionProduced": false,
+    "voiceCommandEvent": false,
+    "timelineShowsVoiceCommand": false,
+    "diagnosticState": "error",
+    "lastError": "service_destroy"
+  },
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": true,
+    "wakeDetected": true,
+    "transcript": ""
+  },
+  "nativeDiagnostics": {
+    "voice_wake": {
+      "enabled": true,
+      "state": "error",
+      "permission_record_audio": true,
+      "foreground_service_running": false,
+      "last_wake_at": 1780833600000,
+      "last_error": "service_destroy",
+      "audio_retained": false
+    }
+  },
+  "nativeEvent": {},
+  "timeline": {
+    "showsVoiceCommand": false
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: service_destroy during capture"
+  }
+}

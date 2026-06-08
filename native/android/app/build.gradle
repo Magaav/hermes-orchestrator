@@ -75,4 +75,16 @@ android {
 }
 
 dependencies {
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20250517")
+}
+
+tasks.register("verifyReleaseWakeAssets", Exec) {
+    workingDir = rootProject.projectDir.parentFile.parentFile
+    commandLine("bash", "native/android/scripts/verify-wake-assets.sh", "release")
+}
+
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    dependsOn("verifyReleaseWakeAssets")
 }

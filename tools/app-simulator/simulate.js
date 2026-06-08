@@ -6,7 +6,7 @@ function usage() {
 
 Usage:
   node tools/app-simulator/simulate.js web
-  node tools/app-simulator/simulate.js android [--device|--emulator|--local-report PATH]
+  node tools/app-simulator/simulate.js android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
   node tools/app-simulator/simulate.js windows
   node tools/app-simulator/simulate.js all
 
@@ -18,6 +18,8 @@ Environment:
   WASM_AGENT_ANDROID_APK   Override Android APK path.
   WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS
                             Wait for manual Google authorization proof.
+  WASM_AGENT_SIM_ANDROID_VOICE_WAKE
+                            Voice wake fixture name for --voice-wake.
 `);
 }
 
@@ -27,6 +29,7 @@ function parseAndroidArgs(args) {
     localReportPath: "",
     interactiveOAuth: false,
     oauthWaitMs: null,
+    voiceWakeFixture: "",
   };
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -46,6 +49,13 @@ function parseAndroidArgs(args) {
     } else if (arg === "--interactive-oauth") {
       options.interactiveOAuth = true;
       options.oauthWaitMs = Number(process.env.WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS || 180000);
+    } else if (arg === "--voice-wake") {
+      const value = args[index + 1] || "";
+      if (!value || value.startsWith("--")) throw new Error("--voice-wake requires a fixture name");
+      options.voiceWakeFixture = value;
+      index += 1;
+    } else if (arg.startsWith("--voice-wake=")) {
+      options.voiceWakeFixture = arg.slice("--voice-wake=".length);
     } else if (arg.startsWith("--oauth-wait-ms=")) {
       options.oauthWaitMs = Number(arg.slice("--oauth-wait-ms=".length));
     } else {

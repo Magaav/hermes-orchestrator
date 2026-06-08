@@ -69,6 +69,18 @@ Ubuntu package indexes and install NSIS on every release attempt.
 with the host OS/arch, target, build mode, installer path, app.asar path,
 `trusted_production`, and `requires_windows_smoke_test`.
 
+`horc build all` runs the concrete Windows and Android lanes, then writes the
+local native update feed to
+`/local/plugins/wasm-agent/public/native/releases/latest.json`. Windows
+artifacts are copied under
+`/local/plugins/wasm-agent/public/native/releases/windows/` and are served as
+`/native/releases/windows/<installer>`. The Go Native modal compares the
+installed Electron metadata (`appVersion`, `installableVersion`, and `buildId`)
+with that feed. Until electron-builder updater metadata is wired end to end,
+Windows Update is a guided installer update: download the installer, verify the
+SHA-256 from the feed, launch the installer, and do not silently overwrite the
+running app.
+
 Installed Windows verification:
 
 1. Install the exact `release/WASM-Agent-Setup-x64-*.exe` artifact on Windows.

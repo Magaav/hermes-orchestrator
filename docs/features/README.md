@@ -6,6 +6,8 @@ features.
 ## Current Docs
 
 - `activity-timeline.md`
+- `android-hermes-wake-training.md`
+- `android-hermes-voice-wake.md`
 - `guard.md`
 - `plugins.md`
 - `scripts.md`

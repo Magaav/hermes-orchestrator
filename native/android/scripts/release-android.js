@@ -23,8 +23,15 @@ function run(command, args, options = {}) {
     env: options.env || process.env,
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
     shell: Boolean(options.shell),
+    timeout: options.timeoutMs || 0,
     encoding: options.capture ? "utf8" : undefined,
   });
+  if (result.error && result.error.code === "ETIMEDOUT") {
+    fail(`${command} timed out after ${options.timeoutMs}ms`);
+  }
+  if (result.signal) {
+    fail(`${command} terminated by signal ${result.signal}`);
+  }
   if (result.status !== 0) {
     if (options.capture) {
       process.stderr.write(result.stdout || "");
@@ -145,7 +152,10 @@ function verifyProductionApk(apkPath, env = process.env) {
   if (!apksigner && env.WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY !== "1") {
     fail("apksigner was not found. Install Android build-tools or set WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY=1.");
   }
-  if (apksigner) run(apksigner, ["verify", "--verbose", apkPath]);
+  if (apksigner) {
+    const timeoutMs = Number(env.WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS || 600_000);
+    run(apksigner, ["verify", "--verbose", apkPath], { env, timeoutMs });
+  }
 }
 
 function metadataFor(target, sourceApk, env, signingLevel) {
@@ -202,7 +212,16 @@ function main() {
   fs.mkdirSync(releaseRoot, { recursive: true });
   const signingLevel = ensureSideloadSigningKey(env);
   const gradle = gradleCommand();
-  run(gradle.command, [...gradle.args, "--no-daemon", "--build-cache", ":app:assembleRelease"], { cwd: androidRoot, env });
+  const gradleArgs = [...gradle.args, "--no-daemon", "--build-cache"];
+  if (env.HORC_ANDROID_KOTLIN_IN_PROCESS === "1") {
+    gradleArgs.push("-Pkotlin.compiler.execution.strategy=in-process");
+    gradleArgs.push("-Dkotlin.compiler.execution.strategy=in-process");
+  }
+  if (env.HORC_ANDROID_RUN_UNIT_TESTS === "1") {
+    run(gradle.command, [...gradleArgs, ":app:testReleaseUnitTest"], { cwd: androidRoot, env });
+  }
+  gradleArgs.push(":app:assembleRelease");
+  run(gradle.command, gradleArgs, { cwd: androidRoot, env });
 
   const apkPath = newestApk(path.join(appRoot, "build", "outputs", "apk", "release"));
   if (!apkPath) fail("Gradle did not produce a signed release APK.");

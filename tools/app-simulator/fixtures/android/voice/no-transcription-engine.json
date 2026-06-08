@@ -1,0 +1,37 @@
+{
+  "description": "Negative fixture: no transcription engine available after wake.",
+  "expected": {
+    "wakeDetected": true,
+    "transcriptionProduced": false,
+    "voiceCommandEvent": false,
+    "timelineShowsVoiceCommand": false,
+    "diagnosticState": "error",
+    "lastError": "android_speech_recognizer_unavailable"
+  },
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": true,
+    "wakeDetected": true,
+    "transcript": ""
+  },
+  "nativeDiagnostics": {
+    "voice_wake": {
+      "enabled": true,
+      "state": "error",
+      "permission_record_audio": true,
+      "foreground_service_running": true,
+      "wake_engine": "StubWakeWordEngine",
+      "transcription_engine": "AndroidSpeechRecognizerEngine",
+      "last_wake_at": 1780833600000,
+      "last_error": "android_speech_recognizer_unavailable",
+      "audio_retained": false
+    }
+  },
+  "nativeEvent": {},
+  "timeline": {
+    "showsVoiceCommand": false
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: android_speech_recognizer_unavailable"
+  }
+}

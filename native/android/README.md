@@ -49,6 +49,30 @@ Build:
 horc build android-apk
 ```
 
+`HORC_ANDROID_BUILD_MODE=auto` uses the local Android lane only when Java,
+Gradle, an Android SDK, and the actual Android resource compiler can all run.
+The preflight executes `aapt2 version`; SDK directories alone are not enough. On
+ARM hosts where the checked-out/local SDK contains an x86_64 AAPT2 that fails
+with a missing loader or exec-format error, auto mode selects the existing
+Docker linux/amd64 Android builder instead of misclassifying the failure as a
+Kotlin/app problem. Forced `HORC_ANDROID_BUILD_MODE=local` fails with the AAPT2
+path, output, and Docker/binfmt remediation. Forced or auto-selected Docker on
+ARM checks:
+
+```bash
+docker run --rm --platform linux/amd64 alpine:3.20 uname -m
+```
+
+If emulation is unavailable and auto-install is disabled or blocked, run:
+
+```bash
+sudo docker run --privileged --rm tonistiigi/binfmt --install amd64
+```
+
+The Docker lane sets `HORC_ANDROID_KOTLIN_IN_PROCESS=1` by default so the
+release script passes Kotlin's in-process compiler strategy to Gradle. This
+avoids Kotlin daemon connection stalls observed under linux/amd64 QEMU on ARM.
+
 Or run the underlying release script directly:
 
 ```bash
@@ -70,6 +94,27 @@ Each promoted APK receives a `.native-defaults.json` sidecar, and
 host, signing level, and cloud-only backend policy. `/native/resolve` and
 `/native/download` use these release files for the Home `Go Native` Android APK
 download.
+
+`horc build all` also publishes the Android APKs into the local native release
+feed:
+
+- `/local/plugins/wasm-agent/public/native/releases/latest.json`
+- `/local/plugins/wasm-agent/public/native/releases/android/WASM-Agent-arm64.apk`
+- `/local/plugins/wasm-agent/public/native/releases/android/WASM-Agent-universal.apk`
+
+The running Android shell exposes current package metadata to the PWA bridge:
+package name, `versionName`, `versionCode`, build id, and whether
+`PackageManager.canRequestPackageInstalls()` is true. The Go Native update check
+must compare that embedded current metadata with `/native/releases/latest.json`;
+it must not guess from downloaded files.
+
+Android sideload updates are guided installs, not silent native updates. The
+safe flow is: download the APK, verify SHA-256, refuse package-name mismatch,
+refuse a `versionCode` that is not greater than the installed app, then launch
+Android's package installer. The user may need to allow "install unknown apps"
+for this package and must confirm the OS installer. Silent replacement is only
+possible through device-owner/root/store-managed install paths, which are not
+implemented here.
 
 Optional production signing environment:
 
@@ -111,9 +156,12 @@ Local verification evidence from this workspace:
   `native/android/release/release-manifest.json`; verify deployment separately
   before claiming `/native/download` serves this exact build.
 
-Durable Next Step: connect a real Android device/emulator in `adb device` state
-and run `horc simulate android` against
-`/local/native/android/release/WASM-Agent-arm64.apk`. Use
+Durable Next Step: run `horc build doctor`, then
+`HORC_ANDROID_BUILD_MODE=auto horc build android`, and verify that ARM hosts
+select the Docker Android builder when local AAPT2 cannot execute. After the APK
+is promoted to `/local/native/android/release/WASM-Agent-arm64.apk`, connect a
+real Android device/emulator in `adb device` state and run
+`horc simulate android` against it. Use
 `reports/sim/android/latest/result.json` and `summary.md` as the Android APK
 source of truth: the installed app must render `https://wa.colmeio.com/home`,
 the app content must fit above Android's OS navigation buttons and below the

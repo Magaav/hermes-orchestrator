@@ -1,0 +1,44 @@
+{
+  "description": "Negative fixture: missing Hermes ONNX model keeps foreground diagnostics visible without pretending wake is active.",
+  "expected": {
+    "wakeDetected": false,
+    "transcriptionProduced": false,
+    "voiceCommandEvent": false,
+    "timelineShowsVoiceCommand": false,
+    "diagnosticState": "listening",
+    "lastError": "hermes_wake_model_missing"
+  },
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": true,
+    "wakeDetected": false,
+    "transcript": ""
+  },
+  "nativeDiagnostics": {
+    "voice_wake": {
+      "enabled": true,
+      "state": "listening",
+      "permission_record_audio": true,
+      "foreground_service_running": true,
+      "notification_active": true,
+      "model_asset_found": false,
+      "onnx_runtime_available": true,
+      "wake_engine": "OpenWakeWordOnnxEngine(model-missing)",
+      "wake_engine_ready": false,
+      "wake_model_path": "files/voice/hermes.onnx",
+      "last_wake_at": 0,
+      "last_transcript": "",
+      "last_error": "hermes_wake_model_missing",
+      "audio_retained": false,
+      "continuous_transcription": false,
+      "continuous_audio_uploaded": false
+    }
+  },
+  "nativeEvent": {},
+  "timeline": {
+    "showsVoiceCommand": false
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: hermes_wake_model_missing; notification active; no wake inference"
+  }
+}

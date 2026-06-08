@@ -1,0 +1,49 @@
+{
+  "description": "Hermes wake phrase followed by a command routed as a native structured voice event.",
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": true,
+    "wakeDetected": true,
+    "transcript": "open my current run logs"
+  },
+  "nativeDiagnostics": {
+    "schema": "hermes.wasm_agent.android_native_diagnostics.v1",
+    "voice_wake": {
+      "schema": "hermes.wasm_agent.android_voice_wake.v1",
+      "enabled": true,
+      "state": "sent",
+      "permission_record_audio": true,
+      "foreground_service_running": true,
+      "wake_word": "hermes",
+      "wake_engine": "StubWakeWordEngine",
+      "transcription_engine": "AndroidSpeechRecognizerEngine",
+      "last_wake_at": 1780833600000,
+      "last_transcript": "open my current run logs",
+      "last_error": "",
+      "audio_retained": false
+    }
+  },
+  "nativeEvent": {
+    "kind": "voice_command",
+    "payload": {
+      "type": "voice_command",
+      "wake_word": "hermes",
+      "transcript": "open my current run logs",
+      "confidence": 0.82,
+      "started_at": 1780833600000,
+      "ended_at": 1780833607800,
+      "source": "android_native_hermes_voice_wake",
+      "build_id": "fixture",
+      "session_id": "fixture-voice-session",
+      "privacy_mode": "wake-word-local-transcript-only",
+      "audio_retained": false
+    }
+  },
+  "timeline": {
+    "showsVoiceCommand": true,
+    "summary": "voice_command: open my current run logs"
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: wake detected confidence=0.82\nHermesVoiceWakeService: voice_command event posted transcript=[redacted-summary]"
+  }
+}

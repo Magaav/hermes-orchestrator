@@ -202,6 +202,44 @@ class ClientFirstCloudTest(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     static_server.resolve_wasm_agent_state_dir(PLUGIN_ROOT)
 
+    def test_native_voice_command_event_writes_timeline_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            handler = SimpleNamespace(
+                headers={"X-Wasm-Agent-Native-Device-Id": "android-test-device"},
+                client_address=("127.0.0.1", 45678),
+            )
+
+            result = static_server.save_native_event(
+                server,
+                {
+                    "kind": "voice_command",
+                    "device_id": "android-test-device",
+                    "type": "voice_command",
+                    "wake_word": "hermes",
+                    "transcript": "open my current run logs",
+                    "confidence": 0.82,
+                    "source": "android_native_hermes_voice_wake",
+                    "build_id": "android-test",
+                    "session_id": "voice-session-test",
+                    "privacy_mode": "wake-word-local-transcript-only",
+                    "audio_retained": False,
+                },
+                handler,
+            )
+
+            self.assertTrue(result["stored"])
+            latest = static_server.latest_native_voice_command(server)
+            self.assertTrue(latest["available"])
+            event = latest["event"]
+            self.assertEqual(event["type"], "voice_command")
+            self.assertEqual(event["wake_word"], "hermes")
+            self.assertEqual(event["transcript"], "open my current run logs")
+            self.assertEqual(event["source"], "android_native_hermes_voice_wake")
+            self.assertFalse(event["audio_retained"])
+            timeline = Path(tmp) / "native-events" / "voice-command-timeline.jsonl"
+            self.assertIn("voice-session-test", timeline.read_text(encoding="utf-8"))
+
     def test_friend_sync_and_fleet_metadata_stay_lightweight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"

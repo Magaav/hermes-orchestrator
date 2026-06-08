@@ -1,0 +1,34 @@
+{
+  "description": "Negative fixture: RECORD_AUDIO denied prevents foreground listening.",
+  "expected": {
+    "wakeDetected": false,
+    "transcriptionProduced": false,
+    "voiceCommandEvent": false,
+    "timelineShowsVoiceCommand": false,
+    "diagnosticState": "error",
+    "lastError": "record_audio_permission_missing"
+  },
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": false,
+    "wakeDetected": false,
+    "transcript": ""
+  },
+  "nativeDiagnostics": {
+    "voice_wake": {
+      "enabled": true,
+      "state": "error",
+      "permission_record_audio": false,
+      "foreground_service_running": false,
+      "last_error": "record_audio_permission_missing",
+      "audio_retained": false
+    }
+  },
+  "nativeEvent": {},
+  "timeline": {
+    "showsVoiceCommand": false
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: record_audio_permission_missing"
+  }
+}

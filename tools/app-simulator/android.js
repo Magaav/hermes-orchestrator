@@ -40,6 +40,15 @@ const REQUIRED_ANDROID_PROOF_ASSERTIONS = [
   "cancel/return makes Google sign-in retryable",
   "retry tap does not stay stuck",
 ];
+const REQUIRED_ANDROID_VOICE_ASSERTIONS = [
+  "foreground service started",
+  "microphone permission state known",
+  "wake detected",
+  "transcription produced",
+  "voice_command event reached wasm-agent",
+  "UI timeline shows event",
+  "logs are redacted",
+];
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2380,13 +2389,97 @@ async function runFixtureAndroidSimulation(ctx, fixtureName) {
   return ctx.result;
 }
 
+async function runVoiceWakeFixtureSimulation(ctx, fixtureName) {
+  const fixturePath = path.join(FIXTURE_DIR, "voice", `${fixtureName}.json`);
+  const observations = {
+    fixture: fixtureName,
+    fixturePath,
+    runtimeVerified: false,
+    buildSuccessIsRuntimeVerification: false,
+    voiceWake: true,
+  };
+  try {
+    ctx.startPhase("boot", "load Android voice wake fixture");
+    if (!fs.existsSync(fixturePath)) throw new Error(`Android voice wake fixture not found: ${fixtureName}`);
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, "utf8"));
+    observations.device = fixture.device || { model: "fixture", androidVersion: "fixture" };
+    observations.apk = fixture.apk || { path: DEFAULT_ANDROID_APK, buildId: "fixture", sha256: "fixture" };
+    observations.voice = fixture.voice || {};
+    observations.nativeDiagnostics = fixture.nativeDiagnostics || {};
+    observations.nativeEvent = fixture.nativeEvent || {};
+    observations.timeline = fixture.timeline || {};
+    observations.logs = fixture.logs || {};
+    ctx.result.target = { fixture: fixtureName, apk: observations.apk, voiceWake: true };
+    ctx.writeJsonArtifact("fixture", "logs/voice-fixture.json", fixture);
+    ctx.writeJsonArtifact("nativeDiagnostics", "logs/native-voice-diagnostics.json", observations.nativeDiagnostics);
+    ctx.writeJsonArtifact("nativeEvent", "logs/native-voice-event.json", observations.nativeEvent);
+    ctx.writeTextArtifact("logcat", "logs/voice-logcat-redacted.txt", observations.logs.logcatText || "");
+    ctx.completePhase("boot", "passed", `voice fixture ${fixtureName} loaded`);
+
+    ctx.startPhase("assert", "evaluate Android voice wake evidence");
+    const voice = observations.voice || {};
+    const diagnostics = observations.nativeDiagnostics?.voice_wake || observations.nativeDiagnostics || {};
+    const payload = observations.nativeEvent?.payload || observations.nativeEvent || {};
+    const transcript = String(payload.transcript || voice.transcript || "");
+    const logText = String(observations.logs?.logcatText || "");
+    const hasSecretLeak = /(access_token|auth_code|refresh_token|Authorization: Bearer|Cookie:|wa_uid=|audio_pcm|continuous background audio)/i.test(logText);
+    const expected = fixture.expected || { voiceCommandEvent: true, wakeDetected: true, transcriptionProduced: true, timelineShowsVoiceCommand: true };
+    ctx.addAssertion("foreground service started", Boolean(voice.foregroundServiceStarted || diagnostics.foreground_service_running), "foreground microphone service evidence", { voice, diagnostics });
+    ctx.addAssertion("microphone permission state known", typeof voice.permissionGranted === "boolean" || typeof diagnostics.permission_record_audio === "boolean", "permission state captured", { voice, diagnostics });
+    const didWake = Boolean(voice.wakeDetected || diagnostics.last_wake_at);
+    const producedTranscript = transcript.length > 0;
+    const emittedVoiceCommand = payload.type === "voice_command" && payload.source === "android_native_hermes_voice_wake" && payload.audio_retained === false;
+    const timelineShowsVoiceCommand = Boolean(observations.timeline?.showsVoiceCommand);
+    ctx.addAssertion("wake detected", expected.wakeDetected === false ? !didWake : didWake, expected.wakeDetected === false ? "no wake expected" : "Hermes wake detection evidence", { voice, diagnostics });
+    ctx.addAssertion("transcription produced", expected.transcriptionProduced === false ? !producedTranscript : producedTranscript, transcript || "missing transcript", { transcript });
+    ctx.addAssertion("voice_command event reached wasm-agent", expected.voiceCommandEvent === false ? !emittedVoiceCommand : emittedVoiceCommand, "structured native voice event stored", payload);
+    ctx.addAssertion("UI timeline shows event", expected.timelineShowsVoiceCommand === false ? !timelineShowsVoiceCommand : timelineShowsVoiceCommand, "timeline evidence captured", observations.timeline);
+    if (expected.diagnosticState) {
+      ctx.addAssertion("diagnostic state matches expected", diagnostics.state === expected.diagnosticState, `expected=${expected.diagnosticState} actual=${diagnostics.state || "missing"}`, diagnostics);
+    }
+    if (expected.lastError) {
+      ctx.addAssertion("diagnostic error matches expected", String(diagnostics.last_error || "").includes(expected.lastError), `expected error includes ${expected.lastError}`, diagnostics);
+    }
+    ctx.addAssertion("logs are redacted", !hasSecretLeak, hasSecretLeak ? "sensitive data found in logs" : "no secret/audio payload leak markers", { logText: logText.slice(0, 2000) });
+    ctx.completePhase("assert", ctx.result.assertions.some((assertion) => assertion.status === "failed") ? "failed" : "passed", "voice wake assertions evaluated");
+  } catch (error) {
+    ctx.addError(error, "voice-wake-fixture");
+    ctx.addAssertion("Android voice wake fixture simulation completed", false, error.message || String(error));
+  } finally {
+    ctx.startPhase("collect evidence", "write voice wake observations");
+    ctx.result.evidence.observations = redactValue(observations);
+    ctx.completePhase("collect evidence", "passed", "voice wake artifacts collected");
+    ctx.startPhase("score", "score voice wake assertions");
+    ctx.score();
+    observations.finalScore = ctx.result.score;
+    observations.missingAssertions = REQUIRED_ANDROID_VOICE_ASSERTIONS.filter((name) => !ctx.result.assertions.some((assertion) => assertion.name === name));
+    ctx.result.evidence.observations = redactValue(observations);
+    ctx.writeJsonArtifact("observations", "logs/voice-observations.json", observations);
+    ctx.completePhase("score", "passed", `status=${ctx.result.status} score=${ctx.result.score == null ? "n/a" : ctx.result.score}`);
+    ctx.startPhase("report", "write result.json and summary.md");
+    ctx.report();
+    ctx.completePhase("report", "passed", "reports written");
+    ctx.report();
+  }
+  console.log(`horc simulate android --voice-wake ${fixtureName}: ${ctx.result.status}${ctx.result.score == null ? "" : ` (${ctx.result.score}/100)`}`);
+  console.log(`  report: ${ctx.reportDir}/summary.md`);
+  return ctx.result;
+}
+
 async function runAndroidSimulation(options = {}) {
   const fixtureName = process.env.WASM_AGENT_SIM_ANDROID_FIXTURE || "";
+  const voiceWakeFixture = options.voiceWakeFixture || process.env.WASM_AGENT_SIM_ANDROID_VOICE_WAKE || "";
   const backend = options.backend || "auto";
   const ctx = new SimulationContext({
     platform: "android",
     command: options.command || "horc simulate android",
-    engine: fixtureName
+    engine: voiceWakeFixture
+      ? {
+          name: "android-voice-wake-fixture",
+          fixture: voiceWakeFixture,
+          description: "Fixture evidence for Android Hermes Voice Wake.",
+        }
+      : fixtureName
       ? {
           name: "android-fixture",
           fixture: fixtureName,
@@ -2412,6 +2505,7 @@ async function runAndroidSimulation(options = {}) {
           description: "ADB install/launch with UIAutomator, logcat, screencap, dumpsys activity/window evidence.",
         },
   });
+  if (voiceWakeFixture) return runVoiceWakeFixtureSimulation(ctx, voiceWakeFixture);
   if (fixtureName) return runFixtureAndroidSimulation(ctx, fixtureName);
   if (backend === "local-report") return runLocalReportAndroidSimulation(ctx, options.localReportPath || "");
   if (backend === "emulator") return runEmulatorAndroidSimulation(ctx, options);

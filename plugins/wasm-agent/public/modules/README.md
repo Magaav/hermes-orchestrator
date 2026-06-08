@@ -35,7 +35,7 @@ tree and workflow.
   device records live under `state/users/<acc_id>/devices/` and main-device
   settings live in `state/users/<acc_id>/device-settings.json`.
 - `native-standby/`: optional native companion contract for screen-off wake
-  phrase and live transcription behavior. Home's Go Native action resolves
+  phrase and live transcription behavior. Home's Native action resolves
   platform-specific installers through `/native/resolve` and downloads only
   existing native artifacts through `/native/download`; generic ZIP packages are
   developer/debug compatibility only. Request records live under

@@ -319,6 +319,8 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path.startswith("/native/releases/"):
+            return super().do_GET()
         if path == "/.well-known/assetlinks.json":
             self._json(HTTPStatus.OK, android_asset_links(), headers={"Cache-Control": "no-store"})
             return
@@ -549,6 +551,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/native/diagnostics/latest":
             try:
                 self._json(HTTPStatus.OK, latest_native_diagnostics(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/events/voice/latest":
+            try:
+                self._json(HTTPStatus.OK, latest_native_voice_command(self.server))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -1586,6 +1594,9 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         super().end_headers()
 
     def translate_path(self, path: str) -> str:
+        if path.split("?", 1)[0].startswith("/native/releases/"):
+            relative = path.split("?", 1)[0].lstrip("/")
+            return str(self.server.public_root.resolve() / relative)
         if path.split("?", 1)[0] == "/voice-lab":
             return str(self.server.public_root.resolve() / "voice-lab.html")
         if path.split("?", 1)[0] == "/composer-lab":
@@ -6440,6 +6451,41 @@ def native_events_dir(server: WasmAgentServer) -> Path:
     return path
 
 
+def append_native_voice_timeline_event(server: WasmAgentServer, record: dict[str, Any]) -> None:
+    payload = record.get("payload") if isinstance(record, dict) else {}
+    if not isinstance(payload, dict):
+        return
+    event_type = str(payload.get("type") or payload.get("kind") or "")
+    if event_type != "voice_command":
+        return
+    item = {
+        "schema": "hermes.wasm_agent.voice_timeline_event.v1",
+        "received_at": record.get("received_at"),
+        "device_id": record.get("device_id"),
+        "type": "voice_command",
+        "wake_word": payload.get("wake_word") or "hermes",
+        "transcript": clipped_verbatim(str(payload.get("transcript") or ""), 1000),
+        "confidence": payload.get("confidence"),
+        "source": payload.get("source") or "android-native",
+        "build_id": payload.get("build_id"),
+        "session_id": payload.get("session_id"),
+        "privacy_mode": payload.get("privacy_mode"),
+        "audio_retained": payload.get("audio_retained") is True,
+    }
+    root = native_events_dir(server)
+    timeline_path = root / "voice-command-timeline.jsonl"
+    with timeline_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(redact_native_diagnostics(item), sort_keys=True, ensure_ascii=True) + "\n")
+    write_json_file(root / "latest-voice-command.json", redact_native_diagnostics(item))
+
+
+def latest_native_voice_command(server: WasmAgentServer) -> dict[str, Any]:
+    latest = read_json_file(native_events_dir(server) / "latest-voice-command.json", {})
+    if not isinstance(latest, dict) or not latest:
+        return {"ok": True, "available": False, "event": None}
+    return {"ok": True, "available": True, "event": redact_native_diagnostics(latest)}
+
+
 def native_control_dir(server: WasmAgentServer) -> Path:
     path = server.state_dir / "native-control"
     path.mkdir(parents=True, exist_ok=True)
@@ -6618,6 +6664,7 @@ def save_native_event(server: WasmAgentServer, body: dict[str, Any], handler: Wa
     }
     write_json_file(target, bundled)
     write_json_file(root / "latest.json", record)
+    append_native_voice_timeline_event(server, record)
     return {"ok": True, "stored": True, "deviceId": device_id, "receivedAt": record["received_at"]}
 
 
@@ -11337,6 +11384,8 @@ def is_public_request(method: str, path: str) -> bool:
         return True
     if method == "GET":
         if path == "/native/download":
+            return True
+        if path.startswith("/native/releases/"):
             return True
         if path == "/.well-known/assetlinks.json":
             return True

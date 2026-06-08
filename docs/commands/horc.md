@@ -70,7 +70,7 @@ horc build prepare-docker
 horc build doctor
 horc build --doctor
 horc simulate web
-horc simulate android [--device|--emulator|--local-report PATH]
+horc simulate android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
 horc simulate windows
 horc simulate all
 ```
@@ -89,10 +89,13 @@ checks the unpacked executable, `resources/app.asar`, and the final installer,
 prints the first 80 `app.asar` entries, and writes
 `/local/native/windows/release/horc-build-manifest.json`.
 
-`horc build android` builds only the Android APK lane. In `auto` mode it
-uses local Java/Gradle/Android SDK when available; otherwise it uses the cached
-Docker amd64 Android SDK builder and persists Gradle caches under
-`native/android/.gradle-*`. It runs `native/android/scripts/release-android.js`,
+`horc build android` builds only the Android APK lane. In `auto` mode it uses
+the local lane only when Java, Gradle, an Android SDK, and the actual Android
+resource compiler (`aapt2 version`) all execute on the current CPU. If local
+Android tooling is present but AAPT2 cannot run, such as an ARM host with an
+x86_64 AAPT2 binary and no loader, `auto` selects the existing Docker
+linux/amd64 Android SDK builder instead. The Docker lane persists Gradle caches
+under `native/android/.gradle-*`. It runs `native/android/scripts/release-android.js`,
 generates a local sideload signing key if no signing environment is provided,
 verifies the signed release APK with `apksigner`, rejects production APKs that
 contain localhost backend literals, and promotes the APKs to:
@@ -100,10 +103,32 @@ contain localhost backend literals, and promotes the APKs to:
 - `/local/native/android/release/WASM-Agent-universal.apk`
 - `/local/native/android/release/WASM-Agent-arm64.apk`
 
+The Docker Android lane sets `HORC_ANDROID_KOTLIN_IN_PROCESS=1` unless
+overridden, so the release script passes Kotlin's in-process compiler strategy
+to Gradle and avoids Kotlin daemon handshakes under linux/amd64 emulation.
+
 The APK sidecars and `release-manifest.json` let `/native/resolve` and
 `/native/download` expose the Android artifact through Home `Go Native` when the
-file exists. `horc build all` explicitly runs the Windows lane first and then the
-Android APK lane.
+file exists. After a successful Android release, `horc build android` also runs
+`native/android/scripts/verify-launcher-icon.py` when present, so the launcher
+icon remains standardized on the shared WA artwork. Build success is not runtime
+proof; use `horc simulate android --device` for installed-app behavior. `horc
+build all` explicitly runs the Windows lane first and then the Android APK lane.
+When both concrete lanes succeed, it generates the local update feed at
+`/local/plugins/wasm-agent/public/native/releases/latest.json`, copies published
+artifacts under `public/native/releases/{windows,android}/`, and prints a
+matrix with target, build mode, artifact path/URL, SHA-256, status, and runtime
+proof status. The local server serves the feed at `/native/releases/latest.json`
+and Android APKs at `/native/releases/android/WASM-Agent-{arm64,universal}.apk`.
+
+The Go Native modal checks `/native/releases/latest.json` and compares it with
+metadata embedded in the current client. Windows uses a guided installer update
+unless electron-builder updater metadata is wired later. Android sideload APKs
+are guided updates only: the app must verify SHA-256, preserve package
+name/signing key, require a greater `versionCode`, and hand off to Android's
+package installer. Android may require the user to allow "install unknown apps"
+and always requires OS confirmation. Web/PWA updates mean service-worker/cache
+refresh and reload. Do not treat build proof as runtime proof.
 
 Build trust lanes:
 
@@ -136,8 +161,15 @@ installs inside each disposable builder container.
 
 `horc build doctor` prints host OS/arch, Docker availability, Docker user
 permission, amd64 binfmt status, Wine builder image pullability, Android
-Java/Gradle/SDK availability, expected Windows build mode, and exact remediation
-commands for missing prerequisites.
+selected build mode, Java availability, Gradle path, Android SDK path, AAPT2
+path, AAPT2 runnable status, Android Docker image, expected Windows build mode,
+and exact remediation commands for missing prerequisites. On ARM hosts where the
+Android Docker lane needs linux/amd64 emulation and binfmt is missing, run:
+
+```bash
+sudo docker run --privileged --rm tonistiigi/binfmt --install amd64
+docker run --rm --platform linux/amd64 alpine:3.20 uname -m
+```
 
 ## Simulation Commands
 
@@ -146,6 +178,7 @@ horc simulate web
 horc simulate android --emulator
 horc simulate android --device
 horc simulate android --local-report reports/sim/android/latest/result.json
+horc simulate android --voice-wake fixture-hermes-command.wav
 horc simulate windows
 horc simulate all
 ```
@@ -237,6 +270,13 @@ fail because it models the stale cancel/retry bug. Set
 `WASM_AGENT_SIM_ANDROID_OAUTH_WAIT_MS=180000` or pass `--interactive-oauth` on a
 local device run when a human will finish Google login during the simulator run.
 
+`horc simulate android --voice-wake fixture-hermes-command.wav` verifies the
+Android-native Hermes Voice Wake path: foreground microphone service evidence,
+known `RECORD_AUDIO` permission state, local wake detection, bounded
+transcription, a stored `voice_command` native event, visible timeline evidence,
+and redacted logs. Negative fixtures include `false-wake`, `permission-denied`,
+`service-killed`, and `no-transcription-engine`.
+
 `horc simulate windows` is a pending skeleton only. Its future engine is
 Playwright Electron + Windows smoke/PowerShell scripts. It does not verify
 Windows installed-app behavior yet.
@@ -312,6 +352,9 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 - `HERMES_WASM_AGENT_ANDROID_ROOT`: override Android native project root;
   default `/local/native/android`.
 - `HORC_ANDROID_BUILD_MODE`: `auto`, `local`, or `docker`; default `auto`.
+  `auto` selects local only when Java, Gradle, Android SDK, and runnable AAPT2
+  are all valid; otherwise it selects Docker. `local` fails clearly if AAPT2
+  cannot execute on the host CPU.
 - `HORC_ANDROID_DOCKER_IMAGE`: Docker image for the Android SDK builder;
   default `ghcr.io/cirruslabs/android-sdk:35`.
 - `HORC_ANDROID_GRADLE_VERSION`: Gradle distribution version cached under

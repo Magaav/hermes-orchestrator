@@ -1,0 +1,34 @@
+{
+  "description": "Negative fixture: background speech without Hermes must not dispatch.",
+  "expected": {
+    "wakeDetected": false,
+    "transcriptionProduced": false,
+    "voiceCommandEvent": false,
+    "timelineShowsVoiceCommand": false,
+    "diagnosticState": "listening"
+  },
+  "voice": {
+    "foregroundServiceStarted": true,
+    "permissionGranted": true,
+    "wakeDetected": false,
+    "transcript": ""
+  },
+  "nativeDiagnostics": {
+    "voice_wake": {
+      "enabled": true,
+      "state": "listening",
+      "permission_record_audio": true,
+      "foreground_service_running": true,
+      "last_wake_at": 0,
+      "last_transcript": "",
+      "audio_retained": false
+    }
+  },
+  "nativeEvent": {},
+  "timeline": {
+    "showsVoiceCommand": false
+  },
+  "logs": {
+    "logcatText": "HermesVoiceWakeService: listening, no wake detected"
+  }
+}

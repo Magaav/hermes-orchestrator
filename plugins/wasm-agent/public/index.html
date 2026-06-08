@@ -180,7 +180,7 @@
         </article>
       </section>
 
-      <section id="nativeModal" class="modal-backdrop" aria-label="Go Native" hidden>
+      <section id="nativeModal" class="modal-backdrop" aria-label="Native" hidden>
         <article class="modal-card wide" role="dialog" aria-modal="true" aria-labelledby="nativeModalTitle">
           <header class="modal-head">
             <div>
@@ -188,7 +188,7 @@
               <p id="nativeModalSubtitle">Detecting device</p>
             </div>
             <div class="modal-head-actions">
-              <button id="nativeDownloadButton" class="native-primary-button" type="button">Go Native</button>
+              <button id="nativeDownloadButton" class="native-primary-button" type="button">Native</button>
               <span id="nativeInstallStatus" class="widget-chip">standby</span>
               <button id="closeNativeModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
             </div>
@@ -219,6 +219,8 @@
             <button id="nativeDebugResetAuthButton" type="button">Reset auth</button>
             <button id="nativeDebugClearWebViewButton" type="button">Clear WebView</button>
             <button id="nativeDebugClearDiagnosticsButton" type="button">Clear diagnostics</button>
+            <button id="nativeDebugEnableVoiceWakeButton" type="button">Enable Hermes voice</button>
+            <button id="nativeDebugDisableVoiceWakeButton" type="button">Disable Hermes voice</button>
           </div>
           <dl id="nativeDebugState" class="native-debug-state"></dl>
           <pre id="nativeDebugOutput" class="native-debug-output"></pre>
@@ -400,7 +402,8 @@
                 <button id="joinSpaceButton" class="home-action-button join" type="button" title="Join Space" aria-label="Join Space"><span>Join Space</span></button>
                 <button id="homeFleetButton" class="home-action-button fleet" type="button" title="Fleet" aria-label="Fleet"><span>Fleet</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
-                <button id="homeGoNativeButton" class="home-action-button go-native" type="button" title="Go Native" aria-label="Go Native"><span>Go Native</span></button>
+                <button id="homeGoNativeButton" class="home-action-button go-native" type="button" title="Native" aria-label="Native"><span>Native</span></button>
+                <button id="homeTuneVoiceButton" class="home-action-button tune-voice" type="button" title="Record Hermes positive, silence negative, speech negative, or noise negative" aria-label="Tune Voice" data-home-action-id="tune_voice"><span>Tune Voice</span><small id="homeTuneVoiceStatus" aria-live="polite"></small></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
@@ -763,6 +766,14 @@
               <p><strong>Auto</strong> answers cheap resume/inspect turns locally and uses the selected node for other messages.</p>
               <p><strong>Local</strong> never calls the model; it only uses inspect tools and deterministic replies.</p>
               <p><strong>Bridge</strong> sends compact tool context to the configured bridge model.</p>
+            </div>
+            <div class="agent-mode">
+              <span>Hermes Voice Wake</span>
+              <div class="native-debug-actions">
+                <button id="agentVoiceWakeEnableButton" type="button">Enable</button>
+                <button id="agentVoiceWakeDisableButton" type="button">Disable</button>
+              </div>
+              <dl id="agentVoiceWakeState" class="native-debug-state"></dl>
             </div>
           </section>
         </header>
