@@ -18,6 +18,7 @@ class VoiceTuningStoreTest {
             val second = store.nextSampleFile(VoiceTuningCategory.POSITIVE, nowMs = 1234)
 
             assertFalse(first.name == second.name)
+            assertTrue(first.name.startsWith("hermes_19700101_000001_234_"))
             assertTrue(second.parentFile!!.path.endsWith("positive"))
         } finally {
             root.deleteRecursively()
@@ -31,7 +32,7 @@ class VoiceTuningStoreTest {
             val store = VoiceTuningStore(root)
 
             try {
-                store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, ShortArray(0), 1200)
+                store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, ShortArray(0), VoiceTuningStore.SAMPLE_DURATION_MS)
                 throw AssertionError("expected zero_byte_recording")
             } catch (error: IllegalArgumentException) {
                 assertEquals("zero_byte_recording", error.message)
@@ -48,10 +49,10 @@ class VoiceTuningStoreTest {
         val root = tempRoot()
         try {
             val store = VoiceTuningStore(root)
-            repeat(5) { store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), 1200) }
-            repeat(4) { store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), 1200) }
-            repeat(3) { store.writeSample(VoiceTuningCategory.NEGATIVE_SPEECH, samplePcm(), 1200) }
-            repeat(3) { store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), 1200) }
+            repeat(5) { store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
+            repeat(4) { store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
+            repeat(3) { store.writeSample(VoiceTuningCategory.NEGATIVE_SPEECH, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
+            repeat(3) { store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
 
             val counts = store.counts()
             assertEquals(5, counts.positive)
@@ -72,19 +73,21 @@ class VoiceTuningStoreTest {
         val root = tempRoot()
         try {
             val store = VoiceTuningStore(root)
-            repeat(4) { store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), 1200) }
-            repeat(10) { store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), 1200) }
+            repeat(4) { store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
+            repeat(10) { store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS) }
 
             var status = store.status()
             assertFalse(status.getBoolean("dataset_ready"))
             assertEquals(4, status.getJSONObject("progress").getInt("positives_current"))
             assertEquals(10, status.getJSONObject("progress").getInt("negatives_current"))
 
-            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), 1200)
+            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
             status = store.status()
             assertTrue(status.getBoolean("dataset_ready"))
-            assertEquals(5, status.getJSONObject("progress").getInt("positives_required"))
-            assertEquals(10, status.getJSONObject("progress").getInt("negatives_required"))
+            assertEquals(50, status.getJSONObject("progress").getInt("positives_required"))
+            assertEquals(200, status.getJSONObject("progress").getInt("negatives_required"))
+            assertEquals(5, status.getJSONObject("progress").getInt("smoke_positives_required"))
+            assertEquals(10, status.getJSONObject("progress").getInt("smoke_negatives_required"))
         } finally {
             root.deleteRecursively()
         }
@@ -95,14 +98,31 @@ class VoiceTuningStoreTest {
         val root = tempRoot()
         try {
             val store = VoiceTuningStore(root)
-            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), 1200)
-            store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), 1200)
+            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
+            store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
 
             val event = store.deleteLast(VoiceTuningCategory.POSITIVE)
 
             assertTrue(event.getBoolean("deleted"))
             assertEquals(0, store.counts().positive)
             assertEquals(1, store.counts().noise)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cachedCountsAreInvalidatedAfterWritesAndDeletes() {
+        val root = tempRoot()
+        try {
+            val store = VoiceTuningStore(root)
+            assertEquals(0, store.counts().positive)
+
+            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
+            assertEquals(1, store.counts().positive)
+
+            store.deleteLast(VoiceTuningCategory.POSITIVE)
+            assertEquals(0, store.counts().positive)
         } finally {
             root.deleteRecursively()
         }
@@ -131,20 +151,26 @@ class VoiceTuningStoreTest {
             val event = store.writeSample(
                 VoiceTuningCategory.POSITIVE,
                 samplePcm(),
-                1200,
+                VoiceTuningStore.SAMPLE_DURATION_MS,
                 source = "space-home:tune-voice",
                 deviceLabel = "Pixel Test",
             )
 
             assertEquals("space-home:tune-voice", event.getString("source"))
-            assertEquals("positive", event.getString("kind"))
+            assertEquals("positive", event.getString("label"))
+            assertEquals("hermes", event.getString("kind"))
             assertEquals("files/voice/hermes-dataset", store.status().getString("storage_path"))
             val metadataFile = requireNotNull(root.resolve("positive").listFiles { file -> file.extension == "json" }?.single())
             val metadata = JSONObject(metadataFile.readText())
-            assertEquals("positive", metadata.getString("kind"))
+            assertEquals("positive", metadata.getString("label"))
+            assertEquals("hermes", metadata.getString("kind"))
+            assertEquals("Hermes", metadata.getString("wake_phrase"))
             assertEquals("space-home:tune-voice", metadata.getString("source"))
-            assertEquals(1.2, metadata.getDouble("duration"), 0.0)
+            assertEquals(1.0, metadata.getDouble("duration"), 0.0)
             assertEquals(VoiceTuningStore.SAMPLE_RATE_HZ, metadata.getInt("sample_rate"))
+            assertEquals(1, metadata.getInt("channels"))
+            assertEquals("PCM16", metadata.getString("encoding"))
+            assertTrue(metadata.getBoolean("accepted"))
             assertEquals("Pixel Test", metadata.getString("device_label"))
         } finally {
             root.deleteRecursively()
@@ -157,13 +183,13 @@ class VoiceTuningStoreTest {
         try {
             val store = VoiceTuningStore(root)
 
-            val silence = store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), 1200)
-            val speech = store.writeSample(VoiceTuningCategory.NEGATIVE_SPEECH, samplePcm(), 1200)
-            val noise = store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), 1200)
+            val silence = store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
+            val speech = store.writeSample(VoiceTuningCategory.NEGATIVE_SPEECH, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
+            val noise = store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), VoiceTuningStore.SAMPLE_DURATION_MS)
 
-            assertEquals("negative_silence", silence.getString("kind"))
-            assertEquals("negative_speech", speech.getString("kind"))
-            assertEquals("negative_noise", noise.getString("kind"))
+            assertEquals("silence", silence.getString("kind"))
+            assertEquals("speech", speech.getString("kind"))
+            assertEquals("noise", noise.getString("kind"))
             assertEquals(3, store.counts().negative)
             assertEquals(1, root.resolve("negative/silence").listFiles { file -> file.extension == "wav" }?.size)
             assertEquals(1, root.resolve("negative/speech").listFiles { file -> file.extension == "wav" }?.size)
@@ -173,7 +199,30 @@ class VoiceTuningStoreTest {
         }
     }
 
+    @Test
+    fun exportDatasetZipIncludesMetadataAndSamples() {
+        val root = tempRoot()
+        try {
+            val store = VoiceTuningStore(root)
+            store.writeSample(VoiceTuningCategory.POSITIVE, samplePcm(), 1000)
+            store.writeSample(VoiceTuningCategory.NEGATIVE_NOISE, samplePcm(), 1000)
+
+            val event = store.exportDataset(root.resolve("exports"))
+
+            assertTrue(event.getBoolean("ok"))
+            assertEquals("hermes-dataset.zip", event.getString("filename"))
+            assertTrue(File(event.getString("path")).length() > 0)
+            val metadata = event.getJSONObject("metadata")
+            assertEquals("hermes-dataset", metadata.getString("name"))
+            assertEquals(1, metadata.getInt("positive_count"))
+            assertEquals(1, metadata.getInt("negative_noise_count"))
+            assertFalse(metadata.getBoolean("real_gate_ready"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun tempRoot(): File = File("build/test-voice-tuning-${System.nanoTime()}")
 
-    private fun samplePcm(): ShortArray = ShortArray(VoiceTuningStore.SAMPLE_RATE_HZ / 10) { 42 }
+    private fun samplePcm(): ShortArray = ShortArray(VoiceTuningStore.SAMPLE_RATE_HZ) { 42 }
 }

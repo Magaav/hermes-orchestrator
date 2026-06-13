@@ -1,0 +1,12 @@
+{
+  "status_source": "live_service",
+  "proof_session_active": true,
+  "foreground_service_started": true,
+  "permission_record_audio": true,
+  "audio_record_started": true,
+  "audio_read_calls": 12,
+  "onnx_runtime_available": true,
+  "wake_engine_ready": false,
+  "personalized_model_exists": false,
+  "model_sha_match": false
+}

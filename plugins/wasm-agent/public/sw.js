@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v145-native-auth-preload";
+const CACHE_NAME = "wasm-agent-v146-hermes-wake-direct";
 const ASSETS = [
   "/auth-redirect.js",
   "/composer-lab",

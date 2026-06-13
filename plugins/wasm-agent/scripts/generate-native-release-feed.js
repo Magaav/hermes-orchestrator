@@ -63,17 +63,21 @@ function latestWindowsArtifact() {
     horcManifest.installer_path,
     path.join(releaseRoot, "WASM-Agent-Setup-x64.exe"),
   ].filter(Boolean).find((candidate) => fs.existsSync(candidate));
-  if (!installer) return null;
+  if (!installer) return latestPublishedWindowsArtifact();
   copyFileArtifact(installer, path.join(publicReleaseRoot, "windows"));
   const artifact = fileArtifact(installer, `/native/releases/windows/${path.basename(installer)}`, {
     platform: "windows",
+    updatePlatform: "win-x64",
     arch: "x64",
     kind: "windows-installer",
     buildId: manifest.buildId || verify.buildId || "",
+    build_id: manifest.buildId || verify.buildId || "",
     version: manifest.version || "",
     installableVersion: manifest.installableVersion || "",
     runtimeProofStatus: verify.ok ? "extracted-installer-verified" : "not-runtime-verified",
     updateMode: "guided-installer",
+    productionTarget: "https://wa.colmeio.com",
+    production_target: "https://wa.colmeio.com",
   });
   const blockmap = `${installer}.blockmap`;
   if (artifact && fs.existsSync(blockmap)) {
@@ -81,6 +85,36 @@ function latestWindowsArtifact() {
     artifact.blockmapUrl = `/native/releases/windows/${path.basename(blockmap)}`;
   }
   return artifact;
+}
+
+function latestPublishedWindowsArtifact() {
+  const publicDir = path.join(publicReleaseRoot, "windows");
+  if (!fs.existsSync(publicDir)) return null;
+  const candidates = fs.readdirSync(publicDir)
+    .filter((name) => /^WASM-Agent-Setup-x64-.*\.exe$/i.test(name))
+    .map((name) => path.join(publicDir, name))
+    .filter((candidate) => fs.statSync(candidate).isFile())
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  const installer = candidates[0] || "";
+  if (!installer) return null;
+  const name = path.basename(installer);
+  const buildMatch = name.match(/(win-x64-\d{8}T\d{6}Z|\d{8}T\d{6}Z)/);
+  const buildId = buildMatch ? (buildMatch[1].startsWith("win-x64-") ? buildMatch[1] : `win-x64-${buildMatch[1]}`) : "";
+  const versionMatch = name.match(/WASM-Agent-Setup-x64-([0-9][^-]*)-/);
+  return fileArtifact(installer, `/native/releases/windows/${name}`, {
+    platform: "windows",
+    updatePlatform: "win-x64",
+    arch: "x64",
+    kind: "windows-installer",
+    buildId,
+    build_id: buildId,
+    version: versionMatch ? versionMatch[1] : "",
+    installableVersion: versionMatch ? versionMatch[1] : "",
+    runtimeProofStatus: "published-artifact-preserved",
+    updateMode: "guided-installer",
+    productionTarget: "https://wa.colmeio.com",
+    production_target: "https://wa.colmeio.com",
+  });
 }
 
 function androidArtifacts() {
@@ -101,7 +135,8 @@ function androidArtifacts() {
       packageName: manifest.packageName || "com.colmeio.wasmagent",
       signingLevel: manifest.signingLevel || "local-sideload",
       updateMode: "guided-apk-installer",
-      runtimeProofStatus: "not-runtime-verified",
+      runtimeProofStatus: manifest.runtimeProofStatus || "not-runtime-verified",
+      runtimeProof: manifest.runtimeProof || undefined,
     });
   }
   return artifacts;
@@ -117,9 +152,17 @@ function writeFeed() {
     app: "wasm-agent",
     name: "wasm-agent",
     channel,
+    platform: "win-x64",
     version: windows?.version || android.universal?.version || android.arm64?.version || "",
     semanticVersion: windows?.version || android.universal?.version || android.arm64?.version || "",
     buildId: buildIds[0] || `native-feed-${publishedAt.replace(/[-:.]/g, "").slice(0, 15)}Z`,
+    build_id: windows?.buildId || "",
+    installer_url: windows?.url || "",
+    artifact_url: windows?.url || "",
+    sha256: windows?.sha256 || "",
+    size_bytes: windows?.sizeBytes || 0,
+    created_at: publishedAt,
+    production_target: "https://wa.colmeio.com",
     gitCommit: gitCommit(),
     publishedAt,
     artifacts: {

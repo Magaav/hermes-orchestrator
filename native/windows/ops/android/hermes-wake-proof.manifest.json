@@ -1,0 +1,13 @@
+{
+  "name": "run_android_hermes_wake_proof",
+  "version": "20260612T2030",
+  "entry": "hermes-wake-proof.js",
+  "capabilities": [
+    "adb.device",
+    "adb.shell",
+    "adb.logcat",
+    "diagnostics.read",
+    "result.upload"
+  ],
+  "timeoutMs": 45000
+}

@@ -42,10 +42,14 @@ data class TranscriptionResult(
 class OpenWakeWordOnnxEngine(
     private val modelFile: File,
     private val threshold: Double = DEFAULT_CONFIDENCE_THRESHOLD,
+    private val modelSource: String = "none",
 ) : WakeWordEngine {
     companion object {
-        const val ASSET_MODEL_PATH = "assets/voice/hermes.onnx"
-        const val APP_PRIVATE_MODEL_PATH = "files/voice/hermes.onnx"
+        const val ASSET_BASE_MODEL_PATH = "assets/voice/base_hermes.onnx"
+        const val APP_PRIVATE_BASE_MODEL_PATH = "files/voice/base_hermes.onnx"
+        const val APP_PRIVATE_PERSONALIZED_MODEL_PATH = "files/voice/hermes.onnx"
+        const val ASSET_MODEL_PATH = ASSET_BASE_MODEL_PATH
+        const val APP_PRIVATE_MODEL_PATH = APP_PRIVATE_PERSONALIZED_MODEL_PATH
         const val SAMPLE_RATE_HZ = 16_000
         const val DEFAULT_WINDOW_SAMPLES = 16_000
         const val MIN_WINDOW_SAMPLES = 4_000
@@ -71,7 +75,8 @@ class OpenWakeWordOnnxEngine(
             try {
                 OrtEnvironment.getEnvironment()
             } catch (error: Throwable) {
-                lastError = error.javaClass.simpleName
+                lastError = describeThrowable(error)
+                lastOnnxRuntimeError = lastError
                 null
             }
         }
@@ -81,7 +86,7 @@ class OpenWakeWordOnnxEngine(
         try {
             runtime.createSession(modelFile.absolutePath, OrtSession.SessionOptions())
         } catch (error: Throwable) {
-            lastError = error.javaClass.simpleName
+            lastError = describeThrowable(error)
             null
         }
     }
@@ -97,6 +102,8 @@ class OpenWakeWordOnnxEngine(
     }
     private val rollingWindow = ArrayDeque<Float>()
     @Volatile private var lastError: String = ""
+    @Volatile private var lastOnnxRuntimeError: String = ""
+    @Volatile private var lastConfidence: Double = 0.0
 
     override val name: String
         get() = when {
@@ -120,17 +127,39 @@ class OpenWakeWordOnnxEngine(
     val onnxRuntimeAvailable: Boolean
         get() = try {
             OrtEnvironment.getEnvironment()
+            lastOnnxRuntimeError = ""
             true
         } catch (error: Throwable) {
-            lastError = error.javaClass.simpleName
+            lastOnnxRuntimeError = describeThrowable(error)
+            lastError = lastOnnxRuntimeError
             false
         }
 
+    val onnxRuntimeError: String
+        get() {
+            onnxRuntimeAvailable
+            return lastOnnxRuntimeError
+        }
+
+    val wakeEngineError: String
+        get() = if (ready) "" else lastError.ifBlank { diagnosticReason }
+
     fun diagnostics(): JSONObject = JSONObject()
-        .put("wake_model_path", APP_PRIVATE_MODEL_PATH)
-        .put("asset_model_path", ASSET_MODEL_PATH)
-        .put("wake_model_exists", modelFile.exists())
+        .put("model_source", modelSource)
+        .put("selected_model_path", relativeModelPath())
+        .put("wake_model_path", relativeModelPath())
+        .put("asset_model_path", ASSET_BASE_MODEL_PATH)
+        .put("base_model_exists", modelSource == "base" && modelFile.exists() && modelFile.length() > 0L)
+        .put("personalized_model_exists", modelSource == "personalized" && modelFile.exists() && modelFile.length() > 0L)
+        .put("wake_model_exists", modelFile.exists() && modelFile.length() > 0L)
+        .put("wake_engine_ready", ready)
+        .put("wake_provider", name)
+        .put("last_model_load_result", if (ready) "loaded" else modelContract.diagnostic)
+        .put("last_model_load_error", if (ready) "" else lastError.ifBlank { diagnosticReason })
+        .put("last_wake_confidence", lastConfidence)
         .put("onnx_runtime_available", onnxRuntimeAvailable)
+        .put("onnx_runtime_error", onnxRuntimeError)
+        .put("wake_engine_error", wakeEngineError)
         .put("wake_model_contract", modelContract.diagnostic)
         .put("wake_model_input_name", inputName.ifBlank { INPUT_NAME_FALLBACK })
         .put("wake_model_input_shape", inputShape.joinToString(prefix = "[", postfix = "]"))
@@ -165,17 +194,19 @@ class OpenWakeWordOnnxEngine(
             OnnxTensor.createTensor(runtime, FloatBuffer.wrap(input), inputShape).use { tensor ->
                 activeSession.run(mapOf(inputName to tensor)).use { results ->
                     val confidence = firstConfidence(results[0].value)
+                    lastConfidence = confidence
                     WakeWordResult(detected = confidence >= threshold, confidence = confidence)
                 }
             }
         } catch (error: Exception) {
             lastError = error.javaClass.simpleName
+            lastConfidence = 0.0
             WakeWordResult(false, confidence = 0.0)
         }
     }
 
     private fun resolveModelContract(): ModelContract {
-        if (!modelFile.exists()) return ModelContract.MISSING
+        if (!modelFile.exists() || modelFile.length() <= 0L) return ModelContract.MISSING
         if (session == null || inputName.isBlank() || inputShape.isEmpty()) return ModelContract.LOAD_ERROR
         val concrete = inputShape.filter { it > 1 }
         val window = concrete.lastOrNull() ?: return ModelContract.UNSUPPORTED_INPUT_SHAPE
@@ -232,6 +263,57 @@ class OpenWakeWordOnnxEngine(
             else -> 0.0
         }.coerceIn(0.0, 1.0)
     }
+
+    private fun relativeModelPath(): String =
+        modelFile.path.substringAfter("/files/", modelFile.path).let { path ->
+            if (path.startsWith("voice/")) "files/$path" else path
+        }
+
+    private fun describeThrowable(error: Throwable): String {
+        val message = error.message?.takeIf { it.isNotBlank() }
+        return if (message == null) error.javaClass.name else "${error.javaClass.name}: $message"
+    }
+}
+
+data class WakeModelCandidate(
+    val source: String,
+    val file: File,
+)
+
+data class WakeModelSelection(
+    val source: String,
+    val engine: OpenWakeWordOnnxEngine,
+    val personalizedModelExists: Boolean,
+    val baseModelExists: Boolean,
+    val attempted: List<OpenWakeWordOnnxEngine>,
+) {
+    val ready: Boolean get() = engine.ready
+}
+
+object WakeModelSelector {
+    const val PERSONALIZED_SOURCE = "personalized"
+    const val BASE_SOURCE = "base"
+    const val NONE_SOURCE = "none"
+
+    fun select(personalizedModelFile: File, baseModelFile: File): WakeModelSelection {
+        val personalizedExists = validFile(personalizedModelFile)
+        val baseExists = validFile(baseModelFile)
+        val attempted = mutableListOf<OpenWakeWordOnnxEngine>()
+        if (personalizedExists) {
+            val engine = OpenWakeWordOnnxEngine(personalizedModelFile, modelSource = PERSONALIZED_SOURCE)
+            attempted.add(engine)
+            if (engine.ready) return WakeModelSelection(PERSONALIZED_SOURCE, engine, personalizedExists, baseExists, attempted)
+        }
+        if (baseExists) {
+            val engine = OpenWakeWordOnnxEngine(baseModelFile, modelSource = BASE_SOURCE)
+            attempted.add(engine)
+            if (engine.ready) return WakeModelSelection(BASE_SOURCE, engine, personalizedExists, baseExists, attempted)
+        }
+        val engine = OpenWakeWordOnnxEngine(personalizedModelFile, modelSource = NONE_SOURCE)
+        return WakeModelSelection(NONE_SOURCE, engine, personalizedExists, baseExists, attempted + engine)
+    }
+
+    private fun validFile(file: File): Boolean = file.exists() && file.isFile && file.length() > 0L
 }
 
 class AndroidSpeechRecognizerEngine(private val context: Context) : TranscriptionEngine {

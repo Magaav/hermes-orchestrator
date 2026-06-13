@@ -241,6 +241,17 @@ an authorized phone. If the installed app cannot be launched, use
 `tools/windows/verify-android-oauth.cmd` or
 `tools/windows/verify-android-oauth.ps1` as fallbacks.
 
+For Hermes Wake dataset export, do not use terminal ADB from this Linux
+workspace. The supported path is the installed Win11 wasm-agent bridge command
+`export_hermes_wake_dataset`, which reads the Android app-private
+`files/voice/exports/hermes-dataset.zip` through the Windows bridge and uploads
+or returns the archive. If the dataset was already uploaded, an admin session or
+`X-Wasm-Agent-Native-Control-Key` may download the protected cloud copy.
+Use `tools/voice/ship-hermes-wake.sh` for the automated repo-side flow; it
+queues that bridge command through Frontier/native control, waits for upload,
+imports the dataset, trains `build/voice/hermes.onnx`, verifies the candidate,
+and prints the model endpoint metadata for installation.
+
 `horc simulate android --local-report <path>` validates a report copied from a
 local USB-phone run, which is the current bridge when Frontier cloud cannot see
 Victor's phone. Pass a copied `result.json` or the report directory containing

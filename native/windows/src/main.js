@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
 const { execFile, spawn } = require("child_process");
+const { once } = require("events");
 const {
   APP_ID,
   DEFAULT_SERVER_URL,
@@ -19,6 +20,12 @@ const {
   selectPreferredBackendResult,
   validateWasmAgentOrigin,
 } = require("./native-backend-resolver");
+const {
+  feedUrlFor,
+  stagedInstallerPath,
+  validateDownloadedInstaller,
+  validateReleaseArtifact,
+} = require("./windows-self-update");
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NATIVE_CONTROL_POLL_INTERVAL_MS = 15_000;
@@ -27,14 +34,39 @@ const AUTH_COOKIE_WAIT_INTERVAL_MS = 200;
 const NATIVE_APP_ORIGIN = "wasm-agent://app";
 const NATIVE_APP_HOME_URL = `${NATIVE_APP_ORIGIN}/home`;
 const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
+  "run_hot_operation",
+  "list_hot_operations",
+  "run_shell_self_test",
+  "check_android_connection",
   "adb_version",
   "adb_devices",
+  "debug_android_voice_tuning_runtime",
+  "export_hermes_wake_dataset",
+  "run_android_hermes_wake_proof",
+  "prove_android_voice_tuning",
+  "run_android_voice_tuning_goal_loop",
   "verify_android_oauth",
   "read_latest_android_report",
   "open_latest_android_report",
+  "request_windows_client_update",
 ]);
+const HOT_OPERATION_PROTOCOL_VERSION = 1;
+const SHELL_PROTOCOL_VERSION = 2;
+const MINIMUM_RUNNER_VERSION = "20260612";
+const HOT_OPERATION_DEFAULT_TIMEOUT_MS = 120_000;
+const HOT_OPERATION_MANIFEST_SUFFIX = ".manifest.json";
+const BRIDGE_LOG_TAIL_LIMIT = 120;
+const BRIDGE_PROTOCOL_CAPABILITIES = [
+  "get_bridge_status",
+  "list_hot_operations",
+  "run_shell_self_test",
+  "run_hot_operation",
+];
+const bridgeLogsTail = [];
 let selectedBackendOrigin = "";
 let nativeControlPollBusy = false;
+let activeNativeCommandCount = 0;
+let activeWindowsSelfUpdate = null;
 let lastReloadCommand = null;
 let activeAndroidOAuthVerification = null;
 const startupDiagnostics = {
@@ -122,6 +154,14 @@ function sha256File(filePath) {
     return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
   } catch {
     return "";
+  }
+}
+
+function statFile(filePath) {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return null;
   }
 }
 
@@ -324,6 +364,14 @@ function nativeControlAuditPath() {
   return path.join(nativeAppDataDir(), "native-control-audit.log");
 }
 
+function nativeUpdateAuditPath() {
+  return path.join(nativeAppDataDir(), "windows-self-update-audit.log");
+}
+
+function windowsSelfUpdateStagingRoot() {
+  return path.join(nativeAppDataDir(), "staged", "windows-updates");
+}
+
 function nativeFatalDiagnosticsPath() {
   return path.join(nativeAppDataDir(), "fatal-diagnostics.log");
 }
@@ -351,7 +399,23 @@ function writeNativeControlAudit(event = {}) {
     timestamp: new Date().toISOString(),
     ...sanitizeRendererDiagnosticValue(event),
   };
+  bridgeLogsTail.push(JSON.stringify(entry));
+  while (bridgeLogsTail.length > BRIDGE_LOG_TAIL_LIMIT) bridgeLogsTail.shift();
   appendJsonLine(nativeControlAuditPath(), entry);
+  return entry;
+}
+
+function recentBridgeLogsTail(limit = 80) {
+  return bridgeLogsTail.slice(-Math.max(1, Math.min(Number(limit) || 80, BRIDGE_LOG_TAIL_LIMIT)));
+}
+
+function writeNativeUpdateAudit(event = {}) {
+  const entry = {
+    schema: "hermes.wasm_agent.windows_self_update_audit.v1",
+    timestamp: new Date().toISOString(),
+    ...sanitizeRendererDiagnosticValue(event),
+  };
+  appendJsonLine(nativeUpdateAuditPath(), entry);
   return entry;
 }
 
@@ -374,6 +438,32 @@ function execFileBounded(command, args = [], options = {}) {
         elapsedMs: Date.now() - startedAt,
         stdout: clipDiagnosticText(stdout),
         stderr: clipDiagnosticText(stderr),
+        error: error ? redactSensitiveText(String(error.message || error)) : "",
+      });
+    });
+  });
+}
+
+function execFileBufferBounded(command, args = [], options = {}) {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    execFile(command, args, {
+      timeout: Number(options.timeoutMs || 8000),
+      maxBuffer: Number(options.maxBuffer || 512 * 1024),
+      cwd: options.cwd || undefined,
+      env: options.env || process.env,
+      windowsHide: true,
+      encoding: "buffer",
+    }, (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        command: [command, ...args].join(" "),
+        exitCode: typeof error?.code === "number" ? error.code : error ? 1 : 0,
+        signal: error?.signal || "",
+        timedOut: Boolean(error?.killed),
+        elapsedMs: Date.now() - startedAt,
+        stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout || ""),
+        stderr: Buffer.isBuffer(stderr) ? clipDiagnosticText(stderr.toString("utf8")) : clipDiagnosticText(stderr || ""),
         error: error ? redactSensitiveText(String(error.message || error)) : "",
       });
     });
@@ -537,6 +627,173 @@ function emitWindowsDiagnosticEvent(sender, event = {}) {
   return payload;
 }
 
+function emitWindowsUpdateEvent(sender, opId, step, detail = {}) {
+  const payload = {
+    type: "progress",
+    operation: "request_windows_client_update",
+    opId,
+    step,
+    status: detail.ok === false ? "failed" : "ok",
+    ...detail,
+  };
+  writeNativeUpdateAudit({ action: step, opId, detail: payload });
+  return emitWindowsDiagnosticEvent(sender, payload);
+}
+
+async function fetchJsonWithTimeout(url, timeoutMs = 10000) {
+  const response = await fetchWithTimeout(url, { method: "GET", headers: { "Cache-Control": "no-cache" } }, timeoutMs);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+function currentWindowsBuildInfo() {
+  const config = ensureConfig();
+  const defaults = readNativeDefaults();
+  return {
+    buildId: String(config.buildId || defaults.buildId || ""),
+    version: String(config.installableVersion || defaults.installableVersion || config.nativeShellVersion || defaults.nativeShellVersion || app.getVersion()),
+    appVersion: app.getVersion(),
+    productionTarget: normalizeServerUrl(selectedBackendOrigin || config.serverUrl || DEFAULT_SERVER_URL),
+  };
+}
+
+async function downloadWindowsInstallerArtifact(sender, opId, artifact, payload = {}) {
+  const timeoutMs = Math.max(1000, Math.min(Number(payload.downloadTimeoutMs || payload.download_timeout_ms || 300_000), 900_000));
+  fs.mkdirSync(windowsSelfUpdateStagingRoot(), { recursive: true });
+  const target = stagedInstallerPath(windowsSelfUpdateStagingRoot(), artifact);
+  emitWindowsUpdateEvent(sender, opId, "update_download_started", { url: artifact.url, target, timeoutMs });
+  let response;
+  try {
+    response = await fetchWithTimeout(artifact.url, { method: "GET" }, timeoutMs);
+  } catch (error) {
+    return { ok: false, error: "download_failed", message: String(error && error.message ? error.message : error), url: artifact.url };
+  }
+  if (!response.ok || !response.body) {
+    return { ok: false, error: "download_failed", status: response.status, statusText: response.statusText || "", url: artifact.url };
+  }
+  const writer = fs.createWriteStream(target);
+  let sizeBytes = 0;
+  try {
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk);
+      sizeBytes += buffer.length;
+      if (!writer.write(buffer)) await once(writer, "drain");
+    }
+    writer.end();
+    await once(writer, "finish");
+  } catch (error) {
+    writer.destroy();
+    return { ok: false, error: "download_failed", message: String(error && error.message ? error.message : error), target };
+  }
+  emitWindowsUpdateEvent(sender, opId, "update_download_finished", { target, sizeBytes });
+  const validation = validateDownloadedInstaller(target, artifact);
+  emitWindowsUpdateEvent(sender, opId, validation.ok ? "update_hash_verified" : validation.error || "hash_mismatch", validation);
+  if (!validation.ok) return validation;
+  return { ok: true, path: target, sizeBytes: validation.sizeBytes, sha256: validation.sha256 };
+}
+
+async function checkAndStageWindowsSelfUpdate(sender, opId, payload = {}) {
+  if (process.platform !== "win32" && !payload.allowNonWindowsTest) {
+    return { ok: false, error: "windows_native_shell_required" };
+  }
+  const current = currentWindowsBuildInfo();
+  const serverUrl = current.productionTarget;
+  const feedUrl = feedUrlFor(serverUrl);
+  emitWindowsUpdateEvent(sender, opId, "update_check_started", { feedUrl, currentBuild: current.buildId });
+  let feed;
+  try {
+    feed = await fetchJsonWithTimeout(feedUrl, Number(payload.feedTimeoutMs || payload.feed_timeout_ms || 10000));
+  } catch (error) {
+    return { ok: false, error: "download_failed", phase: "feed", feedUrl, message: String(error && error.message ? error.message : error), current };
+  }
+  const validation = validateReleaseArtifact(feed, {
+    serverUrl,
+    currentBuildId: current.buildId,
+    productionTarget: serverUrl,
+  });
+  if (!validation.ok) {
+    emitWindowsUpdateEvent(sender, opId, validation.error || "update_metadata_rejected", { ok: false, ...validation });
+    return { ok: false, phase: "metadata", current, ...validation };
+  }
+  const latest = validation.artifact;
+  if (!validation.updateAvailable) {
+    emitWindowsUpdateEvent(sender, opId, validation.reason === "older_build_ignored" ? "older_build_ignored" : "same_build_noop", { currentBuild: current.buildId, latestBuild: latest.buildId });
+    return { ok: true, updateAvailable: false, reason: validation.reason, current, latest };
+  }
+  emitWindowsUpdateEvent(sender, opId, "update_available", {
+    currentBuild: current.buildId,
+    latestBuild: latest.buildId,
+    version: latest.version || "",
+    sha256: latest.sha256,
+    sizeBytes: latest.sizeBytes,
+  });
+  const downloaded = await downloadWindowsInstallerArtifact(sender, opId, latest, payload);
+  if (!downloaded.ok) return { ok: false, phase: "download", current, latest, ...downloaded, manualInstallerUrl: latest.url };
+  const staged = { ...downloaded, artifact: latest, stagedAt: new Date().toISOString() };
+  activeWindowsSelfUpdate = { opId, current, latest, staged };
+  emitWindowsUpdateEvent(sender, opId, "update_ready_for_install", {
+    currentBuild: current.buildId,
+    latestBuild: latest.buildId,
+    installerPath: staged.path,
+    sha256: staged.sha256,
+  });
+  return { ok: true, updateAvailable: true, approvalRequired: true, current, latest, staged };
+}
+
+async function promptAndLaunchWindowsInstaller(sender, opId, stagedUpdate) {
+  if (process.platform !== "win32") return { ok: false, error: "windows_native_shell_required" };
+  if (activeNativeCommandCount > 0) return { ok: false, error: "native_command_in_progress" };
+  const win = currentNativeWindow();
+  const staged = stagedUpdate?.staged || stagedUpdate;
+  const latest = stagedUpdate?.latest || staged?.artifact || {};
+  const current = stagedUpdate?.current || currentWindowsBuildInfo();
+  if (!staged?.path) return { ok: false, error: "update_not_staged" };
+  const validation = validateDownloadedInstaller(staged.path, latest);
+  if (!validation.ok) return { ok: false, ...validation, manualInstallerPath: staged.path || "" };
+  const { dialog } = require("electron");
+  const message = [
+    "WASM Agent update available",
+    `Current build: ${current.buildId || "unknown"}`,
+    `New build: ${latest.buildId || "unknown"}`,
+    `SHA-256: ${latest.sha256 || validation.sha256}`,
+  ].join("\n");
+  const response = await dialog.showMessageBox(win || undefined, {
+    type: "info",
+    title: "WASM Agent Update",
+    message: "WASM Agent update available",
+    detail: message,
+    buttons: ["Install Update", "Later", "View Details"],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (response.response === 2) {
+    await shell.showItemInFolder(staged.path);
+    return { ok: true, approvalRequired: true, userDeferred: true, detailsOpened: true, manualInstallerPath: staged.path };
+  }
+  if (response.response !== 0) return { ok: true, approvalRequired: true, userDeferred: true, manualInstallerPath: staged.path };
+  emitWindowsUpdateEvent(sender, opId, "user_approved_install", { installerPath: staged.path });
+  emitWindowsUpdateEvent(sender, opId, "install_started", { installerPath: staged.path, mode: "guided-installer" });
+  try {
+    spawn(staged.path, [], { detached: true, stdio: "ignore", windowsHide: false }).unref();
+  } catch (error) {
+    return { ok: false, error: "installer_failed", message: String(error && error.message ? error.message : error), manualInstallerPath: staged.path };
+  }
+  emitWindowsUpdateEvent(sender, opId, "app_restarting", { installerPath: staged.path });
+  setTimeout(() => app.quit(), 500).unref();
+  return { ok: true, installStarted: true, restarting: true, expectedNewBuildId: latest.buildId, manualInstallerPath: staged.path };
+}
+
+async function runWindowsSelfUpdate(sender, opId, payload = {}) {
+  if (process.platform !== "win32" && !payload.allowNonWindowsTest) {
+    return { ok: false, error: "windows_native_shell_required" };
+  }
+  const staged = await checkAndStageWindowsSelfUpdate(sender, opId, payload);
+  if (!staged.ok || !staged.updateAvailable) return staged;
+  if (!payload.applyApproved) return staged;
+  return promptAndLaunchWindowsInstaller(sender, opId, staged);
+}
+
 function commandLineDisplay(command, args = []) {
   return [command, ...args].join(" ");
 }
@@ -697,6 +954,190 @@ function bundledAndroidApkDefaultsPath() {
   return resourcePath("android", "WASM-Agent-arm64.native-defaults.json");
 }
 
+function userHotOperationsRoot() {
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  return path.join(appData, "WASM-Agent", "bridge-ops");
+}
+
+function bundledHotOperationsRoot() {
+  const candidates = [
+    resourcePath("bridge-ops"),
+    path.resolve(__dirname, "..", "ops"),
+    path.resolve(__dirname, "..", "..", "ops"),
+  ];
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || candidates[0];
+}
+
+function hotOperationRoots() {
+  const roots = [];
+  const devOverride = String(process.env.WASM_AGENT_BRIDGE_OPS_DIR || "").trim();
+  const devReload = String(process.env.WASM_AGENT_HOT_OPS_DEV_RELOAD || "").trim() === "1";
+  if (devOverride) roots.push({ kind: "dev", root: path.resolve(devOverride), reload: true, active: true });
+  roots.push({ kind: "user", root: path.resolve(userHotOperationsRoot()), reload: true });
+  roots.push({ kind: "bundled", root: path.resolve(bundledHotOperationsRoot()), reload: devReload });
+  return roots.map((item, index) => ({
+    ...item,
+    active: item.active === true || (!devOverride && index === 0),
+    exists: fs.existsSync(item.root),
+  }));
+}
+
+function hotOperationsDevReloadEnabled() {
+  return String(process.env.WASM_AGENT_HOT_OPS_DEV_RELOAD || "").trim() === "1";
+}
+
+function hotOperationsDisabled() {
+  return String(process.env.WASM_AGENT_DISABLE_HOT_OPS || "").trim() === "1";
+}
+
+function hotOperationsRequireSha() {
+  return String(process.env.WASM_AGENT_HOT_OPS_REQUIRE_SHA || "").trim() === "1";
+}
+
+function verboseBridgeLogsEnabled() {
+  return String(process.env.WASM_AGENT_ENABLE_VERBOSE_BRIDGE_LOGS || "").trim() === "1";
+}
+
+function activeHotOperationsRoot() {
+  const roots = hotOperationRoots();
+  return roots.find((item) => item.active) || roots[0] || { kind: "bundled", root: bundledHotOperationsRoot(), exists: false };
+}
+
+function hotOperationsSummary() {
+  const active = activeHotOperationsRoot();
+  const availableHotOps = scanHotOperationManifests().map((op) => ({
+    name: op.name,
+    version: op.version,
+    entry: op.entry,
+    manifest: op.manifest,
+    loadedFrom: op.loadedFrom,
+    sha256: op.sha256,
+    capabilities: op.capabilities,
+    timeoutMs: op.timeoutMs,
+  }));
+  return {
+    shellProtocolVersion: SHELL_PROTOCOL_VERSION,
+    supportedHotOpsProtocol: HOT_OPERATION_PROTOCOL_VERSION,
+    hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION,
+    minimumRunnerVersion: MINIMUM_RUNNER_VERSION,
+    capabilities: BRIDGE_PROTOCOL_CAPABILITIES.slice(),
+    hotOpsMode: active.kind || "bundled",
+    hotOpsRoot: active.root || "",
+    devReload: active.kind === "dev" || hotOperationsDevReloadEnabled(),
+    hotOpsDisabled: hotOperationsDisabled(),
+    hotOpsRequireSha: hotOperationsRequireSha(),
+    hotOpsRoots: hotOperationRoots().map((item) => ({
+      kind: item.kind,
+      path: item.root,
+      active: item.root === active.root,
+      exists: item.exists,
+    })),
+    availableHotOps,
+  };
+}
+
+function walkHotOperationManifestFiles(root) {
+  const files = [];
+  const visit = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(fullPath);
+      } else if (entry.isFile() && entry.name.endsWith(HOT_OPERATION_MANIFEST_SUFFIX)) {
+        files.push(fullPath);
+      }
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function normalizeHotOperationManifest(rootInfo, manifestPath) {
+  const manifest = readJsonFile(manifestPath, {});
+  const name = String(manifest.name || "").trim();
+  const entry = normalizeHotOperationModulePath(manifest.entry || "");
+  if (!name || !entry) return null;
+  const root = path.resolve(rootInfo.root);
+  const manifestRelative = path.relative(root, manifestPath).replace(/\\/g, "/");
+  const entryRelative = normalizeHotOperationModulePath(path.posix.join(path.posix.dirname(manifestRelative), entry));
+  if (!entryRelative) return null;
+  const entryPath = path.resolve(root, entryRelative);
+  const entryRootRelative = path.relative(root, entryPath);
+  if (!entryRootRelative || entryRootRelative.startsWith("..") || path.isAbsolute(entryRootRelative)) return null;
+  if (!fs.existsSync(entryPath) || !fs.statSync(entryPath).isFile()) return null;
+  const sha256 = sha256File(entryPath).toLowerCase();
+  const manifestSha256 = String(manifest.sha256 || manifest.expectedSha256 || manifest.expected_sha256 || "").trim().toLowerCase();
+  return {
+    name,
+    version: String(manifest.version || ""),
+    entry: entryRelative,
+    manifest: manifestRelative,
+    loadedFrom: rootInfo.kind,
+    root,
+    path: entryPath,
+    modulePath: entryRelative,
+    manifestPath,
+    sha256,
+    manifestSha256,
+    capabilities: Array.isArray(manifest.capabilities) ? manifest.capabilities.map(String) : [],
+    timeoutMs: Number(manifest.timeoutMs || manifest.timeout_ms || 0) || HOT_OPERATION_DEFAULT_TIMEOUT_MS,
+    reload: rootInfo.reload || hotOperationsDevReloadEnabled(),
+  };
+}
+
+function scanHotOperationManifests() {
+  const seen = new Set();
+  const operations = [];
+  for (const rootInfo of hotOperationRoots()) {
+    if (!rootInfo.exists) continue;
+    for (const manifestPath of walkHotOperationManifestFiles(rootInfo.root)) {
+      const op = normalizeHotOperationManifest(rootInfo, manifestPath);
+      if (!op || seen.has(op.name)) continue;
+      seen.add(op.name);
+      operations.push(op);
+    }
+  }
+  return operations;
+}
+
+function listHotOperations() {
+  const summary = hotOperationsSummary();
+  return {
+    ok: true,
+    ...summary,
+    logsTail: recentBridgeLogsTail(),
+  };
+}
+
+function getBridgeStatus() {
+  const hotOps = hotOperationsSummary();
+  return {
+    ok: true,
+    stable: true,
+    operation: "get_bridge_status",
+    source: "shell",
+    shellProtocolVersion: SHELL_PROTOCOL_VERSION,
+    hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION,
+    minimumRunnerVersion: MINIMUM_RUNNER_VERSION,
+    capabilities: BRIDGE_PROTOCOL_CAPABILITIES.slice(),
+    buildId: currentWindowsBuildInfo().buildId,
+    buildSha: currentWindowsBuildInfo().sha256 || "",
+    appVersion: app.getVersion(),
+    arch: os.arch(),
+    platform: process.platform,
+    hotOperations: hotOps,
+    logsTail: recentBridgeLogsTail(),
+    failureClassification: null,
+    nextAction: "Run list_hot_operations, run_shell_self_test, then canary_echo.",
+  };
+}
+
 function androidSimulatorStateRoot() {
   try {
     return path.join(app.getPath("userData"), "native-diagnostics", "android-oauth-verifier");
@@ -824,6 +1265,17 @@ function parseAdbDevices(stdout = "") {
     .filter(Boolean);
 }
 
+function adbDeviceFields(detail = "") {
+  const fields = {};
+  String(detail || "").split(/\s+/).forEach((part) => {
+    const match = part.match(/^([^:]+):(.+)$/);
+    if (!match) return;
+    const key = match[1];
+    if (["model", "product", "device"].includes(key)) fields[key] = match[2];
+  });
+  return fields;
+}
+
 function classifyAdbDevices(stdout = "") {
   const devices = parseAdbDevices(stdout);
   const authorized = devices.filter((device) => device.state === "device");
@@ -846,6 +1298,51 @@ function classifyAdbDevices(stdout = "") {
   };
 }
 
+function androidConnectionInstructions(status = "") {
+  if (status === "adb_missing") return adbMissingInstructions();
+  if (status === "unauthorized") {
+    return "Unlock phone, accept the USB debugging prompt, then retry. If the prompt does not appear, revoke USB debugging authorizations in Developer Options and reconnect.";
+  }
+  if (status === "no_device") {
+    return "Change cable or USB port, switch phone USB mode to File Transfer / Android Auto, and confirm Developer Options plus USB debugging are enabled.";
+  }
+  if (status === "multiple_devices") return "Disconnect extra Android devices or emulators, then retry with exactly one authorized phone.";
+  if (status === "one_authorized_device") return "One authorized Android device is visible to Windows ADB.";
+  return "ADB returned an unexpected error. Check platform-tools and reconnect the phone.";
+}
+
+function parseAndroidConnectionState(stdout = "", commandOk = true) {
+  if (!commandOk) {
+    return {
+      status: "adb_error",
+      ok: false,
+      devices: [],
+      authorizedDevices: [],
+      instructions: androidConnectionInstructions("adb_error"),
+    };
+  }
+  const devices = parseAdbDevices(stdout).map((device) => ({ ...device, ...adbDeviceFields(device.detail) }));
+  const authorizedDevices = devices.filter((device) => device.state === "device");
+  const unauthorizedDevices = devices.filter((device) => device.state === "unauthorized");
+  let status = "no_device";
+  if (authorizedDevices.length === 1 && devices.length === 1) status = "one_authorized_device";
+  else if (authorizedDevices.length > 1 || (authorizedDevices.length === 1 && devices.length > 1)) status = "multiple_devices";
+  else if (unauthorizedDevices.length > 0) status = "unauthorized";
+  else if (devices.length > 1) status = "multiple_devices";
+  const device = status === "one_authorized_device" ? authorizedDevices[0] : null;
+  return {
+    status,
+    ok: status === "one_authorized_device",
+    devices,
+    authorizedDevices,
+    serial: device?.serial || "",
+    model: device?.model || "",
+    product: device?.product || "",
+    device: device?.device || "",
+    instructions: androidConnectionInstructions(status),
+  };
+}
+
 function adbMissingInstructions() {
   return "Install Android SDK Platform Tools, add platform-tools to PATH, then restart WASM Agent.";
 }
@@ -862,6 +1359,22 @@ async function runWindowsDiagnosticExec(sender, opId, operation, command, args =
   const result = sanitizeRendererDiagnosticValue(await execFileBounded(command, args, options));
   writeNativeControlAudit({ action: "local_diagnostics_command_finished", operation, opId, result });
   emitWindowsDiagnosticEvent(sender, { type: "command_finished", operation, opId, result });
+  return result;
+}
+
+async function runWindowsDiagnosticExecBinary(sender, opId, operation, command, args = [], options = {}) {
+  const startedAt = new Date().toISOString();
+  const displayCommand = commandLineDisplay(path.basename(command), args);
+  writeNativeControlAudit({ action: "local_diagnostics_command_started", operation, opId, command: displayCommand, startedAt });
+  emitWindowsDiagnosticEvent(sender, { type: "command_started", operation, opId, command: displayCommand, startedAt });
+  const result = await execFileBufferBounded(command, args, options);
+  const summary = sanitizeRendererDiagnosticValue({
+    ...result,
+    stdout: undefined,
+    stdoutBytes: Buffer.isBuffer(result.stdout) ? result.stdout.length : 0,
+  });
+  writeNativeControlAudit({ action: "local_diagnostics_command_finished", operation, opId, result: summary });
+  emitWindowsDiagnosticEvent(sender, { type: "command_finished", operation, opId, result: summary });
   return result;
 }
 
@@ -904,6 +1417,45 @@ async function runAdbDevicesDiagnostics(sender, opId, adbPath = "") {
     devices,
   });
   return { ...result, adbPath: resolvedAdbPath, devices };
+}
+
+async function runAndroidConnectionCheck(sender, opId) {
+  if (process.platform !== "win32") return { ok: false, status: "adb_error", error: "windows_native_shell_required" };
+  const adbPath = await findWindowsAdbExecutable();
+  const commands = {};
+  emitWindowsDiagnosticEvent(sender, {
+    type: "status",
+    operation: "check_android_connection",
+    opId,
+    status: "checking_adb",
+    label: "checking Android connection",
+  });
+  commands.killServer = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_kill_server", adbPath, ["kill-server"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  if (isAdbMissingResult(commands.killServer)) {
+    const result = { ok: false, status: "adb_missing", adbPath, commands, instructions: androidConnectionInstructions("adb_missing") };
+    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "check_android_connection", opId, status: result.status, label: "adb missing", message: result.instructions });
+    return result;
+  }
+  commands.startServer = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_start_server", adbPath, ["start-server"], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  if (isAdbMissingResult(commands.startServer)) {
+    const result = { ok: false, status: "adb_missing", adbPath, commands, instructions: androidConnectionInstructions("adb_missing") };
+    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "check_android_connection", opId, status: result.status, label: "adb missing", message: result.instructions });
+    return result;
+  }
+  commands.devices = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const connection = parseAndroidConnectionState(commands.devices.stdout || "", commands.devices.ok);
+  const result = { ...connection, adbPath, commands };
+  emitWindowsDiagnosticEvent(sender, {
+    type: "status",
+    operation: "check_android_connection",
+    opId,
+    status: result.status,
+    label: result.status,
+    message: result.instructions,
+    device: result.ok ? { serial: result.serial, model: result.model, product: result.product, device: result.device } : null,
+  });
+  writeNativeControlAudit({ action: "android_connection_check_finished", opId, result });
+  return result;
 }
 
 function reportDirFromPath(value = "") {
@@ -989,6 +1541,1416 @@ async function waitForAuthorizedAndroidDevice(sender, opId, adbPath) {
     await sleep(2000);
   }
   return latest || { ok: false, devices: { status: "waiting_for_phone", hasAuthorizedDevice: false } };
+}
+
+function androidVoiceTuningProofRoot() {
+  try {
+    return path.join(app.getPath("userData"), "native-diagnostics", "android-voice-tuning");
+  } catch {
+    return path.join(os.tmpdir(), "wasm-agent-android-voice-tuning");
+  }
+}
+
+function androidVoiceTuningInstructions(status) {
+  if (status === "unauthorized") return "Device visible but unauthorized. Accept the USB debugging prompt on the phone, then rerun adb devices.";
+  return "No Android device visible to Windows ADB. Unlock phone, enable USB debugging, set USB mode to File Transfer, accept RSA prompt.";
+}
+
+function androidVoiceTuningStagingRoot() {
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+  return path.join(localAppData, "WASM Agent", "staged", "android");
+}
+
+function emitAndroidVoiceTuningStep(sender, opId, step, detail = {}, operation = "prove_android_voice_tuning") {
+  return emitWindowsDiagnosticEvent(sender, {
+    type: "progress",
+    operation,
+    opId,
+    step,
+    status: detail.ok === false ? "failed" : "ok",
+    ...detail,
+  });
+}
+
+function bundledAndroidApkMetadata() {
+  return readJsonFile(bundledAndroidApkDefaultsPath(), {});
+}
+
+function latestAndroidReleaseFeedPath() {
+  return path.resolve(__dirname, "..", "..", "..", "plugins", "wasm-agent", "public", "native", "releases", "latest.json");
+}
+
+async function latestAndroidReleaseFeed(payload = {}) {
+  const timeoutMs = Math.max(1000, Math.min(Number(payload.feedTimeoutMs || payload.feed_timeout_ms || 10000), 60000));
+  const feedUrl = new URL("/native/releases/latest.json", selectedBackendOrigin || DEFAULT_SERVER_URL).toString();
+  try {
+    return {
+      source: "live",
+      feedUrl,
+      feed: await fetchJsonWithTimeout(feedUrl, timeoutMs),
+    };
+  } catch (error) {
+    return {
+      source: "bundled_fallback",
+      feedUrl,
+      error: String(error && error.message ? error.message : error),
+      feed: readJsonFile(latestAndroidReleaseFeedPath(), {}),
+    };
+  }
+}
+
+function androidReleaseArtifactFromFeed(feed = {}) {
+  const android = feed?.artifacts?.android || {};
+  return android.arm64 || android.universal || {};
+}
+
+function defaultAndroidReleaseArtifact() {
+  return {
+    platform: "android",
+    arch: "arm64",
+    kind: "android-apk",
+    filename: "WASM-Agent-arm64.apk",
+    url: "/native/releases/android/WASM-Agent-arm64.apk",
+    packageName: "com.colmeio.wasmagent",
+  };
+}
+
+function expectedAndroidApkMetadata(payload = {}, source = {}) {
+  const sha256 = String(payload.apkSha256 || payload.apk_sha256 || source.sha256 || "").trim().toLowerCase();
+  const sizeBytes = Number(payload.apkSizeBytes || payload.apk_size_bytes || source.sizeBytes || source.size || 0);
+  return {
+    sha256,
+    sizeBytes: Number.isFinite(sizeBytes) ? sizeBytes : 0,
+    buildId: String(payload.buildId || payload.build_id || source.buildId || "").trim(),
+    url: String(source.url || "").trim(),
+    packageName: String(source.packageName || payload.packageName || payload.package_name || "com.colmeio.wasmagent").trim(),
+  };
+}
+
+function isAllowlistedAndroidApkUrl(value) {
+  let url;
+  try {
+    url = new URL(value, selectedBackendOrigin || DEFAULT_SERVER_URL);
+  } catch {
+    return { ok: false, error: "invalid_apk_url" };
+  }
+  if (!/^https?:$/.test(url.protocol)) return { ok: false, error: "invalid_apk_url" };
+  if (!/\/native\/releases\/android\/WASM-Agent-(arm64|universal)\.apk$/i.test(url.pathname)) {
+    return { ok: false, error: "apk_url_not_allowlisted", url: url.toString() };
+  }
+  const origin = url.origin.toLowerCase();
+  const allowedOrigins = new Set([
+    normalizeServerUrl(selectedBackendOrigin || DEFAULT_SERVER_URL).toLowerCase(),
+    normalizeServerUrl(DEFAULT_SERVER_URL).toLowerCase(),
+  ]);
+  if (allowLocalDevCandidates()) {
+    allowedOrigins.add(loopbackDevServerUrl().toLowerCase());
+    allowedOrigins.add(localhostDevServerUrl().toLowerCase());
+  }
+  if (!allowedOrigins.has(origin)) return { ok: false, error: "apk_url_origin_not_allowlisted", url: url.toString() };
+  return { ok: true, url: url.toString() };
+}
+
+function validateAndroidVoiceTuningApk(filePath, expected = {}) {
+  const stat = statFile(filePath);
+  if (!stat || !stat.isFile()) return { ok: false, error: "apk_missing", path: filePath };
+  const sizeBytes = stat.size;
+  const expectedSize = Number(expected.sizeBytes || 0);
+  if (expectedSize > 0 && sizeBytes !== expectedSize) {
+    return { ok: false, error: "apk_size_mismatch", path: filePath, sizeBytes, expectedSize };
+  }
+  if (!expectedSize && sizeBytes <= 50 * 1024 * 1024) {
+    return { ok: false, error: "stale_or_stub_apk", path: filePath, sizeBytes, minSizeBytes: 50 * 1024 * 1024 };
+  }
+  if (expectedSize > 0 && expectedSize <= 50 * 1024 * 1024) {
+    return { ok: false, error: "stale_or_stub_apk", path: filePath, sizeBytes, expectedSize };
+  }
+  const sha256 = sha256File(filePath).toLowerCase();
+  if (expected.sha256 && sha256 !== expected.sha256) {
+    return { ok: false, error: "apk_sha256_mismatch", path: filePath, sizeBytes, sha256, expectedSha256: expected.sha256 };
+  }
+  return { ok: true, path: filePath, sizeBytes, sha256, expectedSize, expectedSha256: expected.sha256 || "", buildId: expected.buildId || "" };
+}
+
+async function downloadAndroidVoiceTuningApk(sender, opId, url, expected = {}, payload = {}) {
+  const timeoutMs = Math.max(1000, Math.min(Number(payload.downloadTimeoutMs || payload.download_timeout_ms || 120_000), 300_000));
+  fs.mkdirSync(androidVoiceTuningStagingRoot(), { recursive: true });
+  const target = path.join(androidVoiceTuningStagingRoot(), "WASM-Agent-arm64.apk");
+  emitAndroidVoiceTuningStep(sender, opId, "apk_download_started", { url, target, timeoutMs }, payload.progressOperation || "prove_android_voice_tuning");
+  let response;
+  try {
+    response = await fetchWithTimeout(url, { method: "GET" }, timeoutMs);
+  } catch (error) {
+    return {
+      ok: false,
+      error: "fresh_apk_download_failed",
+      url,
+      timeoutMs,
+      message: error?.message || String(error),
+      suggestedManualInstall: `Download ${url} and run: adb install -r <downloaded_fresh_apk_path>`,
+    };
+  }
+  if (!response.ok || !response.body) {
+    return {
+      ok: false,
+      error: "fresh_apk_download_failed",
+      url,
+      status: response.status,
+      statusText: response.statusText || "",
+      timeoutMs,
+      suggestedManualInstall: `Download ${url} and run: adb install -r <downloaded_fresh_apk_path>`,
+    };
+  }
+  const writer = fs.createWriteStream(target);
+  let sizeBytes = 0;
+  const hash = crypto.createHash("sha256");
+  try {
+    for await (const chunk of response.body) {
+      const buffer = Buffer.from(chunk);
+      sizeBytes += buffer.length;
+      hash.update(buffer);
+      if (!writer.write(buffer)) await once(writer, "drain");
+    }
+    writer.end();
+    await once(writer, "finish");
+  } catch (error) {
+    writer.destroy();
+    return { ok: false, error: "fresh_apk_download_failed", url, timeoutMs, message: error?.message || String(error), target };
+  }
+  const sha256 = hash.digest("hex");
+  emitAndroidVoiceTuningStep(sender, opId, "apk_download_finished", { url, target, sizeBytes }, payload.progressOperation || "prove_android_voice_tuning");
+  emitAndroidVoiceTuningStep(sender, opId, "apk_hash_computed", { path: target, sizeBytes, sha256, expectedSha256: expected.sha256 || "" }, payload.progressOperation || "prove_android_voice_tuning");
+  return { ok: true, source: "download", path: target, url, sizeBytes, sha256 };
+}
+
+async function resolveAndroidVoiceTuningApk(sender, opId, payload = {}) {
+  const explicitUrl = String(payload.apkUrl || payload.apk_url || "").trim();
+  const explicitPath = String(payload.apkPath || payload.apk_path || process.env.WASM_AGENT_ANDROID_APK || "").trim();
+  const releaseFeed = await latestAndroidReleaseFeed(payload);
+  const releaseArtifact = androidReleaseArtifactFromFeed(releaseFeed.feed);
+  const freshArtifact = releaseArtifact.url || releaseArtifact.path ? releaseArtifact : defaultAndroidReleaseArtifact();
+  const releaseMeta = expectedAndroidApkMetadata(payload, releaseArtifact);
+  let selected = null;
+
+  if (explicitUrl) {
+    const allowed = isAllowlistedAndroidApkUrl(explicitUrl);
+    if (!allowed.ok) return allowed;
+    selected = { source: "explicit_url", url: allowed.url, expected: expectedAndroidApkMetadata(payload, {}) };
+  } else if (freshArtifact.url) {
+    const allowed = isAllowlistedAndroidApkUrl(freshArtifact.url);
+    selected = allowed.ok
+      ? { source: "release_feed", url: allowed.url, expected: releaseMeta }
+      : { source: "release_feed_path", path: freshArtifact.path, expected: releaseMeta };
+  } else if (explicitPath) {
+    selected = { source: "explicit_path", path: explicitPath, expected: expectedAndroidApkMetadata(payload, {}) };
+  } else {
+    selected = { source: "bundled", path: bundledAndroidApkPath(), expected: expectedAndroidApkMetadata(payload, bundledAndroidApkMetadata()) };
+  }
+
+  emitAndroidVoiceTuningStep(sender, opId, "apk_source_selected", {
+    source: selected.source,
+    releaseFeedSource: releaseFeed.source,
+    releaseFeedUrl: releaseFeed.feedUrl,
+    releaseFeedError: releaseFeed.error || "",
+    url: selected.url || "",
+    path: selected.path || "",
+    expectedSizeBytes: selected.expected.sizeBytes || 0,
+    expectedSha256: selected.expected.sha256 || "",
+    buildId: selected.expected.buildId || "",
+  }, payload.progressOperation || "prove_android_voice_tuning");
+
+  let apk = selected;
+  if (selected.url) {
+    apk = await downloadAndroidVoiceTuningApk(sender, opId, selected.url, selected.expected, payload);
+    if (!apk.ok) return apk;
+    apk = { ...selected, ...apk };
+  }
+  const validation = validateAndroidVoiceTuningApk(apk.path, selected.expected);
+  emitAndroidVoiceTuningStep(sender, opId, validation.ok ? "apk_validation_passed" : "apk_validation_failed", validation, payload.progressOperation || "prove_android_voice_tuning");
+  if (!validation.ok) return { ok: false, ...validation, source: selected.source, url: selected.url || "" };
+  return { ok: true, source: selected.source, path: apk.path, url: selected.url || "", ...validation };
+}
+
+function parseJsonObjectSafe(value, fallback = {}) {
+  if (value && typeof value === "object" && !Buffer.isBuffer(value)) return value;
+  try {
+    return JSON.parse(String(value || ""));
+  } catch {
+    return fallback;
+  }
+}
+
+function latestAndroidEvent(nativeDiagnostics = {}, kind = "") {
+  const events = Array.isArray(nativeDiagnostics.events) ? nativeDiagnostics.events : [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (String(events[index]?.kind || "") === kind) return events[index];
+  }
+  return null;
+}
+
+function firstAndroidEventAt(nativeDiagnostics = {}, kind = "") {
+  const events = Array.isArray(nativeDiagnostics.events) ? nativeDiagnostics.events : [];
+  const event = events.find((item) => String(item?.kind || "") === kind);
+  return Number(event?.timestamp || 0) || 0;
+}
+
+function androidVoiceTuningRuntimeProbe(nativeDiagnostics = {}) {
+  const event = latestAndroidEvent(nativeDiagnostics, "train_hermes_wake_runtime_probe");
+  return event?.payload && typeof event.payload === "object" ? event.payload : {};
+}
+
+function permissionStateFromRuntime(nativeDiagnostics = {}, probe = {}) {
+  const voiceTuning = nativeDiagnostics.voice_tuning || {};
+  const bridgeDetails = probe?.payload?.bridge_details || probe?.bridge_details || {};
+  const permissionState = voiceTuning.permission_state || bridgeDetails.permission_state || {};
+  const recordAudio = typeof permissionState.record_audio === "string"
+    ? permissionState.record_audio
+    : voiceTuning.permission_record_audio === true || bridgeDetails.recording_supported === true
+      ? "granted"
+      : "missing";
+  return {
+    record_audio: recordAudio,
+    permission_record_audio: recordAudio === "granted",
+    raw: permissionState,
+  };
+}
+
+function androidPermissionPromptInfo(uiXml = "") {
+  const text = String(uiXml || "");
+  const microphonePrompt = /android\.permissioncontroller|permission/i.test(text)
+    && /microphone|record audio|record_audio|audio/i.test(text)
+    && /while using|allow|deny/i.test(text);
+  const unrelatedPrompt = /android\.permissioncontroller|permission/i.test(text)
+    && !/microphone|record audio|record_audio|audio/i.test(text)
+    && /while using|allow|deny|permission/i.test(text);
+  return {
+    visible: microphonePrompt || unrelatedPrompt,
+    microphone: microphonePrompt,
+    unrelated: unrelatedPrompt,
+  };
+}
+
+function androidVoiceTuningTiming(nativeDiagnostics = {}, launchStartedAtMs = 0, resultFinishedAtMs = Date.now()) {
+  const pageStartedAt = Number(nativeDiagnostics.webview?.page_started_at || firstAndroidEventAt(nativeDiagnostics, "webview_page_started") || 0);
+  const pageCommitVisibleAt = Number(nativeDiagnostics.webview?.page_commit_visible_at || firstAndroidEventAt(nativeDiagnostics, "webview_page_commit_visible") || 0);
+  const pageFinishedAt = Number(nativeDiagnostics.webview?.page_finished_at || firstAndroidEventAt(nativeDiagnostics, "webview_page_finished") || 0);
+  const probeAt = firstAndroidEventAt(nativeDiagnostics, "train_hermes_wake_runtime_probe");
+  return {
+    activity_launch_to_visible_ms: launchStartedAtMs && pageCommitVisibleAt ? Math.max(0, pageCommitVisibleAt - launchStartedAtMs) : 0,
+    activity_launch_to_probe_ms: launchStartedAtMs && probeAt ? Math.max(0, probeAt - launchStartedAtMs) : 0,
+    modal_open_to_bridge_ready_ms: pageCommitVisibleAt && probeAt ? Math.max(0, probeAt - pageCommitVisibleAt) : 0,
+    page_started_to_commit_visible_ms: pageStartedAt && pageCommitVisibleAt ? Math.max(0, pageCommitVisibleAt - pageStartedAt) : 0,
+    page_started_to_finished_ms: pageStartedAt && pageFinishedAt ? Math.max(0, pageFinishedAt - pageStartedAt) : 0,
+    wall_wait_ms: launchStartedAtMs ? Math.max(0, resultFinishedAtMs - launchStartedAtMs) : 0,
+  };
+}
+
+function classifyAndroidVoiceTuningRuntime(capture = {}, expectedApk = {}) {
+  const nativeDiagnostics = capture.nativeDiagnostics || {};
+  const probe = capture.runtimeProbe || {};
+  const bridgePayload = probe.payload || probe || {};
+  const bridgeDetails = bridgePayload.bridge_details || {};
+  const permission = capture.permissionState || permissionStateFromRuntime(nativeDiagnostics, probe);
+  const timing = capture.timing || {};
+  const logcat = String(capture.relevantLogcat || "");
+  const uiXml = String(capture.uiXml || "");
+  const prompt = capture.permissionPrompt || androidPermissionPromptInfo(uiXml);
+  const apkBuildId = String(nativeDiagnostics.build?.build_id || bridgeDetails.apk_build_id || capture.apkBuildId || "");
+  const webBuildId = String(bridgePayload.web_build_id || bridgeDetails.web_build_id || capture.webBuildId || "");
+  const expectedBuildId = String(expectedApk.buildId || expectedApk.build_id || "");
+  const failures = [];
+  if (expectedBuildId && apkBuildId && apkBuildId !== expectedBuildId) failures.push("stale_apk");
+  if (capture.blankWebView) failures.push("blank_webview");
+  if (!bridgePayload.bridge_object_present && !capture.bridgeObjectPresent) failures.push("missing_bridge");
+  if (permission.record_audio === "missing") failures.push("missing_permission");
+  if (prompt.microphone) failures.push("permission_prompt_visible");
+  if (prompt.unrelated) failures.push("unrelated_permission_prompt_visible");
+  if (/ANR|Application Not Responding|Input dispatching timed out/i.test(logcat)) failures.push("ui_thread_lag_anr_risk");
+  if (/Choreographer.*Skipped\s+([3-9]\d|[1-9]\d{2,})\s+frames/i.test(logcat) || Number(timing.activity_launch_to_visible_ms || 0) > 8000 || Number(timing.modal_open_to_bridge_ready_ms || 0) > 3000) {
+    failures.push("ui_thread_lag");
+  }
+  if (/clear_webview_data|cache|ServiceWorker|ERR_CACHE|stale/i.test(logcat) && !bridgePayload.native_flags_present) failures.push("webview_cache_issue");
+  if (permission.record_audio === "granted" && /recorder_unavailable|audio_record_initialization_failed/i.test(logcat)) failures.push("recorder_not_ready");
+  if (/onnx|OrtEnvironment|OpenWakeWordOnnxEngine|createSession|wake_model/i.test(logcat) && Number(timing.modal_open_to_bridge_ready_ms || 0) > 1000) failures.push("onnx_model_initialization_lag");
+  if (capture.recordingStartedAutomatically) failures.push("recording_started_automatically");
+  if (capture.crashDetected) failures.push("app_crash");
+  const stable = !failures.some((item) => !["missing_permission", "permission_prompt_visible"].includes(item))
+    && Boolean(bridgePayload.android_shell_detected || capture.androidShellDetected)
+    && Boolean(bridgePayload.native_flags_present || capture.nativeFlagsPresent)
+    && Boolean(bridgePayload.bridge_object_present || capture.bridgeObjectPresent)
+    && Boolean(bridgePayload.tune_voice_modal_open || /Train Hermes Wake/i.test(uiXml));
+  return {
+    stable,
+    failure_classification: failures[0] || "stable",
+    failures,
+    apk_build_id: apkBuildId,
+    web_build_id: webBuildId,
+    bridge_status: bridgeDetails.bridge_status || nativeDiagnostics.voice_tuning?.bridge_status || (capture.bridgeObjectPresent ? "connected" : "missing"),
+    permission_state: permission.record_audio,
+    next_run_safe: !failures.includes("recording_started_automatically")
+      && !failures.includes("unrelated_permission_prompt_visible")
+      && !failures.includes("app_crash")
+      && !failures.includes("ui_thread_lag_anr_risk"),
+  };
+}
+
+async function captureAndroidVoiceTuningRuntime(sender, opId, adbPath, payload = {}, operation = "debug_android_voice_tuning_runtime") {
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  const componentName = String(payload.componentName || payload.component_name || `${packageName}/.MainActivity`);
+  const debugScreen = String(payload.debugScreen || payload.debug_screen || "train-hermes-wake");
+  const commands = {};
+  const run = async (name, args, options = {}) => {
+    commands[name] = await runWindowsDiagnosticExec(sender, opId, `android_voice_runtime_${name}`, adbPath, args, {
+      timeoutMs: options.timeoutMs || 15000,
+      maxBuffer: options.maxBuffer || 2 * 1024 * 1024,
+    });
+    return commands[name];
+  };
+  commands.devices = await run("devices", ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const devices = parseAndroidConnectionState(commands.devices.stdout || "", commands.devices.ok);
+  if (devices.status !== "one_authorized_device") {
+    return { ok: false, status: devices.status, devices, commands, message: devices.instructions };
+  }
+  commands.packageInfo = await run("package_info", ["shell", "dumpsys", "package", packageName], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  commands.apkPath = await run("apk_path", ["shell", "pm", "path", packageName], { timeoutMs: 8000, maxBuffer: 256 * 1024 });
+  commands.appOps = await run("appops_record_audio", ["shell", "appops", "get", packageName, "RECORD_AUDIO"], { timeoutMs: 8000, maxBuffer: 256 * 1024 });
+  const clearData = Boolean(payload.clearData || payload.clear_data);
+  const clearWebViewData = Boolean(payload.clearWebViewData || payload.clear_webview_data || payload.debugProofRun || payload.debug_proof_run);
+  if (clearData) {
+    commands.clearData = await run("clear_data", ["shell", "pm", "clear", packageName], { timeoutMs: 20000, maxBuffer: 256 * 1024 });
+  } else if (payload.clearCache === true || payload.clear_cache === true) {
+    commands.clearCache = await run("clear_cache", ["shell", "pm", "trim-caches", "64G"], { timeoutMs: 15000, maxBuffer: 256 * 1024 });
+  }
+  commands.forceStop = await run("force_stop", ["shell", "am", "force-stop", packageName], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  commands.logcatClear = await run("logcat_clear", ["logcat", "-c"], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  const launchStartedAtMs = Date.now();
+  commands.launch = await run("launch", [
+    "shell", "am", "start",
+    "-n", componentName,
+    "-a", "android.intent.action.MAIN",
+    "-c", "android.intent.category.LAUNCHER",
+    "--es", "debug_screen", debugScreen,
+    "--es", "native_screen", debugScreen,
+    "--ez", "clear_webview_data", clearWebViewData ? "true" : "false",
+    "--es", "debug_requested_by", operation,
+  ], { timeoutMs: 15000, maxBuffer: 512 * 1024 });
+  const waitMs = Math.max(1000, Math.min(Number(payload.waitMs || payload.wait_ms || 12000), 60000));
+  await sleep(waitMs);
+  commands.activity = await run("activity", ["shell", "dumpsys", "activity", "activities"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  commands.window = await run("window", ["shell", "dumpsys", "window"], { timeoutMs: 12000, maxBuffer: 2 * 1024 * 1024 });
+  commands.gfxinfo = await run("gfxinfo", ["shell", "dumpsys", "gfxinfo", packageName, "framestats"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  commands.uiautomatorDump = await run("uiautomator_dump", ["shell", "uiautomator", "dump", "/sdcard/wasm-agent-hermes-wake.xml"], { timeoutMs: 15000, maxBuffer: 256 * 1024 });
+  commands.uiautomatorXml = await run("uiautomator_xml", ["exec-out", "cat", "/sdcard/wasm-agent-hermes-wake.xml"], { timeoutMs: 10000, maxBuffer: 2 * 1024 * 1024 });
+  commands.nativeDiagnostics = await run("native_diagnostics", ["exec-out", "run-as", packageName, "cat", "files/native-diagnostics/latest.json"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  if (!commands.nativeDiagnostics.ok || !String(commands.nativeDiagnostics.stdout || "").trim()) {
+    commands.nativeDiagnosticsFallback = await run("native_diagnostics_fallback", ["shell", "run-as", packageName, "cat", "files/native-diagnostics/latest.json"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  }
+  commands.logcat = await run("logcat", ["logcat", "-d", "-v", "time"], { timeoutMs: 20000, maxBuffer: 16 * 1024 * 1024 });
+
+  const proofRoot = androidVoiceTuningProofRoot();
+  fs.mkdirSync(proofRoot, { recursive: true });
+  const timestamp = timestampForFilename();
+  const screenshotPath = path.join(proofRoot, `hermes-wake-${timestamp}.png`);
+  const screenshot = await runWindowsDiagnosticExecBinary(sender, opId, `android_voice_runtime_screenshot`, adbPath, ["exec-out", "screencap", "-p"], { timeoutMs: 12000, maxBuffer: 16 * 1024 * 1024 });
+  if (screenshot.ok && Buffer.isBuffer(screenshot.stdout) && screenshot.stdout.length > 0) {
+    fs.writeFileSync(screenshotPath, screenshot.stdout);
+  }
+
+  const packageInfo = String(commands.packageInfo.stdout || "");
+  const activity = String(commands.activity.stdout || "");
+  const windowDump = String(commands.window.stdout || "");
+  const logcat = String(commands.logcat.stdout || "");
+  const uiXml = String(commands.uiautomatorXml.stdout || "");
+  const nativeDiagnosticsText = String(commands.nativeDiagnostics.stdout || commands.nativeDiagnosticsFallback?.stdout || "");
+  const nativeDiagnostics = parseJsonObjectSafe(nativeDiagnosticsText, {});
+  const runtimeProbe = androidVoiceTuningRuntimeProbe(nativeDiagnostics);
+  const permissionState = permissionStateFromRuntime(nativeDiagnostics, runtimeProbe);
+  const permissionPrompt = androidPermissionPromptInfo(uiXml);
+  const interestingLogPattern = /MainActivity|addJavascriptInterface|WasmAgentNativeVoiceTuning|voice_tuning_bridge_registered|native=android|native=electron|shell=android-webview|WebView URL|webview_load_url|webview_page_started|webview_page_finished|webview_page_commit_visible|Train Hermes Wake|bridge unavailable|getNativeVoiceTuningBridge|voice_tuning_bridge_available|frontend_bridge_detection|renderer_|train_hermes_wake_runtime_probe|activity_debug_screen_requested|activity_clear_webview_requested|wa\.colmeio\.com|com\.colmeio\.wasmagent|ANR|Application Not Responding|Choreographer|onnx|OrtEnvironment|OpenWakeWordOnnxEngine|native_record_started|voice_tuning_started/i;
+  const activityPattern = /mResumedActivity|mFocusedRootTask|Hist #|Intent|dat=|cmp=com\.colmeio|cmp=com\.android\.chrome|webapk|wa\.colmeio/i;
+  const versionLines = packageInfo.split(/\r?\n/).filter((line) => /version|versionCode|firstInstall|lastUpdate|Package \[|codePath|resourcePath/i.test(line)).join("\n");
+  const activityLines = activity.split(/\r?\n/).filter((line) => activityPattern.test(line)).slice(0, 240).join("\n");
+  const windowLines = windowDump.split(/\r?\n/).filter((line) => /mCurrentFocus|mFocusedApp|com\.colmeio|ChromeTabbedActivity|webapk|permissioncontroller/i.test(line)).slice(0, 160).join("\n");
+  const relevantLogcat = logcat.split(/\r?\n/).filter((line) => interestingLogPattern.test(line)).slice(-800).join("\n");
+  const launchUrl = String(nativeDiagnostics.current_webview_url || nativeDiagnostics.webview?.current_url || "");
+  const bridgePayload = runtimeProbe.payload || runtimeProbe || {};
+  const bridgeObjectPresent = Boolean(bridgePayload.bridge_object_present || /"bridge_object_present":true|voice_tuning_bridge_available[^\n]*(true|1)/i.test(relevantLogcat));
+  const nativeFlagsPresent = Boolean(bridgePayload.native_flags_present || /"native_flags_present":true/i.test(relevantLogcat));
+  const androidShellDetected = Boolean(bridgePayload.android_shell_detected || /"android_shell_detected":true/i.test(relevantLogcat));
+  const recordingStartedAutomatically = /native_record_started|voice_tuning_started/i.test(relevantLogcat);
+  const crashDetected = /FATAL EXCEPTION|AndroidRuntime|Process com\.colmeio\.wasmagent.*has died|Force finishing activity/i.test(logcat);
+  const blankWebView = !/Train Hermes Wake|tuneVoice|tune-voice|Hermes/i.test(uiXml) && !bridgePayload.tune_voice_modal_open;
+  const timing = androidVoiceTuningTiming(nativeDiagnostics, launchStartedAtMs, Date.now());
+  const artifactPaths = {
+    screenshotPath: screenshot.ok ? screenshotPath : "",
+    uiXmlPath: path.join(proofRoot, `hermes-wake-${timestamp}.xml`),
+    nativeDiagnosticsPath: path.join(proofRoot, `hermes-wake-native-${timestamp}.json`),
+    logcatPath: path.join(proofRoot, `hermes-wake-${timestamp}.log`),
+    resultPath: path.join(proofRoot, `runtime-bridge-${timestamp}.json`),
+  };
+  fs.writeFileSync(artifactPaths.uiXmlPath, uiXml);
+  fs.writeFileSync(artifactPaths.nativeDiagnosticsPath, nativeDiagnosticsText || "{}");
+  fs.writeFileSync(artifactPaths.logcatPath, relevantLogcat || logcat);
+  const result = {
+    ok: commands.devices.ok && commands.packageInfo.ok && commands.apkPath.ok && commands.launch.ok,
+    status: "runtime_debug_captured",
+    adbPath,
+    packageName,
+    componentName,
+    debugScreen,
+    waitMs,
+    clearData,
+    clearWebViewData,
+    devices,
+    launchUrl,
+    webViewUrl: launchUrl,
+    bridgeObject: bridgePayload.detected_bridge_object || bridgePayload.bridge_details?.detected_voice_tuning_bridge_name || "",
+    bridgeObjectPresent,
+    nativeFlagsPresent,
+    androidShellDetected,
+    permissionState,
+    permissionPrompt,
+    timing,
+    apkBuildId: nativeDiagnostics.build?.build_id || bridgePayload.apk_build_id || "",
+    webBuildId: bridgePayload.web_build_id || bridgePayload.bridge_details?.web_build_id || "",
+    previousGuardFailureReason: bridgePayload.failure_reason || "",
+    recordingStartedAutomatically,
+    crashDetected,
+    blankWebView,
+    runtimeProbe,
+    nativeDiagnostics,
+    versionLines: clipDiagnosticText(versionLines, 32 * 1024),
+    apkPath: clipDiagnosticText(commands.apkPath.stdout || "", 32 * 1024),
+    activityLines: clipDiagnosticText(activityLines, 64 * 1024),
+    windowLines: clipDiagnosticText(windowLines, 32 * 1024),
+    uiXml: clipDiagnosticText(uiXml, 128 * 1024),
+    relevantLogcat: clipDiagnosticText(relevantLogcat, 160 * 1024),
+    fullLogLineCount: logcat.split(/\r?\n/).length,
+    artifactPaths,
+    commands: sanitizeRendererDiagnosticValue(commands),
+  };
+  result.classification = classifyAndroidVoiceTuningRuntime(result, payload.expectedApk || {});
+  fs.writeFileSync(artifactPaths.resultPath, `${JSON.stringify(result, null, 2)}\n`);
+  result.proofPath = artifactPaths.resultPath;
+  writeNativeControlAudit({ action: "android_voice_tuning_runtime_debug_finished", opId, result });
+  return result;
+}
+
+async function runAndroidVoiceTuningProof(sender, opId, payload = {}) {
+  if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+  const adbPath = await findWindowsAdbExecutable();
+  const commands = {};
+  const connection = await runAndroidConnectionCheck(sender, opId);
+  if (connection.status !== "one_authorized_device") {
+    return { ok: false, status: connection.status, adbPath, connection, message: connection.instructions };
+  }
+  commands.killServer = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_adb_kill_server", adbPath, ["kill-server"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  commands.startServer = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_adb_start_server", adbPath, ["start-server"], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  commands.devices = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_adb_devices", adbPath, ["devices"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const devices = classifyAdbDevices(commands.devices.stdout || "");
+  emitAndroidVoiceTuningStep(sender, opId, "adb_devices_result", { devices, command: sanitizeRendererDiagnosticValue(commands.devices) });
+  if (!devices.hasAuthorizedDevice) {
+    const status = devices.status === "unauthorized" ? "unauthorized" : "no_device";
+    const result = { ok: false, status, adbPath, devices, commands, message: androidVoiceTuningInstructions(status) };
+    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "prove_android_voice_tuning", opId, status, label: result.message, devices });
+    return result;
+  }
+
+  const apk = await resolveAndroidVoiceTuningApk(sender, opId, payload);
+  if (!apk.ok) return { ok: false, status: "FAIL", adbPath, devices, apk };
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  emitAndroidVoiceTuningStep(sender, opId, "adb_install_started", { apkPath: apk.path, sizeBytes: apk.sizeBytes, sha256: apk.sha256, source: apk.source });
+  commands.install = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_install", adbPath, ["install", "-r", apk.path], { timeoutMs: 180_000, maxBuffer: 2 * 1024 * 1024 });
+  emitAndroidVoiceTuningStep(sender, opId, "adb_install_finished", { ok: commands.install.ok, command: sanitizeRendererDiagnosticValue(commands.install) });
+  if (!commands.install.ok) return { ok: false, status: "install_failed", adbPath, devices, apk, commands };
+  commands.forceStop = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_force_stop", adbPath, ["shell", "am", "force-stop", packageName], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  emitAndroidVoiceTuningStep(sender, opId, "app_force_stopped", { ok: commands.forceStop.ok, command: sanitizeRendererDiagnosticValue(commands.forceStop) });
+  commands.logcatClear = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_logcat_clear", adbPath, ["logcat", "-c"], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
+  commands.launch = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_launch", adbPath, ["shell", "monkey", "-p", packageName, "1"], { timeoutMs: 15000, maxBuffer: 512 * 1024 });
+  emitAndroidVoiceTuningStep(sender, opId, "app_launched", { ok: commands.launch.ok, command: sanitizeRendererDiagnosticValue(commands.launch) });
+  const waitMs = Math.max(1000, Math.min(Number(payload.proofWaitMs || payload.proof_wait_ms || 12000), 60000));
+  if (waitMs) await sleep(waitMs);
+  const tags = "voice_tuning_bridge_registered|WasmAgentNativeVoiceTuning|native=android|shell=android-webview|native=electron|getNativeVoiceTuningBridge|voice_tuning_bridge_available|Train Hermes Wake|bridge unavailable";
+  emitAndroidVoiceTuningStep(sender, opId, "logcat_capture_started", { waitMs, tags });
+  commands.logcat = await runWindowsDiagnosticExec(sender, opId, "android_voice_tuning_logcat", adbPath, ["logcat", "-d", "-v", "time"], { timeoutMs: 20000, maxBuffer: 8 * 1024 * 1024 });
+  emitAndroidVoiceTuningStep(sender, opId, "logcat_capture_finished", { ok: commands.logcat.ok, command: sanitizeRendererDiagnosticValue(commands.logcat) });
+  const logcat = String(commands.logcat.stdout || "");
+  const relevantLogcat = logcat.split(/\r?\n/).filter((line) => new RegExp(tags, "i").test(line)).join("\n");
+  const proofRoot = androidVoiceTuningProofRoot();
+  fs.mkdirSync(proofRoot, { recursive: true });
+  const logcatPath = path.join(proofRoot, `voice-tuning-${timestampForFilename()}.log`);
+  fs.writeFileSync(logcatPath, relevantLogcat || logcat);
+  const bridgeRegistered = /voice_tuning_bridge_registered[^\n]*(true|1)|voice_tuning_bridge_registered=true/i.test(relevantLogcat);
+  const bridgeObjectSeen = /WasmAgentNativeVoiceTuning/i.test(relevantLogcat);
+  const androidShellSeen = /native=android|shell=android-webview/i.test(relevantLogcat);
+  const electronShellSeen = /native=electron/i.test(relevantLogcat);
+  const developerPanelAvailable = /voice_tuning_bridge_available[^\n]*(true|1)|voice_tuning_bridge_available=true/i.test(relevantLogcat);
+  const result = {
+    ok: commands.install.ok && commands.launch.ok && bridgeRegistered && bridgeObjectSeen && androidShellSeen && !electronShellSeen,
+    status: commands.install.ok && commands.launch.ok ? "runtime_bridge_checked" : "runtime_bridge_check_failed",
+    adbPath,
+    devices,
+    apk,
+    packageName,
+    logcatPath,
+    relevantLogcat: clipDiagnosticText(relevantLogcat, 64 * 1024),
+    proof: {
+      bridgeRegistered,
+      bridgeObjectSeen,
+      androidShellSeen,
+      electronShellSeen,
+      developerPanelAvailable,
+    },
+    commands: sanitizeRendererDiagnosticValue(commands),
+  };
+  writeNativeControlAudit({ action: "android_voice_tuning_proof_finished", opId, result });
+  return result;
+}
+
+async function exportHermesWakeDataset(sender, opId, payload = {}) {
+  if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  const sourcePath = String(payload.sourcePath || payload.source_path || "files/voice/exports/hermes-dataset.zip");
+  if (packageName !== "com.colmeio.wasmagent") {
+    return { ok: false, status: "invalid_package", error: "Only com.colmeio.wasmagent dataset export is supported." };
+  }
+  if (sourcePath !== "files/voice/exports/hermes-dataset.zip") {
+    return { ok: false, status: "invalid_source_path", error: "Only files/voice/exports/hermes-dataset.zip may be exported." };
+  }
+  const adbPath = await findWindowsAdbExecutable();
+  const commands = {};
+  commands.devices = await runWindowsDiagnosticExec(sender, opId, "export_hermes_wake_dataset_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const devices = parseAndroidConnectionState(commands.devices.stdout || "", commands.devices.ok);
+  if (devices.status !== "one_authorized_device") {
+    return { ok: false, status: devices.status, adbPath, devices, commands, message: devices.instructions };
+  }
+  commands.stat = await runWindowsDiagnosticExec(sender, opId, "export_hermes_wake_dataset_stat", adbPath, ["exec-out", "run-as", packageName, "stat", "-c", "%s", sourcePath], { timeoutMs: 10000, maxBuffer: 64 * 1024 });
+  const sizeBytes = Number.parseInt(String(commands.stat.stdout || "").trim(), 10);
+  if (!commands.stat.ok || !Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+    return { ok: false, status: "dataset_export_missing", adbPath, devices, commands, message: "Click Export in Train Hermes Wake, then retry." };
+  }
+  const maxBytes = 256 * 1024 * 1024;
+  if (sizeBytes > maxBytes) {
+    return { ok: false, status: "dataset_export_too_large", adbPath, devices, commands, sizeBytes, maxBytes };
+  }
+  const pulled = await runWindowsDiagnosticExecBinary(sender, opId, "export_hermes_wake_dataset_pull", adbPath, ["exec-out", "run-as", packageName, "cat", sourcePath], {
+    timeoutMs: 120000,
+    maxBuffer: maxBytes + 1024,
+  });
+  if (!pulled.ok || !Buffer.isBuffer(pulled.stdout) || pulled.stdout.length <= 0) {
+    return { ok: false, status: "dataset_export_pull_failed", adbPath, devices, commands, pull: sanitizeRendererDiagnosticValue(pulled) };
+  }
+  const timestamp = timestampForFilename();
+  const exportDir = path.join(nativeDiagnosticsBundleRoot(), "android-hermes-wake-dataset");
+  fs.mkdirSync(exportDir, { recursive: true });
+  const exportPath = path.join(exportDir, `hermes-dataset-${timestamp}.zip`);
+  fs.writeFileSync(exportPath, pulled.stdout);
+  const sha256 = crypto.createHash("sha256").update(pulled.stdout).digest("hex");
+  let upload = { ok: false, skipped: true, reason: "backend_origin_unavailable" };
+  const backendOrigin = normalizeServerUrl(selectedBackendOrigin || DEFAULT_SERVER_URL);
+  if (backendOrigin) {
+    try {
+      const response = await fetchWithTimeout(`${backendOrigin}/native/android/hermes-wake-dataset`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/zip",
+          "X-Wasm-Agent-Dataset-Source": "windows-adb-run-as",
+          "X-Wasm-Agent-Native-Device-Id": devices.serial || "android-hermes-wake",
+          "X-Wasm-Agent-Dataset-Sha256": sha256,
+        },
+        body: pulled.stdout,
+      }, Number(payload.uploadTimeoutMs || payload.upload_timeout_ms || 120000));
+      const responseText = await response.text();
+      let responseJson = {};
+      try {
+        responseJson = JSON.parse(responseText || "{}");
+      } catch {
+        responseJson = { raw: clipDiagnosticText(responseText, 2000) };
+      }
+      upload = { ok: response.ok, status: response.status, backendOrigin, response: responseJson };
+    } catch (error) {
+      upload = { ok: false, backendOrigin, error: String(error && error.message ? error.message : error) };
+    }
+  }
+  const result = {
+    ok: true,
+    status: "dataset_exported",
+    adbPath,
+    packageName,
+    sourcePath,
+    exportPath,
+    sizeBytes: pulled.stdout.length,
+    expectedSizeBytes: sizeBytes,
+    sha256,
+    upload,
+    devices,
+    commands,
+  };
+  fs.writeFileSync(path.join(exportDir, "latest.json"), `${JSON.stringify(result, null, 2)}\n`);
+  fs.writeFileSync(path.join(exportDir, "latest.path.txt"), `${exportPath}\n`);
+  return result;
+}
+
+function parseJsonDiagnosticText(text = "") {
+  const raw = String(text || "").trim();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { raw: clipDiagnosticText(raw, 16 * 1024) };
+  }
+}
+
+function classifyHermesWakeProof(status = {}) {
+  const metrics = status.confidence_metrics || {};
+  const latestWindow = status.latest_inference_window || {};
+  const lastConfidence = Number(status.last_wake_confidence ?? metrics.last_confidence ?? latestWindow.confidence ?? 0);
+  const maxConfidence = Number(status.max_observed_confidence ?? metrics.max_confidence ?? latestWindow.max_confidence ?? lastConfidence);
+  const threshold = Number(status.wake_threshold ?? status.threshold ?? metrics.threshold ?? latestWindow.threshold ?? 0.58);
+  const inferenceCount = Number(status.inference_count || 0);
+  const wakeDetectionCount = Number(status.wake_detection_count || latestWindow.detection_count || (status.last_wake_at ? 1 : 0));
+  const serviceAlive = Boolean(status.status_source === "live_service" && status.proof_session_active && (status.foreground_service_started || status.foreground_service_running || status.service_running));
+  const audioCaptureAlive = Boolean(status.permission_record_audio && status.audio_record_started && Number(status.audio_read_calls || 0) > 0);
+  const onnxModelReady = Boolean(status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match);
+  const inferenceRunning = inferenceCount > 0;
+  const confidenceObserved = Boolean(status.wake_confidence_observed || inferenceRunning || maxConfidence > 0);
+  const thresholdCrossed = Boolean(status.threshold_crossed || status.last_inference_threshold_crossed || metrics.threshold_crossed || latestWindow.threshold_crossed || maxConfidence >= threshold);
+  const wakeEventEmitted = Boolean(status.wake_detected_event_emitted || wakeDetectionCount > 0);
+  const commandCaptureStarted = Boolean(status.command_capture_started || Number(status.command_capture_started_at || 0) > 0 || ["capturing", "transcribing", "sent"].includes(String(status.state || "").toLowerCase()));
+  return {
+    ok: serviceAlive && audioCaptureAlive && onnxModelReady && inferenceRunning && confidenceObserved && thresholdCrossed && wakeEventEmitted && commandCaptureStarted,
+    stages: {
+      "1_service_alive": serviceAlive,
+      "2_audio_capture_alive": audioCaptureAlive,
+      "3_onnx_model_ready": onnxModelReady,
+      "4_inference_running": inferenceRunning,
+      "5_wake_confidence_observed": confidenceObserved,
+      "6_wake_threshold_crossed": thresholdCrossed,
+      "7_wake_event_emitted": wakeEventEmitted,
+      "8_command_capture_ui_action_started": commandCaptureStarted,
+    },
+    confidence: {
+      last: lastConfidence,
+      max: maxConfidence,
+      threshold,
+      rejection_reason: status.rejection_reason || status.last_inference_rejection_reason || latestWindow.rejection_reason || "",
+      inference_count: inferenceCount,
+      wake_detection_count: wakeDetectionCount,
+      last_detection_timestamp: Number(status.last_detection_timestamp || status.last_wake_detection_at || status.last_wake_at || 0),
+    },
+  };
+}
+
+async function fetchAndroidHermesWakeStatusFromBackend() {
+  const backendOrigin = normalizeServerUrl(selectedBackendOrigin || DEFAULT_SERVER_URL);
+  if (!backendOrigin) return { ok: false, error: "backend_origin_unavailable" };
+  try {
+    const response = await fetchWithTimeout(`${backendOrigin}/native/diagnostics/latest`, {
+      method: "GET",
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+    }, 12000);
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = JSON.parse(text || "{}");
+    } catch {
+      payload = { raw: clipDiagnosticText(text, 16000) };
+    }
+    const voiceWake = payload.voice_wake || payload.voiceWake || payload.payload?.voice_wake || payload.payload?.voiceWake || {};
+    return {
+      ok: response.ok && Boolean(voiceWake && Object.keys(voiceWake).length),
+      status: response.status,
+      backendOrigin,
+      payload: voiceWake,
+      diagnostics: sanitizeRendererDiagnosticValue(payload),
+    };
+  } catch (error) {
+    return { ok: false, backendOrigin, error: String(error && error.message ? error.message : error) };
+  }
+}
+
+async function resolveBestVoiceWakeDiagnostics(sender, opId, payload = {}) {
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  const result = { source: "missing", path: "", data: {}, error: null };
+  try {
+    const adbPath = await findWindowsAdbExecutable();
+    const device = await runWindowsDiagnosticExec(sender, opId, "hot_voice_wake_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+    const connection = parseAndroidConnectionState(device.stdout || "", device.ok);
+    const serialArgs = connection.serial ? ["-s", connection.serial] : [];
+    const remotePath = "/sdcard/wasm-agent-voice-wake.json";
+    const pullPath = path.join(hotOperationDataRoot("voice-wake-diagnostics"), `voice-wake-${timestampForFilename()}.json`);
+    const pull = await runWindowsDiagnosticExec(sender, opId, "hot_voice_wake_pull", adbPath, [
+      ...serialArgs,
+      "pull",
+      `/sdcard/Android/data/${packageName}/files/native-diagnostics/voice-wake.json`,
+      pullPath,
+    ], { timeoutMs: 12000, maxBuffer: 1024 * 1024 });
+    if (pull.ok && fileExists(pullPath)) {
+      return { source: "adb_pull", path: pullPath, data: readJsonFile(pullPath, {}), error: null };
+    }
+    const runAs = await runWindowsDiagnosticExec(sender, opId, "hot_voice_wake_run_as", adbPath, [
+      ...serialArgs,
+      "exec-out",
+      "run-as",
+      packageName,
+      "cat",
+      "files/native-diagnostics/voice-wake.json",
+    ], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+    const parsed = parseJsonDiagnosticText(runAs.stdout || "");
+    if (runAs.ok && Object.keys(parsed).length && !parsed.raw) {
+      return { source: "run_as", path: "files/native-diagnostics/voice-wake.json", data: parsed, error: null };
+    }
+    const backend = await fetchAndroidHermesWakeStatusFromBackend();
+    if (backend.ok) return { source: "server_upload", path: backend.backendOrigin || "", data: backend.payload || {}, error: null };
+    result.error = backend.error || pull.stderr || runAs.stderr || "voice_wake_diagnostics_missing";
+    return result;
+  } catch (error) {
+    result.error = String(error && error.message ? error.message : error);
+    return result;
+  }
+}
+
+async function runAndroidHermesWakeProof(sender, opId, payload = {}) {
+  if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  if (packageName !== "com.colmeio.wasmagent") {
+    return { ok: false, status: "invalid_package", error: "Only com.colmeio.wasmagent Hermes wake proof is supported." };
+  }
+  const adbPath = await findWindowsAdbExecutable();
+  const commands = {};
+  commands.devices = await runWindowsDiagnosticExec(sender, opId, "android_hermes_wake_proof_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+  const devices = parseAndroidConnectionState(commands.devices.stdout || "", commands.devices.ok);
+  if (devices.status !== "one_authorized_device") {
+    return { ok: false, status: devices.status, adbPath, devices, commands, message: devices.instructions };
+  }
+  const waitMs = Math.max(5000, Math.min(Number(payload.waitMs || payload.wait_ms || 30000), 120000));
+  emitAndroidVoiceTuningStep(sender, opId, "hermes_wake_proof_launching", { packageName, waitMs }, "run_android_hermes_wake_proof");
+  commands.wakeup = await runWindowsDiagnosticExec(sender, opId, "android_hermes_wake_wakeup", adbPath, ["shell", "input", "keyevent", "KEYCODE_WAKEUP"], { timeoutMs: 5000, maxBuffer: 64 * 1024 });
+  commands.launch = await runWindowsDiagnosticExec(sender, opId, "android_hermes_wake_launch", adbPath, [
+    "shell",
+    "am",
+    "start",
+    "-W",
+    "-n",
+    `${packageName}/.MainActivity`,
+    "--es",
+    "native_screen",
+    "hermes-wake-proof",
+  ], { timeoutMs: 15000, maxBuffer: 512 * 1024 });
+  emitAndroidVoiceTuningStep(sender, opId, "hermes_wake_proof_listening", {
+    waitMs,
+    prompt: "Speak Hermes near the connected phone now.",
+  }, "run_android_hermes_wake_proof");
+  await new Promise((resolve) => setTimeout(resolve, waitMs));
+  commands.statusRequest = await runWindowsDiagnosticExec(sender, opId, "android_hermes_wake_status_request", adbPath, [
+    "shell",
+    "am",
+    "startservice",
+    "-n",
+    `${packageName}/.HermesVoiceWakeService`,
+    "-a",
+    "com.colmeio.wasmagent.voice.STATUS",
+    "--ez",
+    "proof_session",
+    "true",
+  ], { timeoutMs: 10000, maxBuffer: 256 * 1024 });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  commands.voiceWakeStatus = await runWindowsDiagnosticExec(sender, opId, "android_hermes_wake_status_pull", adbPath, [
+    "exec-out",
+    "run-as",
+    packageName,
+    "cat",
+    "files/native-diagnostics/voice-wake.json",
+  ], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+  let statusPayload = parseJsonDiagnosticText(commands.voiceWakeStatus.stdout || "");
+  let statusSource = "run-as";
+  let backendStatus = { ok: false };
+  if (!statusPayload.schema || /run-as:\s*package not debuggable/i.test(String(commands.voiceWakeStatus.stdout || ""))) {
+    backendStatus = await fetchAndroidHermesWakeStatusFromBackend();
+    if (backendStatus.ok) {
+      statusPayload = backendStatus.payload || {};
+      statusSource = "backend-upload";
+    }
+  }
+  const classification = classifyHermesWakeProof(statusPayload);
+  const result = {
+    ok: classification.ok,
+    status: classification.ok ? "hermes_wake_proof_passed" : "hermes_wake_proof_incomplete",
+    adbPath,
+    devices,
+    packageName,
+    waitMs,
+    statusSource,
+    classification,
+    backendStatus,
+    voiceWakeStatus: sanitizeRendererDiagnosticValue(statusPayload),
+    commands: sanitizeRendererDiagnosticValue(commands),
+  };
+  emitAndroidVoiceTuningStep(sender, opId, "hermes_wake_proof_finished", result, "run_android_hermes_wake_proof");
+  writeNativeControlAudit({ action: "android_hermes_wake_proof_finished", opId, result });
+  return result;
+}
+
+async function runAndroidVoiceTuningRuntimeDebug(sender, opId, payload = {}) {
+  if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+  const adbPath = await findWindowsAdbExecutable();
+  const connection = await runAndroidConnectionCheck(sender, opId);
+  if (connection.status !== "one_authorized_device") {
+    return { ok: false, status: connection.status, adbPath, connection, message: connection.instructions };
+  }
+  return captureAndroidVoiceTuningRuntime(sender, opId, adbPath, {
+    clearWebViewData: false,
+    clearCache: false,
+    ...payload,
+  }, "debug_android_voice_tuning_runtime");
+}
+
+function normalizeHotOperationModulePath(value = "") {
+  const modulePath = String(value || "").replace(/\\/g, "/").trim();
+  if (!modulePath || path.isAbsolute(modulePath) || modulePath.includes("\0")) return "";
+  const parts = modulePath.split("/").filter(Boolean);
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) return "";
+  if (path.extname(parts[parts.length - 1]).toLowerCase() !== ".js") return "";
+  return parts.join("/");
+}
+
+function resolveHotOperationModule(modulePath = "") {
+  const safePath = normalizeHotOperationModulePath(modulePath);
+  if (!safePath) return { ok: false, error: "hot_operation_missing", message: "Hot operation module path must be a relative .js path." };
+  for (const candidate of hotOperationRoots()) {
+    const root = path.resolve(candidate.root);
+    const resolved = path.resolve(root, safePath);
+    const relative = path.relative(root, resolved);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) continue;
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+      return { ok: true, modulePath: safePath, path: resolved, root, rootKind: candidate.kind, reload: candidate.reload };
+    }
+  }
+  return { ok: false, error: "hot_operation_missing", modulePath: safePath, roots: hotOperationRoots().map((item) => item.root) };
+}
+
+function resolveHotOperation(payload = {}) {
+  const operationName = String(payload.operationName || payload.operation || "").trim();
+  if (operationName) {
+    const manifestOp = scanHotOperationManifests().find((item) => item.name === operationName);
+    if (manifestOp) return { ok: true, ...manifestOp, operationName, fromManifest: true };
+    if (!payload.modulePath && !payload.moduleId) {
+      return { ok: false, error: "hot_operation_missing", operationName, roots: hotOperationRoots().map((item) => item.root) };
+    }
+  }
+  const moduleInfo = resolveHotOperationModule(String(payload.modulePath || payload.moduleId || "").trim());
+  if (!moduleInfo.ok) return { ...moduleInfo, operationName };
+  return {
+    ...moduleInfo,
+    operationName,
+    loadedFrom: moduleInfo.rootKind,
+    capabilities: Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : [],
+    timeoutMs: HOT_OPERATION_DEFAULT_TIMEOUT_MS,
+    version: String(payload.operationVersion || ""),
+    manifestSha256: "",
+    sha256: sha256File(moduleInfo.path).toLowerCase(),
+    fromManifest: false,
+  };
+}
+
+function requireHotOperationCapability(granted, capability) {
+  if (!granted.has(capability)) {
+    const error = new Error(`Hot operation capability denied: ${capability}`);
+    error.code = "hot_operation_capability_denied";
+    error.capability = capability;
+    throw error;
+  }
+}
+
+function safeFsPathForHotOperation(root, value = "") {
+  const target = path.resolve(root, String(value || ""));
+  const relative = path.relative(root, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    const error = new Error("Hot operation filesystem path outside operation data root.");
+    error.code = "hot_operation_capability_denied";
+    error.capability = "fs.safe";
+    throw error;
+  }
+  return target;
+}
+
+function hotOperationDataRoot(operationName = "") {
+  const safeName = String(operationName || "operation").replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 80) || "operation";
+  const root = path.join(nativeDiagnosticsBundleRoot(), "bridge-ops", safeName);
+  fs.mkdirSync(root, { recursive: true });
+  return root;
+}
+
+function createHotOperationContext(sender, opId, payload = {}, moduleInfo = {}) {
+  const capabilities = new Set(Array.isArray(moduleInfo.capabilities) ? moduleInfo.capabilities.map(String) : []);
+  const operationName = String(payload.operationName || payload.operation || "");
+  const dataRoot = hotOperationDataRoot(operationName);
+  const adbDeviceArgs = (deviceId, args = []) => deviceId ? ["-s", String(deviceId), ...args.map(String)] : args.map(String);
+  const adbExec = async (capability, step, deviceId, args, options = {}) => {
+    requireHotOperationCapability(capabilities, capability);
+    const adbPath = await findWindowsAdbExecutable();
+    return runWindowsDiagnosticExec(sender, opId, `hot_${step}`, adbPath, adbDeviceArgs(deviceId, args), options);
+  };
+  return {
+    operation: {
+      name: operationName,
+      version: String(payload.operationVersion || ""),
+      modulePath: moduleInfo.modulePath || "",
+      moduleFile: moduleInfo.path || "",
+      dataRoot,
+      capabilities: Array.from(capabilities),
+      dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
+    },
+    dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
+    args: payload.args && typeof payload.args === "object" ? { ...payload.args, dryRun: Boolean(payload.dryRun || payload.dry_run || payload.args.dryRun || payload.args.dry_run) } : { dryRun: Boolean(payload.dryRun || payload.dry_run) },
+    adb: {
+      findAuthorizedDevice: async () => {
+        requireHotOperationCapability(capabilities, "adb.device");
+        const adbPath = await findWindowsAdbExecutable();
+        const result = await runWindowsDiagnosticExec(sender, opId, "hot_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+        return { adbPath, command: result, ...parseAndroidConnectionState(result.stdout || "", result.ok) };
+      },
+      shell: (deviceId, args, options) => adbExec("adb.shell", "adb_shell", deviceId, ["shell", ...args], options),
+      install: (deviceId, apkPath, options) => adbExec("adb.install", "adb_install", deviceId, ["install", "-r", String(apkPath || "")], options),
+      pull: (deviceId, remotePath, localPath, options) => adbExec("adb.pull", "adb_pull", deviceId, ["pull", String(remotePath || ""), String(localPath || "")], options),
+      push: (deviceId, localPath, remotePath, options) => adbExec("adb.push", "adb_push", deviceId, ["push", String(localPath || ""), String(remotePath || "")], options),
+      logcat: (deviceId, options = {}) => adbExec("adb.logcat", "adb_logcat", deviceId, ["logcat", "-d", "-v", "time"], { timeoutMs: options.timeoutMs || 20000, maxBuffer: options.maxBuffer || 16 * 1024 * 1024 }),
+      launchIntent: (deviceId, intentArgs, options) => adbExec("adb.shell", "adb_launch_intent", deviceId, ["shell", "am", "start", ...intentArgs], options),
+    },
+    fs: {
+      existsSafe: (safePath) => fs.existsSync(safeFsPathForHotOperation(dataRoot, safePath)),
+      mkdirSafe: (safePath) => fs.mkdirSync(safeFsPathForHotOperation(dataRoot, safePath), { recursive: true }),
+      readJsonSafe: (safePath) => readJsonFile(safeFsPathForHotOperation(dataRoot, safePath), {}),
+      readTextSafe: (safePath) => fs.readFileSync(safeFsPathForHotOperation(dataRoot, safePath), "utf8"),
+      writeJsonSafe: (safePath, data) => {
+        const target = safeFsPathForHotOperation(dataRoot, safePath);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, `${JSON.stringify(data, null, 2)}\n`);
+        return target;
+      },
+      writeTextSafe: (safePath, text) => {
+        const target = safeFsPathForHotOperation(dataRoot, safePath);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, String(text || ""));
+        return target;
+      },
+    },
+    diagnostics: {
+      readLatestNativeDiagnostics: () => {
+        requireHotOperationCapability(capabilities, "diagnostics.read");
+        return readJsonFile(path.join(nativeDiagnosticsBundleRoot(), "latest.json"), {});
+      },
+      readLatestServerDiagnostics: () => {
+        requireHotOperationCapability(capabilities, "diagnostics.read");
+        return fetchAndroidHermesWakeStatusFromBackend();
+      },
+      uploadResult: async (data) => {
+        requireHotOperationCapability(capabilities, "result.upload");
+        return uploadNativeDiagnosticsPayload({ source: "hot_operation", operation: operationName, result: data });
+      },
+      resolveBestVoiceWakeDiagnostics: async () => {
+        requireHotOperationCapability(capabilities, "diagnostics.read");
+        return resolveBestVoiceWakeDiagnostics(sender, opId, payload.args || {});
+      },
+    },
+    release: {
+      readLatestFeed: () => latestAndroidReleaseFeed(payload.args || {}),
+      resolveAndroidApk: async () => {
+        requireHotOperationCapability(capabilities, "release.android_apk");
+        return resolveAndroidVoiceTuningApk(sender, opId, payload.args || {});
+      },
+    },
+    artifacts: {
+      writeJson: (name, data) => {
+        requireHotOperationCapability(capabilities, "artifact.write");
+        const target = safeFsPathForHotOperation(dataRoot, path.join("artifacts", String(name || "artifact.json")));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, `${JSON.stringify(data, null, 2)}\n`);
+        return { ok: true, path: target };
+      },
+      writeText: (name, text) => {
+        requireHotOperationCapability(capabilities, "artifact.write");
+        const target = safeFsPathForHotOperation(dataRoot, path.join("artifacts", String(name || "artifact.txt")));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, String(text || ""));
+        return { ok: true, path: target };
+      },
+      copyFile: (name, sourcePath) => {
+        requireHotOperationCapability(capabilities, "artifact.write");
+        const target = safeFsPathForHotOperation(dataRoot, path.join("artifacts", String(name || path.basename(sourcePath || "artifact.bin"))));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.copyFileSync(String(sourcePath || ""), target);
+        return { ok: true, path: target };
+      },
+      attach: (name, metadata) => {
+        requireHotOperationCapability(capabilities, "artifact.write");
+        return { ok: true, name: String(name || ""), metadata: sanitizeRendererDiagnosticValue(metadata || {}) };
+      },
+    },
+    logger: {
+      info: (...items) => writeNativeControlAudit({ action: "hot_operation_log", level: "info", opId, operation: operationName, items: sanitizeRendererDiagnosticValue(items) }),
+      warn: (...items) => writeNativeControlAudit({ action: "hot_operation_log", level: "warn", opId, operation: operationName, items: sanitizeRendererDiagnosticValue(items) }),
+      error: (...items) => writeNativeControlAudit({ action: "hot_operation_log", level: "error", opId, operation: operationName, items: sanitizeRendererDiagnosticValue(items) }),
+    },
+  };
+}
+
+async function runWithHotOperationTimeout(promise, timeoutMs) {
+  let timeout = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => {
+          const error = new Error(`Hot operation timed out after ${timeoutMs}ms`);
+          error.code = "hot_operation_timeout";
+          reject(error);
+        }, timeoutMs);
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function runHotOperation(sender, opId, payload = {}) {
+  const startedAt = new Date();
+  const operationName = String(payload.operationName || payload.operation || "").trim();
+  const finishEnvelope = (fields = {}) => {
+    const finishedAt = new Date();
+    const failureClassification = fields.failureClassification || fields.failure_classification || fields.error || fields.status || null;
+    return {
+      ok: fields.ok === true,
+      stable: fields.stable === true,
+      operation: fields.operation || operationName,
+      source: "hot_operation",
+      loadedFrom: fields.loadedFrom || "",
+      operationVersion: String(fields.operationVersion || ""),
+      startedAt: startedAt.toISOString(),
+      finishedAt: finishedAt.toISOString(),
+      durationMs: finishedAt.getTime() - startedAt.getTime(),
+      failureClassification: fields.ok === true ? (fields.failureClassification || null) : failureClassification,
+      stages: fields.stages && typeof fields.stages === "object" ? fields.stages : {},
+      metrics: fields.metrics && typeof fields.metrics === "object" ? fields.metrics : {},
+      artifacts: fields.artifacts && typeof fields.artifacts === "object" ? fields.artifacts : {},
+      logsTail: Array.isArray(fields.logsTail) ? fields.logsTail.slice(-80) : [],
+      runId: fields.runId || payload.runId || payload.run_id || opId,
+      ...fields,
+    };
+  };
+  if (hotOperationsDisabled()) {
+    return finishEnvelope({ ok: false, stable: false, status: "hot_operations_disabled", error: "hot_operations_disabled", operation: operationName });
+  }
+  const moduleInfo = resolveHotOperation(payload);
+  if (!moduleInfo.ok) {
+    return finishEnvelope({ ok: false, stable: false, status: moduleInfo.error, error: moduleInfo.error, operation: operationName, roots: moduleInfo.roots || [] });
+  }
+  const expectedSha256 = String(payload.expectedSha256 || payload.expected_sha256 || "").trim().toLowerCase();
+  const actualSha256 = moduleInfo.sha256 || sha256File(moduleInfo.path).toLowerCase();
+  if (expectedSha256 && actualSha256 !== expectedSha256) {
+    return finishEnvelope({ ok: false, stable: false, status: "hot_operation_sha_mismatch", error: "hot_operation_sha_mismatch", operation: operationName, loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind, operationVersion: moduleInfo.version || "", modulePath: moduleInfo.modulePath, sha256: actualSha256, expectedSha256 });
+  }
+  const manifestSha = moduleInfo.manifestSha256 || "";
+  if (manifestSha && actualSha256 !== manifestSha) {
+    return finishEnvelope({ ok: false, stable: false, status: "hot_operation_sha_mismatch", error: "hot_operation_sha_mismatch", operation: operationName, loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind, operationVersion: moduleInfo.version || "", modulePath: moduleInfo.modulePath, sha256: actualSha256, expectedSha256: manifestSha });
+  }
+  if (hotOperationsRequireSha() && moduleInfo.loadedFrom !== "bundled" && !expectedSha256 && !manifestSha) {
+    return finishEnvelope({ ok: false, stable: false, status: "hot_operation_sha_mismatch", error: "hot_operation_sha_mismatch", operation: operationName, loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind, operationVersion: moduleInfo.version || "", modulePath: moduleInfo.modulePath, sha256: actualSha256, expectedSha256: "" });
+  }
+  const requestedTimeout = Number(payload.timeoutMs || payload.timeout_ms || 0);
+  const manifestTimeout = Number(moduleInfo.timeoutMs || HOT_OPERATION_DEFAULT_TIMEOUT_MS);
+  const timeoutMs = Math.max(1000, Math.min(requestedTimeout > 0 ? Math.min(requestedTimeout, manifestTimeout) : manifestTimeout, 10 * 60 * 1000));
+  try {
+    if (moduleInfo.reload || hotOperationsDevReloadEnabled()) delete require.cache[require.resolve(moduleInfo.path)];
+    const loaded = require(moduleInfo.path);
+    const runner = typeof loaded === "function" ? loaded : loaded && loaded.run;
+    if (typeof runner !== "function") {
+      throw Object.assign(new Error("Hot operation module must export run(context)."), { code: "hot_operation_exception" });
+    }
+    const context = createHotOperationContext(sender, opId, payload, moduleInfo);
+    const result = await runWithHotOperationTimeout(Promise.resolve(runner(context)), timeoutMs);
+    const rawResult = sanitizeRendererDiagnosticValue(result || {});
+    return finishEnvelope({
+      ok: rawResult.ok !== false,
+      stable: rawResult.stable === true || rawResult.ok === true,
+      status: result?.status || "hot_operation_finished",
+      operation: operationName || moduleInfo.name || "",
+      loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind,
+      operationVersion: String(moduleInfo.version || payload.operationVersion || ""),
+      modulePath: moduleInfo.modulePath,
+      moduleRoot: moduleInfo.loadedFrom || moduleInfo.rootKind,
+      sha256: actualSha256,
+      stages: rawResult.stages || {},
+      metrics: rawResult.metrics || rawResult.confidence || {},
+      artifacts: rawResult.artifacts || {},
+      failureClassification: rawResult.failureClassification || rawResult.failure_classification || (rawResult.ok === false ? rawResult.status : null),
+      rawResult,
+      result: rawResult,
+    });
+  } catch (error) {
+    const code = error && error.code ? String(error.code) : "hot_operation_exception";
+    return finishEnvelope({
+      ok: false,
+      stable: false,
+      status: code,
+      error: code,
+      operation: operationName,
+      loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind,
+      operationVersion: String(moduleInfo.version || payload.operationVersion || ""),
+      modulePath: moduleInfo.modulePath,
+      message: String(error && error.message ? error.message : error),
+      capability: error?.capability || "",
+      logsTail: verboseBridgeLogsEnabled() ? [String(error && error.stack ? error.stack : error), ...recentBridgeLogsTail(20)] : recentBridgeLogsTail(20),
+    });
+  }
+}
+
+async function runShellSelfTest(sender, opId, payload = {}) {
+  const startedAt = new Date();
+  const checks = {};
+  let failureClassification = null;
+  const setCheck = (name, value, failure = name) => {
+    checks[name] = Boolean(value);
+    if (!checks[name] && !failureClassification) failureClassification = failure;
+  };
+  const summary = hotOperationsSummary();
+  setCheck("local_bridge_alive", true);
+  setCheck("hot_ops_root_resolved", Boolean(summary.hotOpsRoot));
+  setCheck("active_root_readable", summary.hotOpsRoots.some((item) => item.active && item.exists));
+  setCheck("bundled_op_root_readable", summary.hotOpsRoots.some((item) => item.kind === "bundled" && item.exists));
+  const listed = listHotOperations();
+  setCheck("manifest_scan_works", Array.isArray(listed.availableHotOps));
+  setCheck("loader_rejects_traversal", !normalizeHotOperationModulePath("../x.js"));
+  setCheck("loader_rejects_absolute_path", !normalizeHotOperationModulePath(path.resolve(os.tmpdir(), "x.js")));
+  const missing = resolveHotOperation({ operationName: "self_test_missing_hot_operation" });
+  setCheck("missing_op_returns_hot_operation_missing", missing.error === "hot_operation_missing");
+  const mismatch = await runHotOperation(sender, `${opId}-sha`, {
+    operationName: "run_android_hermes_wake_proof",
+    expectedSha256: "0".repeat(64),
+    timeoutMs: 1000,
+  });
+  setCheck("sha_mismatch_returns_hot_operation_sha_mismatch", mismatch.error === "hot_operation_sha_mismatch");
+  try {
+    const context = createHotOperationContext(sender, `${opId}-cap`, {
+      operationName: "run_shell_self_test_capability_probe",
+      args: {},
+    }, { capabilities: [] });
+    await context.adb.logcat("", { timeoutMs: 1 });
+    setCheck("denied_capability_returns_hot_operation_capability_denied", false, "hot_operation_capability_denied");
+  } catch (error) {
+    setCheck("denied_capability_returns_hot_operation_capability_denied", error?.code === "hot_operation_capability_denied", "hot_operation_capability_denied");
+  }
+  const adbPath = await findWindowsAdbExecutable();
+  setCheck("adb_discoverable", Boolean(adbPath));
+  let authorized = false;
+  if (adbPath) {
+    const devices = await runWindowsDiagnosticExec(sender, opId, "shell_self_test_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
+    const parsed = parseAndroidConnectionState(devices.stdout || "", devices.ok);
+    authorized = parsed.hasAuthorizedDevice === true;
+  }
+  checks.authorized_android_device_present = authorized;
+  const localMode = !selectedBackendOrigin || isLocalDevCandidateUrl(selectedBackendOrigin);
+  checks.result_upload_path_works_or_skipped = localMode ? true : Boolean(selectedBackendOrigin);
+  const finishedAt = new Date();
+  const ok = Object.entries(checks)
+    .filter(([name]) => name !== "authorized_android_device_present")
+    .every(([, passed]) => passed === true);
+  return {
+    ok,
+    stable: ok,
+    operation: "run_shell_self_test",
+    source: "shell",
+    startedAt: startedAt.toISOString(),
+    finishedAt: finishedAt.toISOString(),
+    durationMs: finishedAt.getTime() - startedAt.getTime(),
+    checks,
+    failureClassification: ok ? null : failureClassification,
+    nextAction: ok ? "Run the canary hot operation, then Hermes wake proof." : "Inspect hot ops root, bridge protocol, ADB, or capability failures before running Hermes.",
+    hotOperations: listed,
+    logsTail: recentBridgeLogsTail(),
+  };
+}
+
+function androidVoiceTuningIterationReport(iteration = {}) {
+  const classification = iteration.classification || {};
+  const timing = iteration.timing || {};
+  return {
+    iteration: iteration.iteration,
+    apk_build_id_installed: classification.apk_build_id || iteration.apkBuildId || "",
+    web_build_id_loaded: classification.web_build_id || iteration.webBuildId || "",
+    bridge_status: classification.bridge_status || "",
+    permission_state: classification.permission_state || "",
+    lag_timing: timing,
+    failure_classification: classification.failure_classification || "",
+    patch_applied: iteration.patchApplied || "none",
+    next_run_safe: Boolean(classification.next_run_safe),
+    artifact_paths: iteration.artifactPaths || {},
+  };
+}
+
+async function runAndroidVoiceTuningGoalLoop(sender, opId, payload = {}) {
+  if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
+  const maxIterations = Math.max(1, Math.min(Number(payload.maxIterations || payload.max_iterations || 3), 5));
+  const packageName = String(payload.packageName || payload.package_name || "com.colmeio.wasmagent");
+  const adbPath = await findWindowsAdbExecutable();
+  const iterations = [];
+  let stopReason = "";
+  let crashOrAnrCount = 0;
+  emitAndroidVoiceTuningStep(sender, opId, "goal_loop_started", {
+    maxIterations,
+    packageName,
+    safety: {
+      autoRecord: false,
+      autoPermissionClick: false,
+      collectVoiceSamples: false,
+    },
+  }, "run_android_voice_tuning_goal_loop");
+
+  for (let index = 1; index <= maxIterations; index += 1) {
+    emitAndroidVoiceTuningStep(sender, opId, "goal_iteration_started", { iteration: index }, "run_android_voice_tuning_goal_loop");
+    const connection = await runAndroidConnectionCheck(sender, opId);
+    if (connection.status !== "one_authorized_device") {
+      stopReason = connection.status === "multiple_devices" ? "hard_stop_multiple_android_devices" : connection.status;
+      const blocked = {
+        iteration: index,
+        ok: false,
+        status: stopReason,
+        connection,
+        classification: {
+          stable: false,
+          failure_classification: stopReason,
+          failures: [stopReason],
+          next_run_safe: false,
+        },
+        patchApplied: "none",
+      };
+      iterations.push(blocked);
+      emitAndroidVoiceTuningStep(sender, opId, "goal_iteration_blocked", androidVoiceTuningIterationReport(blocked), "run_android_voice_tuning_goal_loop");
+      break;
+    }
+
+    const apk = await resolveAndroidVoiceTuningApk(sender, opId, {
+      ...payload,
+      packageName,
+      progressOperation: "run_android_voice_tuning_goal_loop",
+    });
+    if (!apk.ok) {
+      stopReason = apk.error || "apk_resolution_failed";
+      const blocked = {
+        iteration: index,
+        ok: false,
+        status: stopReason,
+        apk,
+        classification: {
+          stable: false,
+          failure_classification: stopReason,
+          failures: [stopReason],
+          next_run_safe: false,
+        },
+        patchApplied: "none",
+      };
+      iterations.push(blocked);
+      emitAndroidVoiceTuningStep(sender, opId, "goal_iteration_blocked", androidVoiceTuningIterationReport(blocked), "run_android_voice_tuning_goal_loop");
+      break;
+    }
+
+    const install = await runWindowsDiagnosticExec(sender, opId, "android_voice_goal_install", adbPath, ["install", "-r", apk.path], { timeoutMs: 180_000, maxBuffer: 2 * 1024 * 1024 });
+    emitAndroidVoiceTuningStep(sender, opId, "goal_apk_installed", {
+      iteration: index,
+      ok: install.ok,
+      apkPath: apk.path,
+      buildId: apk.buildId || "",
+      sha256: apk.sha256 || "",
+      sizeBytes: apk.sizeBytes || 0,
+    }, "run_android_voice_tuning_goal_loop");
+    if (!install.ok) {
+      stopReason = "install_failed";
+      const blocked = {
+        iteration: index,
+        ok: false,
+        status: stopReason,
+        apk,
+        install,
+        classification: {
+          stable: false,
+          failure_classification: stopReason,
+          failures: [stopReason],
+          next_run_safe: false,
+        },
+        patchApplied: "none",
+      };
+      iterations.push(blocked);
+      emitAndroidVoiceTuningStep(sender, opId, "goal_iteration_blocked", androidVoiceTuningIterationReport(blocked), "run_android_voice_tuning_goal_loop");
+      break;
+    }
+
+    const runtime = await captureAndroidVoiceTuningRuntime(sender, opId, adbPath, {
+      ...payload,
+      packageName,
+      clearWebViewData: Boolean(payload.debugProofRun || payload.debug_proof_run || payload.clearWebViewData || payload.clear_webview_data),
+      clearCache: false,
+      expectedApk: apk,
+      waitMs: payload.waitMs || payload.wait_ms || 10000,
+    }, "run_android_voice_tuning_goal_loop");
+    runtime.iteration = index;
+    runtime.apk = apk;
+    runtime.install = sanitizeRendererDiagnosticValue(install);
+    runtime.patchApplied = "renderer/native lazy status guard in current source; runtime loop applied no on-device patch";
+    runtime.classification = classifyAndroidVoiceTuningRuntime(runtime, apk);
+    iterations.push(runtime);
+    const report = androidVoiceTuningIterationReport(runtime);
+    emitAndroidVoiceTuningStep(sender, opId, "goal_iteration_report", report, "run_android_voice_tuning_goal_loop");
+
+    if (runtime.recordingStartedAutomatically) {
+      stopReason = "hard_stop_recording_started_automatically";
+      break;
+    }
+    if (runtime.permissionPrompt?.unrelated) {
+      stopReason = "hard_stop_unrelated_permission_prompt";
+      break;
+    }
+    if (runtime.classification.failures.includes("app_crash") || runtime.classification.failures.includes("ui_thread_lag_anr_risk")) {
+      crashOrAnrCount += 1;
+      if (crashOrAnrCount >= 2) {
+        stopReason = "hard_stop_repeated_crash_or_anr";
+        break;
+      }
+    }
+    if (runtime.classification.stable) {
+      stopReason = "stable";
+      break;
+    }
+    if (!runtime.classification.next_run_safe) {
+      stopReason = runtime.classification.failure_classification || "unsafe_next_run";
+      break;
+    }
+  }
+
+  const latest = iterations[iterations.length - 1] || {};
+  const latestClassification = latest.classification || {};
+  const result = {
+    ok: stopReason === "stable" || latestClassification.stable === true,
+    status: stopReason || latestClassification.failure_classification || "max_iterations_reached",
+    opId,
+    adbPath,
+    packageName,
+    iterations: iterations.map((iteration) => ({
+      ...androidVoiceTuningIterationReport(iteration),
+      failures: iteration.classification?.failures || [],
+      proofPath: iteration.proofPath || "",
+    })),
+    latest: androidVoiceTuningIterationReport(latest),
+    latestProofPath: latest.proofPath || "",
+    safety: {
+      recording_started_automatically: iterations.some((iteration) => iteration.recordingStartedAutomatically),
+      permission_prompt_auto_clicked: false,
+      voice_samples_collected: false,
+    },
+  };
+  emitAndroidVoiceTuningStep(sender, opId, "goal_loop_finished", result, "run_android_voice_tuning_goal_loop");
+  writeNativeControlAudit({ action: "android_voice_tuning_goal_loop_finished", opId, result });
+  return result;
 }
 
 async function runWindowsAndroidOAuthVerification(sender, opId) {
@@ -1125,7 +3087,8 @@ function isWindowsNativeDiagnosticsAllowed(event) {
 }
 
 async function handleWindowsNativeDiagnosticsOperation(event, operation) {
-  const opName = String(operation || "");
+  const opName = typeof operation === "object" ? String(operation.operation || operation.type || "") : String(operation || "");
+  const payload = operation && typeof operation === "object" ? operation.payload || {} : {};
   const opId = `win-android-oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   if (!WINDOWS_ANDROID_OAUTH_OPERATIONS.has(opName)) {
     writeNativeControlAudit({ action: "local_diagnostics_command_refused", operation: opName, opId, reason: "operation_not_allowlisted" });
@@ -1156,8 +3119,38 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
   if (opName === "adb_devices") {
     return runAdbDevicesDiagnostics(event.sender, opId);
   }
+  if (opName === "check_android_connection") {
+    return runAndroidConnectionCheck(event.sender, opId);
+  }
+  if (opName === "run_hot_operation") {
+    return runHotOperation(event.sender, opId, payload);
+  }
+  if (opName === "list_hot_operations") {
+    return listHotOperations();
+  }
+  if (opName === "run_shell_self_test") {
+    return runShellSelfTest(event.sender, opId, payload);
+  }
+  if (opName === "debug_android_voice_tuning_runtime") {
+    return runAndroidVoiceTuningRuntimeDebug(event.sender, opId, payload);
+  }
+  if (opName === "export_hermes_wake_dataset") {
+    return exportHermesWakeDataset(event.sender, opId, payload);
+  }
+  if (opName === "run_android_hermes_wake_proof") {
+    return runAndroidHermesWakeProof(event.sender, opId, payload);
+  }
+  if (opName === "prove_android_voice_tuning") {
+    return runAndroidVoiceTuningProof(event.sender, opId, payload);
+  }
+  if (opName === "run_android_voice_tuning_goal_loop") {
+    return runAndroidVoiceTuningGoalLoop(event.sender, opId, payload);
+  }
   if (opName === "verify_android_oauth") {
     return runWindowsAndroidOAuthVerification(event.sender, opId);
+  }
+  if (opName === "request_windows_client_update") {
+    return runWindowsSelfUpdate(event.sender, opId, { ...payload, applyApproved: Boolean(payload.applyApproved) });
   }
   return { ok: false, opId, error: "operation_not_implemented" };
 }
@@ -1184,6 +3177,12 @@ function runtimeDiagnosticsPayload(overrides = {}) {
       bundledAndroidApkPath: bundledAndroidApkPath(),
       bundledAndroidApkPresent: fileExists(bundledAndroidApkPath()),
       reportRoot: androidSimulatorStateRoot(),
+    },
+    hotOperations: {
+      supported: true,
+      protocol: HOT_OPERATION_PROTOCOL_VERSION,
+      roots: hotOperationRoots().map((item) => ({ kind: item.kind, root: item.root, reload: item.reload })),
+      bundledRoot: bundledHotOperationsRoot(),
     },
     packageVersion: app.getVersion(),
     buildId: String(config.buildId || defaults.buildId || ""),
@@ -2267,6 +4266,7 @@ async function executeNativeControlCommand(command = {}) {
   const type = String(command.type || "");
   const payload = command && typeof command.payload === "object" ? command.payload : {};
   const win = currentNativeWindow();
+  activeNativeCommandCount += 1;
   logNativeDiagnostic("native-control-command", {
     id: command.id || "",
     type,
@@ -2279,6 +4279,7 @@ async function executeNativeControlCommand(command = {}) {
     actor: command.created_by || payload.requested_by || "",
     reason: command.reason || payload.reason || "",
   });
+  try {
   if (type === "upload_diagnostics") {
     const result = await uploadRendererAuthDiagnostics({ reason: `control:${command.id || type}` });
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
@@ -2323,6 +4324,58 @@ async function executeNativeControlCommand(command = {}) {
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
+  if (type === "check_android_connection") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-android-connection-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runAndroidConnectionCheck(sender, opId);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "run_hot_operation") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-hot-operation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runHotOperation(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "get_bridge_status" || type === "status") {
+    const result = getBridgeStatus();
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "list_hot_operations") {
+    const result = listHotOperations();
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "run_shell_self_test") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-shell-self-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runShellSelfTest(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "debug_android_voice_tuning_runtime") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-android-runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runAndroidVoiceTuningRuntimeDebug(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "export_hermes_wake_dataset") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-hermes-wake-export-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await exportHermesWakeDataset(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "run_android_hermes_wake_proof") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-hermes-wake-proof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runAndroidHermesWakeProof(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
   if (type === "read_latest_android_report") {
     const report = readLatestAndroidSimulatorReport();
     const result = {
@@ -2341,6 +4394,30 @@ async function executeNativeControlCommand(command = {}) {
     const sender = win?.webContents || { send: () => {} };
     const opId = `control-android-oauth-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const result = await runWindowsAndroidOAuthVerification(sender, opId);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "prove_android_voice_tuning") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-android-voice-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runAndroidVoiceTuningProof(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "run_android_voice_tuning_goal_loop") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-android-voice-goal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runAndroidVoiceTuningGoalLoop(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "request_windows_client_update") {
+    const sender = win?.webContents || { send: () => {} };
+    const opId = `control-windows-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const result = await runWindowsSelfUpdate(sender, opId, {
+      reason: command.reason || payload.reason || `control:${command.id || type}`,
+      applyApproved: payload.applyApproved === true || payload.apply_approved === true,
+    });
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -2462,6 +4539,9 @@ async function executeNativeControlCommand(command = {}) {
   const result = { ok: false, error: `unsupported_command:${type}` };
   writeNativeControlAudit({ action: "command_refused", id: command.id || "", type, result });
   return result;
+  } finally {
+    activeNativeCommandCount = Math.max(0, activeNativeCommandCount - 1);
+  }
 }
 
 async function pollNativeControl(reason = "interval") {
@@ -2842,11 +4922,39 @@ function createWindow() {
   setTimeout(() => {
     void uploadRendererAuthDiagnostics({ reason: "native-window-created" });
   }, 2500).unref();
+  setTimeout(() => {
+    void checkAndStageWindowsSelfUpdate(win.webContents, `startup-update-${Date.now().toString(36)}`, { startup: true })
+      .then((result) => {
+        if (result?.ok && result.updateAvailable) {
+          writeNativeUpdateAudit({ action: "startup_update_ready", result });
+        }
+      })
+      .catch((error) => writeNativeUpdateAudit({ action: "startup_update_check_failed", error: String(error && error.message ? error.message : error) }));
+  }, 8000).unref();
   return win;
 }
 
 app.setName("WASM Agent");
-Menu.setApplicationMenu(null);
+Menu.setApplicationMenu(Menu.buildFromTemplate([
+  {
+    label: "WASM Agent",
+    submenu: [
+      {
+        label: "Check for Updates",
+        click: () => {
+          const win = currentNativeWindow();
+          const sender = win?.webContents || { send: () => {} };
+          const opId = `manual-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+          void runWindowsSelfUpdate(sender, opId, { applyApproved: true }).then((result) => {
+            if (!result?.ok && result?.manualInstallerPath) shell.showItemInFolder(result.manualInstallerPath);
+          });
+        },
+      },
+      { type: "separator" },
+      { role: "quit" },
+    ],
+  },
+]));
 
 ipcMain.handle("wasm-agent:native-config", async () => nativeConfigPayload());
 
@@ -2919,11 +5027,22 @@ ipcMain.handle("wasm-agent:native-status", () => postNativeEvent("device.status"
 
 ipcMain.handle("wasm-agent:native-diagnostics-operation", (event, operation) => handleWindowsNativeDiagnosticsOperation(event, operation));
 
+ipcMain.handle("wasm-agent:check-for-updates", (event) => {
+  const opId = `manual-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return checkAndStageWindowsSelfUpdate(event.sender, opId, { manual: true });
+});
+
+ipcMain.handle("wasm-agent:install-staged-update", (event) => {
+  const opId = activeWindowsSelfUpdate?.opId || `manual-install-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  return promptAndLaunchWindowsInstaller(event.sender, opId, activeWindowsSelfUpdate);
+});
+
 app.whenReady().then(async () => {
   registerNativeAppProtocol();
   await clearNativeWebShellCache();
   createWindow();
   void postNativeEvent("native.install_status", { status: "launched", app_version: app.getVersion() });
+  const hotOpsStatus = hotOperationsSummary();
   void postNativeEvent("native.capabilities", {
     desktop_app: true,
     persistent_config: true,
@@ -2935,11 +5054,22 @@ app.whenReady().then(async () => {
 	    frontier_visual_state_ready: true,
 	    frontier_diagnostic_bundle_ready: true,
 	    windows_android_oauth_verification_ready: process.platform === "win32",
+	    windows_self_update_ready: process.platform === "win32",
+	    run_hot_operation_ready: true,
+	    list_hot_operations_ready: true,
+	    run_shell_self_test_ready: true,
+	    shell_protocol_version: SHELL_PROTOCOL_VERSION,
+	    supported_hot_ops_protocol: HOT_OPERATION_PROTOCOL_VERSION,
+	    hot_ops_protocol_version: HOT_OPERATION_PROTOCOL_VERSION,
+	    minimum_runner_version: MINIMUM_RUNNER_VERSION,
+	    bridge_protocol_capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
+	    hotOperations: hotOpsStatus,
 	  });
-  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch() });
+  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logsTail: recentBridgeLogsTail() });
   startNativeControlPolling();
   setInterval(() => {
-    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch() });
+    const heartbeatHotOps = hotOperationsSummary();
+    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logsTail: recentBridgeLogsTail() });
   }, HEARTBEAT_INTERVAL_MS).unref();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

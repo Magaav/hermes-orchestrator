@@ -11,6 +11,7 @@ import struct
 import tempfile
 import threading
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -219,7 +220,9 @@ class ClientFirstCloudTest(unittest.TestCase):
                     "wake_word": "hermes",
                     "transcript": "open my current run logs",
                     "confidence": 0.82,
-                    "source": "android_native_hermes_voice_wake",
+                    "source": "android_native_voice_wake",
+                    "wake_confidence": 0.99,
+                    "asr_provider": "debug_stub",
                     "build_id": "android-test",
                     "session_id": "voice-session-test",
                     "privacy_mode": "wake-word-local-transcript-only",
@@ -235,10 +238,64 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertEqual(event["type"], "voice_command")
             self.assertEqual(event["wake_word"], "hermes")
             self.assertEqual(event["transcript"], "open my current run logs")
-            self.assertEqual(event["source"], "android_native_hermes_voice_wake")
+            self.assertEqual(event["source"], "android_native_voice_wake")
             self.assertFalse(event["audio_retained"])
+            self.assertTrue(result["dispatch"]["routed"])
+            dispatch = Path(tmp) / "native-events" / "latest-voice-command-dispatch.json"
+            dispatched = json.loads(dispatch.read_text(encoding="utf-8"))
+            self.assertEqual(dispatched["dispatch"], "active_session_user_input")
+            self.assertEqual(dispatched["message"], "open my current run logs")
+            self.assertEqual(dispatched["asr_provider"], "debug_stub")
             timeline = Path(tmp) / "native-events" / "voice-command-timeline.jsonl"
             self.assertIn("voice-session-test", timeline.read_text(encoding="utf-8"))
+
+    def test_android_hermes_wake_dataset_operator_can_read_latest_upload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            handler = SimpleNamespace(
+                headers={
+                    "Host": "127.0.0.1:8877",
+                    "X-Wasm-Agent-Native-Device-Id": "android-test-device",
+                    "X-Wasm-Agent-Dataset-Source": "android-native-export",
+                },
+                client_address=("127.0.0.1", 45678),
+            )
+            payload_io = io.BytesIO()
+            with zipfile.ZipFile(payload_io, "w") as archive:
+                archive.writestr("metadata.json", "{}")
+                archive.writestr("positive/hermes_test_phone_20260612T130000Z_001.wav", b"RIFFtest")
+            upload = static_server.save_native_android_hermes_wake_dataset(server, payload_io.getvalue(), handler)
+
+            latest = static_server.latest_native_android_hermes_wake_dataset_metadata(server, handler, None)
+            listed = static_server.list_native_android_hermes_wake_datasets(server, handler, None)
+
+            self.assertEqual(latest["archivePath"], upload["archivePath"])
+            self.assertEqual(latest["device_id"], "android-test-device")
+            self.assertEqual(latest["sha256"], upload["sha256"])
+            self.assertEqual(latest["downloadUrl"], "/native/android/hermes-wake-dataset/latest.zip")
+            self.assertEqual(listed["count"], 1)
+            self.assertEqual(listed["datasets"][0]["archivePath"], upload["archivePath"])
+            audit = Path(tmp) / "native-control" / "audit.jsonl"
+            self.assertIn("android_hermes_wake_dataset_latest_read", audit.read_text(encoding="utf-8"))
+
+    def test_android_hermes_wake_dataset_upload_is_public_for_native_bridge(self) -> None:
+        self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-dataset"))
+        self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/request"))
+        self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/result"))
+
+    def test_android_hermes_wake_dataset_operator_rejects_remote_without_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            handler = SimpleNamespace(
+                headers={"Host": "wa.colmeio.com"},
+                client_address=("198.51.100.4", 45678),
+            )
+
+            with self.assertRaises(static_server.BrowserError) as raised:
+                static_server.latest_native_android_hermes_wake_dataset_metadata(server, handler, None)
+
+            self.assertEqual(raised.exception.status, static_server.HTTPStatus.FORBIDDEN)
+            self.assertEqual(raised.exception.code, "native_android_hermes_wake_dataset_forbidden")
 
     def test_friend_sync_and_fleet_metadata_stay_lightweight(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,18 +2,22 @@
 
 Place the production Hermes wake-word ONNX model here as:
 
-  hermes.onnx
+  base_hermes.onnx
 
-The Android service copies assets/voice/hermes.onnx into the app-private
-files/voice/hermes.onnx path on first start. Do not add a placeholder or fake
-ONNX file: when the model is absent, diagnostics must report
-hermes_wake_model_missing and production wake detection must remain inactive.
+The Android service copies assets/voice/base_hermes.onnx into the app-private
+files/voice/base_hermes.onnx path on first start when the bundled asset exists
+and the runtime copy is missing or stale. Do not add a placeholder or fake ONNX
+file: when no validated personalized or base model is available, diagnostics
+must report hermes_wake_model_missing and production wake detection must remain
+inactive.
 
 Current production engine:
 
 - engine: OpenWakeWordOnnxEngine
-- asset path: assets/voice/hermes.onnx
-- copied app-private path: files/voice/hermes.onnx
+- base asset path: assets/voice/base_hermes.onnx
+- copied base path: files/voice/base_hermes.onnx
+- personalized path: files/voice/hermes.onnx
+- model priority: personalized, then base, then no-model safe scaffold
 - input name: first ONNX graph input is used; diagnostics report first_input
   only when no model metadata can be read
 - input type/format: float32 normalized raw audio, derived from signed PCM16
@@ -33,7 +37,8 @@ Current production engine:
 
 Diagnostics:
 
-- hermes_wake_model_missing: files/voice/hermes.onnx does not exist
+- hermes_wake_model_missing: no non-empty files/voice/hermes.onnx or
+  files/voice/base_hermes.onnx is available
 - hermes_wake_model_load_error: ONNX Runtime cannot open the file or model
   metadata cannot be read
 - hermes_wake_model_incompatible: the model loads but input/output metadata does
@@ -41,6 +46,30 @@ Diagnostics:
 
 Real wake-on-Hermes is not complete until a genuine Hermes-trained hermes.onnx is
 present and verified against positive and negative audio fixtures.
+
+Training sample persistence:
+
+- Manual `Train Hermes Wake` recordings are written by the installed Android app
+  to app-private storage at files/voice/hermes-dataset.
+- The browser/PWA does not persist WAV clips. Current Android builds upload
+  `files/voice/exports/hermes-dataset.zip` to
+  `/native/android/hermes-wake-dataset` when `Export Hermes Dataset` is clicked.
+  If the protected cloud download is not available to the current operator, use
+  the installed Win11 wasm-agent bridge command `export_hermes_wake_dataset`.
+  Do not use terminal ADB from this workspace for this workflow; ADB access for
+  this device/export path is only expected through the installed Win11 bridge.
+- Clearing Android app data, uninstalling with data removal, or testing in a
+  different app profile can make the modal show zero counts even if a prior APK
+  session had recordings.
+- Use the uploaded/exported `hermes-dataset.zip`, import it into
+  `data/voice/hermes`, train and verify `build/voice/hermes.onnx`, then install
+  the model into app-private storage at `files/voice/hermes.onnx` through the
+  Android bridge method `installHermesWakeModel(modelUrl, sha256)`. This avoids
+  APK rebuilds for wake-model iteration.
+- Preferred automation: run `tools/voice/ship-hermes-wake.sh` with
+  `WASM_AGENT_NATIVE_CONTROL_KEY` set. It queues the Win11 bridge export,
+  downloads the uploaded zip, imports, trains, validates, and prints the model
+  SHA from `/native/android/hermes-wake-model/latest.json`.
 
 Artifact types:
 

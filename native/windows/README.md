@@ -1,252 +1,225 @@
 # wasm-agent Windows Native
 
-This lane owns the Windows desktop body for wasm-agent.
+`native/windows` owns the Windows Electron shell, NSIS installer, packaged
+`app.asar`, Windows diagnostics bridge, and installed-app verification lane for
+WASM Agent Native.
 
-Target output:
+## Contract
 
-- `release/WASM-Agent-Setup-x64.exe` or `release/WASM-Agent-x64.msi`
-- `release/WASM-Agent-Setup-arm64.exe` or `release/WASM-Agent-arm64.msi`
+| Rule | Value |
+| --- | --- |
+| Production backend | `https://wa.colmeio.com` |
+| Production app URL | `https://wa.colmeio.com/home?native=electron` |
+| Production local origins | Forbidden: `127.0.0.1:8877`, `localhost`, `0.0.0.0`, source-tree assets, dev fallbacks |
+| Installer secrets | No account secrets or pre-minted device tokens |
+| Proof floor | Final extracted NSIS installer and installed `app.asar` verification |
+| Runtime proof floor | Real installed app with Google login, close/reopen, route, cookie, expiration metadata, and `/auth/session` |
 
-Contract:
+Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
+`native/AGENTS.md`, `native/NATIVE_SHELL_CONTRACT.md`, this directory's
+`AGENTS.md`, then this file.
 
-- Follows the shared native shell contract in `../NATIVE_SHELL_CONTRACT.md`.
-- Runs as a real desktop app process, not Edge or Chrome app mode.
-- Electron is acceptable for v1 when packaged as `WASM Agent.exe`.
-- Stores persistent local config outside the installer artifact.
-- Registers the current account/device after launch and receives a pairing or device token at activation time.
-- Emits `device.register`, `device.status`, `device.heartbeat`, `native.capabilities`, and `native.install_status`.
-- Connects to wasm-agent through the native bridge; downloadable installers must not contain account secrets or device tokens.
+## Current Evidence
 
-Build:
+| Evidence | Status | Notes |
+| --- | --- | --- |
+| Release feed installer `WASM-Agent-Setup-x64-0.1.0-20260612T152322Z.exe` | implemented-unverified | Feed SHA `c77a542d6444f16afbcdd556b704f59a6176238bd886c5d9901ae6c2a1f6608b`; built via `linux-arm64-native-nsis-no-rcedit`, so Windows smoke proof remains required. |
+| `native/windows/release/VERIFY.json` | verified | Final NSIS extraction and `app.asar` verification passed for build `win-x64-20260612T152322Z`. |
+| Win11 staged update | implemented-unverified | Old app staged `C:\Users\Victor\AppData\Local\WASM Agent Native\staged\windows-updates\WASM-Agent-Setup-x64-0.1.0-20260612T152322Z.exe`; guided installer approval/install still required. |
+| Installed-app login persistence | implemented-unverified | Required Windows host proof absent. |
+| Android OAuth through Windows diagnostics | implemented-unverified | Requires installed Windows app plus local runner report PASS/PASSED. |
+
+## Build
 
 ```bash
 horc build
 ```
 
-Or run the underlying release script directly:
+Direct Windows release lane:
 
 ```bash
 cd native/windows/src
 npm run release:win:x64:prod
 ```
 
-Native Windows is the preferred and trusted production build host. Linux x86_64
-with Wine/NSIS is a supported CI cross-build path, but the resulting installer
-must pass a real Windows smoke test before release. Linux aarch64 uses a Docker
-`--platform linux/amd64` Wine builder by default and is an experimental
-cross-build path that also requires a Windows smoke test. Linux aarch64 direct
-Wine is debug-only and requires `HORC_ALLOW_CROSS_WIN_BUILD=1`.
+Linux x86_64 with Wine/NSIS is a supported CI cross-build path. Linux ARM64
+prefers Docker `linux/amd64` Wine builder; direct ARM64 Wine/NSIS is
+experimental and still requires Windows smoke proof.
 
-On Linux aarch64, `horc build` checks whether Docker can execute
-`linux/amd64` containers. If QEMU/binfmt is missing and automatic repair is not
-disabled, it runs:
+`horc build all` publishes generated release feed files under
+`/local/plugins/wasm-agent/public/native/releases/`. Feed publication is not
+installer/runtime verification.
 
-```bash
-docker run --privileged --rm tonistiigi/binfmt --install amd64
-```
+## Verification
 
-Then it re-tests `docker run --rm --platform linux/amd64 alpine:3.20 uname -m`
-and proceeds only when the result is `x86_64`. Use `horc build doctor` to print
-the host/build readiness report without starting the installer build.
-If the amd64 Docker builder itself fails under QEMU, `horc build` in `auto`
-mode can fall back to a Linux ARM64 native NSIS build with Windows executable
-resource editing disabled. That fallback is labeled
-`linux-arm64-native-nsis-no-rcedit` and requires a Windows smoke test.
-
-For repeated Linux ARM64 release builds, prepare the reusable amd64 Wine builder
-once:
-
-```bash
-horc build prepare-docker
-```
-
-That creates `horc/electron-builder-wine-nsis:jammy` with NSIS and `unar`
-preinstalled. Future `horc build` runs auto-use the local prepared image when
-`HORC_DOCKER_IMAGE` is unset, so the disposable build container does not fetch
-Ubuntu package indexes and install NSIS on every release attempt.
-
-`horc build` writes `/local/native/windows/release/horc-build-manifest.json`
-with the host OS/arch, target, build mode, installer path, app.asar path,
-`trusted_production`, and `requires_windows_smoke_test`.
-
-`horc build all` runs the concrete Windows and Android lanes, then writes the
-local native update feed to
-`/local/plugins/wasm-agent/public/native/releases/latest.json`. Windows
-artifacts are copied under
-`/local/plugins/wasm-agent/public/native/releases/windows/` and are served as
-`/native/releases/windows/<installer>`. The Go Native modal compares the
-installed Electron metadata (`appVersion`, `installableVersion`, and `buildId`)
-with that feed. Until electron-builder updater metadata is wired end to end,
-Windows Update is a guided installer update: download the installer, verify the
-SHA-256 from the feed, launch the installer, and do not silently overwrite the
-running app.
-
-Installed Windows verification:
-
-1. Install the exact `release/WASM-Agent-Setup-x64-*.exe` artifact on Windows.
-2. Start the installed `WASM Agent` app and wait until it loads the cloud PWA
-   or shows native diagnostics.
-3. Run the lifecycle verifier from PowerShell:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File native\windows\scripts\verify-installed-app.ps1 -Launch -InteractiveLogin -Pause
-```
-
-Or double-click `native\windows\scripts\verify-installed-app.cmd`. The wrapper
-keeps the console open so pass/fail output remains visible.
-
-Android OAuth real-phone verification:
-
-1. Open the installed `WASM Agent` Windows app.
-2. Go to `Diagnostics`.
-3. Select `Verify Android OAuth on real phone`.
-4. Click `Start Android OAuth verification`.
-
-This is the preferred path: `Open wasm-agent Windows app -> Diagnostics ->
-Verify Android OAuth`. The app checks `adb version`, polls `adb devices`, tells
-the user when the phone is missing, offline, or unauthorized, and only runs
-the bundled local horc runner with fixed arguments
-`simulate android --device --interactive-oauth` after a USB phone is in the
-authorized `device` state. Production installs resolve
-`resources/horc/horc-local.js` and the bundled Android APK from Electron
-resources first; PATH `horc` is only a `WASM_AGENT_ALLOW_LOCAL_DEV=1` fallback.
-Reports are written under the app-owned user-data diagnostics root, and the UI
-links the latest `summary.md` or `result.json` when available. Do not claim
-Android OAuth is fixed unless the local runner exits successfully and the latest
-report status is PASS/PASSED.
-
-Fallback scripts are available for users who cannot launch the Windows app:
-
-```powershell
-tools\windows\verify-android-oauth.ps1
-```
-
-```cmd
-tools\windows\verify-android-oauth.cmd
-```
-
-The verifier launches or detects the installed app, confirms
-`https://wa.colmeio.com/home?native=electron`, probes
-`https://wa.colmeio.com/config.json`, detects an existing Google login or waits
-for interactive login when `-InteractiveLogin` is passed, verifies
-`authCookie.hasWaUid: true`, verifies authenticated `/auth/session`, fully
-closes the app, reopens from the installed exe, verifies the session survives,
-and writes `installed-app-VERIFY-*.json`. Failures are classified as one of:
-`cookie missing`, `cookie wrong domain`, `cookie wrong partition`,
-`frontend bootstrap crash`, `backend/config discovery failure`,
-`Google redirect/code redemption failure`, `cloud asset stale/cache issue`,
-`native shell issue`, or `installer packaging issue`.
-
-Packaged artifact verification:
+Final NSIS/app.asar proof:
 
 ```bash
 cd native/windows/src
-npm run verify:win-installer
+npm run verify:win-installer -- /local/plugins/wasm-agent/public/native/releases/windows/WASM-Agent-Setup-x64-0.1.0-20260609T220027Z.exe
 ```
 
-This extracts the final NSIS installer, inspects the installed `app.asar`,
-confirms cloud-only URL defaults, patched `app.js` and `dev-hmr.js`, the
-boot-time fatal trap, icon resources, and native/preload bridge compatibility,
-then writes `native/windows/release/VERIFY.json`. Source tests and
-`win-unpacked` are useful early signals but are not release proof by
-themselves.
+Expected proof artifact:
 
-## Frontier Operator Commands
+```text
+native/windows/release/VERIFY.json
+```
 
-The cloud backend exposes a gated Frontier surface:
+Installed Windows proof:
 
-- `GET /native/frontier/status`
-- `POST /native/frontier/command`
+```powershell
+native\windows\scripts\verify-installed-app.ps1 -Launch -InteractiveLogin
+```
 
-Authorization requires an admin session, localhost operator access, or
-`X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY`. Calls without
-that gate return HTTP 403. A successful command queue returns HTTP 200 with a
-structured JSON body and `queuedCount`.
+Required installed evidence:
 
-Supported commands are `status`, `screenshot`, `collect_logs`,
-`collect_adb_diagnostics`, `read_latest_android_report`,
-`verify_android_oauth`, `reload`, `reload_ignore_cache`, `clear_cache`,
-`restart_app`, `verify_session`, `verify_installed_app`, `open_devtools`, and
-`export_diagnostics`. Unknown commands are refused. `clear_cache` and
-`restart_app` require
-`enable_destructive: true` or `X-Wasm-Agent-Destructive-Allowed: 1`.
+| Check | Required |
+| --- | --- |
+| Google login | Passes in installed app |
+| Close/reopen | Full app restart |
+| Route | `https://wa.colmeio.com/home?native=electron` |
+| Auth cookie | `authCookie.hasWaUid: true` |
+| Cookie metadata | Durable expiration metadata present |
+| Session | Authenticated `/auth/session` after reopen |
 
-One-device reload:
+Do not claim fixed from source tests, build success, `win-unpacked`, or feed
+presence.
+
+## Frontier Commands
+
+The cloud backend exposes gated Frontier routes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /native/frontier/status` | Compact app/auth/frontend/native/backend health and recommended next action |
+| `POST /native/frontier/command` | Queue scoped command for one device or explicit test cohort |
+
+Authorization requires admin session, localhost operator access, or
+`X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY`. Destructive
+commands such as cache clear or restart require an explicit destructive gate.
+Unknown commands are refused. No global unauthenticated reload endpoint is
+allowed.
+
+Android real-device Hermes Wake proof now uses the stable generic bridge
+operation `run_hot_operation`. Windows is now treated as a hot-op shell: the
+installed app keeps stable primitives for Electron startup, backend validation,
+native-control polling, result upload, ADB, manifest scanning, and
+capability-checked helper APIs; Android/Hermes workflow logic lives in hot
+operations under `bridge-ops/`.
+
+The shell resolves operation manifests in this order:
+
+| Root | Purpose |
+| --- | --- |
+| `WASM_AGENT_BRIDGE_OPS_DIR` | Dev override; modules reload on every run. |
+| `%APPDATA%/WASM-Agent/bridge-ops` | User-staged ops; modules reload on every run. |
+| Installed `bridge-ops/` resource | Bundled emergency/base ops. |
+
+The bundled fallback module is
+`native/windows/ops/android/hermes-wake-proof.js` with manifest
+`native/windows/ops/android/hermes-wake-proof.manifest.json`. Prefer compact
+manifest-based payloads:
+
+```json
+{"operationName":"run_android_hermes_wake_proof","args":{"waitForSpeech":true,"timeoutMs":30000}}
+```
+
+Explicit `modulePath` remains only for dev/debug. Hot ops receive only
+capability-scoped helpers for ADB, safe files, artifacts, release/feed reads,
+diagnostics, result upload, and logging. Absolute module paths, `..` traversal,
+missing modules, SHA mismatches, denied capabilities, disabled hot ops,
+timeouts, and exceptions return structured `hot_operation_*` errors wrapped in
+a camelCase result envelope with `rawResult` preserved.
+
+Use `list_hot_operations` to inspect the installed bridge view before a proof
+run. It reports `supportedHotOpsProtocol`, `hotOpsMode`, `hotOpsRoot`,
+`devReload`, every root, and `availableHotOps` with manifest path, entry,
+version, SHA-256, capabilities, timeout, and loaded source. Set
+`WASM_AGENT_BRIDGE_OPS_DIR=/local/native/windows/ops` for dev override;
+`WASM_AGENT_HOT_OPS_DEV_RELOAD=1` forces cache clearing on every run,
+`WASM_AGENT_DISABLE_HOT_OPS=1` returns `hot_operations_disabled`,
+`WASM_AGENT_HOT_OPS_REQUIRE_SHA=1` requires SHA metadata for non-bundled ops,
+and `WASM_AGENT_ENABLE_VERBOSE_BRIDGE_LOGS=1` includes verbose `logsTail`
+details.
+
+Use `run_shell_self_test` before Hermes wake proof. It checks bridge liveness,
+root readability, manifest scanning, path traversal/absolute-path rejection,
+missing-op classification, SHA mismatch classification, capability denial, ADB
+discovery, authorized-device presence when connected, and result-upload
+availability or local-mode skip.
+
+Use the canary hot operation before debugging Android/Hermes logic:
+
+```json
+{"operationName":"canary_echo","args":{"dryRun":true}}
+```
+
+The expected canary result is `ok: true`, `stable: true`,
+`operation: "canary_echo"`, `source: "hot_operation"`, and
+`message: "hot op loaded"`.
+
+The shell protocol contract is:
+
+```json
+{
+  "shellProtocolVersion": 2,
+  "hotOpsProtocolVersion": 1,
+  "minimumRunnerVersion": "20260612",
+  "capabilities": [
+    "get_bridge_status",
+    "list_hot_operations",
+    "run_shell_self_test",
+    "run_hot_operation"
+  ]
+}
+```
+
+Fast proof/debug commands:
 
 ```bash
-curl -X POST "https://wa.colmeio.com/native/frontier/command" \
-  -H "Content-Type: application/json" \
-  -H "X-Wasm-Agent-Native-Control-Key: $WASM_AGENT_NATIVE_CONTROL_KEY" \
-  --data '{"device_id":"<device-id>","command":"reload_ignore_cache","reason":"verify fresh cloud build"}'
+python3 tools/windows/prove-hot-shell.py
+python3 tools/doctor/wasm-agent-doctor.py
+python3 tools/voice/run-hermes-wake-proof.py --dry-run
+python3 tools/voice/run-hermes-wake-proof.py --debug
 ```
 
-Test cohort reload is intentionally explicit: inspect
-`/native/control/clients`, filter the desired test devices, then pass
-`device_ids: [...]` to `/native/frontier/command`, or pass `allow_cohort: true`
-with a narrow `cohort` filter such as `build_id` or `route_contains`. Do not add
-or use a global unauthenticated reload endpoint.
+Local proof scripts write latest artifacts under `reports/<area>/latest/` and
+per-run artifacts under `reports/<area>/runs/<runId>/`. Each result envelope
+includes `runId`, `failureClassification`, `nextAction`, and an `artifacts`
+object with `result` and `logs`. Windows installed-app operation artifacts use
+`%APPDATA%/WASM-Agent/runs/<runId>/` when produced by the shell.
 
-Build status: Electron plus Windows x64 NSIS installer lane is present. The
-primary artifact is built by electron-builder, matching the Space Agent-style
-desktop packaging direction. The installer embeds the packaged Electron app,
-creates Start Menu/Desktop shortcuts, uses a bundled icon generated from the PWA
-`public/icons/icon.svg` for the window and shortcuts, persists config under the
-Electron user-data directory, writes shortcut creation diagnostics to
-`%LOCALAPPDATA%\\WASM Agent Native\\shortcut-report.txt`, and leaves
-account/device tokens to runtime pairing instead of embedding secrets in the
-artifact. On launch, the desktop app clears stale service-worker and Cache
-Storage data, probes configured backend candidates in parallel through
-`/config.json`, prefers a candidate whose config reports
-`auth.googleClientIdConfigured`, and opens the validated backend's real PWA
-`/home?native=electron` URL. The packaged fallback is only a backend-missing
-screen; it must not run the real app shell or Google login from bundled assets.
-Startup diagnostics log the resolved backend, Google config state, final loaded
-URL, app root, UI source, current route, candidate origins, and selected backend
-origin. Origins that expose the old Colmeio Admin identity or unavailable/invalid
-`/config.json` are rejected instead of being used as the native backend. In
-remote-PWA mode, normal PWA dev-HMR
-comes from the backend through `/modules/hmr/events`; the native shell adds
-browser-like `Ctrl+R` refresh and `Ctrl+Shift+R` hard refresh so UI/module
-changes can be picked up without reinstalling the desktop app. Remote HTTPS
-Google login uses the registered browser redirect flow; the JS credential
-callback is reserved for the bundled `wasm-agent://` fallback only. Google popup
-URLs are allowed as popup windows instead of replacing the primary app window,
-same-origin auth completions are routed back into the primary window, and the
-auth-code preloader waits briefly for the durable `wa_uid` cookie before
-flushing Electron's cookie store after redemption so restart persistence can be
-verified. The shell strips Electron-specific user agent markers before loading
-the PWA so the installed app behaves like a browser PWA for login.
-The native shell now writes renderer auth diagnostics, runtime diagnostics, and
-native upload attempts, and the source includes a bounded native control poller.
-Runtime and status diagnostics include `authCookie.hasWaUid`, cookie session and
-expiration metadata, domain/path, current route, and an Electron-session-backed
-`/auth/session` status for close/reopen verification.
-The cloud PWA must also preserve Electron's read-only preload globals during
-bootstrap. The app-owned HMR deferral hook lives at `__wasmAgentAppDevHmr`, while
-the preload-provided native reload bridge remains available for fallback HMR
-reloads.
-After installing the verified `win-x64-20260605T115715Z` artifact, the app can
-receive server-queued diagnostics commands from `/native/control/poll` and
-report command results to `/native/control/result`, making client-log fetches
-possible without asking the Windows user to manually refresh.
-The Windows installer also packages a local Android OAuth verifier under
-Electron resources: `horc/horc-local.js`, `horc/app-simulator/`, and the current
-`android/WASM-Agent-arm64.apk` plus metadata sidecar. The installed app uses
-that local verifier for `verify_android_oauth`, so cloud Frontier can queue the
-operation while ADB/USB access and OAuth proof execute on the user's Windows
-machine.
-On Linux build hosts, `scripts/prepare-native-assets.js` prepares a local NSIS
-shim around system `makensis` for the Wine/electron-builder path. On Linux
-aarch64, `horc build` prefers Docker amd64 emulation over direct Wine.
+Use `tools/voice/run-hermes-wake-proof.py` from the repo. It defaults to the
+local bridge at `http://127.0.0.1:8877`, reads heartbeat hot-op capabilities,
+prints the active root/mode, verifies `run_android_hermes_wake_proof` is
+visible when the heartbeat lists ops, and queues compact manifest-based
+`run_hot_operation`. It reports `bridge_update_required` only when the shell
+lacks `run_hot_operation`, lacks `list_hot_operations`, or exposes an old/missing
+hot-op protocol. It reports `hot_operation_missing` separately. Stale
+command-specific fallback is opt-in with `--allow-stale-command-fallback`.
 
-Durable Next Step: Install
-`/local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260606T193120Z.exe`
-on the Windows host, then queue `verify_android_oauth` through Frontier or click
-`Diagnostics -> Verify Android OAuth on real phone`. The currently connected
-Windows app is still `win-x64-20260606T191516Z`; it resolves the bundled runner
-but reports PENDING because the bundled simulator misclassified a real ADB phone
-line containing `transport_id` as an emulator. Do not claim Android OAuth is
-fixed until the installed `win-x64-20260606T193120Z` app resolves the bundled
-local horc runner, detects the authorized USB phone as a device, runs the local
-simulator, uploads/saves the generated report, and the report status is
-PASS/PASSED.
+Common diagnoses:
+
+| Status | Meaning |
+| --- | --- |
+| `bridge_update_required` | Installed bridge lacks the generic hot-op/list/protocol contract; rebuild/reinstall proof is required. |
+| `hot_operation_missing` | Bridge is new enough, but the manifest is not visible in the active root. Check `WASM_AGENT_BRIDGE_OPS_DIR` and bundled resources. |
+| `hot_operation_sha_mismatch` | Expected or manifest SHA does not match the loaded entry. |
+| `hot_operation_capability_denied` | The manifest did not grant a helper capability the op attempted to use. |
+| `hot_operations_disabled` | `WASM_AGENT_DISABLE_HOT_OPS=1` is active. |
+| `hot_operation_timeout` | The op exceeded the stricter of payload timeout and manifest timeout. |
+
+The Windows installable should remain the stable shell: Electron startup,
+backend validation, local bridge server/control polling, self-update,
+hot-operation loader/helpers, diagnostics/result upload, and bundled base ops.
+Do not bundle Android APKs, reports, simulator fixtures, datasets, logs, docs,
+or dev-only scripts unless a reviewed runtime path requires them.
+
+## Durable Next Step
+
+Install the staged Win11 update
+`WASM-Agent-Setup-x64-0.1.0-20260612T152322Z.exe`, confirm the native-control
+heartbeat reports `win-x64-20260612T152322Z` or newer, then rerun the Hermes
+Wake export/train loop. After installation, run
+`native\windows\scripts\verify-installed-app.ps1 -Launch -InteractiveLogin` for
+Windows runtime/login proof.

@@ -590,6 +590,48 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/native/android/hermes-wake-model/latest":
+            try:
+                serve_native_android_hermes_wake_model(self.server, self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-model/latest.json":
+            try:
+                self._json(HTTPStatus.OK, latest_native_android_hermes_wake_model_metadata(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-dataset/latest.json":
+            try:
+                self._json(HTTPStatus.OK, latest_native_android_hermes_wake_dataset_metadata(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-dataset/list":
+            try:
+                self._json(HTTPStatus.OK, list_native_android_hermes_wake_datasets(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-dataset/latest.zip":
+            try:
+                serve_native_android_hermes_wake_dataset(self.server, self, user)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-export/request":
+            try:
+                self._json(HTTPStatus.OK, poll_native_android_hermes_wake_export(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/hermes-wake-install/request":
+            try:
+                self._json(HTTPStatus.OK, poll_native_android_hermes_wake_install(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/native/android/auth/return":
             try:
                 serve_native_android_auth_return(self)
@@ -1166,6 +1208,64 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "native_diagnostics_error", "message": str(exc)}},
                 )
             return
+        if path == "/native/android/hermes-wake-dataset":
+            try:
+                payload = self._read_raw_body(max_bytes=256 * 1024 * 1024)
+                self._json(HTTPStatus.OK, save_native_android_hermes_wake_dataset(self.server, payload, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_hermes_wake_dataset_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/hermes-wake-export/request":
+            try:
+                self._json(HTTPStatus.OK, queue_native_android_hermes_wake_export(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_hermes_wake_export_request_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/hermes-wake-export/result":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_native_android_hermes_wake_export_result(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_hermes_wake_export_result_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/hermes-wake-install/request":
+            try:
+                self._json(HTTPStatus.OK, queue_native_android_hermes_wake_install(self.server, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_hermes_wake_install_request_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/hermes-wake-install/result":
+            try:
+                body = self._read_json(max_bytes=256 * 1024)
+                self._json(HTTPStatus.OK, save_native_android_hermes_wake_install_result(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_hermes_wake_install_result_error", "message": str(exc)}},
+                )
+            return
         if path == "/native/events":
             try:
                 body = self._read_json(max_bytes=256 * 1024)
@@ -1655,6 +1755,21 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if not isinstance(payload, dict):
             raise BrowserError("invalid_json", "Request body must be a JSON object.")
         return payload
+
+    def _read_raw_body(self, *, max_bytes: int = 64 * 1024) -> bytes:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise BrowserError("invalid_content_length", "Invalid Content-Length header.") from exc
+        if length > max_bytes:
+            raise BrowserError(
+                "payload_too_large",
+                "Request body is too large.",
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+        if length <= 0:
+            return b""
+        return self.rfile.read(length)
 
     def _read_form(self, *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
         try:
@@ -6479,6 +6594,36 @@ def append_native_voice_timeline_event(server: WasmAgentServer, record: dict[str
     write_json_file(root / "latest-voice-command.json", redact_native_diagnostics(item))
 
 
+def route_native_voice_command_to_active_session(server: WasmAgentServer, record: dict[str, Any]) -> dict[str, Any]:
+    payload = record.get("payload") if isinstance(record, dict) else {}
+    if not isinstance(payload, dict):
+        return {"ok": False, "routed": False, "reason": "invalid_payload"}
+    event_type = str(payload.get("type") or payload.get("kind") or "")
+    transcript = clipped_verbatim(str(payload.get("transcript") or "").strip(), 4000)
+    if event_type != "voice_command" or not transcript:
+        return {"ok": False, "routed": False, "reason": "not_voice_command"}
+    item = {
+        "schema": "hermes.wasm_agent.voice_command_dispatch.v1",
+        "received_at": record.get("received_at"),
+        "type": "voice_command",
+        "source": payload.get("source") or "android_native_voice_wake",
+        "wake_word": payload.get("wake_word") or "hermes",
+        "wake_confidence": payload.get("wake_confidence", payload.get("confidence")),
+        "transcript": transcript,
+        "asr_provider": payload.get("asr_provider") or "",
+        "session_id": payload.get("session_id") or "",
+        "dispatch": "active_session_user_input",
+        "message": transcript,
+    }
+    root = native_events_dir(server)
+    dispatch_path = root / "voice-command-dispatch.jsonl"
+    redacted = redact_native_diagnostics(item)
+    with dispatch_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(redacted, sort_keys=True, ensure_ascii=True) + "\n")
+    write_json_file(root / "latest-voice-command-dispatch.json", redacted)
+    return {"ok": True, "routed": True, "dispatch": "active_session_user_input"}
+
+
 def latest_native_voice_command(server: WasmAgentServer) -> dict[str, Any]:
     latest = read_json_file(native_events_dir(server) / "latest-voice-command.json", {})
     if not isinstance(latest, dict) or not latest:
@@ -6531,13 +6676,23 @@ def redact_native_diagnostics(value: Any, depth: int = 0) -> Any:
 
 
 NATIVE_CONTROL_COMMAND_TYPES = {
+    "get_bridge_status",
+    "list_hot_operations",
+    "run_shell_self_test",
+    "run_hot_operation",
     "upload_diagnostics",
     "write_runtime_diagnostics",
     "clear_web_cache",
     "clear_cache",
     "collect_logs",
     "collect_adb_diagnostics",
+    "check_android_connection",
+    "debug_android_voice_tuning_runtime",
+    "export_hermes_wake_dataset",
+    "run_android_hermes_wake_proof",
+    "prove_android_voice_tuning",
     "read_latest_android_report",
+    "request_windows_client_update",
     "verify_android_oauth",
     "export_diagnostics",
     "open_devtools",
@@ -6552,11 +6707,21 @@ NATIVE_CONTROL_COMMAND_TYPES = {
 }
 
 FRONTIER_OPERATOR_COMMAND_TYPES = {
+    "get_bridge_status",
+    "list_hot_operations",
+    "run_shell_self_test",
+    "run_hot_operation",
     "status",
     "screenshot",
     "collect_logs",
     "collect_adb_diagnostics",
+    "check_android_connection",
+    "debug_android_voice_tuning_runtime",
+    "export_hermes_wake_dataset",
+    "run_android_hermes_wake_proof",
+    "prove_android_voice_tuning",
     "read_latest_android_report",
+    "request_windows_client_update",
     "verify_android_oauth",
     "reload",
     "reload_ignore_cache",
@@ -6571,11 +6736,21 @@ FRONTIER_OPERATOR_COMMAND_TYPES = {
 FRONTIER_OPERATOR_DESTRUCTIVE_COMMANDS = {"clear_cache", "restart_app"}
 
 FRONTIER_OPERATOR_NATIVE_COMMAND = {
+    "get_bridge_status": "get_bridge_status",
+    "list_hot_operations": "list_hot_operations",
+    "run_shell_self_test": "run_shell_self_test",
+    "run_hot_operation": "run_hot_operation",
     "status": "status",
     "screenshot": "screenshot",
     "collect_logs": "collect_logs",
     "collect_adb_diagnostics": "collect_adb_diagnostics",
+    "check_android_connection": "check_android_connection",
+    "debug_android_voice_tuning_runtime": "debug_android_voice_tuning_runtime",
+    "export_hermes_wake_dataset": "export_hermes_wake_dataset",
+    "run_android_hermes_wake_proof": "run_android_hermes_wake_proof",
+    "prove_android_voice_tuning": "prove_android_voice_tuning",
     "read_latest_android_report": "read_latest_android_report",
+    "request_windows_client_update": "request_windows_client_update",
     "verify_android_oauth": "verify_android_oauth",
     "reload": "reload",
     "reload_ignore_cache": "reload_ignore_cache",
@@ -6665,7 +6840,8 @@ def save_native_event(server: WasmAgentServer, body: dict[str, Any], handler: Wa
     write_json_file(target, bundled)
     write_json_file(root / "latest.json", record)
     append_native_voice_timeline_event(server, record)
-    return {"ok": True, "stored": True, "deviceId": device_id, "receivedAt": record["received_at"]}
+    dispatch_result = route_native_voice_command_to_active_session(server, record)
+    return {"ok": True, "stored": True, "deviceId": device_id, "receivedAt": record["received_at"], "dispatch": dispatch_result}
 
 
 def native_control_command_path(server: WasmAgentServer, device_id: str, command_id: str) -> Path:
@@ -6841,6 +7017,328 @@ def latest_native_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
     if not isinstance(payload, dict) or not payload:
         return {"ok": True, "available": False, "diagnostics": None}
     return {"ok": True, "available": True, "diagnostics": payload}
+
+
+def save_native_android_hermes_wake_dataset(server: WasmAgentServer, payload: bytes, handler: WasmAgentHandler) -> dict[str, Any]:
+    if not payload:
+        raise BrowserError("empty_hermes_wake_dataset", "Hermes wake dataset upload is empty.")
+    if len(payload) > 256 * 1024 * 1024:
+        raise BrowserError(
+            "hermes_wake_dataset_too_large",
+            "Hermes wake dataset upload is too large.",
+            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        )
+    if not payload.startswith(b"PK\x03\x04"):
+        raise BrowserError("invalid_hermes_wake_dataset", "Hermes wake dataset must be a zip archive.")
+    device_id = native_device_id_from_value(
+        handler.headers.get("X-Wasm-Agent-Native-Device-Id")
+        or handler.headers.get("X-Wasm-Agent-Android-Device-Id")
+        or "android-hermes-wake"
+    )
+    sha256 = hashlib.sha256(payload).hexdigest()
+    timestamp = iso_timestamp().replace(":", "").replace("-", "")
+    root = native_diagnostics_dir(server) / "android-hermes-wake-datasets" / device_id
+    root.mkdir(parents=True, exist_ok=True)
+    archive_path = root / f"hermes-dataset-{timestamp}.zip"
+    archive_path.write_bytes(payload)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_dataset_upload.v1",
+        "received_at": iso_timestamp(),
+        "device_id": device_id,
+        "sizeBytes": len(payload),
+        "sha256": sha256,
+        "archivePath": str(archive_path),
+        "source": clipped_verbatim(str(handler.headers.get("X-Wasm-Agent-Dataset-Source") or "windows-adb-run-as"), 120),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+    }
+    write_json_file(root / "latest.json", record)
+    write_json_file(native_diagnostics_dir(server) / "latest-android-hermes-wake-dataset.json", record)
+    append_native_control_audit(server, {
+        "action": "android_hermes_wake_dataset_uploaded",
+        "device_id": device_id,
+        "sizeBytes": len(payload),
+        "sha256": sha256,
+        "archivePath": str(archive_path),
+    })
+    return record
+
+
+def native_android_hermes_wake_export_request_path(server: WasmAgentServer) -> Path:
+    root = native_diagnostics_dir(server) / "android-hermes-wake-export"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "request.json"
+
+
+def native_android_hermes_wake_export_result_path(server: WasmAgentServer) -> Path:
+    root = native_diagnostics_dir(server) / "android-hermes-wake-export"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "result.json"
+
+
+def native_android_hermes_wake_install_request_path(server: WasmAgentServer) -> Path:
+    root = native_diagnostics_dir(server) / "android-hermes-wake-install"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "request.json"
+
+
+def native_android_hermes_wake_install_result_path(server: WasmAgentServer) -> Path:
+    root = native_diagnostics_dir(server) / "android-hermes-wake-install"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "result.json"
+
+
+def queue_native_android_hermes_wake_export(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    require_native_dataset_operator(server, handler, user, "android_hermes_wake_export_request")
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_export_request.v1",
+        "id": f"hermes-wake-export-{uuid.uuid4().hex[:16]}",
+        "status": "pending",
+        "created_at": iso_timestamp(),
+        "requested_by": native_control_operator_actor(handler, user),
+    }
+    write_json_file(native_android_hermes_wake_export_request_path(server), record)
+    return record
+
+
+def poll_native_android_hermes_wake_export(server: WasmAgentServer) -> dict[str, Any]:
+    request = read_json_file(native_android_hermes_wake_export_request_path(server), {})
+    if not isinstance(request, dict) or request.get("status") not in {"pending", "delivered"}:
+        return {"ok": True, "pending": False}
+    if request.get("status") == "pending":
+        request["status"] = "delivered"
+        request["delivered_at"] = iso_timestamp()
+        write_json_file(native_android_hermes_wake_export_request_path(server), request)
+    return {"ok": True, "pending": True, "request": request}
+
+
+def save_native_android_hermes_wake_export_result(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    request = read_json_file(native_android_hermes_wake_export_request_path(server), {})
+    result = redact_native_diagnostics(body.get("result") if isinstance(body.get("result"), dict) else body)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_export_result.v1",
+        "id": clipped_verbatim(str(body.get("id") or request.get("id") or "unknown"), 120),
+        "received_at": iso_timestamp(),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "result": result,
+    }
+    write_json_file(native_android_hermes_wake_export_result_path(server), record)
+    if isinstance(request, dict) and request:
+        request["status"] = "finished"
+        request["finished_at"] = record["received_at"]
+        request["result"] = result
+        write_json_file(native_android_hermes_wake_export_request_path(server), request)
+    append_native_control_audit(server, {
+        "action": "android_hermes_wake_export_result",
+        "result_ok": bool(result.get("ok")) if isinstance(result, dict) else None,
+        "remote_addr": record["remote_addr"],
+    })
+    return {"ok": True, "stored": True, "id": record["id"], "receivedAt": record["received_at"]}
+
+
+def queue_native_android_hermes_wake_install(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    require_native_dataset_operator(server, handler, user, "android_hermes_wake_install_request")
+    model = latest_native_android_hermes_wake_model_metadata(server)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_install_request.v1",
+        "id": f"hermes-wake-install-{uuid.uuid4().hex[:16]}",
+        "status": "pending",
+        "created_at": iso_timestamp(),
+        "requested_by": native_control_operator_actor(handler, user),
+        "model": {
+            "url": model["url"],
+            "sha256": model["sha256"],
+            "sizeBytes": model["sizeBytes"],
+        },
+    }
+    write_json_file(native_android_hermes_wake_install_request_path(server), record)
+    return record
+
+
+def poll_native_android_hermes_wake_install(server: WasmAgentServer) -> dict[str, Any]:
+    request = read_json_file(native_android_hermes_wake_install_request_path(server), {})
+    if not isinstance(request, dict) or request.get("status") not in {"pending", "delivered"}:
+        return {"ok": True, "pending": False}
+    if request.get("status") == "pending":
+        request["status"] = "delivered"
+        request["delivered_at"] = iso_timestamp()
+        write_json_file(native_android_hermes_wake_install_request_path(server), request)
+    return {"ok": True, "pending": True, "request": request}
+
+
+def save_native_android_hermes_wake_install_result(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    request = read_json_file(native_android_hermes_wake_install_request_path(server), {})
+    result = redact_native_diagnostics(body.get("result") if isinstance(body.get("result"), dict) else body)
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_install_result.v1",
+        "id": clipped_verbatim(str(body.get("id") or request.get("id") or "unknown"), 120),
+        "received_at": iso_timestamp(),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "result": result,
+    }
+    write_json_file(native_android_hermes_wake_install_result_path(server), record)
+    if isinstance(request, dict) and request:
+        request["status"] = "finished"
+        request["finished_at"] = record["received_at"]
+        request["result"] = result
+        write_json_file(native_android_hermes_wake_install_request_path(server), request)
+    append_native_control_audit(server, {
+        "action": "android_hermes_wake_install_result",
+        "result_ok": bool(result.get("ok")) if isinstance(result, dict) else None,
+        "remote_addr": record["remote_addr"],
+    })
+    return {"ok": True, "stored": True, "id": record["id"], "receivedAt": record["received_at"]}
+
+
+def require_native_dataset_operator(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None, action: str) -> str:
+    if native_control_operator_allowed(handler, user):
+        actor = native_control_operator_actor(handler, user)
+        append_native_control_audit(server, {
+            "action": action,
+            "actor": actor,
+            "remote_addr": str(handler.client_address[0] if handler.client_address else ""),
+        })
+        return actor
+    append_native_control_audit(server, {
+        "action": f"{action}_denied",
+        "remote_addr": str(handler.client_address[0] if handler.client_address else ""),
+    })
+    raise BrowserError(
+        "native_android_hermes_wake_dataset_forbidden",
+        "Native Hermes wake dataset access requires an admin session, localhost operator access, or the native control key.",
+        status=HTTPStatus.FORBIDDEN,
+    )
+
+
+def native_android_hermes_wake_dataset_root(server: WasmAgentServer) -> Path:
+    return native_diagnostics_dir(server) / "android-hermes-wake-datasets"
+
+
+def native_android_hermes_wake_dataset_record(server: WasmAgentServer, archive_path: Path, latest_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    data = archive_path.read_bytes()
+    record = dict(latest_record or {})
+    record.update({
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_dataset_archive.v1",
+        "archivePath": str(archive_path),
+        "filename": archive_path.name,
+        "sizeBytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "downloadUrl": "/native/android/hermes-wake-dataset/latest.zip",
+    })
+    if "device_id" not in record:
+        try:
+            record["device_id"] = archive_path.parent.name
+        except Exception:
+            record["device_id"] = "unknown"
+    return record
+
+
+def latest_native_android_hermes_wake_dataset_path(server: WasmAgentServer) -> tuple[Path, dict[str, Any]]:
+    latest_record = read_json_file(native_diagnostics_dir(server) / "latest-android-hermes-wake-dataset.json", {})
+    if isinstance(latest_record, dict):
+        candidate = Path(str(latest_record.get("archivePath") or ""))
+        try:
+            if candidate.is_file() and candidate.resolve().is_relative_to(native_android_hermes_wake_dataset_root(server).resolve()):
+                return candidate, latest_record
+        except (OSError, ValueError):
+            pass
+    archives = sorted(
+        native_android_hermes_wake_dataset_root(server).glob("*/hermes-dataset-*.zip"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    if not archives:
+        raise BrowserError("native_android_hermes_wake_dataset_missing", "No Android Hermes wake dataset archive has been uploaded yet.", status=HTTPStatus.NOT_FOUND)
+    return archives[0], {}
+
+
+def latest_native_android_hermes_wake_dataset_metadata(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    require_native_dataset_operator(server, handler, user, "android_hermes_wake_dataset_latest_read")
+    archive_path, latest_record = latest_native_android_hermes_wake_dataset_path(server)
+    return native_android_hermes_wake_dataset_record(server, archive_path, latest_record)
+
+
+def list_native_android_hermes_wake_datasets(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
+    require_native_dataset_operator(server, handler, user, "android_hermes_wake_dataset_list_read")
+    archives = sorted(
+        native_android_hermes_wake_dataset_root(server).glob("*/hermes-dataset-*.zip"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_dataset_list.v1",
+        "count": len(archives),
+        "datasets": [native_android_hermes_wake_dataset_record(server, path) for path in archives[:50]],
+    }
+
+
+def serve_native_android_hermes_wake_dataset(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:
+    require_native_dataset_operator(server, handler, user, "android_hermes_wake_dataset_latest_download")
+    archive_path, latest_record = latest_native_android_hermes_wake_dataset_path(server)
+    record = native_android_hermes_wake_dataset_record(server, archive_path, latest_record)
+    size = archive_path.stat().st_size
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header("Content-Disposition", 'attachment; filename="hermes-dataset.zip"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Wasm-Agent-Hermes-Wake-Dataset-Sha256", str(record["sha256"]))
+    handler.send_header("X-Wasm-Agent-Hermes-Wake-Dataset-Bytes", str(size))
+    handler.send_header("Content-Length", str(size))
+    handler.end_headers()
+    with archive_path.open("rb") as fh:
+        shutil.copyfileobj(fh, handler.wfile)
+
+
+def native_android_hermes_wake_model_candidates(server: WasmAgentServer) -> list[Path]:
+    return [
+        native_diagnostics_dir(server) / "android-hermes-wake-models" / "latest" / "hermes.onnx",
+        repo_root(server) / "build" / "voice" / "hermes.onnx",
+    ]
+
+
+def latest_native_android_hermes_wake_model_path(server: WasmAgentServer) -> Path:
+    for candidate in native_android_hermes_wake_model_candidates(server):
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except OSError:
+            continue
+    raise BrowserError("hermes_wake_model_missing", "No trained Hermes wake model is available yet.", status=HTTPStatus.NOT_FOUND)
+
+
+def latest_native_android_hermes_wake_model_metadata(server: WasmAgentServer) -> dict[str, Any]:
+    model = latest_native_android_hermes_wake_model_path(server)
+    data = model.read_bytes()
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_hermes_wake_model.v1",
+        "url": "/native/android/hermes-wake-model/latest",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "sizeBytes": len(data),
+        "sourcePath": str(model),
+    }
+
+
+def serve_native_android_hermes_wake_model(server: WasmAgentServer, handler: WasmAgentHandler) -> None:
+    model = latest_native_android_hermes_wake_model_path(server)
+    size = model.stat().st_size
+    digest = hashlib.sha256(model.read_bytes()).hexdigest()
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header("Content-Disposition", 'attachment; filename="hermes.onnx"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Wasm-Agent-Hermes-Wake-Model-Sha256", digest)
+    handler.send_header("X-Wasm-Agent-Hermes-Wake-Model-Bytes", str(size))
+    handler.send_header("Content-Length", str(size))
+    handler.end_headers()
+    with model.open("rb") as fh:
+        shutil.copyfileobj(fh, handler.wfile)
 
 
 def latest_native_diagnostics_for_device(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
@@ -11385,6 +11883,8 @@ def is_public_request(method: str, path: str) -> bool:
     if method == "GET":
         if path == "/native/download":
             return True
+        if path in {"/native/android/hermes-wake-model/latest", "/native/android/hermes-wake-model/latest.json"}:
+            return True
         if path.startswith("/native/releases/"):
             return True
         if path == "/.well-known/assetlinks.json":
@@ -11425,6 +11925,8 @@ def is_public_request(method: str, path: str) -> bool:
             "/native/android/auth/start",
             "/native/android/auth/debug",
             "/native/android/auth/return",
+            "/native/android/hermes-wake-export/request",
+            "/native/android/hermes-wake-install/request",
             "/native/frontier/status",
             "/auth/google/callback",
         }:
@@ -11440,6 +11942,11 @@ def is_public_request(method: str, path: str) -> bool:
             "/auth/google/callback",
             "/auth/redeem",
             "/auth/logout",
+            "/native/android/hermes-wake-dataset",
+            "/native/android/hermes-wake-export/request",
+            "/native/android/hermes-wake-export/result",
+            "/native/android/hermes-wake-install/request",
+            "/native/android/hermes-wake-install/result",
             "/native/diagnostics",
             "/native/events",
             "/native/control/command",

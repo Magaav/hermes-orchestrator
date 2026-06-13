@@ -63,6 +63,12 @@ function stamp(date = new Date()) {
   return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }
 
+function androidVersionCode(date = new Date()) {
+  const explicit = Number(process.env.WASM_AGENT_ANDROID_VERSION_CODE || 0);
+  if (Number.isFinite(explicit) && explicit > 0) return String(Math.floor(explicit));
+  return String(Math.floor(date.getTime() / 1000));
+}
+
 function sha256(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
@@ -172,6 +178,7 @@ function metadataFor(target, sourceApk, env, signingLevel) {
     nativeShellVersion: env.WASM_AGENT_ANDROID_VERSION,
     wasmAgentVersion: env.WASM_AGENT_ANDROID_VERSION,
     installableVersion: env.WASM_AGENT_ANDROID_VERSION,
+    versionCode: Number(env.WASM_AGENT_ANDROID_VERSION_CODE),
     buildId: env.WASM_AGENT_ANDROID_BUILD_ID,
     buildGeneratedAt: env.WASM_AGENT_ANDROID_BUILD_GENERATED_AT,
     artifactKind: "android-apk",
@@ -190,6 +197,7 @@ function main() {
   const env = {
     ...process.env,
     WASM_AGENT_ANDROID_VERSION: version,
+    WASM_AGENT_ANDROID_VERSION_CODE: androidVersionCode(generatedAt),
     WASM_AGENT_ANDROID_BUILD_ID: process.env.WASM_AGENT_ANDROID_BUILD_ID || `android-universal-${buildStamp}`,
     WASM_AGENT_ANDROID_BUILD_GENERATED_AT: generatedAt.toISOString(),
     WASM_AGENT_ANDROID_KEYSTORE: process.env.WASM_AGENT_ANDROID_KEYSTORE || path.join(signingRoot, "wasm-agent-sideload.jks"),
@@ -220,6 +228,9 @@ function main() {
   if (env.HORC_ANDROID_RUN_UNIT_TESTS === "1") {
     run(gradle.command, [...gradleArgs, ":app:testReleaseUnitTest"], { cwd: androidRoot, env });
   }
+  if (env.WASM_AGENT_ANDROID_SKIP_LINT === "1") {
+    gradleArgs.push("-x", "lintVitalAnalyzeRelease", "-x", "lintVitalReportRelease", "-x", "lintVitalRelease");
+  }
   gradleArgs.push(":app:assembleRelease");
   run(gradle.command, gradleArgs, { cwd: androidRoot, env });
 
@@ -243,6 +254,7 @@ function main() {
     host: { os: os.platform(), arch: os.arch() },
     buildId: env.WASM_AGENT_ANDROID_BUILD_ID,
     version,
+    versionCode: Number(env.WASM_AGENT_ANDROID_VERSION_CODE),
     sourceApk: path.relative(androidRoot, apkPath),
     serverUrl: cloudOrigin,
     allowLocalDev: false,

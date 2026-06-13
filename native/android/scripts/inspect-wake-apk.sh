@@ -9,8 +9,8 @@ if [[ ! -f "$apk" ]]; then
   exit 2
 fi
 
-if [[ "$expect_model" != "--expect-model" && "$expect_model" != "--expect-no-model" ]]; then
-  echo "Usage: $0 <apk> [--expect-model|--expect-no-model]" >&2
+if [[ "$expect_model" != "--expect-model" && "$expect_model" != "--expect-base-model" && "$expect_model" != "--expect-no-model" ]]; then
+  echo "Usage: $0 <apk> [--expect-model|--expect-base-model|--expect-no-model]" >&2
   exit 2
 fi
 
@@ -46,8 +46,12 @@ if [[ "$expect_model" == "--expect-model" ]]; then
     echo "Forbidden non-production wake fixture marker present inside assets/voice/hermes.onnx" >&2
     exit 1
   fi
+elif [[ "$expect_model" == "--expect-base-model" ]]; then
+  require_entry '^assets/voice/base_hermes\.onnx$' 'assets/voice/base_hermes.onnx'
+  forbid_entry '^assets/voice/hermes\.onnx$' 'assets/voice/hermes.onnx when expecting base_hermes.onnx'
 else
   forbid_entry '^assets/voice/hermes\.onnx$' 'assets/voice/hermes.onnx in dev/no-model build'
+  forbid_entry '^assets/voice/base_hermes\.onnx$' 'assets/voice/base_hermes.onnx in dev/no-model build'
 fi
 
 echo "Wake APK inspection passed: $apk ($expect_model)"

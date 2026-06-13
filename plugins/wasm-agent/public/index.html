@@ -379,6 +379,28 @@
         </article>
       </section>
 
+      <section id="tuneVoiceModal" class="modal-backdrop" aria-label="Train Hermes Wake" hidden>
+        <article class="modal-card wide tune-voice-modal-card" role="dialog" aria-modal="true" aria-labelledby="tuneVoiceTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="tuneVoiceTitle">Train Hermes Wake</h2>
+              <p id="tuneVoiceSubtitle">Guided one-second wake phrase dataset</p>
+            </div>
+            <button id="closeTuneVoiceModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div id="tuneVoiceProgress" class="tune-voice-progress" aria-label="Tune voice progress"></div>
+          <div id="tuneVoiceBody" class="tune-voice-body"></div>
+          <p id="tuneVoiceMessage" class="modal-message tune-voice-message" aria-live="polite"></p>
+          <div class="modal-actions tune-voice-actions">
+            <button id="tuneVoiceBackButton" type="button">Back</button>
+            <button id="tuneVoiceDeleteLastButton" type="button">Delete Last</button>
+            <button id="tuneVoiceRetryLastButton" type="button">Retry Last</button>
+            <button id="tuneVoiceRecordButton" class="primary" type="button">Start</button>
+            <button id="tuneVoiceNextButton" type="button">Next</button>
+          </div>
+        </article>
+      </section>
+
       <section id="authGate" class="auth-gate" aria-label="Account sign-in">
         <article class="auth-card">
           <span class="auth-mark" aria-hidden="true">
@@ -403,7 +425,7 @@
                 <button id="homeFleetButton" class="home-action-button fleet" type="button" title="Fleet" aria-label="Fleet"><span>Fleet</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
                 <button id="homeGoNativeButton" class="home-action-button go-native" type="button" title="Native" aria-label="Native"><span>Native</span></button>
-                <button id="homeTuneVoiceButton" class="home-action-button tune-voice" type="button" title="Record Hermes positive, silence negative, speech negative, or noise negative" aria-label="Tune Voice" data-home-action-id="tune_voice"><span>Tune Voice</span><small id="homeTuneVoiceStatus" aria-live="polite"></small></button>
+                <button id="homeTuneVoiceButton" class="home-action-button tune-voice" type="button" title="Train Hermes Wake" aria-label="Tune Voice" data-home-action-id="tune_voice"><span>Train Hermes Wake</span><small id="homeTuneVoiceStatus" aria-live="polite"></small></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>
@@ -682,7 +704,13 @@
 	              <section class="native-diagnostics-console" aria-label="Verify Android OAuth on real phone">
 	                <header>
 	                  <h3>Verify Android OAuth on real phone</h3>
-	                  <button id="androidOAuthStartButton" class="native-primary-button" type="button">Start Android OAuth verification</button>
+	                  <div class="native-diagnostics-header-actions">
+	                    <button id="androidConnectionCheckButton" type="button">Check Android Connection</button>
+	                    <button id="androidVoiceTuningProofButton" class="native-primary-button" type="button">Install / Prove Android Voice Tuning APK</button>
+	                    <button id="androidVoiceTuningRuntimeButton" type="button">Debug Android Voice Tuning Runtime</button>
+	                    <button id="androidVoiceTuningGoalLoopButton" type="button">Run Hermes Wake Goal Loop</button>
+	                    <button id="androidOAuthStartButton" class="native-primary-button" type="button">Start Android OAuth verification</button>
+	                  </div>
 	                </header>
 	                <div class="native-diagnostics-status">
 	                  <strong id="androidOAuthStatus">idle</strong>
@@ -981,7 +1009,7 @@
       </section>
       <div id="agentToastStack" class="agent-toast-stack" aria-live="polite"></div>
     </section>
-    <script src="/auth-redirect.js?v=20260604-auth-preload"></script>
-    <script type="module" src="/app.js?v=20260604-auth-preload"></script>
+    <script src="/auth-redirect.js?v=20260612-hermes-wake-install"></script>
+    <script type="module" src="/app.js?v=20260612-hermes-wake-install"></script>
   </body>
 </html>

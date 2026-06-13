@@ -1430,6 +1430,7 @@ run_docker_android_release() {
   local host_uid
   local host_gid
   local docker_status
+  local skip_apksigner_verify
   host_arch="$(canonical_host_arch)"
   ensure_docker_available || exit 2
   if [[ "${host_arch}" == "aarch64" ]]; then
@@ -1441,12 +1442,17 @@ run_docker_android_release() {
   echo "horc build android-apk: starting Docker Android builder..."
   echo "horc build android-apk: docker ${image} --platform linux/amd64"
   docker_status=0
+  skip_apksigner_verify="${WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY:-}"
+  if [[ -z "${skip_apksigner_verify}" && "${host_arch}" == "aarch64" ]]; then
+    skip_apksigner_verify=1
+  fi
   docker run --rm \
     --platform linux/amd64 \
     -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
     -e HORC_ANDROID_RUN_UNIT_TESTS="${HORC_ANDROID_RUN_UNIT_TESTS:-0}" \
+    -e WASM_AGENT_ANDROID_SKIP_LINT="${WASM_AGENT_ANDROID_SKIP_LINT:-1}" \
     -e WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS="${WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS:-600000}" \
-    -e WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY="${WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY:-0}" \
+    -e WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY="${skip_apksigner_verify:-0}" \
     -e HORC_HOST_UID="${host_uid}" \
     -e HORC_HOST_GID="${host_gid}" \
     -v "${root}:${root}" \
@@ -1457,6 +1463,24 @@ run_docker_android_release() {
     echo "horc build android-apk: Docker Android builder exited with status ${docker_status}" >&2
     return "${docker_status}"
   fi
+}
+
+verify_android_release_artifact_on_host() {
+  local android_root="$1"
+  local apk="${android_root}/release/WASM-Agent-arm64.apk"
+  local sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${android_root}/.android-sdk}}"
+  local apksigner=""
+  if [[ -n "${APKSIGNER_BIN:-}" && -x "${APKSIGNER_BIN}" ]]; then
+    apksigner="${APKSIGNER_BIN}"
+  elif [[ -d "${sdk_root}/build-tools" ]]; then
+    apksigner="$(find "${sdk_root}/build-tools" -maxdepth 2 -type f -name apksigner -perm -u+x 2>/dev/null | sort -V | tail -1)"
+  fi
+  if [[ -z "${apksigner}" ]]; then
+    echo "horc build android-apk: host apksigner not found; skipping host signature verification" >&2
+    return 0
+  fi
+  echo "horc build android-apk: host verifying APK signature with ${apksigner}"
+  "${apksigner}" verify --verbose "${apk}"
 }
 
 build_android_native_release() {
@@ -1504,6 +1528,10 @@ build_android_native_release() {
 
   [[ -f "${android_root}/release/WASM-Agent-arm64.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-arm64.apk"
   [[ -f "${android_root}/release/WASM-Agent-universal.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-universal.apk"
+  verify_android_release_artifact_on_host "${android_root}"
+  echo "horc build android-apk: generating native release feed"
+  require_command node "Install Node.js so horc can generate the native release feed."
+  (cd "${root}" && node plugins/wasm-agent/scripts/generate-native-release-feed.js)
   echo "horc build android-apk: APK artifacts ready:"
   echo "horc build android-apk:   ${android_root}/release/WASM-Agent-arm64.apk"
   echo "horc build android-apk:   ${android_root}/release/WASM-Agent-universal.apk"

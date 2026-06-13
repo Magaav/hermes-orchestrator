@@ -46,13 +46,14 @@ import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
-import com.colmeio.wasmagent.voice.OpenWakeWordOnnxEngine
+import com.colmeio.wasmagent.voice.WakeModelSelector
 import com.colmeio.wasmagent.voice.VoiceTuningCategory
 import com.colmeio.wasmagent.voice.VoiceTuningRecorder
 import com.colmeio.wasmagent.voice.VoiceTuningStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -73,11 +74,15 @@ class MainActivity : Activity() {
         private const val PREF_SELECTED_ORIGIN = "selected_origin"
         private const val STATE_WEBVIEW = "wasm_agent_webview_state"
         private const val STATE_SELECTED_ORIGIN = "wasm_agent_selected_origin"
+        private const val EXTRA_DEBUG_SCREEN = "debug_screen"
+        private const val EXTRA_CLEAR_WEBVIEW_DATA = "clear_webview_data"
+        private const val EXTRA_NATIVE_SCREEN = "native_screen"
         private const val LOG_TAG = "WasmAgentNative"
         private const val REQUEST_FILE_CHOOSER = 8801
         private const val REQUEST_WEB_PERMISSIONS = 8802
         private const val REQUEST_GEOLOCATION_PERMISSION = 8803
         private const val REQUEST_VOICE_WAKE_PERMISSION = 8804
+        private const val HERMES_WAKE_ACCEPTANCE_MODEL_SHA256 = "23aee3f94d9499c7809b413037a59e3e6f8668767a49e077017e743dd959e58c"
         private const val BRAND_BG = 0xFF050A12.toInt()
         private const val BRAND_PANEL = 0xFF0E1726.toInt()
         private const val BRAND_TEXT = 0xFFEFF6FF.toInt()
@@ -113,6 +118,7 @@ class MainActivity : Activity() {
     @Volatile private var lastAndroidReturnIntentAt: Long = 0
     @Volatile private var lastAndroidReturnSessionId: String = ""
     @Volatile private var lastDiagnosticsUploadAt: Long = 0
+    @Volatile private var pendingDebugScreen: String = ""
     private var lastIntentSummary: JSONObject? = null
     private var lastDeepLinkSummary: JSONObject? = null
     private var lastExceptionSummary: JSONObject? = null
@@ -252,6 +258,25 @@ class MainActivity : Activity() {
         val summary = summarizeIntent(intent, reason)
         lastIntentSummary = summary
         logDiagnostic("activity_intent_observed", summary)
+        val debugScreen = intent?.getStringExtra(EXTRA_DEBUG_SCREEN).orEmpty()
+            .ifBlank { intent?.getStringExtra(EXTRA_NATIVE_SCREEN).orEmpty() }
+        if (debugScreen.isNotBlank()) {
+            pendingDebugScreen = debugScreen
+            logDiagnostic("activity_debug_screen_requested", JSONObject()
+                .put("reason", reason)
+                .put("debug_screen", debugScreen))
+            if (debugScreen == "export-hermes-dataset") {
+                triggerHermesDatasetExport("debug_intent")
+            } else if (debugScreen == "hermes-wake-proof") {
+                beginHermesWakeProof("debug_intent")
+            }
+        }
+        if (intent?.getBooleanExtra(EXTRA_CLEAR_WEBVIEW_DATA, false) == true) {
+            clearWebViewData("launch_intent")
+            logDiagnostic("activity_clear_webview_requested", JSONObject()
+                .put("reason", reason)
+                .put("debug_screen", debugScreen))
+        }
         val data = intent?.data ?: return
         lastDeepLinkSummary = JSONObject()
             .put("reason", reason)
@@ -259,6 +284,16 @@ class MainActivity : Activity() {
             .put("scheme", data.scheme.orEmpty())
             .put("host", data.host.orEmpty())
         logDiagnostic("activity_intent_data_observed", lastDeepLinkSummary ?: JSONObject())
+        val requestedScreen = data.getQueryParameter(EXTRA_NATIVE_SCREEN).orEmpty()
+        if (requestedScreen.isNotBlank()) {
+            pendingDebugScreen = requestedScreen
+            logDiagnostic("activity_debug_screen_url_requested", JSONObject()
+                .put("reason", reason)
+                .put("debug_screen", requestedScreen))
+            if (requestedScreen == "hermes-wake-proof") {
+                beginHermesWakeProof("debug_url")
+            }
+        }
         val isCustomSchemeReturn = data.scheme == "wasm-agent" && data.host == "android-auth-return"
         val isHttpsReturn = data.scheme == "https" && data.host == "wa.colmeio.com" && data.path.orEmpty().startsWith("/native/android/auth/return")
         if (!isCustomSchemeReturn && !isHttpsReturn) return
@@ -466,9 +501,13 @@ class MainActivity : Activity() {
             .appendQueryParameter("native", "android")
             .appendQueryParameter("shell", "android-webview")
             .appendQueryParameter("buildId", BuildConfig.NATIVE_BUILD_ID)
+            .appendQueryParameter("webBuildHint", BuildConfig.BUILD_GENERATED_AT)
             .appendQueryParameter("native_correlation_id", nativeCorrelationId)
             .appendQueryParameter("android_auth_session", androidAuthSessionId)
             .appendQueryParameter("install_device_hash", installDeviceHash)
+        if (pendingDebugScreen.isNotBlank()) {
+            builder.appendQueryParameter("native_screen", pendingDebugScreen)
+        }
         if (authCode.isNotBlank()) {
             builder.appendQueryParameter("auth_code", authCode)
         }
@@ -558,8 +597,14 @@ class MainActivity : Activity() {
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
         view.addJavascriptInterface(AndroidBridge(origin), "wasmAgentAndroid")
-        view.addJavascriptInterface(AndroidNativeBridge(origin), "wasmAgentNative")
+        view.addJavascriptInterface(AndroidNativeBridge(origin), NativeBridgeContract.GENERAL_BRIDGE_OBJECT)
+        view.addJavascriptInterface(AndroidVoiceTuningBridge(origin), NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
         view.addJavascriptInterface(AndroidDiagnosticsBridge(origin), "WasmAgentAndroidDiagnostics")
+        logDiagnostic("voice_tuning_bridge_registered", JSONObject()
+            .put("voice_tuning_bridge_registered", true)
+            .put("bridge_object_name", NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
+            .put("general_bridge_object_name", NativeBridgeContract.GENERAL_BRIDGE_OBJECT)
+            .put("methods", JSONArray(NativeBridgeContract.voiceTuningMethods)))
         view.webViewClient = createWebViewClient()
         view.webChromeClient = createWebChromeClient()
         view.setDownloadListener(createDownloadListener())
@@ -1188,6 +1233,154 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun uploadHermesWakeDataset(dataset: File): JSONObject {
+        if (!dataset.isFile || dataset.length() <= 0L) {
+            return JSONObject().put("ok", false).put("error", "dataset_export_missing")
+        }
+        val maxBytes = 256L * 1024L * 1024L
+        if (dataset.length() > maxBytes) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "dataset_export_too_large")
+                .put("bytes", dataset.length())
+                .put("max_bytes", maxBytes)
+        }
+        val origin = selectedOrigin.ifBlank { BuildConfig.DEFAULT_SERVER_URL }.trimEnd('/')
+        return try {
+            val bytes = dataset.readBytes()
+            val sha256 = sha256Bytes(bytes)
+            val connection = (URL("$origin/native/android/hermes-wake-dataset").openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 60000
+                requestMethod = "POST"
+                setRequestProperty("Content-Type", "application/zip")
+                setRequestProperty("X-Wasm-Agent-Dataset-Source", "android-native-export")
+                setRequestProperty("X-Wasm-Agent-Native-Device-Id", "android-${BuildConfig.NATIVE_BUILD_ID}-${installDeviceHash}")
+                setRequestProperty("X-Wasm-Agent-Dataset-Sha256", sha256)
+                doOutput = true
+            }
+            connection.outputStream.use { stream -> stream.write(bytes) }
+            val responseText = runCatching {
+                (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream)
+                    ?.bufferedReader()
+                    ?.use { it.readText() }
+            }.getOrNull().orEmpty()
+            val response = runCatching { JSONObject(responseText) }.getOrElse { JSONObject().put("raw", responseText.take(2000)) }
+            JSONObject()
+                .put("ok", connection.responseCode in 200..299)
+                .put("status_code", connection.responseCode)
+                .put("origin", origin)
+                .put("sha256", sha256)
+                .put("response", response)
+        } catch (error: Exception) {
+            JSONObject()
+                .put("ok", false)
+                .put("error", error.javaClass.simpleName)
+                .put("message", error.message ?: "")
+        }
+    }
+
+    private fun triggerHermesDatasetExport(reason: String) {
+        thread(name = "hermes-dataset-export-$reason") {
+            try {
+                Thread.sleep(1200)
+                val event = voiceTuningStore.exportDataset(File(filesDir, "voice/exports"))
+                val upload = uploadHermesWakeDataset(File(event.optString("path")))
+                event.put("upload", upload)
+                    .put("trigger", reason)
+                    .put("status", voiceTuningStatus())
+                logDiagnostic("voice_tuning_dataset_exported", event)
+                emitRendererEvent("wasm-agent:native-voice-tuning", event)
+            } catch (error: Exception) {
+                logDiagnostic("voice_tuning_dataset_export_failed", JSONObject()
+                    .put("ok", false)
+                    .put("trigger", reason)
+                    .put("error", error.message ?: error.javaClass.simpleName))
+            }
+        }
+    }
+
+    private fun installHermesWakeModel(modelUrl: String, expectedSha256: String = ""): JSONObject {
+        val origin = selectedOrigin.ifBlank { BuildConfig.DEFAULT_SERVER_URL }.trimEnd('/')
+        val resolved = try {
+            URL(URL("$origin/"), modelUrl)
+        } catch (error: Exception) {
+            return JSONObject().put("ok", false).put("error", "invalid_model_url").put("message", error.message ?: "")
+        }
+        val expectedHost = Uri.parse(origin).host.orEmpty().lowercase()
+        val allowedProtocol = resolved.protocol == "https" || (BuildConfig.ALLOW_LOCAL_DEV && resolved.protocol == "http")
+        if (!allowedProtocol || resolved.host.lowercase() != expectedHost) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "model_url_not_allowed")
+                .put("message", "Hermes wake models must be downloaded from the selected wasm-agent backend.")
+        }
+        val targetDir = File(filesDir, "voice")
+        val target = File(targetDir, "hermes.onnx")
+        val temp = File(targetDir, "hermes.onnx.tmp")
+        return try {
+            targetDir.mkdirs()
+            val connection = (resolved.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 120000
+                requestMethod = "GET"
+            }
+            if (connection.responseCode !in 200..299) {
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "model_download_failed")
+                    .put("status_code", connection.responseCode)
+            }
+            val maxBytes = 32L * 1024L * 1024L
+            var total = 0L
+            MessageDigest.getInstance("SHA-256").let { digest ->
+                connection.inputStream.use { input ->
+                    FileOutputStream(temp).use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            total += read
+                            if (total > maxBytes) throw IllegalStateException("model_too_large")
+                            digest.update(buffer, 0, read)
+                            output.write(buffer, 0, read)
+                        }
+                    }
+                }
+                val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+                if (expectedSha256.isNotBlank() && !actualSha256.equals(expectedSha256, ignoreCase = true)) {
+                    temp.delete()
+                    return JSONObject()
+                        .put("ok", false)
+                        .put("error", "model_sha256_mismatch")
+                        .put("expected_sha256", expectedSha256)
+                        .put("actual_sha256", actualSha256)
+                }
+                if (!temp.renameTo(target)) {
+                    temp.copyTo(target, overwrite = true)
+                    temp.delete()
+                }
+                logDiagnostic("hermes_wake_model_installed", JSONObject()
+                    .put("bytes", total)
+                    .put("sha256", actualSha256)
+                    .put("path", "files/voice/hermes.onnx"))
+                JSONObject()
+                    .put("ok", true)
+                    .put("type", "hermes_wake_model_installed")
+                    .put("path", "files/voice/hermes.onnx")
+                    .put("bytes", total)
+                    .put("sha256", actualSha256)
+                    .put("status", voiceWakeStatus())
+            }
+        } catch (error: Exception) {
+            temp.delete()
+            JSONObject()
+                .put("ok", false)
+                .put("error", error.message ?: error.javaClass.simpleName)
+                .put("message", error.javaClass.simpleName)
+        }
+    }
+
     private inner class AndroidBridge(private val origin: String) {
         @JavascriptInterface
         fun authSessionId(): String = androidAuthSessionId
@@ -1209,6 +1402,9 @@ class MainActivity : Activity() {
             runOnUiThread {
                 webView?.alpha = 1f
                 hideSplash()
+            }
+            if (pendingDebugScreen == "train-hermes-wake") {
+                collectTrainHermesWakeDiagnostics(true, "renderer_app_ready")
             }
         }
 
@@ -1331,12 +1527,36 @@ class MainActivity : Activity() {
         fun voiceTuningStatus(): String = voiceTuningStatus().toString()
 
         @JavascriptInterface
+        fun getTrainHermesWakeDiagnostics(): String = collectTrainHermesWakeDiagnostics(false, "android_bridge").toString()
+
+        @JavascriptInterface
+        fun openTrainHermesWake(): String = collectTrainHermesWakeDiagnostics(true, "android_bridge").toString()
+
+        @JavascriptInterface
         fun startVoiceTuningSample(categoryId: String): String = startVoiceTuningSample(categoryId, null)
 
         @JavascriptInterface
         fun startVoiceTuningSample(categoryId: String, source: String?): String {
-            val category = VoiceTuningCategory.fromId(categoryId)
+            val request = runCatching { JSONObject(categoryId) }.getOrNull()
+            val categoryIdFromRequest = request?.optString("category").orEmpty()
+            val kind = request?.optString("kind").orEmpty()
+            val label = request?.optString("label").orEmpty()
+            val resolvedCategoryId = when {
+                categoryIdFromRequest.isNotBlank() -> categoryIdFromRequest
+                kind == "hermes" && label == "positive" -> "positive"
+                kind == "silence" && label == "negative" -> "negative/silence"
+                kind == "speech" && label == "negative" -> "negative/speech"
+                kind == "noise" && label == "negative" -> "negative/noise"
+                else -> categoryId
+            }
+            val resolvedSource = request?.optString("source").takeUnless { it.isNullOrBlank() } ?: source
+            val category = VoiceTuningCategory.fromId(resolvedCategoryId)
                 ?: return JSONObject().put("ok", false).put("error", "unknown_voice_tuning_category").toString()
+            logDiagnostic("native_record_request_received", JSONObject()
+                .put("kind", category.kind)
+                .put("label", category.label)
+                .put("duration_ms", VoiceTuningStore.SAMPLE_DURATION_MS)
+                .put("prompt", request?.optString("prompt") ?: ""))
             if (!permissionGranted(Manifest.permission.RECORD_AUDIO)) {
                 runOnUiThread {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -1346,12 +1566,21 @@ class MainActivity : Activity() {
                 return JSONObject()
                     .put("ok", false)
                     .put("requested", true)
-                    .put("error", "record_audio_permission_missing")
+                    .put("kind", category.kind)
+                    .put("label", category.label)
+                    .put("error", "permission_denied")
+                    .put("message", "Microphone permission is required to record training samples.")
                     .put("status", this@MainActivity.voiceTuningStatus())
                     .toString()
             }
-            val result = voiceTuningRecorder.record(category, source) { event ->
+            val result = voiceTuningRecorder.record(category, resolvedSource) { event ->
                 logDiagnostic(event.optString("type", "voice_tuning_event"), event)
+                when (event.optString("type")) {
+                    "voice_tuning_sample_recorded" -> logDiagnostic("native_record_result", event)
+                    "voice_tuning_recording_failed" -> logDiagnostic("native_record_error", event)
+                    "native_record_started" -> logDiagnostic("native_record_started", event)
+                    "native_record_finished" -> logDiagnostic("native_record_finished", event)
+                }
                 emitRendererEvent("wasm-agent:native-voice-tuning", event)
             }
             return result.put("status", this@MainActivity.voiceTuningStatus()).toString()
@@ -1375,6 +1604,33 @@ class MainActivity : Activity() {
             emitRendererEvent("wasm-agent:native-voice-tuning", event)
             return event.put("status", this@MainActivity.voiceTuningStatus()).toString()
         }
+
+        @JavascriptInterface
+        fun exportHermesDataset(): String {
+            return try {
+                val event = voiceTuningStore.exportDataset(File(filesDir, "voice/exports"))
+                val upload = uploadHermesWakeDataset(File(event.optString("path")))
+                event.put("upload", upload)
+                logDiagnostic("voice_tuning_dataset_exported", event)
+                emitRendererEvent("wasm-agent:native-voice-tuning", event)
+                runOnUiThread {
+                    val message = if (upload.optBoolean("ok", false)) "Hermes dataset exported and uploaded." else "Hermes dataset exported."
+                    Toast.makeText(this@MainActivity, message, Toast.LENGTH_SHORT).show()
+                }
+                event.put("status", this@MainActivity.voiceTuningStatus()).toString()
+            } catch (error: Exception) {
+                val event = JSONObject()
+                    .put("ok", false)
+                    .put("type", "voice_tuning_dataset_export_failed")
+                    .put("error", error.message ?: error.javaClass.simpleName)
+                logDiagnostic("voice_tuning_dataset_export_failed", event)
+                event.toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun installHermesWakeModel(modelUrl: String, sha256: String?): String =
+            this@MainActivity.installHermesWakeModel(modelUrl, sha256.orEmpty()).toString()
 
         @JavascriptInterface
         fun requestVoiceWakePermission(): String {
@@ -1416,6 +1672,12 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
+        fun beginHermesWakeProof(): String = this@MainActivity.beginHermesWakeProof("native_bridge").toString()
+
+        @JavascriptInterface
+        fun getHermesWakeProof(): String = this@MainActivity.voiceWakeStatus().toString()
+
+        @JavascriptInterface
         fun disableVoiceWake(): String {
             prefs.edit().putBoolean(HermesVoiceWakeService.PREF_ENABLED, false).apply()
             runOnUiThread {
@@ -1424,6 +1686,56 @@ class MainActivity : Activity() {
             }
             return JSONObject().put("ok", true).put("status", voiceWakeStatus()).toString()
         }
+    }
+
+    private inner class AndroidVoiceTuningBridge(private val origin: String) {
+        private fun nativeBridge(): AndroidNativeBridge = AndroidNativeBridge(origin)
+
+        @JavascriptInterface
+        fun getStatus(): String = nativeBridge().voiceTuningStatus()
+
+        @JavascriptInterface
+        fun getBuildInfo(): String = this@MainActivity.voiceTuningBridgeBuildInfo().toString()
+
+        @JavascriptInterface
+        fun isRecordingSupported(): Boolean = permissionGranted(Manifest.permission.RECORD_AUDIO)
+
+        @JavascriptInterface
+        fun voiceTuningStatus(): String = nativeBridge().voiceTuningStatus()
+
+        @JavascriptInterface
+        fun getVoiceTuningDiagnostics(): String = this@MainActivity.voiceTuningBridgeDiagnostics().toString()
+
+        @JavascriptInterface
+        fun startVoiceTuningSample(payloadJson: String): String = nativeBridge().startVoiceTuningSample(payloadJson)
+
+        @JavascriptInterface
+        fun stopVoiceTuningSample(): String = nativeBridge().cancelVoiceTuning()
+
+        @JavascriptInterface
+        fun deleteLastVoiceTuningSample(categoryId: String): String = nativeBridge().deleteLastVoiceTuningSample(categoryId)
+
+        @JavascriptInterface
+        fun cancelVoiceTuning(): String = nativeBridge().cancelVoiceTuning()
+
+        @JavascriptInterface
+        fun exportHermesDataset(): String = nativeBridge().exportHermesDataset()
+
+        @JavascriptInterface
+        fun installHermesWakeModel(modelUrl: String, sha256: String?): String =
+            this@MainActivity.installHermesWakeModel(modelUrl, sha256.orEmpty()).toString()
+
+        @JavascriptInterface
+        fun beginHermesWakeProof(): String = this@MainActivity.beginHermesWakeProof("voice_tuning_bridge").toString()
+
+        @JavascriptInterface
+        fun getHermesWakeProof(): String = this@MainActivity.voiceWakeStatus().toString()
+
+        @JavascriptInterface
+        fun getTrainHermesWakeDiagnostics(): String = collectTrainHermesWakeDiagnostics(false, "voice_tuning_bridge").toString()
+
+        @JavascriptInterface
+        fun openTrainHermesWake(): String = collectTrainHermesWakeDiagnostics(true, "voice_tuning_bridge").toString()
     }
 
     private inner class AndroidDiagnosticsBridge(private val origin: String) {
@@ -1470,6 +1782,12 @@ class MainActivity : Activity() {
         fun voiceTuningStatus(): String = this@MainActivity.voiceTuningStatus().toString()
 
         @JavascriptInterface
+        fun getTrainHermesWakeDiagnostics(): String = collectTrainHermesWakeDiagnostics(false, "diagnostics_bridge").toString()
+
+        @JavascriptInterface
+        fun openTrainHermesWake(): String = collectTrainHermesWakeDiagnostics(true, "diagnostics_bridge").toString()
+
+        @JavascriptInterface
         fun startVoiceTuningSample(categoryId: String): String = AndroidNativeBridge(origin).startVoiceTuningSample(categoryId)
 
         @JavascriptInterface
@@ -1482,6 +1800,9 @@ class MainActivity : Activity() {
         fun cancelVoiceTuning(): String = AndroidNativeBridge(origin).cancelVoiceTuning()
 
         @JavascriptInterface
+        fun exportHermesDataset(): String = AndroidNativeBridge(origin).exportHermesDataset()
+
+        @JavascriptInterface
         fun requestVoiceWakePermission(): String = AndroidNativeBridge(origin).requestVoiceWakePermission()
 
         @JavascriptInterface
@@ -1489,6 +1810,12 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun disableVoiceWake(): String = AndroidNativeBridge(origin).disableVoiceWake()
+
+        @JavascriptInterface
+        fun beginHermesWakeProof(): String = this@MainActivity.beginHermesWakeProof("diagnostics_bridge").toString()
+
+        @JavascriptInterface
+        fun getHermesWakeProof(): String = this@MainActivity.voiceWakeStatus().toString()
 
         @JavascriptInterface
         fun retryGoogleLogin(): String {
@@ -1536,7 +1863,7 @@ class MainActivity : Activity() {
             .put("nativeCorrelationId", nativeCorrelationId)
             .put("installDeviceHash", installDeviceHash)
             .put("deviceId", "android-${BuildConfig.NATIVE_BUILD_ID}")
-            .put("voiceWake", voiceWakeStatus())
+            .put("voiceWake", voiceWakeStatusLightweight())
             .put("diagnosticsPath", diagnostics.path())
     }
 
@@ -1708,6 +2035,47 @@ class MainActivity : Activity() {
             """.trimIndent()
             webView?.evaluateJavascript(script, null)
         }
+    }
+
+    private fun collectTrainHermesWakeDiagnostics(openModal: Boolean, source: String): JSONObject {
+        val result = JSONObject()
+            .put("ok", false)
+            .put("source", source)
+            .put("open_requested", openModal)
+        val latch = CountDownLatch(1)
+        runOnUiThread {
+            val script = """
+                (() => {
+                  try {
+                    const api = window.__wasmAgentTuneVoice;
+                    if (!api || typeof api.diagnostics !== "function") {
+                      return JSON.stringify({ ok: false, error: "tune_voice_api_missing" });
+                    }
+                    const payload = ${if (openModal) "api.open(" else "api.diagnostics("}${JSONObject.quote(source)}${if (openModal) ")" else ")"};
+                    return JSON.stringify({ ok: true, payload });
+                  } catch (error) {
+                    return JSON.stringify({ ok: false, error: String(error && error.message ? error.message : error) });
+                  }
+                })();
+            """.trimIndent()
+            webView?.evaluateJavascript(script) { raw ->
+                try {
+                    val clean = raw.orEmpty().trim().removeSurrounding("\"").replace("\\\"", "\"").replace("\\\\", "\\")
+                    val parsed = if (clean.isBlank() || clean == "null") JSONObject() else JSONObject(clean)
+                    result.put("ok", parsed.optBoolean("ok", false))
+                    result.put("error", parsed.optString("error", ""))
+                    result.put("payload", parsed.optJSONObject("payload") ?: JSONObject())
+                } catch (error: Exception) {
+                    result.put("ok", false)
+                    result.put("error", error.javaClass.simpleName)
+                } finally {
+                    latch.countDown()
+                }
+            } ?: latch.countDown()
+        }
+        latch.await(5, TimeUnit.SECONDS)
+        logDiagnostic("train_hermes_wake_runtime_probe", result)
+        return result
     }
 
     private fun mapRendererDiagnosticToOAuthStage(eventName: String, payload: JSONObject = JSONObject()) {
@@ -1936,19 +2304,54 @@ class MainActivity : Activity() {
     }
 
     private fun voiceTuningStatus(): JSONObject {
-        val wakeStatus = voiceWakeStatus()
+        val wakeStatus = voiceWakeStatusLightweight()
         val modelStatus = when {
             wakeStatus.optBoolean("wake_engine_ready", false) -> "validated_model"
             wakeStatus.optJSONObject("wake_model")?.optBoolean("wake_model_exists", false) == true -> "candidate_model"
             else -> "no_model"
         }
-        val nextAction = "Samples collected here must be exported and trained with tools/voice/audit-hermes-dataset.py, train-hermes-wake-model.py, build-hermes-wake-model.sh, verify-hermes-wake-model.py, and import-hermes-wake-model.sh before wake-on-Hermes is enabled."
+        val nextAction = "Export uploads the dataset to wasm-agent, then train/verify hermes.onnx and install it with installHermesWakeModel('/native/android/hermes-wake-model/latest', sha256). APK rebuild is not required for model iteration."
         return voiceTuningStore.status(modelStatus = modelStatus, nextAction = nextAction)
+            .put("bridge_name", NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
+            .put("bridge_ready", true)
+            .put("bridge_connected", true)
+            .put("bridge_build_id", BuildConfig.NATIVE_BUILD_ID)
+            .put("bridge_methods", JSONArray(NativeBridgeContract.voiceTuningMethods))
+            .put("direct_dataset_upload", true)
+            .put("direct_model_install", true)
+            .put("model_install_path", "files/voice/hermes.onnx")
+            .put("bridge_status", if (permissionGranted(Manifest.permission.RECORD_AUDIO)) "connected_ready" else "connected_recording_disabled")
             .put("recording_active", voiceTuningRecorder.isRecording())
             .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
+            .put("permission_state", JSONObject()
+                .put("record_audio", if (permissionGranted(Manifest.permission.RECORD_AUDIO)) "granted" else "missing"))
+            .put("recording_supported", permissionGranted(Manifest.permission.RECORD_AUDIO))
             .put("always_on_wake_service_started", false)
             .put("wake_service_enabled", prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false))
-            .put("message", "Samples collected. Training and validation still required.")
+            .put("message", if (permissionGranted(Manifest.permission.RECORD_AUDIO)) {
+                "Android bridge connected. Samples can be recorded manually."
+            } else {
+                "Android bridge connected. Recording not enabled yet."
+            })
+    }
+
+    private fun voiceTuningBridgeBuildInfo(): JSONObject {
+        return JSONObject()
+            .put("bridge_name", NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
+            .put("bridge_build_id", BuildConfig.NATIVE_BUILD_ID)
+            .put("apk_build_id", BuildConfig.NATIVE_BUILD_ID)
+            .put("build_generated_at", BuildConfig.BUILD_GENERATED_AT)
+            .put("package_name", packageName)
+            .put("bridge_methods", JSONArray(NativeBridgeContract.voiceTuningMethods))
+            .put("direct_dataset_upload", true)
+            .put("direct_model_install", true)
+            .put("model_install_path", "files/voice/hermes.onnx")
+    }
+
+    private fun voiceTuningBridgeDiagnostics(): JSONObject {
+        return voiceTuningStatus()
+            .put("build", voiceTuningBridgeBuildInfo())
+            .put("bridge_present", true)
     }
 
     private fun nativeDeviceLabel(): String {
@@ -1962,9 +2365,102 @@ class MainActivity : Activity() {
             .take(120)
     }
 
+    private fun voiceWakeStatusLightweight(): JSONObject {
+        val enabled = prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false)
+        val personalizedModelFile = File(filesDir, "voice/hermes.onnx")
+        val baseModelFile = File(filesDir, "voice/base_hermes.onnx")
+        val personalizedModelExists = personalizedModelFile.exists() && personalizedModelFile.isFile && personalizedModelFile.length() > 0L
+        val baseModelExists = baseModelFile.exists() && baseModelFile.isFile && baseModelFile.length() > 0L
+        val base = try {
+            val file = HermesVoiceWakeService.statusFile(this)
+            if (file.exists()) JSONObject(file.readText()) else JSONObject()
+        } catch (_: Exception) {
+            JSONObject()
+        }
+        if (!base.has("schema")) base.put("schema", "hermes.wasm_agent.android_voice_wake.v1")
+        if (!base.has("visible_state")) {
+            val fallbackState = base.optString("state", if (enabled) "enabled" else "disabled")
+            base.put("visible_state", when (fallbackState) {
+                "listening" -> "Listening for Hermes"
+                "capturing" -> "Capturing"
+                "transcribing" -> "Transcribing"
+                "sent" -> "Sent"
+                "error" -> "Error"
+                "enabled" -> "Enabled"
+                else -> "Disabled"
+            })
+        }
+        val selectedModelPath = when {
+            personalizedModelExists -> "files/voice/hermes.onnx"
+            baseModelExists -> "files/voice/base_hermes.onnx"
+            else -> "files/voice/hermes.onnx"
+        }
+        val wakeModelExists = personalizedModelExists || baseModelExists
+        val modelSha = sha256FileOrBlank(personalizedModelFile)
+        val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
+        val liveStatusMissing = !base.has("wake_engine_ready")
+        val disabledReason = when {
+            !permissionGranted(Manifest.permission.RECORD_AUDIO) -> "record_audio_permission_missing"
+            !enabled -> "voice_wake_disabled"
+            liveStatusMissing -> "live_service_status_unavailable"
+            !base.optBoolean("onnx_runtime_available", false) -> "onnx_runtime_unavailable"
+            selectedModelPath != "files/voice/hermes.onnx" -> "personalized_model_path_mismatch"
+            !personalizedModelExists -> "personalized_model_missing"
+            !modelShaMatch -> "model_sha_mismatch"
+            !base.optBoolean("wake_engine_ready", false) -> "wake_engine_not_ready"
+            else -> ""
+        }
+        return base
+            .put("enabled", enabled)
+            .put("disabled_reason", base.optString("disabled_reason", disabledReason))
+            .put("wake_word", "hermes")
+            .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
+            .put("permission_post_notifications", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionGranted(Manifest.permission.POST_NOTIFICATIONS) else true)
+            .put("wake_engine", base.optString("wake_engine", "deferred_until_voice_wake_enabled"))
+            .put("wake_engine_ready", base.optBoolean("wake_engine_ready", false))
+            .put("wake_engine_state", base.optString("wake_engine_state", if (wakeModelExists) "model_diagnostics_deferred" else "hermes_wake_model_missing"))
+            .put("model_source", base.optString("model_source", if (personalizedModelExists) "personalized" else if (baseModelExists) "base" else "none"))
+            .put("wake_model_path", base.optString("wake_model_path", selectedModelPath))
+            .put("selected_model_path", base.optString("selected_model_path", selectedModelPath))
+            .put("asset_model_path", "assets/voice/base_hermes.onnx")
+            .put("base_model_exists", base.optBoolean("base_model_exists", baseModelExists))
+            .put("personalized_model_exists", base.optBoolean("personalized_model_exists", personalizedModelExists))
+            .put("wake_model_exists", base.optBoolean("wake_model_exists", wakeModelExists))
+            .put("model_path", base.optString("model_path", selectedModelPath))
+            .put("model_exists", base.optBoolean("model_exists", wakeModelExists))
+            .put("model_sha", base.optString("model_sha", modelSha))
+            .put("model_sha256", base.optString("model_sha256", modelSha))
+            .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
+            .put("model_sha_match", base.optBoolean("model_sha_match", modelShaMatch))
+            .put("acceptance_model_sha256_match", base.optBoolean("acceptance_model_sha256_match", modelShaMatch))
+            .put("model_asset_found", hermesWakeModelAssetFound())
+            .put("onnx_runtime_available", base.optBoolean("onnx_runtime_available", false))
+            .put("onnx_runtime_error", base.optString("onnx_runtime_error", if (liveStatusMissing) "live service has not reported ONNX Runtime readiness" else ""))
+            .put("wake_engine_error", base.optString("wake_engine_error", if (liveStatusMissing) "live service has not reported WakeEngine readiness" else ""))
+            .put("wake_model", JSONObject()
+                .put("wake_model_exists", base.optBoolean("wake_model_exists", wakeModelExists))
+                .put("base_model_exists", base.optBoolean("base_model_exists", baseModelExists))
+                .put("personalized_model_exists", base.optBoolean("personalized_model_exists", personalizedModelExists))
+                .put("diagnostics_deferred", true))
+            .put("foreground_service_required", true)
+            .put("foreground_notification", "WASM Agent listening for Hermes")
+            .put("source", "android_native_voice_wake_lightweight")
+            .put("status_source", "lightweight_no_model_load")
+            .put("model_diagnostics_deferred", true)
+            .put("build_id", BuildConfig.NATIVE_BUILD_ID)
+            .put("origin", prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, selectedOrigin).orEmpty())
+            .put("audio_retained", false)
+            .put("continuous_audio_uploaded", false)
+    }
+
     private fun voiceWakeStatus(): JSONObject {
         val enabled = prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false)
-        val wakeEngine = OpenWakeWordOnnxEngine(File(filesDir, "voice/hermes.onnx"))
+        val wakeSelection = WakeModelSelector.select(
+            File(filesDir, "voice/hermes.onnx"),
+            File(filesDir, "voice/base_hermes.onnx"),
+        )
+        val wakeEngine = wakeSelection.engine
+        val wakeDiagnostics = wakeEngine.diagnostics()
         val base = try {
             val file = HermesVoiceWakeService.statusFile(this)
             if (file.exists()) JSONObject(file.readText()) else JSONObject()
@@ -1983,26 +2479,149 @@ class MainActivity : Activity() {
                 else -> "Disabled"
             })
         }
+        val modelSha = sha256FileOrBlank(File(filesDir, "voice/hermes.onnx"))
+        val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
+        val modelPath = base.optString("selected_model_path", wakeDiagnostics.getString("selected_model_path"))
+        val modelExists = base.optBoolean("wake_model_exists", wakeDiagnostics.getBoolean("wake_model_exists"))
+        val disabledReason = base.optString("disabled_reason", when {
+            !permissionGranted(Manifest.permission.RECORD_AUDIO) -> "record_audio_permission_missing"
+            !enabled -> "voice_wake_disabled"
+            !wakeDiagnostics.optBoolean("onnx_runtime_available", false) -> "onnx_runtime_unavailable"
+            modelPath != "files/voice/hermes.onnx" -> "personalized_model_path_mismatch"
+            !modelExists -> "personalized_model_missing"
+            !modelShaMatch -> "model_sha_mismatch"
+            !base.optBoolean("wake_engine_ready", wakeEngine.ready) -> "wake_engine_not_ready"
+            base.optLong("audio_record_started_at", 0L) <= 0L -> "audio_record_not_started"
+            base.optLong("inference_count", 0L) <= 0L -> "inference_not_observed"
+            else -> ""
+        })
         return base
             .put("enabled", enabled)
+            .put("disabled_reason", disabledReason)
             .put("wake_word", "hermes")
             .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
+            .put("permission_foreground_service", hasManifestPermission(Manifest.permission.FOREGROUND_SERVICE))
+            .put("permission_foreground_service_microphone", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) hasManifestPermission(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) else true)
             .put("permission_post_notifications", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionGranted(Manifest.permission.POST_NOTIFICATIONS) else true)
-            .put("wake_engine", wakeEngine.name)
-            .put("wake_engine_ready", wakeEngine.ready)
-            .put("wake_engine_state", if (wakeEngine.ready) "ready" else wakeEngine.diagnosticReason)
-            .put("wake_model_path", "files/voice/hermes.onnx")
-            .put("asset_model_path", "assets/voice/hermes.onnx")
+            .put("wake_engine", base.optString("wake_engine", wakeEngine.name))
+            .put("wake_engine_ready", if (base.has("wake_engine_ready")) base.optBoolean("wake_engine_ready") else wakeEngine.ready)
+            .put("wake_engine_state", if (base.optBoolean("wake_engine_ready", wakeEngine.ready)) "ready" else wakeEngine.diagnosticReason)
+            .put("model_source", base.optString("model_source", wakeSelection.source))
+            .put("wake_model_path", base.optString("wake_model_path", wakeDiagnostics.getString("wake_model_path")))
+            .put("model_path", modelPath)
+            .put("selected_model_path", modelPath)
+            .put("asset_model_path", "assets/voice/base_hermes.onnx")
+            .put("base_model_exists", base.optBoolean("base_model_exists", wakeSelection.baseModelExists))
+            .put("personalized_model_exists", base.optBoolean("personalized_model_exists", wakeSelection.personalizedModelExists))
+            .put("model_exists", modelExists)
+            .put("wake_model_exists", modelExists)
+            .put("model_sha", base.optString("model_sha", modelSha))
+            .put("model_sha256", base.optString("model_sha256", modelSha))
+            .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
+            .put("foreground_service_started", base.optBoolean("foreground_service_started", base.optBoolean("foreground_service_running", false)))
+            .put("proof_session_active", base.optBoolean("proof_session_active", false))
+            .put("status_source", base.optString("status_source", if (base.has("wake_engine_ready")) "live_service" else "activity_fallback"))
+            .put("model_sha_match", base.optBoolean("model_sha_match", modelShaMatch))
+            .put("acceptance_model_sha256_match", base.optBoolean("acceptance_model_sha256_match", modelShaMatch))
             .put("model_asset_found", hermesWakeModelAssetFound())
-            .put("onnx_runtime_available", wakeEngine.onnxRuntimeAvailable)
-            .put("wake_model", wakeEngine.diagnostics())
+            .put("onnx_runtime_available", wakeDiagnostics.getBoolean("onnx_runtime_available"))
+            .put("onnx_runtime_error", wakeDiagnostics.getString("onnx_runtime_error"))
+            .put("wake_engine_error", wakeDiagnostics.getString("wake_engine_error"))
+            .put("wake_model", wakeDiagnostics
+                .put("base_model_exists", wakeSelection.baseModelExists)
+                .put("personalized_model_exists", wakeSelection.personalizedModelExists))
             .put("foreground_service_required", true)
             .put("foreground_notification", "WASM Agent listening for Hermes")
-            .put("source", "android_native_hermes_voice_wake")
+            .put("source", "android_native_voice_wake")
             .put("build_id", BuildConfig.NATIVE_BUILD_ID)
             .put("origin", prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, selectedOrigin).orEmpty())
             .put("audio_retained", false)
             .put("continuous_audio_uploaded", false)
+    }
+
+    private fun beginHermesWakeProof(reason: String): JSONObject {
+        val origin = selectedOrigin.ifBlank {
+            prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, "").orEmpty()
+        }.ifBlank { BuildConfig.DEFAULT_SERVER_URL }
+        val needed = voiceWakeRuntimePermissions().filter { permission -> !permissionGranted(permission) }
+        prefs.edit()
+            .putBoolean(HermesVoiceWakeService.PREF_ENABLED, true)
+            .putString(HermesVoiceWakeService.PREF_ORIGIN, origin)
+            .apply()
+        val proof = JSONObject()
+            .put("ok", needed.isEmpty())
+            .put("type", "hermes_wake_proof_started")
+            .put("reason", reason)
+            .put("origin", origin)
+            .put("missing_runtime_permissions", JSONArray(needed))
+            .put("status", voiceWakeStatus())
+        if (needed.isEmpty()) {
+            runOnUiThread { HermesVoiceWakeService.start(this, origin, proofSession = true) }
+            awaitHermesWakeProofAndUpload(origin, reason)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runOnUiThread { requestPermissions(needed.toTypedArray(), REQUEST_VOICE_WAKE_PERMISSION) }
+        }
+        logDiagnostic("voice_wake_proof_started", proof)
+        return proof
+    }
+
+    private fun awaitHermesWakeProofAndUpload(origin: String, reason: String) {
+        thread(name = "hermes-wake-proof-upload") {
+            var latest = voiceWakeStatus()
+            val deadline = System.currentTimeMillis() + 15_000L
+            while (System.currentTimeMillis() < deadline) {
+                HermesVoiceWakeService.requestStatus(this, proofSession = true)
+                latest = voiceWakeStatus()
+                if (hermesWakeProofAcceptanceReady(latest)) break
+                Thread.sleep(250L)
+            }
+            val accepted = hermesWakeProofAcceptanceReady(latest)
+            val payload = JSONObject()
+                .put("ok", accepted)
+                .put("type", "hermes_wake_proof_live_diagnostics")
+                .put("reason", reason)
+                .put("acceptance_ready", accepted)
+                .put("required", JSONArray(listOf(
+                    "status_source=live_service",
+                    "proof_session_active=true",
+                    "permission_record_audio=true",
+                    "foreground_service_started=true",
+                    "audio_record_started=true",
+                    "personalized_model_exists=true",
+                    "model_sha=$HERMES_WAKE_ACCEPTANCE_MODEL_SHA256",
+                    "model_sha_match=true",
+                    "onnx_runtime_available=true",
+                    "wake_engine_ready=true",
+                    "inference_count>0",
+                    "wake_confidence_observed=true",
+                    "threshold_crossed=true",
+                    "wake_detection_count>0",
+                    "wake_detected_event_emitted=true",
+                    "command_capture_started=true",
+                )))
+                .put("status", latest)
+            logDiagnostic(if (accepted) "voice_wake_proof_live_ready" else "voice_wake_proof_live_incomplete", payload)
+            forceUploadNativeDiagnostics(origin, if (accepted) "hermes_wake_proof_live_ready" else "hermes_wake_proof_live_incomplete")
+        }
+    }
+
+    private fun hermesWakeProofAcceptanceReady(status: JSONObject): Boolean {
+        return status.optString("status_source") == "live_service" &&
+            status.optBoolean("proof_session_active", false) &&
+            status.optBoolean("permission_record_audio", false) &&
+            status.optBoolean("foreground_service_started", false) &&
+            status.optBoolean("audio_record_started", false) &&
+            status.optBoolean("personalized_model_exists", false) &&
+            status.optString("model_sha").equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true) &&
+            status.optBoolean("model_sha_match", false) &&
+            status.optBoolean("onnx_runtime_available", false) &&
+            status.optBoolean("wake_engine_ready", false) &&
+            status.optLong("inference_count", 0L) > 0L &&
+            status.optBoolean("wake_confidence_observed", false) &&
+            status.optBoolean("threshold_crossed", false) &&
+            status.optLong("wake_detection_count", 0L) > 0L &&
+            status.optBoolean("wake_detected_event_emitted", false) &&
+            status.optBoolean("command_capture_started", false)
     }
 
     private fun voiceWakeRuntimePermissions(): List<String> {
@@ -2012,9 +2631,36 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun hasManifestPermission(permission: String): Boolean {
+        return try {
+            val info = packageManager.getPackageInfo(packageName, PackageManager.GET_PERMISSIONS)
+            info.requestedPermissions?.contains(permission) == true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun sha256FileOrBlank(file: File): String {
+        if (!file.isFile || file.length() <= 0L) return ""
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
     private fun hermesWakeModelAssetFound(): Boolean {
         return try {
-            assets.open("voice/hermes.onnx").use { true }
+            assets.open("voice/base_hermes.onnx").use { true }
         } catch (_: Exception) {
             false
         }
@@ -2137,8 +2783,43 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun forceUploadNativeDiagnostics(origin: String, reason: String) {
+        val latest = diagnostics.latestString()
+        thread(name = "wasm-agent-native-diagnostics-force-upload") {
+            try {
+                val payload = JSONObject(latest)
+                    .put("device_id", "android-${BuildConfig.NATIVE_BUILD_ID}-${installDeviceHash}")
+                    .put("build_id", BuildConfig.NATIVE_BUILD_ID)
+                    .put("android_auth_session", androidAuthSessionId)
+                    .put("native_correlation_id", nativeCorrelationId)
+                    .put("install_device_hash", installDeviceHash)
+                    .put("reason", reason)
+                    .put("forced_upload", true)
+                val connection = (URL(origin.trimEnd('/') + "/native/diagnostics").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                    requestMethod = "POST"
+                    setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    doOutput = true
+                }
+                connection.outputStream.use { stream ->
+                    stream.write(payload.toString().toByteArray(Charsets.UTF_8))
+                }
+                connection.inputStream.close()
+                connection.disconnect()
+            } catch (error: Exception) {
+                Log.w(LOG_TAG, "forced diagnostics upload failed: ${error.javaClass.simpleName}")
+            }
+        }
+    }
+
     private fun sha256Hex(value: String): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> "%02x".format(byte) }
+    }
+
+    private fun sha256Bytes(value: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value)
         return digest.joinToString("") { byte -> "%02x".format(byte) }
     }
 
@@ -2176,6 +2857,7 @@ class MainActivity : Activity() {
                 .put("safe_cookie_session_summary", redactValue(snapshot.opt("safe_cookie_session_summary")))
                 .put("oauth", redactValue(snapshot.opt("oauth")))
                 .put("voice_wake", redactValue(snapshot.opt("voice_wake")))
+                .put("voice_tuning", redactValue(snapshot.opt("voice_tuning")))
                 .put("last_exception", redactValue(snapshot.opt("last_exception")))
                 .put("events", eventList)
             file.parentFile?.mkdirs()
@@ -2199,6 +2881,7 @@ class MainActivity : Activity() {
                 .put("native_correlation_id", snapshot.optString("native_correlation_id", ""))
                 .put("oauth", redactValue(snapshot.opt("oauth")))
                 .put("voice_wake", redactValue(snapshot.opt("voice_wake")))
+                .put("voice_tuning", redactValue(snapshot.opt("voice_tuning")))
                 .put("events", JSONArray())
             file.parentFile?.mkdirs()
             file.writeText(latest.toString(2))

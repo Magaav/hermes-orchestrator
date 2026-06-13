@@ -1,0 +1,16 @@
+{
+  "name": "hermes-dataset",
+  "wake_phrase": "Hermes",
+  "created_at": "2026-06-12T13:26:23.282Z",
+  "positive_count": 55,
+  "negative_silence_count": 14,
+  "negative_speech_count": 100,
+  "negative_noise_count": 50,
+  "total_negative_count": 164,
+  "sample_rate": 16000,
+  "channels": 1,
+  "encoding": "PCM16",
+  "duration_ms": 1000,
+  "smoke_gate_ready": true,
+  "real_gate_ready": false
+}

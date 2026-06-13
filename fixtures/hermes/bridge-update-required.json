@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "failureClassification": "bridge_update_required",
+  "nextAction": "Rebuild and reinstall the Windows shell before running hot-operation proofs."
+}

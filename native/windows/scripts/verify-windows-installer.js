@@ -231,11 +231,17 @@ if (!mainJs.includes("frontier_operator_commands_ready") || !mainJs.includes("co
 if (!mainJs.includes("WINDOWS_ANDROID_OAUTH_OPERATIONS") || !mainJs.includes("verify_android_oauth") || !mainJs.includes("read_latest_android_report") || !mainJs.includes("operation_not_allowlisted") || !mainJs.includes("horc simulate android --device --interactive-oauth")) {
   fail("Extracted installer app.asar main.js is missing the Windows Android OAuth diagnostics bridge");
 }
+if (!mainJs.includes("run_android_voice_tuning_goal_loop") || !mainJs.includes("screencap") || !mainJs.includes("uiautomator_dump") || !mainJs.includes("native-diagnostics/latest.json") || !mainJs.includes("permission_prompt_auto_clicked: false")) {
+  fail("Extracted installer app.asar main.js is missing the guarded Android Hermes Wake goal loop");
+}
 if (!mainJs.includes("resolveLocalHorcRunner") || !mainJs.includes("bundledHorcRunnerPath") || !mainJs.includes("ELECTRON_RUN_AS_NODE") || !mainJs.includes("WASM_AGENT_SIM_ROOT_DIR") || !mainJs.includes("WASM_AGENT_ANDROID_APK")) {
   fail("Extracted installer app.asar main.js is missing deterministic bundled horc runner resolution");
 }
 if (!preloadJs.includes("nativeDiagnostics") || !preloadJs.includes("wasm-agent:native-diagnostics-operation") || !resourceIndexHtml.includes("Verify Android OAuth on real phone") || !resourceIndexHtml.includes("Start Android OAuth verification") || !resourceAppJs.includes("startAndroidOAuthVerification")) {
   fail("Extracted installer preload/PWA assets are missing the Windows Android OAuth diagnostics UI");
+}
+if (!resourceIndexHtml.includes("Run Hermes Wake Goal Loop") || !resourceAppJs.includes("run_android_voice_tuning_goal_loop")) {
+  fail("Extracted installer PWA assets are missing the guarded Hermes Wake goal loop UI");
 }
 if (!preloadJs.includes("__wasmAgentDevHmr") || !resourceAppJs.includes("__wasmAgentAppDevHmr")) {
   fail("Preload/PWA bridge layout does not preserve the native read-only bridge plus app-owned HMR bridge");

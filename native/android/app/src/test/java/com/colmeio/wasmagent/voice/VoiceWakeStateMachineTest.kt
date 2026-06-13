@@ -74,7 +74,7 @@ class VoiceWakeStateMachineTest {
         val event = machine.lastEvent!!.toJson()
         assertEquals("voice_command", event.getString("type"))
         assertEquals("hermes", event.getString("wake_word"))
-        assertEquals("android_native_hermes_voice_wake", event.getString("source"))
+        assertEquals("android_native_voice_wake", event.getString("source"))
         assertFalse(event.getBoolean("audio_retained"))
         assertEquals(1000, machine.lastCommandCaptureDurationMs)
         assertEquals("transcribed", machine.lastTranscriptStatus)
@@ -134,12 +134,12 @@ class VoiceWakeStateMachineTest {
 
     @Test
     fun bundledModelInstallRefreshesAwayFromMissingState() {
-        val model = File("build/test-installed-hermes-${System.nanoTime()}/voice/hermes.onnx")
+        val model = File("build/test-installed-hermes-${System.nanoTime()}/voice/base_hermes.onnx")
         val missingEngine = OpenWakeWordOnnxEngine(model)
         assertEquals("hermes_wake_model_missing", missingEngine.diagnosticReason)
 
         val installed = HermesVoiceWakeService.installBundledHermesModelIfPresent(model) { path ->
-            assertEquals("voice/hermes.onnx", path)
+            assertEquals("voice/base_hermes.onnx", path)
             ByteArrayInputStream("not an onnx model".toByteArray())
         }
         val refreshedEngine = OpenWakeWordOnnxEngine(model)
@@ -156,8 +156,8 @@ class VoiceWakeStateMachineTest {
         val model = File("build/test-missing-contract-${System.nanoTime()}.onnx")
         val diagnostics = OpenWakeWordOnnxEngine(model).diagnostics()
 
-        assertEquals(OpenWakeWordOnnxEngine.APP_PRIVATE_MODEL_PATH, diagnostics.getString("wake_model_path"))
-        assertEquals(OpenWakeWordOnnxEngine.ASSET_MODEL_PATH, diagnostics.getString("asset_model_path"))
+        assertEquals(model.path, diagnostics.getString("wake_model_path"))
+        assertEquals(OpenWakeWordOnnxEngine.ASSET_BASE_MODEL_PATH, diagnostics.getString("asset_model_path"))
         assertEquals(OpenWakeWordOnnxEngine.INPUT_FORMAT, diagnostics.getString("wake_model_input_format"))
         assertEquals(OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ, diagnostics.getInt("wake_model_sample_rate_hz"))
         assertEquals(OpenWakeWordOnnxEngine.DEFAULT_CONFIDENCE_THRESHOLD, diagnostics.getDouble("wake_model_threshold"), 0.0)
@@ -185,5 +185,181 @@ class VoiceWakeStateMachineTest {
 
         assertEquals(VoiceWakeState.ERROR, machine.state)
         assertEquals("android_speech_recognizer_unavailable", machine.lastError)
+    }
+
+    @Test
+    fun debugProviderSelectionProducesExpectedVoiceCommandShape() {
+        val providers = VoiceProviderSelector.select(
+            requestedDebugVoiceMode = true,
+            modelReady = false,
+            modelMissing = true,
+            productionWakeEngine = OpenWakeWordOnnxEngine(File("build/test-debug-missing-${System.nanoTime()}.onnx")),
+            productionTranscriber = DebugTranscriber(enabled = false),
+            debugAllowed = true,
+        )
+
+        val wake = providers.wake.processPcm16(ShortArray(16_000) { 1 }, 16_000)
+        val transcript = providers.transcriber.transcribeLiveAfterWake()
+        val event = VoiceWakeEvent(
+            transcript = transcript.transcript,
+            confidence = wake.confidence,
+            startedAt = 10,
+            endedAt = 20,
+            buildId = "test-build",
+            sessionId = "debug-session",
+        )
+        val payload = VoiceCommandRouter().payload(event, providers.transcriber.name)
+
+        assertEquals("debug_stub", providers.vad.name)
+        assertEquals("debug_stub", providers.wake.name)
+        assertEquals("debug_stub", providers.transcriber.name)
+        assertTrue(wake.detected)
+        assertEquals(0.99, wake.confidence, 0.0)
+        assertEquals("test command", transcript.transcript)
+        assertEquals("voice_command", payload.getString("type"))
+        assertEquals("android_native_voice_wake", payload.getString("source"))
+        assertEquals("hermes", payload.getString("wake_word"))
+        assertEquals(0.99, payload.getDouble("wake_confidence"), 0.0)
+        assertEquals("test command", payload.getString("transcript"))
+        assertEquals("debug_stub", payload.getString("asr_provider"))
+    }
+
+    @Test
+    fun noModelProductionSelectionStaysSafe() {
+        val model = File("build/test-provider-missing-${System.nanoTime()}.onnx")
+        val providers = VoiceProviderSelector.select(
+            requestedDebugVoiceMode = false,
+            modelReady = false,
+            modelMissing = true,
+            productionWakeEngine = OpenWakeWordOnnxEngine(model),
+            productionTranscriber = object : TranscriptionEngine {
+                override val name: String = "prod_transcriber_stub"
+                override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
+                    TranscriptionResult("", 0.0, "not_used")
+            },
+            debugAllowed = false,
+        )
+
+        assertFalse(providers.debugVoiceModeEnabled)
+        assertEquals("none", providers.modelSource)
+        assertFalse(providers.wake.ready)
+        assertFalse(providers.wake.processPcm16(ShortArray(16_000) { 12_000 }, 16_000).detected)
+    }
+
+    @Test
+    fun debugProvidersAreBlockedWhenDebugNotAllowed() {
+        val model = File("build/test-release-blocked-${System.nanoTime()}.onnx")
+        val productionTranscriber = object : TranscriptionEngine {
+            override val name: String = "prod_transcriber_stub"
+            override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
+                TranscriptionResult("", 0.0, "not_used")
+        }
+        val providers = VoiceProviderSelector.select(
+            requestedDebugVoiceMode = true,
+            modelReady = false,
+            modelMissing = true,
+            productionWakeEngine = OpenWakeWordOnnxEngine(model),
+            productionTranscriber = productionTranscriber,
+            debugAllowed = false,
+        )
+
+        assertFalse(providers.debugVoiceModeEnabled)
+        assertFalse(providers.wake.name == "debug_stub")
+        assertFalse(providers.transcriber.name == "debug_stub")
+        assertFalse(providers.wake.ready)
+    }
+
+    @Test
+    fun wakeModelSelectorReportsNoneWhenNoModelExists() {
+        val root = File("build/test-selector-none-${System.nanoTime()}")
+        val selection = WakeModelSelector.select(
+            File(root, "voice/hermes.onnx"),
+            File(root, "voice/base_hermes.onnx"),
+        )
+
+        assertEquals("none", selection.source)
+        assertFalse(selection.ready)
+        assertFalse(selection.personalizedModelExists)
+        assertFalse(selection.baseModelExists)
+        assertEquals("none", selection.engine.diagnostics().getString("model_source"))
+        assertEquals("hermes_wake_model_missing", selection.engine.diagnosticReason)
+    }
+
+    @Test
+    fun wakeModelSelectorAttemptsPersonalizedBeforeBaseAndFallsBackSafely() {
+        val root = File("build/test-selector-priority-${System.nanoTime()}")
+        val personalized = File(root, "voice/hermes.onnx")
+        val base = File(root, "voice/base_hermes.onnx")
+        personalized.parentFile?.mkdirs()
+        personalized.writeText("not an onnx personalized model")
+        base.writeText("not an onnx base model")
+        try {
+            val selection = WakeModelSelector.select(personalized, base)
+
+            assertEquals("none", selection.source)
+            assertFalse(selection.ready)
+            assertTrue(selection.personalizedModelExists)
+            assertTrue(selection.baseModelExists)
+            assertEquals("personalized", selection.attempted[0].diagnostics().getString("model_source"))
+            assertEquals("base", selection.attempted[1].diagnostics().getString("model_source"))
+            assertEquals("none", selection.engine.diagnostics().getString("model_source"))
+            assertFalse(selection.engine.diagnostics().getBoolean("wake_engine_ready"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun bundledBaseModelCopyDoesNotOverwritePersonalizedModel() {
+        val root = File("build/test-base-copy-${System.nanoTime()}")
+        val personalized = File(root, "voice/hermes.onnx")
+        val base = File(root, "voice/base_hermes.onnx")
+        personalized.parentFile?.mkdirs()
+        personalized.writeText("personalized")
+
+        val installed = HermesVoiceWakeService.installBundledHermesModelIfPresent(base) { path ->
+            assertEquals("voice/base_hermes.onnx", path)
+            ByteArrayInputStream("base".toByteArray())
+        }
+
+        assertTrue(installed)
+        assertEquals("personalized", personalized.readText())
+        assertEquals("base", base.readText())
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun bundledBaseModelCopyRefreshesStaleBaseOnly() {
+        val root = File("build/test-base-copy-stale-${System.nanoTime()}")
+        val base = File(root, "voice/base_hermes.onnx")
+        base.parentFile?.mkdirs()
+        base.writeText("old")
+
+        val installed = HermesVoiceWakeService.installBundledHermesModelIfPresent(base) {
+            ByteArrayInputStream("new-base".toByteArray())
+        }
+
+        assertTrue(installed)
+        assertEquals("new-base", base.readText())
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun failedModelLoadDiagnosticsDoNotClaimReadiness() {
+        val root = File("build/test-failed-load-diagnostics-${System.nanoTime()}")
+        val base = File(root, "voice/base_hermes.onnx")
+        base.parentFile?.mkdirs()
+        base.writeText("not an onnx base model")
+        try {
+            val selection = WakeModelSelector.select(File(root, "voice/hermes.onnx"), base)
+            val diagnostics = selection.attempted[0].diagnostics()
+
+            assertEquals("base", diagnostics.getString("model_source"))
+            assertEquals("model_load_error", diagnostics.getString("last_model_load_result"))
+            assertFalse(diagnostics.getBoolean("wake_engine_ready"))
+            assertEquals("none", selection.source)
+        } finally {
+            root.deleteRecursively()
+        }
     }
 }

@@ -69,6 +69,8 @@ plugins/wasm-agent/conf/wa.env
 **/node_modules/
 
 # Native build/release outputs
+/build/
+plugins/wasm-agent/public/native/releases/
 native/*/release/*
 !native/*/release/.gitkeep
 native/windows/release/win-unpacked/

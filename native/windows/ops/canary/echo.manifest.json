@@ -1,0 +1,7 @@
+{
+  "name": "canary_echo",
+  "version": "20260612T0000",
+  "entry": "echo.js",
+  "capabilities": [],
+  "timeoutMs": 3000
+}

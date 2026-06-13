@@ -16,8 +16,35 @@
       "to": "native-defaults.json"
     },
     {
+      "from": "../ops",
+      "to": "bridge-ops",
+      "filter": [
+        "**/*.js",
+        "**/*.manifest.json"
+      ]
+    },
+    {
       "from": "../../../plugins/wasm-agent/public",
-      "to": "public"
+      "to": "public",
+      "filter": [
+        "**/*",
+        "!**/*.map",
+        "!**/*.log",
+        "!**/*.zip",
+        "!**/*.apk",
+        "!reports/**",
+        "!build/**",
+        "!dist/**",
+        "!coverage/**",
+        "!test/**",
+        "!tests/**",
+        "!tools/app-simulator/**",
+        "!screenshots/**",
+        "!fixtures/**",
+        "!native/android/**",
+        "!plugins/**/tests/**",
+        "!native/releases/android/*.apk"
+      ]
     },
     {
       "from": "../../../tools/horc-local/horc-local.js",
@@ -32,27 +59,38 @@
         "skeleton.js",
         "package.json",
         "core/**",
-        "fixtures/android/**"
+        "!fixtures/**",
+        "!reports/**",
+        "!tests/**",
+        "!test/**"
       ]
-    },
-    {
-      "from": "../../../native/android/release/WASM-Agent-arm64.apk",
-      "to": "android/WASM-Agent-arm64.apk"
-    },
-    {
-      "from": "../../../native/android/release/WASM-Agent-arm64.native-defaults.json",
-      "to": "android/WASM-Agent-arm64.native-defaults.json"
     }
   ],
   "files": [
     "main.js",
     "native-backend-resolver.js",
     "native-shell-policy.js",
+    "windows-self-update.js",
     "preload.js",
     "fallback.html",
     "native-defaults.json",
     "build/icon.svg",
-    "package.json"
+    "package.json",
+    "!reports/**",
+    "!build/**",
+    "!dist/**",
+    "!coverage/**",
+    "!test/**",
+    "!tests/**",
+    "!tools/app-simulator/**",
+    "!native/android/**",
+    "!plugins/**/tests/**",
+    "!screenshots/**",
+    "!fixtures/**",
+    "!*.map",
+    "!*.log",
+    "!*.zip",
+    "!*.apk"
   ],
   "asar": true,
   "publish": null,

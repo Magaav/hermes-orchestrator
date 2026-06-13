@@ -1018,6 +1018,18 @@ const els = {
   homeGoNativeButton: document.querySelector("#homeGoNativeButton"),
   homeTuneVoiceButton: document.querySelector("#homeTuneVoiceButton"),
   homeTuneVoiceStatus: document.querySelector("#homeTuneVoiceStatus"),
+  tuneVoiceModal: document.querySelector("#tuneVoiceModal"),
+  closeTuneVoiceModalButton: document.querySelector("#closeTuneVoiceModalButton"),
+  tuneVoiceTitle: document.querySelector("#tuneVoiceTitle"),
+  tuneVoiceSubtitle: document.querySelector("#tuneVoiceSubtitle"),
+  tuneVoiceProgress: document.querySelector("#tuneVoiceProgress"),
+  tuneVoiceBody: document.querySelector("#tuneVoiceBody"),
+  tuneVoiceMessage: document.querySelector("#tuneVoiceMessage"),
+  tuneVoiceBackButton: document.querySelector("#tuneVoiceBackButton"),
+  tuneVoiceDeleteLastButton: document.querySelector("#tuneVoiceDeleteLastButton"),
+  tuneVoiceRetryLastButton: document.querySelector("#tuneVoiceRetryLastButton"),
+  tuneVoiceRecordButton: document.querySelector("#tuneVoiceRecordButton"),
+  tuneVoiceNextButton: document.querySelector("#tuneVoiceNextButton"),
   homeArtifactsButton: document.querySelector("#homeArtifactsButton"),
   homeMarketButton: document.querySelector("#homeMarketButton"),
   homeModulesButton: document.querySelector("#homeModulesButton"),
@@ -1139,6 +1151,10 @@ const els = {
 	  nativeDebugDisableVoiceWakeButton: document.querySelector("#nativeDebugDisableVoiceWakeButton"),
 	  closeNativeDebugButton: document.querySelector("#closeNativeDebugButton"),
   androidOAuthPanelStatus: document.querySelector("#androidOAuthPanelStatus"),
+  androidConnectionCheckButton: document.querySelector("#androidConnectionCheckButton"),
+  androidVoiceTuningProofButton: document.querySelector("#androidVoiceTuningProofButton"),
+  androidVoiceTuningRuntimeButton: document.querySelector("#androidVoiceTuningRuntimeButton"),
+  androidVoiceTuningGoalLoopButton: document.querySelector("#androidVoiceTuningGoalLoopButton"),
   androidOAuthStartButton: document.querySelector("#androidOAuthStartButton"),
   androidOAuthStatus: document.querySelector("#androidOAuthStatus"),
   androidOAuthHint: document.querySelector("#androidOAuthHint"),
@@ -1378,6 +1394,8 @@ const state = {
   androidOAuthVerification: {
     available: false,
     busy: false,
+    connectionBusy: false,
+    action: "",
     opId: "",
     status: "idle",
     label: "idle",
@@ -1386,6 +1404,7 @@ const state = {
     report: null,
     latestReportPath: "",
     needsAppUpdate: false,
+    connection: null,
   },
   androidOAuthDiagnosticsUnsubscribe: null,
 	  userFleetNodes: [],
@@ -17580,9 +17599,172 @@ function recordAndroidNativeDiagnostic(eventName, payload = {}) {
   }
 }
 
+const EXPECTED_VOICE_TUNING_BRIDGE_NAME = "WasmAgentNativeVoiceTuning";
+const SUPPORTED_VOICE_TUNING_BRIDGE_NAMES = [
+  EXPECTED_VOICE_TUNING_BRIDGE_NAME,
+  "wasmAgentNative",
+  "wasmAgentAndroid",
+  "WasmAgentAndroid",
+  "AndroidNativeBridge",
+];
+const VOICE_TUNING_BRIDGE_UNAVAILABLE_MESSAGE = "Native voice tuning is only available in the Android app. Reinstall the latest debug APK if you are already in the app.";
+const TUNE_VOICE_BRIDGE_DETAILS_TTL_MS = 2500;
+const TUNE_VOICE_STATUS_TTL_MS = 10000;
+const VOICE_TUNING_SAFE_METHODS = [
+  "getStatus",
+  "getBuildInfo",
+  "isRecordingSupported",
+  "startVoiceTuningSample",
+  "stopVoiceTuningSample",
+  "deleteLastVoiceTuningSample",
+  "exportHermesDataset",
+  "installHermesWakeModel",
+  "getVoiceTuningDiagnostics",
+  "voiceTuningStatus",
+  "cancelVoiceTuning",
+];
+
+function tuneVoiceWebBuildId() {
+  return Array.from(document.scripts)
+    .map((item) => item.src || "")
+    .find((src) => src.includes("/app.js"))
+    ?.split("?v=")[1] || "";
+}
+
+function availableNativeBridgeNames() {
+  return SUPPORTED_VOICE_TUNING_BRIDGE_NAMES.filter((name) => {
+    const bridge = window[name];
+    return bridge && typeof bridge === "object";
+  });
+}
+
+function isAndroidWebViewGuess() {
+  const ua = navigator.userAgent || "";
+  return /Android/i.test(ua) && (/wv\)/i.test(ua) || /Version\/\d+\.\d+/i.test(ua) || /shell\/android-webview/i.test(ua) || /WASMAgentAndroid/i.test(ua));
+}
+
+function getNativeVoiceTuningBridge() {
+  for (const name of SUPPORTED_VOICE_TUNING_BRIDGE_NAMES) {
+    const bridge = window[name];
+    if (!bridge || typeof bridge !== "object") continue;
+    const methods = VOICE_TUNING_SAFE_METHODS.filter((method) => typeof bridge[method] === "function");
+    const safeStatusMethod = typeof bridge.getStatus === "function"
+      ? "getStatus"
+      : typeof bridge.voiceTuningStatus === "function"
+        ? "voiceTuningStatus"
+        : typeof bridge.getVoiceTuningDiagnostics === "function"
+          ? "getVoiceTuningDiagnostics"
+          : "";
+    const recordingMethod = typeof bridge.startVoiceTuningSample === "function" ? "startVoiceTuningSample" : "";
+    if (methods.length || safeStatusMethod || recordingMethod) {
+      return { bridge, name, methods, safeStatusMethod, recordingMethod };
+    }
+  }
+  return { bridge: null, name: "", methods: [], safeStatusMethod: "", recordingMethod: "" };
+}
+
 function androidNativeVoiceBridge() {
-  const bridge = window.wasmAgentNative || window.wasmAgentAndroid || window.WasmAgentAndroid || window.AndroidNativeBridge;
-  return bridge && typeof bridge === "object" ? bridge : null;
+  return getNativeVoiceTuningBridge().bridge;
+}
+
+function tuneVoiceBridgeDetails(options = {}) {
+  const now = Date.now();
+  if (!options.force && tuneVoiceState?.bridgeDetails && now - Number(tuneVoiceState.bridgeDetailsAtMs || 0) < TUNE_VOICE_BRIDGE_DETAILS_TTL_MS) {
+    return tuneVoiceState.bridgeDetails;
+  }
+  const detected = getNativeVoiceTuningBridge();
+  const androidShell = androidNativeShellInfo();
+  const nativeFlagsPresent = androidShell.native === "android" && androidShell.shell === "android-webview";
+  const methodsAvailable = detected.methods || [];
+  const safeStatusMethod = detected.safeStatusMethod || "";
+  const bridgeStatus = options.status && typeof options.status === "object" ? options.status : (tuneVoiceState?.status || {});
+  let bridgeBuildInfo = {};
+  let permissionState = {};
+  let recordingSupported = null;
+  try {
+    if (detected.bridge && typeof detected.bridge.getBuildInfo === "function") {
+      bridgeBuildInfo = parseNativeBridgePayload(detected.bridge.getBuildInfo()) || {};
+    }
+  } catch {}
+  try {
+    if (detected.bridge && typeof detected.bridge.isRecordingSupported === "function") {
+      recordingSupported = Boolean(detected.bridge.isRecordingSupported());
+    }
+  } catch {}
+  permissionState = bridgeStatus.permission_state && typeof bridgeStatus.permission_state === "object"
+    ? bridgeStatus.permission_state
+    : {};
+  const failureReasons = [];
+  if (!androidShell.isAndroidNativeShell) failureReasons.push("android_shell_not_detected");
+  if (androidShell.native !== "android") failureReasons.push("missing_native_android_flag");
+  if (androidShell.shell !== "android-webview") failureReasons.push("missing_android_webview_shell_flag");
+  if (!detected.bridge) failureReasons.push("voice_tuning_bridge_object_missing");
+  if (detected.bridge && !safeStatusMethod) failureReasons.push("voice_tuning_bridge_status_method_missing");
+  const details = {
+    failure_reason: failureReasons[0] || "",
+    failure_reasons: failureReasons,
+    android_shell_detected: androidShell.isAndroidNativeShell,
+    is_android_webview_guess: isAndroidWebViewGuess(),
+    native_flag: androidShell.native,
+    shell_flag: androidShell.shell,
+    native_flags_present: nativeFlagsPresent,
+    available_native_bridge_names: availableNativeBridgeNames(),
+    expected_voice_tuning_bridge_name: EXPECTED_VOICE_TUNING_BRIDGE_NAME,
+    voice_tuning_bridge_available: Boolean(detected.bridge),
+    detected_voice_tuning_bridge_name: detected.name || "",
+    voice_tuning_bridge_methods_available: methodsAvailable,
+    voice_tuning_bridge_status_method: safeStatusMethod,
+    voice_tuning_bridge_recording_method: detected.recordingMethod || "",
+    bridge_safe_ready: Boolean(detected.bridge && safeStatusMethod),
+    bridge_status: cleanText(bridgeStatus.bridge_status || bridgeStatus.message || "", ""),
+    recording_supported: typeof recordingSupported === "boolean" ? recordingSupported : Boolean(bridgeStatus.recording_supported),
+    permission_state: permissionState,
+    has_android_bridge_object: Boolean(window.wasmAgentAndroid),
+    user_agent: navigator.userAgent || "",
+    location_href: window.location?.href || "",
+    apk_build_id: cleanText(bridgeBuildInfo.apk_build_id || androidShell.packageInfo?.buildId || androidShell.buildId, ""),
+    bridge_build_id: cleanText(bridgeBuildInfo.bridge_build_id || bridgeStatus.bridge_build_id, ""),
+    web_build_id: cleanText(tuneVoiceWebBuildId(), ""),
+  };
+  if (tuneVoiceState) {
+    tuneVoiceState.bridgeDetails = details;
+    tuneVoiceState.bridgeDetailsAtMs = now;
+  }
+  return details;
+}
+
+function tuneVoiceFailureSummary(details = tuneVoiceBridgeDetails()) {
+  const bridgeLine = details.voice_tuning_bridge_available
+    ? details.recording_supported
+      ? "Native voice tuning bridge connected and ready."
+      : "Android bridge connected; recording not enabled yet."
+    : VOICE_TUNING_BRIDGE_UNAVAILABLE_MESSAGE;
+  return [
+    bridgeLine,
+    `reason: ${details.failure_reason || "unknown"}`,
+    `android shell: ${details.android_shell_detected ? "true" : "false"}`,
+    `native flags: ${details.native_flags_present ? "present" : "missing"} (${details.native_flag || "-"} / ${details.shell_flag || "-"})`,
+    `bridge object: ${details.voice_tuning_bridge_available ? details.detected_voice_tuning_bridge_name || "present" : "missing"}`,
+    `bridge methods: ${(details.voice_tuning_bridge_methods_available || []).join(", ") || "-"}`,
+    `permission: ${typeof details.permission_state?.record_audio === "string" ? details.permission_state.record_audio : "-"}`,
+    `apk build: ${details.apk_build_id || "-"}`,
+    `bridge build: ${details.bridge_build_id || "-"}`,
+    `web build: ${details.web_build_id || "-"}`,
+  ].join("\n");
+}
+
+function tuneVoiceBridgeDevPanelMarkup(summary = "Native bridge details", details = tuneVoiceBridgeDetails()) {
+  const rows = Object.entries(details).map(([key, value]) => {
+    const display = Array.isArray(value) ? value.join(", ") : String(value);
+    return `<div><dt>${tuneVoiceEscapeHtml(key)}</dt><dd>${tuneVoiceEscapeHtml(display || "-")}</dd></div>`;
+  }).join("");
+  return `
+    <details class="tune-voice-dev-panel">
+      <summary>${tuneVoiceEscapeHtml(summary)}</summary>
+      <dl>${rows}</dl>
+      <button type="button" data-tune-voice-action="recheck-native-bridge">Recheck Native Bridge</button>
+    </details>
+  `;
 }
 
 function homeTuneVoiceProgressLabel(payload = {}) {
@@ -17624,6 +17806,635 @@ function homeTuneVoiceRecordingLabel(category = "positive") {
   return `${prompt}...`;
 }
 
+function tuneVoiceEscapeHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char] || char));
+}
+
+const TUNE_VOICE_SPEECH_PROMPTS = [
+  "open the dashboard",
+  "start the agent",
+  "what time is it",
+  "show my tasks",
+  "hello assistant",
+  "summarize this",
+  "open settings",
+  "check the logs",
+];
+
+const tuneVoiceState = {
+  step: 0,
+  status: null,
+  message: "",
+  phase: "idle",
+  countdown: 0,
+  recordTimeout: 0,
+  recordStartedAt: 0,
+  lastCategory: "positive",
+  lastRecordKind: "",
+  lastRecordPath: "",
+  lastRecordDurationMs: 0,
+  diagnostics: {},
+  speechPromptIndex: 0,
+  exportResult: null,
+  bridgeInitializingUntil: 0,
+  bridgeDetails: null,
+  bridgeDetailsAtMs: 0,
+  statusAtMs: 0,
+  deferredStatusTimer: 0,
+};
+
+const TUNE_VOICE_STEPS = [
+  { id: "intro", title: "Train Hermes Wake", subtitle: "Guided one-second wake phrase dataset" },
+  { id: "positive", title: "Record Hermes", category: "positive", target: 50, progressLabel: "Hermes samples", button: "Record Hermes", source: "space-home:tune-voice" },
+  { id: "silence", title: "Record Silence", category: "negative/silence", target: 50, progressLabel: "Silence samples", button: "Record Silence", source: "space-home:tune-voice:negative-silence" },
+  { id: "speech", title: "Record Not-Hermes Speech", category: "negative/speech", target: 100, progressLabel: "Speech negatives", button: "Record This Phrase", source: "space-home:tune-voice:negative-speech" },
+  { id: "noise", title: "Record Room Noise", category: "negative/noise", target: 50, progressLabel: "Noise samples", button: "Record Room Noise", source: "space-home:tune-voice:negative-noise" },
+  { id: "readiness", title: "Dataset Readiness", subtitle: "Quality gates and diagnostics" },
+  { id: "export", title: "Export Hermes Dataset", subtitle: "Create hermes-dataset.zip" },
+];
+
+function tuneVoiceCounts(status = tuneVoiceState.status || {}) {
+  const counts = status?.counts && typeof status.counts === "object" ? status.counts : {};
+  const diagnostics = status?.diagnostics && typeof status.diagnostics === "object" ? status.diagnostics : {};
+  const positive = Number(status.positive_count ?? diagnostics.positive_count ?? counts.positive ?? 0) || 0;
+  const silence = Number(status.negative_silence_count ?? diagnostics.negative_silence_count ?? counts.negative_silence ?? 0) || 0;
+  const speech = Number(status.negative_speech_count ?? diagnostics.negative_speech_count ?? counts.negative_speech ?? 0) || 0;
+  const noise = Number(status.negative_noise_count ?? diagnostics.negative_noise_count ?? counts.negative_noise ?? 0) || 0;
+  return {
+    positive,
+    silence,
+    speech,
+    noise,
+    negative: Number(status.total_negative_count ?? diagnostics.total_negative_count ?? counts.negative ?? silence + speech + noise) || 0,
+    zeroByte: Number(diagnostics.zero_byte_count ?? status.zero_byte_count ?? 0) || 0,
+    invalidFormat: Number(diagnostics.invalid_format_count ?? status.invalid_format_count ?? 0) || 0,
+    smokeReady: Boolean(status.smoke_gate_ready ?? diagnostics.smoke_gate_ready ?? status.dataset_ready ?? status.thresholds?.tiny),
+    realReady: Boolean(status.real_gate_ready ?? diagnostics.real_gate_ready ?? status.thresholds?.production),
+  };
+}
+
+function tuneVoiceRecordKindForCategory(category = "") {
+  if (category === "positive") return "hermes";
+  if (category === "negative/silence") return "silence";
+  if (category === "negative/speech") return "speech";
+  if (category === "negative/noise") return "noise";
+  return "";
+}
+
+function tuneVoiceRecordLabelForCategory(category = "") {
+  return category === "positive" ? "positive" : category.startsWith("negative/") ? "negative" : "";
+}
+
+function tuneVoiceLogDiagnostic(event, payload = {}, options = {}) {
+  const nowMs = Date.now();
+  const previous = tuneVoiceState.diagnostics[event];
+  const sampleMs = Number(options.sampleMs || 0);
+  if (!options.force && sampleMs > 0 && previous?.atMs && nowMs - previous.atMs < sampleMs) {
+    return previous;
+  }
+  const entry = {
+    event,
+    at: new Date().toISOString(),
+    atMs: nowMs,
+    ...payload,
+  };
+  tuneVoiceState.diagnostics[event] = entry;
+  if (options.console !== false) console.info("[train-hermes-wake]", event, payload);
+  return entry;
+}
+
+function tuneVoiceClearRecordTimeout() {
+  if (tuneVoiceState.recordTimeout) {
+    window.clearTimeout(tuneVoiceState.recordTimeout);
+    tuneVoiceState.recordTimeout = 0;
+  }
+}
+
+function tuneVoiceFinishRecord(message, detail = {}) {
+  tuneVoiceClearRecordTimeout();
+  tuneVoiceState.phase = "idle";
+  tuneVoiceState.message = message;
+  tuneVoiceState.lastRecordKind = cleanText(detail.kind || tuneVoiceRecordKindForCategory(detail.category || tuneVoiceState.lastCategory), "");
+  tuneVoiceState.lastRecordPath = cleanText(detail.path || detail.storage_path || "", "");
+  tuneVoiceState.lastRecordDurationMs = Number(detail.duration_ms || detail.durationMs || 0) || 0;
+  tuneVoiceLogDiagnostic("wizard_record_state", {
+    phase: tuneVoiceState.phase,
+    message,
+    last_record_kind: tuneVoiceState.lastRecordKind,
+    last_record_path: tuneVoiceState.lastRecordPath,
+    last_record_duration_ms: tuneVoiceState.lastRecordDurationMs,
+  });
+}
+
+function tuneVoiceFailureMessage(error = "", fallback = "Unexpected error. Try again.") {
+  const code = cleanText(error, "");
+  if (code === "permission_denied" || code === "record_audio_permission_missing") return "Permission denied. Microphone permission is required to record training samples.";
+  if (code === "recorder_unavailable" || code === "audio_record_initialization_failed") return "Recorder unavailable. Try again.";
+  if (code === "too_quiet") return "Too quiet. Try again.";
+  if (code === "too_short") return "Too short. Try again.";
+  if (code === "timeout") return "Recording timed out. Try again.";
+  if (code === "native_bridge_error") return "Native bridge error. Try again.";
+  if (code === "voice_tuning_cancelled") return "Recording cancelled.";
+  return cleanText(error, fallback);
+}
+
+function tuneVoiceCountForStep(step, counts = tuneVoiceCounts()) {
+  if (step?.id === "positive") return counts.positive;
+  if (step?.id === "silence") return counts.silence;
+  if (step?.id === "speech") return counts.speech;
+  if (step?.id === "noise") return counts.noise;
+  return 0;
+}
+
+function getTuneVoiceStatus(options = {}) {
+  const now = Date.now();
+  if (!options.force && tuneVoiceState.status && now - Number(tuneVoiceState.statusAtMs || 0) < TUNE_VOICE_STATUS_TTL_MS) {
+    return tuneVoiceState.status;
+  }
+  const { bridge, name, safeStatusMethod } = getNativeVoiceTuningBridge();
+  tuneVoiceLogDiagnostic("frontend_bridge_detection", tuneVoiceBridgeDetails({ force: options.force }), { sampleMs: 2000, console: false });
+  if (bridge) tuneVoiceState.bridgeInitializingUntil = 0;
+  if (!safeStatusMethod || typeof bridge?.[safeStatusMethod] !== "function") return tuneVoiceState.status || {};
+  try {
+    const status = parseNativeBridgePayload(bridge[safeStatusMethod]()) || {};
+    if (name) status.detected_voice_tuning_bridge_name = name;
+    tuneVoiceState.status = status;
+    tuneVoiceState.statusAtMs = now;
+    tuneVoiceState.bridgeDetailsAtMs = 0;
+    renderHomeTuneVoiceState(status.dataset_ready || status.thresholds?.tiny ? "saved" : "idle", "", status);
+    return status;
+  } catch {
+    return tuneVoiceState.status || {};
+  }
+}
+
+function scheduleTuneVoiceStatusRefresh(reason = "deferred_status") {
+  if (tuneVoiceState.deferredStatusTimer) window.clearTimeout(tuneVoiceState.deferredStatusTimer);
+  tuneVoiceState.deferredStatusTimer = window.setTimeout(() => {
+    tuneVoiceState.deferredStatusTimer = 0;
+    if (!els.tuneVoiceModal || els.tuneVoiceModal.hidden) return;
+    getTuneVoiceStatus({ force: true, reason });
+    renderTuneVoiceWizard({ skipStatus: true });
+  }, 80);
+}
+
+function tuneVoiceReadinessLabel(counts = tuneVoiceCounts()) {
+  if (counts.realReady || (counts.positive >= 50 && counts.negative >= 200)) return "Recommended quality reached";
+  if (counts.smokeReady || (counts.positive >= 5 && counts.negative >= 10)) return "Ready for smoke model";
+  return "Keep recording for better accuracy";
+}
+
+function tuneVoiceLowCountWarning(nextIndex) {
+  const current = TUNE_VOICE_STEPS[tuneVoiceState.step];
+  const counts = tuneVoiceCounts();
+  if (nextIndex <= tuneVoiceState.step || !current?.category) return "";
+  const currentCount = tuneVoiceCountForStep(current, counts);
+  if (currentCount >= Math.min(current.target || 0, current.id === "speech" ? 10 : 5)) return "";
+  return `${current.progressLabel} are still low. You can skip ahead, but more clips improve accuracy.`;
+}
+
+function tuneVoiceProgressMarkup() {
+  const counts = tuneVoiceCounts();
+  const cells = [
+    ["Hermes", counts.positive, 50],
+    ["Silence", counts.silence, 50],
+    ["Speech", counts.speech, 100],
+    ["Noise", counts.noise, 50],
+  ];
+  return cells.map(([label, value, target]) => `
+    <span class="tune-voice-progress-chip${value >= target ? " is-complete" : ""}">
+      <strong>${tuneVoiceEscapeHtml(label)}</strong>
+      <em>${value} / ${target}</em>
+    </span>
+  `).join("");
+}
+
+function renderTuneVoiceWizard(options = {}) {
+  if (!els.tuneVoiceModal || els.tuneVoiceModal.hidden) return;
+  const shouldRefreshStatus = Boolean(options.refreshStatus);
+  const status = shouldRefreshStatus ? getTuneVoiceStatus({ force: Boolean(options.forceStatus), reason: options.reason || "render" }) : (tuneVoiceState.status || {});
+  const counts = tuneVoiceCounts(status);
+  const step = TUNE_VOICE_STEPS[tuneVoiceState.step] || TUNE_VOICE_STEPS[0];
+  const bridgeDetails = tuneVoiceBridgeDetails({ status });
+  const bridgeInitializing = !bridgeDetails.voice_tuning_bridge_available && tuneVoiceState.bridgeInitializingUntil > Date.now();
+  if (els.tuneVoiceTitle) els.tuneVoiceTitle.textContent = step.title;
+  if (els.tuneVoiceSubtitle) els.tuneVoiceSubtitle.textContent = step.subtitle || tuneVoiceReadinessLabel(counts);
+  if (els.tuneVoiceProgress) els.tuneVoiceProgress.innerHTML = tuneVoiceProgressMarkup();
+  if (els.tuneVoiceMessage) {
+    els.tuneVoiceMessage.textContent = tuneVoiceState.message || (bridgeInitializing ? "Checking native voice tuning bridge..." : "");
+  }
+  if (els.tuneVoiceBackButton) {
+    els.tuneVoiceBackButton.disabled = tuneVoiceState.step <= 0 && tuneVoiceState.phase === "idle";
+    els.tuneVoiceBackButton.textContent = tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown" ? "Cancel" : "Back";
+  }
+  if (els.tuneVoiceNextButton) {
+    els.tuneVoiceNextButton.hidden = tuneVoiceState.step >= TUNE_VOICE_STEPS.length - 1;
+    els.tuneVoiceNextButton.disabled = tuneVoiceState.phase !== "idle";
+    els.tuneVoiceNextButton.textContent = tuneVoiceState.step === 0 ? "Skip Intro" : "Next";
+  }
+  if (els.tuneVoiceDeleteLastButton) {
+    els.tuneVoiceDeleteLastButton.hidden = !step.category;
+    els.tuneVoiceDeleteLastButton.disabled = tuneVoiceState.phase !== "idle" || tuneVoiceCountForStep(step, counts) <= 0;
+  }
+  if (els.tuneVoiceRetryLastButton) {
+    els.tuneVoiceRetryLastButton.hidden = !step.category;
+    els.tuneVoiceRetryLastButton.disabled = tuneVoiceState.phase !== "idle";
+  }
+  if (els.tuneVoiceRecordButton) {
+    els.tuneVoiceRecordButton.disabled = tuneVoiceState.phase !== "idle" || (!bridgeDetails.voice_tuning_bridge_available && !bridgeInitializing) || (step.id === "export" && !counts.smokeReady);
+    els.tuneVoiceRecordButton.hidden = false;
+    els.tuneVoiceRecordButton.textContent = step.id === "intro" ? "Start" : step.id === "export" ? "Export Hermes Dataset" : step.button || "Record";
+  }
+  if (!els.tuneVoiceBody) return;
+  if (!bridgeDetails.voice_tuning_bridge_available && !bridgeInitializing) {
+    els.tuneVoiceBody.innerHTML = `
+      <div class="tune-voice-copy">
+        <p>${tuneVoiceEscapeHtml(tuneVoiceFailureSummary(bridgeDetails))}</p>
+        ${tuneVoiceBridgeDevPanelMarkup("Developer details", bridgeDetails)}
+      </div>
+    `;
+    return;
+  }
+  if (step.id === "intro") {
+    els.tuneVoiceBody.innerHTML = `
+      <div class="tune-voice-copy">
+        <p>Your phone will learn to recognize the wake phrase 'Hermes'.</p>
+        <p>We'll record short one-second clips.</p>
+        <p>First, you'll say Hermes several times.</p>
+        <p>Then we'll record silence, room noise, and speech that is not Hermes to reduce false wakes.</p>
+        <p>This does not enable always-on wake automatically.</p>
+        ${tuneVoiceBridgeDevPanelMarkup("Developer details", bridgeDetails)}
+      </div>
+    `;
+  } else if (step.category) {
+    const instruction = step.id === "positive"
+      ? "When the countdown ends, say: Hermes"
+      : step.id === "silence"
+        ? "Stay quiet for one second."
+        : step.id === "speech"
+          ? "Say the phrase shown. Do not say Hermes."
+          : "Let the room sound normal. Do not speak.";
+    const prompt = step.id === "speech" ? TUNE_VOICE_SPEECH_PROMPTS[tuneVoiceState.speechPromptIndex % TUNE_VOICE_SPEECH_PROMPTS.length] : "";
+    const count = tuneVoiceCountForStep(step, counts);
+    const phaseText = tuneVoiceState.phase === "countdown" ? `${tuneVoiceState.countdown}...` : tuneVoiceState.phase === "recording" ? "Recording for 1 second" : tuneVoiceState.phase === "saving" ? "Saving..." : cleanText(tuneVoiceState.message, "");
+    const diagnostics = [
+      ["frontend_record_request_sent", tuneVoiceState.diagnostics.frontend_record_request_sent?.at || ""],
+      ["renderer_record_result_received", tuneVoiceState.diagnostics.renderer_record_result_received?.at || ""],
+      ["wizard_record_state", tuneVoiceState.phase],
+      ["last_record_kind", tuneVoiceState.lastRecordKind],
+      ["last_record_path", tuneVoiceState.lastRecordPath],
+      ["last_record_duration_ms", tuneVoiceState.lastRecordDurationMs || ""],
+    ];
+    els.tuneVoiceBody.innerHTML = `
+      <div class="tune-voice-record-panel">
+        <p class="tune-voice-instruction">${tuneVoiceEscapeHtml(instruction)}</p>
+        ${prompt ? `<div class="tune-voice-prompt">${tuneVoiceEscapeHtml(prompt)}</div>` : ""}
+        <div class="tune-voice-meter" aria-live="polite">${tuneVoiceEscapeHtml(phaseText || "Ready")}</div>
+        <div class="tune-voice-step-progress">
+          <span>${tuneVoiceEscapeHtml(step.progressLabel)}: ${count} / ${step.target}</span>
+          ${step.id === "positive" ? "<span>Smoke target: 5</span>" : ""}
+        </div>
+        <details class="tune-voice-dev-panel">
+          <summary>Recording diagnostics</summary>
+          <dl>${diagnostics.map(([key, value]) => `<div><dt>${tuneVoiceEscapeHtml(key)}</dt><dd>${tuneVoiceEscapeHtml(String(value || "-"))}</dd></div>`).join("")}</dl>
+        </details>
+        ${tuneVoiceBridgeDevPanelMarkup("Native bridge details", bridgeDetails)}
+      </div>
+    `;
+  } else if (step.id === "readiness") {
+    const rows = [
+      ["positive_count", counts.positive],
+      ["negative_silence_count", counts.silence],
+      ["negative_speech_count", counts.speech],
+      ["negative_noise_count", counts.noise],
+      ["total_negative_count", counts.negative],
+      ["zero_byte_count", counts.zeroByte],
+      ["invalid_format_count", counts.invalidFormat],
+      ["smoke_gate_ready", counts.smokeReady ? "yes" : "no"],
+      ["real_gate_ready", counts.realReady ? "yes" : "no"],
+    ];
+    els.tuneVoiceBody.innerHTML = `
+      <div class="tune-voice-readiness ${counts.realReady ? "is-real" : counts.smokeReady ? "is-smoke" : ""}">
+        <strong>${tuneVoiceEscapeHtml(tuneVoiceReadinessLabel(counts))}</strong>
+        <span>${counts.smokeReady ? "Export is available. Smoke datasets are useful for pipeline checks." : "Need at least 5 Hermes samples and 10 negative samples."}</span>
+      </div>
+      <dl class="tune-voice-diagnostics">
+        ${rows.map(([label, value]) => `<div><dt>${tuneVoiceEscapeHtml(label)}</dt><dd>${tuneVoiceEscapeHtml(String(value))}</dd></div>`).join("")}
+      </dl>
+      ${tuneVoiceBridgeDevPanelMarkup("Native bridge details", bridgeDetails)}
+    `;
+  } else {
+    const result = tuneVoiceState.exportResult;
+    const exportText = result?.ok
+      ? `Your dataset zip is ready. Use it with the repo trainer to create base_hermes.onnx. ${cleanText(result.path || result.filename, "")}`
+      : result?.error
+        ? `Export failed: ${cleanText(result.error, "unknown error")}`
+        : counts.smokeReady
+          ? "Ready to export a smoke dataset."
+          : "Smoke gate is not ready yet. You can keep recording, then export once you have at least 5 Hermes and 10 negative clips.";
+    els.tuneVoiceBody.innerHTML = `
+      <div class="tune-voice-export">
+        <p>${tuneVoiceEscapeHtml(tuneVoiceState.phase === "exporting" ? "Export in progress..." : exportText)}</p>
+        <details>
+          <summary>Developer command</summary>
+          <pre>python3 tools/voice/import-hermes-dataset.py hermes-dataset.zip --out data/voice/hermes
+python3 tools/voice/train-hermes-wake.py --dataset data/voice/hermes --out native/android/app/src/main/assets/voice/base_hermes.onnx</pre>
+        </details>
+        ${tuneVoiceBridgeDevPanelMarkup("Native bridge details", bridgeDetails)}
+      </div>
+    `;
+  }
+}
+
+function openTuneVoiceWizard() {
+  if (!els.tuneVoiceModal) return;
+  tuneVoiceState.bridgeInitializingUntil = Date.now() + 1500;
+  tuneVoiceState.step = 0;
+  tuneVoiceState.message = "";
+  tuneVoiceState.phase = "idle";
+  tuneVoiceState.exportResult = null;
+  els.tuneVoiceModal.hidden = false;
+  renderTuneVoiceWizard({ skipStatus: true });
+  scheduleTuneVoiceStatusRefresh("modal_open");
+  window.setTimeout(() => {
+    if (!els.tuneVoiceModal || els.tuneVoiceModal.hidden) return;
+    if (tuneVoiceState.bridgeInitializingUntil && tuneVoiceState.bridgeInitializingUntil <= Date.now()) renderTuneVoiceWizard({ skipStatus: true });
+  }, 1600);
+  pushUiNavigationLayer("tune-voice-modal", () => closeTuneVoiceWizard({ skipHistory: true, skipStack: true }));
+}
+
+function maybeOpenRequestedTuneVoiceWizard(reason = "native_request") {
+  let params = null;
+  try {
+    params = new URL(window.location.href).searchParams;
+  } catch {
+    params = new URLSearchParams();
+  }
+  const requested = cleanText(params.get("native_screen") || params.get("debug_screen"), "").toLowerCase();
+  if (requested !== "train-hermes-wake") return false;
+  if (!state.authUser) return false;
+  if (els.tuneVoiceModal && !els.tuneVoiceModal.hidden) return true;
+  tuneVoiceLogDiagnostic("native_requested_tune_voice_open", { reason, requested });
+  openTuneVoiceWizard();
+  return true;
+}
+
+function collectTuneVoiceRuntimeDiagnostics(options = {}) {
+  const details = tuneVoiceBridgeDetails({ force: true, status: tuneVoiceState.status || {} });
+  const payload = {
+    requested_by: cleanText(options.requested_by, ""),
+    tune_voice_modal_open: Boolean(els.tuneVoiceModal && !els.tuneVoiceModal.hidden),
+    active_panel: cleanText(state.activePanel || "", ""),
+    auth_state: state.authUser ? "authenticated" : state.authChecked ? "locked" : "checking",
+    user_agent: details.user_agent,
+    url: details.location_href,
+    native_flag_state: details.native_flag,
+    shell_flag_state: details.shell_flag,
+    native_flags_present: details.native_flags_present,
+    bridge_object_present: details.voice_tuning_bridge_available,
+    detected_bridge_object: details.detected_voice_tuning_bridge_name || "",
+    android_shell_detected: details.android_shell_detected,
+    available_native_bridge_names: details.available_native_bridge_names,
+    apk_build_id: details.apk_build_id,
+    web_build_id: details.web_build_id,
+    failure_reason: details.failure_reason,
+    failure_reasons: details.failure_reasons,
+    bridge_details: details,
+    recording_active: tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown",
+    recording_started_automatically: false,
+  };
+  tuneVoiceLogDiagnostic("frontend_bridge_detection", payload, { force: true });
+  return payload;
+}
+
+window.__wasmAgentTuneVoice = {
+  diagnostics(requestedBy = "") {
+    return collectTuneVoiceRuntimeDiagnostics({ requested_by: requestedBy });
+  },
+  open(requestedBy = "") {
+    maybeOpenRequestedTuneVoiceWizard(requestedBy || "native_open");
+    return collectTuneVoiceRuntimeDiagnostics({ requested_by: requestedBy || "native_open" });
+  },
+};
+
+function closeTuneVoiceWizard(options = {}) {
+  if (!els.tuneVoiceModal) return;
+  if (!options.skipHistory && closeUiNavigationLayer("tune-voice-modal")) return;
+  els.tuneVoiceModal.hidden = true;
+  tuneVoiceClearRecordTimeout();
+  if (tuneVoiceState.deferredStatusTimer) {
+    window.clearTimeout(tuneVoiceState.deferredStatusTimer);
+    tuneVoiceState.deferredStatusTimer = 0;
+  }
+  tuneVoiceState.phase = "idle";
+  if (!options.skipStack) closeUiNavigationLayer("tune-voice-modal", { skipHistory: true, replaceHistory: true });
+}
+
+function setTuneVoiceStep(stepIndex) {
+  const warning = tuneVoiceLowCountWarning(stepIndex);
+  tuneVoiceState.step = clamp(stepIndex, 0, TUNE_VOICE_STEPS.length - 1);
+  tuneVoiceState.phase = "idle";
+  tuneVoiceState.message = warning;
+  renderTuneVoiceWizard({ skipStatus: true });
+}
+
+function cancelTuneVoiceRecording() {
+  tuneVoiceClearRecordTimeout();
+  const bridge = androidNativeVoiceBridge();
+  try {
+    if (typeof bridge?.cancelVoiceTuning === "function") bridge.cancelVoiceTuning();
+  } catch (error) {
+    tuneVoiceLogDiagnostic("native_record_error", { error: "native_bridge_error", message: errorMessage(error) });
+  }
+  tuneVoiceFinishRecord("Recording cancelled.", {
+    category: tuneVoiceState.lastCategory,
+    kind: tuneVoiceRecordKindForCategory(tuneVoiceState.lastCategory),
+    duration_ms: Date.now() - tuneVoiceState.recordStartedAt,
+  });
+  renderTuneVoiceWizard({ skipStatus: true });
+  renderHomeTuneVoiceState("idle", "Recording cancelled.");
+}
+
+function runTuneVoiceCountdown(step) {
+  if (tuneVoiceState.phase !== "idle") return;
+  tuneVoiceState.phase = "countdown";
+  tuneVoiceState.countdown = 3;
+  tuneVoiceState.message = "";
+  renderTuneVoiceWizard({ skipStatus: true });
+  const tick = () => {
+    tuneVoiceState.countdown -= 1;
+    if (tuneVoiceState.countdown > 0) {
+      renderTuneVoiceWizard({ skipStatus: true });
+      window.setTimeout(tick, 650);
+      return;
+    }
+    tuneVoiceState.phase = "recording";
+    tuneVoiceState.message = "Recording for 1 second";
+    renderTuneVoiceWizard({ skipStatus: true });
+    startHomeTuneVoiceSample(step.category, step.source);
+  };
+  window.setTimeout(tick, 650);
+}
+
+function tuneVoiceRecordCurrent() {
+  const step = TUNE_VOICE_STEPS[tuneVoiceState.step] || TUNE_VOICE_STEPS[0];
+  if (step.id === "intro") return setTuneVoiceStep(1);
+  if (step.id === "export") return exportTuneVoiceDataset();
+  if (!step.category) return;
+  if (tuneVoiceState.phase !== "idle") return;
+  tuneVoiceState.lastCategory = step.category;
+  runTuneVoiceCountdown(step);
+}
+
+function deleteTuneVoiceLast() {
+  const step = TUNE_VOICE_STEPS[tuneVoiceState.step];
+  const bridge = androidNativeVoiceBridge();
+  if (!step?.category || typeof bridge?.deleteLastVoiceTuningSample !== "function") return;
+  try {
+    const result = parseNativeBridgePayload(bridge.deleteLastVoiceTuningSample(step.category));
+    tuneVoiceState.status = result?.status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
+    tuneVoiceState.message = result?.ok ? "Last sample deleted." : cleanText(result?.error, "Delete failed.");
+  } catch (error) {
+    tuneVoiceState.message = errorMessage(error) || "Delete failed.";
+  }
+  renderTuneVoiceWizard({ skipStatus: true });
+}
+
+function exportTuneVoiceDataset() {
+  const bridge = androidNativeVoiceBridge();
+  tuneVoiceState.phase = "exporting";
+  tuneVoiceState.message = "Export in progress...";
+  renderTuneVoiceWizard({ skipStatus: true });
+  try {
+    if (typeof bridge?.exportHermesDataset !== "function") throw new Error(VOICE_TUNING_BRIDGE_UNAVAILABLE_MESSAGE);
+    const result = parseNativeBridgePayload(bridge.exportHermesDataset());
+    tuneVoiceState.exportResult = result || { ok: false, error: "empty_export_result" };
+    tuneVoiceState.status = result?.status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
+    tuneVoiceState.message = result?.ok ? "Export success." : cleanText(result?.error, "Export failed.");
+  } catch (error) {
+    tuneVoiceState.exportResult = { ok: false, error: errorMessage(error) || "Export failed." };
+    tuneVoiceState.message = tuneVoiceState.exportResult.error;
+  }
+  tuneVoiceState.phase = "idle";
+  renderTuneVoiceWizard({ skipStatus: true });
+}
+
+let hermesWakeExportPollBusy = false;
+let hermesWakeExportLastRequestId = "";
+let hermesWakeInstallPollBusy = false;
+let hermesWakeInstallLastRequestId = "";
+
+async function pollHermesWakeExportRequest() {
+  if (hermesWakeExportPollBusy) return;
+  const bridge = androidNativeVoiceBridge();
+  if (typeof bridge?.exportHermesDataset !== "function") return;
+  hermesWakeExportPollBusy = true;
+  try {
+    const response = await fetch("/native/android/hermes-wake-export/request", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const request = payload?.request || {};
+    const requestId = cleanText(request.id, "");
+    if (!payload?.pending || !requestId || requestId === hermesWakeExportLastRequestId) return;
+    hermesWakeExportLastRequestId = requestId;
+    let result = null;
+    const bridgeDiagnostics = {
+      page: {
+        href: window.location?.href || "",
+        origin: window.location?.origin || "",
+        user_agent: navigator.userAgent || "",
+      },
+      bridge_details: tuneVoiceBridgeDetails({ force: true }),
+    };
+    try {
+      if (typeof bridge.getBuildInfo === "function") {
+        bridgeDiagnostics.build_info = parseNativeBridgePayload(bridge.getBuildInfo()) || {};
+      }
+    } catch (error) {
+      bridgeDiagnostics.build_info_error = errorMessage(error) || "get_build_info_failed";
+    }
+    try {
+      if (typeof bridge.getVoiceTuningDiagnostics === "function") {
+        bridgeDiagnostics.voice_tuning_diagnostics = parseNativeBridgePayload(bridge.getVoiceTuningDiagnostics()) || {};
+      }
+    } catch (error) {
+      bridgeDiagnostics.voice_tuning_diagnostics_error = errorMessage(error) || "get_voice_tuning_diagnostics_failed";
+    }
+    try {
+      result = parseNativeBridgePayload(bridge.exportHermesDataset()) || { ok: false, error: "empty_export_result" };
+    } catch (error) {
+      result = { ok: false, error: errorMessage(error) || "export_failed" };
+    }
+    if (result && typeof result === "object") result.frontend_diagnostics = bridgeDiagnostics;
+    await fetch("/native/android/hermes-wake-export/result", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: requestId, result }),
+    });
+    tuneVoiceState.exportResult = result;
+    tuneVoiceState.status = result?.status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
+  } catch (error) {
+    tuneVoiceLogDiagnostic("hermes_wake_export_request_error", { error: errorMessage(error) }, { sampleMs: 5000, console: false });
+  } finally {
+    hermesWakeExportPollBusy = false;
+  }
+}
+
+async function pollHermesWakeInstallRequest() {
+  if (hermesWakeInstallPollBusy) return;
+  const bridge = androidNativeVoiceBridge();
+  if (typeof bridge?.installHermesWakeModel !== "function") return;
+  hermesWakeInstallPollBusy = true;
+  try {
+    const response = await fetch("/native/android/hermes-wake-install/request", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const request = payload?.request || {};
+    const requestId = cleanText(request.id, "");
+    const model = request.model && typeof request.model === "object" ? request.model : {};
+    const modelUrl = cleanText(model.url, "/native/android/hermes-wake-model/latest");
+    const sha256 = cleanText(model.sha256, "");
+    if (!payload?.pending || !requestId || requestId === hermesWakeInstallLastRequestId || !sha256) return;
+    hermesWakeInstallLastRequestId = requestId;
+    let result = null;
+    try {
+      result = parseNativeBridgePayload(bridge.installHermesWakeModel(modelUrl, sha256)) || { ok: false, error: "empty_install_result" };
+    } catch (error) {
+      result = { ok: false, error: errorMessage(error) || "install_failed" };
+    }
+    await fetch("/native/android/hermes-wake-install/result", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: requestId, result }),
+    });
+    tuneVoiceState.status = result?.status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
+  } catch (error) {
+    tuneVoiceLogDiagnostic("hermes_wake_install_request_error", { error: errorMessage(error) }, { sampleMs: 5000, console: false });
+  } finally {
+    hermesWakeInstallPollBusy = false;
+  }
+}
+
 function renderHomeTuneVoiceState(status = "idle", message = "", payload = null) {
   const button = els.homeTuneVoiceButton;
   const progressLabel = payload ? homeTuneVoiceProgressLabel(payload) : "";
@@ -17642,12 +18453,19 @@ function renderHomeTuneVoiceState(status = "idle", message = "", payload = null)
 }
 
 function startHomeTuneVoiceSample(category = null, source = "") {
+  if (category && typeof category === "object" && typeof category.preventDefault === "function") {
+    category.preventDefault();
+    openTuneVoiceWizard();
+    return;
+  }
   let cleanCategory = cleanText(category, "");
   let cleanSource = cleanText(source, "");
   const bridge = androidNativeVoiceBridge();
   if (!cleanCategory && typeof bridge?.voiceTuningStatus === "function") {
     const status = parseNativeBridgePayload(bridge.voiceTuningStatus());
     cleanCategory = homeTuneVoiceNextCategory(status);
+    tuneVoiceState.status = status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
     renderHomeTuneVoiceState("idle", "", status);
   }
   if (!cleanCategory) cleanCategory = "positive";
@@ -17657,31 +18475,118 @@ function startHomeTuneVoiceSample(category = null, source = "") {
       : `space-home:tune-voice:${cleanCategory.replace("/", "-")}`;
   }
   const promptLabel = homeTuneVoiceRecordingLabel(cleanCategory);
+  const recordPayload = {
+    kind: tuneVoiceRecordKindForCategory(cleanCategory),
+    label: tuneVoiceRecordLabelForCategory(cleanCategory),
+    duration_ms: 1000,
+    prompt: cleanCategory === "positive" ? "Hermes" : "",
+    category: cleanCategory,
+    source: cleanSource,
+  };
+  tuneVoiceState.recordStartedAt = Date.now();
+  tuneVoiceState.lastRecordKind = recordPayload.kind;
+  tuneVoiceState.lastRecordPath = "";
+  tuneVoiceState.lastRecordDurationMs = 0;
+  tuneVoiceLogDiagnostic("frontend_record_request_sent", recordPayload);
+  tuneVoiceLogDiagnostic("wizard_record_state", { phase: "recording", category: cleanCategory });
+  tuneVoiceClearRecordTimeout();
+  tuneVoiceState.recordTimeout = window.setTimeout(() => {
+    if (tuneVoiceState.phase !== "recording" && tuneVoiceState.phase !== "saving") return;
+    tuneVoiceFinishRecord("Recording timed out. Try again.", {
+      category: cleanCategory,
+      kind: recordPayload.kind,
+      duration_ms: Date.now() - tuneVoiceState.recordStartedAt,
+    });
+    tuneVoiceLogDiagnostic("native_record_error", { error: "timeout", category: cleanCategory });
+    renderTuneVoiceWizard({ skipStatus: true });
+    renderHomeTuneVoiceState("error", "Recording timed out. Try again.");
+  }, 5000);
   renderHomeTuneVoiceState("recording", promptLabel);
   try {
     if (typeof bridge?.startVoiceTuningSample !== "function") {
-      throw new Error("Android native voice tuning bridge is not available.");
+      throw new Error(VOICE_TUNING_BRIDGE_UNAVAILABLE_MESSAGE);
     }
-    const result = parseNativeBridgePayload(bridge.startVoiceTuningSample(cleanCategory, cleanSource));
+    const result = parseNativeBridgePayload(bridge.startVoiceTuningSample(JSON.stringify(recordPayload)));
     if (!result?.ok) {
-      throw new Error(cleanText(result?.error, "Voice sample recording failed."));
+      if (result?.requested) {
+        tuneVoiceFinishRecord("Microphone permission is required to record training samples.", { ...recordPayload, duration_ms: 0 });
+        tuneVoiceState.status = result.status || tuneVoiceState.status;
+        tuneVoiceState.statusAtMs = Date.now();
+        renderTuneVoiceWizard({ skipStatus: true });
+        renderHomeTuneVoiceState("error", "Microphone permission is required to record training samples.", result.status);
+        return;
+      }
+      throw new Error(tuneVoiceFailureMessage(result?.error, "Voice sample recording failed."));
     }
-    if (result?.status) renderHomeTuneVoiceState("recording", promptLabel, result.status);
+    tuneVoiceLogDiagnostic("native_record_request_received", { ok: true, result });
+    if (result?.status) {
+      tuneVoiceState.status = result.status;
+      tuneVoiceState.statusAtMs = Date.now();
+      renderHomeTuneVoiceState("recording", promptLabel, result.status);
+    }
   } catch (error) {
+    tuneVoiceLogDiagnostic("native_record_error", { error: "native_bridge_error", message: errorMessage(error) });
+    tuneVoiceFinishRecord(errorMessage(error) || "Native bridge error. Try again.", { ...recordPayload, duration_ms: 0 });
     renderHomeTuneVoiceState("error", errorMessage(error) || "Voice sample recording failed.");
+    renderTuneVoiceWizard({ skipStatus: true });
   }
+}
+
+function recheckTuneVoiceBridge() {
+  tuneVoiceState.bridgeInitializingUntil = Date.now() + 1000;
+  tuneVoiceState.message = "Checking native voice tuning bridge...";
+  tuneVoiceState.bridgeDetailsAtMs = 0;
+  tuneVoiceLogDiagnostic("frontend_bridge_detection", tuneVoiceBridgeDetails({ force: true }), { force: true });
+  renderTuneVoiceWizard({ skipStatus: true });
+  window.setTimeout(() => {
+    getTuneVoiceStatus({ force: true, reason: "manual_recheck" });
+    const details = tuneVoiceBridgeDetails({ force: true, status: tuneVoiceState.status || {} });
+    tuneVoiceState.message = details.voice_tuning_bridge_available
+      ? details.recording_supported
+        ? "Native voice tuning bridge connected and ready."
+        : "Android bridge connected; recording not enabled yet."
+      : VOICE_TUNING_BRIDGE_UNAVAILABLE_MESSAGE;
+    tuneVoiceLogDiagnostic("frontend_bridge_detection", details, { force: true });
+    renderTuneVoiceWizard({ skipStatus: true });
+  }, 1000);
 }
 
 function handleHomeTuneVoiceEvent(event) {
   const detail = event?.detail || {};
   const type = cleanText(detail.type, "");
-  if (type === "voice_tuning_started") {
+  if (type === "voice_tuning_started" || type === "native_record_started") {
+    tuneVoiceLogDiagnostic("native_record_started", detail);
+    tuneVoiceState.phase = "recording";
+    tuneVoiceState.message = "Recording for 1 second";
+    renderTuneVoiceWizard({ skipStatus: true });
     renderHomeTuneVoiceState("recording", homeTuneVoiceRecordingLabel(detail.category), detail);
+  } else if (type === "native_record_finished") {
+    tuneVoiceLogDiagnostic("native_record_finished", detail);
+    tuneVoiceState.phase = "saving";
+    tuneVoiceState.message = "Saving...";
+    renderTuneVoiceWizard({ skipStatus: true });
   } else if (type === "voice_tuning_sample_recorded") {
+    tuneVoiceLogDiagnostic("native_record_finished", detail);
+    tuneVoiceLogDiagnostic("native_record_result", { ok: true, ...detail });
+    tuneVoiceLogDiagnostic("renderer_record_result_received", detail);
+    tuneVoiceFinishRecord("Saved", detail);
+    tuneVoiceState.status = detail;
+    tuneVoiceState.statusAtMs = Date.now();
+    if (detail.category === "negative/speech") tuneVoiceState.speechPromptIndex += 1;
+    renderTuneVoiceWizard({ skipStatus: true });
     renderHomeTuneVoiceState("saved", "Voice sample saved", detail);
   } else if (type === "voice_tuning_counts_updated" || type === "voice_tuning_threshold_met") {
+    tuneVoiceState.status = detail;
+    tuneVoiceState.statusAtMs = Date.now();
+    renderTuneVoiceWizard({ skipStatus: true });
     renderHomeTuneVoiceState(detail.dataset_ready || detail.thresholds?.tiny ? "saved" : "idle", "", detail);
   } else if (type === "voice_tuning_recording_failed") {
+    tuneVoiceLogDiagnostic("native_record_error", detail);
+    tuneVoiceLogDiagnostic("renderer_record_result_received", detail);
+    tuneVoiceFinishRecord(tuneVoiceFailureMessage(detail.error, cleanText(detail.message, "Try again.")), detail);
+    tuneVoiceState.status = detail;
+    tuneVoiceState.statusAtMs = Date.now();
+    renderTuneVoiceWizard({ skipStatus: true });
     renderHomeTuneVoiceState("error", cleanText(detail.error, "Voice sample recording failed."));
   }
 }
@@ -18333,7 +19238,19 @@ function compareNativeUpdateState(current, artifact, profile = state.nativeInsta
     if (artifact.packageName && current.packageName && artifact.packageName !== current.packageName) {
       return { platform, status: "update_failed", reason: "package name mismatch", currentBuildId: current.buildId, latestBuildId, artifactAvailable: true, safeUpdatePath: false };
     }
-    if (Number(artifact.versionCode || 0) && Number(current.versionCode || 0) >= Number(artifact.versionCode || 0)) {
+    if (current.buildId && latestBuildId && current.buildId !== latestBuildId) {
+      return {
+        platform,
+        status: artifact.url ? "update_available" : "unavailable",
+        currentBuildId: current.buildId,
+        latestBuildId,
+        artifactAvailable: Boolean(artifact.url),
+        safeUpdatePath: Boolean(artifact.url),
+        artifact,
+        message: "Android requires OS confirmation to install this APK update.",
+      };
+    }
+    if (!latestBuildId && Number(artifact.versionCode || 0) && Number(current.versionCode || 0) >= Number(artifact.versionCode || 0)) {
       return { platform, status: "up_to_date", currentBuildId: current.buildId, latestBuildId, artifactAvailable: true, safeUpdatePath: false };
     }
   }
@@ -29289,6 +30206,10 @@ function androidOAuthStatusLabel(status = "") {
     unauthorized: "unauthorized: unlock phone and tap Allow",
     offline: "phone offline",
     device_authorized: "device authorized",
+    no_device: "no Android device",
+    multiple_devices: "multiple Android devices",
+    one_authorized_device: "one authorized device",
+    adb_error: "adb error",
     running_horc: "running horc simulate android --device --interactive-oauth",
     PASS: "PASS",
     PENDING: "PENDING",
@@ -29339,6 +30260,14 @@ function appendAndroidOAuthOutput(kind, text) {
   state.androidOAuthVerification.output = state.androidOAuthVerification.output.slice(-260);
 }
 
+function appendAndroidOAuthStructured(kind, value) {
+  if (value === undefined) return;
+  const formatted = typeof value === "string"
+    ? value
+    : JSON.stringify(value, null, 2);
+  appendAndroidOAuthOutput(kind, formatted);
+}
+
 function applyAndroidOAuthReport(report = null) {
   if (!report) return;
   state.androidOAuthVerification.report = report;
@@ -29376,10 +30305,23 @@ function renderAndroidOAuthDiagnosticsPanel() {
   const needsAppUpdate = androidOAuthNeedsWindowsAppUpdate();
   if (els.androidOAuthPanelStatus) {
     els.androidOAuthPanelStatus.textContent = status || "standby";
-    els.androidOAuthPanelStatus.className = `widget-chip ${verification.status === "PASS" || verification.status === "passed" ? "ok" : verification.status === "FAIL" || verification.status === "failed" || verification.status === "adb_missing" ? "err" : ""}`;
+    els.androidOAuthPanelStatus.className = `widget-chip ${verification.status === "PASS" || verification.status === "passed" || verification.status === "one_authorized_device" ? "ok" : verification.status === "FAIL" || verification.status === "failed" || verification.status === "adb_missing" || verification.status === "adb_error" || verification.status === "unauthorized" || verification.status === "no_device" || verification.status === "multiple_devices" ? "err" : ""}`;
+  }
+  if (els.androidConnectionCheckButton) {
+    els.androidConnectionCheckButton.disabled = !bridge || verification.busy || verification.connectionBusy;
+  }
+  const connectionReady = verification.connection?.status === "one_authorized_device";
+  if (els.androidVoiceTuningProofButton) {
+    els.androidVoiceTuningProofButton.disabled = !bridge || verification.busy || verification.connectionBusy || !connectionReady;
+  }
+  if (els.androidVoiceTuningRuntimeButton) {
+    els.androidVoiceTuningRuntimeButton.disabled = !bridge || verification.busy || verification.connectionBusy || !connectionReady;
+  }
+  if (els.androidVoiceTuningGoalLoopButton) {
+    els.androidVoiceTuningGoalLoopButton.disabled = !bridge || verification.busy || verification.connectionBusy || !connectionReady;
   }
   if (els.androidOAuthStartButton) {
-    els.androidOAuthStartButton.disabled = !bridge || verification.busy;
+    els.androidOAuthStartButton.disabled = !bridge || verification.busy || verification.connectionBusy;
   }
   if (els.androidOAuthStatus) {
     els.androidOAuthStatus.textContent = verification.busy ? status || "running" : status || (bridge ? "ready" : "unavailable");
@@ -29411,18 +30353,43 @@ function renderAndroidOAuthDiagnosticsPanel() {
   }
 }
 
+function appendAndroidConnectionSummary(result = {}) {
+  const status = cleanText(result.status, "adb_error");
+  const device = result.ok
+    ? [result.serial, result.model, result.product, result.device].map((value) => cleanText(value, "")).filter(Boolean).join(" ")
+    : "";
+  appendAndroidOAuthOutput("connection", `${androidOAuthStatusLabel(status)}${device ? `: ${device}` : ""}`);
+  if (result.instructions) appendAndroidOAuthOutput("hint", result.instructions);
+}
+
 function handleAndroidOAuthDiagnosticsEvent(event = {}) {
+  const operation = cleanText(event.operation, "");
   const incomingOpId = cleanText(event.opId, "");
   if (incomingOpId && !state.androidOAuthVerification.opId) {
     state.androidOAuthVerification.opId = incomingOpId;
   }
   if (incomingOpId && state.androidOAuthVerification.opId && incomingOpId !== state.androidOAuthVerification.opId) return;
+  if (operation === "check_android_connection" && event.type === "status") {
+    state.androidOAuthVerification.status = cleanText(event.status, "");
+    state.androidOAuthVerification.label = cleanText(event.label, androidOAuthStatusLabel(event.status));
+    state.androidOAuthVerification.message = cleanText(event.message, "");
+    renderAndroidOAuthDiagnosticsPanel();
+    return;
+  }
   if (event.type === "status") {
     state.androidOAuthVerification.status = cleanText(event.status, "");
     state.androidOAuthVerification.label = cleanText(event.label, androidOAuthStatusLabel(event.status));
     state.androidOAuthVerification.message = cleanText(event.message, "");
     if (event.report) applyAndroidOAuthReport(event.report);
     appendAndroidOAuthOutput("status", state.androidOAuthVerification.label);
+    if (operation === "prove_android_voice_tuning" || operation === "debug_android_voice_tuning_runtime" || operation === "run_android_voice_tuning_goal_loop" || operation === "run_android_hermes_wake_proof") {
+      appendAndroidOAuthStructured("status-detail", {
+        operation,
+        status: event.status,
+        label: event.label,
+        message: event.message,
+      });
+    }
   } else if (event.type === "stdout" || event.type === "stderr") {
     appendAndroidOAuthOutput(event.type, event.text);
   } else if (event.type === "command_started") {
@@ -29434,6 +30401,11 @@ function handleAndroidOAuthDiagnosticsEvent(event = {}) {
       appendAndroidOAuthOutput("update", "Bundled Android verifier is missing. Download and install the latest Windows app.");
     }
     appendAndroidOAuthOutput("exit", `code ${event.result?.exitCode ?? ""}`.trim());
+    if (operation === "prove_android_voice_tuning" || operation === "debug_android_voice_tuning_runtime" || operation === "run_android_voice_tuning_goal_loop" || operation === "run_android_hermes_wake_proof") {
+      appendAndroidOAuthStructured("command-result", event.result || {});
+    }
+  } else if (event.type === "progress") {
+    appendAndroidOAuthStructured(event.step || "progress", event);
   }
   renderAndroidOAuthDiagnosticsPanel();
 }
@@ -29481,6 +30453,72 @@ async function updateWindowsAppForAndroidOAuthVerifier() {
   renderAndroidOAuthDiagnosticsPanel();
 }
 
+async function checkAndroidConnection() {
+  const bridge = windowsNativeDiagnosticsBridge();
+  if (!bridge?.run || state.androidOAuthVerification.busy || state.androidOAuthVerification.connectionBusy) {
+    renderAndroidOAuthDiagnosticsPanel();
+    return;
+  }
+  state.androidOAuthVerification.connectionBusy = true;
+  state.androidOAuthVerification.opId = "";
+  state.androidOAuthVerification.status = "checking_adb";
+  state.androidOAuthVerification.label = "checking Android connection";
+  state.androidOAuthVerification.message = "";
+  renderAndroidOAuthDiagnosticsPanel();
+  try {
+    const result = await bridge.run("check_android_connection");
+    state.androidOAuthVerification.connection = result || null;
+    applyAndroidOAuthResult(result || {});
+    appendAndroidConnectionSummary(result || {});
+    appendAndroidOAuthStructured("connection-detail", result || {});
+  } catch (error) {
+    state.androidOAuthVerification.status = "adb_error";
+    state.androidOAuthVerification.label = androidOAuthStatusLabel("adb_error");
+    state.androidOAuthVerification.message = errorMessage(error);
+    appendAndroidOAuthOutput("error", state.androidOAuthVerification.message);
+  } finally {
+    state.androidOAuthVerification.connectionBusy = false;
+    renderAndroidOAuthDiagnosticsPanel();
+  }
+}
+
+async function runAndroidVoiceTuningDiagnostic(operation, options = {}) {
+  const bridge = windowsNativeDiagnosticsBridge();
+  const label = cleanText(options.label, operation);
+  if (!bridge?.run || state.androidOAuthVerification.busy || state.androidOAuthVerification.connectionBusy) {
+    renderAndroidOAuthDiagnosticsPanel();
+    return;
+  }
+  if (state.androidOAuthVerification.connection?.status !== "one_authorized_device") {
+    state.androidOAuthVerification.message = state.androidOAuthVerification.connection?.instructions
+      || "Run Check Android Connection and wait for one authorized device.";
+    renderAndroidOAuthDiagnosticsPanel();
+    return;
+  }
+  state.androidOAuthVerification.busy = true;
+  state.androidOAuthVerification.action = operation;
+  state.androidOAuthVerification.opId = "";
+  state.androidOAuthVerification.status = "running";
+  state.androidOAuthVerification.label = label;
+  state.androidOAuthVerification.message = "";
+  state.androidOAuthVerification.output = [];
+  renderAndroidOAuthDiagnosticsPanel();
+  try {
+    const result = await bridge.run(operation, options.payload || {});
+    applyAndroidOAuthResult(result || {});
+    appendAndroidOAuthStructured(operation, result || {});
+  } catch (error) {
+    state.androidOAuthVerification.status = "FAIL";
+    state.androidOAuthVerification.label = label;
+    state.androidOAuthVerification.message = errorMessage(error);
+    appendAndroidOAuthOutput("error", state.androidOAuthVerification.message);
+  } finally {
+    state.androidOAuthVerification.busy = false;
+    state.androidOAuthVerification.action = "";
+    renderAndroidOAuthDiagnosticsPanel();
+  }
+}
+
 async function startAndroidOAuthVerification() {
   const bridge = windowsNativeDiagnosticsBridge();
   if (!bridge?.run || state.androidOAuthVerification.busy) {
@@ -29488,6 +30526,7 @@ async function startAndroidOAuthVerification() {
     return;
   }
   state.androidOAuthVerification.busy = true;
+  state.androidOAuthVerification.action = "verify_android_oauth";
   state.androidOAuthVerification.opId = "";
   state.androidOAuthVerification.status = "checking_adb";
   state.androidOAuthVerification.label = "checking adb";
@@ -29513,6 +30552,7 @@ async function startAndroidOAuthVerification() {
     appendAndroidOAuthOutput("error", state.androidOAuthVerification.message);
   } finally {
     state.androidOAuthVerification.busy = false;
+    state.androidOAuthVerification.action = "";
     renderAndroidOAuthDiagnosticsPanel();
   }
 }
@@ -34559,6 +35599,21 @@ function wireEvents() {
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
   els.homeTuneVoiceButton?.addEventListener("click", startHomeTuneVoiceSample);
+  els.closeTuneVoiceModalButton?.addEventListener("click", closeTuneVoiceWizard);
+  els.tuneVoiceBackButton?.addEventListener("click", () => {
+    if (tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown") return cancelTuneVoiceRecording();
+    return setTuneVoiceStep(tuneVoiceState.step - 1);
+  });
+  els.tuneVoiceNextButton?.addEventListener("click", () => setTuneVoiceStep(tuneVoiceState.step + 1));
+  els.tuneVoiceRecordButton?.addEventListener("click", tuneVoiceRecordCurrent);
+  els.tuneVoiceRetryLastButton?.addEventListener("click", tuneVoiceRecordCurrent);
+  els.tuneVoiceDeleteLastButton?.addEventListener("click", deleteTuneVoiceLast);
+  els.tuneVoiceBody?.addEventListener("click", (event) => {
+    const target = event.target?.closest?.('[data-tune-voice-action="recheck-native-bridge"]');
+    if (!target) return;
+    event.preventDefault();
+    recheckTuneVoiceBridge();
+  });
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
   els.homeDiagnosticsButton?.addEventListener("click", () => setPanel("diagnostics"));
@@ -34594,6 +35649,21 @@ function wireEvents() {
   els.agentVoiceWakeDisableButton?.addEventListener("click", () => {
     callNativeDebugBridge("disableVoiceWake", "Hermes voice disabled");
   });
+  els.androidConnectionCheckButton?.addEventListener("click", () => void checkAndroidConnection());
+  els.androidVoiceTuningProofButton?.addEventListener("click", () => void runAndroidVoiceTuningDiagnostic("prove_android_voice_tuning", {
+    label: "installing / proving Android voice tuning APK",
+  }));
+  els.androidVoiceTuningRuntimeButton?.addEventListener("click", () => void runAndroidVoiceTuningDiagnostic("debug_android_voice_tuning_runtime", {
+    label: "capturing Android voice tuning runtime",
+  }));
+  els.androidVoiceTuningGoalLoopButton?.addEventListener("click", () => void runAndroidVoiceTuningDiagnostic("run_android_voice_tuning_goal_loop", {
+    label: "running guarded Hermes Wake goal loop",
+    payload: {
+      maxIterations: 3,
+      clearWebViewData: false,
+      waitMs: 10000,
+    },
+  }));
   els.androidOAuthStartButton?.addEventListener("click", () => void startAndroidOAuthVerification());
   els.androidOAuthRefreshReportButton?.addEventListener("click", () => void refreshAndroidOAuthReport());
   els.androidOAuthOpenReportButton?.addEventListener("click", () => void openAndroidOAuthLatestReport());
@@ -34643,6 +35713,11 @@ function wireEvents() {
   installModalBackdropDismiss(els.devicesModal, closeDevicesModal);
   installModalBackdropDismiss(els.nativeModal, closeNativeModal);
   installModalBackdropDismiss(els.nativeDebugModal, closeNativeDebugModal);
+  installModalBackdropDismiss(els.tuneVoiceModal, closeTuneVoiceWizard);
+  window.setTimeout(pollHermesWakeExportRequest, 1500);
+  window.setInterval(pollHermesWakeExportRequest, 5000);
+  window.setTimeout(pollHermesWakeInstallRequest, 1800);
+  window.setInterval(pollHermesWakeInstallRequest, 5000);
   els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
   els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
   installModalBackdropDismiss(els.fleetModal, closeFleetModal);
@@ -34905,6 +35980,7 @@ async function bootstrapAuthenticatedApp() {
   }
   if (state.authenticatedBootstrapped) {
     renderAuthGate();
+    maybeOpenRequestedTuneVoiceWizard("authenticated_bootstrapped");
     notifyNativeAppReady("authenticated-app-ready");
     return;
   }
@@ -34946,6 +36022,7 @@ async function bootstrapAuthenticatedApp() {
   syncClientSnapshotRequestPolling();
   await refresh("startup");
   if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
+  maybeOpenRequestedTuneVoiceWizard("bootstrap_complete");
   notifyNativeAppReady("authenticated-app-ready", {
     refresh_interval: Boolean(state.refreshInterval),
   });

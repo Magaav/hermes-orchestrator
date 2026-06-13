@@ -31,11 +31,12 @@ data class VoiceWakeEvent(
     fun toJson(): JSONObject = JSONObject()
         .put("type", "voice_command")
         .put("wake_word", "hermes")
+        .put("wake_confidence", confidence)
         .put("transcript", transcript)
         .put("confidence", confidence)
         .put("started_at", startedAt)
         .put("ended_at", endedAt)
-        .put("source", "android_native_hermes_voice_wake")
+        .put("source", "android_native_voice_wake")
         .put("build_id", buildId)
         .put("session_id", sessionId)
         .put("privacy_mode", privacyMode)
@@ -57,6 +58,10 @@ class VoiceWakeStateMachine {
         private set
     var lastEvent: VoiceWakeEvent? = null
         private set
+    var lastWakeConfidence: Double = 0.0
+        private set
+    var lastDispatchResult: Any = JSONObject.NULL
+        private set
 
     fun enable() {
         lastError = ""
@@ -70,6 +75,7 @@ class VoiceWakeStateMachine {
     fun onWake(result: WakeWordResult, now: Long = System.currentTimeMillis()): Boolean {
         if (state != VoiceWakeState.LISTENING || !result.detected) return false
         lastWakeAt = now
+        lastWakeConfidence = result.confidence
         state = VoiceWakeState.CAPTURING
         return true
     }
@@ -88,6 +94,10 @@ class VoiceWakeStateMachine {
         lastTranscriptStatus = "transcribed"
         lastError = ""
         state = VoiceWakeState.SENT
+    }
+
+    fun dispatched(result: JSONObject) {
+        lastDispatchResult = result
     }
 
     fun listenAgain() {
@@ -113,6 +123,12 @@ class VoiceWakeStateMachine {
         wakeEngine: String,
         wakeEngineReady: Boolean,
         transcriptionEngine: String,
+        vadProvider: String = "",
+        wakeProvider: String = "",
+        asrProvider: String = "",
+        modelSource: String = "",
+        selectedModelPath: String = "files/voice/hermes.onnx",
+        debugVoiceModeEnabled: Boolean = false,
         batteryWarning: String = "",
     ): JSONObject = JSONObject()
         .put("schema", "hermes.wasm_agent.android_voice_wake.v1")
@@ -128,6 +144,7 @@ class VoiceWakeStateMachine {
         })
         .put("wake_word", "hermes")
         .put("permission_record_audio", permissionGranted)
+        .put("voice_service_running", foregroundServiceRunning)
         .put("foreground_service_running", foregroundServiceRunning)
         .put("notification_active", foregroundServiceRunning)
         .put("service_running", foregroundServiceRunning)
@@ -136,14 +153,23 @@ class VoiceWakeStateMachine {
         .put("bounded_capture_min_ms", 8000)
         .put("bounded_capture_max_ms", 20000)
         .put("wake_engine", wakeEngine)
+        .put("vad_provider", vadProvider.ifBlank { "unknown" })
+        .put("wake_provider", wakeProvider.ifBlank { wakeEngine })
+        .put("asr_provider", asrProvider.ifBlank { transcriptionEngine })
         .put("wake_engine_ready", wakeEngineReady)
-        .put("wake_model_path", "files/voice/hermes.onnx")
+        .put("model_source", modelSource.ifBlank { "unknown" })
+        .put("wake_model_path", selectedModelPath)
+        .put("selected_model_path", selectedModelPath)
         .put("transcription_engine", transcriptionEngine)
         .put("last_wake_at", lastWakeAt)
+        .put("last_wake_confidence", lastWakeConfidence)
         .put("last_command_capture_duration_ms", lastCommandCaptureDurationMs)
         .put("last_transcript_status", lastTranscriptStatus)
         .put("last_transcript", lastTranscript)
         .put("last_error", lastError)
+        .put("last_voice_command_event", lastEvent?.toJson() ?: JSONObject.NULL)
+        .put("last_dispatch_result", lastDispatchResult)
+        .put("debug_voice_mode_enabled", debugVoiceModeEnabled)
         .put("last_emitted_voice_event", lastEvent?.toJson() ?: JSONObject.NULL)
         .put("last_event", lastEvent?.toJson() ?: JSONObject.NULL)
         .put("battery_warning", batteryWarning)

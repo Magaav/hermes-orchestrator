@@ -2051,6 +2051,10 @@ button.danger:hover,
   width: min(720px, 100%);
 }
 
+.tune-voice-modal-card {
+  width: min(760px, 100%);
+}
+
 .modal-head,
 .modal-head-actions,
 .modal-actions {
@@ -2134,6 +2138,239 @@ button.danger:hover,
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.tune-voice-progress {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tune-voice-progress-chip {
+  min-height: 48px;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  padding: 9px;
+  border: 1px solid rgba(147, 170, 203, 0.18);
+  border-radius: 8px;
+  background: rgba(5, 11, 21, 0.72);
+}
+
+.tune-voice-progress-chip strong,
+.tune-voice-progress-chip em {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tune-voice-progress-chip strong {
+  font-size: 11px;
+}
+
+.tune-voice-progress-chip em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.tune-voice-progress-chip.is-complete {
+  border-color: rgba(124, 228, 176, 0.38);
+  background: rgba(124, 228, 176, 0.1);
+}
+
+.tune-voice-body {
+  min-height: 250px;
+  display: grid;
+  align-content: stretch;
+}
+
+.tune-voice-copy,
+.tune-voice-record-panel,
+.tune-voice-export {
+  display: grid;
+  align-content: center;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: 8px;
+  background: rgba(3, 8, 16, 0.62);
+}
+
+.tune-voice-copy p,
+.tune-voice-export p {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.45;
+}
+
+.tune-voice-instruction {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.tune-voice-prompt {
+  min-height: 58px;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  border-radius: 8px;
+  background: rgba(125, 220, 255, 0.1);
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 800;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.tune-voice-meter {
+  min-height: 76px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 213, 122, 0.24);
+  border-radius: 8px;
+  background: rgba(255, 213, 122, 0.08);
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 900;
+  text-align: center;
+}
+
+.tune-voice-step-progress,
+.tune-voice-readiness {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tune-voice-step-progress span,
+.tune-voice-readiness span {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: rgba(147, 170, 203, 0.1);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tune-voice-readiness {
+  padding: 12px;
+  border: 1px solid rgba(255, 213, 122, 0.28);
+  border-radius: 8px;
+  background: rgba(255, 213, 122, 0.08);
+}
+
+.tune-voice-readiness strong {
+  font-size: 14px;
+}
+
+.tune-voice-readiness.is-smoke,
+.tune-voice-readiness.is-real {
+  border-color: rgba(124, 228, 176, 0.36);
+  background: rgba(124, 228, 176, 0.1);
+}
+
+.tune-voice-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 10px 0 0;
+}
+
+.tune-voice-diagnostics div {
+  min-height: 54px;
+  padding: 9px;
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: 8px;
+  background: rgba(5, 11, 21, 0.72);
+}
+
+.tune-voice-diagnostics dt {
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.tune-voice-diagnostics dd {
+  margin: 5px 0 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.tune-voice-export details {
+  border: 1px solid rgba(147, 170, 203, 0.16);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(5, 11, 21, 0.72);
+}
+
+.tune-voice-export summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tune-voice-export pre {
+  margin: 10px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.tune-voice-dev-panel {
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.tune-voice-dev-panel summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.tune-voice-dev-panel dl {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+}
+
+.tune-voice-dev-panel div {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+  gap: 8px;
+}
+
+.tune-voice-dev-panel dt,
+.tune-voice-dev-panel dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.tune-voice-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.tune-voice-actions button {
+  min-width: 92px;
+}
+
+@media (max-width: 640px) {
+  .tune-voice-progress,
+  .tune-voice-diagnostics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tune-voice-prompt,
+  .tune-voice-meter {
+    font-size: 18px;
+  }
 }
 
 .config-details {
@@ -4755,6 +4992,14 @@ textarea:focus {
   color: var(--text);
   font-size: 13px;
   line-height: 1.25;
+}
+
+.native-diagnostics-header-actions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .native-primary-button {

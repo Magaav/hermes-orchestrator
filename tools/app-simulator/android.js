@@ -41,14 +41,17 @@ const REQUIRED_ANDROID_PROOF_ASSERTIONS = [
   "retry tap does not stay stuck",
 ];
 const REQUIRED_ANDROID_VOICE_ASSERTIONS = [
-  "foreground service started",
-  "microphone permission state known",
-  "wake detected",
-  "transcription produced",
-  "voice_command event reached wasm-agent",
-  "UI timeline shows event",
+  "1. Service alive",
+  "2. Audio capture alive",
+  "3. ONNX model ready",
+  "4. Inference running",
+  "5. Wake confidence observed",
+  "6. Wake threshold crossed",
+  "7. Wake event emitted",
+  "8. Command capture/UI action started",
   "logs are redacted",
 ];
+const ACCEPTANCE_HERMES_MODEL_SHA256 = "23aee3f94d9499c7809b413037a59e3e6f8668767a49e077017e743dd959e58c";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -2424,13 +2427,84 @@ async function runVoiceWakeFixtureSimulation(ctx, fixtureName) {
     const logText = String(observations.logs?.logcatText || "");
     const hasSecretLeak = /(access_token|auth_code|refresh_token|Authorization: Bearer|Cookie:|wa_uid=|audio_pcm|continuous background audio)/i.test(logText);
     const expected = fixture.expected || { voiceCommandEvent: true, wakeDetected: true, transcriptionProduced: true, timelineShowsVoiceCommand: true };
-    ctx.addAssertion("foreground service started", Boolean(voice.foregroundServiceStarted || diagnostics.foreground_service_running), "foreground microphone service evidence", { voice, diagnostics });
-    ctx.addAssertion("microphone permission state known", typeof voice.permissionGranted === "boolean" || typeof diagnostics.permission_record_audio === "boolean", "permission state captured", { voice, diagnostics });
+    const foregroundStarted = Boolean(voice.foregroundServiceStarted || diagnostics.foreground_service_running || diagnostics.service_running);
+    const permissionKnown = typeof voice.permissionGranted === "boolean" || typeof diagnostics.permission_record_audio === "boolean";
+    const permissionGranted = voice.permissionGranted === true || diagnostics.permission_record_audio === true;
+    const audioRecordStarted = Boolean(diagnostics.audio_record_started || diagnostics.audio_record_active || diagnostics.audio_record_started_at > 0 || diagnostics.audio_read_calls > 0);
+    const onnxRuntimeAvailable = diagnostics.onnx_runtime_available === true;
+    const modelPath = String(diagnostics.model_path || diagnostics.selected_model_path || diagnostics.wake_model_path || "");
+    const personalizedModelInstalled = modelPath === "files/voice/hermes.onnx" && (diagnostics.model_exists === true || diagnostics.personalized_model_exists === true || diagnostics.wake_model_exists === true);
+    const modelSha = String(diagnostics.model_sha || diagnostics.model_sha256 || "").toLowerCase();
+    const modelShaMatches = diagnostics.model_sha_match === true || diagnostics.acceptance_model_sha256_match === true || modelSha === ACCEPTANCE_HERMES_MODEL_SHA256;
+    const wakeEngineInitialized = diagnostics.wake_engine_ready === true && !String(diagnostics.wake_engine_error || diagnostics.last_model_load_error || "").trim();
+    const voiceWakeEnabled = diagnostics.enabled === true || voice.enabled === true;
+    const wakeEngineReady = diagnostics.wake_engine_ready === true;
+    const inferenceCount = Number(diagnostics.inference_count || voice.inferenceCount || 0);
+    const inferenceIncreased = inferenceCount > 0;
+    const confidenceMetrics = diagnostics.confidence_metrics || {};
+    const latestWindow = diagnostics.latest_inference_window || {};
+    const lastConfidence = Number(diagnostics.last_wake_confidence ?? confidenceMetrics.last_confidence ?? latestWindow.confidence ?? voice.wakeConfidence ?? 0);
+    const maxConfidence = Number(diagnostics.max_observed_confidence ?? confidenceMetrics.max_confidence ?? latestWindow.max_confidence ?? lastConfidence);
+    const wakeThreshold = Number(diagnostics.wake_threshold ?? diagnostics.threshold ?? confidenceMetrics.threshold ?? latestWindow.threshold ?? 0.58);
+    const wakeConfidenceObserved = diagnostics.wake_confidence_observed === true || inferenceIncreased || maxConfidence > 0;
+    const thresholdCrossed = diagnostics.threshold_crossed === true || diagnostics.last_inference_threshold_crossed === true || confidenceMetrics.threshold_crossed === true || latestWindow.threshold_crossed === true || maxConfidence >= wakeThreshold;
+    const wakeDetectionCount = Number(diagnostics.wake_detection_count || latestWindow.detection_count || (diagnostics.last_wake_at ? 1 : 0));
+    const lastDetectionTimestamp = Number(diagnostics.last_detection_timestamp || diagnostics.last_wake_detection_at || diagnostics.last_wake_at || latestWindow.last_detection_timestamp || 0);
+    const wakeEventEmitted = diagnostics.wake_detected_event_emitted === true || String(diagnostics.last_dispatch_result?.event_type || "") === "wake_detected" || wakeDetectionCount > 0;
+    const commandCaptureStarted = diagnostics.command_capture_started === true || Number(diagnostics.command_capture_started_at || 0) > 0 || ["capturing", "transcribing", "sent"].includes(String(diagnostics.state || "").toLowerCase());
+    const readiness = {
+      disabled_reason: diagnostics.disabled_reason || "",
+      onnx_runtime_available: diagnostics.onnx_runtime_available,
+      onnx_runtime_error: diagnostics.onnx_runtime_error || "",
+      wake_engine_ready: diagnostics.wake_engine_ready,
+      wake_engine_error: diagnostics.wake_engine_error || diagnostics.last_model_load_error || "",
+      model_path: modelPath,
+      model_exists: diagnostics.model_exists ?? diagnostics.wake_model_exists,
+      model_sha: modelSha,
+      model_sha_match: modelShaMatches,
+      audio_record_error: diagnostics.audio_record_error || "",
+      inference_count: inferenceCount,
+      confidence_metrics: confidenceMetrics,
+      latest_inference_window: latestWindow,
+      last_confidence: lastConfidence,
+      max_confidence: maxConfidence,
+      wake_threshold: wakeThreshold,
+      threshold_crossed: thresholdCrossed,
+      wake_detection_count: wakeDetectionCount,
+      last_detection_timestamp: lastDetectionTimestamp,
+      wake_detected_event_emitted: wakeEventEmitted,
+      command_capture_started: commandCaptureStarted,
+      rejection_reason: diagnostics.rejection_reason || diagnostics.last_inference_rejection_reason || latestWindow.rejection_reason || "",
+    };
+    ctx.addAssertion("foreground service started", foregroundStarted, "foreground microphone service evidence", { voice, diagnostics });
+    ctx.addAssertion("microphone permission state known", permissionKnown, "permission state captured", { voice, diagnostics });
+    ctx.addAssertion("microphone permission granted", permissionGranted, permissionGranted ? "RECORD_AUDIO granted" : diagnostics.disabled_reason || "RECORD_AUDIO must be granted before wake proof", readiness);
+    ctx.addAssertion("AudioRecord started", audioRecordStarted, audioRecordStarted ? "AudioRecord entered recording state" : diagnostics.audio_record_error || "AudioRecord must enter recording state before wake proof", readiness);
+    ctx.addAssertion("ONNX Runtime available", onnxRuntimeAvailable, onnxRuntimeAvailable ? "ONNX Runtime loaded in installed APK/runtime" : diagnostics.onnx_runtime_error || diagnostics.disabled_reason || "ONNX Runtime unavailable in installed APK/runtime", readiness);
+    ctx.addAssertion("personalized Hermes model installed", personalizedModelInstalled, `expected files/voice/hermes.onnx, actual ${modelPath || "missing"}`, readiness);
+    ctx.addAssertion("Hermes model SHA matches acceptance", modelShaMatches, `expected ${ACCEPTANCE_HERMES_MODEL_SHA256}, actual ${modelSha || "missing"}`, readiness);
+    ctx.addAssertion("WakeEngine initialized", wakeEngineInitialized, wakeEngineInitialized ? "WakeEngine provider initialized cleanly" : diagnostics.wake_engine_error || diagnostics.last_model_load_error || "WakeEngine provider did not initialize cleanly", readiness);
+    ctx.addAssertion("voice wake enabled", voiceWakeEnabled, voiceWakeEnabled ? "voice_wake.enabled is true" : diagnostics.disabled_reason || "voice_wake.enabled must be true", readiness);
+    ctx.addAssertion("wake engine ready", wakeEngineReady, wakeEngineReady ? "wake_engine_ready is true" : diagnostics.wake_engine_error || diagnostics.disabled_reason || "wake_engine_ready must be true", readiness);
+    ctx.addAssertion("inference count increased during capture", inferenceIncreased, `inference_count=${inferenceCount}`, readiness);
+    const preflightPassed = foregroundStarted && permissionKnown && permissionGranted && audioRecordStarted && onnxRuntimeAvailable && personalizedModelInstalled && modelShaMatches && wakeEngineInitialized && voiceWakeEnabled && wakeEngineReady && inferenceIncreased;
+    ctx.addAssertion("wake readiness preflight passed", preflightPassed, preflightPassed ? "ready to listen for Hermes" : "wake detection skipped until readiness errors are fixed", readiness);
+    const serviceAlive = foregroundStarted && voiceWakeEnabled;
+    const audioCaptureAlive = permissionGranted && audioRecordStarted && Number(diagnostics.audio_read_calls || 0) > 0;
+    const onnxModelReady = onnxRuntimeAvailable && personalizedModelInstalled && modelShaMatches && wakeEngineInitialized && wakeEngineReady;
+    ctx.addAssertion("1. Service alive", serviceAlive, serviceAlive ? "foreground Hermes wake service alive" : diagnostics.disabled_reason || "service not alive", readiness);
+    ctx.addAssertion("2. Audio capture alive", audioCaptureAlive, audioCaptureAlive ? "AudioRecord is reading PCM frames" : diagnostics.audio_record_error || "audio capture not alive", readiness);
+    ctx.addAssertion("3. ONNX model ready", onnxModelReady, onnxModelReady ? "ONNX runtime and personalized Hermes model ready" : diagnostics.onnx_runtime_error || diagnostics.wake_engine_error || "ONNX model not ready", readiness);
+    ctx.addAssertion("4. Inference running", inferenceIncreased, `inference_count=${inferenceCount}`, readiness);
+    ctx.addAssertion("5. Wake confidence observed", wakeConfidenceObserved, `max_confidence=${maxConfidence} threshold=${wakeThreshold}`, readiness);
+    ctx.addAssertion("6. Wake threshold crossed", expected.wakeDetected === false ? !thresholdCrossed : thresholdCrossed, thresholdCrossed ? `max_confidence=${maxConfidence} >= threshold=${wakeThreshold}` : readiness.rejection_reason || `max_confidence=${maxConfidence} < threshold=${wakeThreshold}`, readiness);
+    ctx.addAssertion("7. Wake event emitted", expected.wakeDetected === false ? !wakeEventEmitted : wakeEventEmitted, wakeEventEmitted ? "wake_detected event emitted" : "wake event was not emitted", readiness);
+    ctx.addAssertion("8. Command capture/UI action started", expected.voiceCommandEvent === false ? !commandCaptureStarted : commandCaptureStarted, commandCaptureStarted ? "command capture or UI action started after wake" : "command capture did not start", readiness);
     const didWake = Boolean(voice.wakeDetected || diagnostics.last_wake_at);
     const producedTranscript = transcript.length > 0;
-    const emittedVoiceCommand = payload.type === "voice_command" && payload.source === "android_native_hermes_voice_wake" && payload.audio_retained === false;
+    const emittedVoiceCommand = payload.type === "voice_command" && payload.source === "android_native_voice_wake" && payload.audio_retained === false;
     const timelineShowsVoiceCommand = Boolean(observations.timeline?.showsVoiceCommand);
-    ctx.addAssertion("wake detected", expected.wakeDetected === false ? !didWake : didWake, expected.wakeDetected === false ? "no wake expected" : "Hermes wake detection evidence", { voice, diagnostics });
+    ctx.addAssertion("wake detected", expected.wakeDetected === false ? !didWake : preflightPassed && didWake, expected.wakeDetected === false ? "no wake expected" : preflightPassed ? "Hermes wake detection evidence" : "readiness preflight failed before wake listen", { voice, diagnostics, readiness });
     ctx.addAssertion("transcription produced", expected.transcriptionProduced === false ? !producedTranscript : producedTranscript, transcript || "missing transcript", { transcript });
     ctx.addAssertion("voice_command event reached wasm-agent", expected.voiceCommandEvent === false ? !emittedVoiceCommand : emittedVoiceCommand, "structured native voice event stored", payload);
     ctx.addAssertion("UI timeline shows event", expected.timelineShowsVoiceCommand === false ? !timelineShowsVoiceCommand : timelineShowsVoiceCommand, "timeline evidence captured", observations.timeline);

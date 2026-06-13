@@ -4,6 +4,8 @@
 
 ## What Belongs Here
 
+- `context/`: canonical agent context engine, route map, claims, verification,
+  and review protocol.
 - `agents/`: node environment and runtime contract docs.
 - `commands/`: command references and operational workflows.
 - `features/`: current feature documentation.

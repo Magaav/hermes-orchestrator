@@ -1,0 +1,15 @@
+{
+  "status_source": "live_service",
+  "proof_session_active": true,
+  "foreground_service_started": true,
+  "permission_record_audio": true,
+  "audio_record_started": true,
+  "audio_read_calls": 12,
+  "onnx_runtime_available": true,
+  "wake_engine_ready": true,
+  "personalized_model_exists": true,
+  "model_sha_match": true,
+  "inference_count": 5,
+  "max_observed_confidence": 0.31,
+  "wake_threshold": 0.58
+}
