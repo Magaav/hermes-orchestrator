@@ -295,21 +295,25 @@ object WakeModelSelector {
     const val BASE_SOURCE = "base"
     const val NONE_SOURCE = "none"
 
-    fun select(personalizedModelFile: File, baseModelFile: File): WakeModelSelection {
+    fun select(
+        personalizedModelFile: File,
+        baseModelFile: File,
+        threshold: Double = OpenWakeWordOnnxEngine.DEFAULT_CONFIDENCE_THRESHOLD,
+    ): WakeModelSelection {
         val personalizedExists = validFile(personalizedModelFile)
         val baseExists = validFile(baseModelFile)
         val attempted = mutableListOf<OpenWakeWordOnnxEngine>()
         if (personalizedExists) {
-            val engine = OpenWakeWordOnnxEngine(personalizedModelFile, modelSource = PERSONALIZED_SOURCE)
+            val engine = OpenWakeWordOnnxEngine(personalizedModelFile, threshold = threshold, modelSource = PERSONALIZED_SOURCE)
             attempted.add(engine)
             if (engine.ready) return WakeModelSelection(PERSONALIZED_SOURCE, engine, personalizedExists, baseExists, attempted)
         }
         if (baseExists) {
-            val engine = OpenWakeWordOnnxEngine(baseModelFile, modelSource = BASE_SOURCE)
+            val engine = OpenWakeWordOnnxEngine(baseModelFile, threshold = threshold, modelSource = BASE_SOURCE)
             attempted.add(engine)
             if (engine.ready) return WakeModelSelection(BASE_SOURCE, engine, personalizedExists, baseExists, attempted)
         }
-        val engine = OpenWakeWordOnnxEngine(personalizedModelFile, modelSource = NONE_SOURCE)
+        val engine = OpenWakeWordOnnxEngine(personalizedModelFile, threshold = threshold, modelSource = NONE_SOURCE)
         return WakeModelSelection(NONE_SOURCE, engine, personalizedExists, baseExists, attempted + engine)
     }
 

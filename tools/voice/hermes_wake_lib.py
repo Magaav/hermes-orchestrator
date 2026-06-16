@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +16,12 @@ WINDOW_SAMPLES = 16_000
 SMOKE_POSITIVE = 5
 SMOKE_NEGATIVE = 10
 RECOMMENDED_POSITIVE = 50
-RECOMMENDED_NEGATIVE = 200
+RECOMMENDED_NEGATIVE = 50
 NEGATIVE_KINDS = ("silence", "speech", "noise")
+ACCEPTANCE_MEDIAN_POSITIVE = 0.75
+ACCEPTANCE_P10_POSITIVE = 0.60
+ACCEPTANCE_MAX_NEGATIVE = 0.40
+ACCEPTANCE_MARGIN = 0.15
 REQUIRED_DIRS = (
     "positive",
     "negative/silence",
@@ -52,7 +57,7 @@ def print_gate(label: str, positive: int, negative: int, min_positive: int, min_
 
 
 def dataset_counts(dataset: Path) -> tuple[int, dict[str, int]]:
-    positive = len(list((dataset / "positive").glob("*.wav"))) if (dataset / "positive").exists() else 0
+    positive = len(list((dataset / "positive").glob("**/*.wav"))) if (dataset / "positive").exists() else 0
     negatives = {
         kind: len(list((dataset / "negative" / kind).glob("*.wav")))
         if (dataset / "negative" / kind).exists()
@@ -60,6 +65,92 @@ def dataset_counts(dataset: Path) -> tuple[int, dict[str, int]]:
         for kind in NEGATIVE_KINDS
     }
     return positive, negatives
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    pos = (len(ordered) - 1) * p
+    lower = int(math.floor(pos))
+    upper = int(math.ceil(pos))
+    if lower == upper:
+        return float(ordered[lower])
+    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * (pos - lower))
+
+
+def score_summary(values: list[float]) -> dict[str, float | int]:
+    return {
+        "count": len(values),
+        "min": min(values) if values else 0.0,
+        "max": max(values) if values else 0.0,
+        "p10": percentile(values, 0.10),
+        "p50": percentile(values, 0.50),
+        "p90": percentile(values, 0.90),
+        "p95": percentile(values, 0.95),
+    }
+
+
+def recommended_threshold(positive_scores: list[float], negative_scores: list[float]) -> float:
+    pos_p10 = percentile(positive_scores, 0.10)
+    neg_p95 = percentile(negative_scores, 0.95)
+    return max(0.05, min(0.95, (pos_p10 + neg_p95) / 2.0))
+
+
+def calibration_report(
+    model_sha: str,
+    positive_scores: list[float],
+    negative_scores: list[float],
+    confuser_scores: list[float] | None = None,
+) -> dict[str, object]:
+    confusers = confuser_scores or []
+    all_negative = negative_scores + confusers
+    threshold = recommended_threshold(positive_scores, all_negative)
+    pos = score_summary(positive_scores)
+    neg = score_summary(negative_scores)
+    conf = score_summary(confusers)
+    max_negative = max(all_negative) if all_negative else 0.0
+    margin = float(pos["p10"]) - max_negative
+    verdict = (
+        float(pos["p50"]) >= ACCEPTANCE_MEDIAN_POSITIVE
+        and float(pos["p10"]) >= ACCEPTANCE_P10_POSITIVE
+        and max_negative <= ACCEPTANCE_MAX_NEGATIVE
+        and margin >= ACCEPTANCE_MARGIN
+    )
+    return {
+        "schema": "hermes.wasm_agent.hermes_wake_calibration.v1",
+        "model_sha": model_sha,
+        "recommended_threshold": threshold,
+        "production_threshold_candidate": max(0.58, threshold),
+        "debug_threshold_candidate": max(0.20, min(0.58, threshold - 0.10)),
+        "positive_score_summary": pos,
+        "negative_score_summary": neg,
+        "confuser_score_summary": conf,
+        "false_accept_estimate": sum(1 for score in all_negative if score >= threshold) / len(all_negative) if all_negative else 0.0,
+        "false_reject_estimate": sum(1 for score in positive_scores if score < threshold) / len(positive_scores) if positive_scores else 1.0,
+        "max_positive_score": max(positive_scores) if positive_scores else 0.0,
+        "min_positive_score": min(positive_scores) if positive_scores else 0.0,
+        "max_negative_score": max_negative,
+        "positive_negative_margin": margin,
+        "quality_verdict": "pass" if verdict else "fail",
+        "acceptance_criteria": {
+            "median_positive_confidence": ACCEPTANCE_MEDIAN_POSITIVE,
+            "p10_positive_confidence": ACCEPTANCE_P10_POSITIVE,
+            "max_negative_confuser_confidence": ACCEPTANCE_MAX_NEGATIVE,
+            "minimum_margin": ACCEPTANCE_MARGIN,
+            "android_live_proof_required": True,
+        },
+    }
 
 
 def inspect_wav(path: Path, min_duration: float = 0.20, quiet_rms: float = 0.002) -> WavReport:

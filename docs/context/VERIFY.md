@@ -6,12 +6,29 @@ Run the smallest command that proves the claim being made. Record proof paths in
 ## Context
 
 ```bash
+python3 tools/context/check-context-sync.py
+make context-check
 rg -n "127\\.0\\.0\\.1:8877|localhost:8877|0\\.0\\.0\\.0:8877|10\\.0\\.2\\.2:8877|win-unpacked|Durable Next Step|current next action|TODO|FIXME|proposal|future|verified|unverified|stale|unknown|fixed|done|complete" \
   README.md AGENTS.md docs/context docs/README.md docs/roadmap plugins/wasm-agent native scripts/public
 ```
 
 Expected use: inspect every match for unsafe production claims, stale next
 actions, proofless success language, and roadmap/current blending.
+
+The context sync checker reads `docs/context/ACTIVE_STATE.json`, scans owned
+durable docs, verifies the current hot-shell proof order, and writes:
+
+```text
+reports/context/latest/context-sync-result.json
+```
+
+Use conservative generated-block repair only when the durable active state
+changes:
+
+```bash
+python3 tools/context/check-context-sync.py --fix
+make context-fix
+```
 
 ## Fresh-Agent Structured Test
 
@@ -28,15 +45,46 @@ horc simulate web
 Use focused tests under `plugins/wasm-agent/tests` when touching one behavior.
 `horc simulate web` proves browser/PWA behavior only.
 
+Native evolution source/feed contract:
+
+```bash
+node plugins/wasm-agent/tests/native_release_feed.test.js
+cd native/windows/src && npm run test:windows-hot-ops
+python3 -m py_compile tools/windows/prove-hot-shell.py tools/windows/hot_shell_common.py tools/doctor/wasm-agent-doctor.py
+```
+
+These commands prove release-feed/runtime/hot-op shape and source guards only.
+Installed proof still requires a shell to report active downloaded runtime and
+hot-op bundle IDs/SHAs through `prove-hot-shell.py` or the doctor.
+
 ## Windows Native
 
 ```bash
 cd native/windows/src
-npm run verify:win-installer -- /local/plugins/wasm-agent/public/native/releases/windows/WASM-Agent-Setup-x64-0.1.0-20260609T220027Z.exe
+npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe
 ```
 
 Writes `native/windows/release/VERIFY.json` when final NSIS extraction and
 installed `app.asar` checks pass. This is still not installed-app login proof.
+
+Package verification is not feed publication. After `VERIFY.json` is written,
+the normal release path must prove the Windows feed before Go Native / Check
+Update can see the build:
+
+```bash
+python3 tools/windows/check-windows-release-feed.py
+```
+
+Expected report:
+
+```text
+reports/windows/latest/windows-release-feed-check.json
+```
+
+The guard compares the verified installer buildId/SHA, feed buildId/SHA,
+installer filename/URL, and local published installer bytes. Same semver with a
+newer Windows `buildId` must be update available; an older feed build must fail
+instead of letting Check Update report up to date.
 
 Installed runtime proof must run on Windows:
 
@@ -76,9 +124,8 @@ The report must name the behavior proven. Voice wake PASS is not OAuth PASS.
 
 ## Hermes Wake Shipping
 
-Do not use terminal ADB from this Linux workspace and do not use the Win11
-bridge export path for Hermes Wake. The supported path is direct Android PWA
-bridge control:
+Historical superseded model-shipping proof used direct Android PWA bridge
+control:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8877/native/android/hermes-wake-export/request
@@ -101,17 +148,20 @@ uv run --with numpy --with onnx --with onnxruntime python tools/voice/verify-her
 curl -fsS https://wa.colmeio.com/native/android/hermes-wake-model/latest.json
 ```
 
-Android's installed wake runtime uses a fixed 0.58 confidence threshold, so the
-served ONNX must pass validation at `--threshold 0.58`.
+Historical model candidates were validated at `--threshold 0.58`. Current
+Android native shells can accept `wakeThreshold` / `wake_threshold` from the
+downloaded Hermes proof operation and must report the active value plus
+`threshold_policy_source` in native diagnostics.
 
 Real wake-on-Hermes is verified only after the Android bridge installs the
 served model with the returned SHA and a runtime proof shows wake detection plus
 voice command dispatch. A trained ONNX file alone is implemented-unverified.
 
-Current blocker as of 2026-06-12: model install is queued, but the installed
-Android WebView is still running the older PWA bundle without the install
-poller. Force/observe reload to `app.js?v=20260612-hermes-wake-install`, then
-poll:
+Historical superseded blocker as of 2026-06-12: model install was queued, but
+the installed Android WebView was still running the older PWA bundle without
+the install poller. The current proof order is the installed Windows hot-op
+shell proof, doctor, Hermes wake dry-run, then Hermes wake debug classifier.
+The older poll path was:
 
 ```bash
 curl -fsS -X POST http://127.0.0.1:8877/native/android/hermes-wake-install/request
@@ -126,11 +176,14 @@ Expected install proof: `result.ok: true`, matching SHA from
 
 ```bash
 jq '.' plugins/wasm-agent/public/native/releases/latest.json
+python3 tools/windows/check-windows-release-feed.py
 sha256sum plugins/wasm-agent/public/native/releases/windows/*.exe
 sha256sum native/android/release/*.apk
 ```
 
 Feed presence is publication evidence, not runtime proof.
+Downloaded runtime feed presence is not active-runtime proof; installed
+diagnostics must report active runtime ID/SHA after sync.
 
 ## Public Scripts
 

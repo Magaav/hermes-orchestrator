@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
@@ -18,6 +19,8 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 import kotlin.math.abs
+import kotlin.math.log10
+import kotlin.math.max
 import kotlin.math.sqrt
 
 enum class VoiceTuningCategory(
@@ -61,7 +64,7 @@ data class VoiceTuningCounts(
     fun thresholds(): VoiceTuningThresholds = VoiceTuningThresholds(
         tiny = positive >= 5 && negative >= 10,
         useful = positive >= 10 && silence >= 5 && speech >= 5 && noise >= 5,
-        production = positive >= 50 && negative >= 200,
+        production = positive >= 50 && negative >= 50,
     )
 
     fun countFor(category: VoiceTuningCategory): Int = when (category) {
@@ -78,6 +81,30 @@ data class VoiceTuningCounts(
         .put("negative_noise", noise)
         .put("negative", negative)
         .put("total", total)
+}
+
+data class VoiceTuningQuality(
+    val accepted: Boolean,
+    val rejectionReason: String,
+    val durationMs: Int,
+    val rmsDb: Double,
+    val peakDb: Double,
+    val clippingRatio: Double,
+    val silenceRatio: Double,
+    val snrEstimate: Double,
+    val duplicate: Boolean,
+) {
+    fun toJson(): JSONObject = JSONObject()
+        .put("duration_ms", durationMs)
+        .put("rms_db", rmsDb)
+        .put("peak_db", peakDb)
+        .put("clipping_ratio", clippingRatio)
+        .put("silence_ratio", silenceRatio)
+        .put("snr_estimate", snrEstimate)
+        .put("accepted", accepted)
+        .put("rejected", !accepted)
+        .put("rejection_reason", rejectionReason)
+        .put("duplicate", duplicate)
 }
 
 class VoiceTuningStore(private val root: File) {
@@ -115,13 +142,14 @@ class VoiceTuningStore(private val root: File) {
         source: String? = null,
         deviceLabel: String? = null,
     ): JSONObject {
-        require(pcm16.isNotEmpty()) { "zero_byte_recording" }
-        require(pcm16.size >= MIN_SAMPLE_COUNT) { "too_short" }
-        if (category != VoiceTuningCategory.NEGATIVE_SILENCE && rms(pcm16) < MIN_VOICE_RMS) {
-            throw IllegalArgumentException("too_quiet")
-        }
+        val quality = analyzeQuality(category, pcm16)
+        require(quality.accepted) { quality.rejectionReason }
         val file = nextSampleFile(category)
-        writePcm16Wav(file, pcm16, SAMPLE_RATE_HZ)
+        try {
+            writePcm16Wav(file, pcm16, SAMPLE_RATE_HZ)
+        } catch (error: Exception) {
+            throw IllegalArgumentException("failed_wav_write:${error.javaClass.simpleName}")
+        }
         if (file.length() <= WAV_HEADER_BYTES) {
             file.delete()
             throw IllegalArgumentException("zero_byte_recording")
@@ -130,9 +158,12 @@ class VoiceTuningStore(private val root: File) {
             file.delete()
             throw IllegalArgumentException("invalid_format")
         }
-        writeMetadata(file, category, durationMs, source, deviceLabel)
+        writeMetadata(file, category, durationMs, source, deviceLabel, quality)
         invalidateCounts()
         return sampleEvent("voice_tuning_sample_recorded", category, file, durationMs, source)
+            .put("quality_metrics", quality.toJson())
+            .put("accepted", true)
+            .put("rejection_reason", "")
     }
 
     fun deleteLast(category: VoiceTuningCategory): JSONObject {
@@ -172,6 +203,16 @@ class VoiceTuningStore(private val root: File) {
                 .put("smoke_negatives_required", SMOKE_NEGATIVE_COUNT))
             .put("dataset_ready", counts.thresholds().tiny)
             .put("diagnostics", diagnostics())
+            .put("quality_gates", JSONObject()
+                .put("min_duration_ms", MIN_DURATION_MS)
+                .put("max_duration_ms", MAX_DURATION_MS)
+                .put("min_voice_rms_db", MIN_VOICE_RMS_DB)
+                .put("max_clipping_ratio", MAX_CLIPPING_RATIO)
+                .put("max_voice_silence_ratio", MAX_VOICE_SILENCE_RATIO)
+                .put("sample_rate_hz", SAMPLE_RATE_HZ)
+                .put("channels", 1))
+            .put("collection_plan", collectionPlanJson())
+            .put("readiness_score", readinessScore(counts))
             .put("positive_count", counts.positive)
             .put("negative_silence_count", counts.silence)
             .put("negative_speech_count", counts.speech)
@@ -233,10 +274,24 @@ class VoiceTuningStore(private val root: File) {
 
     fun exportMetadata(): JSONObject {
         val counts = counts()
+        val samples = sampleMetadata()
+        val accepted = samples.count { it.optBoolean("accepted", false) }
+        val rejected = samples.count { !it.optBoolean("accepted", false) }
         return JSONObject()
+            .put("schema", "hermes.wasm_agent.android_hermes_wake_dataset.v2")
             .put("name", "hermes-dataset")
+            .put("build_id", "android")
+            .put("wizard_version", WIZARD_VERSION)
             .put("wake_phrase", "Hermes")
+            .put("model_target_wake_word", "hermes")
             .put("created_at", isoNow())
+            .put("user_session_id_hash", JSONObject.NULL)
+            .put("device_model", samples.firstOrNull()?.optString("device_model", "") ?: "")
+            .put("android_version", JSONObject.NULL)
+            .put("microphone_source", "MIC")
+            .put("sample_category_counts", counts.toJson())
+            .put("accepted_count", accepted)
+            .put("rejected_count", rejected)
             .put("positive_count", counts.positive)
             .put("negative_silence_count", counts.silence)
             .put("negative_speech_count", counts.speech)
@@ -246,6 +301,16 @@ class VoiceTuningStore(private val root: File) {
             .put("channels", 1)
             .put("encoding", "PCM16")
             .put("duration_ms", SAMPLE_DURATION_MS)
+            .put("sample_rate_hz", SAMPLE_RATE_HZ)
+            .put("quality_gates", JSONObject()
+                .put("min_duration_ms", MIN_DURATION_MS)
+                .put("max_duration_ms", MAX_DURATION_MS)
+                .put("min_voice_rms_db", MIN_VOICE_RMS_DB)
+                .put("max_clipping_ratio", MAX_CLIPPING_RATIO)
+                .put("max_voice_silence_ratio", MAX_VOICE_SILENCE_RATIO))
+            .put("samples", JSONArray(samples))
+            .put("collection_plan", collectionPlanJson())
+            .put("readiness_score", readinessScore(counts))
             .put("smoke_gate_ready", counts.positive >= SMOKE_POSITIVE_COUNT && counts.negative >= SMOKE_NEGATIVE_COUNT)
             .put("real_gate_ready", counts.positive >= REAL_POSITIVE_COUNT && counts.negative >= REAL_NEGATIVE_COUNT)
     }
@@ -261,6 +326,8 @@ class VoiceTuningStore(private val root: File) {
             .put("total_negative_count", counts.negative)
             .put("zero_byte_count", sampleFiles.count { it.extension == "wav" && it.length() == 0L })
             .put("invalid_format_count", sampleFiles.count { it.extension == "wav" && !isValidWav(it) })
+            .put("accepted_count", sampleMetadata().count { it.optBoolean("accepted", false) })
+            .put("rejected_count", sampleMetadata().count { !it.optBoolean("accepted", false) })
             .put("smoke_gate_ready", counts.positive >= SMOKE_POSITIVE_COUNT && counts.negative >= SMOKE_NEGATIVE_COUNT)
             .put("real_gate_ready", counts.positive >= REAL_POSITIVE_COUNT && counts.negative >= REAL_NEGATIVE_COUNT)
     }
@@ -280,6 +347,7 @@ class VoiceTuningStore(private val root: File) {
         durationMs: Int,
         source: String?,
         deviceLabel: String?,
+        quality: VoiceTuningQuality,
     ) {
         val metadata = JSONObject()
             .put("schema", "hermes.wasm_agent.android_voice_tuning_sample.v1")
@@ -298,8 +366,17 @@ class VoiceTuningStore(private val root: File) {
             .put("channels", 1)
             .put("encoding", "PCM16")
             .put("app_build", "android")
+            .put("wizard_version", WIZARD_VERSION)
             .put("device_model", deviceLabel ?: JSONObject.NULL)
-            .put("accepted", true)
+            .put("accepted", quality.accepted)
+            .put("rejection_reason", quality.rejectionReason)
+            .put("quality_metrics", quality.toJson())
+            .put("rms_db", quality.rmsDb)
+            .put("peak_db", quality.peakDb)
+            .put("clipping_ratio", quality.clippingRatio)
+            .put("silence_ratio", quality.silenceRatio)
+            .put("snr_estimate", quality.snrEstimate)
+            .put("fingerprint", fingerprint(readPcm16Wav(wavFile)))
             .put("device_label", deviceLabel ?: JSONObject.NULL)
             .put("audio_file", wavFile.name)
         File(wavFile.parentFile, wavFile.nameWithoutExtension + ".json").writeText(metadata.toString(2))
@@ -309,17 +386,84 @@ class VoiceTuningStore(private val root: File) {
         categoryDir(category).listFiles()?.filter { it.isFile }.orEmpty()
     }
 
+    private fun sampleMetadata(): List<JSONObject> = VoiceTuningCategory.entries.flatMap { category ->
+        categoryDir(category).listFiles { file -> file.isFile && file.extension == "json" }
+            ?.mapNotNull { file -> runCatching { JSONObject(file.readText()) }.getOrNull() }
+            .orEmpty()
+    }
+
+    private fun analyzeQuality(category: VoiceTuningCategory, pcm16: ShortArray): VoiceTuningQuality {
+        val durationMs = if (SAMPLE_RATE_HZ > 0) (pcm16.size * 1000) / SAMPLE_RATE_HZ else 0
+        if (pcm16.isEmpty()) return rejectedQuality("zero_byte_recording", durationMs)
+        val rmsValue = rms(pcm16)
+        val peak = pcm16.maxOfOrNull { abs(it.toInt()) } ?: 0
+        val rmsDb = amplitudeDb(rmsValue / Short.MAX_VALUE.toDouble())
+        val peakDb = amplitudeDb(peak / Short.MAX_VALUE.toDouble())
+        val clippingRatio = pcm16.count { abs(it.toInt()) >= CLIPPING_SAMPLE_ABS }.toDouble() / pcm16.size
+        val silenceRatio = pcm16.count { abs(it.toInt()) <= SILENCE_SAMPLE_ABS }.toDouble() / pcm16.size
+        val noiseFloor = percentileAbs(pcm16, 0.10).coerceAtLeast(1.0)
+        val snrEstimate = 20.0 * log10((rmsValue.coerceAtLeast(1.0)) / noiseFloor)
+            val duplicate = category != VoiceTuningCategory.NEGATIVE_SILENCE && hasNearDuplicate(pcm16)
+        val reason = when {
+            durationMs < MIN_DURATION_MS -> "too_short"
+            durationMs > MAX_DURATION_MS -> "too_long"
+            clippingRatio > MAX_CLIPPING_RATIO -> "clipped_audio"
+            duplicate -> "duplicate_sample"
+            category != VoiceTuningCategory.NEGATIVE_SILENCE && rmsDb < MIN_VOICE_RMS_DB -> "too_quiet"
+            category != VoiceTuningCategory.NEGATIVE_SILENCE && silenceRatio > MAX_VOICE_SILENCE_RATIO -> "mostly_silence"
+            category == VoiceTuningCategory.NEGATIVE_SILENCE && peakDb > MAX_SILENCE_PEAK_DB -> "excessive_noise"
+            else -> ""
+        }
+        return VoiceTuningQuality(reason.isBlank(), reason, durationMs, rmsDb, peakDb, clippingRatio, silenceRatio, snrEstimate, duplicate)
+    }
+
+    private fun rejectedQuality(reason: String, durationMs: Int): VoiceTuningQuality =
+        VoiceTuningQuality(false, reason, durationMs, -120.0, -120.0, 0.0, 1.0, 0.0, false)
+
+    private fun hasNearDuplicate(pcm16: ShortArray): Boolean {
+        val fingerprint = fingerprint(pcm16)
+        return sampleMetadata().any { metadata ->
+            metadata.optString("fingerprint", "") == fingerprint ||
+                metadata.optJSONObject("quality_metrics")?.optBoolean("duplicate", false) == true
+        }
+    }
+
+    private fun collectionPlanJson(): JSONObject = JSONObject()
+        .put("positive_normal", 10)
+        .put("positive_soft", 10)
+        .put("positive_farther", 10)
+        .put("positive_phone_on_desk", 10)
+        .put("positive_noisy_room", 10)
+        .put("silence_background", 20)
+        .put("speech_negative", 20)
+        .put("confuser_negative", 10)
+
+    private fun readinessScore(counts: VoiceTuningCounts): Int {
+        val positive = (counts.positive.toDouble() / REAL_POSITIVE_COUNT).coerceIn(0.0, 1.0)
+        val silence = (counts.silence.toDouble() / 20.0).coerceIn(0.0, 1.0)
+        val speech = (counts.speech.toDouble() / 30.0).coerceIn(0.0, 1.0)
+        val noise = (counts.noise.toDouble() / 10.0).coerceIn(0.0, 1.0)
+        return ((positive * 50.0) + (silence * 20.0) + (speech * 20.0) + (noise * 10.0)).toInt().coerceIn(0, 100)
+    }
+
     companion object {
         const val SMOKE_POSITIVE_COUNT = 5
         const val SMOKE_NEGATIVE_COUNT = 10
         const val REAL_POSITIVE_COUNT = 50
-        const val REAL_NEGATIVE_COUNT = 200
+        const val REAL_NEGATIVE_COUNT = 50
         const val SAMPLE_RATE_HZ = 16_000
         const val SAMPLE_DURATION_MS = 1_000
         const val SAMPLE_COUNT = SAMPLE_RATE_HZ * SAMPLE_DURATION_MS / 1_000
-        const val MIN_SAMPLE_COUNT = SAMPLE_RATE_HZ * 800 / 1_000
-        const val MIN_VOICE_RMS = 25.0
+        const val MIN_DURATION_MS = 700
+        const val MAX_DURATION_MS = 1400
+        const val MIN_VOICE_RMS_DB = -45.0
+        const val MAX_SILENCE_PEAK_DB = -28.0
+        const val MAX_CLIPPING_RATIO = 0.01
+        const val MAX_VOICE_SILENCE_RATIO = 0.85
+        const val SILENCE_SAMPLE_ABS = 96
+        const val CLIPPING_SAMPLE_ABS = 32100
         const val WAV_HEADER_BYTES = 44L
+        const val WIZARD_VERSION = "2026.06.hermes-balanced-v2"
         const val NEXT_ACTION = "Collect samples, export the dataset, then run audit/train/verify/import on the repository pipeline."
 
         fun filenameTimestamp(nowMs: Long): String =
@@ -332,6 +476,38 @@ class VoiceTuningStore(private val root: File) {
             if (pcm16.isEmpty()) return 0.0
             val sum = pcm16.fold(0.0) { acc, sample -> acc + abs(sample.toDouble()) * abs(sample.toDouble()) }
             return sqrt(sum / pcm16.size)
+        }
+
+        fun amplitudeDb(amplitude: Double): Double =
+            if (amplitude <= 0.0) -120.0 else (20.0 * log10(amplitude)).coerceAtLeast(-120.0)
+
+        fun percentileAbs(pcm16: ShortArray, percentile: Double): Double {
+            if (pcm16.isEmpty()) return 0.0
+            val values = pcm16.map { abs(it.toInt()).toDouble() }.sorted()
+            val index = ((values.size - 1) * percentile.coerceIn(0.0, 1.0)).toInt()
+            return values[index]
+        }
+
+        fun fingerprint(pcm16: ShortArray): String {
+            if (pcm16.isEmpty()) return ""
+            val buckets = 64
+            val bucketSize = max(1, pcm16.size / buckets)
+            return (0 until buckets).joinToString(":") { bucket ->
+                val start = bucket * bucketSize
+                val end = minOf(pcm16.size, start + bucketSize)
+                val avg = if (start >= end) 0 else pcm16.sliceArray(start until end).map { abs(it.toInt()) }.average().toInt()
+                (avg / 16).coerceIn(0, 4095).toString(16)
+            }
+        }
+
+        fun readPcm16Wav(file: File): ShortArray {
+            val bytes = file.readBytes()
+            if (bytes.size <= WAV_HEADER_BYTES) return ShortArray(0)
+            val count = (bytes.size - WAV_HEADER_BYTES.toInt()) / 2
+            return ShortArray(count) { index ->
+                val offset = WAV_HEADER_BYTES.toInt() + index * 2
+                ((bytes[offset].toInt() and 0xff) or (bytes[offset + 1].toInt() shl 8)).toShort()
+            }
         }
 
         fun isValidWav(file: File): Boolean {

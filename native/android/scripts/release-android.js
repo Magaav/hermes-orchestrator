@@ -154,8 +154,12 @@ function verifyProductionApk(apkPath, env = process.env) {
     if (text.includes(forbidden)) fail(`production APK contains forbidden local backend literal: ${forbidden}`);
   }
   if (!text.includes("wa.colmeio.com")) fail("production APK does not contain the cloud backend origin");
+  if (env.WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY === "1") {
+    console.log("android release: skipping apksigner verification by WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY=1");
+    return;
+  }
   const apksigner = findApksigner(env);
-  if (!apksigner && env.WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY !== "1") {
+  if (!apksigner) {
     fail("apksigner was not found. Install Android build-tools or set WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY=1.");
   }
   if (apksigner) {
@@ -221,15 +225,18 @@ function main() {
   const signingLevel = ensureSideloadSigningKey(env);
   const gradle = gradleCommand();
   const gradleArgs = [...gradle.args, "--no-daemon", "--build-cache"];
+  if (env.HORC_ANDROID_GRADLE_PARALLEL !== "0") {
+    gradleArgs.push("--parallel");
+  }
   if (env.HORC_ANDROID_KOTLIN_IN_PROCESS === "1") {
     gradleArgs.push("-Pkotlin.compiler.execution.strategy=in-process");
     gradleArgs.push("-Dkotlin.compiler.execution.strategy=in-process");
   }
-  if (env.HORC_ANDROID_RUN_UNIT_TESTS === "1") {
-    run(gradle.command, [...gradleArgs, ":app:testReleaseUnitTest"], { cwd: androidRoot, env });
-  }
   if (env.WASM_AGENT_ANDROID_SKIP_LINT === "1") {
     gradleArgs.push("-x", "lintVitalAnalyzeRelease", "-x", "lintVitalReportRelease", "-x", "lintVitalRelease");
+  }
+  if (env.HORC_ANDROID_RUN_UNIT_TESTS === "1") {
+    gradleArgs.push(":app:testReleaseUnitTest");
   }
   gradleArgs.push(":app:assembleRelease");
   run(gradle.command, gradleArgs, { cwd: androidRoot, env });

@@ -12,8 +12,9 @@ if [[ -x "${HERMES_WAKE_VENV:-$repo_root/.venv-hermes-wake}/bin/python" ]]; then
   python_bin="${HERMES_WAKE_VENV:-$repo_root/.venv-hermes-wake}/bin/python"
 fi
 
-"$python_bin" tools/voice/train-hermes-wake-model.py \
+"$python_bin" tools/voice/train-hermes-wake.py \
   --dataset "$dataset" \
-  --output "$output"
+  --out "$output" \
+  --calibration-out "${HERMES_WAKE_CALIBRATION_OUT:-build/voice/hermes-calibration.json}"
 
 echo "Validated baseline candidate staged at: $output"

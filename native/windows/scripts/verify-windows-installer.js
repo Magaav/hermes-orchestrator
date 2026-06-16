@@ -139,6 +139,7 @@ const resourceHorcRunnerPath = findFile(path.dirname(appAsarPath), "horc/horc-lo
 const resourceAppSimulatorPath = findFile(path.dirname(appAsarPath), "horc/app-simulator/simulate.js");
 const resourceAndroidApkPath = findFile(path.dirname(appAsarPath), "android/WASM-Agent-arm64.apk");
 const resourceAndroidApkDefaultsPath = findFile(path.dirname(appAsarPath), "android/WASM-Agent-arm64.native-defaults.json");
+const packagedOldInstallers = walkFiles(path.dirname(appAsarPath)).filter((filePath) => /[\\/]public[\\/]native[\\/]releases[\\/]windows[\\/].*\.(exe|blockmap)$/i.test(filePath));
 const mainJsPath = path.join(asarRoot, "main.js");
 const preloadJsPath = path.join(asarRoot, "preload.js");
 const nativeDefaults = fs.existsSync(nativeDefaultsPath)
@@ -251,8 +252,10 @@ if (!resourceHorcRunnerPath || !resourceHorcRunnerJs.includes("horc-local only s
   fail("Extracted installer resources/horc/horc-local.js is missing or stale");
 }
 if (!resourceAppSimulatorPath) fail("Extracted installer resources/horc/app-simulator/simulate.js is missing");
-if (!resourceAndroidApkPath || fs.statSync(resourceAndroidApkPath).size < 64 * 1024) fail("Extracted installer bundled Android APK is missing or unexpectedly small");
-if (!resourceAndroidApkDefaultsPath) fail("Extracted installer bundled Android APK metadata sidecar is missing");
+if (packagedOldInstallers.length) fail(`Extracted installer still bundles old Windows release artifacts: ${packagedOldInstallers.map((item) => path.relative(path.dirname(appAsarPath), item)).join(", ")}`);
+if (!mainJs.includes("latestAndroidReleaseFeed") || !mainJs.includes("downloadAndroidVoiceTuningApk") || !mainJs.includes("release_feed")) {
+  fail("Extracted installer app.asar main.js is missing Android APK release-feed download support");
+}
 
 const manifest = {
   app: "WASM Agent",
@@ -269,6 +272,7 @@ const manifest = {
   horcRunnerSha256: resourceHorcRunnerPath ? sha256(resourceHorcRunnerPath) : "",
   appSimulatorSha256: resourceAppSimulatorPath ? sha256(resourceAppSimulatorPath) : "",
   androidApkSha256: resourceAndroidApkPath ? sha256(resourceAndroidApkPath) : "",
+  androidApkBundled: Boolean(resourceAndroidApkPath),
   verifiedAt: new Date().toISOString(),
   forbiddenStringsFound: [],
 };
@@ -298,7 +302,8 @@ const verifyReport = {
     { name: "frontier native commands present", ok: true, evidence: "main.js" },
     { name: "bundled local horc runner present", ok: true, evidence: resourceHorcRunnerPath ? path.relative(extractRoot, resourceHorcRunnerPath) : "" },
     { name: "bundled app simulator present", ok: true, evidence: resourceAppSimulatorPath ? path.relative(extractRoot, resourceAppSimulatorPath) : "" },
-    { name: "bundled Android APK present", ok: true, evidence: resourceAndroidApkPath ? `${path.relative(extractRoot, resourceAndroidApkPath)} ${fs.statSync(resourceAndroidApkPath).size} bytes` : "" },
+    { name: "Android APK release-feed download support present", ok: true, evidence: resourceAndroidApkPath ? `optional bundled APK present: ${path.relative(extractRoot, resourceAndroidApkPath)}` : "no bundled APK; release feed download path verified" },
+    { name: "old Windows installers excluded from resources", ok: true, evidence: "public/native/releases/windows excluded" },
     { name: "icon metadata present", ok: true, evidence: resourceIconPath ? `${path.relative(extractRoot, resourceIconPath)} ${fs.statSync(resourceIconPath).size} bytes` : "" },
     { name: "preload bridge does not conflict with PWA bridge", ok: true, evidence: "__wasmAgentDevHmr + __wasmAgentAppDevHmr" },
   ],

@@ -103,6 +103,15 @@ contain localhost backend literals, and promotes the APKs to:
 - `/local/native/android/release/WASM-Agent-universal.apk`
 - `/local/native/android/release/WASM-Agent-arm64.apk`
 
+By default, `horc build android` clears inherited
+`WASM_AGENT_ANDROID_BUILD_ID`, `WASM_AGENT_ANDROID_VERSION_CODE`, and
+`WASM_AGENT_ANDROID_BUILD_GENERATED_AT` before invoking the release promoter.
+Each rebuild therefore gets a fresh Android build identity in
+`native/android/release/release-manifest.json` and the generated
+`/native/releases/latest.json` feed, so Home / Go Native can detect that an
+installed Android shell needs the guided APK update. Set
+`HORC_ANDROID_PRESERVE_BUILD_ID=1` only for intentional reproducible rebuilds.
+
 The Docker Android lane sets `HORC_ANDROID_KOTLIN_IN_PROCESS=1` unless
 overridden, so the release script passes Kotlin's in-process compiler strategy
 to Gradle and avoids Kotlin daemon handshakes under linux/amd64 emulation.
@@ -113,8 +122,8 @@ file exists. After a successful Android release, `horc build android` also runs
 `native/android/scripts/verify-launcher-icon.py` when present, so the launcher
 icon remains standardized on the shared WA artwork. Build success is not runtime
 proof; use `horc simulate android --device` for installed-app behavior. `horc
-build all` explicitly runs the Windows lane first and then the Android APK lane.
-When both concrete lanes succeed, it generates the local update feed at
+build all` runs the Windows and Android lanes in parallel, waits for both
+platform artifacts to finish, then generates the local update feed at
 `/local/plugins/wasm-agent/public/native/releases/latest.json`, copies published
 artifacts under `public/native/releases/{windows,android}/`, and prints a
 matrix with target, build mode, artifact path/URL, SHA-256, status, and runtime
@@ -158,6 +167,11 @@ This builds `horc/electron-builder-wine-nsis:jammy` with NSIS and `unar`
 preinstalled. Future `horc build` runs auto-use that local image when
 `HORC_DOCKER_IMAGE` is unset, avoiding repeated `apt-get update` and package
 installs inside each disposable builder container.
+
+Windows Docker builds also reuse `native/windows/src/node_modules` when the
+`package.json` and `package-lock.json` fingerprint is unchanged, avoiding a full
+`npm ci` on repeated builds. Set `HORC_FORCE_NPM_CI=1` to force a clean Node
+dependency install.
 
 `horc build doctor` prints host OS/arch, Docker availability, Docker user
 permission, amd64 binfmt status, Wine builder image pullability, Android
@@ -370,6 +384,10 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
   default `ghcr.io/cirruslabs/android-sdk:35`.
 - `HORC_ANDROID_GRADLE_VERSION`: Gradle distribution version cached under
   `native/android/.gradle-dist`; default `8.9`.
+- `HORC_ANDROID_PRESERVE_BUILD_ID=1`: keep caller-provided
+  `WASM_AGENT_ANDROID_BUILD_ID`, `WASM_AGENT_ANDROID_VERSION_CODE`, and
+  `WASM_AGENT_ANDROID_BUILD_GENERATED_AT`; by default `horc build android`
+  clears them so every rebuild publishes a fresh update identity.
 - `WASM_AGENT_SIM_URL`: optional `horc simulate web` target URL override.
 - `WASM_AGENT_SIM_CHROMIUM`: optional Chromium/Chrome executable path for
   `horc simulate web`; otherwise the simulator searches common local browser

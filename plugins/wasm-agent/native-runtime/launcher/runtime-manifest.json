@@ -1,0 +1,20 @@
+{
+  "schema": "hermes.wasm_agent.downloaded_runtime.v1",
+  "runtimeId": "native-launcher-runtime",
+  "version": "20260614T0000",
+  "entry": "launcher.html",
+  "description": "Server-published native launcher/runtime bundle for lab UI, diagnostics schemas, operation routing, config, and model metadata.",
+  "capabilities": [
+    "runtime.launcher",
+    "runtime.labUi",
+    "runtime.proofScripts",
+    "runtime.diagnosticsSchema",
+    "runtime.classifierConfig",
+    "runtime.modelMetadata",
+    "runtime.operationRouting"
+  ],
+  "rollback": {
+    "mode": "last-known-good",
+    "preservePreviousActiveBundle": true
+  }
+}

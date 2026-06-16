@@ -3,6 +3,55 @@ package com.colmeio.wasmagent
 object NativeBridgeContract {
     const val GENERAL_BRIDGE_OBJECT = "wasmAgentNative"
     const val VOICE_TUNING_BRIDGE_OBJECT = "WasmAgentNativeVoiceTuning"
+    const val KERNEL_CONTRACT_VERSION = "2026.06.14"
+
+    val allKernelCapabilities = listOf(
+        "native.capabilities.runtimeLoader.v1",
+        "native.capabilities.hotOps.v1",
+        "native.capabilities.statusBus.v1",
+        "native.capabilities.diagnostics.v1",
+        "native.capabilities.fileStore.v1",
+        "native.capabilities.downloadedRuntime.v1",
+        "native.capabilities.downloadedOperations.v1",
+        "native.capabilities.deviceControl.v1",
+        "native.capabilities.audioCapture.v1",
+        "native.capabilities.modelRuntime.v1",
+        "native.capabilities.foregroundSession.v1",
+        "native.capabilities.webViewBridge.v1",
+        "native.capabilities.boundedCommand.v1",
+        "native.capabilities.auditLog.v1",
+        "native.capabilities.releaseFeedValidation.v1",
+        "native.capabilities.nativeControlPolling.v1",
+        "native.capabilities.crashSafeStatus.v1",
+        "native.capabilities.capabilityManifest.v1",
+    )
+
+    val androidKernelCapabilities = listOf(
+        "native.capabilities.runtimeLoader.v1",
+        "native.capabilities.hotOps.v1",
+        "native.capabilities.statusBus.v1",
+        "native.capabilities.diagnostics.v1",
+        "native.capabilities.fileStore.v1",
+        "native.capabilities.downloadedRuntime.v1",
+        "native.capabilities.downloadedOperations.v1",
+        "native.capabilities.audioCapture.v1",
+        "native.capabilities.modelRuntime.v1",
+        "native.capabilities.foregroundSession.v1",
+        "native.capabilities.webViewBridge.v1",
+        "native.capabilities.boundedCommand.v1",
+        "native.capabilities.auditLog.v1",
+        "native.capabilities.releaseFeedValidation.v1",
+        "native.capabilities.crashSafeStatus.v1",
+        "native.capabilities.capabilityManifest.v1",
+    )
+
+    val nativeKernelMethods = listOf(
+        "getKernelStatus",
+        "syncDownloadedRuntime",
+        "forceSyncDownloadedRuntime",
+        "rollbackDownloadedRuntime",
+        "runDownloadedOperation",
+    )
 
     val voiceTuningMethods = listOf(
         "getStatus",
@@ -18,6 +67,7 @@ object NativeBridgeContract {
         "getHermesWakeProof",
         "voiceTuningStatus",
         "cancelVoiceTuning",
+        *nativeKernelMethods.toTypedArray(),
     )
 
     /*

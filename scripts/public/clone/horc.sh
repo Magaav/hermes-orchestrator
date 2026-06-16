@@ -201,7 +201,7 @@ Usage:
 Behavior:
   - `horc build win` builds the Windows 11 x64 wasm-agent Electron/NSIS installer.
   - `horc build android` builds the Android sideload APK lane only.
-  - `horc build all` builds Windows, then Android.
+  - `horc build all` builds Windows and Android in parallel, then publishes the combined feed.
   - Native Windows builds are production-trusted.
   - Android release builds are cloud-only, signed for sideload install, and
     promoted to native/android/release/WASM-Agent-{arm64,universal}.apk.
@@ -217,12 +217,15 @@ Environment:
   HORC_DOCKER_IMAGE=electronuserland/builder:wine
   HORC_PREPARED_DOCKER_IMAGE=horc/electron-builder-wine-nsis:jammy
   HORC_DOCKER_AMD64_PROBE_IMAGE=alpine:3.20
+  HORC_FORCE_NPM_CI=1                          force Windows Docker npm reinstall
   HORC_AUTO_INSTALL_BINFMT=1                   default on Linux aarch64 auto/docker
   HORC_NO_AUTO_INSTALL_BINFMT=1                disable binfmt self-healing
   HORC_ANDROID_BUILD_MODE=auto|local|docker    default: auto
   HORC_ANDROID_DOCKER_IMAGE=ghcr.io/cirruslabs/android-sdk:35
   HORC_ANDROID_GRADLE_VERSION=8.9
   HORC_ANDROID_RUN_UNIT_TESTS=1                 run Android JVM tests before release assembly
+  HORC_ANDROID_PRESERVE_BUILD_ID=1              keep caller-provided Android buildId/versionCode
+  HORC_GENERATE_NATIVE_RELEASE_FEED=0           skip per-target feed generation
   WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS=600000
   HERMES_WASM_AGENT_ANDROID_ROOT=/local/native/android
   GRADLE_BIN=/path/to/gradle                   optional Android Gradle override
@@ -330,10 +333,12 @@ release_build_lock() {
     return
   fi
   local pid_file="${HORC_BUILD_LOCK_DIR}/pid"
-  if [[ -f "${pid_file}" && "$(cat "${pid_file}" 2>/dev/null || true)" == "$$" ]]; then
+  local owner_pid="${HORC_BUILD_LOCK_OWNER_PID:-${BASHPID:-$$}}"
+  if [[ -f "${pid_file}" && "$(cat "${pid_file}" 2>/dev/null || true)" == "${owner_pid}" ]]; then
     rm -rf "${HORC_BUILD_LOCK_DIR}"
   fi
   HORC_BUILD_LOCK_DIR=""
+  HORC_BUILD_LOCK_OWNER_PID=""
 }
 
 build_lock_pid_alive() {
@@ -355,7 +360,8 @@ acquire_build_lock() {
   pid_file="${lock_dir}/pid"
 
   if mkdir "${lock_dir}" 2>/dev/null; then
-    printf '%s\n' "$$" > "${pid_file}"
+    HORC_BUILD_LOCK_OWNER_PID="${BASHPID:-$$}"
+    printf '%s\n' "${HORC_BUILD_LOCK_OWNER_PID}" > "${pid_file}"
     HORC_BUILD_LOCK_DIR="${lock_dir}"
     trap release_build_lock EXIT
     echo "horc build: acquired build lock ${lock_dir}"
@@ -377,7 +383,8 @@ acquire_build_lock() {
     echo "horc build: could not acquire build lock ${lock_dir}; another build may have started." >&2
     exit 2
   fi
-  printf '%s\n' "$$" > "${pid_file}"
+  HORC_BUILD_LOCK_OWNER_PID="${BASHPID:-$$}"
+  printf '%s\n' "${HORC_BUILD_LOCK_OWNER_PID}" > "${pid_file}"
   HORC_BUILD_LOCK_DIR="${lock_dir}"
   trap release_build_lock EXIT
   echo "horc build: acquired build lock ${lock_dir}"
@@ -979,9 +986,44 @@ cleanup_owner() {
   fi
 }
 trap cleanup_owner EXIT
-npm ci
-test -x node_modules/.bin/electron-builder || { echo "missing electron-builder after npm ci" >&2; exit 2; }
-test -x node_modules/.bin/asar || { echo "missing asar after npm ci" >&2; exit 2; }
+node_dependency_fingerprint() {
+  node - <<'NODE'
+const crypto = require("crypto");
+const fs = require("fs");
+const files = ["package.json", "package-lock.json"];
+const hash = crypto.createHash("sha256");
+for (const file of files) {
+  if (fs.existsSync(file)) {
+    hash.update(file);
+    hash.update("\0");
+    hash.update(fs.readFileSync(file));
+    hash.update("\0");
+  }
+}
+process.stdout.write(hash.digest("hex"));
+NODE
+}
+ensure_node_deps() {
+  local fingerprint_file="node_modules/.horc-npm-fingerprint"
+  local expected
+  expected="$(node_dependency_fingerprint)"
+  if [[ "${HORC_FORCE_NPM_CI:-0}" != "1" \
+    && -f "${fingerprint_file}" \
+    && "$(cat "${fingerprint_file}" 2>/dev/null || true)" == "${expected}" \
+    && -x node_modules/.bin/electron-builder \
+    && -x node_modules/.bin/asar ]]; then
+    echo "horc build: reusing cached Windows Node dependencies"
+    return
+  fi
+
+  echo "horc build: installing Windows Node dependencies with npm ci"
+  npm ci
+  test -x node_modules/.bin/electron-builder || { echo "missing electron-builder after npm ci" >&2; exit 2; }
+  test -x node_modules/.bin/asar || { echo "missing asar after npm ci" >&2; exit 2; }
+  mkdir -p node_modules
+  printf '%s\n' "${expected}" > "${fingerprint_file}"
+}
+ensure_node_deps
 npm run release:win:x64:prod
 TXT
 )"
@@ -997,6 +1039,7 @@ TXT
     -e WASM_AGENT_ALLOW_LOCAL_DEV="" \
     -e ELECTRON_CACHE="/root/.cache/electron" \
     -e ELECTRON_BUILDER_CACHE="/root/.cache/electron-builder" \
+    -e HORC_FORCE_NPM_CI="${HORC_FORCE_NPM_CI:-0}" \
     -e HORC_HOST_UID="${host_uid}" \
     -e HORC_HOST_GID="${host_gid}" \
     -v "${root}:${root}" \
@@ -1117,6 +1160,28 @@ NODE
   echo "horc build: mode=${build_mode} trusted_production=${trusted_production} requires_windows_smoke_test=${requires_windows_smoke_test}"
 }
 
+generate_native_release_feed() {
+  local root="$1"
+  local label="${2:-horc build}"
+  echo "${label}: generating native release feed"
+  require_command node "Install Node.js so horc can generate the native release feed."
+  (cd "${root}" && node plugins/wasm-agent/scripts/generate-native-release-feed.js)
+}
+
+should_generate_native_release_feed() {
+  ! is_falsey "${HORC_GENERATE_NATIVE_RELEASE_FEED:-1}"
+}
+
+android_release_identity_env() {
+  if is_truthy "${HORC_ANDROID_PRESERVE_BUILD_ID:-}"; then
+    return
+  fi
+  echo "horc build android-apk: forcing fresh Android build identity for update detection"
+  unset WASM_AGENT_ANDROID_BUILD_ID
+  unset WASM_AGENT_ANDROID_VERSION_CODE
+  unset WASM_AGENT_ANDROID_BUILD_GENERATED_AT
+}
+
 build_windows_native_release() {
   local native_src="${HERMES_WASM_AGENT_NATIVE_SRC:-}"
   local root
@@ -1219,6 +1284,11 @@ build_windows_native_release() {
   esac
 
   post_build_verify_and_manifest "${native_src}" "${build_mode}" "${target_arch}" "${trusted_production}" "${requires_windows_smoke_test}" "${host_os}" "${host_arch}"
+  if should_generate_native_release_feed; then
+    generate_native_release_feed "${root}" "horc build"
+  else
+    echo "horc build: skipping native release feed generation for parallel build join"
+  fi
 }
 
 android_local_tools_available() {
@@ -1418,6 +1488,11 @@ export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk-linux}"
 export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
 export APKSIGNER_BIN="${APKSIGNER_BIN:-${ANDROID_HOME}/build-tools/35.0.0/apksigner}"
 export HORC_ANDROID_KOTLIN_IN_PROCESS="${HORC_ANDROID_KOTLIN_IN_PROCESS:-1}"
+if [[ "${HORC_ANDROID_PRESERVE_BUILD_ID:-}" != "1" ]]; then
+  unset WASM_AGENT_ANDROID_BUILD_ID
+  unset WASM_AGENT_ANDROID_VERSION_CODE
+  unset WASM_AGENT_ANDROID_BUILD_GENERATED_AT
+fi
 node scripts/release-android.js
 TXT
 }
@@ -1450,9 +1525,13 @@ run_docker_android_release() {
     --platform linux/amd64 \
     -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
     -e HORC_ANDROID_RUN_UNIT_TESTS="${HORC_ANDROID_RUN_UNIT_TESTS:-0}" \
+    -e HORC_ANDROID_PRESERVE_BUILD_ID="${HORC_ANDROID_PRESERVE_BUILD_ID:-0}" \
     -e WASM_AGENT_ANDROID_SKIP_LINT="${WASM_AGENT_ANDROID_SKIP_LINT:-1}" \
     -e WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS="${WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS:-600000}" \
     -e WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY="${skip_apksigner_verify:-0}" \
+    -e WASM_AGENT_ANDROID_BUILD_ID="${WASM_AGENT_ANDROID_BUILD_ID:-}" \
+    -e WASM_AGENT_ANDROID_VERSION_CODE="${WASM_AGENT_ANDROID_VERSION_CODE:-}" \
+    -e WASM_AGENT_ANDROID_BUILD_GENERATED_AT="${WASM_AGENT_ANDROID_BUILD_GENERATED_AT:-}" \
     -e HORC_HOST_UID="${host_uid}" \
     -e HORC_HOST_GID="${host_gid}" \
     -v "${root}:${root}" \
@@ -1511,7 +1590,7 @@ build_android_native_release() {
         exit 2
       fi
       echo "horc build android-apk: cd ${android_root} && node scripts/release-android.js"
-      (cd "${android_root}" && node scripts/release-android.js)
+      (cd "${android_root}" && android_release_identity_env && node scripts/release-android.js)
       ;;
     docker)
       run_docker_android_release "${root}" "${android_root}"
@@ -1529,9 +1608,11 @@ build_android_native_release() {
   [[ -f "${android_root}/release/WASM-Agent-arm64.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-arm64.apk"
   [[ -f "${android_root}/release/WASM-Agent-universal.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-universal.apk"
   verify_android_release_artifact_on_host "${android_root}"
-  echo "horc build android-apk: generating native release feed"
-  require_command node "Install Node.js so horc can generate the native release feed."
-  (cd "${root}" && node plugins/wasm-agent/scripts/generate-native-release-feed.js)
+  if should_generate_native_release_feed; then
+    generate_native_release_feed "${root}" "horc build android-apk"
+  else
+    echo "horc build android-apk: skipping native release feed generation for parallel build join"
+  fi
   echo "horc build android-apk: APK artifacts ready:"
   echo "horc build android-apk:   ${android_root}/release/WASM-Agent-arm64.apk"
   echo "horc build android-apk:   ${android_root}/release/WASM-Agent-universal.apk"
@@ -1539,14 +1620,30 @@ build_android_native_release() {
 
 build_all_native_release() {
   local root
+  local win_pid
+  local android_pid
+  local win_status=0
+  local android_status=0
   root="$(repo_root)"
-  build_windows_native_release
-  release_build_lock
-  build_android_native_release
-  release_build_lock
-  echo "horc build all: generating native release feed"
-  require_command node "Install Node.js so horc can generate the native release feed."
-  (cd "${root}" && node plugins/wasm-agent/scripts/generate-native-release-feed.js)
+  echo "horc build all: starting Windows and Android builds in parallel"
+  (export HORC_GENERATE_NATIVE_RELEASE_FEED=0; build_windows_native_release) &
+  win_pid=$!
+  (export HORC_GENERATE_NATIVE_RELEASE_FEED=0; build_android_native_release) &
+  android_pid=$!
+
+  set +e
+  wait "${win_pid}"
+  win_status=$?
+  wait "${android_pid}"
+  android_status=$?
+  set -e
+
+  if [[ "${win_status}" -ne 0 || "${android_status}" -ne 0 ]]; then
+    echo "horc build all: Windows status=${win_status}, Android status=${android_status}" >&2
+    exit 1
+  fi
+
+  generate_native_release_feed "${root}" "horc build all"
   echo "horc build all: target matrix"
   (cd "${root}" && node <<'NODE'
 const fs = require("fs");

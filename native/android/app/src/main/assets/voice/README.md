@@ -66,10 +66,29 @@ Training sample persistence:
   the model into app-private storage at `files/voice/hermes.onnx` through the
   Android bridge method `installHermesWakeModel(modelUrl, sha256)`. This avoids
   APK rebuilds for wake-model iteration.
+- The Android wizard is expected to collect a balanced personalized dataset:
+  50 Hermes positives across normal, soft, farther-away, phone-on-desk, and
+  noisy-room prompts; 20 silence/background negatives; 20 normal-speech
+  negatives; and 10 similar-word/confuser negatives. Each accepted sample
+  exports duration, RMS dB, peak dB, clipping ratio, silence ratio, estimated
+  SNR, category, accepted/rejected state, and rejection reason.
+- `metadata.json` uses schema
+  `hermes.wasm_agent.android_hermes_wake_dataset.v2` and includes build/device
+  fields, sample-rate/channel contract, category counts, accepted/rejected
+  counts, per-sample quality metrics, wizard version, hash-only session field,
+  creation time, and model target wake word `hermes`.
 - Preferred automation: run `tools/voice/ship-hermes-wake.sh` with
   `WASM_AGENT_NATIVE_CONTROL_KEY` set. It queues the Win11 bridge export,
-  downloads the uploaded zip, imports, trains, validates, and prints the model
-  SHA from `/native/android/hermes-wake-model/latest.json`.
+  downloads the uploaded zip, imports, trains, validates, writes
+  `build/voice/hermes-calibration.json`, and prints the model SHA from
+  `/native/android/hermes-wake-model/latest.json`.
+
+Model acceptance is stricter than crossing 0.58 once: median positive
+confidence should be at least 0.75, p10 positive at least 0.60, max
+negative/confuser at most 0.40, and the threshold recommendation should retain
+at least 0.15 margin. Final acceptance still requires Android live proof showing
+clear Hermes crosses threshold and emits wake/command-capture events while
+silence and normal speech do not trigger.
 
 Artifact types:
 

@@ -17827,6 +17827,19 @@ const TUNE_VOICE_SPEECH_PROMPTS = [
   "check the logs",
 ];
 
+const TUNE_VOICE_CONFUSER_PROMPTS = [
+  "her",
+  "terms",
+  "service",
+  "Ermes",
+  "Herm",
+  "open the window",
+  "start a timer",
+  "near my desk",
+  "turn this off",
+  "show me notes",
+];
+
 const tuneVoiceState = {
   step: 0,
   status: null,
@@ -17850,11 +17863,16 @@ const tuneVoiceState = {
 };
 
 const TUNE_VOICE_STEPS = [
-  { id: "intro", title: "Train Hermes Wake", subtitle: "Guided one-second wake phrase dataset" },
-  { id: "positive", title: "Record Hermes", category: "positive", target: 50, progressLabel: "Hermes samples", button: "Record Hermes", source: "space-home:tune-voice" },
-  { id: "silence", title: "Record Silence", category: "negative/silence", target: 50, progressLabel: "Silence samples", button: "Record Silence", source: "space-home:tune-voice:negative-silence" },
-  { id: "speech", title: "Record Not-Hermes Speech", category: "negative/speech", target: 100, progressLabel: "Speech negatives", button: "Record This Phrase", source: "space-home:tune-voice:negative-speech" },
-  { id: "noise", title: "Record Room Noise", category: "negative/noise", target: 50, progressLabel: "Noise samples", button: "Record Room Noise", source: "space-home:tune-voice:negative-noise" },
+  { id: "intro", title: "Train Hermes Wake", subtitle: "Balanced personalized wake dataset" },
+  { id: "positive-normal", title: "Say Hermes Normally", category: "positive", target: 10, progressLabel: "Normal Hermes", button: "Record Normal", source: "space-home:tune-voice:positive-normal", prompt: "Say Hermes normally" },
+  { id: "positive-soft", title: "Say Hermes Softly", category: "positive", target: 10, progressLabel: "Soft Hermes", button: "Record Soft", source: "space-home:tune-voice:positive-soft", prompt: "Say Hermes softly" },
+  { id: "positive-far", title: "Say Hermes Farther Away", category: "positive", target: 10, progressLabel: "Farther Hermes", button: "Record Farther", source: "space-home:tune-voice:positive-far", prompt: "Say Hermes from farther away" },
+  { id: "positive-desk", title: "Phone On Desk", category: "positive", target: 10, progressLabel: "Desk Hermes", button: "Record Desk", source: "space-home:tune-voice:positive-desk", prompt: "Put the phone on the desk and say Hermes" },
+  { id: "positive-noisy", title: "Noisy Room Hermes", category: "positive", target: 10, progressLabel: "Noisy Hermes", button: "Record Noisy", source: "space-home:tune-voice:positive-noisy", prompt: "Say Hermes in a noisy room" },
+  { id: "silence", title: "Stay Silent", category: "negative/silence", target: 20, progressLabel: "Silence/background", button: "Record Silence", source: "space-home:tune-voice:negative-silence", prompt: "Stay silent" },
+  { id: "speech", title: "Normal Speech Without Hermes", category: "negative/speech", target: 20, progressLabel: "Speech negatives", button: "Record This Phrase", source: "space-home:tune-voice:negative-speech", prompt: "Speak normally without saying Hermes" },
+  { id: "confuser", title: "Similar Words, Not Hermes", category: "negative/speech", target: 10, progressLabel: "Confuser negatives", button: "Record Confuser", source: "space-home:tune-voice:negative-confuser", prompt: "Say similar words, but not Hermes" },
+  { id: "noise", title: "Noisy Room Background", category: "negative/noise", target: 10, progressLabel: "Noise samples", button: "Record Room Noise", source: "space-home:tune-voice:negative-noise", prompt: "Let the room sound normal. Do not speak." },
   { id: "readiness", title: "Dataset Readiness", subtitle: "Quality gates and diagnostics" },
   { id: "export", title: "Export Hermes Dataset", subtitle: "Create hermes-dataset.zip" },
 ];
@@ -17945,7 +17963,7 @@ function tuneVoiceFailureMessage(error = "", fallback = "Unexpected error. Try a
 }
 
 function tuneVoiceCountForStep(step, counts = tuneVoiceCounts()) {
-  if (step?.id === "positive") return counts.positive;
+  if (step?.category === "positive") return counts.positive;
   if (step?.id === "silence") return counts.silence;
   if (step?.id === "speech") return counts.speech;
   if (step?.id === "noise") return counts.noise;
@@ -18003,9 +18021,9 @@ function tuneVoiceProgressMarkup() {
   const counts = tuneVoiceCounts();
   const cells = [
     ["Hermes", counts.positive, 50],
-    ["Silence", counts.silence, 50],
-    ["Speech", counts.speech, 100],
-    ["Noise", counts.noise, 50],
+    ["Silence", counts.silence, 20],
+    ["Speech/confusers", counts.speech, 30],
+    ["Noise", counts.noise, 10],
   ];
   return cells.map(([label, value, target]) => `
     <span class="tune-voice-progress-chip${value >= target ? " is-complete" : ""}">
@@ -18065,22 +18083,19 @@ function renderTuneVoiceWizard(options = {}) {
     els.tuneVoiceBody.innerHTML = `
       <div class="tune-voice-copy">
         <p>Your phone will learn to recognize the wake phrase 'Hermes'.</p>
-        <p>We'll record short one-second clips.</p>
-        <p>First, you'll say Hermes several times.</p>
-        <p>Then we'll record silence, room noise, and speech that is not Hermes to reduce false wakes.</p>
+        <p>We'll record short one-second clips across normal, soft, far, desk, and noisy-room positives.</p>
+        <p>Then we'll record silence, background, normal speech, and similar-word confusers to reduce false wakes.</p>
         <p>This does not enable always-on wake automatically.</p>
         ${tuneVoiceBridgeDevPanelMarkup("Developer details", bridgeDetails)}
       </div>
     `;
   } else if (step.category) {
-    const instruction = step.id === "positive"
-      ? "When the countdown ends, say: Hermes"
-      : step.id === "silence"
-        ? "Stay quiet for one second."
-        : step.id === "speech"
-          ? "Say the phrase shown. Do not say Hermes."
-          : "Let the room sound normal. Do not speak.";
-    const prompt = step.id === "speech" ? TUNE_VOICE_SPEECH_PROMPTS[tuneVoiceState.speechPromptIndex % TUNE_VOICE_SPEECH_PROMPTS.length] : "";
+    const instruction = step.prompt || (step.category === "positive" ? "Say Hermes normally" : "Record the requested negative sample");
+    const prompt = step.id === "speech"
+      ? TUNE_VOICE_SPEECH_PROMPTS[tuneVoiceState.speechPromptIndex % TUNE_VOICE_SPEECH_PROMPTS.length]
+      : step.id === "confuser"
+        ? TUNE_VOICE_CONFUSER_PROMPTS[tuneVoiceState.speechPromptIndex % TUNE_VOICE_CONFUSER_PROMPTS.length]
+        : "";
     const count = tuneVoiceCountForStep(step, counts);
     const phaseText = tuneVoiceState.phase === "countdown" ? `${tuneVoiceState.countdown}...` : tuneVoiceState.phase === "recording" ? "Recording for 1 second" : tuneVoiceState.phase === "saving" ? "Saving..." : cleanText(tuneVoiceState.message, "");
     const diagnostics = [
@@ -18090,6 +18105,11 @@ function renderTuneVoiceWizard(options = {}) {
       ["last_record_kind", tuneVoiceState.lastRecordKind],
       ["last_record_path", tuneVoiceState.lastRecordPath],
       ["last_record_duration_ms", tuneVoiceState.lastRecordDurationMs || ""],
+      ["last_rms_db", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.rms_db ?? ""],
+      ["last_peak_db", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.peak_db ?? ""],
+      ["last_clipping_ratio", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.clipping_ratio ?? ""],
+      ["last_silence_ratio", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.silence_ratio ?? ""],
+      ["last_rejection_reason", tuneVoiceState.diagnostics.renderer_record_result_received?.rejection_reason || ""],
     ];
     els.tuneVoiceBody.innerHTML = `
       <div class="tune-voice-record-panel">
@@ -18098,7 +18118,7 @@ function renderTuneVoiceWizard(options = {}) {
         <div class="tune-voice-meter" aria-live="polite">${tuneVoiceEscapeHtml(phaseText || "Ready")}</div>
         <div class="tune-voice-step-progress">
           <span>${tuneVoiceEscapeHtml(step.progressLabel)}: ${count} / ${step.target}</span>
-          ${step.id === "positive" ? "<span>Smoke target: 5</span>" : ""}
+          ${step.category === "positive" ? "<span>Balanced target: 50</span>" : ""}
         </div>
         <details class="tune-voice-dev-panel">
           <summary>Recording diagnostics</summary>
@@ -18114,6 +18134,7 @@ function renderTuneVoiceWizard(options = {}) {
       ["negative_speech_count", counts.speech],
       ["negative_noise_count", counts.noise],
       ["total_negative_count", counts.negative],
+      ["readiness_score", status.readiness_score ?? "-"],
       ["zero_byte_count", counts.zeroByte],
       ["invalid_format_count", counts.invalidFormat],
       ["smoke_gate_ready", counts.smokeReady ? "yes" : "no"],
@@ -18122,7 +18143,7 @@ function renderTuneVoiceWizard(options = {}) {
     els.tuneVoiceBody.innerHTML = `
       <div class="tune-voice-readiness ${counts.realReady ? "is-real" : counts.smokeReady ? "is-smoke" : ""}">
         <strong>${tuneVoiceEscapeHtml(tuneVoiceReadinessLabel(counts))}</strong>
-        <span>${counts.smokeReady ? "Export is available. Smoke datasets are useful for pipeline checks." : "Need at least 5 Hermes samples and 10 negative samples."}</span>
+        <span>${counts.realReady ? "Balanced export is ready for cloud training." : counts.smokeReady ? "Export is available, but production training still needs the balanced targets." : "Need at least 5 Hermes samples and 10 negative samples."}</span>
       </div>
       <dl class="tune-voice-diagnostics">
         ${rows.map(([label, value]) => `<div><dt>${tuneVoiceEscapeHtml(label)}</dt><dd>${tuneVoiceEscapeHtml(String(value))}</dd></div>`).join("")}
@@ -18479,7 +18500,7 @@ function startHomeTuneVoiceSample(category = null, source = "") {
     kind: tuneVoiceRecordKindForCategory(cleanCategory),
     label: tuneVoiceRecordLabelForCategory(cleanCategory),
     duration_ms: 1000,
-    prompt: cleanCategory === "positive" ? "Hermes" : "",
+    prompt: cleanCategory === "positive" ? "Hermes" : cleanText(tuneVoiceState.message, ""),
     category: cleanCategory,
     source: cleanSource,
   };
@@ -19184,6 +19205,9 @@ function windowsNativeShellNeedsDiagnosticsUpdate() {
 
 function nativeInstalledBuildId() {
   const androidInfo = androidNativeShellInfo();
+  if (androidInfo.isAndroidNativeShell) {
+    return cleanText(androidInfo.packageInfo?.buildId || androidInfo.buildId || nativeConfigState()?.buildId, "");
+  }
   return cleanText(nativeConfigState()?.buildId || window.wasmAgentNative?.buildId || androidInfo.buildId, "");
 }
 
@@ -19254,6 +19278,28 @@ function compareNativeUpdateState(current, artifact, profile = state.nativeInsta
       return { platform, status: "up_to_date", currentBuildId: current.buildId, latestBuildId, artifactAvailable: true, safeUpdatePath: false };
     }
   }
+  if (platform === "windows") {
+    const currentBuildId = cleanText(current.buildId, "");
+    const currentRank = currentBuildId.replace(/^win-x64-/i, "");
+    const latestRank = latestBuildId.replace(/^win-x64-/i, "");
+    const sameBuild = currentBuildId && latestBuildId && currentBuildId === latestBuildId;
+    const newerBuild = latestBuildId && (!currentBuildId || latestRank > currentRank);
+    const olderBuild = currentBuildId && latestBuildId && latestRank < currentRank;
+    const safeUpdatePath = Boolean(artifact.url);
+    return {
+      platform,
+      status: sameBuild || olderBuild ? "up_to_date" : newerBuild && safeUpdatePath ? "update_available" : "unavailable",
+      reason: sameBuild ? "same_build" : olderBuild ? "older_build_ignored" : newerBuild ? "newer_build_available" : "missing_build_id",
+      comparisonMode: "buildId",
+      currentBuildId,
+      currentVersion: current.version,
+      latestBuildId,
+      latestVersion: cleanText(artifact.version, ""),
+      artifactAvailable: Boolean(artifact.url),
+      safeUpdatePath,
+      artifact,
+    };
+  }
   const sameBuild = current.buildId && latestBuildId && current.buildId === latestBuildId;
   const safeUpdatePath = ["windows", "android", "web"].includes(platform) && Boolean(artifact.url);
   return {
@@ -19271,7 +19317,8 @@ function compareNativeUpdateState(current, artifact, profile = state.nativeInsta
 }
 
 async function loadNativeReleaseManifest() {
-  const manifest = await fetchJson("/native/releases/latest.json", { timeoutMs: 5000 });
+  const manifestUrl = `/native/releases/latest.json?_=${Date.now()}`;
+  const manifest = await fetchJson(manifestUrl, { timeoutMs: 5000, cache: "no-store" });
   state.nativeReleaseManifest = manifest;
   const artifact = nativeReleaseArtifactForPlatform(manifest);
   state.nativeUpdateState = compareNativeUpdateState(nativePackageInfoSync(), artifact);

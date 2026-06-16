@@ -53,8 +53,20 @@ native/android/release/WASM-Agent-arm64.apk
 native/android/release/release-manifest.json
 ```
 
+`horc build android` clears inherited Android build identity by default so each
+release-promotion rebuild publishes a fresh update identity in the native feed.
+On ARM hosts using the linux/amd64 Docker builder, container-side
+`apksigner verify` is skipped to avoid QEMU hangs; host-side verification still
+runs when `apksigner` is available. The native release feed generator also
+promotes a newer signed Gradle `app-release.apk` into `native/android/release/`
+before publishing `/native/releases/latest.json`, so the Go Native Android
+download resolves to the newest built APK.
+
 `horc build all` also publishes APKs into
-`plugins/wasm-agent/public/native/releases/android/`.
+`plugins/wasm-agent/public/native/releases/android/`. When
+`HORC_ANDROID_RUN_UNIT_TESTS=1`, the release script submits unit tests and
+release assembly to one parallel-capable Gradle invocation to avoid repeated
+startup/configuration cost.
 
 ## Verification
 
@@ -71,6 +83,72 @@ Runtime proof:
 ```bash
 horc simulate android
 ```
+
+After installing a newly trained `files/voice/hermes.onnx`, Android proof mode
+must show `model_sha_match=true`, `wake_engine_ready=true`,
+`inference_count>0`, a Hermes `max_observed_confidence`, `threshold_crossed=true`,
+`wake_detection_count>0`, `wake_detected_event_emitted=true`, and
+`command_capture_started=true`. A silence/normal-speech proof pass must not
+trigger wake detection. Do not globally lower the production threshold as the
+model fix; temporary proof threshold overrides are only for downstream command
+capture testing.
+
+## Native Evolution Layer
+
+Android exposes the native capability kernel through the WebView bridge objects
+`window.wasmAgentNative` and `window.WasmAgentNativeVoiceTuning`. Stable generic
+methods are:
+
+```text
+getKernelStatus()
+syncDownloadedRuntime(manifestJson)
+forceSyncDownloadedRuntime(manifestJson)
+rollbackDownloadedRuntime()
+runDownloadedOperation(operationManifestJson, inputsJson)
+```
+
+Android stores downloaded runtime metadata in app shared preferences and reports
+`downloadedRuntime`, `nativeKernel`, and `hotOperations` from shell config and
+native diagnostics. It does not silently replace the installed APK. It can,
+however, accept server-published runtime/operation manifests, compare required
+native capabilities, expose active bundle IDs/SHAs, and route product logic to
+stable native primitives without an APK rebuild.
+
+Android advertised capabilities:
+
+```text
+native.capabilities.runtimeLoader.v1
+native.capabilities.hotOps.v1
+native.capabilities.statusBus.v1
+native.capabilities.diagnostics.v1
+native.capabilities.fileStore.v1
+native.capabilities.downloadedRuntime.v1
+native.capabilities.downloadedOperations.v1
+native.capabilities.audioCapture.v1
+native.capabilities.modelRuntime.v1
+native.capabilities.foregroundSession.v1
+native.capabilities.webViewBridge.v1
+native.capabilities.boundedCommand.v1
+native.capabilities.auditLog.v1
+native.capabilities.releaseFeedValidation.v1
+native.capabilities.crashSafeStatus.v1
+native.capabilities.capabilityManifest.v1
+```
+
+The first downloaded-operation proof path is `run_android_hermes_wake_proof`.
+Its operation inputs may set `wakeThreshold` or `wake_threshold`; the Android
+foreground service persists that value as `voice_wake_threshold`, reloads the
+wake engine with the new threshold, and reports `wake_threshold`,
+`threshold_policy_source`, and `policy_source` in
+`files/native-diagnostics/voice-wake.json`. Changing this threshold, proof
+timeout, classifier logic, diagnostics schema, launcher UI, config, or model
+metadata should not require an APK rebuild as long as the installed capability
+kernel already exposes the required native primitives.
+
+An APK rebuild is still required for new Android permissions, manifest service
+declarations, native libraries such as ONNX Runtime changes, package identity,
+signing/update behavior, notification/foreground-service categories, or a new
+native primitive that cannot be expressed through the generic bridge.
 
 Hermes Wake acceptance must pass a readiness preflight before listening for the
 spoken wake word. The report must show microphone permission granted,
@@ -115,12 +193,11 @@ loop. Use the Windows wasm-agent app Diagnostics/Frontier bridge operation
 `export_hermes_wake_dataset`, or fetch the protected uploaded dataset from the
 cloud with an admin session or native control key.
 
-Repo-side automation lives at `tools/voice/ship-hermes-wake.sh`. With
-`WASM_AGENT_NATIVE_CONTROL_KEY` set, it queues `export_hermes_wake_dataset` for
-the polling Win11 native bridge, waits for the backend upload, imports the zip,
-trains `build/voice/hermes.onnx`, validates the production candidate, and prints
-the `/native/android/hermes-wake-model/latest.json` SHA for Android bridge
-installation.
+Historical superseded repo-side automation used `tools/voice/ship-hermes-wake.sh`
+for the dataset/model loop. The current wake debug path depends on installed
+Windows hot-op shell proof first, then
+`tools/voice/run-hermes-wake-proof.py --dry-run` and
+`tools/voice/run-hermes-wake-proof.py --debug`.
 
 Copied-report validation:
 
@@ -152,8 +229,8 @@ install paths.
 
 ## Durable Next Step
 
-Ship `android-universal-20260612T201043Z` only with the paired release feed
-entry that points at SHA
-`15d49526bf556368597796a8ac4c6991376088b4dbd709d36a25f47cb753ad06` and
-runtime proof status `installed-windows-bridge-hermes-wake-verified`. Android
-OAuth native return remains a separate installed-app proof lane.
+After installed Windows hot-op shell proof passes, run Hermes wake dry-run and
+debug proof through `run_hot_operation`. The next proof must classify spoken
+"Hermes" doing nothing as `wake_threshold_not_crossed`,
+`wake_event_not_emitted`, or `command_capture_ui_not_started`. Android OAuth
+native return remains a separate installed-app proof lane.

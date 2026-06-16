@@ -35,7 +35,13 @@ const NATIVE_APP_ORIGIN = "wasm-agent://app";
 const NATIVE_APP_HOME_URL = `${NATIVE_APP_ORIGIN}/home`;
 const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
   "run_hot_operation",
+  "get_native_kernel_status",
   "list_hot_operations",
+  "refresh_downloaded_runtime",
+  "sync_downloaded_runtime",
+  "rollback_downloaded_runtime",
+  "refresh_downloaded_hot_ops",
+  "sync_downloaded_hot_ops",
   "run_shell_self_test",
   "check_android_connection",
   "adb_version",
@@ -52,21 +58,72 @@ const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
 ]);
 const HOT_OPERATION_PROTOCOL_VERSION = 1;
 const SHELL_PROTOCOL_VERSION = 2;
+const DOWNLOADED_RUNTIME_PROTOCOL_VERSION = 1;
+const NATIVE_KERNEL_CONTRACT_VERSION = "2026.06.14";
 const MINIMUM_RUNNER_VERSION = "20260612";
-const HOT_OPERATION_DEFAULT_TIMEOUT_MS = 120_000;
+const HOT_OPERATION_DEFAULT_TIMEOUT_MS = 45_000;
 const HOT_OPERATION_MANIFEST_SUFFIX = ".manifest.json";
 const BRIDGE_LOG_TAIL_LIMIT = 120;
+const ALL_NATIVE_KERNEL_CAPABILITIES = [
+  "native.capabilities.runtimeLoader.v1",
+  "native.capabilities.hotOps.v1",
+  "native.capabilities.statusBus.v1",
+  "native.capabilities.diagnostics.v1",
+  "native.capabilities.fileStore.v1",
+  "native.capabilities.downloadedRuntime.v1",
+  "native.capabilities.downloadedOperations.v1",
+  "native.capabilities.deviceControl.v1",
+  "native.capabilities.audioCapture.v1",
+  "native.capabilities.modelRuntime.v1",
+  "native.capabilities.foregroundSession.v1",
+  "native.capabilities.webViewBridge.v1",
+  "native.capabilities.boundedCommand.v1",
+  "native.capabilities.auditLog.v1",
+  "native.capabilities.releaseFeedValidation.v1",
+  "native.capabilities.nativeControlPolling.v1",
+  "native.capabilities.crashSafeStatus.v1",
+  "native.capabilities.capabilityManifest.v1",
+];
+const WINDOWS_NATIVE_KERNEL_CAPABILITIES = [
+  "native.capabilities.runtimeLoader.v1",
+  "native.capabilities.hotOps.v1",
+  "native.capabilities.statusBus.v1",
+  "native.capabilities.diagnostics.v1",
+  "native.capabilities.fileStore.v1",
+  "native.capabilities.downloadedRuntime.v1",
+  "native.capabilities.downloadedOperations.v1",
+  "native.capabilities.deviceControl.v1",
+  "native.capabilities.webViewBridge.v1",
+  "native.capabilities.boundedCommand.v1",
+  "native.capabilities.auditLog.v1",
+  "native.capabilities.releaseFeedValidation.v1",
+  "native.capabilities.nativeControlPolling.v1",
+  "native.capabilities.crashSafeStatus.v1",
+  "native.capabilities.capabilityManifest.v1",
+];
 const BRIDGE_PROTOCOL_CAPABILITIES = [
   "get_bridge_status",
+  "get_native_kernel_status",
   "list_hot_operations",
+  "refresh_downloaded_runtime",
+  "sync_downloaded_runtime",
+  "rollback_downloaded_runtime",
+  "refresh_downloaded_hot_ops",
+  "sync_downloaded_hot_ops",
   "run_shell_self_test",
   "run_hot_operation",
 ];
 const bridgeLogsTail = [];
+const NATIVE_CONTROL_DEFAULT_TIMEOUT_MS = 60_000;
+const NATIVE_CONTROL_MAX_TIMEOUT_MS = 240_000;
 let selectedBackendOrigin = "";
 let nativeControlPollBusy = false;
 let activeNativeCommandCount = 0;
 let activeWindowsSelfUpdate = null;
+let lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: "", syncedAt: "", feedUrl: "", error: "", status: "not_attempted", feedBundleId: "", cachedBundleId: "", activeRuntimeId: "", activeRuntimeSha: "", activeRuntimePath: "", staleReason: "", fallbackReason: "", files: [] };
+let downloadedRuntimeSyncPromise = null;
+let lastHotOperationBundleSync = { ok: false, changed: false, attemptedAt: "", syncedAt: "", feedUrl: "", error: "", feedBundleId: "", cachedBundleId: "", moduleSha: "", manifestSha: "", cachePath: "", bundles: [] };
+let hotOperationBundleSyncPromise = null;
 let lastReloadCommand = null;
 let activeAndroidOAuthVerification = null;
 const startupDiagnostics = {
@@ -699,28 +756,41 @@ async function checkAndStageWindowsSelfUpdate(sender, opId, payload = {}) {
   const current = currentWindowsBuildInfo();
   const serverUrl = current.productionTarget;
   const feedUrl = feedUrlFor(serverUrl);
-  emitWindowsUpdateEvent(sender, opId, "update_check_started", { feedUrl, currentBuild: current.buildId });
+  const cacheBypass = payload.cacheBypass !== false && payload.bypassCache !== false;
+  const fetchUrl = cacheBypass ? `${feedUrl}${feedUrl.includes("?") ? "&" : "?"}_=${Date.now()}` : feedUrl;
+  emitWindowsUpdateEvent(sender, opId, "update_check_started", {
+    feedUrl,
+    fetchUrl,
+    cacheBypass,
+    currentBuild: current.buildId,
+    comparisonMode: "buildId",
+  });
   let feed;
   try {
-    feed = await fetchJsonWithTimeout(feedUrl, Number(payload.feedTimeoutMs || payload.feed_timeout_ms || 10000));
+    feed = await fetchJsonWithTimeout(fetchUrl, Number(payload.feedTimeoutMs || payload.feed_timeout_ms || 10000));
   } catch (error) {
-    return { ok: false, error: "download_failed", phase: "feed", feedUrl, message: String(error && error.message ? error.message : error), current };
+    return { ok: false, error: "download_failed", phase: "feed", feedUrl, fetchUrl, cacheBypass, message: String(error && error.message ? error.message : error), current };
   }
+  const fetched = windowsArtifactFromFeed(feed);
   const validation = validateReleaseArtifact(feed, {
     serverUrl,
     currentBuildId: current.buildId,
     productionTarget: serverUrl,
   });
   if (!validation.ok) {
-    emitWindowsUpdateEvent(sender, opId, validation.error || "update_metadata_rejected", { ok: false, ...validation });
-    return { ok: false, phase: "metadata", current, ...validation };
+    emitWindowsUpdateEvent(sender, opId, validation.error || "update_metadata_rejected", { ok: false, feedUrl, fetchUrl, cacheBypass, comparisonMode: "buildId", currentBuild: current.buildId, fetchedBuildId: fetched.buildId || "", fetchedSha256: fetched.sha256 || "", ...validation });
+    return { ok: false, phase: "metadata", feedUrl, fetchUrl, cacheBypass, comparisonMode: "buildId", current, ...validation };
   }
   const latest = validation.artifact;
   if (!validation.updateAvailable) {
-    emitWindowsUpdateEvent(sender, opId, validation.reason === "older_build_ignored" ? "older_build_ignored" : "same_build_noop", { currentBuild: current.buildId, latestBuild: latest.buildId });
-    return { ok: true, updateAvailable: false, reason: validation.reason, current, latest };
+    emitWindowsUpdateEvent(sender, opId, validation.reason === "older_build_ignored" ? "older_build_ignored" : "same_build_noop", { feedUrl, fetchUrl, cacheBypass, comparisonMode: "buildId", currentBuild: current.buildId, latestBuild: latest.buildId, fetchedSha256: latest.sha256 });
+    return { ok: true, updateAvailable: false, reason: validation.reason, feedUrl, fetchUrl, cacheBypass, comparisonMode: "buildId", current, latest };
   }
   emitWindowsUpdateEvent(sender, opId, "update_available", {
+    feedUrl,
+    fetchUrl,
+    cacheBypass,
+    comparisonMode: "buildId",
     currentBuild: current.buildId,
     latestBuild: latest.buildId,
     version: latest.version || "",
@@ -737,7 +807,7 @@ async function checkAndStageWindowsSelfUpdate(sender, opId, payload = {}) {
     installerPath: staged.path,
     sha256: staged.sha256,
   });
-  return { ok: true, updateAvailable: true, approvalRequired: true, current, latest, staged };
+  return { ok: true, updateAvailable: true, approvalRequired: true, feedUrl, fetchUrl, cacheBypass, comparisonMode: "buildId", current, latest, staged };
 }
 
 async function promptAndLaunchWindowsInstaller(sender, opId, stagedUpdate) {
@@ -959,6 +1029,21 @@ function userHotOperationsRoot() {
   return path.join(appData, "WASM-Agent", "bridge-ops");
 }
 
+function localHotOperationOverrideRoot() {
+  const explicit = String(process.env.WASM_AGENT_HOT_OPS_OVERRIDE_DIR || "").trim();
+  if (explicit) return path.resolve(explicit);
+  return path.join(os.homedir(), ".wasm-agent", "hot-ops");
+}
+
+function localHotOperationOverrideEnabled() {
+  const value = String(
+    process.env.WASM_AGENT_ENABLE_HOT_OP_OVERRIDES
+    || process.env.WASM_AGENT_ENABLE_LOCAL_HOT_OPS
+    || "",
+  ).trim().toLowerCase();
+  return ["1", "true", "yes", "on", "dev"].includes(value);
+}
+
 function bundledHotOperationsRoot() {
   const candidates = [
     resourcePath("bridge-ops"),
@@ -968,16 +1053,324 @@ function bundledHotOperationsRoot() {
   return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || candidates[0];
 }
 
+function userDownloadedRuntimeRoot() {
+  const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+  return path.join(appData, "WASM-Agent", "runtime");
+}
+
+function downloadedRuntimeActiveRoot() {
+  return path.join(userDownloadedRuntimeRoot(), "active");
+}
+
+function downloadedRuntimeLastKnownGoodRoot() {
+  return path.join(userDownloadedRuntimeRoot(), "last-known-good");
+}
+
+function downloadedRuntimeStagingRoot(bundleId = "") {
+  const safeBundleId = String(bundleId || "runtime").replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 100) || "runtime";
+  return path.join(userDownloadedRuntimeRoot(), "staging", safeBundleId);
+}
+
+function downloadedRuntimeMetadataPath(root = downloadedRuntimeActiveRoot()) {
+  return path.join(root, ".runtime-cache.json");
+}
+
+function removeDirSafe(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // A stale cache directory must not crash the native shell.
+  }
+}
+
+function normalizeDownloadedRuntimeTargetPath(value = "") {
+  const text = String(value || "").replace(/\\/g, "/").trim();
+  if (!text || path.isAbsolute(text) || text.includes("\0")) return "";
+  const parts = text.split("/").filter(Boolean);
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) return "";
+  const ext = path.extname(parts[parts.length - 1] || "").toLowerCase();
+  if (![".html", ".css", ".js", ".json", ".webmanifest", ".txt", ".md"].includes(ext)) return "";
+  return parts.join("/");
+}
+
+function releaseUrlAllowedForDownloadedRuntime(value = "", serverUrl = selectedBackendOrigin || DEFAULT_SERVER_URL) {
+  const text = String(value || "").trim();
+  if (!text) return { ok: false, error: "missing_url" };
+  try {
+    const base = new URL(serverUrl || DEFAULT_SERVER_URL);
+    const url = new URL(text, base);
+    if (url.origin !== base.origin) return { ok: false, error: "unallowlisted_origin", url: url.toString() };
+    if (!url.pathname.startsWith("/native/releases/runtime/")) return { ok: false, error: "unallowlisted_url_path", url: url.toString() };
+    return { ok: true, url: url.toString(), pathname: url.pathname };
+  } catch (error) {
+    return { ok: false, error: "invalid_url", message: String(error && error.message ? error.message : error) };
+  }
+}
+
+function downloadedRuntimeBundlesFromFeed(feed = {}) {
+  const runtime = feed?.artifacts?.runtime || feed?.artifacts?.downloadedRuntime || feed?.downloadedRuntime || {};
+  const bundles = [];
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (Array.isArray(value.files) && (value.bundleId || value.runtimeId || value.id || value.kind === "native-runtime-bundle")) {
+      bundles.push(value);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(runtime);
+  return bundles;
+}
+
+function downloadedRuntimeBundleFeedMetadata(bundle = {}) {
+  const files = Array.isArray(bundle.files) ? bundle.files : [];
+  const fileShaList = files.map((file) => `${file.targetPath || file.target_path || ""}:${String(file.sha256 || "").toLowerCase()}`).sort().join("|");
+  const bundleSha = String(bundle.bundleSha || bundle.bundle_sha || bundle.sha256 || crypto.createHash("sha256").update(fileShaList).digest("hex")).trim().toLowerCase();
+  const feedBundleId = String(bundle.bundleId || bundle.runtimeId || bundle.id || (bundleSha ? `runtime-${bundleSha.slice(0, 16)}` : "")).trim();
+  const manifest = files.find((file) => String(file.role || "").toLowerCase() === "manifest" || String(file.targetPath || file.target_path || "").endsWith(".json")) || {};
+  return {
+    feedBundleId,
+    bundleSha,
+    manifestSha: String(manifest.sha256 || "").trim().toLowerCase(),
+    cachePath: downloadedRuntimeActiveRoot(),
+    files,
+  };
+}
+
+function downloadedRuntimeCachedMetadata(root = downloadedRuntimeActiveRoot()) {
+  const meta = readJsonFile(downloadedRuntimeMetadataPath(root), {});
+  return {
+    bundleId: String(meta.bundleId || meta.runtimeId || "").trim(),
+    runtimeId: String(meta.runtimeId || meta.bundleId || "").trim(),
+    bundleSha: String(meta.bundleSha || meta.sha256 || "").trim().toLowerCase(),
+    manifestSha: String(meta.manifestSha || "").trim().toLowerCase(),
+    activatedAt: String(meta.activatedAt || ""),
+    cachePath: root,
+    files: Array.isArray(meta.files) ? meta.files : [],
+  };
+}
+
+function downloadedRuntimeFileMismatch(files = [], root = downloadedRuntimeActiveRoot()) {
+  for (const file of files) {
+    const relPath = normalizeDownloadedRuntimeTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+    if (!relPath) return { ok: false, reason: "runtime_invalid_target_path", path: String(file.targetPath || file.target_path || "") };
+    const target = path.resolve(path.join(root, relPath));
+    const expectedSha = String(file.sha256 || "").trim().toLowerCase();
+    if (!target.startsWith(`${path.resolve(root)}${path.sep}`)) return { ok: false, reason: "runtime_invalid_target_path", path: relPath };
+    if (!fileExists(target)) return { ok: false, reason: "runtime_file_missing", path: relPath };
+    const actualSha = sha256File(target).toLowerCase();
+    if (expectedSha && actualSha !== expectedSha) {
+      return { ok: false, reason: "runtime_sha_mismatch", path: relPath, expectedSha256: expectedSha, sha256: actualSha };
+    }
+  }
+  return { ok: true, reason: "" };
+}
+
+function downloadedRuntimeMetadataDiffers(feedMeta, cachedMeta) {
+  return Boolean(
+    (feedMeta.feedBundleId || "") !== (cachedMeta.bundleId || "")
+    || (feedMeta.bundleSha || "") !== (cachedMeta.bundleSha || "")
+  );
+}
+
+async function fetchDownloadedRuntimeBundleFile(file, serverUrl, stageRoot) {
+  const relPath = normalizeDownloadedRuntimeTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+  const urlCheck = releaseUrlAllowedForDownloadedRuntime(file.url || "", serverUrl);
+  if (!relPath) return { ok: false, error: "invalid_runtime_path", file };
+  if (!urlCheck.ok) return urlCheck;
+  const expectedSha = String(file.sha256 || "").trim().toLowerCase();
+  if (!expectedSha) return { ok: false, error: "missing_sha256", path: relPath };
+  const res = await fetchWithTimeout(urlCheck.url, {}, 15000);
+  if (!res.ok) return { ok: false, error: "download_failed", status: res.status, url: urlCheck.url };
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > 8 * 1024 * 1024) return { ok: false, error: "runtime_file_too_large", path: relPath, sizeBytes: buffer.length };
+  const actualSha = crypto.createHash("sha256").update(buffer).digest("hex");
+  if (actualSha !== expectedSha) return { ok: false, error: "sha256_mismatch", path: relPath, expectedSha256: expectedSha, sha256: actualSha };
+  const root = path.resolve(stageRoot);
+  const target = path.resolve(path.join(root, relPath));
+  if (!target.startsWith(`${root}${path.sep}`)) return { ok: false, error: "invalid_runtime_target", path: relPath };
+  return { ok: true, role: String(file.role || ""), path: relPath, target, sha256: actualSha, sizeBytes: buffer.length, buffer };
+}
+
+function writeDownloadedRuntimeMetadata(root, bundle, feedMeta, fileResults = []) {
+  const metadata = {
+    schema: "hermes.wasm_agent.downloaded_runtime_cache.v1",
+    runtimeId: feedMeta.feedBundleId,
+    bundleId: feedMeta.feedBundleId,
+    bundleSha: feedMeta.bundleSha,
+    sha256: feedMeta.bundleSha,
+    manifestSha: feedMeta.manifestSha,
+    updateMode: String(bundle.updateMode || "downloaded-runtime-atomic"),
+    activatedAt: new Date().toISOString(),
+    source: "release-feed",
+    files: fileResults.map((file) => ({
+      role: file.role || "",
+      path: file.path || "",
+      sha256: file.sha256 || "",
+      sizeBytes: file.sizeBytes || 0,
+    })),
+  };
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(downloadedRuntimeMetadataPath(root), `${JSON.stringify(metadata, null, 2)}\n`);
+  return metadata;
+}
+
+function activateDownloadedRuntimeBundle(bundle, stageRoot, feedMeta, fileResults = []) {
+  const activeRoot = downloadedRuntimeActiveRoot();
+  const lkgRoot = downloadedRuntimeLastKnownGoodRoot();
+  const failedRoot = path.join(userDownloadedRuntimeRoot(), "failed-active");
+  fs.mkdirSync(userDownloadedRuntimeRoot(), { recursive: true });
+  removeDirSafe(lkgRoot);
+  removeDirSafe(failedRoot);
+  try {
+    if (fs.existsSync(activeRoot)) fs.renameSync(activeRoot, lkgRoot);
+    fs.renameSync(stageRoot, activeRoot);
+    const metadata = writeDownloadedRuntimeMetadata(activeRoot, bundle, feedMeta, fileResults);
+    return { ok: true, activeRoot, lastKnownGoodRoot: fs.existsSync(lkgRoot) ? lkgRoot : "", metadata };
+  } catch (error) {
+    try {
+      if (fs.existsSync(activeRoot)) fs.renameSync(activeRoot, failedRoot);
+      if (fs.existsSync(lkgRoot)) fs.renameSync(lkgRoot, activeRoot);
+    } catch {
+      // Preserve the original activation error below.
+    }
+    return { ok: false, error: "runtime_activation_failed", message: String(error && error.message ? error.message : error), activeRoot, lastKnownGoodRoot: fs.existsSync(activeRoot) ? activeRoot : "" };
+  }
+}
+
+async function syncDownloadedRuntimeFromFeed(options = {}) {
+  const now = new Date().toISOString();
+  const serverUrl = selectedBackendOrigin || DEFAULT_SERVER_URL;
+  const feedUrl = new URL("/native/releases/latest.json", serverUrl).toString();
+  lastDownloadedRuntimeSync = { ...lastDownloadedRuntimeSync, attemptedAt: now, feedUrl, status: "syncing" };
+  let feed;
+  try {
+    feed = await fetchJsonWithTimeout(`${feedUrl}${feedUrl.includes("?") ? "&" : "?"}_=${Date.now()}`, Number(options.feedTimeoutMs || 10000));
+  } catch (error) {
+    const cached = downloadedRuntimeCachedMetadata();
+    lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: now, feedUrl, syncedAt: "", error: String(error && error.message ? error.message : error), status: "runtime_feed_fetch_failed", feedBundleId: "", cachedBundleId: cached.bundleId, activeRuntimeId: cached.bundleId, activeRuntimeSha: cached.bundleSha, activeRuntimePath: cached.cachePath, staleReason: "runtime_feed_fetch_failed", fallbackReason: cached.bundleId ? "using_cached_active_runtime" : "", files: [] };
+    return lastDownloadedRuntimeSync;
+  }
+  const bundles = downloadedRuntimeBundlesFromFeed(feed);
+  const bundle = bundles.find((item) => String(item.kind || "").includes("runtime")) || bundles[0];
+  if (!bundle) {
+    const cached = downloadedRuntimeCachedMetadata();
+    lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: now, feedUrl, syncedAt: "", error: "runtime_bundle_missing", status: "runtime_bundle_missing", feedBundleId: "", cachedBundleId: cached.bundleId, activeRuntimeId: cached.bundleId, activeRuntimeSha: cached.bundleSha, activeRuntimePath: cached.cachePath, staleReason: "runtime_bundle_missing", fallbackReason: cached.bundleId ? "using_cached_active_runtime" : "", files: [] };
+    return lastDownloadedRuntimeSync;
+  }
+  const feedMeta = downloadedRuntimeBundleFeedMetadata(bundle);
+  const cached = downloadedRuntimeCachedMetadata();
+  const mismatch = downloadedRuntimeFileMismatch(feedMeta.files, downloadedRuntimeActiveRoot());
+  const changed = options.force === true || options.forceSync === true || downloadedRuntimeMetadataDiffers(feedMeta, cached) || !mismatch.ok;
+  if (!changed) {
+    lastDownloadedRuntimeSync = { ok: true, changed: false, attemptedAt: now, feedUrl, syncedAt: new Date().toISOString(), error: "", status: "current", feedBundleId: feedMeta.feedBundleId, cachedBundleId: cached.bundleId, activeRuntimeId: cached.bundleId, activeRuntimeSha: cached.bundleSha, activeRuntimePath: cached.cachePath, staleReason: "", fallbackReason: "", files: feedMeta.files.map((file) => ({ path: normalizeDownloadedRuntimeTargetPath(file.targetPath || file.target_path || ""), sha256: String(file.sha256 || "").trim().toLowerCase(), skipped: true })) };
+    return lastDownloadedRuntimeSync;
+  }
+  const stageRoot = downloadedRuntimeStagingRoot(feedMeta.feedBundleId);
+  removeDirSafe(stageRoot);
+  const staged = [];
+  const fileResults = [];
+  for (const file of feedMeta.files) {
+    const fileResult = await fetchDownloadedRuntimeBundleFile(file, serverUrl, stageRoot);
+    fileResults.push({ ...fileResult, buffer: undefined });
+    if (!fileResult.ok) {
+      removeDirSafe(stageRoot);
+      lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: now, feedUrl, syncedAt: "", error: fileResult.error || "runtime_download_failed", status: fileResult.error || "runtime_download_failed", feedBundleId: feedMeta.feedBundleId, cachedBundleId: cached.bundleId, activeRuntimeId: cached.bundleId, activeRuntimeSha: cached.bundleSha, activeRuntimePath: cached.cachePath, staleReason: fileResult.error || "runtime_download_failed", fallbackReason: cached.bundleId ? "last-known-good-preserved" : "", files: fileResults };
+      return lastDownloadedRuntimeSync;
+    }
+    staged.push(fileResult);
+  }
+  for (const fileResult of staged) {
+    fs.mkdirSync(path.dirname(fileResult.target), { recursive: true });
+    fs.writeFileSync(fileResult.target, fileResult.buffer);
+  }
+  const activation = activateDownloadedRuntimeBundle(bundle, stageRoot, feedMeta, staged);
+  if (!activation.ok) {
+    removeDirSafe(stageRoot);
+    const active = downloadedRuntimeCachedMetadata();
+    lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: now, feedUrl, syncedAt: "", error: activation.error, status: activation.error, feedBundleId: feedMeta.feedBundleId, cachedBundleId: cached.bundleId, activeRuntimeId: active.bundleId, activeRuntimeSha: active.bundleSha, activeRuntimePath: active.cachePath, staleReason: activation.error, fallbackReason: active.bundleId ? "last-known-good-restored" : "", files: fileResults };
+    return lastDownloadedRuntimeSync;
+  }
+  lastDownloadedRuntimeSync = { ok: true, changed: true, attemptedAt: now, feedUrl, syncedAt: new Date().toISOString(), error: "", status: "activated", feedBundleId: feedMeta.feedBundleId, cachedBundleId: activation.metadata.bundleId, activeRuntimeId: activation.metadata.bundleId, activeRuntimeSha: activation.metadata.bundleSha, activeRuntimePath: activation.activeRoot, staleReason: "", fallbackReason: activation.lastKnownGoodRoot ? "previous-active-preserved-as-last-known-good" : "", files: fileResults };
+  return lastDownloadedRuntimeSync;
+}
+
+async function ensureDownloadedRuntimeFromFeed(options = {}) {
+  const active = downloadedRuntimeCachedMetadata();
+  const force = options.force === true || options.forceSync === true;
+  if (active.bundleId && !force) return lastDownloadedRuntimeSync;
+  if (!downloadedRuntimeSyncPromise) {
+    downloadedRuntimeSyncPromise = syncDownloadedRuntimeFromFeed(options).finally(() => {
+      downloadedRuntimeSyncPromise = null;
+    });
+  }
+  return downloadedRuntimeSyncPromise;
+}
+
+function rollbackDownloadedRuntimeToLastKnownGood() {
+  const activeRoot = downloadedRuntimeActiveRoot();
+  const lkgRoot = downloadedRuntimeLastKnownGoodRoot();
+  if (!fs.existsSync(lkgRoot)) {
+    return { ok: false, operation: "rollback_downloaded_runtime", error: "last_known_good_missing", downloadedRuntime: downloadedRuntimeSummary() };
+  }
+  const failedRoot = path.join(userDownloadedRuntimeRoot(), `rolled-back-${timestampForFilename()}`);
+  try {
+    if (fs.existsSync(activeRoot)) fs.renameSync(activeRoot, failedRoot);
+    fs.renameSync(lkgRoot, activeRoot);
+    const active = downloadedRuntimeCachedMetadata();
+    lastDownloadedRuntimeSync = { ...lastDownloadedRuntimeSync, ok: true, changed: true, status: "rolled_back_to_last_known_good", activeRuntimeId: active.bundleId, activeRuntimeSha: active.bundleSha, activeRuntimePath: active.cachePath, staleReason: "", fallbackReason: `previous_active_moved:${failedRoot}` };
+    return { ok: true, operation: "rollback_downloaded_runtime", rolledBack: true, failedRoot, downloadedRuntime: downloadedRuntimeSummary() };
+  } catch (error) {
+    return { ok: false, operation: "rollback_downloaded_runtime", error: "runtime_rollback_failed", message: String(error && error.message ? error.message : error), downloadedRuntime: downloadedRuntimeSummary() };
+  }
+}
+
+function downloadedRuntimeSummary() {
+  const active = downloadedRuntimeCachedMetadata();
+  const lkg = downloadedRuntimeCachedMetadata(downloadedRuntimeLastKnownGoodRoot());
+  const staleReason = lastDownloadedRuntimeSync.staleReason
+    || (lastDownloadedRuntimeSync.feedBundleId && active.bundleId && lastDownloadedRuntimeSync.feedBundleId !== active.bundleId ? "runtime_bundle_stale" : "");
+  return {
+    supported: true,
+    protocol: DOWNLOADED_RUNTIME_PROTOCOL_VERSION,
+    runtimeLoaderProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION,
+    root: userDownloadedRuntimeRoot(),
+    activeRoot: downloadedRuntimeActiveRoot(),
+    lastKnownGoodRoot: downloadedRuntimeLastKnownGoodRoot(),
+    activeRuntimeId: active.bundleId,
+    activeRuntimeSha: active.bundleSha,
+    activeDownloadedRuntimeId: active.bundleId,
+    activeDownloadedRuntimeSha: active.bundleSha,
+    activeRuntimePath: active.cachePath,
+    activeManifestSha: active.manifestSha,
+    activeRuntimeActivatedAt: active.activatedAt,
+    lastKnownGoodRuntimeId: lkg.bundleId,
+    lastKnownGoodRuntimeSha: lkg.bundleSha,
+    syncStatus: lastDownloadedRuntimeSync.status || (active.bundleId ? "cached" : "not_synced"),
+    lastSync: lastDownloadedRuntimeSync,
+    stale: Boolean(staleReason),
+    staleReason,
+    mismatchReason: staleReason,
+  };
+}
+
 function hotOperationRoots() {
   const roots = [];
   const devOverride = String(process.env.WASM_AGENT_BRIDGE_OPS_DIR || "").trim();
   const devReload = String(process.env.WASM_AGENT_HOT_OPS_DEV_RELOAD || "").trim() === "1";
-  if (devOverride) roots.push({ kind: "dev", root: path.resolve(devOverride), reload: true, active: true });
-  roots.push({ kind: "user", root: path.resolve(userHotOperationsRoot()), reload: true });
+  if (localHotOperationOverrideEnabled()) {
+    const overrideRoot = devOverride ? path.resolve(devOverride) : path.resolve(localHotOperationOverrideRoot());
+    roots.push({ kind: "local_override", root: overrideRoot, reload: true, active: true });
+  }
+  roots.push({ kind: "downloaded", root: path.resolve(userHotOperationsRoot()), reload: true });
   roots.push({ kind: "bundled", root: path.resolve(bundledHotOperationsRoot()), reload: devReload });
   return roots.map((item, index) => ({
     ...item,
-    active: item.active === true || (!devOverride && index === 0),
+    active: item.active === true || (!localHotOperationOverrideEnabled() && index === 0),
     exists: fs.existsSync(item.root),
   }));
 }
@@ -994,13 +1387,229 @@ function hotOperationsRequireSha() {
   return String(process.env.WASM_AGENT_HOT_OPS_REQUIRE_SHA || "").trim() === "1";
 }
 
+function downloadedHotOperationManifestTrusted(manifest, entrySha256) {
+  const trusted = manifest && manifest.trusted === true;
+  const bundleId = String(manifest?.bundleId || manifest?.bundle_id || "").trim();
+  const trustedSha256 = String(manifest?.trustedSha256 || manifest?.trusted_sha256 || manifest?.sha256 || "").trim().toLowerCase();
+  return trusted || (Boolean(bundleId) && Boolean(trustedSha256) && trustedSha256 === String(entrySha256 || "").toLowerCase());
+}
+
+function releaseUrlAllowedForHotOperationBundle(value = "", serverUrl = selectedBackendOrigin || DEFAULT_SERVER_URL) {
+  const text = String(value || "").trim();
+  if (!text) return { ok: false, error: "missing_url" };
+  try {
+    const base = new URL(serverUrl || DEFAULT_SERVER_URL);
+    const url = new URL(text, base);
+    if (url.origin !== base.origin) return { ok: false, error: "unallowlisted_origin", url: url.toString() };
+    if (!url.pathname.startsWith("/native/releases/hot-ops/")) return { ok: false, error: "unallowlisted_url_path", url: url.toString() };
+    return { ok: true, url: url.toString(), pathname: url.pathname };
+  } catch (error) {
+    return { ok: false, error: "invalid_url", message: String(error && error.message ? error.message : error) };
+  }
+}
+
+function normalizeHotOperationBundleTargetPath(value = "") {
+  const text = String(value || "").replace(/\\/g, "/").trim();
+  if (!text || path.isAbsolute(text) || text.includes("\0")) return "";
+  const parts = text.split("/").filter(Boolean);
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) return "";
+  const filename = parts[parts.length - 1] || "";
+  if (path.extname(filename).toLowerCase() === ".js" || filename.endsWith(HOT_OPERATION_MANIFEST_SUFFIX)) {
+    return parts.join("/");
+  }
+  return "";
+}
+
+function hotOperationBundlesFromFeed(feed = {}) {
+  const hotOps = feed?.artifacts?.hotOps || feed?.artifacts?.hot_ops || feed?.hotOps || {};
+  const bundles = [];
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (Array.isArray(value.files) && (value.bundleId || value.id || value.operationName)) {
+      bundles.push(value);
+      return;
+    }
+    for (const child of Object.values(value)) visit(child);
+  };
+  visit(hotOps);
+  return bundles;
+}
+
+async function fetchHotOperationBundleFile(file, serverUrl) {
+  const relPath = normalizeHotOperationBundleTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+  const urlCheck = releaseUrlAllowedForHotOperationBundle(file.url || "", serverUrl);
+  if (!relPath) return { ok: false, error: "invalid_hot_op_path", file };
+  if (!urlCheck.ok) return urlCheck;
+  const expectedSha = String(file.sha256 || "").trim().toLowerCase();
+  if (!expectedSha) return { ok: false, error: "missing_sha256", path: relPath };
+  const res = await fetchWithTimeout(urlCheck.url, {}, 15000);
+  if (!res.ok) return { ok: false, error: "download_failed", status: res.status, url: urlCheck.url };
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const actualSha = crypto.createHash("sha256").update(buffer).digest("hex");
+  if (actualSha !== expectedSha) return { ok: false, error: "sha256_mismatch", path: relPath, expectedSha256: expectedSha, sha256: actualSha };
+  const root = path.resolve(userHotOperationsRoot());
+  const target = path.resolve(path.join(root, relPath));
+  if (!target.startsWith(`${root}${path.sep}`)) return { ok: false, error: "invalid_hot_op_target", path: relPath };
+  return { ok: true, role: String(file.role || ""), path: relPath, target, sha256: actualSha, sizeBytes: buffer.length, buffer };
+}
+
+function hotOperationBundleCachedMetadata(files = []) {
+  const root = path.resolve(userHotOperationsRoot());
+  const result = { bundleId: "", moduleSha: "", manifestSha: "", cachePath: "" };
+  for (const file of files) {
+    const relPath = normalizeHotOperationBundleTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+    if (!relPath) continue;
+    const target = path.resolve(path.join(root, relPath));
+    if (!target.startsWith(`${root}${path.sep}`) || !fileExists(target)) continue;
+    const sha = sha256File(target).toLowerCase();
+    const role = String(file.role || "").trim().toLowerCase();
+    if (role === "module" || target.endsWith(".js")) {
+      result.moduleSha = sha;
+      result.cachePath = target;
+    }
+    if (role === "manifest" || target.endsWith(HOT_OPERATION_MANIFEST_SUFFIX)) {
+      result.manifestSha = sha;
+      const manifest = readJsonFile(target, {});
+      result.bundleId = String(manifest.bundleId || manifest.bundle_id || "").trim();
+    }
+  }
+  return result;
+}
+
+function hotOperationBundleFeedMetadata(bundle = {}) {
+  const result = {
+    feedBundleId: String(bundle.bundleId || bundle.id || "").trim(),
+    moduleSha: "",
+    manifestSha: "",
+    cachePath: "",
+  };
+  const root = path.resolve(userHotOperationsRoot());
+  const files = Array.isArray(bundle.files) ? bundle.files : [];
+  for (const file of files) {
+    const relPath = normalizeHotOperationBundleTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+    if (!relPath) continue;
+    const sha = String(file.sha256 || "").trim().toLowerCase();
+    const role = String(file.role || "").trim().toLowerCase();
+    if (role === "module" || relPath.endsWith(".js")) {
+      result.moduleSha = sha;
+      result.cachePath = path.resolve(path.join(root, relPath));
+    }
+    if (role === "manifest" || relPath.endsWith(HOT_OPERATION_MANIFEST_SUFFIX)) {
+      result.manifestSha = sha;
+    }
+  }
+  return result;
+}
+
+function hotOperationBundleMetadataDiffers(feedMeta, cachedMeta) {
+  return Boolean(
+    (feedMeta.feedBundleId || "") !== (cachedMeta.bundleId || "")
+    || (feedMeta.moduleSha || "") !== (cachedMeta.moduleSha || "")
+    || (feedMeta.manifestSha || "") !== (cachedMeta.manifestSha || "")
+  );
+}
+
+async function syncDownloadedHotOperationsFromFeed(options = {}) {
+  const now = new Date().toISOString();
+  const serverUrl = selectedBackendOrigin || DEFAULT_SERVER_URL;
+  const feedUrl = new URL("/native/releases/latest.json", serverUrl).toString();
+  lastHotOperationBundleSync = { ...lastHotOperationBundleSync, attemptedAt: now, feedUrl };
+  let feed;
+  try {
+    feed = await fetchJsonWithTimeout(`${feedUrl}${feedUrl.includes("?") ? "&" : "?"}_=${Date.now()}`, Number(options.feedTimeoutMs || 10000));
+  } catch (error) {
+    lastHotOperationBundleSync = { ok: false, changed: false, attemptedAt: now, feedUrl, syncedAt: "", error: String(error && error.message ? error.message : error), feedBundleId: "", cachedBundleId: "", moduleSha: "", manifestSha: "", cachePath: "", bundles: [] };
+    return lastHotOperationBundleSync;
+  }
+  const bundles = hotOperationBundlesFromFeed(feed);
+  const synced = [];
+  let anyChanged = false;
+  let primarySync = { feedBundleId: "", cachedBundleId: "", moduleSha: "", manifestSha: "", cachePath: "" };
+  for (const bundle of bundles) {
+    const files = Array.isArray(bundle.files) ? bundle.files : [];
+    const feedMeta = hotOperationBundleFeedMetadata(bundle);
+    const beforeMeta = hotOperationBundleCachedMetadata(files);
+    const changed = hotOperationBundleMetadataDiffers(feedMeta, beforeMeta);
+    const result = {
+      bundleId: feedMeta.feedBundleId,
+      cachedBundleId: beforeMeta.bundleId,
+      operationName: String(bundle.operationName || ""),
+      changed,
+      moduleSha: feedMeta.moduleSha,
+      manifestSha: feedMeta.manifestSha,
+      cachePath: feedMeta.cachePath,
+      files: [],
+    };
+    if (changed) {
+      const staged = [];
+      for (const file of files) {
+        const fileResult = await fetchHotOperationBundleFile(file, serverUrl);
+        result.files.push({ ...fileResult, buffer: undefined });
+        if (!fileResult.ok) {
+          lastHotOperationBundleSync = { ok: false, changed: anyChanged, attemptedAt: now, feedUrl, syncedAt: "", error: fileResult.error || "hot_op_download_failed", feedBundleId: feedMeta.feedBundleId, cachedBundleId: beforeMeta.bundleId, moduleSha: feedMeta.moduleSha, manifestSha: feedMeta.manifestSha, cachePath: feedMeta.cachePath, bundles: [result] };
+          return lastHotOperationBundleSync;
+        }
+        staged.push(fileResult);
+      }
+      for (const fileResult of staged) {
+        fs.mkdirSync(path.dirname(fileResult.target), { recursive: true });
+        fs.writeFileSync(fileResult.target, fileResult.buffer);
+      }
+      anyChanged = true;
+    } else {
+      for (const file of files) {
+        const relPath = normalizeHotOperationBundleTargetPath(file.targetPath || file.target_path || file.installPath || file.install_path || file.target || "");
+        if (relPath) result.files.push({ ok: true, path: relPath, target: path.resolve(path.join(userHotOperationsRoot(), relPath)), sha256: String(file.sha256 || "").trim().toLowerCase(), skipped: true });
+      }
+    }
+    const afterMeta = hotOperationBundleCachedMetadata(files);
+    result.cachedBundleId = afterMeta.bundleId || beforeMeta.bundleId;
+    result.cachedModuleSha = afterMeta.moduleSha || beforeMeta.moduleSha;
+    result.cachedManifestSha = afterMeta.manifestSha || beforeMeta.manifestSha;
+    if (!primarySync.feedBundleId || result.operationName === "run_android_hermes_wake_proof") {
+      primarySync = {
+        feedBundleId: feedMeta.feedBundleId,
+        cachedBundleId: result.cachedBundleId,
+        moduleSha: feedMeta.moduleSha,
+        manifestSha: feedMeta.manifestSha,
+        cachePath: feedMeta.cachePath,
+      };
+    }
+    synced.push(result);
+  }
+  lastHotOperationBundleSync = { ok: true, changed: anyChanged, attemptedAt: now, feedUrl, syncedAt: new Date().toISOString(), error: "", ...primarySync, bundles: synced };
+  return lastHotOperationBundleSync;
+}
+
+async function ensureDownloadedHotOperationsFromFeed(options = {}) {
+  if (localHotOperationOverrideEnabled()) return lastHotOperationBundleSync;
+  const downloadedRoot = userHotOperationsRoot();
+  const hasDownloadedOps = fs.existsSync(downloadedRoot) && walkHotOperationManifestFiles(downloadedRoot).length > 0;
+  const force = options.force === true || options.forceSync === true;
+  if (hasDownloadedOps && !force) return lastHotOperationBundleSync;
+  if (!hotOperationBundleSyncPromise) {
+    hotOperationBundleSyncPromise = syncDownloadedHotOperationsFromFeed(options).finally(() => {
+      hotOperationBundleSyncPromise = null;
+    });
+  }
+  return hotOperationBundleSyncPromise;
+}
+
 function verboseBridgeLogsEnabled() {
   return String(process.env.WASM_AGENT_ENABLE_VERBOSE_BRIDGE_LOGS || "").trim() === "1";
 }
 
 function activeHotOperationsRoot() {
   const roots = hotOperationRoots();
-  return roots.find((item) => item.active) || roots[0] || { kind: "bundled", root: bundledHotOperationsRoot(), exists: false };
+  return roots.find((item) => item.active && item.exists)
+    || roots.find((item) => item.kind === "downloaded" && item.exists)
+    || roots.find((item) => item.kind === "bundled")
+    || roots[0]
+    || { kind: "bundled", root: bundledHotOperationsRoot(), exists: false };
 }
 
 function hotOperationsSummary() {
@@ -1013,6 +1622,12 @@ function hotOperationsSummary() {
     loadedFrom: op.loadedFrom,
     sha256: op.sha256,
     capabilities: op.capabilities,
+    requiredNativeCapabilities: op.requiredNativeCapabilities,
+    operationId: op.operationId,
+    inputsSchema: op.inputsSchema,
+    outputsSchema: op.outputsSchema,
+    safetyLimits: op.safetyLimits,
+    rollback: op.rollback,
     timeoutMs: op.timeoutMs,
   }));
   return {
@@ -1023,9 +1638,13 @@ function hotOperationsSummary() {
     capabilities: BRIDGE_PROTOCOL_CAPABILITIES.slice(),
     hotOpsMode: active.kind || "bundled",
     hotOpsRoot: active.root || "",
-    devReload: active.kind === "dev" || hotOperationsDevReloadEnabled(),
+    devReload: active.kind === "local_override" || hotOperationsDevReloadEnabled(),
+    overrideEnabled: localHotOperationOverrideEnabled(),
+    localOverrideRoot: localHotOperationOverrideRoot(),
     hotOpsDisabled: hotOperationsDisabled(),
     hotOpsRequireSha: hotOperationsRequireSha(),
+    downloadedHotOpsSync: lastHotOperationBundleSync,
+    downloadedRuntime: downloadedRuntimeSummary(),
     hotOpsRoots: hotOperationRoots().map((item) => ({
       kind: item.kind,
       path: item.root,
@@ -1033,6 +1652,60 @@ function hotOperationsSummary() {
       exists: item.exists,
     })),
     availableHotOps,
+  };
+}
+
+function activeHotOperationBundleStatus() {
+  const operations = scanHotOperationManifests();
+  const preferred = operations.find((item) => item.loadedFrom === "downloaded" && item.name === "run_android_hermes_wake_proof")
+    || operations.find((item) => item.loadedFrom === "downloaded")
+    || operations.find((item) => item.name === "run_android_hermes_wake_proof")
+    || operations[0]
+    || {};
+  return {
+    activeHotOpBundleId: String(preferred.bundleId || ""),
+    activeHotOpSha: String(preferred.sha256 || ""),
+    activeHotOpSource: String(preferred.hotOpSource || preferred.loadedFrom || ""),
+    activeHotOpOperation: String(preferred.name || ""),
+    activeHotOpManifestSha: String(preferred.manifestSha256 || ""),
+  };
+}
+
+function nativeKernelStatus() {
+  const build = currentWindowsBuildInfo();
+  const downloadedRuntime = downloadedRuntimeSummary();
+  const hotOp = activeHotOperationBundleStatus();
+  const unsupportedCapabilities = ALL_NATIVE_KERNEL_CAPABILITIES.filter((capability) => !WINDOWS_NATIVE_KERNEL_CAPABILITIES.includes(capability));
+  const staleReason = downloadedRuntime.staleReason || lastHotOperationBundleSync.error || "";
+  return {
+    schema: "hermes.wasm_agent.native_kernel_status.v1",
+    "native.kernel.version": NATIVE_KERNEL_CONTRACT_VERSION,
+    nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION,
+    kernelContractVersion: NATIVE_KERNEL_CONTRACT_VERSION,
+    platform: "windows",
+    runtime: "electron",
+    installedNativeBuildId: build.buildId,
+    nativeBuildId: build.buildId,
+    installedNativeVersion: build.version,
+    appVersion: app.getVersion(),
+    productionTarget: build.productionTarget,
+    supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES.slice(),
+    missingCapabilities: [],
+    unsupportedCapabilities,
+    bridgeProtocolCapabilities: BRIDGE_PROTOCOL_CAPABILITIES.slice(),
+    downloadedRuntime,
+    activeDownloadedRuntimeId: downloadedRuntime.activeRuntimeId,
+    activeDownloadedRuntimeSha: downloadedRuntime.activeRuntimeSha,
+    activeHotOpBundleId: hotOp.activeHotOpBundleId,
+    activeHotOpSha: hotOp.activeHotOpSha,
+    activeHotOpSource: hotOp.activeHotOpSource,
+    activeHotOpOperation: hotOp.activeHotOpOperation,
+    syncStatus: {
+      runtime: downloadedRuntime.syncStatus,
+      hotOps: lastHotOperationBundleSync.ok ? "current_or_synced" : (lastHotOperationBundleSync.error || "not_attempted"),
+    },
+    stale: Boolean(staleReason),
+    staleReason,
   };
 }
 
@@ -1073,19 +1746,31 @@ function normalizeHotOperationManifest(rootInfo, manifestPath) {
   if (!fs.existsSync(entryPath) || !fs.statSync(entryPath).isFile()) return null;
   const sha256 = sha256File(entryPath).toLowerCase();
   const manifestSha256 = String(manifest.sha256 || manifest.expectedSha256 || manifest.expected_sha256 || "").trim().toLowerCase();
+  if (rootInfo.kind === "downloaded" && !downloadedHotOperationManifestTrusted(manifest, sha256)) return null;
   return {
     name,
     version: String(manifest.version || ""),
     entry: entryRelative,
     manifest: manifestRelative,
     loadedFrom: rootInfo.kind,
+    hotOpSource: rootInfo.kind,
     root,
     path: entryPath,
+    hotOpPath: entryPath,
+    bundleId: String(manifest.bundleId || manifest.bundle_id || ""),
     modulePath: entryRelative,
     manifestPath,
     sha256,
     manifestSha256,
     capabilities: Array.isArray(manifest.capabilities) ? manifest.capabilities.map(String) : [],
+    requiredNativeCapabilities: Array.isArray(manifest.requiredNativeCapabilities || manifest.required_native_capabilities)
+      ? (manifest.requiredNativeCapabilities || manifest.required_native_capabilities).map(String)
+      : [],
+    operationId: String(manifest.operationId || manifest.operation_id || name),
+    inputsSchema: manifest.inputsSchema || manifest.inputs_schema || {},
+    outputsSchema: manifest.outputsSchema || manifest.outputs_schema || {},
+    safetyLimits: manifest.safetyLimits || manifest.safety_limits || {},
+    rollback: manifest.rollback || {},
     timeoutMs: Number(manifest.timeoutMs || manifest.timeout_ms || 0) || HOT_OPERATION_DEFAULT_TIMEOUT_MS,
     reload: rootInfo.reload || hotOperationsDevReloadEnabled(),
   };
@@ -1106,6 +1791,18 @@ function scanHotOperationManifests() {
   return operations;
 }
 
+function bundledHotOperationSha(operationName = "") {
+  const name = String(operationName || "").trim();
+  if (!name) return "";
+  const bundledRoot = hotOperationRoots().find((item) => item.kind === "bundled");
+  if (!bundledRoot || !bundledRoot.exists) return "";
+  for (const manifestPath of walkHotOperationManifestFiles(bundledRoot.root)) {
+    const op = normalizeHotOperationManifest(bundledRoot, manifestPath);
+    if (op && op.name === name) return op.sha256 || "";
+  }
+  return "";
+}
+
 function listHotOperations() {
   const summary = hotOperationsSummary();
   return {
@@ -1117,6 +1814,7 @@ function listHotOperations() {
 
 function getBridgeStatus() {
   const hotOps = hotOperationsSummary();
+  const kernel = nativeKernelStatus();
   return {
     ok: true,
     stable: true,
@@ -1131,6 +1829,15 @@ function getBridgeStatus() {
     appVersion: app.getVersion(),
     arch: os.arch(),
     platform: process.platform,
+    kernel,
+    nativeKernel: kernel,
+    downloadedRuntime: kernel.downloadedRuntime,
+    activeDownloadedRuntimeId: kernel.activeDownloadedRuntimeId,
+    activeDownloadedRuntimeSha: kernel.activeDownloadedRuntimeSha,
+    activeHotOpBundleId: kernel.activeHotOpBundleId,
+    activeHotOpSha: kernel.activeHotOpSha,
+    syncStatus: kernel.syncStatus,
+    staleReason: kernel.staleReason,
     hotOperations: hotOps,
     logsTail: recentBridgeLogsTail(),
     failureClassification: null,
@@ -1301,33 +2008,56 @@ function classifyAdbDevices(stdout = "") {
 function androidConnectionInstructions(status = "") {
   if (status === "adb_missing") return adbMissingInstructions();
   if (status === "unauthorized") {
-    return "Unlock phone, accept the USB debugging prompt, then retry. If the prompt does not appear, revoke USB debugging authorizations in Developer Options and reconnect.";
+    return "Unlock the phone and accept the USB debugging authorization prompt.";
+  }
+  if (status === "offline") {
+    return "Reconnect USB, toggle USB debugging, then retry.";
   }
   if (status === "no_device") {
-    return "Change cable or USB port, switch phone USB mode to File Transfer / Android Auto, and confirm Developer Options plus USB debugging are enabled.";
+    return "Phone not visible to Windows ADB. Check cable, USB mode, driver, and debugging.";
   }
   if (status === "multiple_devices") return "Disconnect extra Android devices or emulators, then retry with exactly one authorized phone.";
   if (status === "one_authorized_device") return "One authorized Android device is visible to Windows ADB.";
+  if (status === "adb_timeout") return "ADB device discovery timed out while starting or contacting the daemon. Retry after platform-tools finishes starting, or restart WASM Agent.";
+  if (status === "adb_server_start_failed") return "ADB server failed to start. Close other ADB processes, reconnect USB, and retry.";
   return "ADB returned an unexpected error. Check platform-tools and reconnect the phone.";
 }
 
-function parseAndroidConnectionState(stdout = "", commandOk = true) {
+function isAdbServerStartupOutput(resultOrText = {}) {
+  const text = typeof resultOrText === "string"
+    ? resultOrText
+    : `${resultOrText.stdout || ""}\n${resultOrText.stderr || ""}\n${resultOrText.error || ""}`;
+  return /\bdaemon not running\b|\bstarting now\b|\bstarted successfully\b|tcp:5037/i.test(text);
+}
+
+function isBlankAdbDevicesOutput(stdout = "") {
+  return parseAdbDevices(stdout).length === 0;
+}
+
+function parseAndroidConnectionState(stdout = "", commandOk = true, commandResult = {}) {
   if (!commandOk) {
+    const status = isAdbMissingResult(commandResult)
+      ? "adb_missing"
+      : commandResult.timedOut
+        ? "adb_timeout"
+        : "adb_timeout";
     return {
-      status: "adb_error",
+      status,
       ok: false,
       devices: [],
       authorizedDevices: [],
-      instructions: androidConnectionInstructions("adb_error"),
+      instructions: androidConnectionInstructions(status),
     };
   }
   const devices = parseAdbDevices(stdout).map((device) => ({ ...device, ...adbDeviceFields(device.detail) }));
   const authorizedDevices = devices.filter((device) => device.state === "device");
   const unauthorizedDevices = devices.filter((device) => device.state === "unauthorized");
+  const offlineDevices = devices.filter((device) => device.state === "offline");
   let status = "no_device";
   if (authorizedDevices.length === 1 && devices.length === 1) status = "one_authorized_device";
   else if (authorizedDevices.length > 1 || (authorizedDevices.length === 1 && devices.length > 1)) status = "multiple_devices";
   else if (unauthorizedDevices.length > 0) status = "unauthorized";
+  else if (offlineDevices.length > 0 && devices.length === 1) status = "offline";
   else if (devices.length > 1) status = "multiple_devices";
   const device = status === "one_authorized_device" ? authorizedDevices[0] : null;
   return {
@@ -1335,6 +2065,7 @@ function parseAndroidConnectionState(stdout = "", commandOk = true) {
     ok: status === "one_authorized_device",
     devices,
     authorizedDevices,
+    hasAuthorizedDevice: status === "one_authorized_device",
     serial: device?.serial || "",
     model: device?.model || "",
     product: device?.product || "",
@@ -1351,6 +2082,14 @@ function isAdbMissingResult(result = {}) {
   return !result.ok && /ENOENT|not recognized|cannot find|not found|where\.exe.*adb/i.test(`${result.stderr || ""}\n${result.error || ""}`);
 }
 
+function shouldRecoverAdbDevicesResult(result = {}) {
+  if (isAdbMissingResult(result)) return false;
+  if (result.timedOut) return true;
+  if (isAdbServerStartupOutput(result)) return true;
+  if (result.ok && isBlankAdbDevicesOutput(result.stdout || "")) return true;
+  return false;
+}
+
 async function runWindowsDiagnosticExec(sender, opId, operation, command, args = [], options = {}) {
   const startedAt = new Date().toISOString();
   const displayCommand = commandLineDisplay(path.basename(command), args);
@@ -1360,6 +2099,58 @@ async function runWindowsDiagnosticExec(sender, opId, operation, command, args =
   writeNativeControlAudit({ action: "local_diagnostics_command_finished", operation, opId, result });
   emitWindowsDiagnosticEvent(sender, { type: "command_finished", operation, opId, result });
   return result;
+}
+
+async function runAdbDeviceDiscoveryWithRecovery(sender, opId, adbPath, operationPrefix = "adb", options = {}) {
+  const resolvedAdbPath = adbPath || await findWindowsAdbExecutable();
+  const commands = {};
+  const deadline = Date.now() + Number(options.recoveryMs || 30_000);
+  const devicesTimeoutMs = Number(options.devicesTimeoutMs || 5000);
+  const maxBuffer = Number(options.maxBuffer || 128 * 1024);
+  const runDevices = async (suffix) => runWindowsDiagnosticExec(sender, opId, `${operationPrefix}_${suffix}`, resolvedAdbPath, ["devices", "-l"], { timeoutMs: devicesTimeoutMs, maxBuffer });
+
+  commands.devicesInitial = await runDevices("adb_devices");
+  if (isAdbMissingResult(commands.devicesInitial)) {
+    const parsed = parseAndroidConnectionState(commands.devicesInitial.stdout || "", false, commands.devicesInitial);
+    return { ok: false, status: parsed.status, adbPath: resolvedAdbPath, commands, ...parsed };
+  }
+
+  if (!shouldRecoverAdbDevicesResult(commands.devicesInitial)) {
+    const parsed = parseAndroidConnectionState(commands.devicesInitial.stdout || "", commands.devicesInitial.ok, commands.devicesInitial);
+    return { adbPath: resolvedAdbPath, commands, ...parsed };
+  }
+
+  commands.killServer = await runWindowsDiagnosticExec(sender, opId, `${operationPrefix}_adb_kill_server`, resolvedAdbPath, ["kill-server"], { timeoutMs: 5000, maxBuffer });
+  if (isAdbMissingResult(commands.killServer)) {
+    const parsed = parseAndroidConnectionState(commands.killServer.stdout || "", false, commands.killServer);
+    return { ok: false, status: parsed.status, adbPath: resolvedAdbPath, commands, ...parsed };
+  }
+  commands.startServer = await runWindowsDiagnosticExec(sender, opId, `${operationPrefix}_adb_start_server`, resolvedAdbPath, ["start-server"], { timeoutMs: 10000, maxBuffer });
+  if (!commands.startServer.ok) {
+    const status = commands.startServer.timedOut || isAdbServerStartupOutput(commands.startServer) ? "adb_server_start_failed" : "adb_server_start_failed";
+    return { ok: false, status, adbPath: resolvedAdbPath, commands, devices: [], authorizedDevices: [], instructions: androidConnectionInstructions(status) };
+  }
+
+  let latest = null;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt += 1;
+    latest = await runDevices(`adb_devices_retry_${attempt}`);
+    commands[`devicesRetry${attempt}`] = latest;
+    if (isAdbMissingResult(latest)) {
+      const parsed = parseAndroidConnectionState(latest.stdout || "", false, latest);
+      return { ok: false, status: parsed.status, adbPath: resolvedAdbPath, commands, ...parsed };
+    }
+    const parsed = parseAndroidConnectionState(latest.stdout || "", latest.ok, latest);
+    if (parsed.status === "one_authorized_device" || parsed.status === "unauthorized" || parsed.status === "offline" || parsed.status === "multiple_devices") {
+      return { adbPath: resolvedAdbPath, commands, ...parsed };
+    }
+    await sleep(Math.max(500, Math.min(Number(options.retryDelayMs || 1500), 5000)));
+  }
+  const parsed = latest
+    ? parseAndroidConnectionState(latest.stdout || "", latest.ok, latest)
+    : parseAndroidConnectionState("", false, { timedOut: true });
+  return { adbPath: resolvedAdbPath, commands, ...parsed, status: parsed.status === "adb_timeout" ? "adb_timeout" : parsed.status };
 }
 
 async function runWindowsDiagnosticExecBinary(sender, opId, operation, command, args = [], options = {}) {
@@ -1398,9 +2189,16 @@ async function runAdbVersionDiagnostics(sender, opId) {
 async function runAdbDevicesDiagnostics(sender, opId, adbPath = "") {
   const resolvedAdbPath = adbPath || await findWindowsAdbExecutable();
   emitWindowsDiagnosticEvent(sender, { type: "status", operation: "adb_devices", opId, status: "waiting_for_phone", label: "waiting for phone" });
-  const result = await runWindowsDiagnosticExec(sender, opId, "adb_devices", resolvedAdbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
-  const devices = classifyAdbDevices(result.stdout || "");
-  const label = devices.status === "device_authorized"
+  const discovery = await runAdbDeviceDiscoveryWithRecovery(sender, opId, resolvedAdbPath, "adb_devices", { recoveryMs: 30_000 });
+  const devices = {
+    status: discovery.status,
+    devices: discovery.devices || [],
+    authorizedCount: (discovery.authorizedDevices || []).length,
+    unauthorizedCount: (discovery.devices || []).filter((device) => device.state === "unauthorized").length,
+    offlineCount: (discovery.devices || []).filter((device) => device.state === "offline").length,
+    hasAuthorizedDevice: discovery.status === "one_authorized_device",
+  };
+  const label = devices.status === "one_authorized_device"
     ? "device authorized"
     : devices.status === "unauthorized"
       ? "unauthorized: unlock phone and tap Allow"
@@ -1413,16 +2211,15 @@ async function runAdbDevicesDiagnostics(sender, opId, adbPath = "") {
     opId,
     status: devices.status,
     label,
-    message: devices.status === "unauthorized" ? "Unlock your phone and tap Allow USB debugging." : "",
+    message: androidConnectionInstructions(devices.status),
     devices,
   });
-  return { ...result, adbPath: resolvedAdbPath, devices };
+  return { ...discovery, adbPath: resolvedAdbPath, devices };
 }
 
 async function runAndroidConnectionCheck(sender, opId) {
   if (process.platform !== "win32") return { ok: false, status: "adb_error", error: "windows_native_shell_required" };
   const adbPath = await findWindowsAdbExecutable();
-  const commands = {};
   emitWindowsDiagnosticEvent(sender, {
     type: "status",
     operation: "check_android_connection",
@@ -1430,21 +2227,7 @@ async function runAndroidConnectionCheck(sender, opId) {
     status: "checking_adb",
     label: "checking Android connection",
   });
-  commands.killServer = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_kill_server", adbPath, ["kill-server"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
-  if (isAdbMissingResult(commands.killServer)) {
-    const result = { ok: false, status: "adb_missing", adbPath, commands, instructions: androidConnectionInstructions("adb_missing") };
-    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "check_android_connection", opId, status: result.status, label: "adb missing", message: result.instructions });
-    return result;
-  }
-  commands.startServer = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_start_server", adbPath, ["start-server"], { timeoutMs: 10000, maxBuffer: 128 * 1024 });
-  if (isAdbMissingResult(commands.startServer)) {
-    const result = { ok: false, status: "adb_missing", adbPath, commands, instructions: androidConnectionInstructions("adb_missing") };
-    emitWindowsDiagnosticEvent(sender, { type: "status", operation: "check_android_connection", opId, status: result.status, label: "adb missing", message: result.instructions });
-    return result;
-  }
-  commands.devices = await runWindowsDiagnosticExec(sender, opId, "android_connection_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
-  const connection = parseAndroidConnectionState(commands.devices.stdout || "", commands.devices.ok);
-  const result = { ...connection, adbPath, commands };
+  const result = await runAdbDeviceDiscoveryWithRecovery(sender, opId, adbPath, "android_connection", { recoveryMs: 30_000 });
   emitWindowsDiagnosticEvent(sender, {
     type: "status",
     operation: "check_android_connection",
@@ -2444,6 +3227,9 @@ function resolveHotOperation(payload = {}) {
     ...moduleInfo,
     operationName,
     loadedFrom: moduleInfo.rootKind,
+    hotOpSource: moduleInfo.rootKind,
+    hotOpPath: moduleInfo.path,
+    bundleId: "",
     capabilities: Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : [],
     timeoutMs: HOT_OPERATION_DEFAULT_TIMEOUT_MS,
     version: String(payload.operationVersion || ""),
@@ -2485,6 +3271,23 @@ function createHotOperationContext(sender, opId, payload = {}, moduleInfo = {}) 
   const capabilities = new Set(Array.isArray(moduleInfo.capabilities) ? moduleInfo.capabilities.map(String) : []);
   const operationName = String(payload.operationName || payload.operation || "");
   const dataRoot = hotOperationDataRoot(operationName);
+  const progress = {
+    lastPhase: "",
+    phases: [],
+  };
+  const markPhase = (phase, details = {}) => {
+    const name = String(phase || "").trim();
+    if (!name) return progress.lastPhase;
+    const entry = {
+      phase: name,
+      at: new Date().toISOString(),
+      details: sanitizeRendererDiagnosticValue(details || {}),
+    };
+    progress.lastPhase = name;
+    progress.phases.push(entry);
+    writeNativeControlAudit({ action: "hot_operation_phase", opId, operation: operationName, ...entry });
+    return name;
+  };
   const adbDeviceArgs = (deviceId, args = []) => deviceId ? ["-s", String(deviceId), ...args.map(String)] : args.map(String);
   const adbExec = async (capability, step, deviceId, args, options = {}) => {
     requireHotOperationCapability(capabilities, capability);
@@ -2499,16 +3302,21 @@ function createHotOperationContext(sender, opId, payload = {}, moduleInfo = {}) 
       moduleFile: moduleInfo.path || "",
       dataRoot,
       capabilities: Array.from(capabilities),
+      requiredNativeCapabilities: Array.isArray(moduleInfo.requiredNativeCapabilities) ? moduleInfo.requiredNativeCapabilities.slice() : [],
+      bundleId: String(moduleInfo.bundleId || ""),
+      bundleSha: String(moduleInfo.sha256 || ""),
       dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
     },
+    progress,
+    markPhase,
     dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
     args: payload.args && typeof payload.args === "object" ? { ...payload.args, dryRun: Boolean(payload.dryRun || payload.dry_run || payload.args.dryRun || payload.args.dry_run) } : { dryRun: Boolean(payload.dryRun || payload.dry_run) },
     adb: {
       findAuthorizedDevice: async () => {
         requireHotOperationCapability(capabilities, "adb.device");
         const adbPath = await findWindowsAdbExecutable();
-        const result = await runWindowsDiagnosticExec(sender, opId, "hot_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
-        return { adbPath, command: result, ...parseAndroidConnectionState(result.stdout || "", result.ok) };
+        const result = await runAdbDeviceDiscoveryWithRecovery(sender, opId, adbPath, "hot_adb", { recoveryMs: 30_000 });
+        return { adbPath, command: result.commands?.devicesInitial || {}, ...result };
       },
       shell: (deviceId, args, options) => adbExec("adb.shell", "adb_shell", deviceId, ["shell", ...args], options),
       install: (deviceId, apkPath, options) => adbExec("adb.install", "adb_install", deviceId, ["install", "-r", String(apkPath || "")], options),
@@ -2595,8 +3403,9 @@ function createHotOperationContext(sender, opId, payload = {}, moduleInfo = {}) 
   };
 }
 
-async function runWithHotOperationTimeout(promise, timeoutMs) {
+async function runWithHotOperationTimeout(promise, timeoutMs, progress = {}) {
   let timeout = null;
+  const started = Date.now();
   try {
     return await Promise.race([
       promise,
@@ -2604,6 +3413,10 @@ async function runWithHotOperationTimeout(promise, timeoutMs) {
         timeout = setTimeout(() => {
           const error = new Error(`Hot operation timed out after ${timeoutMs}ms`);
           error.code = "hot_operation_timeout";
+          error.timeoutMs = timeoutMs;
+          error.elapsedMs = Date.now() - started;
+          error.lastPhase = progress.lastPhase || "";
+          error.phases = Array.isArray(progress.phases) ? progress.phases.slice() : [];
           reject(error);
         }, timeoutMs);
         timeout.unref?.();
@@ -2614,22 +3427,50 @@ async function runWithHotOperationTimeout(promise, timeoutMs) {
   }
 }
 
+function hotOperationTimeoutClassification(operationName, lastPhase) {
+  if (operationName === "run_android_hermes_wake_proof") {
+    const phase = String(lastPhase || "").trim();
+    return phase ? `hermes_wake_timeout_after_${phase}` : "hermes_wake_timeout_before_phase";
+  }
+  return "hot_operation_timeout";
+}
+
 async function runHotOperation(sender, opId, payload = {}) {
   const startedAt = new Date();
   const operationName = String(payload.operationName || payload.operation || "").trim();
+  let activeModuleInfo = null;
   const finishEnvelope = (fields = {}) => {
     const finishedAt = new Date();
+    const kernel = nativeKernelStatus();
     const failureClassification = fields.failureClassification || fields.failure_classification || fields.error || fields.status || null;
+    const opName = fields.operation || operationName || activeModuleInfo?.name || "";
+    const hotOpSource = fields.hotOpSource || fields.loadedFrom || activeModuleInfo?.hotOpSource || activeModuleInfo?.loadedFrom || activeModuleInfo?.rootKind || "";
     return {
       ok: fields.ok === true,
       stable: fields.stable === true,
-      operation: fields.operation || operationName,
+      operation: opName,
       source: "hot_operation",
       loadedFrom: fields.loadedFrom || "",
       operationVersion: String(fields.operationVersion || ""),
+      hotOpSource,
+      hotOpPath: fields.hotOpPath || activeModuleInfo?.hotOpPath || activeModuleInfo?.path || "",
+      bundleId: fields.bundleId || activeModuleInfo?.bundleId || "",
+      activeDownloadedRuntimeId: kernel.activeDownloadedRuntimeId,
+      activeDownloadedRuntimeSha: kernel.activeDownloadedRuntimeSha,
+      activeHotOpBundleId: fields.bundleId || activeModuleInfo?.bundleId || kernel.activeHotOpBundleId,
+      activeHotOpSha: fields.hotOpSha || fields.sha256 || activeModuleInfo?.sha256 || kernel.activeHotOpSha,
+      hotOpSha: fields.hotOpSha || fields.sha256 || activeModuleInfo?.sha256 || "",
+      bundledHotOpSha: fields.bundledHotOpSha || bundledHotOperationSha(opName),
+      overrideEnabled: localHotOperationOverrideEnabled(),
+      manifestTimeoutMs: fields.manifestTimeoutMs ?? activeModuleInfo?.timeoutMs,
+      kernel,
+      nativeKernel: kernel,
       startedAt: startedAt.toISOString(),
       finishedAt: finishedAt.toISOString(),
       durationMs: finishedAt.getTime() - startedAt.getTime(),
+      elapsedMs: fields.elapsedMs ?? (finishedAt.getTime() - startedAt.getTime()),
+      timeoutMs: fields.timeoutMs,
+      lastPhase: fields.lastPhase || "",
       failureClassification: fields.ok === true ? (fields.failureClassification || null) : failureClassification,
       stages: fields.stages && typeof fields.stages === "object" ? fields.stages : {},
       metrics: fields.metrics && typeof fields.metrics === "object" ? fields.metrics : {},
@@ -2643,8 +3484,23 @@ async function runHotOperation(sender, opId, payload = {}) {
     return finishEnvelope({ ok: false, stable: false, status: "hot_operations_disabled", error: "hot_operations_disabled", operation: operationName });
   }
   const moduleInfo = resolveHotOperation(payload);
+  activeModuleInfo = moduleInfo.ok ? moduleInfo : null;
   if (!moduleInfo.ok) {
     return finishEnvelope({ ok: false, stable: false, status: moduleInfo.error, error: moduleInfo.error, operation: operationName, roots: moduleInfo.roots || [] });
+  }
+  const missingNativeCapabilities = (moduleInfo.requiredNativeCapabilities || [])
+    .filter((capability) => !WINDOWS_NATIVE_KERNEL_CAPABILITIES.includes(capability));
+  if (missingNativeCapabilities.length) {
+    return finishEnvelope({
+      ok: false,
+      stable: false,
+      status: "hot_operation_capability_denied",
+      error: "hot_operation_capability_denied",
+      failureClassification: "native_capability_missing",
+      operation: operationName,
+      missingNativeCapabilities,
+      requiredNativeCapabilities: moduleInfo.requiredNativeCapabilities,
+    });
   }
   const expectedSha256 = String(payload.expectedSha256 || payload.expected_sha256 || "").trim().toLowerCase();
   const actualSha256 = moduleInfo.sha256 || sha256File(moduleInfo.path).toLowerCase();
@@ -2669,7 +3525,7 @@ async function runHotOperation(sender, opId, payload = {}) {
       throw Object.assign(new Error("Hot operation module must export run(context)."), { code: "hot_operation_exception" });
     }
     const context = createHotOperationContext(sender, opId, payload, moduleInfo);
-    const result = await runWithHotOperationTimeout(Promise.resolve(runner(context)), timeoutMs);
+    const result = await runWithHotOperationTimeout(Promise.resolve(runner(context)), timeoutMs, context.progress);
     const rawResult = sanitizeRendererDiagnosticValue(result || {});
     return finishEnvelope({
       ok: rawResult.ok !== false,
@@ -2677,10 +3533,21 @@ async function runHotOperation(sender, opId, payload = {}) {
       status: result?.status || "hot_operation_finished",
       operation: operationName || moduleInfo.name || "",
       loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind,
+      hotOpSource: moduleInfo.hotOpSource || moduleInfo.loadedFrom || moduleInfo.rootKind,
+      hotOpPath: moduleInfo.hotOpPath || moduleInfo.path,
+      bundleId: moduleInfo.bundleId || "",
       operationVersion: String(moduleInfo.version || payload.operationVersion || ""),
       modulePath: moduleInfo.modulePath,
       moduleRoot: moduleInfo.loadedFrom || moduleInfo.rootKind,
       sha256: actualSha256,
+      hotOpSha: actualSha256,
+      bundledHotOpSha: bundledHotOperationSha(operationName || moduleInfo.name || ""),
+      overrideEnabled: localHotOperationOverrideEnabled(),
+      manifestTimeoutMs: manifestTimeout,
+      timeoutMs,
+      elapsedMs: Date.now() - startedAt.getTime(),
+      lastPhase: rawResult.lastPhase || context.progress.lastPhase || "",
+      phaseHistory: rawResult.phaseHistory || context.progress.phases || [],
       stages: rawResult.stages || {},
       metrics: rawResult.metrics || rawResult.confidence || {},
       artifacts: rawResult.artifacts || {},
@@ -2690,16 +3557,28 @@ async function runHotOperation(sender, opId, payload = {}) {
     });
   } catch (error) {
     const code = error && error.code ? String(error.code) : "hot_operation_exception";
+    const lastPhase = error?.lastPhase || "";
+    const failureClassification = code === "hot_operation_timeout"
+      ? hotOperationTimeoutClassification(operationName, lastPhase)
+      : code;
     return finishEnvelope({
       ok: false,
       stable: false,
       status: code,
       error: code,
+      failureClassification,
       operation: operationName,
       loadedFrom: moduleInfo.loadedFrom || moduleInfo.rootKind,
+      hotOpSource: moduleInfo.hotOpSource || moduleInfo.loadedFrom || moduleInfo.rootKind,
+      hotOpPath: moduleInfo.hotOpPath || moduleInfo.path,
+      bundleId: moduleInfo.bundleId || "",
       operationVersion: String(moduleInfo.version || payload.operationVersion || ""),
       modulePath: moduleInfo.modulePath,
       message: String(error && error.message ? error.message : error),
+      timeoutMs: error?.timeoutMs || timeoutMs,
+      elapsedMs: error?.elapsedMs || (Date.now() - startedAt.getTime()),
+      lastPhase,
+      phaseHistory: Array.isArray(error?.phases) ? sanitizeRendererDiagnosticValue(error.phases) : [],
       capability: error?.capability || "",
       logsTail: verboseBridgeLogsEnabled() ? [String(error && error.stack ? error.stack : error), ...recentBridgeLogsTail(20)] : recentBridgeLogsTail(20),
     });
@@ -2710,14 +3589,25 @@ async function runShellSelfTest(sender, opId, payload = {}) {
   const startedAt = new Date();
   const checks = {};
   let failureClassification = null;
+  const includeDeepProbes = payload.includeDeepProbes === true || payload.include_deep_probes === true;
+  const includeAdbDiscovery = payload.includeAdbDiscovery === true
+    || payload.include_adb_discovery === true
+    || payload.requireAuthorizedAndroid === true
+    || payload.require_authorized_android === true;
+  const requireAuthorizedAndroid = payload.requireAuthorizedAndroid === true
+    || payload.require_authorized_android === true;
   const setCheck = (name, value, failure = name) => {
     checks[name] = Boolean(value);
     if (!checks[name] && !failureClassification) failureClassification = failure;
   };
   const summary = hotOperationsSummary();
   setCheck("local_bridge_alive", true);
+  setCheck("native_kernel_contract_advertised", nativeKernelStatus().kernelContractVersion === NATIVE_KERNEL_CONTRACT_VERSION);
+  setCheck("downloaded_runtime_status_exposed", downloadedRuntimeSummary().supported === true);
+  setCheck("runtime_sync_compares_bundle_sha", typeof downloadedRuntimeMetadataDiffers === "function");
+  setCheck("runtime_rollback_available", typeof rollbackDownloadedRuntimeToLastKnownGood === "function");
   setCheck("hot_ops_root_resolved", Boolean(summary.hotOpsRoot));
-  setCheck("active_root_readable", summary.hotOpsRoots.some((item) => item.active && item.exists));
+  setCheck("active_or_bundled_root_readable", summary.hotOpsRoots.some((item) => (item.active || item.kind === "bundled") && item.exists));
   setCheck("bundled_op_root_readable", summary.hotOpsRoots.some((item) => item.kind === "bundled" && item.exists));
   const listed = listHotOperations();
   setCheck("manifest_scan_works", Array.isArray(listed.availableHotOps));
@@ -2725,36 +3615,43 @@ async function runShellSelfTest(sender, opId, payload = {}) {
   setCheck("loader_rejects_absolute_path", !normalizeHotOperationModulePath(path.resolve(os.tmpdir(), "x.js")));
   const missing = resolveHotOperation({ operationName: "self_test_missing_hot_operation" });
   setCheck("missing_op_returns_hot_operation_missing", missing.error === "hot_operation_missing");
-  const mismatch = await runHotOperation(sender, `${opId}-sha`, {
-    operationName: "run_android_hermes_wake_proof",
-    expectedSha256: "0".repeat(64),
-    timeoutMs: 1000,
-  });
-  setCheck("sha_mismatch_returns_hot_operation_sha_mismatch", mismatch.error === "hot_operation_sha_mismatch");
-  try {
-    const context = createHotOperationContext(sender, `${opId}-cap`, {
-      operationName: "run_shell_self_test_capability_probe",
-      args: {},
-    }, { capabilities: [] });
-    await context.adb.logcat("", { timeoutMs: 1 });
-    setCheck("denied_capability_returns_hot_operation_capability_denied", false, "hot_operation_capability_denied");
-  } catch (error) {
-    setCheck("denied_capability_returns_hot_operation_capability_denied", error?.code === "hot_operation_capability_denied", "hot_operation_capability_denied");
+  checks.deep_hot_operation_probes_skipped = !includeDeepProbes;
+  if (includeDeepProbes) {
+    const mismatch = await runHotOperation(sender, `${opId}-sha`, {
+      operationName: "run_android_hermes_wake_proof",
+      expectedSha256: "0".repeat(64),
+      timeoutMs: 1000,
+    });
+    setCheck("sha_mismatch_returns_hot_operation_sha_mismatch", mismatch.error === "hot_operation_sha_mismatch");
+    try {
+      const context = createHotOperationContext(sender, `${opId}-cap`, {
+        operationName: "run_shell_self_test_capability_probe",
+        args: {},
+      }, { capabilities: [] });
+      await context.adb.logcat("", { timeoutMs: 1 });
+      setCheck("denied_capability_returns_hot_operation_capability_denied", false, "hot_operation_capability_denied");
+    } catch (error) {
+      setCheck("denied_capability_returns_hot_operation_capability_denied", error?.code === "hot_operation_capability_denied", "hot_operation_capability_denied");
+    }
+  } else {
+    setCheck("sha_mismatch_probe_available", typeof runHotOperation === "function");
+    setCheck("capability_guard_available", typeof createHotOperationContext === "function");
   }
   const adbPath = await findWindowsAdbExecutable();
   setCheck("adb_discoverable", Boolean(adbPath));
   let authorized = false;
-  if (adbPath) {
-    const devices = await runWindowsDiagnosticExec(sender, opId, "shell_self_test_adb_devices", adbPath, ["devices", "-l"], { timeoutMs: 5000, maxBuffer: 128 * 1024 });
-    const parsed = parseAndroidConnectionState(devices.stdout || "", devices.ok);
-    authorized = parsed.hasAuthorizedDevice === true;
+  let adbDiscovery = { ok: Boolean(adbPath), status: adbPath ? "skipped" : "adb_missing", skipped: true, adbPath: adbPath || "" };
+  if (adbPath && includeAdbDiscovery) {
+    const recoveryMs = Math.max(0, Math.min(Number(payload.adbRecoveryMs || payload.adb_recovery_ms || 5000), 30_000));
+    adbDiscovery = await runAdbDeviceDiscoveryWithRecovery(sender, opId, adbPath, "shell_self_test", { recoveryMs });
+    authorized = adbDiscovery.status === "one_authorized_device";
   }
-  checks.authorized_android_device_present = authorized;
+  setCheck("authorized_android_device_present", includeAdbDiscovery ? authorized : true, requireAuthorizedAndroid ? (adbDiscovery?.status || "no_device") : "authorized_android_device_present");
+  checks.authorized_android_device_present_skipped = !includeAdbDiscovery;
   const localMode = !selectedBackendOrigin || isLocalDevCandidateUrl(selectedBackendOrigin);
   checks.result_upload_path_works_or_skipped = localMode ? true : Boolean(selectedBackendOrigin);
   const finishedAt = new Date();
   const ok = Object.entries(checks)
-    .filter(([name]) => name !== "authorized_android_device_present")
     .every(([, passed]) => passed === true);
   return {
     ok,
@@ -2765,10 +3662,33 @@ async function runShellSelfTest(sender, opId, payload = {}) {
     finishedAt: finishedAt.toISOString(),
     durationMs: finishedAt.getTime() - startedAt.getTime(),
     checks,
+    adbDiscovery,
+    androidDiscoveryStatus: adbDiscovery?.status || (adbPath ? "adb_timeout" : "adb_missing"),
     failureClassification: ok ? null : failureClassification,
     nextAction: ok ? "Run the canary hot operation, then Hermes wake proof." : "Inspect hot ops root, bridge protocol, ADB, or capability failures before running Hermes.",
     hotOperations: listed,
     logsTail: recentBridgeLogsTail(),
+  };
+}
+
+function runShellSelfTestSnapshot() {
+  const now = new Date().toISOString();
+  return {
+    ok: true,
+    stable: true,
+    operation: "run_shell_self_test",
+    source: "shell",
+    mode: "constant_native_control_roundtrip",
+    startedAt: now,
+    finishedAt: now,
+    durationMs: 0,
+    checks: { native_control_roundtrip: true },
+    adbDiscovery: { ok: true, status: "skipped", skipped: true },
+    androidDiscoveryStatus: "skipped",
+    failureClassification: null,
+    nextAction: "Run the canary hot operation, then Hermes wake proof.",
+    hotOperations: { skipped: true },
+    logsTail: [],
   };
 }
 
@@ -3122,13 +4042,36 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
   if (opName === "check_android_connection") {
     return runAndroidConnectionCheck(event.sender, opId);
   }
+  if (opName === "get_native_kernel_status") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
+    return { ok: true, operation: opName, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+  }
+  if (opName === "refresh_downloaded_runtime" || opName === "sync_downloaded_runtime") {
+    const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
+    return { ok: downloadedRuntimeSync.ok === true, operation: opName, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+  }
+  if (opName === "rollback_downloaded_runtime") {
+    const result = rollbackDownloadedRuntimeToLastKnownGood();
+    return { ...result, logsTail: recentBridgeLogsTail() };
+  }
   if (opName === "run_hot_operation") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     return runHotOperation(event.sender, opId, payload);
   }
   if (opName === "list_hot_operations") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     return listHotOperations();
   }
+  if (opName === "refresh_downloaded_hot_ops" || opName === "sync_downloaded_hot_ops") {
+    const downloadedHotOpsSync = await ensureDownloadedHotOperationsFromFeed({ ...payload, forceSync: true });
+    return { ok: downloadedHotOpsSync.ok === true, operation: opName, downloadedHotOpsSync, logsTail: recentBridgeLogsTail() };
+  }
   if (opName === "run_shell_self_test") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     return runShellSelfTest(event.sender, opId, payload);
   }
   if (opName === "debug_android_voice_tuning_runtime") {
@@ -3178,6 +4121,8 @@ function runtimeDiagnosticsPayload(overrides = {}) {
       bundledAndroidApkPresent: fileExists(bundledAndroidApkPath()),
       reportRoot: androidSimulatorStateRoot(),
     },
+    nativeKernel: nativeKernelStatus(),
+    downloadedRuntime: downloadedRuntimeSummary(),
     hotOperations: {
       supported: true,
       protocol: HOT_OPERATION_PROTOCOL_VERSION,
@@ -3796,6 +4741,9 @@ async function nativeConfigPayload() {
       envWasmAgentDefaultServerUrl: process.env.WASM_AGENT_DEFAULT_SERVER_URL || "",
       envWasmAgentAllowLocalDev: process.env.WASM_AGENT_ALLOW_LOCAL_DEV || "",
       runtimeDiagnosticsPath: runtimeDiagnosticsPath(),
+      nativeKernel: nativeKernelStatus(),
+      downloadedRuntime: downloadedRuntimeSummary(),
+      hotOperations: hotOperationsSummary(),
       candidateEntries: startupDiagnostics.candidateEntries,
       discardedCandidateOrigins: startupDiagnostics.discardedCandidateOrigins,
       selectedTestedCandidateSource: candidateSourceFor(serverUrl || config.serverUrl, config),
@@ -4262,6 +5210,101 @@ async function postNativeControlResult(command, result = {}) {
   }
 }
 
+function nativeControlCommandTimeoutMs(command = {}) {
+  const payload = command && typeof command.payload === "object" ? command.payload : {};
+  const requested = Number(payload.nativeControlTimeoutMs || payload.native_control_timeout_ms || payload.commandTimeoutMs || payload.command_timeout_ms || 0);
+  if (Number.isFinite(requested) && requested > 0) {
+    return Math.max(1000, Math.min(requested, NATIVE_CONTROL_MAX_TIMEOUT_MS));
+  }
+  const type = String(command.type || "");
+  if (type === "run_hot_operation") {
+    const hotOpRequested = Number(payload.timeoutMs || payload.timeout_ms || payload.args?.timeoutMs || payload.args?.timeout_ms || 0);
+    if (Number.isFinite(hotOpRequested) && hotOpRequested > 0) {
+      return Math.max(1000, Math.min(hotOpRequested + 15_000, NATIVE_CONTROL_MAX_TIMEOUT_MS));
+    }
+    return 75_000;
+  }
+  if (type === "run_shell_self_test") return 10_000;
+  return NATIVE_CONTROL_DEFAULT_TIMEOUT_MS;
+}
+
+function nativeControlTimeoutResult(command = {}, timeoutMs = NATIVE_CONTROL_DEFAULT_TIMEOUT_MS, startedAt = new Date().toISOString()) {
+  const type = String(command.type || "unknown");
+  return {
+    ok: false,
+    operation: type,
+    error: "handler_timeout",
+    failureClassification: "handler_timeout",
+    started_at: startedAt,
+    completed_at: new Date().toISOString(),
+    timedOut: true,
+    timeoutMs,
+    message: `Native-control handler timed out after ${timeoutMs}ms.`,
+    logsTail: recentBridgeLogsTail(),
+  };
+}
+
+function nativeControlConstantSelfTestResult() {
+  const config = ensureConfig();
+  return {
+    ok: true,
+    operation: "run_shell_self_test",
+    mode: "constant_self_test",
+    source: "shell",
+    buildId: String(config.buildId || ""),
+    clientId: String(config.deviceId || ""),
+    ts: Date.now(),
+  };
+}
+
+function isRunShellSelfTestNativeControlCommand(command = {}) {
+  const candidates = [
+    command.type,
+    command.name,
+    command.command,
+    command.operation,
+    command.operationName,
+    command.operation_name,
+    command.payload?.type,
+    command.payload?.name,
+    command.payload?.command,
+    command.payload?.operation,
+    command.payload?.operationName,
+    command.payload?.operation_name,
+  ];
+  return candidates.some((value) => String(value || "") === "run_shell_self_test");
+}
+
+async function executeNativeControlCommandWithWatchdog(command = {}) {
+  const timeoutMs = nativeControlCommandTimeoutMs(command);
+  const startedAt = new Date().toISOString();
+  let timeoutHandle = null;
+  let timedOut = false;
+  const handlerPromise = executeNativeControlCommand(command);
+  handlerPromise.catch((error) => {
+    if (timedOut) {
+      writeNativeControlAudit({
+        action: "command_late_rejection_after_timeout",
+        id: command.id || "",
+        type: command.type || "",
+        error: String(error && error.message ? error.message : error),
+      });
+    }
+  });
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      const result = nativeControlTimeoutResult(command, timeoutMs, startedAt);
+      writeNativeControlAudit({ action: "command_timeout", id: command.id || "", type: command.type || "", timeoutMs, result });
+      resolve(result);
+    }, timeoutMs);
+    timeoutHandle.unref();
+  });
+  const result = await Promise.race([handlerPromise, timeoutPromise]);
+  if (timeoutHandle) clearTimeout(timeoutHandle);
+  return result && typeof result === "object" ? result : { ok: false, error: "result_seen_wrong_shape", failureClassification: "result_seen_wrong_shape", rawResult: result };
+}
+
 async function executeNativeControlCommand(command = {}) {
   const type = String(command.type || "");
   const payload = command && typeof command.payload === "object" ? command.payload : {};
@@ -4334,24 +5377,62 @@ async function executeNativeControlCommand(command = {}) {
   if (type === "run_hot_operation") {
     const sender = win?.webContents || { send: () => {} };
     const opId = `control-hot-operation-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     const result = await runHotOperation(sender, opId, payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
+  if (type === "get_native_kernel_status") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
+    const result = { ok: true, operation: type, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
   if (type === "get_bridge_status" || type === "status") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     const result = getBridgeStatus();
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
   if (type === "list_hot_operations") {
+    await ensureDownloadedRuntimeFromFeed(payload);
+    await ensureDownloadedHotOperationsFromFeed(payload);
     const result = listHotOperations();
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "refresh_downloaded_runtime" || type === "sync_downloaded_runtime") {
+    const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
+    const result = { ok: downloadedRuntimeSync.ok === true, operation: type, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "rollback_downloaded_runtime") {
+    const result = { ...rollbackDownloadedRuntimeToLastKnownGood(), logsTail: recentBridgeLogsTail() };
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "refresh_downloaded_hot_ops" || type === "sync_downloaded_hot_ops") {
+    const downloadedHotOpsSync = await ensureDownloadedHotOperationsFromFeed({ ...payload, forceSync: true });
+    const result = { ok: downloadedHotOpsSync.ok === true, operation: type, downloadedHotOpsSync, logsTail: recentBridgeLogsTail() };
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
   if (type === "run_shell_self_test") {
     const sender = win?.webContents || { send: () => {} };
     const opId = `control-shell-self-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const result = await runShellSelfTest(sender, opId, payload);
+    const defaultLightweight = payload.includeDeepProbes !== true
+      && payload.include_deep_probes !== true
+      && payload.includeAdbDiscovery !== true
+      && payload.include_adb_discovery !== true
+      && payload.requireAuthorizedAndroid !== true
+      && payload.require_authorized_android !== true;
+    const result = defaultLightweight
+      ? runShellSelfTestSnapshot()
+      : await runShellSelfTest(sender, opId, payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -4567,12 +5648,39 @@ async function pollNativeControl(reason = "interval") {
     const commands = Array.isArray(payload.commands) ? payload.commands : [];
     for (const command of commands) {
       let result = {};
-      try {
-        result = await executeNativeControlCommand(command);
-      } catch (error) {
-        result = { ok: false, error: String(error && error.message ? error.message : error) };
+      let upload = {};
+      writeNativeControlAudit({
+        action: "command_received",
+        id: command?.id || "",
+        type: command?.type || "",
+        name: command?.name || command?.operationName || command?.operation_name || "",
+        payloadType: command?.payload?.type || "",
+        payloadName: command?.payload?.name || command?.payload?.operationName || command?.payload?.operation_name || "",
+      });
+      if (isRunShellSelfTestNativeControlCommand(command)) {
+        writeNativeControlAudit({ action: "self_test_branch_entered", id: command?.id || "", type: command?.type || "", name: command?.name || "" });
+        result = nativeControlConstantSelfTestResult();
+        writeNativeControlAudit({ action: "self_test_result_built", id: command?.id || "", type: command?.type || "", result });
+        try {
+          writeNativeControlAudit({ action: "self_test_upload_start", id: command?.id || "", type: command?.type || "" });
+          upload = await postNativeControlResult(command, result);
+          writeNativeControlAudit({ action: "self_test_upload_done", id: command?.id || "", type: command?.type || "", upload });
+          writeNativeControlAudit({ action: "command_result_upload_finished", id: command?.id || "", type: command?.type || "", upload });
+        } catch (error) {
+          upload = { ok: false, error: String(error && error.message ? error.message : error) };
+          writeNativeControlAudit({ action: "self_test_upload_error", id: command?.id || "", type: command?.type || "", upload });
+          writeNativeControlAudit({ action: "command_result_upload_finished", id: command?.id || "", type: command?.type || "", upload });
+        }
+        continue;
       }
-      await postNativeControlResult(command, result);
+      try {
+        result = await executeNativeControlCommandWithWatchdog(command);
+      } catch (error) {
+        result = { ok: false, error: String(error && error.message ? error.message : error), failureClassification: "handler_threw" };
+      } finally {
+        upload = await postNativeControlResult(command, result);
+        writeNativeControlAudit({ action: "command_result_upload_finished", id: command.id || "", type: command.type || "", upload });
+      }
     }
     return { ok: true, commandCount: commands.length };
   } catch (error) {
@@ -4657,6 +5765,14 @@ function loadConfiguredServer(win) {
     console.log(`[native] resolved backend: ${serverUrl || ""}`);
     console.log(`[native] config googleClientIdConfigured: ${Boolean(startupDiagnostics.originChecks.find((result) => result.serverUrl === serverUrl)?.googleClientIdConfigured)}`);
     console.log(`[native] final loaded URL: ${startUrl || fallbackPagePath()}`);
+    if (serverUrl) {
+      void ensureDownloadedRuntimeFromFeed({ launch: true, forceSync: true })
+        .then((downloadedRuntimeSync) => postNativeEvent("native.runtime_sync", { downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), kernel: nativeKernelStatus() }))
+        .catch((error) => logNativeDiagnostic("downloaded-runtime-sync-failed", { reason: String(error && error.message ? error.message : error) }));
+      void ensureDownloadedHotOperationsFromFeed({ launch: true, forceSync: true })
+        .then((downloadedHotOpsSync) => postNativeEvent("native.hot_ops_sync", { downloadedHotOpsSync, hotOperations: hotOperationsSummary(), kernel: nativeKernelStatus() }))
+        .catch((error) => logNativeDiagnostic("downloaded-hot-ops-sync-failed", { reason: String(error && error.message ? error.message : error) }));
+    }
     if (!startUrl) {
       showFallback(win, "No validated cloud wasm-agent backend was found.");
       return;
@@ -5023,6 +6139,9 @@ ipcMain.handle("wasm-agent:native-status", () => postNativeEvent("device.status"
   app_version: app.getVersion(),
   hostname: os.hostname(),
   arch: os.arch(),
+  nativeKernel: nativeKernelStatus(),
+  downloadedRuntime: downloadedRuntimeSummary(),
+  hotOperations: hotOperationsSummary(),
 }));
 
 ipcMain.handle("wasm-agent:native-diagnostics-operation", (event, operation) => handleWindowsNativeDiagnosticsOperation(event, operation));
@@ -5043,7 +6162,13 @@ app.whenReady().then(async () => {
   createWindow();
   void postNativeEvent("native.install_status", { status: "launched", app_version: app.getVersion() });
   const hotOpsStatus = hotOperationsSummary();
+  const runtimeStatus = downloadedRuntimeSummary();
+  const kernelStatus = nativeKernelStatus();
   void postNativeEvent("native.capabilities", {
+    native_kernel_version: NATIVE_KERNEL_CONTRACT_VERSION,
+    kernelContractVersion: NATIVE_KERNEL_CONTRACT_VERSION,
+    supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES,
+    missingCapabilities: [],
     desktop_app: true,
     persistent_config: true,
     device_registration_ready: true,
@@ -5063,13 +6188,17 @@ app.whenReady().then(async () => {
 	    hot_ops_protocol_version: HOT_OPERATION_PROTOCOL_VERSION,
 	    minimum_runner_version: MINIMUM_RUNNER_VERSION,
 	    bridge_protocol_capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
+	    downloadedRuntime: runtimeStatus,
+	    nativeKernel: kernelStatus,
 	    hotOperations: hotOpsStatus,
 	  });
-  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logsTail: recentBridgeLogsTail() });
+  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: runtimeStatus, nativeKernel: kernelStatus, activeDownloadedRuntimeId: kernelStatus.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: kernelStatus.activeDownloadedRuntimeSha, activeHotOpBundleId: kernelStatus.activeHotOpBundleId, activeHotOpSha: kernelStatus.activeHotOpSha, syncStatus: kernelStatus.syncStatus, staleReason: kernelStatus.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logsTail: recentBridgeLogsTail() });
   startNativeControlPolling();
   setInterval(() => {
+    void ensureDownloadedRuntimeFromFeed({ heartbeat: true });
     const heartbeatHotOps = hotOperationsSummary();
-    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logsTail: recentBridgeLogsTail() });
+    const heartbeatKernel = nativeKernelStatus();
+    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: heartbeatKernel.downloadedRuntime, nativeKernel: heartbeatKernel, activeDownloadedRuntimeId: heartbeatKernel.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: heartbeatKernel.activeDownloadedRuntimeSha, activeHotOpBundleId: heartbeatKernel.activeHotOpBundleId, activeHotOpSha: heartbeatKernel.activeHotOpSha, syncStatus: heartbeatKernel.syncStatus, staleReason: heartbeatKernel.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logsTail: recentBridgeLogsTail() });
   }, HEARTBEAT_INTERVAL_MS).unref();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

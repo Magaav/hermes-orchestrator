@@ -1,0 +1,17 @@
+{
+  "schema": "hermes.wasm_agent.native_runtime_config.v1",
+  "version": "20260614T0000",
+  "routingPolicy": {
+    "defaultProofOperation": "run_android_hermes_wake_proof",
+    "diagnosticsClassifierOperation": "classify_native_diagnostics"
+  },
+  "hermesWakePolicy": {
+    "wakeThreshold": 0.58,
+    "proofWaitMs": 30000,
+    "diagnosticsSourceOrder": [
+      "run-as",
+      "server_upload",
+      "adb_pull"
+    ]
+  }
+}

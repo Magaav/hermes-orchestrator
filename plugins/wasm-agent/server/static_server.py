@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 from html import escape as html_escape
 import hashlib
 import hmac
@@ -88,6 +89,10 @@ DEFAULT_CAMERA_PUSH_PLAYBACK_FPS = 15
 DEFAULT_CAMERA_PUSH_PLAYBACK_RETENTION_SEC = DEFAULT_CAMERA_PUSH_TIMELINE_LIVE_SEC
 DEFAULT_CAMERA_PUSH_PLAYBACK_SAMPLE_SEC = 1 / DEFAULT_CAMERA_PUSH_PLAYBACK_FPS
 DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC = 5.0
+NATIVE_CONTROL_DEFAULT_COMMAND_TIMEOUT_SEC = 30
+NATIVE_CONTROL_COMMAND_TIMEOUT_SEC = {
+    "run_shell_self_test": 10,
+}
 DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC = 30
 CAMERA_PUSH_MJPEG_BOUNDARY = "wasm-agent-push"
 CAMERA_PUSH_SCHEMA = "hermes.wasm_agent.camera.push_ingest.v1"
@@ -6468,9 +6473,12 @@ def native_installer_candidates(plugin_root: Path, platform: str, arch: str) -> 
         names.extend(["WASM-Agent-Setup-x64.exe", "WASM-Agent-x64.msi"])
         return versioned + [release_root / name for name in names]
     if platform == "android":
+        android_root = native_root / "android"
         names = [f"WASM-Agent-{arch}.apk"] if arch != "unknown" else []
         names.extend(["WASM-Agent-arm64.apk", "WASM-Agent-universal.apk"])
-        return [native_root / "android" / "release" / name for name in names]
+        candidates = [android_root / "release" / name for name in names]
+        candidates.append(android_root / "app" / "build" / "outputs" / "apk" / "release" / "app-release.apk")
+        return sorted(candidates, key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
     if platform == "macos":
         return [
             native_root / "macos" / "release" / "WASM-Agent.dmg",
@@ -6516,6 +6524,25 @@ def native_installer_metadata(artifact: Path, platform: str) -> dict[str, Any]:
         payload = read_json_file(metadata_path, {})
         if isinstance(payload, dict) and payload:
             return payload
+    if platform == "android" and artifact.is_file():
+        stat = artifact.stat()
+        digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+        generated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime))
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(stat.st_mtime))
+        return {
+            "schema": "hermes.wasm_agent.native_defaults.v1",
+            "buildPlatform": "android",
+            "targetArch": "arm64" if "arm64" in artifact.name or artifact.name == "app-release.apk" else "universal",
+            "nativeShellVersion": PLUGIN_VERSION,
+            "wasmAgentVersion": PLUGIN_VERSION,
+            "installableVersion": PLUGIN_VERSION,
+            "versionCode": 1,
+            "buildId": f"android-{stamp}-{digest[:8]}",
+            "buildGeneratedAt": generated_at,
+            "artifactKind": "android-apk",
+            "artifactSha256": digest,
+            "artifactSize": stat.st_size,
+        }
     return {}
 
 
@@ -6677,7 +6704,13 @@ def redact_native_diagnostics(value: Any, depth: int = 0) -> Any:
 
 NATIVE_CONTROL_COMMAND_TYPES = {
     "get_bridge_status",
+    "get_native_kernel_status",
     "list_hot_operations",
+    "refresh_downloaded_runtime",
+    "sync_downloaded_runtime",
+    "rollback_downloaded_runtime",
+    "refresh_downloaded_hot_ops",
+    "sync_downloaded_hot_ops",
     "run_shell_self_test",
     "run_hot_operation",
     "upload_diagnostics",
@@ -6708,7 +6741,13 @@ NATIVE_CONTROL_COMMAND_TYPES = {
 
 FRONTIER_OPERATOR_COMMAND_TYPES = {
     "get_bridge_status",
+    "get_native_kernel_status",
     "list_hot_operations",
+    "refresh_downloaded_runtime",
+    "sync_downloaded_runtime",
+    "rollback_downloaded_runtime",
+    "refresh_downloaded_hot_ops",
+    "sync_downloaded_hot_ops",
     "run_shell_self_test",
     "run_hot_operation",
     "status",
@@ -6737,7 +6776,13 @@ FRONTIER_OPERATOR_DESTRUCTIVE_COMMANDS = {"clear_cache", "restart_app"}
 
 FRONTIER_OPERATOR_NATIVE_COMMAND = {
     "get_bridge_status": "get_bridge_status",
+    "get_native_kernel_status": "get_native_kernel_status",
     "list_hot_operations": "list_hot_operations",
+    "refresh_downloaded_runtime": "refresh_downloaded_runtime",
+    "sync_downloaded_runtime": "sync_downloaded_runtime",
+    "rollback_downloaded_runtime": "rollback_downloaded_runtime",
+    "refresh_downloaded_hot_ops": "refresh_downloaded_hot_ops",
+    "sync_downloaded_hot_ops": "sync_downloaded_hot_ops",
     "run_shell_self_test": "run_shell_self_test",
     "run_hot_operation": "run_hot_operation",
     "status": "status",
@@ -6850,6 +6895,95 @@ def native_control_command_path(server: WasmAgentServer, device_id: str, command
     return root / f"{command_id}.json"
 
 
+def native_control_iso_to_epoch(value: Any) -> float:
+    try:
+        return float(calendar.timegm(time.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")))
+    except Exception:
+        return 0.0
+
+
+def native_control_command_timeout_sec(command_type: str, payload: dict[str, Any] | None = None) -> int:
+    payload = payload if isinstance(payload, dict) else {}
+    requested = payload.get("nativeControlTimeoutSec") or payload.get("native_control_timeout_sec")
+    if requested is None:
+        requested_ms = payload.get("nativeControlTimeoutMs") or payload.get("native_control_timeout_ms")
+        try:
+            requested = float(requested_ms) / 1000.0 if requested_ms is not None else None
+        except (TypeError, ValueError):
+            requested = None
+    try:
+        if requested is not None:
+            return max(1, min(600, int(float(requested))))
+    except (TypeError, ValueError):
+        pass
+    return int(NATIVE_CONTROL_COMMAND_TIMEOUT_SEC.get(command_type, NATIVE_CONTROL_DEFAULT_COMMAND_TIMEOUT_SEC))
+
+
+def native_control_timeout_result(command: dict[str, Any], now: str) -> dict[str, Any]:
+    command_type = clipped_verbatim(str(command.get("type") or "unknown"), 80)
+    timeout_sec = int(command.get("timeout_sec") or native_control_command_timeout_sec(command_type, command.get("payload") if isinstance(command.get("payload"), dict) else {}))
+    return {
+        "ok": False,
+        "operation": command_type,
+        "error": "handler_timeout",
+        "failureClassification": "handler_timeout",
+        "timedOut": True,
+        "timeoutSec": timeout_sec,
+        "timeoutMs": timeout_sec * 1000,
+        "started_at": command.get("delivered_at") or "",
+        "completed_at": now,
+        "message": f"Native-control command exceeded its {timeout_sec}s server deadline before a result upload arrived.",
+    }
+
+
+def expire_native_control_command(server: WasmAgentServer, path: Path, command: dict[str, Any], now: str, reason: str = "server_deadline") -> dict[str, Any]:
+    device_id = native_device_id_from_value(command.get("device_id"), path.parent.name)
+    command_id = safe_state_id(str(command.get("id") or path.stem), path.stem)
+    result_payload = native_control_timeout_result(command, now)
+    result = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_control_result.v1",
+        "device_id": device_id,
+        "command_id": command_id,
+        "received_at": now,
+        "remote_addr": "server-timeout",
+        "result": result_payload,
+    }
+    root = native_control_dir(server)
+    write_json_file(root / "results" / device_id / f"{command_id}.json", result)
+    command["status"] = "finished"
+    command["finished_at"] = now
+    command["timeout_at"] = now
+    command["timeout_reason"] = reason
+    command["result"] = result_payload
+    write_json_file(path, command)
+    append_native_control_audit(server, {
+        "action": "command_timeout",
+        "device_id": device_id,
+        "command_id": command_id,
+        "command_type": command.get("type") or "unknown",
+        "timeout_sec": result_payload["timeoutSec"],
+        "reason": reason,
+    })
+    return result
+
+
+def expire_stale_native_control_commands(server: WasmAgentServer, command_root: Path, now: str) -> None:
+    now_epoch = native_control_iso_to_epoch(now)
+    if now_epoch <= 0 or not command_root.exists():
+        return
+    for path in sorted(command_root.glob("*.json"), key=lambda item: item.stat().st_mtime):
+        command = read_json_file(path, {})
+        if not isinstance(command, dict) or command.get("status") != "delivered" or command.get("finished_at"):
+            continue
+        delivered_epoch = native_control_iso_to_epoch(command.get("delivered_at"))
+        if delivered_epoch <= 0:
+            continue
+        timeout_sec = int(command.get("timeout_sec") or native_control_command_timeout_sec(str(command.get("type") or ""), command.get("payload") if isinstance(command.get("payload"), dict) else {}))
+        if now_epoch - delivered_epoch >= timeout_sec:
+            expire_native_control_command(server, path, command, now)
+
+
 def create_native_control_command(
     server: WasmAgentServer,
     body: dict[str, Any],
@@ -6866,6 +7000,7 @@ def create_native_control_command(
     command_id = safe_state_id(str(body.get("command_id") or f"cmd-{uuid.uuid4().hex[:16]}"), f"cmd-{uuid.uuid4().hex[:16]}")
     payload = redact_native_diagnostics(body.get("payload") if isinstance(body.get("payload"), dict) else {})
     reason = clipped_verbatim(str(body.get("reason") or payload.get("reason") or ""), 600)
+    timeout_sec = native_control_command_timeout_sec(command_type, payload)
     record = {
         "ok": True,
         "schema": "hermes.wasm_agent.native_control_command.v1",
@@ -6875,6 +7010,7 @@ def create_native_control_command(
         "payload": payload,
         "status": "pending",
         "created_at": iso_timestamp(),
+        "timeout_sec": timeout_sec,
         "created_by": actor,
         "reason": reason,
     }
@@ -6885,6 +7021,7 @@ def create_native_control_command(
         "device_id": device_id,
         "command_id": command_id,
         "command_type": command_type,
+        "timeout_sec": timeout_sec,
         "reason": reason,
         "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
     })
@@ -6909,6 +7046,7 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
     root = native_control_dir(server)
     write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
     command_root = root / "commands" / device_id
+    expire_stale_native_control_commands(server, command_root, now)
     commands: list[dict[str, Any]] = []
     if command_root.exists():
         for path in sorted(command_root.glob("*.json"), key=lambda item: item.stat().st_mtime):
@@ -6917,6 +7055,7 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
                 continue
             command["status"] = "delivered"
             command["delivered_at"] = now
+            command["deadline_at"] = iso_timestamp_from_epoch(native_control_iso_to_epoch(now) + int(command.get("timeout_sec") or native_control_command_timeout_sec(str(command.get("type") or ""), command.get("payload") if isinstance(command.get("payload"), dict) else {})))
             write_json_file(path, command)
             commands.append(command)
             if len(commands) >= 8:
@@ -8597,6 +8736,10 @@ def save_user_spaces(
 
 def iso_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def iso_timestamp_from_epoch(value: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
 
 
 def json_clone(value: Any) -> Any:

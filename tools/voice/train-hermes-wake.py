@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import warnings
 from pathlib import Path
 
 from hermes_wake_lib import (
+    calibration_report,
     RECOMMENDED_NEGATIVE,
     RECOMMENDED_POSITIVE,
     SAMPLE_RATE,
@@ -19,14 +21,29 @@ from hermes_wake_lib import (
     WINDOW_SAMPLES,
     load_audio,
     print_gate,
+    score_summary,
+    sha256_file,
     write_threshold,
 )
 
 
 def collect(dataset: Path) -> tuple[list[Path], list[Path]]:
-    positives = sorted(path for path in (dataset / "positive").glob("*.wav") if path.is_file() and path.stat().st_size > 0)
+    positives = sorted(path for path in (dataset / "positive").glob("**/*.wav") if path.is_file() and path.stat().st_size > 0)
     negatives = sorted(path for path in (dataset / "negative").glob("**/*.wav") if path.is_file() and path.stat().st_size > 0)
     return positives, negatives
+
+
+def is_confuser(path: Path) -> bool:
+    text = str(path).lower()
+    if "confuser" in text:
+        return True
+    sidecar = path.with_suffix(".json")
+    if not sidecar.exists():
+        return False
+    try:
+        return "confuser" in sidecar.read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
 
 
 def split_indices(count: int) -> tuple[list[int], list[int]]:
@@ -44,6 +61,7 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--threshold-out", default=None)
+    parser.add_argument("--calibration-out", default="build/voice/hermes-calibration.json")
     args = parser.parse_args()
 
     try:
@@ -119,8 +137,10 @@ def main() -> int:
             print(f"epoch={epoch + 1} loss={total / len(loader.dataset):.6f}")
 
     model.eval()
+    all_x = torch.from_numpy(x[:, None, :])
     with torch.no_grad():
         scores = model(val_x).numpy().reshape(-1)
+        all_scores = model(all_x).numpy().reshape(-1)
     threshold = float(np.clip((scores[val_y_np == 1].mean() + scores[val_y_np == 0].mean()) / 2.0, 0.05, 0.95)) if len(scores) else 0.5
     predictions = scores >= threshold
     positives_mask = val_y_np == 1
@@ -166,6 +186,38 @@ def main() -> int:
                 "validation_count": len(val_idx),
             },
         )
+
+    score_by_path = {path: float(score) for path, score in zip([pair[0] for pair in pairs], all_scores, strict=True)}
+    positive_scores = [score_by_path[path] for path in positives if path in score_by_path]
+    negative_scores = [score_by_path[path] for path in negatives if path in score_by_path and not is_confuser(path)]
+    confuser_scores = [score_by_path[path] for path in negatives if path in score_by_path and is_confuser(path)]
+    model_sha = sha256_file(output)
+    report = calibration_report(model_sha, positive_scores, negative_scores, confuser_scores)
+    calibration_out = Path(args.calibration_out)
+    calibration_out.parent.mkdir(parents=True, exist_ok=True)
+    calibration_out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def print_summary(label: str, values: list[float]) -> None:
+        summary = score_summary(values)
+        print(
+            f"{label} confidence distribution: "
+            f"count={summary['count']} min={summary['min']:.4f} "
+            f"p50={summary['p50']:.4f} p90={summary['p90']:.4f} "
+            f"p95={summary['p95']:.4f} max={summary['max']:.4f}"
+        )
+
+    print_summary("positive", positive_scores)
+    print_summary("negative", negative_scores)
+    print_summary("confuser", confuser_scores)
+    print(f"recommended threshold: {report['recommended_threshold']:.4f}")
+    print(f"false accept estimate: {report['false_accept_estimate']:.4f}")
+    print(f"false reject estimate: {report['false_reject_estimate']:.4f}")
+    print(f"max positive score: {report['max_positive_score']:.4f}")
+    print(f"min positive score: {report['min_positive_score']:.4f}")
+    print(f"max negative/confuser score: {report['max_negative_score']:.4f}")
+    print(f"model SHA: {model_sha}")
+    print(f"calibration report: {calibration_out}")
+    print(f"quality verdict: {report['quality_verdict']}")
 
     sys.stdout.flush()
     checker = Path(__file__).with_name("check-hermes-onnx.py")

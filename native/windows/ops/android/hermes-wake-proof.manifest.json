@@ -1,7 +1,14 @@
 {
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
   "name": "run_android_hermes_wake_proof",
   "version": "20260612T2030",
   "entry": "hermes-wake-proof.js",
+  "operationId": "run_android_hermes_wake_proof",
+  "requiredNativeCapabilities": [
+    "native.capabilities.deviceControl.v1",
+    "native.capabilities.statusBus.v1",
+    "native.capabilities.hotOps.v1"
+  ],
   "capabilities": [
     "adb.device",
     "adb.shell",
@@ -9,5 +16,27 @@
     "diagnostics.read",
     "result.upload"
   ],
-  "timeoutMs": 45000
+  "timeoutMs": 180000,
+  "inputsSchema": {
+    "type": "object",
+    "properties": {
+      "waitMs": { "type": "number" },
+      "wakeThreshold": { "type": "number" },
+      "wake_threshold": { "type": "number" },
+      "dryRun": { "type": "boolean" }
+    }
+  },
+  "outputsSchema": {
+    "type": "object",
+    "required": ["ok", "stable", "failureClassification", "stages", "metrics"]
+  },
+  "safetyLimits": {
+    "maxWaitMs": 120000,
+    "adbPackage": "com.colmeio.wasmagent",
+    "network": "native-diagnostics-upload-only"
+  },
+  "rollback": {
+    "mode": "last-known-good",
+    "fallbackOperation": "canary_echo"
+  }
 }

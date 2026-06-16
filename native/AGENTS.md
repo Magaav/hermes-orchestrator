@@ -44,6 +44,8 @@ and Linux.
 
 - `NATIVE_SHELL_CONTRACT.md`: shared backend, login, live-evolution, diagnostics,
   and platform status contract.
+- `NATIVE_EVOLUTION_CONTRACT.md`: shared native capability kernel,
+  downloaded-runtime, hot-op, sync, rollback, and no-rebuild contract.
 - `windows/AGENTS.md`: Windows Electron/NSIS contract.
 - `windows/README.md`: Windows build, proof, artifact, and next action.
 - `android/AGENTS.md`: Android APK/WebView/voice contract.

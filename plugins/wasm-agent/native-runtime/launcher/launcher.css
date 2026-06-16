@@ -1,0 +1,31 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #07110f;
+  color: #edf7f2;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+main {
+  width: min(720px, calc(100vw - 32px));
+}
+
+h1 {
+  margin: 0 0 12px;
+  font-size: 24px;
+  letter-spacing: 0;
+}
+
+pre {
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid #29443b;
+  border-radius: 8px;
+  background: #0d1d19;
+}

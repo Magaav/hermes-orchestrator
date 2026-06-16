@@ -72,6 +72,15 @@ class MainActivity : Activity() {
         private const val PREF_INSTALL_ID = "install_id"
         private const val PREF_LAST_URL = "last_url"
         private const val PREF_SELECTED_ORIGIN = "selected_origin"
+        private const val PREF_ACTIVE_RUNTIME_ID = "active_downloaded_runtime_id"
+        private const val PREF_ACTIVE_RUNTIME_SHA = "active_downloaded_runtime_sha"
+        private const val PREF_ACTIVE_RUNTIME_MANIFEST_SHA = "active_downloaded_runtime_manifest_sha"
+        private const val PREF_ACTIVE_RUNTIME_SYNCED_AT = "active_downloaded_runtime_synced_at"
+        private const val PREF_LAST_GOOD_RUNTIME_ID = "last_good_downloaded_runtime_id"
+        private const val PREF_LAST_GOOD_RUNTIME_SHA = "last_good_downloaded_runtime_sha"
+        private const val PREF_LAST_RUNTIME_SYNC_STATUS = "last_downloaded_runtime_sync_status"
+        private const val PREF_ACTIVE_HOT_OP_ID = "active_hot_op_bundle_id"
+        private const val PREF_ACTIVE_HOT_OP_SHA = "active_hot_op_bundle_sha"
         private const val STATE_WEBVIEW = "wasm_agent_webview_state"
         private const val STATE_SELECTED_ORIGIN = "wasm_agent_selected_origin"
         private const val EXTRA_DEBUG_SCREEN = "debug_screen"
@@ -268,7 +277,7 @@ class MainActivity : Activity() {
             if (debugScreen == "export-hermes-dataset") {
                 triggerHermesDatasetExport("debug_intent")
             } else if (debugScreen == "hermes-wake-proof") {
-                beginHermesWakeProof("debug_intent")
+                beginHermesWakeProof("debug_intent", thresholdFromIntent(intent))
             }
         }
         if (intent?.getBooleanExtra(EXTRA_CLEAR_WEBVIEW_DATA, false) == true) {
@@ -291,7 +300,7 @@ class MainActivity : Activity() {
                 .put("reason", reason)
                 .put("debug_screen", requestedScreen))
             if (requestedScreen == "hermes-wake-proof") {
-                beginHermesWakeProof("debug_url")
+                beginHermesWakeProof("debug_url", thresholdFromData(data))
             }
         }
         val isCustomSchemeReturn = data.scheme == "wasm-agent" && data.host == "android-auth-return"
@@ -1429,6 +1438,25 @@ class MainActivity : Activity() {
         fun config(): String = nativeShellConfig(origin).toString()
 
         @JavascriptInterface
+        fun getKernelStatus(): String = this@MainActivity.nativeKernelStatus().toString()
+
+        @JavascriptInterface
+        fun syncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = false).toString()
+
+        @JavascriptInterface
+        fun forceSyncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = true).toString()
+
+        @JavascriptInterface
+        fun rollbackDownloadedRuntime(): String =
+            this@MainActivity.rollbackDownloadedRuntime().toString()
+
+        @JavascriptInterface
+        fun runDownloadedOperation(operationManifestJson: String?, inputsJson: String?): String =
+            this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
+
+        @JavascriptInterface
         fun reload() {
             runOnUiThread {
                 logDiagnostic("renderer_reload_requested")
@@ -1695,6 +1723,25 @@ class MainActivity : Activity() {
         fun getStatus(): String = nativeBridge().voiceTuningStatus()
 
         @JavascriptInterface
+        fun getKernelStatus(): String = this@MainActivity.nativeKernelStatus().toString()
+
+        @JavascriptInterface
+        fun syncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = false).toString()
+
+        @JavascriptInterface
+        fun forceSyncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = true).toString()
+
+        @JavascriptInterface
+        fun rollbackDownloadedRuntime(): String =
+            this@MainActivity.rollbackDownloadedRuntime().toString()
+
+        @JavascriptInterface
+        fun runDownloadedOperation(operationManifestJson: String?, inputsJson: String?): String =
+            this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
+
+        @JavascriptInterface
         fun getBuildInfo(): String = this@MainActivity.voiceTuningBridgeBuildInfo().toString()
 
         @JavascriptInterface
@@ -1758,6 +1805,25 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun getNativeState(): String = diagnosticsSnapshot().toString()
+
+        @JavascriptInterface
+        fun getKernelStatus(): String = this@MainActivity.nativeKernelStatus().toString()
+
+        @JavascriptInterface
+        fun syncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = false).toString()
+
+        @JavascriptInterface
+        fun forceSyncDownloadedRuntime(manifestJson: String?): String =
+            this@MainActivity.syncDownloadedRuntimeFromManifest(manifestJson, force = true).toString()
+
+        @JavascriptInterface
+        fun rollbackDownloadedRuntime(): String =
+            this@MainActivity.rollbackDownloadedRuntime().toString()
+
+        @JavascriptInterface
+        fun runDownloadedOperation(operationManifestJson: String?, inputsJson: String?): String =
+            this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
 
         @JavascriptInterface
         fun exportLatest(): String = diagnostics.latestString()
@@ -1843,6 +1909,244 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun jsonArray(values: List<String>): JSONArray {
+        val array = JSONArray()
+        values.forEach { value -> array.put(value) }
+        return array
+    }
+
+    private fun jsonStringList(array: JSONArray?): List<String> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            array.optString(index, "").takeIf { it.isNotBlank() }
+        }
+    }
+
+    private fun activeDownloadedRuntimeStatus(): JSONObject {
+        val activeId = prefs.getString(PREF_ACTIVE_RUNTIME_ID, "").orEmpty()
+        val activeSha = prefs.getString(PREF_ACTIVE_RUNTIME_SHA, "").orEmpty()
+        val lastGoodId = prefs.getString(PREF_LAST_GOOD_RUNTIME_ID, "").orEmpty()
+        val lastGoodSha = prefs.getString(PREF_LAST_GOOD_RUNTIME_SHA, "").orEmpty()
+        val syncStatus = prefs.getString(PREF_LAST_RUNTIME_SYNC_STATUS, "").orEmpty()
+            .ifBlank { if (activeId.isBlank()) "not_synced" else "cached" }
+        return JSONObject()
+            .put("supported", true)
+            .put("protocol", 1)
+            .put("runtimeLoaderProtocolVersion", 1)
+            .put("storage", "shared-preferences-and-webview-cache")
+            .put("activeRuntimeId", activeId)
+            .put("activeRuntimeSha", activeSha)
+            .put("activeDownloadedRuntimeId", activeId)
+            .put("activeDownloadedRuntimeSha", activeSha)
+            .put("activeManifestSha", prefs.getString(PREF_ACTIVE_RUNTIME_MANIFEST_SHA, "").orEmpty())
+            .put("activeRuntimeActivatedAt", prefs.getString(PREF_ACTIVE_RUNTIME_SYNCED_AT, "").orEmpty())
+            .put("lastKnownGoodRuntimeId", lastGoodId)
+            .put("lastKnownGoodRuntimeSha", lastGoodSha)
+            .put("syncStatus", syncStatus)
+            .put("stale", syncStatus.contains("stale", ignoreCase = true))
+            .put("staleReason", if (syncStatus.contains("stale", ignoreCase = true)) syncStatus else "")
+    }
+
+    private fun activeHotOpStatus(): JSONObject {
+        return JSONObject()
+            .put("supported", true)
+            .put("protocol", 1)
+            .put("activeHotOpBundleId", prefs.getString(PREF_ACTIVE_HOT_OP_ID, "").orEmpty())
+            .put("activeHotOpSha", prefs.getString(PREF_ACTIVE_HOT_OP_SHA, "").orEmpty())
+            .put("source", "downloaded-runtime-webview-bridge")
+    }
+
+    private fun nativeKernelStatus(): JSONObject {
+        val supported = NativeBridgeContract.androidKernelCapabilities
+        val unsupported = NativeBridgeContract.allKernelCapabilities.filter { capability -> capability !in supported }
+        val runtime = activeDownloadedRuntimeStatus()
+        val hotOps = activeHotOpStatus()
+        return JSONObject()
+            .put("schema", "hermes.wasm_agent.native_kernel_status.v1")
+            .put("native.kernel.version", NativeBridgeContract.KERNEL_CONTRACT_VERSION)
+            .put("nativeKernelVersion", NativeBridgeContract.KERNEL_CONTRACT_VERSION)
+            .put("kernelContractVersion", NativeBridgeContract.KERNEL_CONTRACT_VERSION)
+            .put("platform", "android")
+            .put("runtime", "android-webview")
+            .put("installedNativeBuildId", BuildConfig.NATIVE_BUILD_ID)
+            .put("nativeBuildId", BuildConfig.NATIVE_BUILD_ID)
+            .put("installedNativeVersion", nativePackageInfo().optString("versionName"))
+            .put("supportedCapabilities", jsonArray(supported))
+            .put("missingCapabilities", JSONArray())
+            .put("unsupportedCapabilities", jsonArray(unsupported))
+            .put("bridgeProtocolCapabilities", jsonArray(NativeBridgeContract.nativeKernelMethods + NativeBridgeContract.voiceTuningMethods))
+            .put("downloadedRuntime", runtime)
+            .put("hotOperations", hotOps)
+            .put("activeDownloadedRuntimeId", runtime.optString("activeRuntimeId"))
+            .put("activeDownloadedRuntimeSha", runtime.optString("activeRuntimeSha"))
+            .put("activeHotOpBundleId", hotOps.optString("activeHotOpBundleId"))
+            .put("activeHotOpSha", hotOps.optString("activeHotOpSha"))
+            .put("syncStatus", JSONObject()
+                .put("runtime", runtime.optString("syncStatus"))
+                .put("hotOps", if (hotOps.optString("activeHotOpBundleId").isBlank()) "not_synced" else "cached"))
+            .put("stale", runtime.optBoolean("stale", false))
+            .put("staleReason", runtime.optString("staleReason"))
+    }
+
+    private fun syncDownloadedRuntimeFromManifest(payloadJson: String?, force: Boolean): JSONObject {
+        val manifest = parseJsonPayload(payloadJson)
+        val bundleId = manifest.optString("bundleId", manifest.optString("runtimeId", manifest.optString("id", "")))
+        val bundleSha = manifest.optString("bundleSha", manifest.optString("sha256", manifest.optString("trustedSha256", "")))
+        val manifestSha = manifest.optString("manifestSha", "")
+        if (bundleId.isBlank() || bundleSha.isBlank()) {
+            prefs.edit().putString(PREF_LAST_RUNTIME_SYNC_STATUS, "runtime_manifest_invalid").apply()
+            return JSONObject()
+                .put("ok", false)
+                .put("operation", if (force) "forceSyncDownloadedRuntime" else "syncDownloadedRuntime")
+                .put("error", "runtime_manifest_invalid")
+                .put("failureClassification", "runtime_manifest_invalid")
+                .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+        }
+        val required = jsonStringList(manifest.optJSONArray("requiredNativeCapabilities"))
+        val missing = required.filter { capability -> capability !in NativeBridgeContract.androidKernelCapabilities }
+        if (missing.isNotEmpty()) {
+            prefs.edit().putString(PREF_LAST_RUNTIME_SYNC_STATUS, "runtime_missing_capability").apply()
+            return JSONObject()
+                .put("ok", false)
+                .put("operation", if (force) "forceSyncDownloadedRuntime" else "syncDownloadedRuntime")
+                .put("error", "runtime_missing_capability")
+                .put("failureClassification", "native_capability_missing")
+                .put("missingNativeCapabilities", jsonArray(missing))
+                .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+        }
+        val previousId = prefs.getString(PREF_ACTIVE_RUNTIME_ID, "").orEmpty()
+        val previousSha = prefs.getString(PREF_ACTIVE_RUNTIME_SHA, "").orEmpty()
+        val changed = force || previousId != bundleId || previousSha != bundleSha
+        val editor = prefs.edit()
+        if (changed && previousId.isNotBlank() && previousSha.isNotBlank()) {
+            editor.putString(PREF_LAST_GOOD_RUNTIME_ID, previousId)
+            editor.putString(PREF_LAST_GOOD_RUNTIME_SHA, previousSha)
+        }
+        editor.putString(PREF_ACTIVE_RUNTIME_ID, bundleId)
+            .putString(PREF_ACTIVE_RUNTIME_SHA, bundleSha)
+            .putString(PREF_ACTIVE_RUNTIME_MANIFEST_SHA, manifestSha)
+            .putString(PREF_ACTIVE_RUNTIME_SYNCED_AT, System.currentTimeMillis().toString())
+            .putString(PREF_LAST_RUNTIME_SYNC_STATUS, if (changed) "activated" else "current")
+            .apply()
+        return JSONObject()
+            .put("ok", true)
+            .put("operation", if (force) "forceSyncDownloadedRuntime" else "syncDownloadedRuntime")
+            .put("changed", changed)
+            .put("bundleId", bundleId)
+            .put("bundleSha", bundleSha)
+            .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+            .put("kernel", nativeKernelStatus())
+    }
+
+    private fun rollbackDownloadedRuntime(): JSONObject {
+        val lastGoodId = prefs.getString(PREF_LAST_GOOD_RUNTIME_ID, "").orEmpty()
+        val lastGoodSha = prefs.getString(PREF_LAST_GOOD_RUNTIME_SHA, "").orEmpty()
+        if (lastGoodId.isBlank() || lastGoodSha.isBlank()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("operation", "rollbackDownloadedRuntime")
+                .put("error", "last_known_good_missing")
+                .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+        }
+        val activeId = prefs.getString(PREF_ACTIVE_RUNTIME_ID, "").orEmpty()
+        val activeSha = prefs.getString(PREF_ACTIVE_RUNTIME_SHA, "").orEmpty()
+        prefs.edit()
+            .putString(PREF_ACTIVE_RUNTIME_ID, lastGoodId)
+            .putString(PREF_ACTIVE_RUNTIME_SHA, lastGoodSha)
+            .putString(PREF_LAST_GOOD_RUNTIME_ID, activeId)
+            .putString(PREF_LAST_GOOD_RUNTIME_SHA, activeSha)
+            .putString(PREF_LAST_RUNTIME_SYNC_STATUS, "rolled_back_to_last_known_good")
+            .apply()
+        return JSONObject()
+            .put("ok", true)
+            .put("operation", "rollbackDownloadedRuntime")
+            .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+            .put("kernel", nativeKernelStatus())
+    }
+
+    private fun runDownloadedOperation(operationJson: String?, inputsJson: String?): JSONObject {
+        val manifest = parseJsonPayload(operationJson)
+        val inputs = parseJsonPayload(inputsJson)
+        val operationId = manifest.optString("operationId", manifest.optString("name", ""))
+        val required = jsonStringList(manifest.optJSONArray("requiredNativeCapabilities"))
+        val missing = required.filter { capability -> capability !in NativeBridgeContract.androidKernelCapabilities }
+        val timeoutMs = manifest.optLong("timeoutMs", 5000L).coerceIn(250L, 180000L)
+        if (missing.isNotEmpty()) {
+            return JSONObject()
+                .put("ok", false)
+                .put("stable", false)
+                .put("operation", operationId)
+                .put("timeoutMs", timeoutMs)
+                .put("error", "native_capability_missing")
+                .put("failureClassification", "native_capability_missing")
+                .put("missingNativeCapabilities", jsonArray(missing))
+                .put("kernel", nativeKernelStatus())
+        }
+        return when (operationId) {
+            "get_native_kernel_status", "native.status", "android_native_status" -> JSONObject()
+                .put("ok", true)
+                .put("stable", true)
+                .put("operation", operationId)
+                .put("timeoutMs", timeoutMs)
+                .put("kernel", nativeKernelStatus())
+                .put("inputs", inputs)
+                .put("failureClassification", "pass")
+            "run_android_hermes_wake_proof" -> {
+                val requestedThreshold = HermesVoiceWakeService.normalizedWakeThreshold(
+                    inputs.optDouble("wake_threshold", inputs.optDouble("wakeThreshold", Double.NaN)),
+                )
+                val origin = inputs.optString("origin", selectedOrigin)
+                    .ifBlank { prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, "").orEmpty() }
+                    .ifBlank { BuildConfig.DEFAULT_SERVER_URL }
+                val needed = voiceWakeRuntimePermissions().filter { permission -> !permissionGranted(permission) }
+                if (requestedThreshold != null) {
+                    prefs.edit()
+                        .putFloat(HermesVoiceWakeService.PREF_WAKE_THRESHOLD, requestedThreshold.toFloat())
+                        .putString(HermesVoiceWakeService.PREF_WAKE_THRESHOLD_SOURCE, HermesVoiceWakeService.THRESHOLD_SOURCE_REMOTE_CONFIG)
+                        .apply()
+                }
+                prefs.edit()
+                    .putBoolean(HermesVoiceWakeService.PREF_ENABLED, true)
+                    .putString(HermesVoiceWakeService.PREF_ORIGIN, origin)
+                    .apply()
+                if (needed.isEmpty()) {
+                    runOnUiThread {
+                        HermesVoiceWakeService.start(this, origin, proofSession = true, wakeThreshold = requestedThreshold)
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    runOnUiThread { requestPermissions(needed.toTypedArray(), REQUEST_VOICE_WAKE_PERMISSION) }
+                }
+                JSONObject()
+                    .put("ok", needed.isEmpty())
+                    .put("stable", false)
+                    .put("operation", operationId)
+                    .put("timeoutMs", timeoutMs)
+                    .put("started", needed.isEmpty())
+                    .put("missingRuntimePermissions", JSONArray(needed))
+                    .put("wakeThreshold", HermesVoiceWakeService.configuredWakeThreshold(this))
+                    .put("thresholdPolicySource", normalizedThresholdPolicySource())
+                    .put("status", voiceWakeStatus())
+                    .put("kernel", nativeKernelStatus())
+                    .put("failureClassification", if (needed.isEmpty()) "proof_started" else "record_audio_permission_missing")
+            }
+            "canary_echo" -> JSONObject()
+                .put("ok", true)
+                .put("stable", true)
+                .put("operation", operationId)
+                .put("message", "downloaded operation manifest accepted")
+                .put("failureClassification", "pass")
+            else -> JSONObject()
+                .put("ok", false)
+                .put("stable", false)
+                .put("operation", operationId)
+                .put("timeoutMs", timeoutMs)
+                .put("error", "downloaded_operation_not_supported")
+                .put("failureClassification", "downloaded_operation_not_supported")
+                .put("nextAction", "Run product logic from the downloaded WebView/runtime bundle and call stable native bridge primitives.")
+                .put("kernel", nativeKernelStatus())
+        }
+    }
+
     private fun nativeShellConfig(origin: String): JSONObject {
         return JSONObject()
             .put("schema", "hermes.wasm_agent.android_native_shell.v1")
@@ -1863,6 +2167,9 @@ class MainActivity : Activity() {
             .put("nativeCorrelationId", nativeCorrelationId)
             .put("installDeviceHash", installDeviceHash)
             .put("deviceId", "android-${BuildConfig.NATIVE_BUILD_ID}")
+            .put("nativeKernel", nativeKernelStatus())
+            .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+            .put("hotOperations", activeHotOpStatus())
             .put("voiceWake", voiceWakeStatusLightweight())
             .put("diagnosticsPath", diagnostics.path())
     }
@@ -2294,6 +2601,9 @@ class MainActivity : Activity() {
             .put("last_deep_link", lastDeepLinkSummary ?: JSONObject.NULL)
             .put("android_auth_session", androidAuthSessionId)
             .put("native_correlation_id", nativeCorrelationId)
+            .put("nativeKernel", nativeKernelStatus())
+            .put("downloadedRuntime", activeDownloadedRuntimeStatus())
+            .put("hotOperations", activeHotOpStatus())
             .put("safe_cookie_session_summary", safeCookieSummary())
             .put("oauth", JSONObject()
                 .put("stage", oauthStage)
@@ -2399,6 +2709,8 @@ class MainActivity : Activity() {
         val modelSha = sha256FileOrBlank(personalizedModelFile)
         val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
         val liveStatusMissing = !base.has("wake_engine_ready")
+        val wakeThreshold = HermesVoiceWakeService.configuredWakeThreshold(this)
+        val thresholdPolicySource = normalizedThresholdPolicySource()
         val disabledReason = when {
             !permissionGranted(Manifest.permission.RECORD_AUDIO) -> "record_audio_permission_missing"
             !enabled -> "voice_wake_disabled"
@@ -2433,8 +2745,24 @@ class MainActivity : Activity() {
             .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
             .put("model_sha_match", base.optBoolean("model_sha_match", modelShaMatch))
             .put("acceptance_model_sha256_match", base.optBoolean("acceptance_model_sha256_match", modelShaMatch))
+            .put("wake_threshold", base.optDouble("wake_threshold", wakeThreshold))
+            .put("threshold", base.optDouble("threshold", wakeThreshold))
+            .put("proof_threshold_override", base.opt("proof_threshold_override") ?: JSONObject.NULL)
+            .put("effective_wake_threshold", base.optDouble("effective_wake_threshold", wakeThreshold))
+            .put("threshold_margin", base.optDouble("threshold_margin", base.optDouble("max_observed_confidence", 0.0) - base.optDouble("threshold", wakeThreshold)))
+            .put("threshold_policy_source", base.optString("threshold_policy_source", thresholdPolicySource))
+            .put("policy_source", base.optString("policy_source", thresholdPolicySource))
             .put("model_asset_found", hermesWakeModelAssetFound())
             .put("onnx_runtime_available", base.optBoolean("onnx_runtime_available", false))
+            .put("foreground_service_started", base.optBoolean("foreground_service_started", false))
+            .put("audio_record_permission_granted", base.optBoolean("audio_record_permission_granted", permissionGranted(Manifest.permission.RECORD_AUDIO)))
+            .put("audio_record_initialized", base.optBoolean("audio_record_initialized", false))
+            .put("audio_record_start_called", base.optBoolean("audio_record_start_called", false))
+            .put("audio_record_read_count", base.optLong("audio_record_read_count", base.optLong("audio_read_calls", 0L)))
+            .put("audio_record_last_error", base.optString("audio_record_last_error", base.optString("audio_record_error", "")))
+            .put("inference_count", base.optLong("inference_count", 0L))
+            .put("last_confidence", base.optDouble("last_confidence", base.optDouble("last_wake_confidence", 0.0)))
+            .put("wake_detected", base.optBoolean("wake_detected", base.optLong("wake_detection_count", 0L) > 0L || base.optBoolean("wake_detected_event_emitted", false)))
             .put("onnx_runtime_error", base.optString("onnx_runtime_error", if (liveStatusMissing) "live service has not reported ONNX Runtime readiness" else ""))
             .put("wake_engine_error", base.optString("wake_engine_error", if (liveStatusMissing) "live service has not reported WakeEngine readiness" else ""))
             .put("wake_model", JSONObject()
@@ -2455,9 +2783,12 @@ class MainActivity : Activity() {
 
     private fun voiceWakeStatus(): JSONObject {
         val enabled = prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false)
+        val wakeThreshold = HermesVoiceWakeService.configuredWakeThreshold(this)
+        val thresholdPolicySource = normalizedThresholdPolicySource()
         val wakeSelection = WakeModelSelector.select(
             File(filesDir, "voice/hermes.onnx"),
             File(filesDir, "voice/base_hermes.onnx"),
+            wakeThreshold,
         )
         val wakeEngine = wakeSelection.engine
         val wakeDiagnostics = wakeEngine.diagnostics()
@@ -2498,6 +2829,7 @@ class MainActivity : Activity() {
         return base
             .put("enabled", enabled)
             .put("disabled_reason", disabledReason)
+            .put("service_alive", base.optBoolean("service_alive", false))
             .put("wake_word", "hermes")
             .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
             .put("permission_foreground_service", hasManifestPermission(Manifest.permission.FOREGROUND_SERVICE))
@@ -2518,8 +2850,29 @@ class MainActivity : Activity() {
             .put("model_sha", base.optString("model_sha", modelSha))
             .put("model_sha256", base.optString("model_sha256", modelSha))
             .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
+            .put("wake_threshold", base.optDouble("wake_threshold", wakeThreshold))
+            .put("threshold", base.optDouble("threshold", wakeThreshold))
+            .put("proof_threshold_override", base.opt("proof_threshold_override") ?: JSONObject.NULL)
+            .put("effective_wake_threshold", base.optDouble("effective_wake_threshold", wakeThreshold))
+            .put("threshold_margin", base.optDouble("threshold_margin", base.optDouble("max_observed_confidence", 0.0) - base.optDouble("threshold", wakeThreshold)))
+            .put("threshold_policy_source", base.optString("threshold_policy_source", thresholdPolicySource))
+            .put("policy_source", base.optString("policy_source", thresholdPolicySource))
             .put("foreground_service_started", base.optBoolean("foreground_service_started", base.optBoolean("foreground_service_running", false)))
             .put("proof_session_active", base.optBoolean("proof_session_active", false))
+            .put("audio_record_permission_granted", base.optBoolean("audio_record_permission_granted", permissionGranted(Manifest.permission.RECORD_AUDIO)))
+            .put("audio_record_initialized", base.optBoolean("audio_record_initialized", false))
+            .put("audio_record_start_called", base.optBoolean("audio_record_start_called", false))
+            .put("audio_record_started", base.optBoolean("audio_record_started", false))
+            .put("audio_capture_alive", base.optBoolean("audio_capture_alive", base.optBoolean("audio_record_active", false)))
+            .put("audio_record_read_count", base.optLong("audio_record_read_count", base.optLong("audio_read_calls", 0L)))
+            .put("audio_record_last_error", base.optString("audio_record_last_error", base.optString("audio_record_error", "")))
+            .put("onnx_model_ready", base.optBoolean("onnx_model_ready", false))
+            .put("inference_running", base.optBoolean("inference_running", base.optLong("inference_count", 0L) > 0L))
+            .put("inference_count", base.optLong("inference_count", 0L))
+            .put("last_confidence", base.optDouble("last_confidence", base.optDouble("last_wake_confidence", 0.0)))
+            .put("wake_detected", base.optBoolean("wake_detected", base.optLong("wake_detection_count", 0L) > 0L || base.optBoolean("wake_detected_event_emitted", false)))
+            .put("failure_reason", base.optString("failure_reason", disabledReason))
+            .put("last_exception", base.opt("last_exception") ?: JSONObject.NULL)
             .put("status_source", base.optString("status_source", if (base.has("wake_engine_ready")) "live_service" else "activity_fallback"))
             .put("model_sha_match", base.optBoolean("model_sha_match", modelShaMatch))
             .put("acceptance_model_sha256_match", base.optBoolean("acceptance_model_sha256_match", modelShaMatch))
@@ -2539,7 +2892,16 @@ class MainActivity : Activity() {
             .put("continuous_audio_uploaded", false)
     }
 
-    private fun beginHermesWakeProof(reason: String): JSONObject {
+    private fun normalizedThresholdPolicySource(): String {
+        val stored = prefs.getString(HermesVoiceWakeService.PREF_WAKE_THRESHOLD_SOURCE, "").orEmpty()
+        return when (stored) {
+            HermesVoiceWakeService.THRESHOLD_SOURCE_REMOTE_CONFIG, "downloaded_operation" ->
+                HermesVoiceWakeService.THRESHOLD_SOURCE_REMOTE_CONFIG
+            else -> HermesVoiceWakeService.THRESHOLD_SOURCE_NATIVE_DEFAULT
+        }
+    }
+
+    private fun beginHermesWakeProof(reason: String, wakeThresholdOverride: Double? = null): JSONObject {
         val origin = selectedOrigin.ifBlank {
             prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, "").orEmpty()
         }.ifBlank { BuildConfig.DEFAULT_SERVER_URL }
@@ -2553,16 +2915,44 @@ class MainActivity : Activity() {
             .put("type", "hermes_wake_proof_started")
             .put("reason", reason)
             .put("origin", origin)
+            .put("proof_threshold_override", wakeThresholdOverride ?: JSONObject.NULL)
             .put("missing_runtime_permissions", JSONArray(needed))
             .put("status", voiceWakeStatus())
         if (needed.isEmpty()) {
-            runOnUiThread { HermesVoiceWakeService.start(this, origin, proofSession = true) }
+            runOnUiThread { HermesVoiceWakeService.start(this, origin, proofSession = true, wakeThreshold = wakeThresholdOverride) }
             awaitHermesWakeProofAndUpload(origin, reason)
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             runOnUiThread { requestPermissions(needed.toTypedArray(), REQUEST_VOICE_WAKE_PERMISSION) }
         }
         logDiagnostic("voice_wake_proof_started", proof)
         return proof
+    }
+
+    private fun thresholdFromIntent(intent: Intent?): Double? =
+        HermesVoiceWakeService.normalizedWakeThreshold(
+            when {
+                intent?.hasExtra(HermesVoiceWakeService.EXTRA_WAKE_THRESHOLD) == true ->
+                    numericExtra(intent, HermesVoiceWakeService.EXTRA_WAKE_THRESHOLD)
+                intent?.hasExtra("threshold") == true ->
+                    numericExtra(intent, "threshold")
+                else -> Double.NaN
+            },
+        )
+
+    private fun thresholdFromData(data: android.net.Uri): Double? =
+        HermesVoiceWakeService.normalizedWakeThreshold(
+            data.getQueryParameter(HermesVoiceWakeService.EXTRA_WAKE_THRESHOLD)?.toDoubleOrNull()
+                ?: data.getQueryParameter("threshold")?.toDoubleOrNull()
+                ?: Double.NaN,
+        )
+
+    private fun numericExtra(intent: Intent, key: String): Double {
+        val raw = intent.extras?.get(key)
+        return when (raw) {
+            is Number -> raw.toDouble()
+            is String -> raw.toDoubleOrNull() ?: Double.NaN
+            else -> Double.NaN
+        }
     }
 
     private fun awaitHermesWakeProofAndUpload(origin: String, reason: String) {

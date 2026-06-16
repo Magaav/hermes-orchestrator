@@ -20,6 +20,10 @@ CLI wrappers.
 - `hord.sh` and `clone.sh` are compatibility aliases that exec `horc.sh`.
 - `horc space start|stop|status` is implemented in the wrapper and delegates to
   `/local/plugins/wasm-agent/scripts/*`.
+- `horc build android` clears inherited Android build identity variables by
+  default so each release-promotion rebuild publishes a fresh update identity
+  into the native release feed; use `HORC_ANDROID_PRESERVE_BUILD_ID=1` only for
+  intentional reproducible rebuilds.
 - `delete` prompts interactively unless `--yes` or `HERMES_HORC_ASSUME_YES=1`
   is used.
 - `purge-node` is intentionally two-step: request first, then confirm with the

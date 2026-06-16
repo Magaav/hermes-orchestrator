@@ -42,6 +42,9 @@
         "!screenshots/**",
         "!fixtures/**",
         "!native/android/**",
+        "!native/releases/windows/**",
+        "!native/releases/**/*.exe",
+        "!native/releases/**/*.blockmap",
         "!plugins/**/tests/**",
         "!native/releases/android/*.apk"
       ]

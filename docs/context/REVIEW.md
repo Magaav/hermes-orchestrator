@@ -12,6 +12,7 @@ future empty-context agent.
 | Claims | Every success word maps to `verified` or is demoted. |
 | Verification | Commands name exact path/artifact and proof boundary. |
 | Next actions | One durable next action per active area. |
+| Active state | `docs/context/ACTIVE_STATE.json` matches generated blocks and current next actions. |
 | Compression | Delete diary text, repeated philosophy, and stale debug history. |
 
 ## Watcher Pass
@@ -25,6 +26,10 @@ Attack the docs as if starting from zero context:
 4. Can I prove Windows installer status without trusting build success?
 5. Can I find the exact next action for wasm-agent, Windows, and Android?
 6. Can I identify generated/runtime state that should not be edited as source?
+7. Does `python3 tools/context/check-context-sync.py` pass and write
+   `reports/context/latest/context-sync-result.json`?
+8. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
+   refuse stale next actions if narrative docs disagree?
 
 Demote or rewrite any ambiguous answer.
 
@@ -86,6 +91,10 @@ Answer from docs only:
   "next_action_android_native": "Run current APK package proof with apksigner, then connected-device/emulator horc simulate android for the behavior being claimed."
 }
 ```
+
+Also read `docs/context/ACTIVE_STATE.json` before following narrative next
+actions. If the checker fails, treat the failing line as suspect until it is
+updated or explicitly marked historical/stale/superseded.
 
 ## Scorecard
 

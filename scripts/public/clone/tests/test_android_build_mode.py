@@ -29,13 +29,15 @@ class AndroidBuildModeTests(unittest.TestCase):
         os.chmod(aapt2, 0o755)
         return tmp, root, android
 
-    def make_bin(self, root: Path, docker_body: str | None = None) -> Path:
+    def make_bin(self, root: Path, docker_body: str | None = None, node_body: str | None = None) -> Path:
         bin_dir = root / "bin"
         bin_dir.mkdir(exist_ok=True)
-        for name in ("java", "node"):
-            path = bin_dir / name
-            path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-            os.chmod(path, 0o755)
+        java = bin_dir / "java"
+        java.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        os.chmod(java, 0o755)
+        node = bin_dir / "node"
+        node.write_text(node_body or "#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+        os.chmod(node, 0o755)
         if docker_body is not None:
             docker = bin_dir / "docker"
             docker.write_text(docker_body, encoding="utf-8")
@@ -167,6 +169,52 @@ exit 0
         self.assertIn("selected mode docker", combined)
         self.assertIn("linux/amd64 containers cannot execute", combined)
         self.assertIn("sudo docker run --privileged --rm tonistiigi/binfmt --install amd64", combined)
+
+    def test_android_build_clears_stale_identity_by_default(self) -> None:
+        aapt2 = "#!/usr/bin/env bash\necho 'Android Asset Packaging Tool (aapt) 2.0'\n"
+        node = """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "scripts/release-android.js" ]]; then
+  {
+    echo "build_id=${WASM_AGENT_ANDROID_BUILD_ID-}"
+    echo "version_code=${WASM_AGENT_ANDROID_VERSION_CODE-}"
+    echo "generated_at=${WASM_AGENT_ANDROID_BUILD_GENERATED_AT-}"
+  } > "${HORC_TEST_NODE_LOG}"
+  mkdir -p release
+  printf 'apk' > release/WASM-Agent-arm64.apk
+  printf 'apk' > release/WASM-Agent-universal.apk
+fi
+"""
+        made = self.make_root(aapt2)
+        tmp, root, android = made
+        try:
+            log_path = root / "node-env.log"
+            bin_dir = self.make_bin(root, node_body=node)
+            result = self.run_horc(
+                root,
+                ["build", "android"],
+                {
+                    "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                    "HERMES_WASM_AGENT_ANDROID_ROOT": str(android),
+                    "HORC_TEST_HOST_KERNEL": "Linux",
+                    "HORC_TEST_HOST_MACHINE": "x86_64",
+                    "HORC_ANDROID_BUILD_MODE": "local",
+                    "HORC_GENERATE_NATIVE_RELEASE_FEED": "0",
+                    "HORC_TEST_NODE_LOG": str(log_path),
+                    "WASM_AGENT_ANDROID_BUILD_ID": "android-universal-stale",
+                    "WASM_AGENT_ANDROID_VERSION_CODE": "123",
+                    "WASM_AGENT_ANDROID_BUILD_GENERATED_AT": "stale",
+                },
+            )
+            log = log_path.read_text(encoding="utf-8")
+        finally:
+            tmp.cleanup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("forcing fresh Android build identity", result.stdout)
+        self.assertIn("build_id=\n", log)
+        self.assertIn("version_code=\n", log)
+        self.assertIn("generated_at=\n", log)
 
 
 if __name__ == "__main__":

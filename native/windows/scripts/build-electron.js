@@ -13,6 +13,7 @@ const hostNsisRoot = path.join(srcRoot, "build", "nsis-host");
 const releaseRoot = path.join(windowsRoot, "release");
 const nativeDefaultsPath = path.join(srcRoot, "build", "native-defaults.json");
 const verifyWindowsInstaller = path.join(windowsRoot, "scripts", "verify-windows-installer.js");
+const auditPackageSize = path.join(windowsRoot, "scripts", "audit-package-size.js");
 
 const knownPlatforms = new Set(["win", "windows", "linux", "mac", "macos"]);
 const requestedPlatform = knownPlatforms.has(platformOrTarget) ? platformOrTarget : "win";
@@ -52,9 +53,9 @@ const result = spawnSync(electronBuilder, args, {
 });
 const status = result.status == null ? 1 : result.status;
 if (status === 0 && platform === "win" && target === "nsis") {
-  verifyInstaller(path.join(releaseRoot, `WASM-Agent-Setup-${arch}.exe`));
+  auditWindowsPackage();
   const versionedInstaller = promoteVersionedWindowsInstaller(arch);
-  if (versionedInstaller) verifyInstaller(versionedInstaller);
+  verifyInstaller(versionedInstaller || path.join(releaseRoot, `WASM-Agent-Setup-${arch}.exe`));
 }
 process.exit(status);
 
@@ -89,6 +90,15 @@ function promoteVersionedWindowsInstaller(archName) {
 
 function verifyInstaller(installerPath) {
   const result = spawnSync(process.execPath, [verifyWindowsInstaller, installerPath], {
+    cwd: srcRoot,
+    env: process.env,
+    stdio: "inherit",
+  });
+  if (result.status !== 0) process.exit(result.status == null ? 1 : result.status);
+}
+
+function auditWindowsPackage() {
+  const result = spawnSync(process.execPath, [auditPackageSize, path.join(releaseRoot, "win-unpacked")], {
     cwd: srcRoot,
     env: process.env,
     stdio: "inherit",

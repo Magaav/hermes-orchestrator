@@ -1,0 +1,33 @@
+{
+  "schema": "hermes.wasm_agent.native_diagnostics_schema.v1",
+  "version": "20260614T0000",
+  "requiredFields": [
+    "installedNativeBuildId",
+    "kernelContractVersion",
+    "supportedCapabilities",
+    "activeDownloadedRuntimeId",
+    "activeDownloadedRuntimeSha",
+    "activeHotOpBundleId",
+    "activeHotOpSha",
+    "syncStatus"
+  ],
+  "failureClassifications": [
+    "pass",
+    "runtime_bundle_missing",
+    "runtime_bundle_stale",
+    "runtime_sha_mismatch",
+    "runtime_download_failed",
+    "runtime_manifest_invalid",
+    "runtime_missing_capability",
+    "native_capability_missing",
+    "downloaded_operation_not_supported",
+    "last_known_good_missing",
+    "runtime_rollback_failed",
+    "hot_operation_missing",
+    "hot_operation_sha_mismatch",
+    "hot_operation_capability_denied",
+    "wake_threshold_not_crossed",
+    "wake_event_not_emitted",
+    "command_capture_ui_not_started"
+  ]
+}

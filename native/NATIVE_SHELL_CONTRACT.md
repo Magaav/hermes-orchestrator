@@ -51,6 +51,27 @@ runtime changes should flow from the validated backend:
   foreground service, tray/menu bar, and standby changes still require a native
   rebuild/reinstall.
 
+See `NATIVE_EVOLUTION_CONTRACT.md` for the versioned capability kernel,
+downloaded runtime, hot-op, sync, rollback, and no-rebuild rules. Current
+shells should expose `nativeKernel`, `downloadedRuntime`, `hotOperations`,
+active downloaded bundle IDs/SHAs, sync status, and stale reason in status,
+diagnostics, and heartbeat payloads. Product behavior, launcher/runtime UI,
+proof/debug scripts, diagnostics classifiers, config, model metadata, and
+operation routing should update through `/native/releases/latest.json` whenever
+the installed native capability surface already supports the required primitive.
+
+The exact release-feed bundle families are:
+
+| Family | Feed key | URL prefix | Activation |
+| --- | --- | --- | --- |
+| Downloaded runtime | `artifacts.runtime.launcher` | `/native/releases/runtime/launcher/` | SHA-verified staging, atomic active swap, preserve `last-known-good` |
+| Downloaded hot ops | `artifacts.hotOps.*` | `/native/releases/hot-ops/` | Trusted manifest/module copy into the shell hot-op root |
+
+New native rebuilds are reserved for new OS permissions, manifest/service
+declarations, native libraries, hardware/OS primitives, security bootstrap
+changes, packaging/installer changes, or a broken capability contract that
+cannot be recovered by server-published runtime or operation bundles.
+
 ## Diagnostics
 
 Every implemented native shell should log or expose:

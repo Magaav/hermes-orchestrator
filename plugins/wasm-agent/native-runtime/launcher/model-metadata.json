@@ -1,0 +1,12 @@
+{
+  "schema": "hermes.wasm_agent.native_model_metadata.v1",
+  "version": "20260614T0000",
+  "models": {
+    "androidHermesWake": {
+      "kind": "onnx-wake-word",
+      "expectedSha256": "23aee3f94d9499c7809b413037a59e3e6f8668767a49e077017e743dd959e58c",
+      "installPath": "files/voice/hermes.onnx",
+      "metadataUrl": "/native/android/hermes-wake-model/latest.json"
+    }
+  }
+}

@@ -1,7 +1,29 @@
 {
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
   "name": "canary_echo",
   "version": "20260612T0000",
   "entry": "echo.js",
+  "operationId": "canary_echo",
+  "requiredNativeCapabilities": [
+    "native.capabilities.hotOps.v1"
+  ],
   "capabilities": [],
-  "timeoutMs": 3000
+  "timeoutMs": 3000,
+  "inputsSchema": {
+    "type": "object",
+    "properties": {
+      "dryRun": { "type": "boolean" }
+    }
+  },
+  "outputsSchema": {
+    "type": "object",
+    "required": ["ok", "stable", "message"]
+  },
+  "safetyLimits": {
+    "network": false,
+    "filesystem": false
+  },
+  "rollback": {
+    "mode": "noop"
+  }
 }

@@ -1,0 +1,33 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "classify_native_diagnostics",
+  "version": "20260614T0000",
+  "entry": "native-diagnostics-classifier.js",
+  "operationId": "classify_native_diagnostics",
+  "requiredNativeCapabilities": [
+    "native.capabilities.statusBus.v1",
+    "native.capabilities.diagnostics.v1"
+  ],
+  "capabilities": [],
+  "timeoutMs": 5000,
+  "inputsSchema": {
+    "type": "object",
+    "properties": {
+      "diagnostics": { "type": "object" },
+      "expectedRuntimeBundleId": { "type": "string" }
+    }
+  },
+  "outputsSchema": {
+    "type": "object",
+    "required": ["ok", "failureClassification", "nextAction"]
+  },
+  "safetyLimits": {
+    "maxInputBytes": 65536,
+    "network": false,
+    "filesystem": "operation-data-root-only"
+  },
+  "rollback": {
+    "mode": "last-known-good",
+    "fallbackOperation": "canary_echo"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-06-13T12:32:57Z",
+  "activeGoal": "Install the feed-published Windows hot-op shell, prove the installed bridge, then use hot ops to classify why spoken Hermes does not trigger an action.",
+  "canonicalProofOrder": [
+    "cd native/windows/src && npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe",
+    "python3 tools/windows/check-windows-release-feed.py",
+    "python3 tools/windows/prove-hot-shell.py",
+    "python3 tools/doctor/wasm-agent-doctor.py",
+    "python3 tools/voice/run-hermes-wake-proof.py --dry-run",
+    "python3 tools/voice/run-hermes-wake-proof.py --debug"
+  ],
+  "protocols": {
+    "shellProtocolVersion": 2,
+    "hotOpsProtocolVersion": 1
+  },
+  "requiredWindowsHotShellCapabilities": [
+    "get_bridge_status",
+    "list_hot_operations",
+    "run_shell_self_test",
+    "run_hot_operation",
+    "canary_echo"
+  ],
+  "proofGuards": [
+    "Do not claim installed Windows shell proof from source tests, build success, or win-unpacked.",
+    "Build success is not update availability; package verification is not feed publication.",
+    "Go Native / Check Update depends on the Windows release feed, and same-semver Windows updates must compare buildId.",
+    "Do not claim Android runtime proof from APK package proof alone.",
+    "Do not treat bridge_update_required or hot_operation_missing as Android wake failures.",
+    "Do not use old command-specific Windows bridge handlers as the canonical Hermes wake proof path."
+  ],
+  "currentHermesWakeQuestion": "Does spoken Hermes fail because threshold is not crossed, wake event is not emitted, or command capture/UI routing does not start?",
+  "stalePatterns": [
+    "tools/voice/ship-hermes-wake.sh",
+    "onnx_runtime_available=false",
+    "wake_engine_ready=false",
+    "voice_wake.enabled=false"
+  ],
+  "ownedDocs": [
+    "README.md",
+    "docs/context/MAP.md",
+    "docs/context/CLAIMS.md",
+    "plugins/wasm-agent/README.md",
+    "native/windows/README.md",
+    "native/android/README.md"
+  ]
+}
