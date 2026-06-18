@@ -45,3 +45,5 @@ until behavior is real.
 - `wiki-engine/README.md`: durable wiki engine track.
 - `hermes-plugin-extension-points/README.md`: upstream Hermes extension seam
   proposal.
+- `asolaria-acceleration/README.md`: descriptor/proof receipt acceleration
+  proposal inspired by the public Asolaria reduction repo.

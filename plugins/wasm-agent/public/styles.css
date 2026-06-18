@@ -2055,6 +2055,74 @@ button.danger:hover,
   width: min(760px, 100%);
 }
 
+.wake-world-modal-card {
+  width: min(1040px, 100%);
+}
+
+.wake-world-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.wake-world-panel {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.wake-world-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.wake-world-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.wake-world-policy {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.wake-world-policy label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.wake-world-policy input {
+  width: 100%;
+  min-width: 0;
+}
+
+.wake-world-output {
+  margin-top: 14px;
+  max-height: 220px;
+}
+
+@media (max-width: 760px) {
+  .wake-world-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wake-world-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .wake-world-policy {
+    grid-template-columns: 1fr;
+  }
+}
+
 .modal-head,
 .modal-head-actions,
 .modal-actions {
@@ -2359,6 +2427,15 @@ button.danger:hover,
 
 .tune-voice-actions button {
   min-width: 92px;
+}
+
+.tune-voice-actions #tuneVoiceResetButton {
+  margin-right: auto;
+}
+
+.tune-voice-actions #tuneVoiceResetButton.is-confirming {
+  border-color: rgba(248, 113, 113, 0.62);
+  background: rgba(248, 113, 113, 0.18);
 }
 
 @media (max-width: 640px) {

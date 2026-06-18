@@ -15,6 +15,9 @@ proof lane for WASM Agent Native.
 | OAuth success | Must return to installed app and authenticate WebView/session |
 | Voice wake iteration | Prefer dataset/model loop over rebuilding APK for every model |
 | Dataset export bridge | Use the installed Win11 wasm-agent bridge command `export_hermes_wake_dataset`; terminal ADB from this workspace is not a valid path for this workflow |
+| False-wake capture | Android stores at most 50 local false-wake samples under app-private storage; successful bridge/server acknowledgement deletes confirmed samples |
+| Wake Word state | `files/native-diagnostics/voice-wake.json`, `WasmAgentNative.getWakeWorldState()`, downloaded operation `fetch_wake_world_state`, and live policy operation `apply_wake_word_policy` expose/tune the foreground-service wake lane packet |
+| Copilot fast path | Android implementation of the generic live-introspection rule: prefer native control `get_runtime_snapshot`, Wake World state, and live `apply_wake_word_policy` before asking the user to describe state or proposing another APK rebuild |
 
 Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 `native/AGENTS.md`, `native/NATIVE_SHELL_CONTRACT.md`, this directory's
@@ -29,6 +32,7 @@ Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 | APK signature proof | implemented-unverified | `assembleRelease` passed; Docker `apksigner verify` timed out under emulation after 600s on 2026-06-12. |
 | Forbidden-origin APK scan | implemented-unverified | Raw compressed APK `strings` scan did not expose definitive literals; run proper package scan with Android tooling. |
 | Hermes Wake installed proof | verified | Windows bridge installed `android-universal-20260612T201043Z` on Xiaomi Mi 9 SE and uploaded live diagnostics at `2026-06-12T20:47:00Z`: `status_source=live_service`, `proof_session_active=true`, `audio_record_started=true`, model SHA match, ONNX ready, wake engine ready, `inference_count=10`. |
+| Latest Hermes Wake model export | implemented-unverified | `build/voice/hermes.onnx` was trained from `hermes-dataset-20260616T215020Z.zip`, served by `/native/android/hermes-wake-model/latest` with SHA `2abbebf21610f91f8d1fcfc12ac92f8ec19dc1191f3c90dbda4cba46e71027b2`, and installed through the Android bridge request. Calibration remains below the production acceptance gate; installed runtime restart/debug proof is still required. |
 | Latest Android simulation report | verified | `reports/sim/android/latest/summary.md` PASS for voice wake fixture, run `android-20260608T154817920Z`; separate from current installed proof. |
 | Android OAuth native return | implemented-unverified | Requires connected-device/emulator report proving native return and authenticated WebView/session. |
 
@@ -93,6 +97,11 @@ trigger wake detection. Do not globally lower the production threshold as the
 model fix; temporary proof threshold overrides are only for downstream command
 capture testing.
 
+Voice tuning silence samples should capture ordinary ambient room/mic noise, not
+near-digital silence. The Android quality gate rejects silence only when
+sustained RMS or the loud sample ratio is too high, and the user-facing error
+should guide the user toward a quieter spot or lower mic gain.
+
 ## Native Evolution Layer
 
 Android exposes the native capability kernel through the WebView bridge objects
@@ -154,7 +163,7 @@ Hermes Wake acceptance must pass a readiness preflight before listening for the
 spoken wake word. The report must show microphone permission granted,
 foreground service running, `AudioRecord` started, ONNX Runtime available in
 the installed APK/runtime, personalized `files/voice/hermes.onnx` present with
-SHA-256 `23aee3f94d9499c7809b413037a59e3e6f8668767a49e077017e743dd959e58c`,
+SHA-256 `2abbebf21610f91f8d1fcfc12ac92f8ec19dc1191f3c90dbda4cba46e71027b2`,
 WakeEngine initialized, `voice_wake.enabled: true`, `wake_engine_ready: true`,
 and `inference_count > 0`. Real-device wake acceptance then has eight separate
 stages: service alive, audio capture alive, ONNX model ready, inference running,
@@ -192,6 +201,95 @@ this Linux workspace; that path is unavailable here and wastes the shipping
 loop. Use the Windows wasm-agent app Diagnostics/Frontier bridge operation
 `export_hermes_wake_dataset`, or fetch the protected uploaded dataset from the
 cloud with an admin session or native control key.
+
+False-wake capture is bounded and best-effort. After wake detection, if command
+capture produces no usable transcript, Android asynchronously writes a short
+PCM16 mono 16 kHz WAV window plus metadata to `files/voice/false-wakes/`.
+Metadata includes wake confidence, threshold, timestamp, model SHA, transcript
+result when available, rejection reason, providers, and build ID. The directory
+is capped at 50 samples and deletes the oldest sample before accepting sample
+51. Storage write failures are logged and do not block the wake service.
+
+The Android bridge exposes `getFalseWakeBatch()` and
+`confirmFalseWakeBatchUploaded(idsJson)`, and downloaded operations may call
+`get_android_false_wake_batch` / `confirm_android_false_wake_batch_uploaded`.
+The backend accepts pushed batches at `/native/android/false-wake-batch` and
+returns acknowledged IDs with `deleteLocal: true`; Android deletes confirmed
+local samples only after that fetch/upload acknowledgement. Voice wake
+diagnostics expose `false_wake_buffer_count`, `false_wake_buffer_max`,
+`false_wake_last_uploaded_at`, `false_wake_last_deleted_count`, and
+`false_wake_storage_bytes`.
+
+Wake Word is the dashboard/control surface over the same Android foreground
+wake service. The service remains the canonical listener for AudioRecord, ONNX
+inference, wake counters, false-wake capture, diagnostics, recent lifecycle
+events, and app event delivery. Do not start an independent in-app
+AudioRecord/ONNX loop while this lane is active. The Wake Word packet is
+available from `files/native-diagnostics/voice-wake.json`, bridge method
+`WasmAgentNative.getWakeWorldState()`, downloaded operation
+`fetch_wake_world_state`, and backend view
+`GET /native/android/wake-world-state` after diagnostics upload.
+`getWakeWorldState()` is a lightweight UI/status read and must not initialize
+ONNX or perform full model diagnostics; explicit proof/debug operations own
+heavy model checks. `recent_events` is capped at 50. Guided live tuning uses downloaded operation
+`apply_wake_word_policy` to update `wakeThreshold`, `vadRmsThreshold`,
+`vadPeakThreshold`, and `tuningSessionId` in app preferences; the service
+refreshes its provider set without stopping the listener. A 2026-06-17
+installed run at threshold `0.58` produced `wake_hit_count: 910` and
+`false_wake_count: 909`; the native default is now a conservative `0.92` with a
+short cooldown to prevent repeated hits from one noisy condition.
+The same policy path also owns the post-Hermes command-capture handoff:
+`transcriptTimeoutMs`, `transcriptMinLengthMs`,
+`transcriptCompleteSilenceMs`, `transcriptPossibleSilenceMs`, and
+`transcriptAcceptPartial` are persisted by Android, applied to
+`SpeechRecognizer`, and echoed in Wake Word diagnostics. Prefer live policy
+tuning through server control/downloaded operations before rebuilding the APK.
+The cloud Wake World state also exposes server-side diagnosis labels and
+experiment presets. Presets include `fast_transcript`, `forgiving_transcript`,
+`partial_first`, and `final_only_probe`; diagnosis labels include
+`wake_threshold_not_crossed`, `wake_heard_no_transcript`,
+`transcript_rejected_unknown_command`, and `command_capture_active`. Agents
+should use these labels and preset payloads to choose the next live policy
+before requesting another rebuild.
+
+Post-wake command transcription now has a local ASR lane. Android can select
+`transcriptEngine=vosk`, `android_speech`, or `auto` through the same
+`apply_wake_word_policy` bridge. The Vosk lane records a bounded PCM16 16 kHz
+command window after Hermes fires, recognizes against a short command grammar,
+and reports `local_asr_vosk_ready`, `local_asr_vosk_model_path`,
+`local_asr_vosk_error`, `last_asr_engine`, `last_asr_latency_ms`, and
+`last_asr_audio_captured_ms` in Wake World state. The expected model directory
+is app-private `files/asr/vosk-model`; if it is missing, `vosk` reports
+`vosk_model_missing`, while `auto` falls back to Android SpeechRecognizer.
+Cloud presets include `local_vosk_command` and `android_speech_fallback` for
+live A/B proof after install.
+
+When voice wake is enabled, the Android foreground microphone service is the
+only supported background listener. On a detected Hermes wake, it requests
+`MainActivity` in Wake Word mode and starts command capture. The service
+preserves the enabled preference across non-user service destruction, schedules
+a short self-restart after task removal, and restores after boot, user unlock,
+or app package replacement. A user force-stop remains an Android OS boundary:
+the app cannot keep listening or auto-launch again until the user opens it.
+
+Android WebView bootstrap must keep first touch responsive. Renderer diagnostic
+bridge calls append quickly, while full `latest.json` snapshots and uploads are
+debounced off the JavaScript bridge call path. The PWA compacts queued startup
+diagnostics before flushing them to native, defers admin bridge refresh/render
+work while Android Home is active, delays nonessential Home module/message DOM
+work until after the shell is visible, and caches Wake Word state briefly so
+opening the Wake Word modal performs one lightweight bridge read instead of
+repeated synchronous reads.
+Remote-control access must follow the same rule. Polling is compact and may be
+skipped while the user is touching, typing, scrolling, or when input is pending.
+Heavy work such as diagnostics export, screenshots, UI tree captures, or log
+bundles must be command-triggered, idle-scheduled, bounded, and allowed to
+return a skipped result instead of competing with app rendering or wake capture.
+The default copilot sync command is `get_runtime_snapshot`: it returns active
+panel, open modals, Wake World state, capability flags, recent redacted events,
+recent interaction trace, and at most 30 visible controls with compact rects.
+It does not capture pixels by default; screenshots remain explicit heavy
+commands.
 
 Historical superseded repo-side automation used `tools/voice/ship-hermes-wake.sh`
 for the dataset/model loop. The current wake debug path depends on installed

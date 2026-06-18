@@ -90,6 +90,7 @@ data class VoiceTuningQuality(
     val rmsDb: Double,
     val peakDb: Double,
     val clippingRatio: Double,
+    val loudSampleRatio: Double,
     val silenceRatio: Double,
     val snrEstimate: Double,
     val duplicate: Boolean,
@@ -99,6 +100,7 @@ data class VoiceTuningQuality(
         .put("rms_db", rmsDb)
         .put("peak_db", peakDb)
         .put("clipping_ratio", clippingRatio)
+        .put("loud_sample_ratio", loudSampleRatio)
         .put("silence_ratio", silenceRatio)
         .put("snr_estimate", snrEstimate)
         .put("accepted", accepted)
@@ -177,6 +179,22 @@ class VoiceTuningStore(private val root: File) {
             .put("deleted", deleted)
     }
 
+    fun resetRecordings(outputDir: File = File(root.parentFile ?: root, "exports")): JSONObject {
+        val before = counts()
+        root.deleteRecursively()
+        File(outputDir, "hermes-dataset.zip").delete()
+        outputDir.mkdirs()
+        VoiceTuningCategory.entries.forEach { category -> categoryDir(category).mkdirs() }
+        File(root, "validation").mkdirs()
+        invalidateCounts()
+        return status()
+            .put("ok", true)
+            .put("type", "voice_tuning_recordings_reset")
+            .put("deleted_counts", before.toJson())
+            .put("deleted_total", before.positive + before.negative)
+            .put("cleared_export_path", File(outputDir, "hermes-dataset.zip").absolutePath)
+    }
+
     fun status(modelStatus: String = "no_model", nextAction: String = NEXT_ACTION): JSONObject {
         val counts = counts()
         return JSONObject()
@@ -207,6 +225,8 @@ class VoiceTuningStore(private val root: File) {
                 .put("min_duration_ms", MIN_DURATION_MS)
                 .put("max_duration_ms", MAX_DURATION_MS)
                 .put("min_voice_rms_db", MIN_VOICE_RMS_DB)
+                .put("max_silence_rms_db", MAX_SILENCE_RMS_DB)
+                .put("max_silence_loud_sample_ratio", MAX_SILENCE_LOUD_SAMPLE_RATIO)
                 .put("max_clipping_ratio", MAX_CLIPPING_RATIO)
                 .put("max_voice_silence_ratio", MAX_VOICE_SILENCE_RATIO)
                 .put("sample_rate_hz", SAMPLE_RATE_HZ)
@@ -306,6 +326,8 @@ class VoiceTuningStore(private val root: File) {
                 .put("min_duration_ms", MIN_DURATION_MS)
                 .put("max_duration_ms", MAX_DURATION_MS)
                 .put("min_voice_rms_db", MIN_VOICE_RMS_DB)
+                .put("max_silence_rms_db", MAX_SILENCE_RMS_DB)
+                .put("max_silence_loud_sample_ratio", MAX_SILENCE_LOUD_SAMPLE_RATIO)
                 .put("max_clipping_ratio", MAX_CLIPPING_RATIO)
                 .put("max_voice_silence_ratio", MAX_VOICE_SILENCE_RATIO))
             .put("samples", JSONArray(samples))
@@ -374,6 +396,7 @@ class VoiceTuningStore(private val root: File) {
             .put("rms_db", quality.rmsDb)
             .put("peak_db", quality.peakDb)
             .put("clipping_ratio", quality.clippingRatio)
+            .put("loud_sample_ratio", quality.loudSampleRatio)
             .put("silence_ratio", quality.silenceRatio)
             .put("snr_estimate", quality.snrEstimate)
             .put("fingerprint", fingerprint(readPcm16Wav(wavFile)))
@@ -400,10 +423,11 @@ class VoiceTuningStore(private val root: File) {
         val rmsDb = amplitudeDb(rmsValue / Short.MAX_VALUE.toDouble())
         val peakDb = amplitudeDb(peak / Short.MAX_VALUE.toDouble())
         val clippingRatio = pcm16.count { abs(it.toInt()) >= CLIPPING_SAMPLE_ABS }.toDouble() / pcm16.size
+        val loudSampleRatio = pcm16.count { abs(it.toInt()) >= SILENCE_LOUD_SAMPLE_ABS }.toDouble() / pcm16.size
         val silenceRatio = pcm16.count { abs(it.toInt()) <= SILENCE_SAMPLE_ABS }.toDouble() / pcm16.size
         val noiseFloor = percentileAbs(pcm16, 0.10).coerceAtLeast(1.0)
         val snrEstimate = 20.0 * log10((rmsValue.coerceAtLeast(1.0)) / noiseFloor)
-            val duplicate = category != VoiceTuningCategory.NEGATIVE_SILENCE && hasNearDuplicate(pcm16)
+        val duplicate = category != VoiceTuningCategory.NEGATIVE_SILENCE && hasNearDuplicate(pcm16)
         val reason = when {
             durationMs < MIN_DURATION_MS -> "too_short"
             durationMs > MAX_DURATION_MS -> "too_long"
@@ -411,14 +435,15 @@ class VoiceTuningStore(private val root: File) {
             duplicate -> "duplicate_sample"
             category != VoiceTuningCategory.NEGATIVE_SILENCE && rmsDb < MIN_VOICE_RMS_DB -> "too_quiet"
             category != VoiceTuningCategory.NEGATIVE_SILENCE && silenceRatio > MAX_VOICE_SILENCE_RATIO -> "mostly_silence"
-            category == VoiceTuningCategory.NEGATIVE_SILENCE && peakDb > MAX_SILENCE_PEAK_DB -> "excessive_noise"
+            category == VoiceTuningCategory.NEGATIVE_SILENCE &&
+                (rmsDb > MAX_SILENCE_RMS_DB || loudSampleRatio > MAX_SILENCE_LOUD_SAMPLE_RATIO) -> "excessive_noise"
             else -> ""
         }
-        return VoiceTuningQuality(reason.isBlank(), reason, durationMs, rmsDb, peakDb, clippingRatio, silenceRatio, snrEstimate, duplicate)
+        return VoiceTuningQuality(reason.isBlank(), reason, durationMs, rmsDb, peakDb, clippingRatio, loudSampleRatio, silenceRatio, snrEstimate, duplicate)
     }
 
     private fun rejectedQuality(reason: String, durationMs: Int): VoiceTuningQuality =
-        VoiceTuningQuality(false, reason, durationMs, -120.0, -120.0, 0.0, 1.0, 0.0, false)
+        VoiceTuningQuality(false, reason, durationMs, -120.0, -120.0, 0.0, 0.0, 1.0, 0.0, false)
 
     private fun hasNearDuplicate(pcm16: ShortArray): Boolean {
         val fingerprint = fingerprint(pcm16)
@@ -457,10 +482,12 @@ class VoiceTuningStore(private val root: File) {
         const val MIN_DURATION_MS = 700
         const val MAX_DURATION_MS = 1400
         const val MIN_VOICE_RMS_DB = -45.0
-        const val MAX_SILENCE_PEAK_DB = -28.0
+        const val MAX_SILENCE_RMS_DB = -22.0
+        const val MAX_SILENCE_LOUD_SAMPLE_RATIO = 0.03
         const val MAX_CLIPPING_RATIO = 0.01
         const val MAX_VOICE_SILENCE_RATIO = 0.85
         const val SILENCE_SAMPLE_ABS = 96
+        const val SILENCE_LOUD_SAMPLE_ABS = 4125
         const val CLIPPING_SAMPLE_ABS = 32100
         const val WAV_HEADER_BYTES = 44L
         const val WIZARD_VERSION = "2026.06.hermes-balanced-v2"
@@ -618,7 +645,8 @@ class VoiceTuningRecorder(
                     .put("duration_ms", VoiceTuningStore.SAMPLE_DURATION_MS)
                     .put("source", source ?: JSONObject.NULL)
                     .put("error", normalized.first)
-                    .put("message", normalized.second))
+                    .put("message", normalized.second)
+                    .put("raw_error", error.message ?: error.javaClass.simpleName))
             } finally {
                 active = false
                 cancelRequested = false
@@ -675,15 +703,18 @@ class VoiceTuningRecorder(
     }
 
     private fun normalizeRecordError(error: Exception): Pair<String, String> {
-        val raw = error.message ?: error.javaClass.simpleName
-        return when (raw) {
-            "record_audio_permission_missing" -> "permission_denied" to "Microphone permission is required to record training samples."
-            "recorder_unavailable", "audio_record_initialization_failed" -> "recorder_unavailable" to "Recorder unavailable."
-            "too_quiet" -> "too_quiet" to "Too quiet. Try again."
-            "too_short" -> "too_short" to "Too short. Try again."
-            "zero_byte_recording" -> "too_short" to "Too short. Try again."
-            "invalid_format" -> "invalid_wav" to "Recorder wrote an invalid WAV."
-            "voice_tuning_cancelled" -> "native_error" to "Recording cancelled."
+        val raw = (error.message ?: error.javaClass.simpleName).trim()
+        return when {
+            raw.contains("record_audio_permission_missing") -> "permission_denied" to "Microphone permission is required to record training samples."
+            raw.contains("recorder_unavailable") || raw.contains("audio_record_initialization_failed") -> "recorder_unavailable" to "Recorder unavailable."
+            raw.contains("too_quiet") -> "too_quiet" to "Too quiet. Try again."
+            raw.contains("too_short") || raw.contains("zero_byte_recording") -> "too_short" to "Too short. Try again."
+            raw.contains("invalid_format") -> "invalid_wav" to "Recorder wrote an invalid WAV."
+            raw.contains("excessive_noise") -> "excessive_noise" to "Background audio is too loud for a silence sample. Try a quieter spot or lower mic gain."
+            raw.contains("clipped_audio") -> "clipped_audio" to "Audio clipped. Move farther away and try again."
+            raw.contains("mostly_silence") -> "mostly_silence" to "Voice sample was mostly silence. Speak clearly and try again."
+            raw.contains("duplicate_sample") -> "duplicate_sample" to "Sample is too similar to a previous one. Vary the recording and try again."
+            raw.contains("voice_tuning_cancelled") -> "voice_tuning_cancelled" to "Recording cancelled."
             else -> "native_error" to raw
         }
     }

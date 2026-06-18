@@ -45,6 +45,37 @@ upgrade a claim.
 | Claim proof gained, missing, stale, or contradicted | `docs/context/CLAIMS.md` |
 | Verification command changes | `docs/context/VERIFY.md` and nearest owning docs |
 
+## Copilotability Fast Path
+
+Fresh agents should use product/runtime introspection before guessing. When an
+app exposes live state, control commands, capability reports, diagnostics, UI
+summaries, snapshots, or policy knobs, prefer those channels before asking the
+user to narrate state or before proposing slower rebuild/reinstall loops.
+
+| Need | First action |
+| --- | --- |
+| Know current screen/state | Use the narrowest available runtime snapshot/state endpoint. |
+| Know what actions are possible | Read capability reports and visible-action/UI summaries. |
+| Change behavior | Prefer live policy/config/control knobs before source/package changes. |
+| Need heavier proof | Request explicit diagnostics/export/screenshot through idle-gated paths only. |
+| Missing primitive/permission/native dependency | Then consider rebuild/reinstall/package changes. |
+
+Performance guard: remote access is subordinate to UX. Introspection must be
+compact by default, idle/debounced for heavy work, capped, redacted, and allowed
+to return `{skipped: true, reason}` rather than forcing debug work during active
+user interaction.
+
+## Reply Next-Step Phase
+
+Every substantive agent reply should end with a short next-step phase. Keep it
+concrete and loop-shortening:
+
+1. Name the immediate next action or command.
+2. Say whether it uses live introspection/control, local static checks, or a rebuild/runtime proof.
+3. If blocked, name the missing access or proof instead of giving a broad menu.
+4. If suggesting rebuild/reinstall/package work, state the missing primitive or proof that makes it necessary.
+5. Never claim runtime success from source/static/build checks.
+
 ## Conflict Law
 
 1. Production/security guard wins.

@@ -392,12 +392,63 @@
           <div id="tuneVoiceBody" class="tune-voice-body"></div>
           <p id="tuneVoiceMessage" class="modal-message tune-voice-message" aria-live="polite"></p>
           <div class="modal-actions tune-voice-actions">
+            <button id="tuneVoiceResetButton" class="danger" type="button">Reset Recordings</button>
             <button id="tuneVoiceBackButton" type="button">Back</button>
             <button id="tuneVoiceDeleteLastButton" type="button">Delete Last</button>
             <button id="tuneVoiceRetryLastButton" type="button">Retry Last</button>
             <button id="tuneVoiceRecordButton" class="primary" type="button">Start</button>
             <button id="tuneVoiceNextButton" type="button">Next</button>
           </div>
+        </article>
+      </section>
+
+      <section id="wakeWorldModal" class="modal-backdrop" aria-label="Wake Word" hidden>
+        <article class="modal-card wide wake-world-modal-card" role="dialog" aria-modal="true" aria-labelledby="wakeWorldTitle">
+          <header class="modal-head">
+            <div>
+              <h2 id="wakeWorldTitle">Wake Word</h2>
+              <p id="wakeWorldSubtitle">Hermes wake-word control center</p>
+            </div>
+            <button id="closeWakeWorldModalButton" class="icon-button modal-close-button" type="button" aria-label="Close"></button>
+          </header>
+          <div class="wake-world-grid">
+            <section class="wake-world-panel">
+              <header>
+                <strong>State</strong>
+                <span id="wakeWorldStatus">idle</span>
+              </header>
+              <dl id="wakeWorldState" class="native-debug-state"></dl>
+            </section>
+            <section class="wake-world-panel">
+              <header>
+                <strong>Debug</strong>
+              </header>
+              <div class="native-debug-actions wake-world-actions">
+                <button id="wakeWordSessionButton" type="button">Start tuning session</button>
+                <button id="wakeWordStepDoneButton" type="button">Step done</button>
+                <button id="wakeWordApplyPolicyButton" type="button">Apply policy</button>
+              </div>
+              <div class="wake-world-policy">
+                <label>Wake threshold <input id="wakeWordThresholdInput" type="number" min="0.05" max="0.99" step="0.01" value="0.92"></label>
+                <label>VAD RMS <input id="wakeWordVadRmsInput" type="number" min="0.001" max="0.2" step="0.001" value="0.012"></label>
+                <label>VAD peak <input id="wakeWordVadPeakInput" type="number" min="100" max="30000" step="100" value="1800"></label>
+              </div>
+              <p id="wakeWordInstruction" class="modal-message">Start session, then follow the next instruction here.</p>
+              <div class="native-debug-actions wake-world-actions">
+                <button id="wakeWorldRefreshButton" type="button">Refresh state</button>
+                <button id="wakeWorldCopyButton" type="button">Copy JSON</button>
+                <button id="wakeWorldFalseWakeFetchButton" type="button">Fetch false-wakes</button>
+                <button id="wakeWorldFalseWakeDrainButton" type="button">Drain acked</button>
+                <button id="wakeWorldRestartButton" type="button">Restart service</button>
+                <button id="wakeWorldStartButton" type="button">Start listener</button>
+                <button id="wakeWorldStopButton" type="button">Stop listener</button>
+                <button id="wakeWorldProofStandbyButton" type="button">Proof standby</button>
+                <button id="wakeWorldProofAppButton" type="button">Proof app-visible</button>
+                <button id="wakeWorldTrainButton" type="button">Train Hermes Wake</button>
+              </div>
+            </section>
+          </div>
+          <pre id="wakeWorldOutput" class="native-debug-output wake-world-output"></pre>
         </article>
       </section>
 
@@ -425,7 +476,7 @@
                 <button id="homeFleetButton" class="home-action-button fleet" type="button" title="Fleet" aria-label="Fleet"><span>Fleet</span></button>
                 <button id="homeDevicesButton" class="home-action-button devices" type="button" title="Devices" aria-label="Devices"><span>Devices</span></button>
                 <button id="homeGoNativeButton" class="home-action-button go-native" type="button" title="Native" aria-label="Native"><span>Native</span></button>
-                <button id="homeTuneVoiceButton" class="home-action-button tune-voice" type="button" title="Train Hermes Wake" aria-label="Tune Voice" data-home-action-id="tune_voice"><span>Train Hermes Wake</span><small id="homeTuneVoiceStatus" aria-live="polite"></small></button>
+                <button id="homeWakeWorldButton" class="home-action-button tune-voice" type="button" title="Wake Word" aria-label="Wake Word" data-home-action-id="wake_word"><span>Wake Word</span><small id="homeTuneVoiceStatus" aria-live="polite"></small></button>
                 <button id="homeArtifactsButton" class="home-action-button artifacts" type="button" title="Artifacts" aria-label="Artifacts"><span>Artifacts</span></button>
                 <button id="homeMarketButton" class="home-action-button market" type="button" title="Market" aria-label="Market"><span>Market</span></button>
                 <button id="homeModulesButton" class="home-action-button modules" type="button" title="Modules" aria-label="Modules"><span>Modules</span></button>

@@ -559,6 +559,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/native/android/wake-world-state":
+            try:
+                self._json(HTTPStatus.OK, latest_native_android_wake_world_state(self.server))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/native/events/voice/latest":
             try:
                 self._json(HTTPStatus.OK, latest_native_voice_command(self.server))
@@ -1203,7 +1209,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return
         if path == "/native/diagnostics":
             try:
-                body = self._read_json(max_bytes=256 * 1024)
+                body = self._read_json(max_bytes=1024 * 1024)
                 self._json(HTTPStatus.OK, save_native_diagnostics(self.server, body, self))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
@@ -1223,6 +1229,18 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 self._json(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
                     {"ok": False, "error": {"code": "native_android_hermes_wake_dataset_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/android/false-wake-batch":
+            try:
+                body = self._read_json(max_bytes=8 * 1024 * 1024)
+                self._json(HTTPStatus.OK, save_native_android_false_wake_batch(self.server, body, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_android_false_wake_batch_error", "message": str(exc)}},
                 )
             return
         if path == "/native/android/hermes-wake-export/request":
@@ -6723,6 +6741,12 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "debug_android_voice_tuning_runtime",
     "export_hermes_wake_dataset",
     "run_android_hermes_wake_proof",
+    "get_runtime_snapshot",
+    "open_wake_world",
+    "start_voice_wake",
+    "stop_voice_wake",
+    "refresh_wake_world_state",
+    "apply_wake_word_policy",
     "prove_android_voice_tuning",
     "read_latest_android_report",
     "request_windows_client_update",
@@ -7142,6 +7166,12 @@ def save_native_diagnostics(server: WasmAgentServer, body: dict[str, Any], handl
     target = root / f"{device_id}.json"
     write_json_file(target, record)
     write_json_file(root / "latest.json", record)
+    if str(body.get("schema") or "") == "hermes.wasm_agent.client_boot_trace_upload.v1" or isinstance(body.get("boot_trace"), dict):
+        boot_id = safe_state_id(str((body.get("boot_trace") or {}).get("boot_id") or body.get("boot_id") or f"{device_id}-{int(time.time())}"), "boot")
+        boot_root = root / "client-boot-traces" / device_id
+        write_json_file(boot_root / f"{boot_id}.json", record)
+        write_json_file(boot_root / "latest.json", record)
+        write_json_file(root / "latest-client-boot-trace.json", record)
     return {
         "ok": True,
         "stored": True,
@@ -7156,6 +7186,359 @@ def latest_native_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
     if not isinstance(payload, dict) or not payload:
         return {"ok": True, "available": False, "diagnostics": None}
     return {"ok": True, "available": True, "diagnostics": payload}
+
+
+def native_diagnostics_voice_wake_payload(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    payload = diagnostics.get("payload") if isinstance(diagnostics.get("payload"), dict) else diagnostics
+    runtime = payload.get("runtime_diagnostics") if isinstance(payload, dict) and isinstance(payload.get("runtime_diagnostics"), dict) else payload
+    if isinstance(runtime, dict) and isinstance(runtime.get("voice_wake"), dict):
+        return runtime["voice_wake"]
+    if isinstance(payload, dict) and isinstance(payload.get("voice_wake"), dict):
+        return payload["voice_wake"]
+    if isinstance(runtime, dict) and (
+        str(runtime.get("wake_world_schema") or "").startswith("hermes.wasm_agent.android_wake_world_state")
+        or str(runtime.get("proof_schema") or "").startswith("hermes.wasm_agent.android_wake_proof")
+        or (
+            ("wake_threshold" in runtime or "threshold" in runtime)
+            and ("wake_engine_ready" in runtime or "wake_service_ready" in runtime)
+            and ("inference_count" in runtime or "wake_detection_count" in runtime)
+        )
+    ):
+        return runtime
+    return {}
+
+
+def latest_native_android_wake_world_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
+    root = native_diagnostics_dir(server)
+    latest = read_json_file(root / "latest.json", {})
+    if isinstance(latest, dict) and native_diagnostics_voice_wake_payload(latest):
+        return latest
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for path in root.glob("*.json"):
+        if path.name == "latest.json":
+            continue
+        diagnostics = read_json_file(path, {})
+        if not isinstance(diagnostics, dict) or not native_diagnostics_voice_wake_payload(diagnostics):
+            continue
+        received = native_control_iso_to_epoch(diagnostics.get("received_at"))
+        score = received if received > 0 else path.stat().st_mtime
+        candidates.append((score, diagnostics))
+    if not candidates:
+        return latest if isinstance(latest, dict) else {}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+ANDROID_WAKE_WORLD_POLICY_PRESETS = {
+    "fast_transcript": {
+        "description": "Short command capture for quick post-Hermes phrases.",
+        "payload": {
+            "transcriptTimeoutMs": 8000,
+            "transcriptMinLengthMs": 650,
+            "transcriptCompleteSilenceMs": 900,
+            "transcriptPossibleSilenceMs": 500,
+            "transcriptAcceptPartial": True,
+        },
+    },
+    "forgiving_transcript": {
+        "description": "Longer silence windows for slower speech or delayed recognizer start.",
+        "payload": {
+            "transcriptTimeoutMs": 18000,
+            "transcriptMinLengthMs": 900,
+            "transcriptCompleteSilenceMs": 2500,
+            "transcriptPossibleSilenceMs": 1300,
+            "transcriptAcceptPartial": True,
+        },
+    },
+    "partial_first": {
+        "description": "Prefer partial recognizer text when final Android speech result is unreliable.",
+        "payload": {
+            "transcriptEngine": "android_speech",
+            "transcriptTimeoutMs": 12000,
+            "transcriptMinLengthMs": 700,
+            "transcriptCompleteSilenceMs": 1500,
+            "transcriptPossibleSilenceMs": 700,
+            "transcriptAcceptPartial": True,
+        },
+    },
+    "final_only_probe": {
+        "description": "Disable partial fallback to isolate Android final-result behavior.",
+        "payload": {
+            "transcriptEngine": "android_speech",
+            "transcriptTimeoutMs": 12000,
+            "transcriptMinLengthMs": 900,
+            "transcriptCompleteSilenceMs": 1500,
+            "transcriptPossibleSilenceMs": 800,
+            "transcriptAcceptPartial": False,
+        },
+    },
+    "local_vosk_command": {
+        "description": "Use the on-device Vosk command recognizer when files/asr/vosk-model is installed.",
+        "payload": {
+            "transcriptEngine": "vosk",
+            "transcriptTimeoutMs": 6000,
+            "transcriptMinLengthMs": 700,
+            "transcriptCompleteSilenceMs": 900,
+            "transcriptPossibleSilenceMs": 500,
+            "transcriptAcceptPartial": True,
+        },
+    },
+    "android_speech_fallback": {
+        "description": "Force Android SpeechRecognizer fallback for comparison with local ASR.",
+        "payload": {
+            "transcriptEngine": "android_speech",
+            "transcriptTimeoutMs": 12000,
+            "transcriptMinLengthMs": 700,
+            "transcriptCompleteSilenceMs": 1500,
+            "transcriptPossibleSilenceMs": 700,
+            "transcriptAcceptPartial": True,
+        },
+    },
+}
+
+
+def android_wake_world_policy_presets() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": preset_id,
+            "description": preset["description"],
+            "command": "apply_wake_word_policy",
+            "payload": preset["payload"],
+        }
+        for preset_id, preset in ANDROID_WAKE_WORLD_POLICY_PRESETS.items()
+    ]
+
+
+def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
+    if not state:
+        return {
+            "label": "no_wake_world_state",
+            "severity": "blocked",
+            "summary": "No uploaded Android Wake World state is available.",
+            "next_action": "Install/open the app and upload native diagnostics or run get_runtime_snapshot.",
+            "next_action_type": "live introspection/control",
+        }
+    permission = state.get("permission_state") if isinstance(state.get("permission_state"), dict) else {}
+    if permission.get("record_audio") == "missing":
+        return {
+            "label": "record_audio_permission_missing",
+            "severity": "blocked",
+            "summary": "Microphone permission is missing, so Wake World cannot listen.",
+            "next_action": "Open the app and grant microphone permission.",
+            "next_action_type": "runtime proof",
+        }
+    if state.get("wake_service_ready") is not True or state.get("foreground_service_active") is not True:
+        return {
+            "label": "listener_not_running",
+            "severity": "actionable",
+            "summary": "The foreground wake listener is not active.",
+            "next_action": "Queue native control start_voice_wake or open_wake_world with startListener=true.",
+            "next_action_type": "live introspection/control",
+            "suggested_command": {"type": "start_voice_wake", "payload": {}},
+        }
+    if state.get("wake_engine_ready") is not True:
+        return {
+            "label": "wake_engine_not_ready",
+            "severity": "blocked",
+            "summary": "The listener is active but the wake engine/model is not ready.",
+            "next_action": "Inspect model_source, loaded_model_sha, expected_model_sha, and native diagnostics.",
+            "next_action_type": "live introspection/control",
+        }
+    wake_hits = int(state.get("wake_hit_count") or 0)
+    inference_count = int(state.get("inference_count") or 0)
+    max_confidence = float(state.get("max_confidence_since_start") or 0)
+    threshold = float(state.get("threshold") or 0)
+    transcript_result = str(state.get("transcript_gate_last_result") or "")
+    rejection = str(state.get("last_rejection_reason") or "")
+    listener_mode = str(state.get("listener_mode") or "")
+    if wake_hits <= 0:
+        if inference_count <= 0:
+            return {
+                "label": "inference_not_observed",
+                "severity": "blocked",
+                "summary": "The listener is active but no wake inference has been observed.",
+                "next_action": "Keep Wake World open and refresh state after saying Hermes.",
+                "next_action_type": "runtime proof",
+            }
+        if threshold and max_confidence < threshold:
+            return {
+                "label": "wake_threshold_not_crossed",
+                "severity": "tunable",
+                "summary": "Wake inference is running, but observed confidence is below threshold.",
+                "next_action": "Apply a temporary wakeThreshold policy only for proof, then retry spoken Hermes.",
+                "next_action_type": "live introspection/control",
+                "suggested_command": {"type": "apply_wake_word_policy", "payload": {"wakeThreshold": max(0.05, min(0.99, round(max_confidence + 0.05, 2)))}},
+            }
+        return {
+            "label": "wake_not_detected",
+            "severity": "unknown",
+            "summary": "Wake inference is running but no wake hit has been uploaded yet.",
+            "next_action": "Say Hermes once near the device, then refresh Wake World state.",
+            "next_action_type": "runtime proof",
+        }
+    if state.get("command_capture_active") is True or listener_mode == "command_capture":
+        return {
+            "label": "command_capture_active",
+            "severity": "observing",
+            "summary": "Wake was detected and command capture is currently active.",
+            "next_action": "Wait for transcript result, then refresh Wake World state.",
+            "next_action_type": "live introspection/control",
+        }
+    if transcript_result:
+        lowered = transcript_result.lower()
+        if "android_speech_error_7" in lowered or "no_match" in lowered or "timeout" in lowered or "transcription_empty" in lowered:
+            return {
+                "label": "wake_heard_no_transcript",
+                "severity": "tunable",
+                "summary": "Wake was detected, but Android speech recognition did not produce usable text.",
+                "next_action": "Apply preset forgiving_transcript or partial_first, then retry Hermes plus a short command.",
+                "next_action_type": "live introspection/control",
+                "suggested_preset": "forgiving_transcript",
+                "suggested_command": {"type": "apply_wake_word_policy", "payload": ANDROID_WAKE_WORLD_POLICY_PRESETS["forgiving_transcript"]["payload"]},
+            }
+        if rejection == "unknown_command":
+            return {
+                "label": "transcript_rejected_unknown_command",
+                "severity": "tunable",
+                "summary": "Speech was transcribed but did not match a known command.",
+                "next_action": "Inspect transcript_gate_last_result and extend command routing or speak a known command.",
+                "next_action_type": "live introspection/control",
+            }
+        return {
+            "label": "transcript_observed",
+            "severity": "observing",
+            "summary": "Wake and transcript data are present; inspect dispatch/result fields for routing.",
+            "next_action": "Refresh latest native voice event and command result history.",
+            "next_action_type": "live introspection/control",
+        }
+    return {
+        "label": "wake_heard_transcript_pending",
+        "severity": "observing",
+        "summary": "Wake was detected; transcript result has not been uploaded yet.",
+        "next_action": "Refresh Wake World state or request get_runtime_snapshot.",
+        "next_action_type": "live introspection/control",
+    }
+
+
+def latest_native_android_wake_world_state(server: WasmAgentServer) -> dict[str, Any]:
+    diagnostics = latest_native_android_wake_world_diagnostics(server)
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return {"ok": True, "available": False, "state": None}
+    voice = native_diagnostics_voice_wake_payload(diagnostics)
+    if not isinstance(voice, dict):
+        return {"ok": True, "available": False, "state": None, "diagnostics": redact_native_diagnostics(diagnostics)}
+    recent_events = voice.get("recent_events") if isinstance(voice.get("recent_events"), list) else []
+    state = {
+        "schema": "hermes.wasm_agent.android_wake_world_state.v1",
+        "ok": True,
+        "available": True,
+        "build_id": voice.get("build_id") or diagnostics.get("build_id") or "",
+        "app_version": voice.get("app_version") or "",
+        "android_build_id": voice.get("android_build_id") or voice.get("build_id") or diagnostics.get("build_id") or "",
+        "loaded_model_sha": voice.get("loaded_model_sha") or voice.get("model_sha") or "",
+        "expected_model_sha": voice.get("expected_model_sha") or voice.get("expected_model_sha256") or "",
+        "model_source": voice.get("model_source") or "unknown",
+        "threshold": voice.get("threshold") or voice.get("wake_threshold"),
+        "vad_rms_threshold": voice.get("vad_rms_threshold"),
+        "vad_peak_threshold": voice.get("vad_peak_threshold"),
+        "transcript_timeout_ms": voice.get("transcript_timeout_ms"),
+        "transcript_min_length_ms": voice.get("transcript_min_length_ms"),
+        "transcript_complete_silence_ms": voice.get("transcript_complete_silence_ms"),
+        "transcript_possible_silence_ms": voice.get("transcript_possible_silence_ms"),
+        "transcript_accept_partial": voice.get("transcript_accept_partial") is not False,
+        "transcript_engine": voice.get("transcript_engine") or "",
+        "local_asr_engine": voice.get("local_asr_engine") or "",
+        "local_asr_preferred_engine": voice.get("local_asr_preferred_engine") or voice.get("transcript_engine") or "",
+        "local_asr_vosk_ready": voice.get("local_asr_vosk_ready") is True,
+        "local_asr_vosk_model_path": voice.get("local_asr_vosk_model_path") or "files/asr/vosk-model",
+        "local_asr_vosk_error": voice.get("local_asr_vosk_error") or "",
+        "last_asr_engine": voice.get("last_asr_engine") or "",
+        "last_asr_latency_ms": voice.get("last_asr_latency_ms") or 0,
+        "last_asr_audio_captured_ms": voice.get("last_asr_audio_captured_ms") or 0,
+        "last_asr_partial_transcript": voice.get("last_asr_partial_transcript") or "",
+        "prototype_threshold": voice.get("prototype_threshold") if "prototype_threshold" in voice else voice.get("proof_threshold_override"),
+        "wake_engine_ready": voice.get("wake_engine_ready") is True,
+        "wake_service_ready": voice.get("wake_service_ready") is True,
+        "foreground_service_active": voice.get("foreground_service_active") is True or voice.get("foreground_service_started") is True,
+        "listener_lane": voice.get("listener_lane") or ("foreground_service" if voice.get("foreground_service_started") is True else "off"),
+        "listener_mode": voice.get("listener_mode") or ("command_capture" if voice.get("command_capture_active") is True else "standby" if voice.get("foreground_service_started") is True else "off"),
+        "app_visible": voice.get("app_visible") is not False,
+        "screen_locked": voice.get("screen_locked"),
+        "service_bound_to_app": voice.get("service_bound_to_app") is not False,
+        "wake_event_delivery": voice.get("wake_event_delivery") or "backend",
+        "duplicate_listener_guard_active": voice.get("duplicate_listener_guard_active") is not False,
+        "permission_state": voice.get("permission_state") if isinstance(voice.get("permission_state"), dict) else {},
+        "battery_optimization_state": voice.get("battery_optimization_state") or "unknown",
+        "inference_count": voice.get("inference_count") or 0,
+        "last_confidence": voice.get("last_confidence") or 0,
+        "max_confidence_since_start": voice.get("max_confidence_since_start") or voice.get("max_observed_confidence") or 0,
+        "wake_hit_count": voice.get("wake_hit_count") or voice.get("wake_detection_count") or 0,
+        "false_wake_count": voice.get("false_wake_count") or 0,
+        "false_wake_buffer_count": voice.get("false_wake_buffer_count") or 0,
+        "false_wake_buffer_max": 50,
+        "false_wake_storage_bytes": voice.get("false_wake_storage_bytes") or 0,
+        "command_capture_active": voice.get("command_capture_active") is True,
+        "transcript_gate_last_result": voice.get("transcript_gate_last_result") or voice.get("last_transcript_result") or "",
+        "last_rejection_reason": voice.get("last_rejection_reason") or voice.get("rejection_reason") or "",
+        "last_wake_at": voice.get("last_wake_at") or voice.get("last_wake_detection_at") or 0,
+        "last_false_wake_at": voice.get("last_false_wake_at") or 0,
+        "last_error": voice.get("last_error") or voice.get("failure_reason") or "",
+        "recent_events": recent_events[-50:],
+        "received_at": diagnostics.get("received_at") or "",
+    }
+    state["diagnosis"] = android_wake_world_diagnosis(state)
+    state["policy_presets"] = android_wake_world_policy_presets()
+    return {"ok": True, "available": True, "state": redact_native_diagnostics(state), "diagnostics": redact_native_diagnostics(diagnostics)}
+
+
+def save_native_android_false_wake_batch(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise BrowserError("invalid_false_wake_batch", "False-wake batch payload must be an object.")
+    samples = body.get("samples")
+    if not isinstance(samples, list):
+        samples = []
+    if len(samples) > 50:
+        samples = samples[:50]
+    device_id = native_device_id_from_value(
+        body.get("device_id")
+        or handler.headers.get("X-Wasm-Agent-Native-Device-Id")
+        or handler.headers.get("X-Wasm-Agent-Android-Device-Id")
+        or "android-false-wake"
+    )
+    received_at = iso_timestamp()
+    acknowledged_ids = [
+        safe_state_id(str(sample.get("id") or ""), "")
+        for sample in samples
+        if isinstance(sample, dict) and str(sample.get("id") or "").strip()
+    ]
+    record = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_false_wake_batch_upload.v1",
+        "received_at": received_at,
+        "device_id": device_id,
+        "sample_count": len(samples),
+        "acknowledged_ids": acknowledged_ids,
+        "false_wake_buffer_max": 50,
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "payload": redact_native_diagnostics({**body, "samples": samples}),
+    }
+    root = native_diagnostics_dir(server) / "android-false-wakes" / device_id
+    root.mkdir(parents=True, exist_ok=True)
+    write_json_file(root / f"false-wake-batch-{received_at.replace(':', '').replace('-', '')}.json", record)
+    write_json_file(root / "latest.json", record)
+    write_json_file(native_diagnostics_dir(server) / "latest-android-false-wake-batch.json", record)
+    batch_files = sorted(root.glob("false-wake-batch-*.json"), key=lambda path: path.stat().st_mtime)
+    while len(batch_files) > 50:
+        batch_files.pop(0).unlink(missing_ok=True)
+    return {
+        "ok": True,
+        "stored": True,
+        "deviceId": device_id,
+        "receivedAt": received_at,
+        "sampleCount": len(samples),
+        "acknowledgedIds": acknowledged_ids,
+        "deleteLocal": True,
+    }
 
 
 def save_native_android_hermes_wake_dataset(server: WasmAgentServer, payload: bytes, handler: WasmAgentHandler) -> dict[str, Any]:
@@ -12061,6 +12444,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/config.json",
             "/auth/session",
             "/native/diagnostics/latest",
+            "/native/android/wake-world-state",
             "/native/debug",
             "/native/control/poll",
             "/native/control/clients",
@@ -12086,6 +12470,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/auth/redeem",
             "/auth/logout",
             "/native/android/hermes-wake-dataset",
+            "/native/android/false-wake-batch",
             "/native/android/hermes-wake-export/request",
             "/native/android/hermes-wake-export/result",
             "/native/android/hermes-wake-install/request",
@@ -17571,7 +17956,10 @@ class BrowserClientWebSocket:
     def _recv_exact(self, length: int) -> bytes:
         chunks = bytearray()
         while len(chunks) < length:
-            chunk = self.reader.read(length - len(chunks))
+            try:
+                chunk = self.reader.read(length - len(chunks))
+            except OSError as exc:
+                raise BrowserError("browser_ws_closed", "Browser websocket closed.") from exc
             if not chunk:
                 raise BrowserError("browser_ws_closed", "Browser websocket closed.")
             chunks.extend(chunk)

@@ -157,6 +157,21 @@ exist. Native rebuilds are still required for new OS permissions, native
 libraries, manifest/service declarations, installer/APK behavior, package
 identity, signing, or a new hardware/OS primitive.
 
+## Copilotability Fast Path
+
+Use live app introspection/control before guessing. When a runtime exposes state
+snapshots, capability reports, visible-action summaries, diagnostics, or policy
+knobs, prefer those channels before asking the user to describe the screen or
+before proposing rebuild/reinstall loops. Heavy access such as screenshots, log
+bundles, or full diagnostics must be explicit, idle-gated, bounded, redacted,
+and allowed to skip during active user interaction.
+
+Every substantive reply should end with a concrete next-step phase: name the
+next command/action, say whether it is live introspection/control, static check,
+or runtime/package proof, and only suggest rebuilds when a missing primitive,
+permission, manifest/service change, native library, signing, or package
+identity requires it.
+
 ## Human Links
 
 | Topic | Link |

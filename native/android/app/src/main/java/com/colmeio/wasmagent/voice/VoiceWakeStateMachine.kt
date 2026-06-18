@@ -17,6 +17,7 @@ data class WakeWordResult(
     val detected: Boolean,
     val wakeWord: String = "hermes",
     val confidence: Double = 0.0,
+    val audioWindow: ShortArray = ShortArray(0),
 )
 
 data class VoiceWakeEvent(

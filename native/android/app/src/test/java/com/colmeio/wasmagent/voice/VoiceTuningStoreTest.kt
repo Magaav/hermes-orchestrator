@@ -207,6 +207,46 @@ class VoiceTuningStoreTest {
     }
 
     @Test
+    fun silenceSampleAllowsBriefAmbientSpike() {
+        val root = tempRoot()
+        try {
+            val store = VoiceTuningStore(root)
+            val pcm = ShortArray(VoiceTuningStore.SAMPLE_RATE_HZ) { 650 }
+            pcm[4000] = 5000
+
+            val event = store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, pcm, VoiceTuningStore.SAMPLE_DURATION_MS)
+
+            assertTrue(event.getBoolean("accepted"))
+            val metadataFile = requireNotNull(root.resolve("negative/silence").listFiles { file -> file.extension == "json" }?.single())
+            val metrics = JSONObject(metadataFile.readText()).getJSONObject("quality_metrics")
+            assertTrue(metrics.getDouble("peak_db") > -28.0)
+            assertTrue(metrics.getDouble("loud_sample_ratio") < VoiceTuningStore.MAX_SILENCE_LOUD_SAMPLE_RATIO)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun silenceSampleRejectsSustainedLoudBackground() {
+        val root = tempRoot()
+        try {
+            val store = VoiceTuningStore(root)
+            val pcm = ShortArray(VoiceTuningStore.SAMPLE_RATE_HZ) { 4500 }
+
+            try {
+                store.writeSample(VoiceTuningCategory.NEGATIVE_SILENCE, pcm, VoiceTuningStore.SAMPLE_DURATION_MS)
+                throw AssertionError("expected excessive_noise")
+            } catch (error: IllegalArgumentException) {
+                assertEquals("excessive_noise", error.message)
+            }
+
+            assertEquals(0, store.counts().silence)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun exportDatasetZipIncludesMetadataAndSamples() {
         val root = tempRoot()
         try {

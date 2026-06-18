@@ -279,9 +279,99 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertIn("android_hermes_wake_dataset_latest_read", audit.read_text(encoding="utf-8"))
 
     def test_android_hermes_wake_dataset_upload_is_public_for_native_bridge(self) -> None:
+        self.assertTrue(static_server.is_public_request("GET", "/native/android/wake-world-state"))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-dataset"))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/request"))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/result"))
+        self.assertIn("open_wake_world", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("start_voice_wake", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("refresh_wake_world_state", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("apply_wake_word_policy", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+
+    def test_wake_world_state_uses_latest_voice_wake_packet_when_boot_trace_is_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            root = Path(tmp) / "native-diagnostics"
+            root.mkdir(parents=True)
+            voice_record = {
+                "ok": True,
+                "received_at": "2026-06-17T17:33:55Z",
+                "device_id": "android-voice-device",
+                "build_id": "android-universal-20260617t165554z",
+                "payload": {
+                    "voice_wake": {
+                        "status_source": "lightweight_no_model_load",
+                        "wake_engine_ready": True,
+                        "wake_service_ready": True,
+                        "foreground_service_active": True,
+                        "model_source": "personalized",
+                        "model_sha": "model-sha",
+                        "expected_model_sha": "model-sha",
+                        "wake_threshold": 0.58,
+                        "inference_count": 91,
+                        "max_observed_confidence": 0.12,
+                        "wake_detection_count": 0,
+                        "listener_mode": "standby",
+                    },
+                },
+            }
+            boot_record = {
+                "ok": True,
+                "received_at": "2026-06-17T17:34:05Z",
+                "device_id": "android-voice-device",
+                "build_id": "android-universal-20260617t165554z",
+                "payload": {
+                    "schema": "hermes.wasm_agent.client_boot_trace_upload.v1",
+                    "boot_trace": {"app": {"app_status": "ready"}},
+                },
+            }
+            static_server.write_json_file(root / "android-voice-device.json", voice_record)
+            static_server.write_json_file(root / "latest.json", boot_record)
+
+            result = static_server.latest_native_android_wake_world_state(server)
+
+            self.assertTrue(result["available"])
+            self.assertEqual(result["state"]["received_at"], "2026-06-17T17:33:55Z")
+            self.assertEqual(result["state"]["build_id"], "android-universal-20260617t165554z")
+            self.assertEqual(result["state"]["threshold"], 0.58)
+            self.assertEqual(result["state"]["inference_count"], 91)
+            self.assertEqual(result["state"]["max_confidence_since_start"], 0.12)
+            self.assertEqual(result["state"]["diagnosis"]["label"], "wake_threshold_not_crossed")
+            self.assertTrue(any(item["id"] == "forgiving_transcript" for item in result["state"]["policy_presets"]))
+
+    def test_wake_world_state_diagnoses_post_wake_transcript_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            root = Path(tmp) / "native-diagnostics"
+            root.mkdir(parents=True)
+            voice_record = {
+                "ok": True,
+                "received_at": "2026-06-17T18:10:00Z",
+                "device_id": "android-voice-device",
+                "build_id": "android-universal-20260617t181000z",
+                "payload": {
+                    "voice_wake": {
+                        "wake_engine_ready": True,
+                        "wake_service_ready": True,
+                        "foreground_service_active": True,
+                        "threshold": 0.58,
+                        "inference_count": 120,
+                        "max_confidence_since_start": 0.84,
+                        "wake_hit_count": 1,
+                        "listener_mode": "standby",
+                        "transcript_gate_last_result": "android_speech_error_7",
+                    },
+                },
+            }
+            static_server.write_json_file(root / "android-voice-device.json", voice_record)
+            static_server.write_json_file(root / "latest.json", voice_record)
+
+            result = static_server.latest_native_android_wake_world_state(server)
+
+            self.assertTrue(result["available"])
+            self.assertEqual(result["state"]["diagnosis"]["label"], "wake_heard_no_transcript")
+            self.assertEqual(result["state"]["diagnosis"]["suggested_preset"], "forgiving_transcript")
+            self.assertEqual(result["state"]["diagnosis"]["suggested_command"]["type"], "apply_wake_word_policy")
 
     def test_android_hermes_wake_dataset_operator_rejects_remote_without_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

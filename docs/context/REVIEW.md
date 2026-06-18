@@ -12,6 +12,7 @@ future empty-context agent.
 | Claims | Every success word maps to `verified` or is demoted. |
 | Verification | Commands name exact path/artifact and proof boundary. |
 | Next actions | One durable next action per active area. |
+| Reply loop | Generic copilotability rule is discoverable: use live introspection/control before guessing, and end substantive replies with a concrete next-step phase. |
 | Active state | `docs/context/ACTIVE_STATE.json` matches generated blocks and current next actions. |
 | Compression | Delete diary text, repeated philosophy, and stale debug history. |
 
@@ -26,9 +27,10 @@ Attack the docs as if starting from zero context:
 4. Can I prove Windows installer status without trusting build success?
 5. Can I find the exact next action for wasm-agent, Windows, and Android?
 6. Can I identify generated/runtime state that should not be edited as source?
-7. Does `python3 tools/context/check-context-sync.py` pass and write
+7. Can I find the generic live-introspection rule and the reply next-step requirement without reading Android feature docs?
+8. Does `python3 tools/context/check-context-sync.py` pass and write
    `reports/context/latest/context-sync-result.json`?
-8. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
+9. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
    refuse stale next actions if narrative docs disagree?
 
 Demote or rewrite any ambiguous answer.

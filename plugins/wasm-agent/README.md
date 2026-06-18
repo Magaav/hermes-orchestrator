@@ -19,6 +19,7 @@ download/update, and bridge work.
 | Frontier operator loop | implemented-unverified | focused server/control tests or gated curl proof | Commands must remain authenticated, audited, bounded, and operation-based. |
 | Dev HMR | implemented-unverified | `horc simulate web`; JS smoke tests | Local developer convenience, not production sync contract. |
 | Hermes Wake data/model loop | implemented-unverified | Android bridge/model tests and device proof | Prefer dataset/model iteration over APK rebuilds. |
+| Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWorldState()`; `apply_wake_word_policy`; `GET /native/android/wake-world-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside. |
 | Host Browser/CDP | implemented-unverified | security-loop/browser tests | Disabled by default on public HTTPS unless explicitly reviewed. |
 | Windows installed-app behavior | implemented-unverified | Windows verifier in `native/windows` | Do not claim fixed from PWA/source tests. |
 | Android runtime behavior | implemented-unverified | `horc simulate android` | Report must name the behavior proven. |
@@ -98,6 +99,46 @@ Android wake evidence.
 The active Hermes wake debug question is whether spoken "Hermes" fails because
 the wake threshold is not crossed, the wake event is not emitted, or command
 capture/UI routing does not start.
+
+Wake Word is the PWA control center for Hermes wake behavior. It reads the
+same Android foreground-service state packet used by Frontier:
+`files/native-diagnostics/voice-wake.json`,
+`WasmAgentNative.getWakeWorldState()`, downloaded operation
+`fetch_wake_world_state`, and backend endpoint
+`GET /native/android/wake-world-state` after native diagnostics upload. The
+Wake World state endpoint is an idempotent public native-diagnostics read that
+returns redacted summary state only. It selects the newest uploaded diagnostics
+record that contains Android `voice_wake` state, so later boot-trace uploads do
+not hide the latest wake packet. Train Hermes Wake remains the existing sample
+wizard and is launched from inside Wake Word. On Android native, opening Wake
+Word auto-requests/starts the listener when it is not already active, while the
+explicit Stop control remains available.
+
+Android native app steering is server-core and bounded through
+`/native/control/*`. The Android-hosted PWA polls `/native/control/poll` with
+its native device id, executes Wake World commands through the existing bridge
+methods, and posts `/native/control/result`. Initial server-controlled commands
+are `open_wake_world`, `start_voice_wake`, `stop_voice_wake`,
+`refresh_wake_world_state`, and `apply_wake_word_policy`; this lets an operator
+open Wake Word and start the listener without relying on local taps.
+
+Android native bootstrap favors first-touch responsiveness over eager admin
+hydration. On Android Home, renderer diagnostics are compacted/chunk-flushed to
+native, full native `latest.json` snapshots are debounced off the synchronous
+bridge path, admin bridge refresh/render work is deferred until an admin panel
+or manual refresh needs it, nonessential Home module/message DOM work waits
+until after the shell is visible, and Wake Word state reads use a short cache
+over a lightweight native status packet. Heavy ONNX/model diagnostics remain
+explicit proof/debug work rather than tab-open work.
+
+The Wake Word modal also starts a guided tuning session. During a session, the
+PWA can apply live policy through downloaded operation `apply_wake_word_policy`
+without rebuilding the APK. The first live knobs are `wakeThreshold`,
+`vadRmsThreshold`, `vadPeakThreshold`, and `tuningSessionId`; Android stores
+them in app preferences, refreshes the foreground-service provider set, and
+continues listening. A 2026-06-17 installed run showed threshold `0.58`
+over-triggered (`wake_hit_count: 910`, `false_wake_count: 909`), so the
+conservative baseline is `wakeThreshold: 0.92` plus a short wake cooldown.
 
 ## Claim Boundaries
 

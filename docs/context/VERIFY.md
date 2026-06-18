@@ -122,6 +122,62 @@ horc simulate android --local-report <path>
 
 The report must name the behavior proven. Voice wake PASS is not OAuth PASS.
 
+### Copilotability / Live Introspection
+
+Agents should use available live runtime channels before asking the user to
+describe app state or before proposing rebuild/reinstall work. Prefer compact
+state snapshots, capability reports, visible-action/UI summaries, diagnostics,
+and live policy/config/control commands. Heavy outputs such as screenshots, log
+bundles, full diagnostics, or UI trees must be explicit, bounded, redacted, and
+idle-gated when the runtime supports it.
+
+Every substantive reply should end with a next-step phase: one concrete next
+action, its proof/control class, and the reason a rebuild is or is not required.
+
+### Android Live Control Example
+
+After an APK/WebView bundle that contains the Android native control agent is
+installed, use the live loop before asking the user to describe the screen or
+before proposing another Android rebuild.
+
+Preferred first reads/actions:
+
+```text
+native control command: get_runtime_snapshot
+GET https://wa.colmeio.com/native/android/wake-world-state
+native control command: open_wake_world
+native control command: start_voice_wake
+native control command: apply_wake_word_policy
+```
+
+`get_runtime_snapshot` is intentionally compact: active panel, open modals,
+Wake World status, capabilities, recent redacted events, recent interaction
+trace, and at most 30 visible controls. It is UX-budgeted and may return a
+skipped result during active touch/typing/scrolling. Treat skipped as a reason
+to retry later, not as a user-facing failure.
+
+Live policy fields include:
+
+```text
+wakeThreshold
+vadRmsThreshold
+vadPeakThreshold
+transcriptTimeoutMs
+transcriptMinLengthMs
+transcriptCompleteSilenceMs
+transcriptPossibleSilenceMs
+transcriptAcceptPartial
+```
+
+The cloud Wake World state may include `diagnosis` and `policy_presets`.
+Treat them as loop-shortening guidance, not installed runtime proof. A preset
+still needs a native control `apply_wake_word_policy` result and a fresh
+post-speech upload to prove behavior.
+
+Rebuild only when the missing change is a native primitive: permissions,
+manifest/service lifecycle, native library/engine replacement, package identity,
+signing, or a bridge method/capability not already exposed by the installed APK.
+
 ## Hermes Wake Shipping
 
 Historical superseded model-shipping proof used direct Android PWA bridge

@@ -20,6 +20,27 @@ class PassthroughVad : VoiceVad {
     override fun isSpeech(samples: ShortArray, sampleRateHz: Int): Boolean = true
 }
 
+class EnergyVoiceVad(
+    private val rmsThreshold: Double = 0.012,
+    private val peakThreshold: Int = 1800,
+) : VoiceVad {
+    override val name: String = "energy_gate"
+
+    override fun isSpeech(samples: ShortArray, sampleRateHz: Int): Boolean {
+        if (samples.isEmpty() || sampleRateHz <= 0) return false
+        var sumSquares = 0.0
+        var peak = 0
+        for (sample in samples) {
+            val value = kotlin.math.abs(sample.toInt())
+            peak = maxOf(peak, value)
+            val normalized = sample.toDouble() / Short.MAX_VALUE.toDouble()
+            sumSquares += normalized * normalized
+        }
+        val rms = kotlin.math.sqrt(sumSquares / samples.size.toDouble())
+        return rms >= rmsThreshold || peak >= peakThreshold
+    }
+}
+
 class DebugWakeEngine(private val enabled: Boolean) : WakeWordEngine {
     override val name: String = "debug_stub"
     override val ready: Boolean = enabled
@@ -54,6 +75,7 @@ object VoiceProviderSelector {
         productionWakeEngine: WakeWordEngine,
         productionTranscriber: TranscriptionEngine,
         modelSource: String = "",
+        productionVad: VoiceVad = EnergyVoiceVad(),
         debugAllowed: Boolean = BuildConfig.DEBUG || BuildConfig.ALLOW_LOCAL_DEV,
     ): VoiceProviderSet {
         val debugEnabled = requestedDebugVoiceMode && debugAllowed
@@ -67,7 +89,7 @@ object VoiceProviderSelector {
             )
         } else {
             VoiceProviderSet(
-                vad = PassthroughVad(),
+                vad = productionVad,
                 wake = productionWakeEngine,
                 transcriber = productionTranscriber,
                 debugVoiceModeEnabled = false,

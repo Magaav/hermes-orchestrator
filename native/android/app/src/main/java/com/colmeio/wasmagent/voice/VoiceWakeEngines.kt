@@ -2,6 +2,9 @@ package com.colmeio.wasmagent.voice
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -14,6 +17,8 @@ import ai.onnxruntime.OrtException
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
 import org.json.JSONObject
+import org.vosk.Model
+import org.vosk.Recognizer
 import java.io.File
 import java.nio.FloatBuffer
 import java.util.Locale
@@ -29,14 +34,25 @@ interface WakeWordEngine {
 interface TranscriptionEngine {
     val name: String
     fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long = 12_000): TranscriptionResult
-    fun transcribeLiveAfterWake(timeoutMs: Long = 12_000): TranscriptionResult =
+    fun transcribeLiveAfterWake(timeoutMs: Long = 12_000, policy: TranscriptionPolicy = TranscriptionPolicy()): TranscriptionResult =
         transcribePcm16(ShortArray(0), 16_000, timeoutMs)
 }
+
+data class TranscriptionPolicy(
+    val acceptPartialResults: Boolean = true,
+    val minimumLengthMs: Long = 900,
+    val completeSilenceMs: Long = 1_500,
+    val possiblyCompleteSilenceMs: Long = 800,
+)
 
 data class TranscriptionResult(
     val transcript: String,
     val confidence: Double,
     val error: String = "",
+    val engine: String = "",
+    val latencyMs: Long = 0,
+    val audioCapturedMs: Long = 0,
+    val partialTranscript: String = "",
 )
 
 class OpenWakeWordOnnxEngine(
@@ -54,7 +70,7 @@ class OpenWakeWordOnnxEngine(
         const val DEFAULT_WINDOW_SAMPLES = 16_000
         const val MIN_WINDOW_SAMPLES = 4_000
         const val MAX_WINDOW_SAMPLES = 32_000
-        const val DEFAULT_CONFIDENCE_THRESHOLD = 0.58
+        const val DEFAULT_CONFIDENCE_THRESHOLD = 0.92
         const val INPUT_FORMAT = "pcm16_mono_16khz_normalized_float32"
         const val INPUT_NAME_FALLBACK = "first_input"
         const val OUTPUT_NAME_FALLBACK = "first_output"
@@ -324,14 +340,16 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
     override val name: String = "AndroidSpeechRecognizerEngine"
 
     override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
-        TranscriptionResult("", 0.0, "android_speech_recognizer_requires_live_capture")
+        TranscriptionResult("", 0.0, "android_speech_recognizer_requires_live_capture", engine = name)
 
-    override fun transcribeLiveAfterWake(timeoutMs: Long): TranscriptionResult {
+    override fun transcribeLiveAfterWake(timeoutMs: Long, policy: TranscriptionPolicy): TranscriptionResult {
         if (!SpeechRecognizer.isRecognitionAvailable(context)) {
-            return TranscriptionResult("", 0.0, "android_speech_recognizer_unavailable")
+            return TranscriptionResult("", 0.0, "android_speech_recognizer_unavailable", engine = name)
         }
+        val startedAt = System.currentTimeMillis()
         val latch = CountDownLatch(1)
         var transcript = ""
+        var partialTranscript = ""
         var confidence = 0.0
         var error = ""
         var recognizer: SpeechRecognizer? = null
@@ -344,7 +362,12 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
                     override fun onRmsChanged(rmsdB: Float) {}
                     override fun onBufferReceived(buffer: ByteArray?) {}
                     override fun onEndOfSpeech() {}
-                    override fun onPartialResults(partialResults: Bundle?) {}
+                    override fun onPartialResults(partialResults: Bundle?) {
+                        partialTranscript = partialResults
+                            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                            ?.firstOrNull()
+                            .orEmpty()
+                    }
                     override fun onEvent(eventType: Int, params: Bundle?) {}
                     override fun onError(errorCode: Int) {
                         error = "android_speech_error_$errorCode"
@@ -361,8 +384,11 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-                    .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                    .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                    .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, policy.acceptPartialResults)
+                    .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+                    .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, policy.minimumLengthMs)
+                    .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, policy.completeSilenceMs)
+                    .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, policy.possiblyCompleteSilenceMs)
                 instance.startListening(intent)
             }
         }
@@ -374,19 +400,190 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
             }
             recognizer?.destroy()
         }
+        if (policy.acceptPartialResults && transcript.isBlank() && partialTranscript.isNotBlank()) {
+            transcript = partialTranscript
+            confidence = 0.55
+            error = ""
+        }
         if (transcript.isBlank() && error.isBlank()) error = "android_speech_timeout"
-        return TranscriptionResult(transcript, confidence, error)
+        return TranscriptionResult(
+            transcript = transcript,
+            confidence = confidence,
+            error = error,
+            engine = name,
+            latencyMs = System.currentTimeMillis() - startedAt,
+            partialTranscript = partialTranscript,
+        )
     }
 }
 
-class VoskOfflineEngine : TranscriptionEngine {
-    override val name: String = "VoskOfflineEngine(optional-not-bundled)"
-    override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
-        TranscriptionResult("", 0.0, "vosk_engine_not_bundled")
+class LocalCommandTranscriptionEngine(
+    private val context: Context,
+    private val fallback: TranscriptionEngine = AndroidSpeechRecognizerEngine(context),
+    private val preferredEngine: String = PREF_ENGINE_VOSK,
+) : TranscriptionEngine {
+    companion object {
+        const val PREF_ENGINE_ANDROID = "android_speech"
+        const val PREF_ENGINE_VOSK = "vosk"
+        const val PREF_ENGINE_AUTO = "auto"
+        const val SAMPLE_RATE_HZ = 16_000
+        const val MODEL_PATH = "asr/vosk-model"
+        private const val COMMAND_GRAMMAR = "[\"open wake world\", \"open wake word\", \"wake world\", \"wake word\", \"open\", \"start listener\", \"stop listener\", \"[unk]\"]"
+    }
+
+    private val vosk by lazy { VoskOfflineEngine(File(context.filesDir, MODEL_PATH), COMMAND_GRAMMAR) }
+
+    override val name: String
+        get() = when (preferredEngine) {
+            PREF_ENGINE_ANDROID -> fallback.name
+            PREF_ENGINE_AUTO -> "LocalCommandTranscriptionEngine(auto:${if (vosk.ready) vosk.name else fallback.name})"
+            else -> "LocalCommandTranscriptionEngine(${vosk.name})"
+        }
+
+    fun diagnostics(): JSONObject = JSONObject()
+        .put("local_asr_engine", name)
+        .put("local_asr_preferred_engine", preferredEngine)
+        .put("local_asr_vosk_ready", vosk.ready)
+        .put("local_asr_vosk_model_path", "files/$MODEL_PATH")
+        .put("local_asr_vosk_error", vosk.lastError)
+        .put("local_asr_fallback_engine", fallback.name)
+
+    override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult {
+        if (preferredEngine != PREF_ENGINE_ANDROID && vosk.ready) {
+            return vosk.transcribePcm16(samples, sampleRateHz, timeoutMs)
+        }
+        return fallback.transcribePcm16(samples, sampleRateHz, timeoutMs)
+    }
+
+    override fun transcribeLiveAfterWake(timeoutMs: Long, policy: TranscriptionPolicy): TranscriptionResult {
+        if (preferredEngine == PREF_ENGINE_ANDROID) return fallback.transcribeLiveAfterWake(timeoutMs, policy)
+        if (!vosk.ready) {
+            if (preferredEngine == PREF_ENGINE_AUTO) return fallback.transcribeLiveAfterWake(timeoutMs, policy)
+            return TranscriptionResult("", 0.0, vosk.lastError.ifBlank { "vosk_model_missing" }, engine = name)
+        }
+        val startedAt = System.currentTimeMillis()
+        val capture = captureCommandPcm(timeoutMs, policy)
+        if (capture.error.isNotBlank()) {
+            return TranscriptionResult(
+                transcript = "",
+                confidence = 0.0,
+                error = capture.error,
+                engine = name,
+                latencyMs = System.currentTimeMillis() - startedAt,
+                audioCapturedMs = capture.durationMs,
+            )
+        }
+        val result = vosk.transcribePcm16(capture.samples, SAMPLE_RATE_HZ, timeoutMs)
+        return result.copy(
+            engine = name,
+            latencyMs = System.currentTimeMillis() - startedAt,
+            audioCapturedMs = capture.durationMs,
+        )
+    }
+
+    private data class PcmCapture(val samples: ShortArray, val durationMs: Long, val error: String = "")
+
+    private fun captureCommandPcm(timeoutMs: Long, policy: TranscriptionPolicy): PcmCapture {
+        val captureMs = timeoutMs.coerceIn(1_500L, 8_000L)
+        val minBuffer = AudioRecord.getMinBufferSize(
+            SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBuffer <= 0) return PcmCapture(ShortArray(0), 0, "local_asr_audio_min_buffer_$minBuffer")
+        val readBuffer = ShortArray(maxOf(minBuffer / 2, SAMPLE_RATE_HZ / 10))
+        val captured = ArrayList<Short>((SAMPLE_RATE_HZ * captureMs / 1000L).toInt())
+        var recorder: AudioRecord? = null
+        return try {
+            recorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE_HZ,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBuffer * 2, readBuffer.size * 2),
+            )
+            recorder.startRecording()
+            val startedAt = System.currentTimeMillis()
+            var lastLoudAt = startedAt
+            while (System.currentTimeMillis() - startedAt < captureMs) {
+                val read = recorder.read(readBuffer, 0, readBuffer.size)
+                if (read <= 0) continue
+                var peak = 0
+                for (index in 0 until read) {
+                    val sample = readBuffer[index]
+                    captured.add(sample)
+                    peak = maxOf(peak, kotlin.math.abs(sample.toInt()))
+                }
+                if (peak > 250) lastLoudAt = System.currentTimeMillis()
+                val elapsed = System.currentTimeMillis() - startedAt
+                if (elapsed >= policy.minimumLengthMs && System.currentTimeMillis() - lastLoudAt >= policy.completeSilenceMs) break
+            }
+            val samples = ShortArray(captured.size)
+            for (index in captured.indices) samples[index] = captured[index]
+            PcmCapture(samples, System.currentTimeMillis() - startedAt)
+        } catch (error: Throwable) {
+            PcmCapture(ShortArray(0), 0, "local_asr_audio_${error.javaClass.simpleName}")
+        } finally {
+            try { recorder?.stop() } catch (_: Throwable) {}
+            recorder?.release()
+        }
+    }
+}
+
+class VoskOfflineEngine(
+    private val modelDir: File,
+    private val grammar: String = "",
+) : TranscriptionEngine {
+    override val name: String = "VoskOfflineEngine"
+    @Volatile var lastError: String = ""
+        private set
+    val ready: Boolean
+        get() = modelDir.exists() && modelDir.isDirectory && modelDir.list()?.isNotEmpty() == true
+
+    private val model: Model? by lazy {
+        if (!ready) {
+            lastError = "vosk_model_missing"
+            null
+        } else {
+            try {
+                Model(modelDir.absolutePath).also { lastError = "" }
+            } catch (error: Throwable) {
+                lastError = "vosk_model_load_${error.javaClass.simpleName}"
+                null
+            }
+        }
+    }
+
+    override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult {
+        val startedAt = System.currentTimeMillis()
+        if (samples.isEmpty()) return TranscriptionResult("", 0.0, "vosk_audio_empty", engine = name)
+        if (sampleRateHz != LocalCommandTranscriptionEngine.SAMPLE_RATE_HZ) {
+            return TranscriptionResult("", 0.0, "vosk_unsupported_sample_rate_$sampleRateHz", engine = name)
+        }
+        val activeModel = model ?: return TranscriptionResult("", 0.0, lastError.ifBlank { "vosk_model_missing" }, engine = name)
+        return try {
+            Recognizer(activeModel, sampleRateHz.toFloat(), grammar).use { recognizer ->
+                recognizer.acceptWaveForm(samples, samples.size)
+                val finalJson = JSONObject(recognizer.finalResult ?: "{}")
+                val text = finalJson.optString("text", "").trim()
+                val confidence = if (text.isBlank()) 0.0 else 0.75
+                TranscriptionResult(
+                    transcript = text,
+                    confidence = confidence,
+                    error = if (text.isBlank()) "vosk_transcript_empty" else "",
+                    engine = name,
+                    latencyMs = System.currentTimeMillis() - startedAt,
+                )
+            }
+        } catch (error: Throwable) {
+            lastError = "vosk_transcribe_${error.javaClass.simpleName}"
+            TranscriptionResult("", 0.0, lastError, engine = name, latencyMs = System.currentTimeMillis() - startedAt)
+        }
+    }
 }
 
 class WhisperCppEngine : TranscriptionEngine {
     override val name: String = "WhisperCppEngine(future)"
     override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
-        TranscriptionResult("", 0.0, "whisper_cpp_engine_not_bundled")
+        TranscriptionResult("", 0.0, "whisper_cpp_engine_not_bundled", engine = name)
 }

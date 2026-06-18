@@ -1016,8 +1016,30 @@ const els = {
   homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeGoNativeButton: document.querySelector("#homeGoNativeButton"),
-  homeTuneVoiceButton: document.querySelector("#homeTuneVoiceButton"),
+  homeTuneVoiceButton: document.querySelector("#homeWakeWorldButton"),
   homeTuneVoiceStatus: document.querySelector("#homeTuneVoiceStatus"),
+  wakeWorldModal: document.querySelector("#wakeWorldModal"),
+  wakeWorldStatus: document.querySelector("#wakeWorldStatus"),
+  wakeWorldState: document.querySelector("#wakeWorldState"),
+  wakeWorldOutput: document.querySelector("#wakeWorldOutput"),
+  closeWakeWorldModalButton: document.querySelector("#closeWakeWorldModalButton"),
+  wakeWorldRefreshButton: document.querySelector("#wakeWorldRefreshButton"),
+  wakeWorldCopyButton: document.querySelector("#wakeWorldCopyButton"),
+  wakeWorldFalseWakeFetchButton: document.querySelector("#wakeWorldFalseWakeFetchButton"),
+  wakeWorldFalseWakeDrainButton: document.querySelector("#wakeWorldFalseWakeDrainButton"),
+  wakeWorldRestartButton: document.querySelector("#wakeWorldRestartButton"),
+  wakeWorldStartButton: document.querySelector("#wakeWorldStartButton"),
+  wakeWorldStopButton: document.querySelector("#wakeWorldStopButton"),
+  wakeWorldProofStandbyButton: document.querySelector("#wakeWorldProofStandbyButton"),
+  wakeWorldProofAppButton: document.querySelector("#wakeWorldProofAppButton"),
+  wakeWorldTrainButton: document.querySelector("#wakeWorldTrainButton"),
+  wakeWordSessionButton: document.querySelector("#wakeWordSessionButton"),
+  wakeWordStepDoneButton: document.querySelector("#wakeWordStepDoneButton"),
+  wakeWordApplyPolicyButton: document.querySelector("#wakeWordApplyPolicyButton"),
+  wakeWordThresholdInput: document.querySelector("#wakeWordThresholdInput"),
+  wakeWordVadRmsInput: document.querySelector("#wakeWordVadRmsInput"),
+  wakeWordVadPeakInput: document.querySelector("#wakeWordVadPeakInput"),
+  wakeWordInstruction: document.querySelector("#wakeWordInstruction"),
   tuneVoiceModal: document.querySelector("#tuneVoiceModal"),
   closeTuneVoiceModalButton: document.querySelector("#closeTuneVoiceModalButton"),
   tuneVoiceTitle: document.querySelector("#tuneVoiceTitle"),
@@ -1025,6 +1047,7 @@ const els = {
   tuneVoiceProgress: document.querySelector("#tuneVoiceProgress"),
   tuneVoiceBody: document.querySelector("#tuneVoiceBody"),
   tuneVoiceMessage: document.querySelector("#tuneVoiceMessage"),
+  tuneVoiceResetButton: document.querySelector("#tuneVoiceResetButton"),
   tuneVoiceBackButton: document.querySelector("#tuneVoiceBackButton"),
   tuneVoiceDeleteLastButton: document.querySelector("#tuneVoiceDeleteLastButton"),
   tuneVoiceRetryLastButton: document.querySelector("#tuneVoiceRetryLastButton"),
@@ -1337,13 +1360,55 @@ function readSharedSpacePointerPredictionPreference() {
 }
 
 const INITIAL_SPACE_WIDGET_LAYOUTS = readLocalSpaceWidgetLayouts();
-const AUTH_DIAGNOSTIC_BUFFER_LIMIT = 120;
+const AUTH_DIAGNOSTIC_BUFFER_LIMIT = 40;
+const AUTH_DIAGNOSTIC_UPLOAD_TAIL_LIMIT = 12;
+const CLIENT_BOOT_TRACE_LIMIT = 180;
+const CLIENT_BOOT_TRACE_SLOW_RESOURCE_LIMIT = 24;
+const CLIENT_BOOT_TRACE_SLOW_FETCH_MS = 1200;
+const CLIENT_BOOT_TRACE_INPUT_LIMIT = 80;
+const CLIENT_BOOT_TRACE_LONG_TASK_LIMIT = 80;
+const CLIENT_BOOT_TRACE_LONG_TASK_MS = 250;
+const CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS = 350;
+const AUTH_REDIRECT_PRELOAD_WAIT_MS = 1500;
+const ANDROID_AUTH_REDEEM_TIMEOUT_MS = 2500;
+const ANDROID_CONFIG_TIMEOUT_MS = 2200;
+const ANDROID_AUTH_SESSION_TIMEOUT_MS = 3000;
+const ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS = 3500;
+const ANDROID_NATIVE_REFRESH_INTERVAL_MS = 60000;
+const ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT = 8;
+const ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_DELAY_MS = 18000;
+const ANDROID_BRIDGE_DIAGNOSTIC_CHUNK_DELAY_MS = 350;
+const WAKE_WORD_STATE_CACHE_TTL_MS = 750;
+const WAKE_WORD_REFRESH_INTERVAL_MS = 2000;
+const ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS = 2500;
+const ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS = 900;
+const ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS = 2500;
+const ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS = 1500;
+const ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS = 30;
 const ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY = "wasmAgent.androidNativeAuthSession";
 const authDiagnosticBuffer = [];
 let authDiagnosticUploadTimer = 0;
 let nativeAuthDiagnosticHeartbeat = 0;
+let nativeAuthDiagnosticHeartbeatStartedAt = 0;
 let nativeShellUiApplied = false;
 let nativeAppReadyNotified = false;
+let clientBootTraceUploadTimer = 0;
+let androidNativeControlPollTimer = 0;
+let androidNativeControlPollBusy = false;
+let androidNativeLastUserInputAt = 0;
+let deferAndroidBridgeDiagnostics = true;
+const pendingAndroidBridgeDiagnostics = [];
+const clientBootTrace = {
+  schema: "hermes.wasm_agent.client_boot_trace.v1",
+  bootId: `boot-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+  startedAt: new Date().toISOString(),
+  startedAtMs: typeof performance !== "undefined" ? performance.now() : 0,
+  marks: [],
+  fetches: [],
+  inputs: [],
+  longTasks: [],
+  errors: [],
+};
 const frontierRuntimeState = {
   authSessionLoadPhase: "not_started",
   loadAuthSessionReached: false,
@@ -1367,6 +1432,7 @@ const state = {
   loginOpen: false,
   loginMessage: "",
   authenticatedBootstrapped: false,
+  postInteractiveStartupScheduled: false,
   refreshInterval: 0,
   wasm: null,
   wasmReady: false,
@@ -1467,6 +1533,7 @@ const state = {
   interactionSeq: 0,
   activePointers: new Map(),
   pointerTraceInstalled: false,
+  androidNativeUxBudgetGuardsInstalled: false,
   lastWheelTraceAt: 0,
   lastScrollTraceAt: 0,
   lastLogSummary: null,
@@ -2103,6 +2170,64 @@ function recordUserEvent(type, options = {}) {
   scheduleObservationRender();
   scheduleObservationPublish();
   return event;
+}
+
+function markAndroidNativeUserInput() {
+  androidNativeLastUserInputAt = Date.now();
+}
+
+function installAndroidNativeUxBudgetGuards() {
+  if (!isAndroidNativeShell() || state.androidNativeUxBudgetGuardsInstalled) return;
+  state.androidNativeUxBudgetGuardsInstalled = true;
+  ["pointerdown", "pointermove", "pointerup", "touchstart", "touchmove", "keydown", "input", "wheel"].forEach((type) => {
+    window.addEventListener(type, markAndroidNativeUserInput, { capture: true, passive: true });
+  });
+}
+
+function androidNativeRecentUserInput(ms = ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) {
+  return Date.now() - androidNativeLastUserInputAt < ms;
+}
+
+function androidNativeInputPending() {
+  try {
+    return Boolean(navigator.scheduling?.isInputPending?.({ includeContinuous: true }));
+  } catch {
+    return false;
+  }
+}
+
+function androidNativeControlCanRun(options = {}) {
+  const heavy = Boolean(options.heavy);
+  const quietMs = heavy ? ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS : ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+  if (document.hidden && !options.allowHidden) return { ok: false, reason: "document_hidden" };
+  if (androidNativeRecentUserInput(quietMs)) return { ok: false, reason: "recent_user_input" };
+  if (androidNativeInputPending()) return { ok: false, reason: "input_pending" };
+  return { ok: true, reason: "budget_available" };
+}
+
+function runAndroidNativeIdleTask(task, options = {}) {
+  return new Promise((resolve) => {
+    const run = () => {
+      const budget = androidNativeControlCanRun({ heavy: true, allowHidden: options.allowHidden });
+      if (!budget.ok && !options.force) {
+        resolve({ ok: false, skipped: true, reason: budget.reason });
+        return;
+      }
+      try {
+        resolve(task());
+      } catch (error) {
+        resolve({ ok: false, error: errorMessage(error) });
+      }
+    };
+    const timeoutMs = Number.isFinite(Number(options.timeoutMs))
+      ? Number(options.timeoutMs)
+      : ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS;
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(run, { timeout: timeoutMs });
+    } else {
+      window.setTimeout(run, 0);
+    }
+  });
 }
 
 function eventCounts() {
@@ -17589,7 +17714,67 @@ function androidDiagnosticsBridge() {
   return bridge && typeof bridge === "object" ? bridge : null;
 }
 
+function queueAndroidBridgeDiagnostic(kind, payload = {}, target = "diagnostics") {
+  pendingAndroidBridgeDiagnostics.push({
+    kind: cleanText(kind, "event").slice(0, 120),
+    target,
+    payload: redactClientBootTraceData(payload),
+  });
+  while (pendingAndroidBridgeDiagnostics.length > 80) pendingAndroidBridgeDiagnostics.shift();
+}
+
+function flushAndroidBridgeDiagnostics(reason = "flush") {
+  deferAndroidBridgeDiagnostics = false;
+  if (!pendingAndroidBridgeDiagnostics.length) return;
+  const pendingCount = pendingAndroidBridgeDiagnostics.length;
+  const droppedCount = Math.max(0, pendingCount - ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT);
+  const queued = pendingAndroidBridgeDiagnostics
+    .splice(Math.max(0, pendingCount - ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT), ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT);
+  pendingAndroidBridgeDiagnostics.length = 0;
+  if (droppedCount) {
+    queued.unshift({
+      kind: "startup_diagnostics_compacted",
+      target: "diagnostics",
+      payload: {
+        reason,
+        dropped_count: droppedCount,
+        kept_count: queued.length,
+      },
+    });
+  }
+  const flushNext = (index = 0) => {
+    const diagnosticsBridge = androidDiagnosticsBridge();
+    const nativeBridge = window.wasmAgentNative;
+    const entry = queued[index];
+    if (!entry) {
+      clientBootMark("android_bridge_diagnostics_flushed", {
+        reason,
+        count: queued.length,
+        dropped_count: droppedCount,
+      });
+      return;
+    }
+    try {
+      if (entry.target === "auth" && nativeBridge?.logAuthDiagnostic) {
+        nativeBridge.logAuthDiagnostic(entry.kind, nativeBridgePayload(entry.payload));
+      } else if (entry.target === "shell" && nativeBridge?.logDiagnostic) {
+        nativeBridge.logDiagnostic(entry.kind, nativeBridgePayload(entry.payload));
+      } else if (diagnosticsBridge?.record) {
+        diagnosticsBridge.record(entry.kind, nativeBridgePayload(entry.payload));
+      }
+    } catch {
+      // Deferred diagnostics must never affect the app.
+    }
+    window.setTimeout(() => flushNext(index + 1), ANDROID_BRIDGE_DIAGNOSTIC_CHUNK_DELAY_MS);
+  };
+  window.setTimeout(() => flushNext(0), isAndroidNativeShell() ? ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_DELAY_MS : 1200);
+}
+
 function recordAndroidNativeDiagnostic(eventName, payload = {}) {
+  if (deferAndroidBridgeDiagnostics) {
+    queueAndroidBridgeDiagnostic(eventName, payload, "diagnostics");
+    return null;
+  }
   const bridge = androidDiagnosticsBridge();
   if (!bridge?.record) return null;
   try {
@@ -17617,6 +17802,7 @@ const VOICE_TUNING_SAFE_METHODS = [
   "startVoiceTuningSample",
   "stopVoiceTuningSample",
   "deleteLastVoiceTuningSample",
+  "resetVoiceTuningRecordings",
   "exportHermesDataset",
   "installHermesWakeModel",
   "getVoiceTuningDiagnostics",
@@ -17860,6 +18046,7 @@ const tuneVoiceState = {
   bridgeDetailsAtMs: 0,
   statusAtMs: 0,
   deferredStatusTimer: 0,
+  resetConfirmUntil: 0,
 };
 
 const TUNE_VOICE_STEPS = [
@@ -17956,6 +18143,10 @@ function tuneVoiceFailureMessage(error = "", fallback = "Unexpected error. Try a
   if (code === "recorder_unavailable" || code === "audio_record_initialization_failed") return "Recorder unavailable. Try again.";
   if (code === "too_quiet") return "Too quiet. Try again.";
   if (code === "too_short") return "Too short. Try again.";
+  if (code === "excessive_noise") return "Background audio is too loud for a silence sample. Try a quieter spot or lower mic gain.";
+  if (code === "clipped_audio") return "Audio clipped. Move farther away and try again.";
+  if (code === "mostly_silence") return "Voice sample was mostly silence. Speak clearly and try again.";
+  if (code === "duplicate_sample") return "Sample is too similar to a previous one. Vary the recording and try again.";
   if (code === "timeout") return "Recording timed out. Try again.";
   if (code === "native_bridge_error") return "Native bridge error. Try again.";
   if (code === "voice_tuning_cancelled") return "Recording cancelled.";
@@ -18002,6 +18193,10 @@ function scheduleTuneVoiceStatusRefresh(reason = "deferred_status") {
   }, 80);
 }
 
+function tuneVoiceTotalRecordings(counts = tuneVoiceCounts()) {
+  return counts.positive + counts.silence + counts.speech + counts.noise;
+}
+
 function tuneVoiceReadinessLabel(counts = tuneVoiceCounts()) {
   if (counts.realReady || (counts.positive >= 50 && counts.negative >= 200)) return "Recommended quality reached";
   if (counts.smokeReady || (counts.positive >= 5 && counts.negative >= 10)) return "Ready for smoke model";
@@ -18046,6 +18241,14 @@ function renderTuneVoiceWizard(options = {}) {
   if (els.tuneVoiceProgress) els.tuneVoiceProgress.innerHTML = tuneVoiceProgressMarkup();
   if (els.tuneVoiceMessage) {
     els.tuneVoiceMessage.textContent = tuneVoiceState.message || (bridgeInitializing ? "Checking native voice tuning bridge..." : "");
+  }
+  if (els.tuneVoiceResetButton) {
+    const totalRecordings = tuneVoiceTotalRecordings(counts);
+    const confirmingReset = tuneVoiceState.resetConfirmUntil > Date.now();
+    els.tuneVoiceResetButton.hidden = !bridgeDetails.voice_tuning_bridge_available && !bridgeInitializing;
+    els.tuneVoiceResetButton.disabled = tuneVoiceState.phase !== "idle" || (!confirmingReset && totalRecordings <= 0);
+    els.tuneVoiceResetButton.textContent = confirmingReset ? `Confirm Reset (${totalRecordings})` : "Reset Recordings";
+    els.tuneVoiceResetButton.classList.toggle("is-confirming", confirmingReset);
   }
   if (els.tuneVoiceBackButton) {
     els.tuneVoiceBackButton.disabled = tuneVoiceState.step <= 0 && tuneVoiceState.phase === "idle";
@@ -18110,6 +18313,7 @@ function renderTuneVoiceWizard(options = {}) {
       ["last_clipping_ratio", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.clipping_ratio ?? ""],
       ["last_silence_ratio", tuneVoiceState.diagnostics.renderer_record_result_received?.quality_metrics?.silence_ratio ?? ""],
       ["last_rejection_reason", tuneVoiceState.diagnostics.renderer_record_result_received?.rejection_reason || ""],
+      ["last_raw_error", tuneVoiceState.diagnostics.renderer_record_result_received?.raw_error || ""],
     ];
     els.tuneVoiceBody.innerHTML = `
       <div class="tune-voice-record-panel">
@@ -18206,6 +18410,21 @@ function maybeOpenRequestedTuneVoiceWizard(reason = "native_request") {
   return true;
 }
 
+function maybeOpenRequestedWakeWorldModal(reason = "native_request") {
+  let params = null;
+  try {
+    params = new URL(window.location.href).searchParams;
+  } catch {
+    params = new URLSearchParams();
+  }
+  const requested = cleanText(params.get("native_screen") || params.get("debug_screen"), "").toLowerCase();
+  if (requested !== "wake-world") return false;
+  if (!state.authUser) return false;
+  if (els.wakeWorldModal && !els.wakeWorldModal.hidden) return true;
+  openWakeWorldModal({ source: reason, autoStart: false });
+  return true;
+}
+
 function collectTuneVoiceRuntimeDiagnostics(options = {}) {
   const details = tuneVoiceBridgeDetails({ force: true, status: tuneVoiceState.status || {} });
   const payload = {
@@ -18258,10 +18477,47 @@ function closeTuneVoiceWizard(options = {}) {
 }
 
 function setTuneVoiceStep(stepIndex) {
+  tuneVoiceState.resetConfirmUntil = 0;
   const warning = tuneVoiceLowCountWarning(stepIndex);
   tuneVoiceState.step = clamp(stepIndex, 0, TUNE_VOICE_STEPS.length - 1);
   tuneVoiceState.phase = "idle";
   tuneVoiceState.message = warning;
+  renderTuneVoiceWizard({ skipStatus: true });
+}
+
+function resetTuneVoiceRecordings() {
+  const counts = tuneVoiceCounts();
+  const totalRecordings = tuneVoiceTotalRecordings(counts);
+  if (tuneVoiceState.phase !== "idle") return;
+  if (totalRecordings <= 0) {
+    tuneVoiceState.message = "No recordings to reset.";
+    renderTuneVoiceWizard({ skipStatus: true });
+    return;
+  }
+  const now = Date.now();
+  if (tuneVoiceState.resetConfirmUntil <= now) {
+    tuneVoiceState.resetConfirmUntil = now + 9000;
+    tuneVoiceState.message = `Click Confirm Reset to delete ${totalRecordings} saved recordings and the exported dataset zip.`;
+    renderTuneVoiceWizard({ skipStatus: true });
+    return;
+  }
+  const bridge = androidNativeVoiceBridge();
+  try {
+    if (typeof bridge?.resetVoiceTuningRecordings !== "function") throw new Error("Reset requires the latest Android native bridge.");
+    const result = parseNativeBridgePayload(bridge.resetVoiceTuningRecordings());
+    tuneVoiceState.status = result?.status || tuneVoiceState.status;
+    tuneVoiceState.statusAtMs = Date.now();
+    tuneVoiceState.exportResult = null;
+    tuneVoiceState.resetConfirmUntil = 0;
+    tuneVoiceState.lastRecordKind = "";
+    tuneVoiceState.lastRecordPath = "";
+    tuneVoiceState.lastRecordDurationMs = 0;
+    tuneVoiceState.diagnostics.renderer_record_result_received = null;
+    tuneVoiceState.message = result?.ok ? "Recordings reset. Fresh dataset ready." : cleanText(result?.error, "Reset failed.");
+    renderHomeTuneVoiceState("idle", tuneVoiceState.message, tuneVoiceState.status);
+  } catch (error) {
+    tuneVoiceState.message = errorMessage(error) || "Reset failed.";
+  }
   renderTuneVoiceWizard({ skipStatus: true });
 }
 
@@ -18723,6 +18979,73 @@ function getAndroidNativeState() {
   }
 }
 
+function androidGeneralNativeBridge() {
+  const bridge = window.wasmAgentNative || window.WasmAgentNative;
+  return bridge && typeof bridge === "object" ? bridge : null;
+}
+
+let wakeWordLastState = {};
+let wakeWordLastStateAt = 0;
+
+function getWakeWorldState(options = {}) {
+  const now = Date.now();
+  if (!options.force && wakeWordLastStateAt && now - wakeWordLastStateAt < WAKE_WORD_STATE_CACHE_TTL_MS) {
+    return wakeWordLastState;
+  }
+  let nextState = {};
+  const bridge = androidGeneralNativeBridge();
+  if (bridge?.getWakeWorldState) {
+    try {
+      nextState = parseNativeBridgePayload(bridge.getWakeWorldState()) || {};
+      wakeWordLastState = nextState;
+      wakeWordLastStateAt = now;
+      return nextState;
+    } catch {
+      wakeWordLastState = {};
+      wakeWordLastStateAt = now;
+      return {};
+    }
+  }
+  const nativeState = getAndroidNativeState();
+  nextState = nativeState?.voice_wake || nativeState?.voiceWake || {};
+  wakeWordLastState = nextState;
+  wakeWordLastStateAt = now;
+  return nextState;
+}
+
+let wakeWordRefreshTimer = 0;
+const wakeWordRenderedRows = new Map();
+const wakeWordTuningSteps = [
+  "Place the phone on a table. Stay quiet for 10 seconds, then press Step done.",
+  "Speak random non-Hermes words for 10 seconds, then press Step done.",
+  "Say Hermes 10 times with natural spacing, then press Step done.",
+  "Say Hermes once, then say open wake word, then press Step done.",
+  "Leave the listener running in normal room noise for 20 seconds, then press Step done.",
+];
+const wakeWordTuningState = {
+  sessionId: "",
+  stepIndex: 0,
+  snapshots: [],
+};
+
+function wakeWordLegacyState(packet = {}) {
+  return packet?.wake_word_state || packet?.wakeWorldState || packet || {};
+}
+
+function runWakeWorldOperation(operationId, inputs = {}) {
+  const bridge = androidGeneralNativeBridge();
+  if (!bridge?.runDownloadedOperation) return null;
+  try {
+    return parseNativeBridgePayload(bridge.runDownloadedOperation(JSON.stringify({
+      operationId,
+      requiredNativeCapabilities: ["native.capabilities.downloadedOperations.v1"],
+      timeoutMs: 30000,
+    }), JSON.stringify(inputs || {})));
+  } catch {
+    return null;
+  }
+}
+
 function exportAndroidNativeDiagnostics() {
   const bridge = androidDiagnosticsBridge();
   if (!bridge?.exportLatest) return "";
@@ -18786,6 +19109,10 @@ function nativeShellDiagnostic(kind, payload = {}) {
     shell,
     ...payload,
   };
+  if (deferAndroidBridgeDiagnostics) {
+    queueAndroidBridgeDiagnostic(kind, diagnostic, "shell");
+    return diagnostic;
+  }
   try {
     if (window.wasmAgentAndroid?.logDiagnostic) {
       window.wasmAgentAndroid.logDiagnostic(kind, nativeBridgePayload(diagnostic));
@@ -18932,10 +19259,241 @@ function authDiagnosticBuildId() {
   return cleanText(state.config?.native?.buildId, "") || cleanText(state.config?.native?.installableVersion, "") || "renderer-live";
 }
 
+function clientBootElapsedMs() {
+  const base = Number(clientBootTrace.startedAtMs || 0);
+  return Math.max(0, Math.round(performance.now() - base));
+}
+
+function clippedBootTraceValue(value, fallback = "") {
+  return cleanText(value, fallback).slice(0, 500);
+}
+
+function clientBootMark(phase, data = {}) {
+  const mark = {
+    at_ms: clientBootElapsedMs(),
+    phase: clippedBootTraceValue(phase, "event").slice(0, 120),
+    auth_checked: Boolean(state.authChecked),
+    config_checked: Boolean(state.configChecked),
+    authenticated: Boolean(state.authUser),
+    active_panel: cleanText(state.activePanel, ""),
+    data: redactClientBootTraceData(data),
+  };
+  clientBootTrace.marks.push(mark);
+  while (clientBootTrace.marks.length > CLIENT_BOOT_TRACE_LIMIT) clientBootTrace.marks.shift();
+  try {
+    performance.mark(`wasm-agent:${mark.phase}`);
+  } catch {
+    // Performance marks are diagnostic only.
+  }
+  return mark;
+}
+
+function redactClientBootTraceData(value, depth = 0) {
+  if (value === null || typeof value === "undefined") return value;
+  if (typeof value === "string") return clippedBootTraceValue(value, "");
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (depth > 4) return "[depth-limit]";
+  if (Array.isArray(value)) return value.slice(0, 30).map((item) => redactClientBootTraceData(item, depth + 1));
+  if (typeof value === "object") {
+    const redacted = {};
+    for (const [key, item] of Object.entries(value).slice(0, 80)) {
+      const cleanKey = cleanText(key, "").slice(0, 120);
+      if (!cleanKey) continue;
+      if (/cookie|token|secret|authorization|credential|password|api[_-]?key/i.test(cleanKey)) {
+        redacted[cleanKey] = "[redacted]";
+      } else {
+        redacted[cleanKey] = redactClientBootTraceData(item, depth + 1);
+      }
+    }
+    return redacted;
+  }
+  return clippedBootTraceValue(String(value), "");
+}
+
+function clientBootRecordFetch(entry) {
+  clientBootTrace.fetches.push(redactClientBootTraceData(entry));
+  while (clientBootTrace.fetches.length > CLIENT_BOOT_TRACE_LIMIT) clientBootTrace.fetches.shift();
+  if (Number(entry.duration_ms || 0) >= CLIENT_BOOT_TRACE_SLOW_FETCH_MS || entry.ok === false) {
+    clientBootMark("fetch_slow_or_failed", entry);
+    scheduleClientBootTraceUpload("fetch_slow_or_failed");
+  }
+}
+
+function clientBootRecordInput(event, type = "") {
+  if (!event) return;
+  const target = event.target;
+  const input = {
+    at_ms: clientBootElapsedMs(),
+    type: clippedBootTraceValue(type || event.type || "input", "input").slice(0, 40),
+    event_time_ms: Math.round(event.timeStamp || 0),
+    dispatch_delay_ms: Math.max(0, Math.round(performance.now() - Number(event.timeStamp || performance.now()))),
+    pointer_type: clippedBootTraceValue(event.pointerType || "", ""),
+    button: Number.isFinite(event.button) ? event.button : null,
+    is_trusted: Boolean(event.isTrusted),
+    target: clippedBootTraceValue(describeEventTarget(target), "").slice(0, 220),
+    app_status: cleanText(els.app?.dataset?.status, ""),
+    app_auth: cleanText(els.app?.dataset?.auth, ""),
+    active_panel: cleanText(state.activePanel, ""),
+  };
+  clientBootTrace.inputs.push(input);
+  while (clientBootTrace.inputs.length > CLIENT_BOOT_TRACE_INPUT_LIMIT) clientBootTrace.inputs.shift();
+  clientBootMark("user_input_seen", input);
+  scheduleClientBootTraceUpload("user_input_seen");
+}
+
+function clientBootRecordLongTask(entry) {
+  clientBootTrace.longTasks.push(redactClientBootTraceData(entry));
+  while (clientBootTrace.longTasks.length > CLIENT_BOOT_TRACE_LONG_TASK_LIMIT) clientBootTrace.longTasks.shift();
+  if (Number(entry.duration_ms || 0) >= CLIENT_BOOT_TRACE_LONG_TASK_MS) {
+    clientBootMark("main_thread_long_task", entry);
+    scheduleClientBootTraceUpload("main_thread_long_task");
+  }
+}
+
+function installClientBootInteractionProbe() {
+  if (clientBootTrace.inputProbeInstalled) return;
+  clientBootTrace.inputProbeInstalled = true;
+  ["pointerdown", "pointerup", "click", "touchstart", "touchend"].forEach((type) => {
+    window.addEventListener(type, (event) => clientBootRecordInput(event, type), { capture: true, passive: true });
+  });
+  if (typeof PerformanceObserver !== "undefined") {
+    try {
+      const observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          clientBootRecordLongTask({
+            at_ms: Math.round(entry.startTime || 0),
+            duration_ms: Math.round(entry.duration || 0),
+            name: clippedBootTraceValue(entry.name || "longtask", ""),
+            entry_type: clippedBootTraceValue(entry.entryType || "", ""),
+          });
+        }
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+      clientBootTrace.longTaskObserver = observer;
+    } catch {
+      // Long task timing is diagnostic only and is not available everywhere.
+    }
+  }
+  clientBootMark("input_latency_probe_installed");
+}
+
+function clientBootTracePayload(reason = "snapshot") {
+  const nav = performance.getEntriesByType?.("navigation")?.[0];
+  const resources = (performance.getEntriesByType?.("resource") || [])
+    .map((entry) => ({
+      name: clippedBootTraceValue(entry.name, "").slice(0, 260),
+      initiator_type: clippedBootTraceValue(entry.initiatorType, ""),
+      start_ms: Math.round(entry.startTime || 0),
+      duration_ms: Math.round(entry.duration || 0),
+      transfer_size: Math.round(entry.transferSize || 0),
+      encoded_body_size: Math.round(entry.encodedBodySize || 0),
+    }))
+    .sort((a, b) => b.duration_ms - a.duration_ms)
+    .slice(0, CLIENT_BOOT_TRACE_SLOW_RESOURCE_LIMIT);
+  return {
+    schema: clientBootTrace.schema,
+    reason,
+    boot_id: clientBootTrace.bootId,
+    started_at: clientBootTrace.startedAt,
+    elapsed_ms: clientBootElapsedMs(),
+    href: window.location.href,
+    user_agent: navigator.userAgent || "",
+    build_id: authDiagnosticBuildId(),
+    native_shell: androidNativeShellInfo(),
+    app: {
+      auth_checked: Boolean(state.authChecked),
+      config_checked: Boolean(state.configChecked),
+      authenticated: Boolean(state.authUser),
+      active_panel: cleanText(state.activePanel, ""),
+      app_status: cleanText(els.app?.dataset?.status, ""),
+      app_auth: cleanText(els.app?.dataset?.auth, ""),
+      last_error: cleanText(state.lastError, ""),
+      auth_session_load_phase: cleanText(frontierRuntimeState.authSessionLoadPhase, ""),
+      load_auth_session_reached: Boolean(frontierRuntimeState.loadAuthSessionReached),
+      native_app_ready_notified: Boolean(nativeAppReadyNotified),
+    },
+    native_webview_boot: state.config?.native?.nativeWebViewBoot || null,
+    navigation: nav ? {
+      start_ms: Math.round(nav.startTime || 0),
+      duration_ms: Math.round(nav.duration || 0),
+      dom_interactive_ms: Math.round(nav.domInteractive || 0),
+      dom_content_loaded_ms: Math.round(nav.domContentLoadedEventEnd || 0),
+      load_event_ms: Math.round(nav.loadEventEnd || 0),
+      transfer_size: Math.round(nav.transferSize || 0),
+    } : null,
+    marks: clientBootTrace.marks.slice(-CLIENT_BOOT_TRACE_LIMIT),
+    fetches: clientBootTrace.fetches.slice(-CLIENT_BOOT_TRACE_LIMIT),
+    inputs: clientBootTrace.inputs.slice(-CLIENT_BOOT_TRACE_INPUT_LIMIT),
+    long_tasks: clientBootTrace.longTasks.slice(-CLIENT_BOOT_TRACE_LONG_TASK_LIMIT),
+    errors: clientBootTrace.errors.slice(-40),
+    slow_resources: resources,
+  };
+}
+
+function exposeClientBootTrace() {
+  try {
+    window.__wasmAgentBootTrace = (reason = "manual") => clientBootTracePayload(reason);
+  } catch {
+    // Debug exposure is best effort.
+  }
+}
+
+function scheduleClientBootTraceUpload(reason = "snapshot") {
+  if (clientBootTraceUploadTimer) window.clearTimeout(clientBootTraceUploadTimer);
+  clientBootTraceUploadTimer = window.setTimeout(() => {
+    clientBootTraceUploadTimer = 0;
+    void uploadClientBootTrace(reason);
+  }, CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS);
+}
+
+async function uploadClientBootTrace(reason = "snapshot", options = {}) {
+  const payload = clientBootTracePayload(reason);
+  const body = JSON.stringify({
+    schema: "hermes.wasm_agent.client_boot_trace_upload.v1",
+    device_id: authDiagnosticDeviceId(),
+    build_id: authDiagnosticBuildId(),
+    reason,
+    boot_trace: payload,
+  });
+  try {
+    if (options.beacon && navigator.sendBeacon) {
+      const sent = navigator.sendBeacon("/native/diagnostics", new Blob([body], { type: "application/json" }));
+      if (sent) return;
+    }
+    await fetch("/native/diagnostics", {
+      method: "POST",
+      cache: "no-store",
+      keepalive: Boolean(options.keepalive),
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+      },
+      body,
+    });
+  } catch {
+    // Boot tracing must never affect the app.
+  }
+}
+
 function authDiagnosticTail() {
   return authDiagnosticBuffer
-    .slice(-AUTH_DIAGNOSTIC_BUFFER_LIMIT)
-    .map((entry) => JSON.stringify(entry))
+    .slice(-AUTH_DIAGNOSTIC_UPLOAD_TAIL_LIMIT)
+    .map((entry) => JSON.stringify({
+      timestamp: entry.timestamp,
+      kind: entry.kind,
+      payload: {
+        href: cleanText(entry.payload?.href, "").slice(0, 220),
+        config_checked: Boolean(entry.payload?.config_checked),
+        auth_checked: Boolean(entry.payload?.auth_checked),
+        auth_session_load_phase: cleanText(entry.payload?.auth_session_load_phase, ""),
+        load_auth_session_reached: Boolean(entry.payload?.load_auth_session_reached),
+        build_id: cleanText(entry.payload?.build_id, ""),
+        message: cleanText(entry.payload?.message, "").slice(0, 220),
+        elapsed_ms: entry.payload?.elapsed_ms || 0,
+        reason: cleanText(entry.payload?.reason, "").slice(0, 120),
+        has_google_client_id: Boolean(entry.payload?.has_google_client_id),
+      },
+    }))
     .join("\n");
 }
 
@@ -18976,6 +19534,7 @@ async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic"
 }
 
 function nativeAuthDiagnostic(kind, payload = {}) {
+  const uploadWorthy = /error|timeout|finished|skipped/i.test(kind);
   const nativeShell = androidNativeShellInfo();
   const diagnostic = {
     href: window.location.href,
@@ -19002,18 +19561,22 @@ function nativeAuthDiagnostic(kind, payload = {}) {
   };
   authDiagnosticBuffer.push(entry);
   while (authDiagnosticBuffer.length > AUTH_DIAGNOSTIC_BUFFER_LIMIT) authDiagnosticBuffer.shift();
-  if (/error|timeout|rendered|finished|skipped|started|resolved/i.test(kind)) {
+  if (uploadWorthy) {
     scheduleRendererAuthDiagnosticUpload(kind);
   }
   if (nativeShell.isAndroidNativeShell) {
     recordAndroidNativeDiagnostic(kind, diagnostic);
+  }
+  if (deferAndroidBridgeDiagnostics) {
+    queueAndroidBridgeDiagnostic(kind, diagnostic, "auth");
+    return;
   }
   if (!window.wasmAgentNative?.logAuthDiagnostic) return;
   try {
     void window.wasmAgentNative.logAuthDiagnostic(kind, nativeShell.isAndroidNativeShell ? nativeBridgePayload(diagnostic) : diagnostic);
     if (
       window.wasmAgentNative.uploadAuthDiagnostics
-      && /error|timeout|rendered|finished|skipped/i.test(kind)
+      && uploadWorthy
     ) {
       void window.wasmAgentNative.uploadAuthDiagnostics();
     }
@@ -19037,17 +19600,27 @@ function reportRendererFatalError(kind, error, extra = {}) {
     ...extra,
   };
   frontierRuntimeState.lastFatalError = fatal;
+  clientBootTrace.errors.push({
+    at_ms: clientBootElapsedMs(),
+    ...redactClientBootTraceData(fatal),
+  });
+  while (clientBootTrace.errors.length > 40) clientBootTrace.errors.shift();
+  clientBootMark(kind, fatal);
   try {
     window.__wasmAgentLastFatalError = fatal;
   } catch {
     // Keep reporting best-effort.
   }
   nativeAuthDiagnostic(kind, fatal);
+  void uploadClientBootTrace(kind, { keepalive: true });
   void uploadRendererAuthDiagnostics(kind);
   return fatal;
 }
 
 function installRendererFatalTrap() {
+  exposeClientBootTrace();
+  clientBootMark("fatal_trap_installed");
+  installClientBootInteractionProbe();
   exposeFrontierRendererState();
   window.addEventListener("error", (event) => {
     reportRendererFatalError("renderer_global_error", event.error || event.message, {
@@ -19059,22 +19632,40 @@ function installRendererFatalTrap() {
   window.addEventListener("unhandledrejection", (event) => {
     reportRendererFatalError("renderer_unhandled_rejection", event.reason || "Unhandled promise rejection");
   });
+  window.addEventListener("visibilitychange", () => {
+    clientBootMark("visibility_change", { visibility_state: document.visibilityState });
+    if (document.visibilityState === "hidden") void uploadClientBootTrace("visibility_hidden", { beacon: true, keepalive: true });
+  });
+  window.addEventListener("pagehide", (event) => {
+    clientBootMark("page_hide", { persisted: Boolean(event.persisted) });
+    void uploadClientBootTrace("page_hide", { beacon: true, keepalive: true });
+  });
 }
 
 function startNativeAuthDiagnosticHeartbeat() {
   if (!window.wasmAgentNative || nativeAuthDiagnosticHeartbeat) return;
+  nativeAuthDiagnosticHeartbeatStartedAt = Date.now();
   nativeAuthDiagnostic("native_auth_diagnostic_heartbeat_started");
   nativeAuthDiagnosticHeartbeat = window.setInterval(() => {
+    const elapsed = nativeAuthDiagnosticHeartbeatStartedAt ? Date.now() - nativeAuthDiagnosticHeartbeatStartedAt : 0;
     if (state.configChecked && state.authChecked) {
       window.clearInterval(nativeAuthDiagnosticHeartbeat);
       nativeAuthDiagnosticHeartbeat = 0;
+      nativeAuthDiagnosticHeartbeatStartedAt = 0;
       nativeAuthDiagnostic("native_auth_diagnostic_heartbeat_stopped");
+      return;
+    }
+    if (elapsed > 20000) {
+      window.clearInterval(nativeAuthDiagnosticHeartbeat);
+      nativeAuthDiagnosticHeartbeat = 0;
+      nativeAuthDiagnosticHeartbeatStartedAt = 0;
+      nativeAuthDiagnostic("native_auth_diagnostic_heartbeat_stopped", { reason: "timeout_cap" });
       return;
     }
     nativeAuthDiagnostic("native_auth_diagnostic_heartbeat", {
       config_load_pending: Boolean(state.configLoadPromise),
     });
-  }, 5000);
+  }, 8000);
 }
 
 function mergeNativePreloadConfig(config = {}, nativePayload = null) {
@@ -19112,6 +19703,7 @@ async function loadConfig() {
 }
 
 async function loadConfigOnce() {
+  clientBootMark("config_load_started");
   nativeAuthDiagnostic("config_load_started");
   const nativeConfigPromise = loadNativePreloadConfig();
   let config = {};
@@ -19119,7 +19711,7 @@ async function loadConfigOnce() {
   const startedAt = performance.now();
   try {
     config = await fetchJson("/config.json", {
-      timeoutMs: window.wasmAgentNative ? 5000 : 10000,
+      timeoutMs: isAndroidNativeShell() ? ANDROID_CONFIG_TIMEOUT_MS : window.wasmAgentNative ? 5000 : 10000,
     });
     nativeAuthDiagnostic("config_fetch_resolved", {
       elapsed_ms: Math.round(performance.now() - startedAt),
@@ -19153,6 +19745,13 @@ async function loadConfigOnce() {
     has_google_client_id: Boolean(state.googleClientId),
     google_login_uri: state.googleLoginUri,
     native_server_url: cleanText(config?.native?.serverUrl, ""),
+  });
+  clientBootMark("config_load_finished", {
+    config_fetch_failed: configFetchFailed,
+    has_google_client_id: Boolean(state.googleClientId),
+    google_login_uri: state.googleLoginUri,
+    native_server_url: cleanText(config?.native?.serverUrl, ""),
+    elapsed_ms: Math.round(performance.now() - startedAt),
   });
   if (window.wasmAgentNative && configFetchFailed) {
     state.loginMessage = "Backend connected incorrectly: /config.json unavailable";
@@ -19384,6 +19983,7 @@ function renderAuthGate() {
   if (!els.app) return;
   const authenticated = Boolean(state.authUser);
   els.app.dataset.auth = authenticated ? "ready" : state.authChecked ? "locked" : "checking";
+  els.app.dataset.status = authenticated ? "ready" : state.authChecked ? "auth-ready" : "booting";
   if (els.authGateCopy) {
     els.authGateCopy.textContent = nativeBackendUnresolved()
       ? "Connect this native app to a validated wasm-agent backend to continue."
@@ -19786,6 +20386,10 @@ async function redeemAuthRedirectCode() {
   const code = authRedirectCodeFromUrl();
   if (!code) return false;
   const androidAuthSession = androidNativeAuthSessionId();
+  const startedAt = performance.now();
+  clientBootMark("auth_redirect_code_redeem_started", {
+    android_auth_session: androidAuthSession,
+  });
   nativeAuthDiagnostic("auth_redirect_code_redeem_started");
   recordAndroidNativeDiagnostic("auth_polling", {
     reason: "auth_redirect_code_redeem_started",
@@ -19795,13 +20399,17 @@ async function redeemAuthRedirectCode() {
     const payload = await fetchJson("/auth/redeem", {
       method: "POST",
       body: { code, android_auth_session: androidAuthSession },
-      timeoutMs: 8000,
+      timeoutMs: isAndroidNativeShell() ? ANDROID_AUTH_REDEEM_TIMEOUT_MS : 8000,
     });
     state.authUser = payload.user || null;
     state.authRedirectMessage = "";
     state.loginMessage = "";
-    await flushNativeAuthCookies("auth_redirect_redeem");
+    void flushNativeAuthCookies("auth_redirect_redeem");
     removeAuthRedirectCodeFromUrl();
+    clientBootMark("auth_redirect_code_redeem_finished", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      authenticated: Boolean(state.authUser),
+    });
     nativeAuthDiagnostic("auth_redirect_code_redeem_finished", {
       authenticated: Boolean(state.authUser),
     });
@@ -19816,6 +20424,10 @@ async function redeemAuthRedirectCode() {
     removeAuthRedirectCodeFromUrl();
     state.authRedirectMessage = errorMessage(error);
     state.loginMessage = state.authRedirectMessage;
+    clientBootMark("auth_redirect_code_redeem_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
     nativeAuthDiagnostic("auth_redirect_code_redeem_error", {
       message: errorMessage(error),
     });
@@ -19829,27 +20441,60 @@ async function redeemAuthRedirectCode() {
 }
 
 async function renderGoogleSignInButton() {
+  const startedAt = performance.now();
   const shouldRender = state.loginOpen || (!state.authUser && els.app?.dataset.auth === "locked");
   const slots = [els.googleSignInButton, els.authGateGoogleSignInButton].filter(Boolean);
+  clientBootMark("google_button_render_requested", {
+    should_render: shouldRender,
+    slot_count: slots.length,
+    auth_user: Boolean(state.authUser),
+  });
   nativeAuthDiagnostic("google_button_render_requested", {
     should_render: shouldRender,
     slot_count: slots.length,
     auth_user: Boolean(state.authUser),
   });
   if (!state.configChecked) {
+    if (isAndroidNativeShell() && renderAndroidNativeGoogleSignIn(slots, "android-native-config-pending", "android-native-shell")) {
+      clientBootMark("google_button_rendered", {
+        mode: "android-native-shell",
+        config_pending: true,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        slot_child_counts: slots.map((slot) => slot.childElementCount),
+      });
+      scheduleClientBootTraceUpload("google_button_rendered");
+      void loadConfig();
+      return;
+    }
+    clientBootMark("google_button_render_skipped", { reason: "config_not_checked" });
     nativeAuthDiagnostic("google_button_render_skipped", { reason: "config_not_checked" });
     void loadConfig();
     return;
   }
   if (!shouldRender || state.authUser || !slots.length) {
+    clientBootMark("google_button_render_skipped", {
+      reason: !shouldRender ? "not_visible" : state.authUser ? "already_authenticated" : "missing_slots",
+    });
     nativeAuthDiagnostic("google_button_render_skipped", {
       reason: !shouldRender ? "not_visible" : state.authUser ? "already_authenticated" : "missing_slots",
     });
     return;
   }
   if (!state.googleClientId) {
+    if (isAndroidNativeShell() && renderAndroidNativeGoogleSignIn(slots, "android-native-missing-google-client-id", "android-native-shell")) {
+      state.loginMessage = "";
+      clientBootMark("google_button_rendered", {
+        mode: "android-native-shell",
+        config_missing_google_client_id: true,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        slot_child_counts: slots.map((slot) => slot.childElementCount),
+      });
+      scheduleClientBootTraceUpload("google_button_rendered");
+      return;
+    }
     slots.forEach((slot) => slot.replaceChildren());
     state.loginMessage = "Google login is not configured.";
+    clientBootMark("google_button_render_skipped", { reason: "missing_google_client_id" });
     nativeAuthDiagnostic("google_button_render_skipped", { reason: "missing_google_client_id" });
     renderLogin();
     return;
@@ -19857,12 +20502,19 @@ async function renderGoogleSignInButton() {
   const loginUri = googleLoginUri();
   const renderKey = `${state.googleClientId}|${loginUri}`;
   if (state.googleButtonRenderedFor === renderKey && slots.every((slot) => slot.childElementCount)) {
+    clientBootMark("google_button_render_skipped", { reason: "already_rendered", render_key: renderKey });
     nativeAuthDiagnostic("google_button_render_skipped", { reason: "already_rendered", render_key: renderKey });
     return;
   }
   if (!state.authRedirectMessage) state.loginMessage = "";
   renderLogin();
   if (isAndroidNativeShell() && renderAndroidNativeGoogleSignIn(slots, renderKey, "android-native-shell")) {
+    clientBootMark("google_button_rendered", {
+      mode: "android-native-shell",
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      slot_child_counts: slots.map((slot) => slot.childElementCount),
+    });
+    scheduleClientBootTraceUpload("google_button_rendered");
     return;
   }
   try {
@@ -19887,6 +20539,13 @@ async function renderGoogleSignInButton() {
     });
     installGoogleStyleOverrides();
     state.googleButtonRenderedFor = renderKey;
+    clientBootMark("google_button_rendered", {
+      mode: signInMode,
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      render_key: renderKey,
+      slot_child_counts: slots.map((slot) => slot.childElementCount),
+    });
+    scheduleClientBootTraceUpload("google_button_rendered");
     nativeAuthDiagnostic("google_button_rendered", {
       render_key: renderKey,
       slot_child_counts: slots.map((slot) => slot.childElementCount),
@@ -19900,6 +20559,11 @@ async function renderGoogleSignInButton() {
     }
   } catch (error) {
     state.loginMessage = errorMessage(error);
+    clientBootMark("google_button_render_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
+    scheduleClientBootTraceUpload("google_button_render_error");
     nativeAuthDiagnostic("google_button_render_error", {
       message: errorMessage(error),
     });
@@ -19911,6 +20575,9 @@ async function renderGoogleSignInButton() {
 async function loadAuthSession() {
   frontierRuntimeState.loadAuthSessionReached = true;
   frontierRuntimeState.authSessionLoadPhase = "started";
+  clientBootMark("auth_session_load_started", {
+    android_auth_session: androidNativeAuthSessionId(),
+  });
   nativeAuthDiagnostic("auth_session_load_started");
   recordAndroidNativeDiagnostic("auth_polling", {
     reason: "auth_session_load_started",
@@ -19918,12 +20585,17 @@ async function loadAuthSession() {
   });
   const startedAt = performance.now();
   try {
-    const payload = await fetchJson("/auth/session", { timeoutMs: 8000 });
+    const payload = await fetchJson("/auth/session", { timeoutMs: isAndroidNativeShell() ? ANDROID_AUTH_SESSION_TIMEOUT_MS : 8000 });
     state.authUser = payload.user || null;
     frontierRuntimeState.authSessionLoadPhase = payload.user ? "authenticated" : "anonymous";
     nativeAuthDiagnostic("auth_session_load_finished", {
       elapsed_ms: Math.round(performance.now() - startedAt),
       authenticated: Boolean(state.authUser),
+    });
+    clientBootMark("auth_session_load_finished", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      authenticated: Boolean(state.authUser),
+      phase: frontierRuntimeState.authSessionLoadPhase,
     });
     if (state.authUser) {
       recordAndroidNativeDiagnostic("authenticated_ui_visible", {
@@ -19945,6 +20617,10 @@ async function loadAuthSession() {
       elapsed_ms: Math.round(performance.now() - startedAt),
       message: errorMessage(error),
     });
+    clientBootMark("auth_session_load_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
     recordAndroidNativeDiagnostic("error", {
       stage: "auth_session_load",
       message: errorMessage(error),
@@ -19958,6 +20634,7 @@ async function loadAuthSession() {
   if (state.authUser) startRemoteControlLiveSocket("auth-session");
   else closeRemoteControlLiveSocket({ reconnect: false });
   renderLogin();
+  scheduleClientBootTraceUpload("auth_session_checked");
 }
 
 async function handleGoogleCredential(response) {
@@ -20069,6 +20746,18 @@ async function fetchJson(path, options = {}) {
   if (options.signal) options.signal.addEventListener("abort", abortFromCaller, { once: true });
   const timeoutMs = Number(options.timeoutMs || 30000);
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  const startedAt = performance.now();
+  const tracePath = typeof path === "string" ? path : String(path || "");
+  const traceEntry = {
+    path: tracePath.replace(/[?&](code|token|auth_code|state|credential|session|android_auth_session)=[^&]*/gi, "$1=[redacted]"),
+    method: cleanText(options.method || "GET", "GET"),
+    started_at_ms: clientBootElapsedMs(),
+    timeout_ms: timeoutMs,
+    ok: false,
+    status: 0,
+    duration_ms: 0,
+    error: "",
+  };
   try {
     const response = await fetch(path, {
       method: options.method || "GET",
@@ -20082,6 +20771,7 @@ async function fetchJson(path, options = {}) {
       body: options.body ? JSON.stringify(options.body) : undefined,
       signal: controller.signal,
     });
+    traceEntry.status = response.status;
     const text = await response.text();
     let payload = {};
     try {
@@ -20095,8 +20785,14 @@ async function fetchJson(path, options = {}) {
       error.status = response.status;
       throw error;
     }
+    traceEntry.ok = true;
     return payload;
+  } catch (error) {
+    traceEntry.error = error?.name === "AbortError" ? "abort_or_timeout" : errorMessage(error);
+    throw error;
   } finally {
+    traceEntry.duration_ms = Math.round(performance.now() - startedAt);
+    clientBootRecordFetch(traceEntry);
     window.clearTimeout(timeout);
     if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
   }
@@ -20406,6 +21102,12 @@ function setAgentOpen(open, options = {}) {
   els.agentAvatarButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   if (nextOpen) {
     placeAgentPanel();
+    if (isAndroidNativeShell()) {
+      window.requestAnimationFrame(() => {
+        renderAgentSessions();
+        renderAgentMessages({ forceBottom: true });
+      });
+    }
     window.setTimeout(() => {
       placeAgentPanel();
       queueAgentScrollToBottom();
@@ -29551,8 +30253,44 @@ function taskPreview(task) {
   return String(response).replace(/\s+/g, " ").slice(0, 150);
 }
 
+function androidNativeBackgroundRefreshDeferred(origin = "auto") {
+  return isAndroidNativeShell()
+    && ["startup", "auto", "poll"].includes(origin)
+    && !isAdminPanel(state.activePanel)
+    && !resourcesWidgetIsOpen()
+    && !securityLoopIsOpen();
+}
+
+function androidNativeLeanHomeBootstrap() {
+  return isAndroidNativeShell()
+    && normalizePanel(panelFromPath()) === "home"
+    && !chatQueryIsOpen();
+}
+
+function scheduleAndroidNativeDeferredHomeUi(enabled = false) {
+  if (!enabled) return;
+  window.setTimeout(() => {
+    renderModules();
+    if (!state.agentOpen) renderAgentMessages({ forceBottom: true });
+    applyAgentLayout();
+    clientBootMark("android_home_deferred_ui_rendered");
+  }, ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS + 700);
+}
+
 async function refresh(origin = "auto") {
+  const refreshTraceStartedAt = performance.now();
+  if (origin === "startup") clientBootMark("refresh_startup_started");
   await syncUserSpacesForOpenClient(origin);
+  if (androidNativeBackgroundRefreshDeferred(origin)) {
+    if (origin === "startup") {
+      clientBootMark("refresh_startup_deferred", {
+        android_native: true,
+        active_panel: cleanText(state.activePanel, ""),
+        elapsed_ms: Math.round(performance.now() - refreshTraceStartedAt),
+      });
+    }
+    return;
+  }
   if (!isAdminUser()) {
     state.bridgeReady = false;
     state.nodes = [];
@@ -29562,6 +30300,12 @@ async function refresh(origin = "auto") {
 	    state.securityRuns = [];
 	    state.securityFindings = [];
     renderAll();
+    if (origin === "startup") {
+      clientBootMark("refresh_startup_finished", {
+        admin: false,
+        elapsed_ms: Math.round(performance.now() - refreshTraceStartedAt),
+      });
+    }
     return;
   }
   const startedAt = performance.now();
@@ -29610,6 +30354,15 @@ async function refresh(origin = "auto") {
         duration_ms: performance.now() - startedAt,
       });
     }
+    if (origin === "startup") {
+      clientBootMark("refresh_startup_finished", {
+        admin: true,
+        bridge_ready: Boolean(state.bridgeReady),
+        node_count: state.nodes.length,
+        task_count: state.tasks.length,
+        elapsed_ms: Math.round(performance.now() - refreshTraceStartedAt),
+      });
+    }
   } catch (error) {
     state.bridgeReady = false;
     state.lastError = error.message;
@@ -29621,6 +30374,12 @@ async function refresh(origin = "auto") {
       data: { origin, error: error.message },
       duration_ms: performance.now() - startedAt,
     });
+    if (origin === "startup") {
+      clientBootMark("refresh_startup_error", {
+        elapsed_ms: Math.round(performance.now() - refreshTraceStartedAt),
+        message: errorMessage(error),
+      });
+    }
   } finally {
     renderAppLayer();
     syncResourcePolling();
@@ -30095,6 +30854,577 @@ function renderAgentVoiceWakeSettings() {
   }));
 }
 
+function wakeWorldRows(statePacket = {}) {
+  return [
+    ["wake_service_ready", statePacket.wake_service_ready],
+    ["wake_engine_ready", statePacket.wake_engine_ready],
+    ["foreground_service_active", statePacket.foreground_service_active],
+    ["listener_lane", statePacket.listener_lane],
+    ["listener_mode", statePacket.listener_mode],
+    ["app_visible", statePacket.app_visible],
+    ["screen_locked", statePacket.screen_locked],
+    ["service_bound_to_app", statePacket.service_bound_to_app],
+    ["wake_event_delivery", statePacket.wake_event_delivery],
+    ["duplicate_listener_guard_active", statePacket.duplicate_listener_guard_active],
+    ["model_source", statePacket.model_source],
+    ["loaded_model_sha", statePacket.loaded_model_sha],
+    ["expected_model_sha", statePacket.expected_model_sha],
+    ["threshold", statePacket.threshold],
+    ["vad_rms_threshold", statePacket.vad_rms_threshold],
+    ["vad_peak_threshold", statePacket.vad_peak_threshold],
+    ["transcript_timeout_ms", statePacket.transcript_timeout_ms],
+    ["transcript_min_length_ms", statePacket.transcript_min_length_ms],
+    ["transcript_complete_silence_ms", statePacket.transcript_complete_silence_ms],
+    ["transcript_possible_silence_ms", statePacket.transcript_possible_silence_ms],
+    ["transcript_accept_partial", statePacket.transcript_accept_partial],
+    ["transcript_engine", statePacket.transcript_engine],
+    ["local_asr_engine", statePacket.local_asr_engine],
+    ["local_asr_preferred_engine", statePacket.local_asr_preferred_engine],
+    ["local_asr_vosk_ready", statePacket.local_asr_vosk_ready],
+    ["local_asr_vosk_model_path", statePacket.local_asr_vosk_model_path],
+    ["local_asr_vosk_error", statePacket.local_asr_vosk_error],
+    ["last_asr_engine", statePacket.last_asr_engine],
+    ["last_asr_latency_ms", statePacket.last_asr_latency_ms],
+    ["last_asr_audio_captured_ms", statePacket.last_asr_audio_captured_ms],
+    ["last_asr_partial_transcript", statePacket.last_asr_partial_transcript],
+    ["diagnosis", statePacket.diagnosis?.label],
+    ["diagnosis_next", statePacket.diagnosis?.next_action],
+    ["wake_cooldown_ms", statePacket.wake_cooldown_ms],
+    ["tuning_session_id", statePacket.tuning_session_id],
+    ["prototype_threshold", statePacket.prototype_threshold],
+    ["inference_count", statePacket.inference_count],
+    ["last_confidence", statePacket.last_confidence],
+    ["max_confidence_since_start", statePacket.max_confidence_since_start],
+    ["wake_hit_count", statePacket.wake_hit_count],
+    ["false_wake_count", statePacket.false_wake_count],
+    ["false_wake_buffer_count", `${Number(statePacket.false_wake_buffer_count || 0)} / ${Number(statePacket.false_wake_buffer_max || 50)}`],
+    ["false_wake_storage_bytes", statePacket.false_wake_storage_bytes],
+    ["last_wake_at", statePacket.last_wake_at],
+    ["last_false_wake_at", statePacket.last_false_wake_at],
+    ["last_rejection_reason", statePacket.last_rejection_reason],
+    ["command_capture_active", statePacket.command_capture_active],
+    ["transcript_gate_last_result", statePacket.transcript_gate_last_result],
+    ["standby_restored", statePacket.standby_restored],
+    ["last_error", statePacket.last_error],
+  ];
+}
+
+function renderWakeWorldModal(statePacket = null) {
+  if (!els.wakeWorldModal) return;
+  const packet = wakeWordLegacyState(statePacket || getWakeWorldState());
+  if (els.wakeWorldStatus) {
+    els.wakeWorldStatus.textContent = `${cleanText(packet.listener_lane, "off")} / ${cleanText(packet.listener_mode, "off")}`;
+  }
+  if (els.wakeWorldState) {
+    for (const [label, value] of wakeWorldRows(packet)) {
+      const text = value === null || typeof value === "undefined" ? "" : cleanText(String(value), "");
+      let row = wakeWordRenderedRows.get(label);
+      if (!row) {
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        els.wakeWorldState.append(dt, dd);
+        row = { dd };
+        wakeWordRenderedRows.set(label, row);
+      }
+      if (row.dd.textContent !== text) row.dd.textContent = text;
+    }
+  }
+  if (els.wakeWordThresholdInput && document.activeElement !== els.wakeWordThresholdInput && Number.isFinite(Number(packet.threshold))) {
+    els.wakeWordThresholdInput.value = Number(packet.threshold).toFixed(2);
+  }
+  if (els.wakeWordVadRmsInput && document.activeElement !== els.wakeWordVadRmsInput && Number.isFinite(Number(packet.vad_rms_threshold))) {
+    els.wakeWordVadRmsInput.value = Number(packet.vad_rms_threshold).toFixed(3);
+  }
+  if (els.wakeWordVadPeakInput && document.activeElement !== els.wakeWordVadPeakInput && Number.isFinite(Number(packet.vad_peak_threshold))) {
+    els.wakeWordVadPeakInput.value = String(Math.round(Number(packet.vad_peak_threshold)));
+  }
+  renderWakeWordInstruction(packet);
+}
+
+function openWakeWorldModal(options = {}) {
+  if (!els.wakeWorldModal) return;
+  const packet = getWakeWorldState({ force: true });
+  els.wakeWorldModal.hidden = false;
+  renderWakeWorldModal(packet);
+  renderWakeWordJsonOutput(packet);
+  startWakeWordRefreshLoop();
+  if (isAndroidNativeShell() && options.autoStart !== false && !packet.foreground_service_active && !packet.wake_service_ready) {
+    window.setTimeout(() => wakeWorldBridgeAction("start"), 100);
+  }
+  if (!options.skipHistory) {
+    pushUiNavigationLayer("wake-world-modal", () => closeWakeWorldModal({ skipHistory: true, skipStack: true }));
+  }
+}
+
+function closeWakeWorldModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("wake-world-modal")) return;
+  if (els.wakeWorldModal) els.wakeWorldModal.hidden = true;
+  stopWakeWordRefreshLoop();
+  wakeWordRenderedRows.clear();
+  if (els.wakeWorldState) els.wakeWorldState.replaceChildren();
+  if (!options.skipStack) closeUiNavigationLayer("wake-world-modal", { skipHistory: true, replaceHistory: true });
+}
+
+function renderWakeWordJsonOutput(packet = getWakeWorldState()) {
+  if (els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(wakeWordLegacyState(packet) || {}, null, 2);
+}
+
+function startWakeWordRefreshLoop() {
+  if (wakeWordRefreshTimer || !els.wakeWorldModal || els.wakeWorldModal.hidden) return;
+  wakeWordRefreshTimer = window.setInterval(() => {
+    if (!els.wakeWorldModal || els.wakeWorldModal.hidden) {
+      stopWakeWordRefreshLoop();
+      return;
+    }
+    renderWakeWorldModal();
+  }, isAndroidNativeShell() ? WAKE_WORD_REFRESH_INTERVAL_MS : 1000);
+}
+
+function stopWakeWordRefreshLoop() {
+  if (!wakeWordRefreshTimer) return;
+  window.clearInterval(wakeWordRefreshTimer);
+  wakeWordRefreshTimer = 0;
+}
+
+async function copyWakeWorldJson() {
+  try {
+    await navigator.clipboard.writeText(els.wakeWorldOutput?.textContent || JSON.stringify(getWakeWorldState(), null, 2));
+    if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = "copied";
+  } catch {
+    if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = "copy failed";
+  }
+}
+
+function wakeWorldBridgeAction(action) {
+  const bridge = androidGeneralNativeBridge();
+  const renderNow = () => window.requestAnimationFrame(renderWakeWorldModal);
+  try {
+    wakeWordLastStateAt = 0;
+    if (action === "refresh") {
+      const result = runWakeWorldOperation("fetch_wake_world_state");
+      renderWakeWordJsonOutput(result || getWakeWorldState());
+    } else if (action === "fetch_false_wakes") {
+      if (bridge?.getFalseWakeBatch) els.wakeWorldOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.getFalseWakeBatch()) || {}, null, 2);
+    } else if (action === "drain_false_wakes") {
+      const batch = bridge?.getFalseWakeBatch ? parseNativeBridgePayload(bridge.getFalseWakeBatch()) : {};
+      const ids = Array.isArray(batch?.samples) ? batch.samples.map((sample) => sample.id).filter(Boolean) : [];
+      if (bridge?.confirmFalseWakeBatchUploaded) els.wakeWorldOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.confirmFalseWakeBatchUploaded(JSON.stringify(ids))) || {}, null, 2);
+    } else if (action === "restart") {
+      try { bridge?.disableVoiceWake?.(); } catch (error) { recordUserEvent("wake_word_bridge_error", { action: "disable", error: errorMessage(error) }); }
+      window.setTimeout(() => {
+        try { bridge?.enableVoiceWake?.(); } catch (error) { renderWakeWordBridgeError("enableVoiceWake", error); }
+      }, 700);
+    } else if (action === "start") {
+      try { bridge?.requestVoiceWakePermission?.(); } catch (error) { renderWakeWordBridgeError("requestVoiceWakePermission", error); }
+      window.setTimeout(() => {
+        try { bridge?.enableVoiceWake?.(); } catch (error) { renderWakeWordBridgeError("enableVoiceWake", error); }
+      }, 500);
+    } else if (action === "stop") {
+      bridge?.disableVoiceWake?.();
+    } else if (action === "proof_standby" || action === "proof_app") {
+      const result = runWakeWorldOperation("prove_wake_world_loop", { appVisible: action === "proof_app" });
+      if (result && els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(result, null, 2);
+    }
+  } catch (error) {
+    renderWakeWordBridgeError(action, error);
+  }
+  renderNow();
+  window.setTimeout(renderWakeWorldModal, 250);
+  window.setTimeout(renderWakeWorldModal, 900);
+}
+
+function queueWakeWorldBridgeAction(action, source = "native-control") {
+  const queuedAt = new Date().toISOString();
+  recordUserEvent("wake_world_bridge_action_queued", { action, source, queued_at: queuedAt });
+  window.setTimeout(() => {
+    recordUserEvent("wake_world_bridge_action_deferred", { action, source, queued_at: queuedAt });
+    wakeWorldBridgeAction(action);
+  }, ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS);
+  return {
+    queued: true,
+    action,
+    source,
+    queuedAt,
+    state: wakeWordLegacyState(getWakeWorldState({ force: true })),
+  };
+}
+
+function renderWakeWordBridgeError(action, error) {
+  const payload = {
+    ok: false,
+    action,
+    error: errorMessage(error) || "wake_word_bridge_error",
+    state: getWakeWorldState(),
+  };
+  if (els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(payload, null, 2);
+  if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = `${action} failed`;
+  recordUserEvent("wake_word_bridge_error", payload);
+}
+
+function wakeWordPolicyFromInputs() {
+  return {
+    wakeThreshold: Number(els.wakeWordThresholdInput?.value || 0.92),
+    vadRmsThreshold: Number(els.wakeWordVadRmsInput?.value || 0.012),
+    vadPeakThreshold: Math.round(Number(els.wakeWordVadPeakInput?.value || 1800)),
+    tuningSessionId: wakeWordTuningState.sessionId,
+  };
+}
+
+function applyWakeWordPolicy(extra = {}) {
+  wakeWordLastStateAt = 0;
+  const result = runWakeWorldOperation("apply_wake_word_policy", {
+    ...wakeWordPolicyFromInputs(),
+    ...extra,
+  });
+  if (result && els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(result, null, 2);
+  window.setTimeout(renderWakeWorldModal, 250);
+  return result;
+}
+
+function startWakeWordTuningSession() {
+  wakeWordTuningState.sessionId = `wake-word-${Date.now().toString(36)}`;
+  wakeWordTuningState.stepIndex = 0;
+  wakeWordTuningState.snapshots = [];
+  applyWakeWordPolicy({ tuningSessionId: wakeWordTuningState.sessionId });
+  wakeWorldBridgeAction("start");
+  renderWakeWordInstruction(getWakeWorldState());
+}
+
+function completeWakeWordTuningStep() {
+  const packet = wakeWordLegacyState(getWakeWorldState());
+  wakeWordTuningState.snapshots.push({
+    step: wakeWordTuningState.stepIndex,
+    at: new Date().toISOString(),
+    wake_hit_count: packet.wake_hit_count,
+    false_wake_count: packet.false_wake_count,
+    inference_count: packet.inference_count,
+    last_confidence: packet.last_confidence,
+    max_confidence_since_start: packet.max_confidence_since_start,
+    last_rejection_reason: packet.last_rejection_reason,
+  });
+  wakeWordTuningState.stepIndex = Math.min(wakeWordTuningState.stepIndex + 1, wakeWordTuningSteps.length - 1);
+  renderWakeWordInstruction(packet);
+}
+
+function renderWakeWordInstruction(packet = {}) {
+  if (!els.wakeWordInstruction) return;
+  const session = wakeWordTuningState.sessionId || cleanText(packet.tuning_session_id, "");
+  const step = wakeWordTuningSteps[wakeWordTuningState.stepIndex] || wakeWordTuningSteps[0];
+  const counts = `hits ${Number(packet.wake_hit_count || 0)} / false ${Number(packet.false_wake_count || 0)} / conf ${Number(packet.last_confidence || 0).toFixed(3)}`;
+  els.wakeWordInstruction.textContent = session ? `${step} ${counts}` : "Start session, then follow the next instruction here.";
+}
+
+function wakeWorldCommandForTranscript(transcript = "") {
+  const normalized = cleanText(transcript, "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  if (normalized === "open wake word" || normalized === "open wake world") return "open_wake_world";
+  if (normalized === "show diagnostics") return "show_diagnostics";
+  if (normalized === "train hermes wake" || normalized === "train hermes") return "train_hermes_wake";
+  if (normalized === "stop listening") return "stop_listening";
+  if (normalized === "go home") return "go_home";
+  return "";
+}
+
+function routeWakeWorldCommand(transcript = "") {
+  const command = wakeWorldCommandForTranscript(transcript);
+  if (command === "open_wake_world") {
+    openWakeWorldModal();
+  } else if (command === "show_diagnostics") {
+    openNativeDebugModal({ reason: "wake-world-command" });
+  } else if (command === "train_hermes_wake") {
+    openWakeWorldModal();
+    openTuneVoiceWizard();
+  } else if (command === "stop_listening") {
+    wakeWorldBridgeAction("stop");
+  } else if (command === "go_home") {
+    closeWakeWorldModal({ skipHistory: true });
+    closeNativeDebugModal({ skipHistory: true });
+    closeTuneVoiceWizard({ skipHistory: true });
+    setPanel("home");
+  }
+  return command;
+}
+
+function androidNativeControlDeviceId() {
+  const shell = androidNativeShellInfo();
+  const nativeState = getAndroidNativeState() || {};
+  const buildId = cleanText(nativeState?.build?.build_id || shell.buildId || "", "");
+  const installHash = cleanText(nativeState?.install_device_hash || shell.installDeviceHash || "", "");
+  if (buildId && installHash) return `android-${buildId}-${installHash}`;
+  if (buildId) return `android-${buildId}`;
+  return "";
+}
+
+function androidNativeControlRoute() {
+  try {
+    return `${window.location.pathname}${window.location.search || ""}`;
+  } catch {
+    return "/home?native=android";
+  }
+}
+
+function androidNativeControlCapabilities() {
+  return {
+    schema: "hermes.wasm_agent.android_control_capabilities.v1",
+    build_id: cleanText(androidNativeShellInfo().buildId, ""),
+    commands: [
+      "get_runtime_snapshot",
+      "open_wake_world",
+      "start_voice_wake",
+      "stop_voice_wake",
+      "refresh_wake_world_state",
+      "apply_wake_word_policy",
+      "upload_diagnostics",
+      "export_diagnostics",
+      "reload",
+    ],
+    live_policies: [
+      "wakeThreshold",
+      "vadRmsThreshold",
+      "vadPeakThreshold",
+      "transcriptTimeoutMs",
+      "transcriptMinLengthMs",
+      "transcriptCompleteSilenceMs",
+      "transcriptPossibleSilenceMs",
+      "transcriptAcceptPartial",
+    ],
+    ux_budgeted: true,
+    heavy_commands_idle_only: true,
+    screenshots_default_enabled: false,
+    ui_snapshot_max_controls: 30,
+  };
+}
+
+function androidNativeOpenModals() {
+  return [
+    ["wake_world", els.wakeWorldModal],
+    ["tune_voice", els.tuneVoiceModal],
+    ["native_debug", els.nativeDebugModal],
+    ["login", els.loginPopover],
+    ["config", els.configModal],
+  ]
+    .filter(([, element]) => Boolean(element && !element.hidden && element.getClientRects?.().length))
+    .map(([name]) => name);
+}
+
+function androidNativeVisibleControlSummary(limit = 30) {
+  const controls = [];
+  const selector = [
+    "button",
+    "a[href]",
+    "input",
+    "textarea",
+    "select",
+    "s-select",
+    "[role='button']",
+    "[data-panel]",
+    "[data-widget-id]",
+    "[data-widget-app]",
+  ].join(",");
+  const seen = new Set();
+  for (const element of Array.from(document.querySelectorAll?.(selector) || [])) {
+    if (controls.length >= limit) break;
+    if (!element || seen.has(element)) continue;
+    seen.add(element);
+    const rect = androidElementVisibleRect(element);
+    if (!rect) continue;
+    const detail = describeEventTarget(element);
+    controls.push({
+      tag: detail.tag,
+      id: detail.id,
+      role: detail.role,
+      aria_label: cleanText(detail.aria_label, ""),
+      title: cleanText(detail.title, ""),
+      data_panel: cleanText(detail.data_panel, ""),
+      data_widget_id: cleanText(detail.data_widget_id, ""),
+      text: truncateText(cleanText(element.textContent || element.getAttribute?.("aria-label") || element.getAttribute?.("title") || "", ""), 80),
+      disabled: Boolean(element.disabled || element.getAttribute?.("aria-disabled") === "true"),
+      rect: compactRect(rect),
+    });
+  }
+  return controls;
+}
+
+function androidNativeRuntimeSnapshot(options = {}) {
+  const wakeState = wakeWordLegacyState(getWakeWorldState({ force: options.forceWakeState === true }));
+  const nativeState = getAndroidNativeState() || {};
+  return {
+    schema: "hermes.wasm_agent.android_runtime_snapshot.v1",
+    captured_at: new Date().toISOString(),
+    route: androidNativeControlRoute(),
+    active_panel: cleanText(state.activePanel, ""),
+    auth_state: state.authUser ? "authenticated" : state.authChecked ? "locked" : "checking",
+    document_hidden: Boolean(document.hidden),
+    recent_user_input_ms: Date.now() - androidNativeLastUserInputAt,
+    input_pending: androidNativeInputPending(),
+    open_modals: androidNativeOpenModals(),
+    wake_world: {
+      listener_lane: cleanText(wakeState.listener_lane, ""),
+      listener_mode: cleanText(wakeState.listener_mode, ""),
+      wake_service_ready: Boolean(wakeState.wake_service_ready),
+      wake_engine_ready: Boolean(wakeState.wake_engine_ready),
+      foreground_service_active: Boolean(wakeState.foreground_service_active),
+      wake_hit_count: Number(wakeState.wake_hit_count || 0),
+      false_wake_count: Number(wakeState.false_wake_count || 0),
+      transcript_gate_last_result: cleanText(wakeState.transcript_gate_last_result, ""),
+      last_rejection_reason: cleanText(wakeState.last_rejection_reason, ""),
+      transcript_timeout_ms: Number(wakeState.transcript_timeout_ms || 0),
+      transcript_accept_partial: wakeState.transcript_accept_partial !== false,
+      transcript_engine: cleanText(wakeState.transcript_engine, ""),
+      local_asr_engine: cleanText(wakeState.local_asr_engine, ""),
+      local_asr_vosk_ready: Boolean(wakeState.local_asr_vosk_ready),
+      local_asr_vosk_error: cleanText(wakeState.local_asr_vosk_error, ""),
+      last_asr_engine: cleanText(wakeState.last_asr_engine, ""),
+      last_asr_latency_ms: Number(wakeState.last_asr_latency_ms || 0),
+      last_asr_audio_captured_ms: Number(wakeState.last_asr_audio_captured_ms || 0),
+      last_asr_partial_transcript: cleanText(wakeState.last_asr_partial_transcript, ""),
+    },
+    native_bridge: {
+      available: Boolean(androidGeneralNativeBridge()),
+      build_id: cleanText(nativeState?.build?.build_id || androidNativeShellInfo().buildId || "", ""),
+      install_device_hash: cleanText(nativeState?.install_device_hash || "", ""),
+    },
+    viewport: {
+      width: roundedNumber(window.innerWidth),
+      height: roundedNumber(window.innerHeight),
+      device_pixel_ratio: Number(window.devicePixelRatio || 1),
+    },
+    visible_controls: androidNativeVisibleControlSummary(Number(options.maxControls || 30)).slice(0, 30),
+    recent_events: latestEvents(12),
+    interaction_trace: state.interactionTrace.slice(-8),
+    capabilities: androidNativeControlCapabilities(),
+  };
+}
+
+async function postAndroidNativeControlResult(command, result) {
+  const deviceId = androidNativeControlDeviceId();
+  if (!deviceId || !command?.id) return;
+  try {
+    await fetchJson("/native/control/result", {
+      method: "POST",
+      timeoutMs: 5000,
+      body: {
+        device_id: deviceId,
+        command_id: command.id,
+        command_type: command.type,
+        result,
+      },
+    });
+  } catch (error) {
+    recordUserEvent("android_native_control_result_failed", {
+      command_id: command.id,
+      command_type: command.type,
+      error: errorMessage(error),
+    });
+  }
+}
+
+async function executeAndroidNativeControlCommand(command = {}) {
+  const type = cleanText(command.type || command.command, "");
+  const payload = command.payload && typeof command.payload === "object" ? command.payload : {};
+  const bridge = androidGeneralNativeBridge();
+  wakeWordLastStateAt = 0;
+  if (type === "get_runtime_snapshot" || type === "status") {
+    return runAndroidNativeIdleTask(() => ({
+      ok: true,
+      command: type,
+      snapshot: androidNativeRuntimeSnapshot(payload),
+    }), {
+      force: payload.force === true,
+      allowHidden: payload.allowHidden === true,
+      timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
+    });
+  }
+  if (type === "open_wake_world") {
+    openWakeWorldModal({ source: "native-control" });
+    const queued = payload.startListener !== false
+      ? queueWakeWorldBridgeAction("start", "native-control-open-wake-world")
+      : null;
+    return { ok: true, command: type, opened: true, started: payload.startListener !== false, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+  }
+  if (type === "start_voice_wake") {
+    const queued = queueWakeWorldBridgeAction("start", "native-control-start-voice-wake");
+    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+  }
+  if (type === "stop_voice_wake") {
+    const queued = queueWakeWorldBridgeAction("stop", "native-control-stop-voice-wake");
+    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+  }
+  if (type === "refresh_wake_world_state") {
+    const statePacket = runWakeWorldOperation("fetch_wake_world_state") || getWakeWorldState({ force: true });
+    renderWakeWorldModal(statePacket);
+    renderWakeWordJsonOutput(statePacket);
+    return { ok: true, command: type, state: wakeWordLegacyState(statePacket) };
+  }
+  if (type === "apply_wake_word_policy") {
+    const result = applyWakeWordPolicy(payload);
+    return { ok: Boolean(result?.ok !== false), command: type, result, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+  }
+  if (type === "upload_diagnostics" || type === "export_diagnostics") {
+    return runAndroidNativeIdleTask(() => {
+      const exported = exportAndroidNativeDiagnostics();
+      return { ok: true, command: type, exported: Boolean(exported), state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+    }, {
+      force: payload.force === true,
+      allowHidden: payload.allowHidden === true,
+      timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
+    });
+  }
+  if (type === "reload") {
+    bridge?.reload?.();
+    return { ok: true, command: type, reloading: true };
+  }
+  return { ok: false, command: type, error: "unsupported_android_native_control_command" };
+}
+
+async function pollAndroidNativeControl(reason = "interval") {
+  if (!isAndroidNativeShell() || androidNativeControlPollBusy) return;
+  const deviceId = androidNativeControlDeviceId();
+  if (!deviceId) return;
+  const budget = androidNativeControlCanRun({ allowHidden: reason === "startup" });
+  if (!budget.ok) return;
+  androidNativeControlPollBusy = true;
+  try {
+    const query = new URLSearchParams({
+      device_id: deviceId,
+      build_id: cleanText(androidNativeShellInfo().buildId, ""),
+      route: androidNativeControlRoute(),
+    });
+    const payload = await fetchJson(`/native/control/poll?${query.toString()}`, { timeoutMs: 5000 });
+    const commands = Array.isArray(payload?.commands) ? payload.commands : [];
+    for (const command of commands) {
+      let result;
+      try {
+        result = await executeAndroidNativeControlCommand(command);
+      } catch (error) {
+        result = { ok: false, command: command?.type || "", error: errorMessage(error) };
+      }
+      await postAndroidNativeControlResult(command, {
+        ...result,
+        reason,
+        executedAt: new Date().toISOString(),
+        capabilities: androidNativeControlCapabilities(),
+      });
+    }
+  } catch (error) {
+    recordUserEvent("android_native_control_poll_failed", {
+      reason,
+      error: errorMessage(error),
+    });
+  } finally {
+    androidNativeControlPollBusy = false;
+  }
+}
+
+function startAndroidNativeControlAgent() {
+  if (!isAndroidNativeShell() || androidNativeControlPollTimer) return;
+  installAndroidNativeUxBudgetGuards();
+  void pollAndroidNativeControl("startup");
+  androidNativeControlPollTimer = window.setInterval(() => {
+    void pollAndroidNativeControl("interval");
+  }, ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS);
+}
+
 async function pollNativeVoiceWakeTimeline(reason = "poll") {
   if (!isAndroidNativeShell()) return;
   try {
@@ -30104,6 +31434,7 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
     const sessionId = cleanText(event.session_id, "");
     if (!sessionId || sessionId === state.nativeVoiceWakeLastSessionId) return;
     state.nativeVoiceWakeLastSessionId = sessionId;
+    const command = routeWakeWorldCommand(event.transcript || "");
     recordUserEvent("voice_command", {
       target: "android-native",
       summary: cleanText(event.transcript, "Voice command"),
@@ -30113,6 +31444,7 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
         confidence: Number(event.confidence || 0),
         source: cleanText(event.source, "android-native"),
         session_id: sessionId,
+        command,
         privacy_mode: cleanText(event.privacy_mode, ""),
         audio_retained: Boolean(event.audio_retained),
         reason,
@@ -30125,6 +31457,7 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
 
 function startNativeVoiceWakeTimelinePolling() {
   if (!isAndroidNativeShell() || state.nativeVoiceWakePollInterval) return;
+  clientBootMark("native_voice_timeline_polling_start");
   void pollNativeVoiceWakeTimeline("startup");
   state.nativeVoiceWakePollInterval = window.setInterval(() => {
     void pollNativeVoiceWakeTimeline("interval");
@@ -32753,6 +34086,7 @@ function scheduleBrowserResizeSync() {
 }
 
 function renderAll() {
+  const deferAdminSurfaces = isAndroidNativeShell() && state.activePanel === "home";
   renderRoleVisibility();
   els.runtimeLabel.textContent = state.wasmReady ? `wasm add=${state.wasm.add(19, 23)}` : "wasm pending";
   renderSpaceTitle();
@@ -32760,15 +34094,19 @@ function renderAll() {
   renderAppLayer();
   renderResources();
   renderDevices();
-  renderTopology();
-  renderNodeList();
-  renderTasks();
-  renderTaskOutput();
+  if (!deferAdminSurfaces) {
+    renderTopology();
+    renderNodeList();
+    renderTasks();
+    renderTaskOutput();
+  }
   renderTimeline();
   renderObservation();
   renderModules();
-  renderWis();
-  renderSecurityLoop();
+  if (!deferAdminSurfaces) {
+    renderWis();
+    renderSecurityLoop();
+  }
   renderAgentNodeSelect();
   renderAgentModelSelect();
   renderAgentReadinessStatus();
@@ -34609,10 +35947,14 @@ function setPanel(panel, options = {}) {
   updateSharedSpaceSyncPolling();
   syncResourcePolling();
   syncSecurityPolling();
+  if (isAndroidNativeShell() && isAdminPanel(panel) && previous !== panel) {
+    window.setTimeout(() => void refresh("panel").catch(() => {}), 250);
+  }
   if (panel === "diagnostics") {
     installWindowsAndroidOAuthDiagnostics();
     if (!state.androidOAuthVerification.busy) void refreshAndroidOAuthReport();
   }
+  if (panel === "modules") renderModules();
   if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
   if (options.updateUrl !== false) syncPanelUrl(panel);
   if (previous !== panel) {
@@ -35645,7 +36987,7 @@ function wireEvents() {
   els.homeFleetButton?.addEventListener("click", openFleetModal);
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
-  els.homeTuneVoiceButton?.addEventListener("click", startHomeTuneVoiceSample);
+  els.homeTuneVoiceButton?.addEventListener("click", () => openWakeWorldModal());
   els.closeTuneVoiceModalButton?.addEventListener("click", closeTuneVoiceWizard);
   els.tuneVoiceBackButton?.addEventListener("click", () => {
     if (tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown") return cancelTuneVoiceRecording();
@@ -35655,6 +36997,7 @@ function wireEvents() {
   els.tuneVoiceRecordButton?.addEventListener("click", tuneVoiceRecordCurrent);
   els.tuneVoiceRetryLastButton?.addEventListener("click", tuneVoiceRecordCurrent);
   els.tuneVoiceDeleteLastButton?.addEventListener("click", deleteTuneVoiceLast);
+  els.tuneVoiceResetButton?.addEventListener("click", resetTuneVoiceRecordings);
   els.tuneVoiceBody?.addEventListener("click", (event) => {
     const target = event.target?.closest?.('[data-tune-voice-action="recheck-native-bridge"]');
     if (!target) return;
@@ -35696,6 +37039,20 @@ function wireEvents() {
   els.agentVoiceWakeDisableButton?.addEventListener("click", () => {
     callNativeDebugBridge("disableVoiceWake", "Hermes voice disabled");
   });
+  els.closeWakeWorldModalButton?.addEventListener("click", () => closeWakeWorldModal());
+  els.wakeWorldRefreshButton?.addEventListener("click", () => wakeWorldBridgeAction("refresh"));
+  els.wakeWorldCopyButton?.addEventListener("click", () => void copyWakeWorldJson());
+  els.wakeWorldFalseWakeFetchButton?.addEventListener("click", () => wakeWorldBridgeAction("fetch_false_wakes"));
+  els.wakeWorldFalseWakeDrainButton?.addEventListener("click", () => wakeWorldBridgeAction("drain_false_wakes"));
+  els.wakeWorldRestartButton?.addEventListener("click", () => wakeWorldBridgeAction("restart"));
+  els.wakeWorldStartButton?.addEventListener("click", () => wakeWorldBridgeAction("start"));
+  els.wakeWorldStopButton?.addEventListener("click", () => wakeWorldBridgeAction("stop"));
+  els.wakeWorldProofStandbyButton?.addEventListener("click", () => wakeWorldBridgeAction("proof_standby"));
+  els.wakeWorldProofAppButton?.addEventListener("click", () => wakeWorldBridgeAction("proof_app"));
+  els.wakeWorldTrainButton?.addEventListener("click", openTuneVoiceWizard);
+  els.wakeWordSessionButton?.addEventListener("click", startWakeWordTuningSession);
+  els.wakeWordStepDoneButton?.addEventListener("click", completeWakeWordTuningStep);
+  els.wakeWordApplyPolicyButton?.addEventListener("click", () => applyWakeWordPolicy());
   els.androidConnectionCheckButton?.addEventListener("click", () => void checkAndroidConnection());
   els.androidVoiceTuningProofButton?.addEventListener("click", () => void runAndroidVoiceTuningDiagnostic("prove_android_voice_tuning", {
     label: "installing / proving Android voice tuning APK",
@@ -35761,10 +37118,12 @@ function wireEvents() {
   installModalBackdropDismiss(els.nativeModal, closeNativeModal);
   installModalBackdropDismiss(els.nativeDebugModal, closeNativeDebugModal);
   installModalBackdropDismiss(els.tuneVoiceModal, closeTuneVoiceWizard);
+  installModalBackdropDismiss(els.wakeWorldModal, closeWakeWorldModal);
   window.setTimeout(pollHermesWakeExportRequest, 1500);
   window.setInterval(pollHermesWakeExportRequest, 5000);
   window.setTimeout(pollHermesWakeInstallRequest, 1800);
   window.setInterval(pollHermesWakeInstallRequest, 5000);
+  startAndroidNativeControlAgent();
   els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
   els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
   installModalBackdropDismiss(els.fleetModal, closeFleetModal);
@@ -36020,68 +37379,146 @@ function wireEvents() {
 }
 
 async function bootstrapAuthenticatedApp() {
+  clientBootMark("bootstrap_authenticated_app_enter", {
+    has_user: Boolean(state.authUser),
+    already_bootstrapped: Boolean(state.authenticatedBootstrapped),
+  });
   if (!state.authUser) {
     renderLogin();
+    clientBootMark("auth_gate_ready");
+    scheduleClientBootTraceUpload("auth_gate_ready");
     notifyNativeAppReady("auth-gate-ready");
+    flushAndroidBridgeDiagnostics("auth_gate_ready");
     return;
   }
   if (state.authenticatedBootstrapped) {
     renderAuthGate();
     maybeOpenRequestedTuneVoiceWizard("authenticated_bootstrapped");
+    maybeOpenRequestedWakeWorldModal("authenticated_bootstrapped");
     notifyNativeAppReady("authenticated-app-ready");
     return;
   }
   state.authenticatedBootstrapped = true;
+  const leanHomeBootstrap = androidNativeLeanHomeBootstrap();
   applyModuleVisibility();
-  renderModules();
+  if (leanHomeBootstrap) clientBootMark("authenticated_module_render_deferred");
+  else renderModules();
   if ("serviceWorker" in navigator && !window.__WASM_AGENT_DISABLE_SW__) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
-  await loadConfig();
-  await loadAuthSession();
+  if (!state.configChecked && !isAndroidNativeShell()) await loadConfig();
+  if (!state.authChecked) await loadAuthSession();
   if (!state.authUser) {
     state.authenticatedBootstrapped = false;
     renderAuthGate();
     return;
   }
-  await loadDevices("bootstrap");
-  await loadUserSpaces();
-  await loadLocalStorageEstimate();
-  await loadAgentModels();
-  await loadCachedSocialState();
-  await loadWasm();
-  await loadUserFleet("bootstrap").catch(() => null);
-  await loadAgentReadiness("bootstrap");
-  await loadAccountCredits("bootstrap");
   state.activeAgentSessionId = state.agentSessions[0]?.id || "";
   restoreActiveAgentSessionPreference();
   updateAgentSendButton();
   renderAgentSessions();
-  renderAgentMessages({ forceBottom: true });
-  applyAgentLayout();
+  if (leanHomeBootstrap) clientBootMark("authenticated_agent_messages_deferred");
+  else renderAgentMessages({ forceBottom: true });
+  if (!leanHomeBootstrap || state.agentOpen) applyAgentLayout();
   setPanel(panelFromPath(), { updateUrl: false });
-  if (isModuleEnabled("wis")) void loadWisArtifacts("bootstrap").catch(() => {});
   initializeUiNavigationFromUrl();
   maybeOpenJoinSpaceFromUrl();
   drawCanvas();
   renderAuthGate();
-  startSocialSync();
-  syncClientSnapshotRequestPolling();
-  await refresh("startup");
-  if (!state.refreshInterval) state.refreshInterval = window.setInterval(refresh, 15000);
+  clientBootMark("authenticated_shell_visible", { lean_home_bootstrap: leanHomeBootstrap });
+  scheduleClientBootTraceUpload("authenticated_shell_visible");
+  flushAndroidBridgeDiagnostics("authenticated_shell_visible");
+  scheduleAndroidNativeDeferredHomeUi(leanHomeBootstrap);
+  schedulePostInteractiveStartup();
+  if (!state.refreshInterval) {
+    state.refreshInterval = window.setInterval(refresh, isAndroidNativeShell() ? ANDROID_NATIVE_REFRESH_INTERVAL_MS : 15000);
+  }
   maybeOpenRequestedTuneVoiceWizard("bootstrap_complete");
+  maybeOpenRequestedWakeWorldModal("bootstrap_complete");
   notifyNativeAppReady("authenticated-app-ready", {
     refresh_interval: Boolean(state.refreshInterval),
   });
 }
 
+function schedulePostInteractiveStartup() {
+  if (state.postInteractiveStartupScheduled) return;
+  state.postInteractiveStartupScheduled = true;
+  const delayMs = isAndroidNativeShell() ? ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS : 0;
+  clientBootMark("post_interactive_startup_scheduled", { delay_ms: delayMs });
+  window.setTimeout(() => {
+    clientBootMark("post_interactive_startup_started", { delay_ms: delayMs });
+    void hydrateAuthenticatedStartup();
+    const pollingDelayMs = isAndroidNativeShell() ? 1800 : 0;
+    window.setTimeout(() => {
+      startSocialSync();
+      syncClientSnapshotRequestPolling();
+      startNativeVoiceWakeTimelinePolling();
+      clientBootMark("native_voice_timeline_polling_started", {
+        android_native: isAndroidNativeShell(),
+        delay_ms: pollingDelayMs,
+      });
+    }, pollingDelayMs);
+  }, delayMs);
+}
+
+async function hydrateAuthenticatedStartup() {
+  const startedAt = performance.now();
+  clientBootMark("authenticated_hydration_started");
+  const startupTasks = [
+    () => loadCachedSocialState(),
+    () => loadLocalStorageEstimate(),
+    () => loadDevices("bootstrap"),
+    () => loadUserSpaces({ origin: "bootstrap" }),
+    () => loadAgentModels(),
+    () => loadWasm(),
+    () => loadUserFleet("bootstrap").catch(() => null),
+    () => loadAgentReadiness("bootstrap"),
+    () => loadAccountCredits("bootstrap"),
+  ];
+  if (isAndroidNativeShell()) {
+    for (let index = 0; index < startupTasks.length; index += 2) {
+      await Promise.allSettled(startupTasks.slice(index, index + 2).map((task) => task()));
+      await new Promise((resolve) => window.setTimeout(resolve, 120));
+    }
+  } else {
+    await Promise.allSettled(startupTasks.map((task) => task()));
+  }
+  if (isModuleEnabled("wis")) void loadWisArtifacts("bootstrap").catch(() => {});
+  await refresh("startup").catch(() => {});
+  renderAll();
+  clientBootMark("authenticated_hydration_finished", {
+    elapsed_ms: Math.round(performance.now() - startedAt),
+  });
+  void uploadClientBootTrace("authenticated_hydration_finished");
+  notifyNativeAppReady("authenticated-app-hydrated", {
+    elapsed_ms: Math.round(performance.now() - startedAt),
+  });
+}
+
 async function main() {
+  clientBootMark("main_started", {
+    ready_state: document.readyState,
+  });
   nativeAuthDiagnostic("main_started");
   nativeShellDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
   if (window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
+    const preloadStartedAt = performance.now();
+    let preloadTimedOut = false;
     nativeAuthDiagnostic("main_auth_redirect_preload_wait_started");
-    await window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__;
+    clientBootMark("auth_redirect_preload_wait_started");
+    await Promise.race([
+      window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__,
+      new Promise((resolve) => {
+        window.setTimeout(() => {
+          preloadTimedOut = true;
+          resolve(null);
+        }, AUTH_REDIRECT_PRELOAD_WAIT_MS);
+      }),
+    ]);
+    clientBootMark(preloadTimedOut ? "auth_redirect_preload_wait_timed_out" : "auth_redirect_preload_wait_finished", {
+      elapsed_ms: Math.round(performance.now() - preloadStartedAt),
+    });
     if (window.__WASM_AGENT_AUTH_REDIRECT_USER__) {
       state.authUser = window.__WASM_AGENT_AUTH_REDIRECT_USER__;
       state.authRedirectMessage = "";
@@ -36089,7 +37526,7 @@ async function main() {
       nativeAuthDiagnostic("main_auth_redirect_preload_user_loaded", {
         authenticated: true,
       });
-      await flushNativeAuthCookies("auth_redirect_preload");
+      void flushNativeAuthCookies("auth_redirect_preload");
     } else if (window.__WASM_AGENT_AUTH_REDIRECT_ERROR__) {
       state.authRedirectMessage = String(window.__WASM_AGENT_AUTH_REDIRECT_ERROR__);
       state.loginMessage = state.authRedirectMessage;
@@ -36099,11 +37536,18 @@ async function main() {
     }
   }
   applyLauncherPreference();
+  clientBootMark("apply_launcher_preference_finished");
   applyNativeShellUi();
+  clientBootMark("apply_native_shell_ui_finished", {
+    android_native: isAndroidNativeShell(),
+  });
   installAndroidNativeShellEventDiagnostics();
-  startNativeVoiceWakeTimelinePolling();
+  clientBootMark("android_native_event_diagnostics_installed", {
+    android_native: isAndroidNativeShell(),
+  });
   nativeAuthDiagnostic("main_apply_launcher_finished");
   wireEvents();
+  clientBootMark("wire_events_finished");
   installWindowsAndroidOAuthDiagnostics();
   nativeAuthDiagnostic("main_wire_events_finished");
   if (shouldOpenNativeDebugFromLocation()) {
@@ -36117,17 +37561,37 @@ async function main() {
   nativeAuthDiagnostic("main_after_install_dev_hmr_bridge");
   nativeAuthDiagnostic("main_before_render_auth_gate");
   renderAuthGate();
+  clientBootMark("initial_auth_gate_rendered");
   nativeAuthDiagnostic("main_after_render_auth_gate");
   nativeAuthDiagnostic("main_before_load_config");
-  await loadConfig();
+  const configPromise = loadConfig();
+  const hasAuthRedirectCode = Boolean(authRedirectCodeFromUrl());
+  const authSessionPromise = hasAuthRedirectCode ? null : loadAuthSession();
+  if (isAndroidNativeShell()) {
+    void configPromise.finally(() => clientBootMark("main_load_config_background_finished"));
+  } else {
+    await configPromise;
+    clientBootMark("main_load_config_awaited");
+  }
   nativeAuthDiagnostic("main_after_load_config");
   if (shouldStartDevHmr()) startDevHmr();
-  await redeemAuthRedirectCode();
+  const redeemedAuthRedirect = await redeemAuthRedirectCode();
   nativeAuthDiagnostic("main_before_load_auth_session");
-  await loadAuthSession();
+  if (authSessionPromise) {
+    await authSessionPromise;
+  } else if (!redeemedAuthRedirect) {
+    await loadAuthSession();
+  }
+  clientBootMark("main_load_auth_session_awaited", {
+    authenticated: Boolean(state.authUser),
+  });
   nativeAuthDiagnostic("main_after_load_auth_session");
   if (!state.authUser) void renderGoogleSignInButton();
   await bootstrapAuthenticatedApp();
+  clientBootMark("main_finished", {
+    authenticated: Boolean(state.authUser),
+  });
+  scheduleClientBootTraceUpload("main_finished");
 }
 
 installRendererFatalTrap();

@@ -15,6 +15,7 @@
   <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
   <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
   <application
     android:allowBackup="false"
@@ -56,5 +57,15 @@
       android:name=".HermesVoiceWakeService"
       android:exported="false"
       android:foregroundServiceType="microphone" />
+    <receiver
+      android:name=".HermesVoiceWakeRestoreReceiver"
+      android:enabled="true"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+        <action android:name="android.intent.action.USER_UNLOCKED" />
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>

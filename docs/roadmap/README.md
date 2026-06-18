@@ -11,6 +11,7 @@ changes. Roadmap status never upgrades product/runtime claims.
 | `guard` | Host doctor loop, guard logs, alerts, bounded restart remediation | implemented-unverified | Verify through `scripts/public/guard/README.md` and focused guard smoke before claiming runtime status; track detail: [guard/README.md](guard/README.md) |
 | `wiki-engine` | Markdown-native wiki, proposal governance, graph routing, self-healing, observability | implemented-unverified | Verify current wiki commands/artifacts before claiming delivered status; track detail: [wiki-engine/README.md](wiki-engine/README.md) |
 | `hermes-plugin-extension-points` | Upstream Hermes Agent extension seam proposal | proposal | Proposal only; track detail: [hermes-plugin-extension-points/README.md](hermes-plugin-extension-points/README.md) |
+| `asolaria-acceleration` | Descriptor-first evolution, tuple/hash proof receipts, bounded hot-op loops, and capability-kernel reuse inspired by the public Asolaria reduction repo | proposal | Pattern source only; no imported runtime claims; track detail: [asolaria-acceleration/README.md](asolaria-acceleration/README.md) |
 
 ## Documentation Truth Invariant
 

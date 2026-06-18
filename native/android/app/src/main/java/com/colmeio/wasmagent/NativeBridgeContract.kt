@@ -51,6 +51,7 @@ object NativeBridgeContract {
         "forceSyncDownloadedRuntime",
         "rollbackDownloadedRuntime",
         "runDownloadedOperation",
+        "getWakeWorldState",
     )
 
     val voiceTuningMethods = listOf(
