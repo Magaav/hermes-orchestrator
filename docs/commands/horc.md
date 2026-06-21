@@ -65,6 +65,7 @@ horc update node <name> [--force]
 ```bash
 horc build win
 horc build android
+horc build android-fast
 horc build all
 horc build prepare-docker
 horc build doctor
@@ -95,13 +96,34 @@ resource compiler (`aapt2 version`) all execute on the current CPU. If local
 Android tooling is present but AAPT2 cannot run, such as an ARM host with an
 x86_64 AAPT2 binary and no loader, `auto` selects the existing Docker
 linux/amd64 Android SDK builder instead. The Docker lane persists Gradle caches
-under `native/android/.gradle-*`. It runs `native/android/scripts/release-android.js`,
+under `native/android/.gradle-*` and prefers the repo-cached Android SDK at
+`native/android/.android-sdk` when present, avoiding container-side SDK package
+installs in this cloud Linux environment. It runs `native/android/scripts/release-android.js`,
 generates a local sideload signing key if no signing environment is provided,
 verifies the signed release APK with `apksigner`, rejects production APKs that
 contain localhost backend literals, and promotes the APKs to:
 
 - `/local/native/android/release/WASM-Agent-universal.apk`
 - `/local/native/android/release/WASM-Agent-arm64.apk`
+
+Before running `horc build android` for an iteration, pause for the Android
+loop reflection:
+
+- Architecture: can this be moved behind a server/native-control policy,
+  downloaded runtime/hot-op, HMR, model install, or other live-updatable
+  mechanism so this and future iterations avoid native rebuilds?
+- Hot path: can the immediate change be done through live policy, native control,
+  PWA/server HMR, downloaded runtime/hot-op, diagnostics upload, or another
+  faster access path?
+- Observability: would a flattened state field, watcher, command result,
+  diagnostic event, or accessibility affordance make the next runtime proof
+  obvious and reduce another rebuild cycle?
+
+After the rebuild, inspect `reports/build/android/build-benchmarks.jsonl`, the
+selected build mode, cache behavior, artifact size, package/feed proof, and
+installed-app access. Decide whether another speed improvement is practical or
+the loop is already limited by fresh update identity, signing, APK size, guided
+install, or runtime proof.
 
 By default, `horc build android` clears inherited
 `WASM_AGENT_ANDROID_BUILD_ID`, `WASM_AGENT_ANDROID_VERSION_CODE`, and
@@ -123,12 +145,68 @@ file exists. After a successful Android release, `horc build android` also runs
 icon remains standardized on the shared WA artwork. Build success is not runtime
 proof; use `horc simulate android --device` for installed-app behavior. `horc
 build all` runs the Windows and Android lanes in parallel, waits for both
-platform artifacts to finish, then generates the local update feed at
-`/local/plugins/wasm-agent/public/native/releases/latest.json`, copies published
-artifacts under `public/native/releases/{windows,android}/`, and prints a
-matrix with target, build mode, artifact path/URL, SHA-256, status, and runtime
-proof status. The local server serves the feed at `/native/releases/latest.json`
-and Android APKs at `/native/releases/android/WASM-Agent-{arm64,universal}.apk`.
+targets, then publishes the combined native release feed.
+
+When a Vosk command model exists at `native/android/build/generated/asr/vosk-model`
+or `WASM_AGENT_ANDROID_VOSK_MODEL_DIR`, Gradle packages it as
+`assets/asr/vosk-model` for post-Hermes local ASR.
+
+`horc build android-fast` is the Android inner-loop lane. It uses the same
+`HORC_ANDROID_BUILD_MODE=auto|local|docker` toolchain selection as the release
+lane, then runs `:app:assembleDebug` by default and prints APK outputs under
+`native/android/app/build/outputs/apk`. It intentionally does not sign release
+artifacts, promote `native/android/release/`, run package proof, or publish the
+native release feed. Override tasks with `HORC_ANDROID_FAST_TASKS`, for example
+`HORC_ANDROID_FAST_TASKS=":app:compileDebugKotlin :app:assembleDebug"`. To lab
+Gradle performance in this cloud Linux environment without risking release
+artifact promotion, first test `HORC_ANDROID_GRADLE_DAEMON=1` or
+`HORC_ANDROID_CONFIGURATION_CACHE=1` on `horc build android-fast`; the same
+knobs also apply to `horc build android` once proven useful. By default the fast
+lane also runs `native/android/scripts/inspect-wake-apk.sh` against APK outputs
+and expects a bundled Vosk model only when
+`WASM_AGENT_ANDROID_VOSK_MODEL_DIR` or
+`native/android/build/generated/asr/vosk-model` contains files; set
+`HORC_ANDROID_FAST_INSPECT_APK=0` to skip that packaging check.
+
+On Linux aarch64 hosts, `horc build android-fast` and `horc build android` prefer
+the local lane when Java, Gradle, the Android SDK, and `aapt2` are usable. If
+`aapt2` is an x86_64 Android SDK binary, horc can validate it through
+`native/android/.android-sdk-qemu-root` with `QEMU_LD_PREFIX`, keeping Gradle and
+Kotlin on the native arm64 JVM while only the Android SDK binary uses qemu.
+
+The release and fast Android lanes must share build wiring. Add SDK/Gradle,
+Docker, generated-asset, dependency, or native-library setup in the shared
+`horc` Android helpers and Gradle project, not in only one lane. The intended
+difference is variant and promotion: release builds run the release promoter,
+sign/package proof/feed steps, while `android-fast` runs selected debug Gradle
+tasks and benchmark/asset checks.
+
+The local server serves the feed at `/native/releases/latest.json` and Android
+APKs at `/native/releases/android/WASM-Agent-{arm64,universal}.apk`.
+
+Both Android build lanes append benchmark records to
+`reports/build/android/build-benchmarks.jsonl` by default. Each JSONL record
+includes lane, selected build mode, task list, status, duration, output sizes,
+and storage counters. Override the location with
+`HORC_ANDROID_BUILD_BENCHMARK_LOG`; keep it under ignored runtime state unless a
+specific benchmark report is being promoted into docs.
+
+`horc build win-fast` is the Windows native inner-loop lane. It runs local Node
+checks and, by default, `npm run pack:win:x64` so Electron Builder creates
+`native/windows/release/win-unpacked` without producing the final NSIS
+installer. It intentionally skips Docker/Wine selection, installer extraction
+verification, release-feed publication, and installed-app proof. Override the
+task list with `HORC_WIN_FAST_TASKS`; set `HORC_WIN_FAST_PACK=0` to remove
+`pack:win:x64` from the default list when a source-only check is enough. Use
+`horc build win` for the production installer lane and installed Windows proof.
+On Linux aarch64, `win-fast` skips Wine resource editing by default to avoid the
+same `rcedit` hang risk as the full cross-build fallback; set
+`HORC_WIN_FAST_RESOURCE_EDIT=1` to opt back in when specifically testing that
+path.
+
+Windows fast benchmark records are appended to
+`reports/build/windows/build-benchmarks.jsonl` by default. Override the location
+with `HORC_WIN_BUILD_BENCHMARK_LOG`.
 
 The Go Native modal checks `/native/releases/latest.json` and compares it with
 metadata embedded in the current client. Windows uses a guided installer update
@@ -155,6 +233,11 @@ Build trust lanes:
   `linux-arm64-native-nsis-no-rcedit`.
 - Linux aarch64 direct Wine: debug-only, requires
   `HORC_ALLOW_CROSS_WIN_BUILD=1`, and may hang in Windows resource editing.
+- Linux aarch64 fast NSIS: set `HORC_WIN_BUILD_MODE=arm64-fast` to bypass the
+  Docker/QEMU amd64 builder and run the local NSIS path with Windows executable
+  resource editing disabled. It still builds and verifies the installer, but the
+  manifest remains `trusted_production: false` and
+  `requires_windows_smoke_test: true`.
 
 For faster repeated Linux ARM64 Docker builds, run the one-time prepared image
 step:
@@ -372,8 +455,19 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
   default on Linux aarch64 in `auto` or `docker` mode.
 - `HORC_NO_AUTO_INSTALL_BINFMT=1`: disable automatic QEMU binfmt registration.
 - `HORC_ALLOW_CROSS_WIN_BUILD=1`: allow Linux aarch64 direct Wine debug builds.
+- `HORC_WIN_BUILD_MODE=arm64-fast`: on Linux aarch64, run the local NSIS
+  no-rcedit Windows installer lane instead of Docker/QEMU. This improves loop
+  time but still requires Windows smoke proof.
 - `WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1`: internal fallback switch used to skip
   Windows executable resource editing on Linux ARM64 native NSIS builds.
+- `HORC_WIN_FAST_TASKS`: space-separated npm scripts for `horc build win-fast`;
+  default runs focused Windows native tests plus `pack:win:x64`.
+- `HORC_WIN_FAST_PACK=0`: remove `pack:win:x64` from the default Windows fast
+  task list.
+- `HORC_WIN_FAST_RESOURCE_EDIT=1`: opt into Wine `rcedit` during Linux aarch64
+  `horc build win-fast`; default skips it to preserve the fast loop.
+- `HORC_WIN_BUILD_BENCHMARK_LOG`: optional JSONL benchmark log path for
+  `horc build win-fast`; default `reports/build/windows/build-benchmarks.jsonl`.
 - `HERMES_WASM_AGENT_ANDROID_ROOT`: override Android native project root;
   default `/local/native/android`.
 - `HORC_ANDROID_BUILD_MODE`: `auto`, `local`, or `docker`; default `auto`.
@@ -388,6 +482,20 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
   `WASM_AGENT_ANDROID_BUILD_ID`, `WASM_AGENT_ANDROID_VERSION_CODE`, and
   `WASM_AGENT_ANDROID_BUILD_GENERATED_AT`; by default `horc build android`
   clears them so every rebuild publishes a fresh update identity.
+- `HORC_ANDROID_FAST_TASKS`: space-separated Gradle tasks for
+  `horc build android-fast`; default `:app:assembleDebug`.
+- `HORC_ANDROID_GRADLE_DAEMON=1`: allow the Gradle daemon on Android build
+  lanes; useful for repeated local loops, conservative default is disabled.
+- `HORC_ANDROID_CONFIGURATION_CACHE=1`: pass `--configuration-cache` on Android
+  build lanes for measured experiments.
+- `HORC_ANDROID_FAST_INSPECT_APK=0`: skip the automatic wake/ASR APK asset
+  inspection after `horc build android-fast`.
+- `HORC_ANDROID_BUILD_BENCHMARK_LOG`: optional JSONL benchmark log path for
+  `horc build android` and `horc build android-fast`; default
+  `reports/build/android/build-benchmarks.jsonl`.
+- `WASM_AGENT_ANDROID_VOSK_MODEL_DIR`: optional directory containing the Vosk
+  command model to package as `assets/asr/vosk-model`; default is
+  `native/android/build/generated/asr/vosk-model`.
 - `WASM_AGENT_SIM_URL`: optional `horc simulate web` target URL override.
 - `WASM_AGENT_SIM_CHROMIUM`: optional Chromium/Chrome executable path for
   `horc simulate web`; otherwise the simulator searches common local browser

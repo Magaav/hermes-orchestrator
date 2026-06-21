@@ -69,7 +69,9 @@ Usage:
   horc update all [--force]
   horc update node <name> [--force]
   horc build win
+  horc build win-fast
   horc build android
+  horc build android-fast
   horc build all
   horc simulate web
   horc simulate android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
@@ -100,6 +102,7 @@ Examples:
   horc update node orchestrator
   horc update node colmeio --force
   horc build win
+  horc build win-fast
   horc simulate web
   horc simulate all
   horc space start
@@ -116,6 +119,8 @@ Notes:
   - `horc update node <name>` refreshes /local/hermes-agent and reseeds only that node.
   - Add `--force` to discard local `/local/hermes-agent` checkout changes during the refresh.
   - `horc build win` creates the Windows wasm-agent native installer and writes a trust manifest.
+  - `horc build win-fast` runs Windows native source/package checks without
+    creating a trusted installer or release feed.
   - `horc build android` creates Android APK artifacts for Go Native.
   - `horc simulate web` runs Playwright browser/PWA runtime evidence and writes reports/sim/web/latest/.
   - `horc simulate android --device` installs and drives the real APK on a connected USB/ADB device.
@@ -192,7 +197,9 @@ horc build — Release artifacts
 
 Usage:
   horc build win
+  horc build win-fast
   horc build android
+  horc build android-fast
   horc build all
   horc build prepare-docker
   horc build doctor
@@ -200,7 +207,12 @@ Usage:
 
 Behavior:
   - `horc build win` builds the Windows 11 x64 wasm-agent Electron/NSIS installer.
+  - `horc build win-fast` runs Windows native source/package checks for the
+    inner loop. It does not build or verify the final NSIS installer, does not
+    publish a native release feed, and is not installed-app proof.
   - `horc build android` builds the Android sideload APK lane only.
+  - `horc build android-fast` builds a debug APK for fast iteration only; it
+    does not sign, promote, verify, or publish native release feed artifacts.
   - `horc build all` builds Windows and Android in parallel, then publishes the combined feed.
   - Native Windows builds are production-trusted.
   - Android release builds are cloud-only, signed for sideload install, and
@@ -210,14 +222,20 @@ Behavior:
     require a Windows smoke test.
 
 Environment:
-  HORC_WIN_BUILD_MODE=auto|native|wine|docker  default: auto
+  HORC_WIN_BUILD_MODE=auto|native|wine|docker|arm64-fast  default: auto
   HORC_ALLOW_CROSS_WIN_BUILD=1                 allow Linux aarch64 direct Wine
+  HORC_WIN_BUILD_MODE=arm64-fast               Linux ARM64 direct NSIS/no-rcedit proof lane
   HORC_TARGET_WIN_ARCH=x64                     default: x64
   HORC_REQUIRE_VERIFIED_INSTALLER=1            default: 1
   HORC_DOCKER_IMAGE=electronuserland/builder:wine
   HORC_PREPARED_DOCKER_IMAGE=horc/electron-builder-wine-nsis:jammy
   HORC_DOCKER_AMD64_PROBE_IMAGE=alpine:3.20
   HORC_FORCE_NPM_CI=1                          force Windows Docker npm reinstall
+  HORC_WIN_FAST_TASKS="test:windows-hot-ops test:android-connection-parser pack:win:x64"
+                                                 override Windows fast npm tasks
+  HORC_WIN_FAST_PACK=0                         skip electron-builder dir package in win-fast
+  HORC_WIN_FAST_RESOURCE_EDIT=1                opt into Wine rcedit during Linux ARM64 win-fast
+  HORC_WIN_BUILD_BENCHMARK_LOG=/path.jsonl     override Windows build benchmark log
   HORC_AUTO_INSTALL_BINFMT=1                   default on Linux aarch64 auto/docker
   HORC_NO_AUTO_INSTALL_BINFMT=1                disable binfmt self-healing
   HORC_ANDROID_BUILD_MODE=auto|local|docker    default: auto
@@ -225,7 +243,13 @@ Environment:
   HORC_ANDROID_GRADLE_VERSION=8.9
   HORC_ANDROID_RUN_UNIT_TESTS=1                 run Android JVM tests before release assembly
   HORC_ANDROID_PRESERVE_BUILD_ID=1              keep caller-provided Android buildId/versionCode
+  HORC_ANDROID_FAST_TASKS=":app:assembleDebug"  override fast-lane Gradle tasks
+  HORC_ANDROID_GRADLE_DAEMON=1                  allow daemon in Android lanes
+  HORC_ANDROID_CONFIGURATION_CACHE=1            enable Gradle configuration cache in Android lanes
+  HORC_ANDROID_FAST_INSPECT_APK=0               skip fast APK wake asset inspection
+  HORC_ANDROID_BUILD_BENCHMARK_LOG=/path.jsonl  override Android build benchmark log
   HORC_GENERATE_NATIVE_RELEASE_FEED=0           skip per-target feed generation
+  WASM_AGENT_ANDROID_VOSK_MODEL_DIR=/path       optional Vosk model assets directory
   WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS=600000
   HERMES_WASM_AGENT_ANDROID_ROOT=/local/native/android
   GRADLE_BIN=/path/to/gradle                   optional Android Gradle override
@@ -519,10 +543,10 @@ select_windows_build_mode() {
   local requested_mode="$1"
   local arch="$2"
   case "${requested_mode}" in
-    auto|native|wine|docker)
+    auto|native|wine|docker|arm64-fast|linux-arm64-fast|fast-arm64)
       ;;
     *)
-      build_fail "HORC_WIN_BUILD_MODE must be auto, native, wine, or docker; got '${requested_mode}'."
+      build_fail "HORC_WIN_BUILD_MODE must be auto, native, wine, docker, or arm64-fast; got '${requested_mode}'."
       ;;
   esac
 
@@ -557,6 +581,13 @@ select_windows_build_mode() {
         exit 2
       fi
       printf '%s\n' "wine"
+      return
+      ;;
+    arm64-fast|linux-arm64-fast|fast-arm64)
+      if [[ "${arch}" != "aarch64" ]]; then
+        build_fail "HORC_WIN_BUILD_MODE=${requested_mode} is only for Linux aarch64 hosts; current arch is ${arch}."
+      fi
+      printf '%s\n' "linux-arm64-native-nsis-no-rcedit"
       return
       ;;
     auto)
@@ -954,6 +985,73 @@ run_direct_windows_release() {
   (cd "${native_src}" && npm run release:win:x64:prod)
 }
 
+build_windows_fast() {
+  local native_src="${HERMES_WASM_AGENT_NATIVE_SRC:-}"
+  local root
+  local started_ms
+  local build_status=0
+  local tasks
+  local filtered_tasks=()
+  local task
+
+  if [[ -z "${native_src}" ]]; then
+    root="$(repo_root)"
+    native_src="${root}/native/windows/src"
+  else
+    root="$(repo_root)"
+  fi
+
+  if [[ ! -f "${native_src}/package.json" ]]; then
+    echo "horc build win-fast: native Windows package not found: ${native_src}" >&2
+    echo "set HERMES_WASM_AGENT_NATIVE_SRC to override" >&2
+    exit 2
+  fi
+
+  acquire_build_lock "${native_src}" "Windows fast"
+  require_npm_prereqs "${native_src}"
+
+  tasks="${HORC_WIN_FAST_TASKS:-test:native-backend-resolver test:native-policy test:windows-hot-ops test:windows-hot-ops-hmr test:windows-hot-ops-override test:android-connection-parser test:artifacts pack:win:x64}"
+  if is_falsey "${HORC_WIN_FAST_PACK:-1}"; then
+    for task in ${tasks}; do
+      if [[ "${task}" != "pack:win:x64" ]]; then
+        filtered_tasks+=("${task}")
+      fi
+    done
+    tasks="${filtered_tasks[*]}"
+  fi
+  if [[ -z "${tasks// }" ]]; then
+    echo "horc build win-fast: no tasks selected" >&2
+    exit 2
+  fi
+
+  started_ms="$(android_now_ms)"
+  echo "horc build win-fast: host $(host_kernel) $(canonical_host_arch), target win32-x64 source/package checks"
+  echo "horc build win-fast: selected mode local-node"
+  echo "horc build win-fast: ${tasks}"
+  set +e
+  (
+    cd "${native_src}" || exit 2
+    if [[ "$(host_kernel)" == "Linux" && "$(canonical_host_arch)" == "aarch64" ]] && ! is_truthy "${HORC_WIN_FAST_RESOURCE_EDIT:-}"; then
+      export WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1
+      echo "horc build win-fast: skipping Wine rcedit on Linux ARM64; set HORC_WIN_FAST_RESOURCE_EDIT=1 to force it"
+    fi
+    for task in ${tasks}; do
+      echo "horc build win-fast: npm run ${task}"
+      npm run "${task}" || exit $?
+    done
+  )
+  build_status=$?
+  set -e
+  if [[ "${build_status}" -eq 0 ]]; then
+    if compgen -G "${native_src}/../release/win-unpacked/*" >/dev/null; then
+      echo "horc build win-fast: win-unpacked output: ${native_src}/../release/win-unpacked"
+    fi
+    echo "horc build win-fast: source/package checks only; no NSIS installer, release feed, or installed-app proof was produced"
+  fi
+  record_windows_build_benchmark "${root}" "${native_src}" "win-fast" "local-node" "${build_status}" "${started_ms}" "${tasks}"
+  return "${build_status}"
+}
+
 run_linux_arm64_native_nsis_no_rcedit_release() {
   local native_src="$1"
   echo "horc build: Docker amd64 Wine builder failed under QEMU; falling back to Linux ARM64 native NSIS without rcedit."
@@ -1172,6 +1270,187 @@ should_generate_native_release_feed() {
   ! is_falsey "${HORC_GENERATE_NATIVE_RELEASE_FEED:-1}"
 }
 
+android_build_benchmark_path() {
+  local root="$1"
+  printf '%s\n' "${HORC_ANDROID_BUILD_BENCHMARK_LOG:-${root}/reports/build/android/build-benchmarks.jsonl}"
+}
+
+android_now_ms() {
+  "${PYTHON_BIN}" - <<'PY'
+import time
+print(int(time.time() * 1000))
+PY
+}
+
+record_android_build_benchmark() {
+  local root="$1"
+  local android_root="$2"
+  local lane="$3"
+  local build_mode="$4"
+  local status="$5"
+  local started_ms="$6"
+  local tasks="${7:-}"
+  local log_path
+  local ended_ms
+  log_path="$(android_build_benchmark_path "${root}")"
+  ended_ms="$(android_now_ms)"
+  mkdir -p "$(dirname "${log_path}")"
+  "${PYTHON_BIN}" - "${log_path}" "${android_root}" "${lane}" "${build_mode}" "${status}" "${started_ms}" "${ended_ms}" "${tasks}" "$(host_kernel)" "$(canonical_host_arch)" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+log_path, android_root, lane, build_mode, status, started_ms, ended_ms, tasks, host_os, host_arch = sys.argv[1:11]
+started_ms = int(started_ms)
+ended_ms = int(ended_ms)
+android = Path(android_root)
+
+def size(path: Path) -> int:
+    return path.stat().st_size if path.is_file() else 0
+
+def du_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    proc = subprocess.run(["du", "-sb", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return 0
+    return int(proc.stdout.split()[0])
+
+def df_avail(path: Path) -> int:
+    proc = subprocess.run(["df", "-Pk", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        return 0
+    lines = proc.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return 0
+    return int(lines[-1].split()[3]) * 1024
+
+release = android / "release"
+debug_apks = sorted((android / "app" / "build" / "outputs" / "apk").glob("**/*.apk")) if (android / "app" / "build" / "outputs" / "apk").exists() else []
+record = {
+    "schema": "hermes.horc.android_build_benchmark.v1",
+    "recordedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "lane": lane,
+    "buildMode": build_mode,
+    "status": int(status),
+    "ok": int(status) == 0,
+    "durationMs": max(0, ended_ms - started_ms),
+    "tasks": tasks.split() if tasks else [],
+    "host": {"os": host_os, "arch": host_arch},
+    "env": {
+        "HORC_ANDROID_BUILD_MODE": os.environ.get("HORC_ANDROID_BUILD_MODE", "auto"),
+        "HORC_ANDROID_GRADLE_VERSION": os.environ.get("HORC_ANDROID_GRADLE_VERSION", "8.9"),
+        "HORC_ANDROID_GRADLE_DAEMON": os.environ.get("HORC_ANDROID_GRADLE_DAEMON", ""),
+        "HORC_ANDROID_CONFIGURATION_CACHE": os.environ.get("HORC_ANDROID_CONFIGURATION_CACHE", ""),
+        "HORC_ANDROID_FAST_TASKS": os.environ.get("HORC_ANDROID_FAST_TASKS", ""),
+    },
+    "outputs": {
+        "debugApkCount": len(debug_apks),
+        "debugApkBytes": sum(size(path) for path in debug_apks),
+        "releaseArm64Bytes": size(release / "WASM-Agent-arm64.apk"),
+        "releaseUniversalBytes": size(release / "WASM-Agent-universal.apk"),
+    },
+    "storage": {
+        "rootAvailableBytes": df_avail(android),
+        "androidAppBuildBytes": du_bytes(android / "app" / "build"),
+        "androidGradleHomeBytes": du_bytes(android / ".gradle-home"),
+    },
+}
+with open(log_path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+print(f"horc build {lane}: benchmark duration={record['durationMs']}ms status={status} log={log_path}")
+PY
+}
+
+windows_build_benchmark_path() {
+  local root="$1"
+  printf '%s\n' "${HORC_WIN_BUILD_BENCHMARK_LOG:-${root}/reports/build/windows/build-benchmarks.jsonl}"
+}
+
+record_windows_build_benchmark() {
+  local root="$1"
+  local native_src="$2"
+  local lane="$3"
+  local build_mode="$4"
+  local status="$5"
+  local started_ms="$6"
+  local tasks="${7:-}"
+  local log_path
+  local ended_ms
+  log_path="$(windows_build_benchmark_path "${root}")"
+  ended_ms="$(android_now_ms)"
+  mkdir -p "$(dirname "${log_path}")"
+  "${PYTHON_BIN}" - "${log_path}" "${native_src}" "${lane}" "${build_mode}" "${status}" "${started_ms}" "${ended_ms}" "${tasks}" "$(host_kernel)" "$(canonical_host_arch)" <<'PY'
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+log_path, native_src, lane, build_mode, status, started_ms, ended_ms, tasks, host_os, host_arch = sys.argv[1:11]
+started_ms = int(started_ms)
+ended_ms = int(ended_ms)
+src = Path(native_src)
+windows = src.parent
+release = windows / "release"
+
+def size(path: Path) -> int:
+    return path.stat().st_size if path.is_file() else 0
+
+def du_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    proc = subprocess.run(["du", "-sb", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return 0
+    return int(proc.stdout.split()[0])
+
+def df_avail(path: Path) -> int:
+    proc = subprocess.run(["df", "-Pk", str(path)], text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        return 0
+    lines = proc.stdout.strip().splitlines()
+    if len(lines) < 2:
+        return 0
+    return int(lines[-1].split()[3]) * 1024
+
+installers = sorted(release.glob("*.exe")) if release.exists() else []
+record = {
+    "schema": "hermes.horc.windows_build_benchmark.v1",
+    "recordedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "lane": lane,
+    "buildMode": build_mode,
+    "status": int(status),
+    "ok": int(status) == 0,
+    "durationMs": max(0, ended_ms - started_ms),
+    "tasks": tasks.split() if tasks else [],
+    "host": {"os": host_os, "arch": host_arch},
+    "env": {
+        "HORC_WIN_BUILD_MODE": os.environ.get("HORC_WIN_BUILD_MODE", "auto"),
+        "HORC_WIN_FAST_TASKS": os.environ.get("HORC_WIN_FAST_TASKS", ""),
+        "HORC_WIN_FAST_PACK": os.environ.get("HORC_WIN_FAST_PACK", ""),
+    },
+    "outputs": {
+        "winUnpackedBytes": du_bytes(release / "win-unpacked"),
+        "installerCount": len(installers),
+        "installerBytes": sum(size(path) for path in installers),
+    },
+    "storage": {
+        "rootAvailableBytes": df_avail(windows),
+        "windowsReleaseBytes": du_bytes(release),
+        "nodeModulesBytes": du_bytes(src / "node_modules"),
+    },
+}
+with open(log_path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+print(f"horc build {lane}: benchmark duration={record['durationMs']}ms status={status} log={log_path}")
+PY
+}
+
 android_release_identity_env() {
   if is_truthy "${HORC_ANDROID_PRESERVE_BUILD_ID:-}"; then
     return
@@ -1193,6 +1472,8 @@ build_windows_native_release() {
   local trusted_production="false"
   local requires_windows_smoke_test="true"
   local docker_image
+  local benchmark_started_ms
+  local build_status=0
 
   if [[ -z "${native_src}" ]]; then
     root="$(repo_root)"
@@ -1220,6 +1501,7 @@ build_windows_native_release() {
     host_os="Windows"
   fi
   build_mode="$(select_windows_build_mode "${requested_mode}" "${host_arch}")"
+  benchmark_started_ms="$(android_now_ms)"
   echo "horc build: host ${host_os} ${host_arch}, target win32-${target_arch}"
   if [[ "${build_mode}" == "docker" ]]; then
     echo "horc build: selected mode docker-amd64-wine"
@@ -1227,6 +1509,7 @@ build_windows_native_release() {
     echo "horc build: selected mode ${build_mode}"
   fi
 
+  set +e
   case "${build_mode}" in
     native)
       trusted_production="true"
@@ -1246,6 +1529,14 @@ build_windows_native_release() {
       require_npm_prereqs "${native_src}"
       require_wine_prereqs
       run_direct_windows_release "${native_src}"
+      ;;
+    linux-arm64-native-nsis-no-rcedit)
+      trusted_production="false"
+      requires_windows_smoke_test="true"
+      echo "horc build: Linux ARM64 fast Windows cross-build selected; Windows smoke test required."
+      require_npm_prereqs "${native_src}"
+      require_command makensis "Install NSIS/makensis for HORC_WIN_BUILD_MODE=arm64-fast."
+      run_linux_arm64_native_nsis_no_rcedit_release "${native_src}"
       ;;
     docker)
       trusted_production="false"
@@ -1282,6 +1573,12 @@ build_windows_native_release() {
       build_fail "internal error: unsupported selected build mode ${build_mode}"
       ;;
   esac
+  build_status=$?
+  set -e
+  if [[ "${build_status}" -ne 0 ]]; then
+    record_windows_build_benchmark "${root}" "${native_src}" "win" "${build_mode}" "${build_status}" "${benchmark_started_ms}" "release:win:x64:prod"
+    return "${build_status}"
+  fi
 
   post_build_verify_and_manifest "${native_src}" "${build_mode}" "${target_arch}" "${trusted_production}" "${requires_windows_smoke_test}" "${host_os}" "${host_arch}"
   if should_generate_native_release_feed; then
@@ -1289,6 +1586,7 @@ build_windows_native_release() {
   else
     echo "horc build: skipping native release feed generation for parallel build join"
   fi
+  record_windows_build_benchmark "${root}" "${native_src}" "win" "${build_mode}" "0" "${benchmark_started_ms}" "release:win:x64:prod verify manifest feed"
 }
 
 android_local_tools_available() {
@@ -1344,10 +1642,17 @@ find_android_aapt2() {
 
 android_aapt2_runnable() {
   local aapt2_path="$1"
+  local android_root="${2:-}"
+  local qemu_root="${QEMU_LD_PREFIX:-${android_root}/.android-sdk-qemu-root}"
   local output
   [[ -n "${aapt2_path}" && -x "${aapt2_path}" ]] || return 1
   if output="$("${aapt2_path}" version 2>&1)"; then
     ANDROID_AAPT2_OUTPUT="$(printf '%s\n' "${output}" | head -n 1 | tr -d '\r')"
+    return 0
+  fi
+  if [[ -n "${android_root}" && -d "${qemu_root}" ]] && output="$(QEMU_LD_PREFIX="${qemu_root}" "${aapt2_path}" version 2>&1)"; then
+    ANDROID_AAPT2_OUTPUT="$(printf '%s\n' "${output}" | head -n 1 | tr -d '\r') via QEMU_LD_PREFIX=${qemu_root}"
+    ANDROID_AAPT2_QEMU_LD_PREFIX="${qemu_root}"
     return 0
   fi
   ANDROID_AAPT2_OUTPUT="${output}"
@@ -1364,6 +1669,7 @@ android_evaluate_local_tools() {
   ANDROID_AAPT2_PATH=""
   ANDROID_AAPT2_RUNNABLE="no"
   ANDROID_AAPT2_OUTPUT=""
+  ANDROID_AAPT2_QEMU_LD_PREFIX=""
   ANDROID_LOCAL_DIAGNOSIS=""
 
   if command -v java >/dev/null 2>&1; then
@@ -1387,7 +1693,7 @@ android_evaluate_local_tools() {
   fi
 
   ANDROID_AAPT2_PATH="$(find_android_aapt2 "${android_root}" "${ANDROID_SDK_PATH}")"
-  if [[ -n "${ANDROID_AAPT2_PATH}" ]] && android_aapt2_runnable "${ANDROID_AAPT2_PATH}"; then
+  if [[ -n "${ANDROID_AAPT2_PATH}" ]] && android_aapt2_runnable "${ANDROID_AAPT2_PATH}" "${android_root}"; then
     ANDROID_AAPT2_RUNNABLE="yes"
   elif [[ -z "${ANDROID_AAPT2_PATH}" ]]; then
     [[ -z "${ANDROID_LOCAL_DIAGNOSIS}" ]] && ANDROID_LOCAL_DIAGNOSIS="AAPT2 was not found in the Android SDK build-tools or Gradle cache."
@@ -1438,12 +1744,12 @@ select_android_build_mode() {
   esac
 }
 
-android_docker_build_script() {
+android_docker_common_script() {
   cat <<'TXT'
 set -euo pipefail
 cleanup_owner() {
   if [[ -n "${HORC_HOST_UID:-}" && -n "${HORC_HOST_GID:-}" ]] && command -v chown >/dev/null 2>&1; then
-    for path in app/build release signing .gradle .gradle-home .gradle-dist; do
+    for path in app/build build release signing .gradle .gradle-home .gradle-dist; do
       [[ -e "${path}" ]] && chown -R "${HORC_HOST_UID}:${HORC_HOST_GID}" "${path}" 2>/dev/null || true
     done
   fi
@@ -1457,7 +1763,7 @@ ensure_tool() {
     return
   fi
   if ! command -v apt-get >/dev/null 2>&1; then
-    echo "horc build android-apk: missing ${tool} and no apt-get in Android builder" >&2
+    echo "${HORC_ANDROID_LOG_LABEL:-horc build android}: missing ${tool} and no apt-get in Android builder" >&2
     exit 2
   fi
   export DEBIAN_FRONTEND=noninteractive
@@ -1474,7 +1780,7 @@ ensure_gradle() {
     ensure_tool unzip unzip
     mkdir -p "${gradle_home}"
     local zip_path="/tmp/gradle-${version}-bin.zip"
-    echo "horc build android-apk: downloading Gradle ${version}"
+    echo "${HORC_ANDROID_LOG_LABEL:-horc build android}: downloading Gradle ${version}"
     curl -fL --retry 3 --retry-delay 2 -o "${zip_path}" "https://services.gradle.org/distributions/gradle-${version}-bin.zip"
     unzip -q -o "${zip_path}" -d "${gradle_home}"
   fi
@@ -1482,12 +1788,24 @@ ensure_gradle() {
 }
 
 ensure_gradle
-ensure_tool node nodejs
 export GRADLE_USER_HOME="${PWD}/.gradle-home"
-export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk-linux}"
+if [[ -z "${ANDROID_HOME:-}" && -d "${PWD}/.android-sdk" ]]; then
+  export ANDROID_HOME="${PWD}/.android-sdk"
+else
+  export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk-linux}"
+fi
 export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
-export APKSIGNER_BIN="${APKSIGNER_BIN:-${ANDROID_HOME}/build-tools/35.0.0/apksigner}"
+if [[ -z "${APKSIGNER_BIN:-}" && -x "${ANDROID_HOME}/build-tools/35.0.0/apksigner" ]]; then
+  export APKSIGNER_BIN="${ANDROID_HOME}/build-tools/35.0.0/apksigner"
+fi
 export HORC_ANDROID_KOTLIN_IN_PROCESS="${HORC_ANDROID_KOTLIN_IN_PROCESS:-1}"
+TXT
+}
+
+android_docker_build_script() {
+  android_docker_common_script
+  cat <<'TXT'
+ensure_tool node nodejs
 if [[ "${HORC_ANDROID_PRESERVE_BUILD_ID:-}" != "1" ]]; then
   unset WASM_AGENT_ANDROID_BUILD_ID
   unset WASM_AGENT_ANDROID_VERSION_CODE
@@ -1524,11 +1842,13 @@ run_docker_android_release() {
   docker run --rm \
     --platform linux/amd64 \
     -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
+    -e HORC_ANDROID_LOG_LABEL="horc build android-apk" \
     -e HORC_ANDROID_RUN_UNIT_TESTS="${HORC_ANDROID_RUN_UNIT_TESTS:-0}" \
     -e HORC_ANDROID_PRESERVE_BUILD_ID="${HORC_ANDROID_PRESERVE_BUILD_ID:-0}" \
     -e WASM_AGENT_ANDROID_SKIP_LINT="${WASM_AGENT_ANDROID_SKIP_LINT:-1}" \
     -e WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS="${WASM_AGENT_ANDROID_APKSIGNER_TIMEOUT_MS:-600000}" \
     -e WASM_AGENT_ANDROID_SKIP_APKSIGNER_VERIFY="${skip_apksigner_verify:-0}" \
+    -e WASM_AGENT_ANDROID_VOSK_MODEL_DIR="${WASM_AGENT_ANDROID_VOSK_MODEL_DIR:-}" \
     -e WASM_AGENT_ANDROID_BUILD_ID="${WASM_AGENT_ANDROID_BUILD_ID:-}" \
     -e WASM_AGENT_ANDROID_VERSION_CODE="${WASM_AGENT_ANDROID_VERSION_CODE:-}" \
     -e WASM_AGENT_ANDROID_BUILD_GENERATED_AT="${WASM_AGENT_ANDROID_BUILD_GENERATED_AT:-}" \
@@ -1562,12 +1882,182 @@ verify_android_release_artifact_on_host() {
   "${apksigner}" verify --verbose "${apk}"
 }
 
+android_fast_docker_script() {
+  android_docker_common_script
+  cat <<'TXT'
+read -r -a tasks <<< "${HORC_ANDROID_FAST_TASKS:-:app:assembleDebug}"
+args=("${GRADLE_BIN}")
+if [[ "${HORC_ANDROID_GRADLE_DAEMON:-}" != "1" ]]; then
+  args+=("--no-daemon")
+fi
+args+=("--build-cache" "--parallel" "-Dkotlin.compiler.execution.strategy=in-process")
+if [[ "${HORC_ANDROID_CONFIGURATION_CACHE:-}" == "1" ]]; then
+  args+=("--configuration-cache")
+fi
+args+=("${tasks[@]}")
+echo "horc build android-fast: ${args[*]}"
+"${args[@]}"
+TXT
+}
+
+run_docker_android_fast_build() {
+  local root="$1"
+  local android_root="$2"
+  local image="${HORC_ANDROID_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
+  local host_arch
+  local host_uid
+  local host_gid
+  local docker_status=0
+  host_arch="$(canonical_host_arch)"
+  ensure_docker_available || exit 2
+  if [[ "${host_arch}" == "aarch64" ]]; then
+    ensure_docker_amd64_emulation "${HORC_ANDROID_BUILD_MODE:-auto}" "${host_arch}" || exit 2
+  fi
+  mkdir -p "${android_root}/.gradle-home" "${android_root}/.gradle-dist"
+  host_uid="$(id -u 2>/dev/null || true)"
+  host_gid="$(id -g 2>/dev/null || true)"
+  echo "horc build android-fast: starting Docker Android builder..."
+  echo "horc build android-fast: docker ${image} --platform linux/amd64"
+  docker run --rm \
+    --platform linux/amd64 \
+    -e HORC_ANDROID_GRADLE_VERSION="${HORC_ANDROID_GRADLE_VERSION:-8.9}" \
+    -e HORC_ANDROID_LOG_LABEL="horc build android-fast" \
+    -e HORC_ANDROID_FAST_TASKS="${HORC_ANDROID_FAST_TASKS:-:app:assembleDebug}" \
+    -e HORC_ANDROID_GRADLE_DAEMON="${HORC_ANDROID_GRADLE_DAEMON:-0}" \
+    -e HORC_ANDROID_CONFIGURATION_CACHE="${HORC_ANDROID_CONFIGURATION_CACHE:-0}" \
+    -e WASM_AGENT_ANDROID_VOSK_MODEL_DIR="${WASM_AGENT_ANDROID_VOSK_MODEL_DIR:-}" \
+    -e HORC_HOST_UID="${host_uid}" \
+    -e HORC_HOST_GID="${host_gid}" \
+    -v "${root}:${root}" \
+    -w "${android_root}" \
+    "${image}" \
+    bash -lc "$(android_fast_docker_script)" || docker_status=$?
+  if [[ "${docker_status}" -ne 0 ]]; then
+    echo "horc build android-fast: Docker Android builder exited with status ${docker_status}" >&2
+    return "${docker_status}"
+  fi
+}
+
+android_vosk_expectation() {
+  local android_root="$1"
+  local model_dir="${WASM_AGENT_ANDROID_VOSK_MODEL_DIR:-${android_root}/build/generated/asr/vosk-model}"
+  if [[ -d "${model_dir}" ]] && find "${model_dir}" -type f -print -quit 2>/dev/null | grep -q .; then
+    printf '%s\n' "--expect-vosk-model"
+  else
+    printf '%s\n' "--expect-no-vosk-model"
+  fi
+}
+
+inspect_android_fast_apks() {
+  local root="$1"
+  local android_root="$2"
+  local expect_vosk
+  local inspect_script="${root}/native/android/scripts/inspect-wake-apk.sh"
+  local -a apks=()
+  if [[ "${HORC_ANDROID_FAST_INSPECT_APK:-1}" == "0" ]]; then
+    echo "horc build android-fast: skipping APK wake asset inspection"
+    return 0
+  fi
+  if [[ ! -x "${inspect_script}" ]]; then
+    echo "horc build android-fast: wake APK inspector not found or not executable: ${inspect_script}" >&2
+    return 0
+  fi
+  mapfile -t apks < <(find "${android_root}/app/build/outputs/apk" -type f -name "*.apk" -print 2>/dev/null | sort)
+  if [[ ${#apks[@]} -eq 0 ]]; then
+    echo "horc build android-fast: no APK outputs found for wake asset inspection" >&2
+    return 0
+  fi
+  expect_vosk="$(android_vosk_expectation "${android_root}")"
+  echo "horc build android-fast: inspecting APK wake assets (${expect_vosk})"
+  for apk in "${apks[@]}"; do
+    "${inspect_script}" "${apk}" --expect-no-model "${expect_vosk}"
+  done
+}
+
+build_android_fast() {
+  local root
+  local android_root="${HERMES_WASM_AGENT_ANDROID_ROOT:-}"
+  local requested_mode="${HORC_ANDROID_BUILD_MODE:-auto}"
+  local build_mode
+  local gradle_bin
+  local benchmark_started_ms
+  local build_status=0
+  local fast_tasks="${HORC_ANDROID_FAST_TASKS:-:app:assembleDebug}"
+  root="$(repo_root)"
+  android_root="${android_root:-${root}/native/android}"
+
+  if [[ ! -f "${android_root}/app/build.gradle" ]]; then
+    echo "horc build android-fast: Android native project not found: ${android_root}" >&2
+    echo "set HERMES_WASM_AGENT_ANDROID_ROOT to override" >&2
+    exit 2
+  fi
+
+  acquire_build_lock "${android_root}/app" "Android"
+  benchmark_started_ms="$(android_now_ms)"
+  echo "horc build android-fast: host $(host_kernel) $(canonical_host_arch), target debug-apk"
+  build_mode="$(select_android_build_mode "${requested_mode}" "${android_root}")"
+  echo "horc build android-fast: selected mode ${build_mode}"
+  set +e
+  case "${build_mode}" in
+    local)
+      if ! android_evaluate_local_tools "${android_root}"; then
+        android_local_failure_hint
+        build_status=2
+      else
+        gradle_bin="$(android_gradle_path "${android_root}")"
+        (
+          cd "${android_root}"
+          export GRADLE_USER_HOME="${GRADLE_USER_HOME:-${android_root}/.gradle-home}"
+          export ANDROID_HOME="${ANDROID_HOME:-$(android_sdk_root "${android_root}")}"
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          export QEMU_LD_PREFIX="${QEMU_LD_PREFIX:-${android_root}/.android-sdk-qemu-root}"
+          read -r -a HORC_ANDROID_FAST_TASK_ARRAY <<< "${fast_tasks}"
+          gradle_args=("${gradle_bin}")
+          if ! is_truthy "${HORC_ANDROID_GRADLE_DAEMON:-}"; then
+            gradle_args+=("--no-daemon")
+          fi
+          gradle_args+=("--build-cache" "--parallel" "-Dkotlin.compiler.execution.strategy=in-process")
+          if is_truthy "${HORC_ANDROID_CONFIGURATION_CACHE:-}"; then
+            gradle_args+=("--configuration-cache")
+          fi
+          gradle_args+=("${HORC_ANDROID_FAST_TASK_ARRAY[@]}")
+          echo "horc build android-fast: ${gradle_args[*]}"
+          "${gradle_args[@]}"
+        )
+        build_status=$?
+      fi
+      ;;
+    docker)
+      run_docker_android_fast_build "${root}" "${android_root}"
+      build_status=$?
+      ;;
+    *)
+      build_fail "internal error: unsupported Android build mode ${build_mode}"
+      ;;
+  esac
+  set -e
+
+  if [[ "${build_status}" -eq 0 ]]; then
+    echo "horc build android-fast: APK outputs:"
+    find "${android_root}/app/build/outputs/apk" -type f -name "*.apk" -print 2>/dev/null | sort || true
+    inspect_android_fast_apks "${root}" "${android_root}" || build_status=$?
+    echo "horc build android-fast: debug build only; no release feed or runtime proof was produced"
+  fi
+  record_android_build_benchmark "${root}" "${android_root}" "android-fast" "${build_mode}" "${build_status}" "${benchmark_started_ms}" "${fast_tasks}"
+  if [[ "${build_status}" -ne 0 ]]; then
+    exit "${build_status}"
+  fi
+}
+
 build_android_native_release() {
   local root
   local android_root="${HERMES_WASM_AGENT_ANDROID_ROOT:-}"
   local release_script
   local requested_mode="${HORC_ANDROID_BUILD_MODE:-auto}"
   local build_mode
+  local benchmark_started_ms
+  local build_status=0
+  local release_tasks=":app:assembleRelease"
   root="$(repo_root)"
   android_root="${android_root:-${root}/native/android}"
   release_script="${android_root}/scripts/release-android.js"
@@ -1580,42 +2070,77 @@ build_android_native_release() {
 
   acquire_build_lock "${android_root}/app" "Android"
   require_command node "Install Node.js so horc can run the Android release promoter."
+  benchmark_started_ms="$(android_now_ms)"
   echo "horc build android-apk: host $(host_kernel) $(canonical_host_arch), target android-apk"
   build_mode="$(select_android_build_mode "${requested_mode}" "${android_root}")"
   echo "horc build android-apk: selected mode ${build_mode}"
+  if [[ "${HORC_ANDROID_RUN_UNIT_TESTS:-0}" == "1" ]]; then
+    release_tasks=":app:testReleaseUnitTest ${release_tasks}"
+  fi
+  set +e
   case "${build_mode}" in
     local)
       if ! android_evaluate_local_tools "${android_root}"; then
         android_local_failure_hint
-        exit 2
+        build_status=2
+      else
+        echo "horc build android-apk: cd ${android_root} && node scripts/release-android.js"
+        (
+          cd "${android_root}"
+          export GRADLE_USER_HOME="${GRADLE_USER_HOME:-${android_root}/.gradle-home}"
+          export ANDROID_HOME="${ANDROID_HOME:-$(android_sdk_root "${android_root}")}"
+          export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME}}"
+          export QEMU_LD_PREFIX="${QEMU_LD_PREFIX:-${android_root}/.android-sdk-qemu-root}"
+          export HORC_ANDROID_KOTLIN_IN_PROCESS="${HORC_ANDROID_KOTLIN_IN_PROCESS:-1}"
+          export WASM_AGENT_ANDROID_SKIP_LINT="${WASM_AGENT_ANDROID_SKIP_LINT:-1}"
+          android_release_identity_env
+          node scripts/release-android.js
+        )
+        build_status=$?
       fi
-      echo "horc build android-apk: cd ${android_root} && node scripts/release-android.js"
-      (cd "${android_root}" && android_release_identity_env && node scripts/release-android.js)
       ;;
     docker)
       run_docker_android_release "${root}" "${android_root}"
+      build_status=$?
       ;;
     *)
       build_fail "internal error: unsupported Android build mode ${build_mode}"
       ;;
   esac
+  set -e
 
-  if [[ -x "${android_root}/scripts/verify-launcher-icon.py" || -f "${android_root}/scripts/verify-launcher-icon.py" ]]; then
+  if [[ "${build_status}" -eq 0 && ( -x "${android_root}/scripts/verify-launcher-icon.py" || -f "${android_root}/scripts/verify-launcher-icon.py" ) ]]; then
     echo "horc build android-apk: verifying launcher icon resources"
-    (cd "${root}" && python3 "${android_root}/scripts/verify-launcher-icon.py")
+    (cd "${root}" && python3 "${android_root}/scripts/verify-launcher-icon.py") || build_status=$?
   fi
 
-  [[ -f "${android_root}/release/WASM-Agent-arm64.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-arm64.apk"
-  [[ -f "${android_root}/release/WASM-Agent-universal.apk" ]] || build_fail "missing Android release artifact: ${android_root}/release/WASM-Agent-universal.apk"
-  verify_android_release_artifact_on_host "${android_root}"
-  if should_generate_native_release_feed; then
-    generate_native_release_feed "${root}" "horc build android-apk"
-  else
-    echo "horc build android-apk: skipping native release feed generation for parallel build join"
+  if [[ "${build_status}" -eq 0 ]]; then
+    [[ -f "${android_root}/release/WASM-Agent-arm64.apk" ]] || build_status=2
+    if [[ "${build_status}" -eq 0 ]]; then
+      [[ -f "${android_root}/release/WASM-Agent-universal.apk" ]] || build_status=2
+    fi
+    if [[ "${build_status}" -eq 0 ]]; then
+      verify_android_release_artifact_on_host "${android_root}" || build_status=$?
+    fi
+    if [[ "${build_status}" -eq 0 ]]; then
+      if should_generate_native_release_feed; then
+        generate_native_release_feed "${root}" "horc build android-apk" || build_status=$?
+      else
+        echo "horc build android-apk: skipping native release feed generation for parallel build join"
+      fi
+    fi
   fi
-  echo "horc build android-apk: APK artifacts ready:"
-  echo "horc build android-apk:   ${android_root}/release/WASM-Agent-arm64.apk"
-  echo "horc build android-apk:   ${android_root}/release/WASM-Agent-universal.apk"
+  if [[ "${build_status}" -eq 0 ]]; then
+    echo "horc build android-apk: APK artifacts ready:"
+    echo "horc build android-apk:   ${android_root}/release/WASM-Agent-arm64.apk"
+    echo "horc build android-apk:   ${android_root}/release/WASM-Agent-universal.apk"
+  else
+    echo "horc build android-apk: failed with status ${build_status}" >&2
+  fi
+  record_android_build_benchmark "${root}" "${android_root}" "android" "${build_mode}" "${build_status}" "${benchmark_started_ms}" "${release_tasks}"
+  if [[ "${build_status}" -ne 0 ]]; then
+    exit "${build_status}"
+  fi
 }
 
 build_all_native_release() {
@@ -1998,6 +2523,14 @@ case "${ACTION}" in
         fi
         build_windows_native_release
         ;;
+      win-fast|windows-fast|win-debug|wasm-agent-win-fast|wasm-agent-windows-fast)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build win-fast: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_windows_fast
+        ;;
       android|android-apk|apk|wasm-agent-android)
         if [[ $# -gt 0 ]]; then
           echo "horc build android-apk: unexpected arguments: $*" >&2
@@ -2005,6 +2538,14 @@ case "${ACTION}" in
           exit 2
         fi
         build_android_native_release
+        ;;
+      android-fast|android-debug|apk-fast|wasm-agent-android-fast)
+        if [[ $# -gt 0 ]]; then
+          echo "horc build android-fast: unexpected arguments: $*" >&2
+          build_usage >&2
+          exit 2
+        fi
+        build_android_fast
         ;;
       all|native-all|wasm-agent-native-all)
         if [[ $# -gt 0 ]]; then

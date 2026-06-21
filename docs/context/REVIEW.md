@@ -13,6 +13,7 @@ future empty-context agent.
 | Verification | Commands name exact path/artifact and proof boundary. |
 | Next actions | One durable next action per active area. |
 | Reply loop | Generic copilotability rule is discoverable: use live introspection/control before guessing, and end substantive replies with a concrete next-step phase. |
+| Loop-aware doctrine | Meaningful native/bridge/wake/hot-op/rebuild-heavy work has Builder, Watcher, Gatekeeper, prime checkpoints, and static/runtime/behavioral evidence where possible. |
 | Active state | `docs/context/ACTIVE_STATE.json` matches generated blocks and current next actions. |
 | Compression | Delete diary text, repeated philosophy, and stale debug history. |
 
@@ -32,8 +33,72 @@ Attack the docs as if starting from zero context:
    `reports/context/latest/context-sync-result.json`?
 9. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
    refuse stale next actions if narrative docs disagree?
+10. Can I find the loop-aware report structure and tell whether evidence is
+    static, runtime, behavioral, or missing?
 
 Demote or rewrite any ambiguous answer.
+
+## Loop-Aware Report Template
+
+Use this compact template in task summaries, PR summaries, or significant
+implementation reports for native, bridge, wake-word, hot-op, runtime-control,
+release, or rebuild-heavy work.
+
+```md
+## Verified Loop-Aware Engineering Report
+
+### Phase 0 - Architecture Loop Reflection
+- Loop speed improvement considered:
+- Decision:
+
+### Phase 1 - Rebuild Avoidance
+- Rebuild-heavy files touched:
+- Hot-op/HMR/config/runtime alternative considered:
+- Decision:
+- If rebuild is required, why:
+
+### Phase 2 - Observability
+- Logs/counters/state available before validation:
+- Missing observability:
+- Added diagnostics:
+- Human inspection required:
+
+### Phase 3 - Rebuild Metadata
+- Rebuild required:
+- Command:
+- Target:
+- Duration:
+- Was it avoidable:
+- Validation command:
+
+### Phase 4 - Post-Rebuild Loop Learning
+- What made this iteration slow:
+- What can make the next loop faster:
+- Follow-up loop-shortening opportunity:
+
+### Phase 5 - Nested Verification
+#### Builder
+- Claim:
+- Patch/shortcut proposed:
+- Expected effect:
+
+#### Watcher
+- Independent verification performed:
+- Evidence:
+- Contradictions or risks:
+
+#### Gatekeeper
+- Decision:
+- Reason:
+- Rollback needed:
+- Human approval needed:
+
+### Rule of Three / Prime Checkpoints
+- Static evidence:
+- Runtime evidence:
+- Behavioral evidence:
+- Prime checkpoints atomic, independent, falsifiable, observable, non-redundant:
+```
 
 ## Fresh-Agent Structured Test
 

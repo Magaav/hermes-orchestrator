@@ -8,6 +8,54 @@ function numberValue(...values) {
   return 0;
 }
 
+function finiteNumberOrNull(...values) {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function boundedIntOrNull(min, max, ...values) {
+  const value = finiteNumberOrNull(...values);
+  if (value === null) return null;
+  return Math.max(min, Math.min(Math.round(value), max));
+}
+
+function boundedFloatOrNull(min, max, ...values) {
+  const value = finiteNumberOrNull(...values);
+  if (value === null) return null;
+  return Math.max(min, Math.min(value, max));
+}
+
+function servicePolicyExtras(args) {
+  const extras = [];
+  const phrase = String(args.wakePhrase || args.wake_phrase || "").trim().toLowerCase();
+  if (phrase) extras.push("--es", "wakePhrase", phrase.slice(0, 40));
+  const confirmationFrames = boundedIntOrNull(1, 5, args.wakeConfirmationFrames, args.wake_confirmation_frames, args.wakeVerificationFrames);
+  if (confirmationFrames !== null) extras.push("--ei", "wakeConfirmationFrames", String(confirmationFrames));
+  const confirmationWindowMs = boundedIntOrNull(150, 2000, args.wakeConfirmationWindowMs, args.wake_confirmation_window_ms, args.wakeVerificationWindowMs);
+  if (confirmationWindowMs !== null) extras.push("--el", "wakeConfirmationWindowMs", String(confirmationWindowMs));
+  const cooldownMs = boundedIntOrNull(500, 60000, args.wakeCooldownMs, args.wake_cooldown_ms);
+  if (cooldownMs !== null) extras.push("--el", "wakeCooldownMs", String(cooldownMs));
+  const vadRms = boundedFloatOrNull(0.001, 0.2, args.vadRmsThreshold, args.vad_rms_threshold);
+  if (vadRms !== null) extras.push("--ef", "vadRmsThreshold", String(vadRms));
+  const vadPeak = boundedIntOrNull(100, 30000, args.vadPeakThreshold, args.vad_peak_threshold);
+  if (vadPeak !== null) extras.push("--ei", "vadPeakThreshold", String(vadPeak));
+  return extras;
+}
+
+function booleanValue(value, fallback) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) return true;
+    if (["0", "false", "no", "off"].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
 function latestWindow(status) {
   return status.latest_inference_window && typeof status.latest_inference_window === "object"
     ? status.latest_inference_window
@@ -18,6 +66,20 @@ function metricsFrom(status) {
   return status.confidence_metrics && typeof status.confidence_metrics === "object"
     ? status.confidence_metrics
     : {};
+}
+
+function modelSourceFrom(status) {
+  return String(status.model_source || status.modelSource || status.wake_model_source || status.wakeProvider || status.wake_provider || "").toLowerCase();
+}
+
+function openWakeWordBundleReady(status) {
+  const source = modelSourceFrom(status);
+  return Boolean(
+    (source === "openwakeword_bundle" || source.includes("openwakeword"))
+      && status.onnx_runtime_available !== false
+      && (status.wake_engine_ready === true || status.onnx_model_ready === true)
+      && status.openwakeword_bundle_exists !== false
+  );
 }
 
 const FAILURE_CLASSIFICATION_BY_STAGE = {
@@ -42,6 +104,8 @@ const NEXT_ACTION_BY_CLASSIFICATION = {
   record_audio_permission_missing: "Grant RECORD_AUDIO to com.colmeio.wasmagent, then rerun the proof.",
   foreground_service_not_started: "Inspect the Android foreground service start path and notification requirements.",
   service_command_not_received: "Inspect the activity debug intent and service command delivery path.",
+  service_start_rejected: "Use the app/native-control policy path; Android rejected direct ADB service start for the non-exported wake service.",
+  production_policy_not_applied: "Use apply_wake_word_policy or an exported app-mediated control path; production listener policy did not reach the Android service.",
   diagnostics_status_missing: "Collect native diagnostics and logcat; voice-wake.json was not available.",
   audio_capture_not_started: "Open Hermes wake proof mode and verify the foreground service starts recording.",
   audio_record_init_failed: "Inspect AudioRecord buffer, source, and microphone availability on the Android device.",
@@ -73,22 +137,29 @@ function markPhase(context, phase, details = {}) {
 }
 
 function modelReady(status) {
-  return Boolean(status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match);
+  return Boolean(
+    status.onnx_model_ready === true
+      || openWakeWordBundleReady(status)
+      || (status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match)
+  );
 }
 
 function normalizeFailureClassification(status, stable, firstMissing) {
-  if (stable) return "pass";
   if (!status || !Object.keys(status).length) return "diagnostics_status_missing";
+  if (numberValue(status.service_start_exit_code, 0) !== 0) return "service_start_rejected";
+  if (status.requested_proof_session === false && status.proof_session_active === true) return "production_policy_not_applied";
+  if (stable) return "pass";
   const reason = String(status.failure_reason || status.disabled_reason || "").trim();
   if (reason && NEXT_ACTION_BY_CLASSIFICATION[reason]) return reason;
   if (status.permission_record_audio === false) return "record_audio_permission_missing";
-  if (status.status_source !== "live_service") return "diagnostics_status_missing";
-  if (status.proof_session_active !== true) return "service_command_not_received";
-  if (!(status.foreground_service_started || status.foreground_service_running || status.service_running)) return "foreground_service_not_started";
+  const serviceVisible = Boolean(status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running);
+  if (!serviceVisible && status.status_source && status.status_source !== "live_service" && status.status_source !== "lightweight_no_model_load") return "diagnostics_status_missing";
+  if (status.proof_session_active === false && !serviceVisible) return "service_command_not_received";
+  if (!serviceVisible) return "foreground_service_not_started";
   if (status.audio_record_error) return status.audio_record_started ? "audio_record_start_failed" : "audio_record_init_failed";
   if (status.personalized_model_exists === false || status.model_exists === false || status.wake_model_exists === false) return "onnx_model_missing";
   if (status.onnx_runtime_available === false || status.wake_engine_ready === false) return "onnx_model_load_failed";
-  if (status.model_sha_match === false) {
+  if (status.model_sha_match === false && !openWakeWordBundleReady(status)) {
     return "onnx_model_load_failed";
   }
   return FAILURE_CLASSIFICATION_BY_STAGE[firstMissing?.[0]] || "unknown_failure";
@@ -97,16 +168,18 @@ function normalizeFailureClassification(status, stable, firstMissing) {
 function classify(status) {
   const metrics = metricsFrom(status);
   const window = latestWindow(status);
-  const confidence = numberValue(status.last_wake_confidence, metrics.last_confidence, window.confidence, null);
-  const maxConfidence = numberValue(status.max_observed_confidence, metrics.max_confidence, window.max_confidence, confidence);
+  const confidence = numberValue(status.last_wake_confidence, status.last_confidence, metrics.last_confidence, window.confidence, null);
+  const maxConfidence = numberValue(status.max_observed_confidence, status.max_confidence_since_start, status.max_confidence, metrics.max_confidence, window.max_confidence, confidence);
   const wakeThreshold = numberValue(status.wake_threshold, status.threshold, metrics.threshold, window.threshold, 0.58);
   const inferenceCount = numberValue(status.inference_count, metrics.inference_count, window.inference_count, 0);
-  const wakeDetectedCount = numberValue(status.wake_detection_count, window.detection_count, status.last_wake_at ? 1 : 0);
+  const wakeDetectedCount = numberValue(status.wake_detection_count, status.wake_hit_count, window.detection_count, status.last_wake_at ? 1 : 0);
+  const serviceAlive = Boolean((status.status_source === "live_service" || status.status_source === "lightweight_no_model_load" || !status.status_source) && (status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running));
+  const audioStarted = Boolean(status.permission_record_audio !== false && (status.audio_record_started || status.audio_capture_alive || numberValue(status.audio_read_calls, 0) > 0 || inferenceCount > 0));
   const stages = {
-    service_alive: Boolean(status.status_source === "live_service" && status.proof_session_active && (status.foreground_service_started || status.foreground_service_running || status.service_running)),
-    audio_record_started: Boolean(status.permission_record_audio && status.audio_record_started),
-    audio_capture_alive: Boolean(status.permission_record_audio && status.audio_capture_alive !== false && status.audio_record_started && numberValue(status.audio_read_calls, 0) > 0),
-    onnx_model_ready: Boolean(status.onnx_model_ready || (status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match)),
+    service_alive: serviceAlive,
+    audio_record_started: audioStarted,
+    audio_capture_alive: Boolean(status.permission_record_audio !== false && status.audio_capture_alive !== false && audioStarted),
+    onnx_model_ready: modelReady(status),
     inference_running: Boolean(status.inference_running || inferenceCount > 0),
     wake_confidence_observed: Boolean(status.wake_confidence_observed || inferenceCount > 0 || maxConfidence > 0),
     wake_threshold_crossed: Boolean(status.threshold_crossed || status.last_inference_threshold_crossed || metrics.threshold_crossed || window.threshold_crossed || maxConfidence >= wakeThreshold),
@@ -120,11 +193,14 @@ function classify(status) {
     onnx_model_ready: stages.onnx_model_ready,
     inference_running: stages.inference_running,
   };
-  const stable = Object.values(requiredStages).every(Boolean);
+  const runtimeStable = Object.values(requiredStages).every(Boolean);
   const firstMissing = Object.entries(requiredStages).find(([, passed]) => !passed);
-  const failureClassification = normalizeFailureClassification(status, stable, firstMissing);
+  const failureClassification = normalizeFailureClassification(status, runtimeStable, firstMissing);
+  const stable = failureClassification === "pass";
   return {
     stable,
+    runtimeStable,
+    runtime_stable: runtimeStable,
     operation: "run_android_hermes_wake_proof",
     source: "hot_operation",
     stages,
@@ -170,7 +246,9 @@ async function run(context) {
   markPhase(context, "adb_ready", { serial: device.serial || "" });
   const waitMs = Math.max(5000, Math.min(Number(args.waitMs || args.wait_ms || args.timeoutMs || 30000), 120000));
   const rawWakeThreshold = numberValue(args.wakeThreshold, args.wake_threshold, args.threshold, 0.58);
-  const wakeThreshold = Math.max(0.05, Math.min(Number.isFinite(rawWakeThreshold) ? rawWakeThreshold : 0.58, 0.99));
+  const wakeThreshold = Math.max(0.05, Math.min(Number.isFinite(rawWakeThreshold) ? rawWakeThreshold : 0.58, 0.999));
+  const policyExtras = servicePolicyExtras(args);
+  const proofSession = booleanValue(args.proofSession ?? args.proof_session, true);
   const serial = device.serial || "";
   await context.adb.shell(serial, ["input", "keyevent", "KEYCODE_WAKEUP"], { timeoutMs: 5000, maxBuffer: 64 * 1024 });
   await context.adb.launchIntent(serial, [
@@ -185,7 +263,7 @@ async function run(context) {
     String(args.nativeScreen || args.native_screen || "hermes-wake-proof"),
   ], { timeoutMs: 15000, maxBuffer: 512 * 1024 });
   markPhase(context, "app_launched", { packageName });
-  const serviceStart = await context.adb.shell(serial, [
+  const serviceStartArgs = [
     "am",
     "start-foreground-service",
     "-n",
@@ -194,16 +272,33 @@ async function run(context) {
     "com.colmeio.wasmagent.voice.START",
     "--ez",
     "proof_session",
-    "true",
+    String(proofSession),
     "--ef",
     "wake_threshold",
     String(wakeThreshold),
-  ], { timeoutMs: 10000, maxBuffer: 256 * 1024 });
+    ...policyExtras,
+  ];
+  let serviceStart = await context.adb.shell(serial, serviceStartArgs, { timeoutMs: 10000, maxBuffer: 256 * 1024 });
+  let serviceStartMethod = "start-foreground-service";
+  if (serviceStart.exitCode !== 0) {
+    const fallbackArgs = [...serviceStartArgs];
+    fallbackArgs[1] = "startservice";
+    const fallback = await context.adb.shell(serial, fallbackArgs, { timeoutMs: 10000, maxBuffer: 256 * 1024 });
+    if (fallback.exitCode === 0 || serviceStart.exitCode !== 0) {
+      serviceStart = fallback;
+      serviceStartMethod = "startservice";
+    }
+  }
   markPhase(context, "service_start_requested", {
     packageName,
     source: "activity_debug_screen_and_foreground_service",
+    method: serviceStartMethod,
     wakeThreshold,
+    policyExtras,
+    proofSession,
     exitCode: serviceStart.exitCode,
+    stdout: String(serviceStart.stdout || "").slice(0, 1200),
+    stderr: String(serviceStart.stderr || serviceStart.error || "").slice(0, 1200),
   });
   context.logger.info("hermes_wake_proof_listening", { waitMs });
   markPhase(context, "listening", { waitMs });
@@ -235,6 +330,12 @@ async function run(context) {
   if (status.status_source === "live_service" && (status.foreground_service_started || status.foreground_service_running || status.service_running)) {
     markPhase(context, "foreground_service_seen");
   }
+  status.service_start_exit_code = Number(serviceStart.exitCode || 0);
+  status.service_start_method = serviceStartMethod;
+  status.service_start_stdout = String(serviceStart.stdout || "").slice(0, 1200);
+  status.service_start_stderr = String(serviceStart.stderr || serviceStart.error || "").slice(0, 1200);
+  status.requested_proof_session = proofSession;
+  status.requested_wake_threshold = wakeThreshold;
   if (status.permission_record_audio && status.audio_record_started && numberValue(status.audio_read_calls, 0) > 0) {
     markPhase(context, "audio_record_seen", { audioReadCalls: numberValue(status.audio_read_calls, 0) });
   }

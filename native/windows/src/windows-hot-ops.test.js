@@ -9,6 +9,8 @@ const hermesOp = require(path.join(__dirname, "..", "ops", "android", "hermes-wa
 
 assert(mainJs.includes('"run_hot_operation"'), "run_hot_operation must be allowlisted");
 assert(mainJs.includes('"list_hot_operations"'), "list_hot_operations must be allowlisted");
+assert(mainJs.includes('"play_wake_phrase_probe"'), "Windows speaker wake probe must be allowlisted");
+assert(mainJs.includes('"play_audio_stimulus"'), "Windows room-state stimulus probe must be allowlisted");
 assert(mainJs.includes('"refresh_downloaded_hot_ops"'), "refresh_downloaded_hot_ops must be allowlisted");
 assert(mainJs.includes('"sync_downloaded_hot_ops"'), "sync_downloaded_hot_ops must be allowlisted");
 assert(mainJs.includes('"get_native_kernel_status"'), "get_native_kernel_status must be allowlisted");
@@ -61,6 +63,8 @@ assert(mainJs.includes("WINDOWS_NATIVE_KERNEL_CAPABILITIES"), "Windows native ca
 assert(mainJs.includes("syncDownloadedRuntimeFromFeed"), "downloaded runtime must sync from the release feed");
 assert(mainJs.includes("ensureDownloadedRuntimeFromFeed"), "downloaded runtime must hydrate before bridge status and hot ops");
 assert(mainJs.includes("rollbackDownloadedRuntimeToLastKnownGood"), "downloaded runtime must support last-known-good rollback");
+assert(mainJs.includes("windowsArtifactFromFeed,"), "Windows self-update handler must import feed artifact extraction");
+assert(mainJs.includes("const fetched = windowsArtifactFromFeed(feed);"), "Windows self-update handler must expose fetched build evidence");
 assert(mainJs.includes("downloadedRuntimeMetadataDiffers"), "downloaded runtime sync must compare feed and cached metadata");
 assert(mainJs.includes("downloadedRuntimeFileMismatch"), "downloaded runtime sync must compare cached file SHAs");
 assert(mainJs.includes("releaseUrlAllowedForDownloadedRuntime"), "downloaded runtime URLs must be allowlisted");
@@ -82,6 +86,15 @@ for (const field of ["downloadedRuntime", "activeRuntimeId", "activeRuntimeSha",
   assert(mainJs.includes(field), `downloaded runtime status must expose ${field}`);
 }
 assert(mainJs.includes("resolveBestVoiceWakeDiagnostics"), "diagnostics fallback primitive must exist");
+assert(mainJs.includes("function playWindowsWakePhraseProbe"), "Windows native-control must expose a bounded speaker wake probe");
+assert(mainJs.includes("System.Speech.Synthesis.SpeechSynthesizer"), "Windows speaker probe must use the fixed SpeechSynthesizer primitive");
+assert(mainJs.includes("function powershellSingleQuoted"), "Windows audio probes must safely embed bounded PowerShell literals");
+assert(mainJs.includes("$phrase = ${powershellSingleQuoted(phrase)};"), "Windows speaker probe must pass phrase as a sanitized literal");
+assert(!mainJs.includes("$synth.Speak($args[0])"), "Windows speaker probe must not rely on broken PowerShell argv passing");
+assert(mainJs.includes("function playWindowsAudioStimulus"), "Windows native-control must expose bounded non-speech audio stimuli");
+assert(mainJs.includes("windows_fixed_audio_stimulus"), "Windows audio stimulus must report the fixed primitive source");
+assert(mainJs.includes("[Console]::Beep(${frequencyHz}, ${durationMs});"), "Windows beep stimulus must embed bounded numeric arguments");
+assert(mainJs.includes("native.capabilities.speaker.v1"), "Windows speaker primitive must be advertised as a native capability");
 
 const deniedIndex = mainJs.indexOf("function requireHotOperationCapability");
 const helperIndex = mainJs.indexOf("function createHotOperationContext");
@@ -100,6 +113,8 @@ assert(manifest.requiredNativeCapabilities.includes("native.capabilities.hotOps.
 assert(manifest.inputsSchema.properties.wakeThreshold, "Hermes proof must accept downloaded wakeThreshold policy");
 assert(manifest.inputsSchema.properties.wake_threshold, "Hermes proof must accept snake-case wake_threshold policy");
 assert(hermesOpText.includes('"--ef"') && hermesOpText.includes('"wake_threshold"'), "Hermes proof must pass threshold policy to Android service");
+assert(hermesOpText.includes("0.999"), "Hermes proof must preserve Android's high wake-threshold ceiling for false-wake hardening");
+assert(mainJs.includes("/native/android/wake-word-state"), "Windows proof helper must prefer compact Wake Word state before large diagnostics");
 assert(manifest.capabilities.includes("adb.device"));
 assert(manifest.timeoutMs >= 120000 && manifest.timeoutMs <= 180000, "Hermes wake proof must request a bounded long timeout");
 for (const phase of ["adb_ready", "app_launched", "service_start_requested", "foreground_service_seen", "audio_record_seen", "model_status_seen", "listening", "result_written"]) {
@@ -148,6 +163,33 @@ assert.strictEqual(pass.stable, true);
 assert.strictEqual(pass.failureClassification, "pass");
 assert.strictEqual(pass.stages.service_alive, true);
 assert.strictEqual(pass.stages.command_capture_ui_started, true);
+
+const openWakeWordBundle = hermesOp.classify({
+  status_source: "lightweight_no_model_load",
+  proof_session_active: true,
+  foreground_service_active: true,
+  service_running: true,
+  permission_record_audio: true,
+  audio_record_started: true,
+  audio_read_calls: 10,
+  onnx_runtime_available: true,
+  onnx_model_ready: true,
+  wake_engine_ready: true,
+  model_source: "openwakeword_bundle",
+  openwakeword_bundle_exists: true,
+  personalized_model_exists: true,
+  model_sha_match: false,
+  inference_count: 68940,
+  last_confidence: 0.000009,
+  max_confidence_since_start: 0.9997,
+  threshold: 0.99,
+  wake_hit_count: 8,
+});
+assert.strictEqual(openWakeWordBundle.stable, true);
+assert.strictEqual(openWakeWordBundle.failureClassification, "pass");
+assert.strictEqual(openWakeWordBundle.stages.onnx_model_ready, true);
+assert.strictEqual(openWakeWordBundle.metrics.inference_count, 68940);
+assert.strictEqual(openWakeWordBundle.metrics.wake_detected_count, 8);
 
 const incomplete = hermesOp.classify({
   status_source: "live_service",

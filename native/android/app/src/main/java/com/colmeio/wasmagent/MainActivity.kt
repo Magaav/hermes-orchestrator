@@ -11,6 +11,9 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.Uri
 import android.net.http.SslError
 import android.os.Build
@@ -18,6 +21,9 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Looper
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.util.Base64
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -49,6 +55,8 @@ import android.widget.Toast
 import com.colmeio.wasmagent.voice.WakeModelSelector
 import com.colmeio.wasmagent.voice.FalseWakeStore
 import com.colmeio.wasmagent.voice.LocalCommandTranscriptionEngine
+import com.colmeio.wasmagent.voice.OpenWakeWordBundleEngine
+import com.colmeio.wasmagent.voice.OpenWakeWordOnnxEngine
 import com.colmeio.wasmagent.voice.VoiceTuningCategory
 import com.colmeio.wasmagent.voice.VoiceTuningRecorder
 import com.colmeio.wasmagent.voice.VoiceTuningStore
@@ -60,11 +68,15 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 import kotlin.concurrent.thread
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 class MainActivity : Activity() {
     companion object {
@@ -88,6 +100,8 @@ class MainActivity : Activity() {
         private const val EXTRA_DEBUG_SCREEN = "debug_screen"
         private const val EXTRA_CLEAR_WEBVIEW_DATA = "clear_webview_data"
         private const val EXTRA_NATIVE_SCREEN = "native_screen"
+        private val LEGACY_FETCH_WAKE_WORD_STATE_OPERATION = listOf("fetch_wake", "world_state").joinToString("_")
+        private val LEGACY_PROVE_WAKE_WORD_LOOP_OPERATION = listOf("prove_wake", "world_loop").joinToString("_")
         private const val LOG_TAG = "WasmAgentNative"
         private const val REQUEST_FILE_CHOOSER = 8801
         private const val REQUEST_WEB_PERMISSIONS = 8802
@@ -172,10 +186,12 @@ class MainActivity : Activity() {
         androidAuthSessionId = getOrCreateAndroidAuthSessionId()
         nativeCorrelationId = getOrCreateNativeCorrelationId()
         installDeviceHash = getOrCreateInstallDeviceHash()
+        val voiceWakeBootReconciliation = reconcileStaleVoiceWakeStatus("boot")
         logDiagnostic("activity_on_create", JSONObject()
             .put("has_saved_state", savedInstanceState != null)
             .put("build_id", BuildConfig.NATIVE_BUILD_ID)
-            .put("shell", "android-webview"))
+            .put("shell", "android-webview")
+            .put("voice_wake_boot_reconciliation", voiceWakeBootReconciliation))
         handleLaunchIntent(intent, "activity_create")
 
         val restoredOrigin = savedInstanceState?.getString(STATE_SELECTED_ORIGIN).orEmpty()
@@ -1404,6 +1420,376 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun installOpenWakeWordBundle(bundleUrl: String, expectedSha256: String = ""): JSONObject {
+        val origin = selectedOrigin.ifBlank { BuildConfig.DEFAULT_SERVER_URL }.trimEnd('/')
+        val resolved = try {
+            URL(URL("$origin/"), bundleUrl)
+        } catch (error: Exception) {
+            return JSONObject().put("ok", false).put("error", "invalid_bundle_url").put("message", error.message ?: "")
+        }
+        val expectedHost = Uri.parse(origin).host.orEmpty().lowercase()
+        val allowedProtocol = resolved.protocol == "https" || (BuildConfig.ALLOW_LOCAL_DEV && resolved.protocol == "http")
+        if (!allowedProtocol || resolved.host.lowercase() != expectedHost) {
+            return JSONObject()
+                .put("ok", false)
+                .put("error", "bundle_url_not_allowed")
+                .put("message", "OpenWakeWord bundles must be downloaded from the selected wasm-agent backend.")
+        }
+        val voiceDir = File(filesDir, "voice")
+        val tempZip = File(voiceDir, "openwakeword.zip.tmp")
+        val targetDir = File(voiceDir, "openwakeword")
+        val tempDir = File(voiceDir, "openwakeword.tmp")
+        return try {
+            voiceDir.mkdirs()
+            val connection = (resolved.openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15000
+                readTimeout = 120000
+                requestMethod = "GET"
+            }
+            if (connection.responseCode !in 200..299) {
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "bundle_download_failed")
+                    .put("status_code", connection.responseCode)
+            }
+            val maxBytes = 96L * 1024L * 1024L
+            var total = 0L
+            val digest = MessageDigest.getInstance("SHA-256")
+            connection.inputStream.use { input ->
+                FileOutputStream(tempZip).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read < 0) break
+                        total += read
+                        if (total > maxBytes) throw IllegalStateException("bundle_too_large")
+                        digest.update(buffer, 0, read)
+                        output.write(buffer, 0, read)
+                    }
+                }
+            }
+            val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
+            if (expectedSha256.isNotBlank() && !actualSha256.equals(expectedSha256, ignoreCase = true)) {
+                tempZip.delete()
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "bundle_sha256_mismatch")
+                    .put("expected_sha256", expectedSha256)
+                    .put("actual_sha256", actualSha256)
+            }
+            tempDir.deleteRecursively()
+            tempDir.mkdirs()
+            val required = setOf(
+                OpenWakeWordBundleEngine.MEL_MODEL_NAME,
+                OpenWakeWordBundleEngine.EMBEDDING_MODEL_NAME,
+                OpenWakeWordBundleEngine.CLASSIFIER_MODEL_NAME,
+            )
+            val extracted = mutableSetOf<String>()
+            ZipInputStream(tempZip.inputStream()).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    val name = entry.name.substringAfterLast('/').trim()
+                    if (!entry.isDirectory && name in required) {
+                        val outFile = File(tempDir, name)
+                        FileOutputStream(outFile).use { output ->
+                            val buffer = ByteArray(64 * 1024)
+                            while (true) {
+                                val read = zip.read(buffer)
+                                if (read < 0) break
+                                output.write(buffer, 0, read)
+                            }
+                        }
+                        extracted.add(name)
+                    }
+                    zip.closeEntry()
+                }
+            }
+            if (!extracted.containsAll(required)) {
+                tempDir.deleteRecursively()
+                tempZip.delete()
+                return JSONObject()
+                    .put("ok", false)
+                    .put("error", "bundle_missing_required_models")
+                    .put("required", JSONArray(required))
+                    .put("extracted", JSONArray(extracted))
+            }
+            targetDir.deleteRecursively()
+            if (!tempDir.renameTo(targetDir)) {
+                tempDir.copyRecursively(targetDir, overwrite = true)
+                tempDir.deleteRecursively()
+            }
+            tempZip.delete()
+            logDiagnostic("openwakeword_bundle_installed", JSONObject()
+                .put("bytes", total)
+                .put("sha256", actualSha256)
+                .put("path", OpenWakeWordBundleEngine.BUNDLE_DIR)
+                .put("files", JSONArray(extracted)))
+            JSONObject()
+                .put("ok", true)
+                .put("type", "openwakeword_bundle_installed")
+                .put("path", OpenWakeWordBundleEngine.BUNDLE_DIR)
+                .put("bytes", total)
+                .put("sha256", actualSha256)
+                .put("status", voiceWakeStatus())
+        } catch (error: Exception) {
+            tempZip.delete()
+            tempDir.deleteRecursively()
+            JSONObject()
+                .put("ok", false)
+                .put("error", error.message ?: error.javaClass.simpleName)
+                .put("message", error.javaClass.simpleName)
+        }
+    }
+
+    private fun playWakePhraseProbe(
+        phrase: String,
+        languageTag: String = "en-US",
+        rate: Float = 0.9f,
+        pitch: Float = 1.0f,
+        timeoutMs: Long = 7000L,
+    ): JSONObject {
+        val text = phrase.trim().ifBlank { HermesVoiceWakeService.configuredWakePhrase(this) }.ifBlank { HermesVoiceWakeService.DEFAULT_WAKE_PHRASE }.take(80)
+        val boundedTimeout = timeoutMs.coerceIn(1000L, 15000L)
+        val latch = CountDownLatch(1)
+        val utteranceId = "wake-phrase-probe-${UUID.randomUUID()}"
+        var tts: TextToSpeech? = null
+        var done = false
+        var error = ""
+        runOnUiThread {
+            tts = TextToSpeech(this) { status ->
+                if (status != TextToSpeech.SUCCESS) {
+                    error = "tts_init_failed:$status"
+                    latch.countDown()
+                    return@TextToSpeech
+                }
+                val active = tts
+                if (active == null) {
+                    error = "tts_unavailable"
+                    latch.countDown()
+                    return@TextToSpeech
+                }
+                val languageResult = active.setLanguage(Locale.forLanguageTag(languageTag.ifBlank { "en-US" }))
+                if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    error = "tts_language_unavailable:$languageTag"
+                    latch.countDown()
+                    return@TextToSpeech
+                }
+                active.setSpeechRate(rate.coerceIn(0.5f, 1.5f))
+                active.setPitch(pitch.coerceIn(0.5f, 1.5f))
+                active.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?) {
+                        if (id == utteranceId) {
+                            done = true
+                            latch.countDown()
+                        }
+                    }
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(id: String?) {
+                        if (id == utteranceId) {
+                            error = "tts_error"
+                            latch.countDown()
+                        }
+                    }
+                    override fun onError(id: String?, errorCode: Int) {
+                        if (id == utteranceId) {
+                            error = "tts_error:$errorCode"
+                            latch.countDown()
+                        }
+                    }
+                })
+                val result = active.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), utteranceId)
+                if (result != TextToSpeech.SUCCESS) {
+                    error = "tts_speak_failed:$result"
+                    latch.countDown()
+                }
+            }
+        }
+        val completed = latch.await(boundedTimeout, TimeUnit.MILLISECONDS)
+        runOnUiThread {
+            try {
+                tts?.stop()
+                tts?.shutdown()
+            } catch (_: Exception) {
+            }
+        }
+        val timedOut = !completed
+        if (timedOut && error.isBlank()) error = "tts_timeout"
+        val result = JSONObject()
+            .put("ok", done && error.isBlank())
+            .put("type", "wake_phrase_probe_playback")
+            .put("phrase", text)
+            .put("language", languageTag.ifBlank { "en-US" })
+            .put("completed", completed)
+            .put("spoken", done)
+            .put("timeoutMs", boundedTimeout)
+            .put("status", voiceWakeStatus())
+        if (error.isNotBlank()) result.put("error", error)
+        logDiagnostic("wake_phrase_probe_playback", result)
+        return result
+    }
+
+    private fun scoreWakePhraseProbe(
+        durationMs: Long = 3500L,
+        restartListener: Boolean = true,
+        stopListenerFirst: Boolean = true,
+        includePcmBase64: Boolean = false,
+    ): JSONObject {
+        if (!permissionGranted(Manifest.permission.RECORD_AUDIO)) {
+            return JSONObject()
+                .put("ok", false)
+                .put("type", "wake_phrase_score_probe")
+                .put("error", "record_audio_permission_denied")
+                .put("status", voiceWakeStatus())
+        }
+        val origin = selectedOrigin.ifBlank {
+            prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, "").orEmpty()
+        }.ifBlank { BuildConfig.DEFAULT_SERVER_URL }
+        val boundedDuration = durationMs.coerceIn(1000L, 8000L)
+        val sampleRate = OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ
+        val rawMinBuffer = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (rawMinBuffer <= 0) {
+            return JSONObject()
+                .put("ok", false)
+                .put("type", "wake_phrase_score_probe")
+                .put("error", "audio_record_min_buffer_failed:$rawMinBuffer")
+                .put("status", voiceWakeStatus())
+        }
+        if (stopListenerFirst) {
+            HermesVoiceWakeService.stop(this)
+            Thread.sleep(350L)
+        }
+        val selection = WakeModelSelector.select(
+            personalizedModelFile = File(filesDir, OpenWakeWordOnnxEngine.APP_PRIVATE_PERSONALIZED_MODEL_PATH.removePrefix("files/")),
+            baseModelFile = File(filesDir, OpenWakeWordOnnxEngine.APP_PRIVATE_BASE_MODEL_PATH.removePrefix("files/")),
+            threshold = HermesVoiceWakeService.configuredWakeThreshold(this),
+        )
+        val engine = selection.engine
+        val frames = JSONArray()
+        var recorder: AudioRecord? = null
+        var maxConfidence = 0.0
+        var lastConfidence = 0.0
+        var detectedFrames = 0
+        var inferenceFrames = 0
+        var readCalls = 0
+        var readErrors = 0
+        var samplesRead = 0L
+        var peak = 0
+        var energy = 0.0
+        var energySamples = 0L
+        var error = ""
+        val captured = if (includePcmBase64) ArrayList<Short>() else null
+        val startedAt = System.currentTimeMillis()
+        try {
+            val bufferSize = rawMinBuffer.coerceAtLeast(sampleRate)
+            recorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize,
+            )
+            if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                error = "audio_record_state:${recorder.state}"
+            } else if (!engine.ready) {
+                error = "wake_engine_not_ready:${engine.diagnosticReason}"
+            } else {
+                recorder.startRecording()
+                if (recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                    error = "audio_record_not_recording"
+                } else {
+                    val frame = ShortArray(1024)
+                    val deadline = startedAt + boundedDuration
+                    while (System.currentTimeMillis() < deadline) {
+                        val count = recorder.read(frame, 0, frame.size)
+                        if (count <= 0) {
+                            readErrors += 1
+                            continue
+                        }
+                        readCalls += 1
+                        samplesRead += count.toLong()
+                        val chunk = frame.copyOf(count)
+                        captured?.addAll(chunk.toList())
+                        for (sample in chunk) {
+                            val value = sample.toInt()
+                            val absolute = if (value == Short.MIN_VALUE.toInt()) Short.MAX_VALUE.toInt() else abs(value)
+                            peak = maxOf(peak, absolute)
+                            val normalized = value.toDouble() / Short.MAX_VALUE.toDouble()
+                            energy += normalized * normalized
+                            energySamples += 1
+                        }
+                        val wake = engine.processPcm16(chunk, sampleRate)
+                        inferenceFrames += 1
+                        lastConfidence = wake.confidence.coerceIn(0.0, 1.0)
+                        maxConfidence = maxOf(maxConfidence, lastConfidence)
+                        if (wake.detected) detectedFrames += 1
+                        if (frames.length() < 80 || wake.detected || lastConfidence >= maxConfidence) {
+                            frames.put(JSONObject()
+                                .put("index", inferenceFrames)
+                                .put("confidence", lastConfidence)
+                                .put("detected", wake.detected))
+                        }
+                    }
+                }
+            }
+        } catch (caught: Exception) {
+            error = caught.message ?: caught.javaClass.simpleName
+        } finally {
+            try {
+                recorder?.stop()
+            } catch (_: Exception) {
+            }
+            recorder?.release()
+            if (restartListener) {
+                HermesVoiceWakeService.start(this, origin)
+            }
+        }
+        val rms = if (energySamples <= 0L) 0.0 else sqrt(energy / energySamples.toDouble())
+        val result = JSONObject()
+            .put("ok", error.isBlank())
+            .put("type", "wake_phrase_score_probe")
+            .put("durationMs", System.currentTimeMillis() - startedAt)
+            .put("requestedDurationMs", boundedDuration)
+            .put("sampleRateHz", sampleRate)
+            .put("readCalls", readCalls)
+            .put("readErrors", readErrors)
+            .put("samplesRead", samplesRead)
+            .put("audioPeak", peak)
+            .put("audioRms", rms)
+            .put("engine", engine.name)
+            .put("modelSource", selection.source)
+            .put("engineReady", engine.ready)
+            .put("diagnosticReason", engine.diagnosticReason)
+            .put("lastConfidence", lastConfidence)
+            .put("maxConfidence", maxConfidence)
+            .put("detectedFrames", detectedFrames)
+            .put("inferenceFrames", inferenceFrames)
+            .put("frames", frames)
+            .put("threshold", HermesVoiceWakeService.configuredWakeThreshold(this))
+            .put("restartedListener", restartListener)
+            .put("pcmIncluded", includePcmBase64)
+        if (error.isNotBlank()) result.put("error", error)
+        if (includePcmBase64 && captured != null) {
+            val bytes = ByteArray(captured.size * 2)
+            for ((index, sample) in captured.withIndex()) {
+                val value = sample.toInt()
+                bytes[index * 2] = (value and 0xff).toByte()
+                bytes[index * 2 + 1] = ((value ushr 8) and 0xff).toByte()
+            }
+            result
+                .put("pcmEncoding", "pcm_s16le_mono_16khz")
+                .put("pcmSamples", captured.size)
+                .put("pcmBase64", Base64.encodeToString(bytes, Base64.NO_WRAP))
+        }
+        result.put("status", voiceWakeStatus())
+        logDiagnostic("wake_phrase_score_probe", result)
+        return result
+    }
+
     private inner class AndroidBridge(private val origin: String) {
         @JavascriptInterface
         fun authSessionId(): String = androidAuthSessionId
@@ -1471,7 +1857,7 @@ class MainActivity : Activity() {
             this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
 
         @JavascriptInterface
-        fun getWakeWorldState(): String = this@MainActivity.wakeWorldState().toString()
+        fun getWakeWordState(): String = this@MainActivity.wakeWordState().toString()
 
         @JavascriptInterface
         fun reload() {
@@ -1703,6 +2089,33 @@ class MainActivity : Activity() {
             this@MainActivity.installHermesWakeModel(modelUrl, sha256.orEmpty()).toString()
 
         @JavascriptInterface
+        fun installOpenWakeWordBundle(bundleUrl: String, sha256: String?): String =
+            this@MainActivity.installOpenWakeWordBundle(bundleUrl, sha256.orEmpty()).toString()
+
+        @JavascriptInterface
+        fun playWakePhraseProbe(payloadJson: String?): String {
+            val payload = parseJsonPayload(payloadJson)
+            return this@MainActivity.playWakePhraseProbe(
+                phrase = payload.optString("phrase", payload.optString("wakePhrase", "")),
+                languageTag = payload.optString("language", payload.optString("lang", "en-US")),
+                rate = payload.optDouble("rate", 0.9).toFloat(),
+                pitch = payload.optDouble("pitch", 1.0).toFloat(),
+                timeoutMs = payload.optLong("timeoutMs", 7000L),
+            ).toString()
+        }
+
+        @JavascriptInterface
+        fun scoreWakePhraseProbe(payloadJson: String?): String {
+            val payload = parseJsonPayload(payloadJson)
+            return this@MainActivity.scoreWakePhraseProbe(
+                durationMs = payload.optLong("durationMs", payload.optLong("duration_ms", 3500L)),
+                restartListener = payload.optBoolean("restartListener", true),
+                stopListenerFirst = payload.optBoolean("stopListenerFirst", true),
+                includePcmBase64 = payload.optBoolean("includePcmBase64", payload.optBoolean("include_pcm_base64", false)),
+            ).toString()
+        }
+
+        @JavascriptInterface
         fun requestVoiceWakePermission(): String {
             return try {
                 val needed = voiceWakeRuntimePermissions().filter { permission -> !permissionGranted(permission) }
@@ -1805,7 +2218,7 @@ class MainActivity : Activity() {
             this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
 
         @JavascriptInterface
-        fun getWakeWorldState(): String = this@MainActivity.wakeWorldState().toString()
+        fun getWakeWordState(): String = this@MainActivity.wakeWordState().toString()
 
         @JavascriptInterface
         fun getBuildInfo(): String = this@MainActivity.voiceTuningBridgeBuildInfo().toString()
@@ -1840,6 +2253,16 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun installHermesWakeModel(modelUrl: String, sha256: String?): String =
             this@MainActivity.installHermesWakeModel(modelUrl, sha256.orEmpty()).toString()
+
+        @JavascriptInterface
+        fun installOpenWakeWordBundle(bundleUrl: String, sha256: String?): String =
+            this@MainActivity.installOpenWakeWordBundle(bundleUrl, sha256.orEmpty()).toString()
+
+        @JavascriptInterface
+        fun playWakePhraseProbe(payloadJson: String?): String = nativeBridge().playWakePhraseProbe(payloadJson)
+
+        @JavascriptInterface
+        fun scoreWakePhraseProbe(payloadJson: String?): String = nativeBridge().scoreWakePhraseProbe(payloadJson)
 
         @JavascriptInterface
         fun beginHermesWakeProof(): String = this@MainActivity.beginHermesWakeProof("voice_tuning_bridge").toString()
@@ -2174,7 +2597,7 @@ class MainActivity : Activity() {
                 .put("kernel", nativeKernelStatus())
                 .put("inputs", inputs)
                 .put("failureClassification", "pass")
-            "fetch_wake_world_state", "android.wake_world.state" -> wakeWorldState()
+            "fetch_wake_word_state", "android.wake_word.state", LEGACY_FETCH_WAKE_WORD_STATE_OPERATION -> wakeWordState()
                 .put("ok", true)
                 .put("stable", true)
                 .put("operation", operationId)
@@ -2223,8 +2646,8 @@ class MainActivity : Activity() {
                     .put("kernel", nativeKernelStatus())
                     .put("failureClassification", if (needed.isEmpty()) "proof_started" else "record_audio_permission_missing")
             }
-            "prove_wake_world_loop" -> {
-                val proof = beginHermesWakeProof("wake_world_operation", HermesVoiceWakeService.normalizedWakeThreshold(
+            "prove_wake_word_loop", LEGACY_PROVE_WAKE_WORD_LOOP_OPERATION -> {
+                val proof = beginHermesWakeProof("wake_word_operation", HermesVoiceWakeService.normalizedWakeThreshold(
                     inputs.optDouble("wake_threshold", inputs.optDouble("wakeThreshold", Double.NaN)),
                 ))
                 JSONObject()
@@ -2233,7 +2656,7 @@ class MainActivity : Activity() {
                     .put("operation", operationId)
                     .put("timeoutMs", timeoutMs)
                     .put("proof", proof)
-                    .put("state", wakeWorldState())
+                    .put("state", wakeWordState())
                     .put("failureClassification", if (proof.optBoolean("ok", false)) "proof_started" else proof.optString("failureClassification", "record_audio_permission_missing"))
             }
             "get_android_false_wake_batch", "android.false_wake.batch" -> FalseWakeStore.batch(this)
@@ -2676,7 +3099,7 @@ class MainActivity : Activity() {
             .put("oauth_result", oauthResult)
             .put("payload", payload)
         diagnostics.remember(kind, enriched)
-        Log.i(LOG_TAG, "${kind} ${NativeDiagnostics.redactString(payload.toString()).take(3000)}")
+        Log.i(LOG_TAG, "${kind} ${NativeDiagnostics.safeJsonString(payload).take(3000)}")
         scheduleDiagnosticsSnapshot(kind)
     }
 
@@ -2867,11 +3290,14 @@ class MainActivity : Activity() {
     }
 
     private fun voiceWakeStatusLightweight(): JSONObject {
+        reconcileStaleVoiceWakeStatus("lightweight_status")
         val enabled = prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false)
         val personalizedModelFile = File(filesDir, "voice/hermes.onnx")
         val baseModelFile = File(filesDir, "voice/base_hermes.onnx")
+        val openWakeWordBundleDir = File(filesDir, "voice/openwakeword")
         val personalizedModelExists = personalizedModelFile.exists() && personalizedModelFile.isFile && personalizedModelFile.length() > 0L
         val baseModelExists = baseModelFile.exists() && baseModelFile.isFile && baseModelFile.length() > 0L
+        val openWakeWordBundleExists = openWakeWordBundleExists(openWakeWordBundleDir)
         val falseWakeDiagnostics = FalseWakeStore.diagnostics(this)
         val base = try {
             val file = HermesVoiceWakeService.statusFile(this)
@@ -2893,31 +3319,41 @@ class MainActivity : Activity() {
             })
         }
         val selectedModelPath = when {
+            openWakeWordBundleExists -> OpenWakeWordBundleEngine.BUNDLE_DIR
             personalizedModelExists -> "files/voice/hermes.onnx"
             baseModelExists -> "files/voice/base_hermes.onnx"
             else -> "files/voice/hermes.onnx"
         }
-        val wakeModelExists = personalizedModelExists || baseModelExists
-        val modelSha = sha256FileOrBlank(personalizedModelFile)
+        val wakeModelExists = openWakeWordBundleExists || personalizedModelExists || baseModelExists
+        val personalizedModelSha = sha256FileOrBlank(personalizedModelFile)
+        val baseModelSha = sha256FileOrBlank(baseModelFile)
+        val modelSha = when (selectedModelPath) {
+            "files/voice/base_hermes.onnx" -> baseModelSha
+            OpenWakeWordBundleEngine.BUNDLE_DIR -> ""
+            else -> personalizedModelSha
+        }
         val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
         val liveStatusMissing = !base.has("wake_engine_ready")
         val wakeThreshold = HermesVoiceWakeService.configuredWakeThreshold(this)
         val thresholdPolicySource = normalizedThresholdPolicySource()
-        val disabledReason = when {
+        val computedDisabledReason = when {
             !permissionGranted(Manifest.permission.RECORD_AUDIO) -> "record_audio_permission_missing"
             !enabled -> "voice_wake_disabled"
             liveStatusMissing -> "live_service_status_unavailable"
             !base.optBoolean("onnx_runtime_available", false) -> "onnx_runtime_unavailable"
-            selectedModelPath != "files/voice/hermes.onnx" -> "personalized_model_path_mismatch"
-            !personalizedModelExists -> "personalized_model_missing"
-            !modelShaMatch -> "model_sha_mismatch"
+            !wakeModelExists -> "wake_model_missing"
             !base.optBoolean("wake_engine_ready", false) -> "wake_engine_not_ready"
             else -> ""
         }
+        val staleDisabledReason = base.optString("disabled_reason", "")
+        val disabledReason = if (
+            staleDisabledReason in setOf("personalized_model_path_mismatch", "personalized_model_missing", "model_sha_mismatch")
+            && computedDisabledReason.isBlank()
+        ) "" else staleDisabledReason.ifBlank { computedDisabledReason }
         return base
             .put("enabled", enabled)
-            .put("disabled_reason", base.optString("disabled_reason", disabledReason))
-            .put("wake_word", "hermes")
+            .put("disabled_reason", disabledReason)
+            .put("wake_word", HermesVoiceWakeService.configuredWakePhrase(this))
             .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
             .put("permission_post_notifications", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) permissionGranted(Manifest.permission.POST_NOTIFICATIONS) else true)
             .put("wake_engine", base.optString("wake_engine", "deferred_until_voice_wake_enabled"))
@@ -2929,11 +3365,14 @@ class MainActivity : Activity() {
             .put("asset_model_path", "assets/voice/base_hermes.onnx")
             .put("base_model_exists", base.optBoolean("base_model_exists", baseModelExists))
             .put("personalized_model_exists", base.optBoolean("personalized_model_exists", personalizedModelExists))
+            .put("openwakeword_bundle_exists", base.optBoolean("openwakeword_bundle_exists", openWakeWordBundleExists))
             .put("wake_model_exists", base.optBoolean("wake_model_exists", wakeModelExists))
             .put("model_path", base.optString("model_path", selectedModelPath))
             .put("model_exists", base.optBoolean("model_exists", wakeModelExists))
             .put("model_sha", base.optString("model_sha", modelSha))
             .put("model_sha256", base.optString("model_sha256", modelSha))
+            .put("personalized_model_sha256", base.optString("personalized_model_sha256", personalizedModelSha))
+            .put("base_model_sha256", base.optString("base_model_sha256", baseModelSha))
             .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
             .put("model_sha_match", base.optBoolean("model_sha_match", modelShaMatch))
             .put("acceptance_model_sha256_match", base.optBoolean("acceptance_model_sha256_match", modelShaMatch))
@@ -2961,6 +3400,7 @@ class MainActivity : Activity() {
                 .put("wake_model_exists", base.optBoolean("wake_model_exists", wakeModelExists))
                 .put("base_model_exists", base.optBoolean("base_model_exists", baseModelExists))
                 .put("personalized_model_exists", base.optBoolean("personalized_model_exists", personalizedModelExists))
+                .put("openwakeword_bundle_exists", base.optBoolean("openwakeword_bundle_exists", openWakeWordBundleExists))
                 .put("diagnostics_deferred", true))
             .put("foreground_service_required", true)
             .put("foreground_notification", "WASM Agent listening for Hermes")
@@ -2976,7 +3416,100 @@ class MainActivity : Activity() {
             .put("false_wake_storage_bytes", falseWakeDiagnostics.optLong("false_wake_storage_bytes", 0L))
     }
 
+    private fun reconcileStaleVoiceWakeStatus(source: String): JSONObject {
+        val file = HermesVoiceWakeService.statusFile(this)
+        if (!file.exists()) {
+            return JSONObject().put("ok", true).put("status", "voice_wake_status_missing")
+        }
+        return try {
+            val status = JSONObject(file.readText())
+            val state = status.optString("state", "")
+            val commandCaptureStarted = status.optBoolean("command_capture_started", false)
+            val diagnosticsStartedAt = status
+                .optJSONObject("last_asr_diagnostics")
+                ?.optLong("started_at", 0L) ?: 0L
+            val commandCaptureStartedAt = listOf(
+                status.optLong("command_capture_started_at", 0L),
+                diagnosticsStartedAt,
+            ).filter { it > 0L }.minOrNull() ?: 0L
+            val staleCandidate = state == "transcribing" ||
+                state == "capturing" ||
+                status.optString("listener_mode", "") == "command_capture" ||
+                status.optBoolean("command_capture_active", false) ||
+                commandCaptureStarted ||
+                status.optString("last_transcript_status", "") == "capturing" ||
+                status.optString("last_transcript_result", "") == "transcript_attempt_started"
+            if (!staleCandidate || commandCaptureStartedAt <= 0L) {
+                return JSONObject()
+                    .put("ok", true)
+                    .put("status", "voice_wake_status_current")
+                    .put("state", state)
+            }
+            val timeoutMs = HermesVoiceWakeService.configuredTranscriptTimeoutMs(this)
+            val elapsedMs = System.currentTimeMillis() - commandCaptureStartedAt
+            if (elapsedMs < timeoutMs + 2_500L) {
+                return JSONObject()
+                    .put("ok", true)
+                    .put("status", "voice_wake_capture_still_fresh")
+                    .put("state", state)
+                    .put("elapsed_ms", elapsedMs)
+                    .put("timeout_ms", timeoutMs)
+            }
+            val result = if (source == "boot") {
+                "transcript_boot_reconciled_timeout"
+            } else {
+                "transcript_status_reconciled_timeout"
+            }
+            val diagnostics = JSONObject()
+                .put("schema", "hermes.wasm_agent.transcript_reconciled_timeout.v1")
+                .put("elapsed_ms", elapsedMs)
+                .put("timeout_ms", timeoutMs)
+                .put("previous_state", state)
+                .put("previous_listener_mode", status.optString("listener_mode", ""))
+                .put("previous_command_capture_active", status.optBoolean("command_capture_active", false))
+                .put("previous_command_capture_started_at", status.optLong("command_capture_started_at", 0L))
+                .put("previous_diagnostics_started_at", diagnosticsStartedAt)
+                .put("previous_last_transcript_result", status.optString("last_transcript_result", ""))
+                .put("previous_last_transcript_status", status.optString("last_transcript_status", ""))
+                .put("source", source)
+                .put("reconciled_at", System.currentTimeMillis())
+            status
+                .put("state", "listening")
+                .put("listener_mode", "standby")
+                .put("visible_state", "Listening for Hermes")
+                .put("last_transcript_result", result)
+                .put("last_transcript_status", "failed")
+                .put("last_asr_latency_ms", elapsedMs)
+                .put("last_asr_audio_captured_ms", 0L)
+                .put("last_asr_partial_transcript", "")
+                .put("last_asr_diagnostics", diagnostics)
+                .put("last_exception", result)
+                .put("command_capture_active", false)
+                .put("command_capture_started", false)
+                .put("command_capture_started_at", 0L)
+                .put("voice_command_event_dispatched", false)
+                .put("voice_command_event_dispatched_at", 0L)
+                .put("reason", result)
+                .put("status_source", "main_activity_${source}_reconciler")
+            file.parentFile?.mkdirs()
+            file.writeText("${NativeDiagnostics.safeJsonString(status, 2)}\n")
+            JSONObject()
+                .put("ok", true)
+                .put("status", result)
+                .put("elapsed_ms", elapsedMs)
+                .put("timeout_ms", timeoutMs)
+                .put("previous_state", state)
+        } catch (error: Exception) {
+            JSONObject()
+                .put("ok", false)
+                .put("status", "voice_wake_reconciliation_failed")
+                .put("source", source)
+                .put("error", error.javaClass.name)
+        }
+    }
+
     private fun voiceWakeStatus(): JSONObject {
+        reconcileStaleVoiceWakeStatus("full_status")
         val enabled = prefs.getBoolean(HermesVoiceWakeService.PREF_ENABLED, false)
         val wakeThreshold = HermesVoiceWakeService.configuredWakeThreshold(this)
         val thresholdPolicySource = normalizedThresholdPolicySource()
@@ -3005,27 +3538,36 @@ class MainActivity : Activity() {
                 else -> "Disabled"
             })
         }
-        val modelSha = sha256FileOrBlank(File(filesDir, "voice/hermes.onnx"))
-        val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
         val modelPath = base.optString("selected_model_path", wakeDiagnostics.getString("selected_model_path"))
         val modelExists = base.optBoolean("wake_model_exists", wakeDiagnostics.getBoolean("wake_model_exists"))
-        val disabledReason = base.optString("disabled_reason", when {
+        val personalizedModelSha = sha256FileOrBlank(File(filesDir, "voice/hermes.onnx"))
+        val baseModelSha = sha256FileOrBlank(File(filesDir, "voice/base_hermes.onnx"))
+        val modelSha = when (modelPath) {
+            "files/voice/base_hermes.onnx" -> baseModelSha
+            OpenWakeWordBundleEngine.BUNDLE_DIR -> ""
+            else -> personalizedModelSha
+        }
+        val modelShaMatch = modelSha.equals(HERMES_WAKE_ACCEPTANCE_MODEL_SHA256, ignoreCase = true)
+        val computedDisabledReason = when {
             !permissionGranted(Manifest.permission.RECORD_AUDIO) -> "record_audio_permission_missing"
             !enabled -> "voice_wake_disabled"
             !wakeDiagnostics.optBoolean("onnx_runtime_available", false) -> "onnx_runtime_unavailable"
-            modelPath != "files/voice/hermes.onnx" -> "personalized_model_path_mismatch"
-            !modelExists -> "personalized_model_missing"
-            !modelShaMatch -> "model_sha_mismatch"
+            !modelExists -> "wake_model_missing"
             !base.optBoolean("wake_engine_ready", wakeEngine.ready) -> "wake_engine_not_ready"
             base.optLong("audio_record_started_at", 0L) <= 0L -> "audio_record_not_started"
             base.optLong("inference_count", 0L) <= 0L -> "inference_not_observed"
             else -> ""
-        })
+        }
+        val staleDisabledReason = base.optString("disabled_reason", "")
+        val disabledReason = if (
+            staleDisabledReason in setOf("personalized_model_path_mismatch", "personalized_model_missing", "model_sha_mismatch")
+            && computedDisabledReason.isBlank()
+        ) "" else staleDisabledReason.ifBlank { computedDisabledReason }
         return base
             .put("enabled", enabled)
             .put("disabled_reason", disabledReason)
             .put("service_alive", base.optBoolean("service_alive", false))
-            .put("wake_word", "hermes")
+            .put("wake_word", HermesVoiceWakeService.configuredWakePhrase(this))
             .put("permission_record_audio", permissionGranted(Manifest.permission.RECORD_AUDIO))
             .put("permission_foreground_service", hasManifestPermission(Manifest.permission.FOREGROUND_SERVICE))
             .put("permission_foreground_service_microphone", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) hasManifestPermission(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE) else true)
@@ -3040,10 +3582,13 @@ class MainActivity : Activity() {
             .put("asset_model_path", "assets/voice/base_hermes.onnx")
             .put("base_model_exists", base.optBoolean("base_model_exists", wakeSelection.baseModelExists))
             .put("personalized_model_exists", base.optBoolean("personalized_model_exists", wakeSelection.personalizedModelExists))
+            .put("openwakeword_bundle_exists", base.optBoolean("openwakeword_bundle_exists", wakeSelection.openWakeWordBundleExists))
             .put("model_exists", modelExists)
             .put("wake_model_exists", modelExists)
             .put("model_sha", base.optString("model_sha", modelSha))
             .put("model_sha256", base.optString("model_sha256", modelSha))
+            .put("personalized_model_sha256", base.optString("personalized_model_sha256", personalizedModelSha))
+            .put("base_model_sha256", base.optString("base_model_sha256", baseModelSha))
             .put("expected_model_sha256", HERMES_WAKE_ACCEPTANCE_MODEL_SHA256)
             .put("wake_threshold", base.optDouble("wake_threshold", wakeThreshold))
             .put("threshold", base.optDouble("threshold", wakeThreshold))
@@ -3077,7 +3622,8 @@ class MainActivity : Activity() {
             .put("wake_engine_error", wakeDiagnostics.getString("wake_engine_error"))
             .put("wake_model", wakeDiagnostics
                 .put("base_model_exists", wakeSelection.baseModelExists)
-                .put("personalized_model_exists", wakeSelection.personalizedModelExists))
+                .put("personalized_model_exists", wakeSelection.personalizedModelExists)
+                .put("openwakeword_bundle_exists", wakeSelection.openWakeWordBundleExists))
             .put("foreground_service_required", true)
             .put("foreground_notification", "WASM Agent listening for Hermes")
             .put("source", "android_native_voice_wake")
@@ -3092,14 +3638,14 @@ class MainActivity : Activity() {
             .put("false_wake_storage_bytes", FalseWakeStore.diagnostics(this).optLong("false_wake_storage_bytes", 0L))
     }
 
-    private fun wakeWorldState(): JSONObject {
+    private fun wakeWordState(): JSONObject {
         val voice = voiceWakeStatusLightweight()
         val recentEvents = voice.optJSONArray("recent_events") ?: JSONArray()
         val permissionState = voice.optJSONObject("permission_state") ?: JSONObject()
             .put("record_audio", if (permissionGranted(Manifest.permission.RECORD_AUDIO)) "granted" else "missing")
             .put("post_notifications", if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !permissionGranted(Manifest.permission.POST_NOTIFICATIONS)) "missing" else "granted")
         return JSONObject()
-            .put("schema", "hermes.wasm_agent.android_wake_world_state.v1")
+            .put("schema", "hermes.wasm_agent.android_wake_word_state.v1")
             .put("ok", true)
             .put("build_id", BuildConfig.NATIVE_BUILD_ID)
             .put("app_version", packageManager.getPackageInfo(packageName, 0).versionName.orEmpty())
@@ -3127,6 +3673,12 @@ class MainActivity : Activity() {
             .put("last_asr_partial_transcript", voice.optString("last_asr_partial_transcript", ""))
             .put("wake_cooldown_ms", voice.optLong("wake_cooldown_ms", 0L))
             .put("wake_cooldown_until", voice.optLong("wake_cooldown_until", 0L))
+            .put("wake_confirmation_frames", voice.optInt("wake_confirmation_frames", HermesVoiceWakeService.configuredWakeConfirmationFrames(this)))
+            .put("wake_confirmation_required_frames", voice.optInt("wake_confirmation_required_frames", HermesVoiceWakeService.configuredWakeConfirmationFrames(this)))
+            .put("wake_confirmation_window_ms", voice.optLong("wake_confirmation_window_ms", HermesVoiceWakeService.configuredWakeConfirmationWindowMs(this)))
+            .put("wake_confirmation", voice.optJSONObject("wake_confirmation") ?: JSONObject()
+                .put("required_frames", HermesVoiceWakeService.configuredWakeConfirmationFrames(this))
+                .put("window_ms", HermesVoiceWakeService.configuredWakeConfirmationWindowMs(this)))
             .put("tuning_session_id", voice.optString("tuning_session_id", prefs.getString(HermesVoiceWakeService.PREF_TUNING_SESSION_ID, "").orEmpty()))
             .put("prototype_threshold", voice.opt("prototype_threshold") ?: voice.opt("proof_threshold_override") ?: JSONObject.NULL)
             .put("wake_engine_ready", voice.optBoolean("wake_engine_ready", false))
@@ -3144,6 +3696,8 @@ class MainActivity : Activity() {
             .put("inference_count", voice.optLong("inference_count", 0L))
             .put("last_confidence", voice.optDouble("last_confidence", 0.0))
             .put("max_confidence_since_start", voice.optDouble("max_confidence_since_start", voice.optDouble("max_observed_confidence", 0.0)))
+            .put("raw_wake_detection_count", voice.optLong("raw_wake_detection_count", 0L))
+            .put("last_raw_wake_detection_at", voice.optLong("last_raw_wake_detection_at", 0L))
             .put("wake_hit_count", voice.optLong("wake_hit_count", voice.optLong("wake_detection_count", 0L)))
             .put("false_wake_count", voice.optLong("false_wake_count", 0L))
             .put("false_wake_buffer_count", voice.optInt("false_wake_buffer_count", 0))
@@ -3180,6 +3734,16 @@ class MainActivity : Activity() {
             }
             return value.coerceIn(min, max)
         }
+        fun intPolicy(snake: String, camel: String, fallback: Int, min: Int, max: Int, alias: String = ""): Int? {
+            if (!inputs.has(snake) && !inputs.has(camel) && (alias.isBlank() || !inputs.has(alias))) return null
+            val raw = inputs.opt(snake) ?: inputs.opt(camel) ?: if (alias.isNotBlank()) inputs.opt(alias) else null
+            val value = when (raw) {
+                is Number -> raw.toInt()
+                is String -> raw.toIntOrNull() ?: fallback
+                else -> fallback
+            }
+            return value.coerceIn(min, max)
+        }
         fun booleanPolicy(snake: String, camel: String): Boolean? {
             if (!inputs.has(snake) && !inputs.has(camel)) return null
             val raw = inputs.opt(snake) ?: inputs.opt(camel)
@@ -3195,6 +3759,29 @@ class MainActivity : Activity() {
         val transcriptCompleteSilenceMs = longPolicy("transcript_complete_silence_ms", "transcriptCompleteSilenceMs", HermesVoiceWakeService.DEFAULT_TRANSCRIPT_COMPLETE_SILENCE_MS, 250L, 10_000L)
         val transcriptPossibleSilenceMs = longPolicy("transcript_possible_silence_ms", "transcriptPossibleSilenceMs", HermesVoiceWakeService.DEFAULT_TRANSCRIPT_POSSIBLE_SILENCE_MS, 250L, 10_000L)
         val transcriptAcceptPartial = booleanPolicy("transcript_accept_partial", "transcriptAcceptPartial")
+        val wakeCooldownMs = longPolicy("wake_cooldown_ms", "wakeCooldownMs", HermesVoiceWakeService.DEFAULT_WAKE_COOLDOWN_MS, 500L, 60_000L)
+        val wakeConfirmationFrames = intPolicy(
+            "wake_confirmation_frames",
+            "wakeConfirmationFrames",
+            HermesVoiceWakeService.DEFAULT_WAKE_CONFIRMATION_FRAMES,
+            1,
+            5,
+            "wakeVerificationFrames",
+        )
+        val wakeConfirmationWindowMs = longPolicy(
+            "wake_confirmation_window_ms",
+            "wakeConfirmationWindowMs",
+            HermesVoiceWakeService.DEFAULT_WAKE_CONFIRMATION_WINDOW_MS,
+            150L,
+            2_000L,
+        ) ?: longPolicy(
+            "wake_verification_window_ms",
+            "wakeVerificationWindowMs",
+            HermesVoiceWakeService.DEFAULT_WAKE_CONFIRMATION_WINDOW_MS,
+            150L,
+            2_000L,
+        )
+        val transcriptAttemptPlan = normalizeTranscriptAttemptPlan(inputs.opt("transcript_attempt_plan") ?: inputs.opt("transcriptAttemptPlan") ?: inputs.opt("transcriptPlan"))
         val transcriptEngine = inputs.optString("transcript_engine", inputs.optString("transcriptEngine", ""))
             .takeIf { it.isNotBlank() }
             ?.let { raw ->
@@ -3205,6 +3792,11 @@ class MainActivity : Activity() {
                     else -> null
                 }
             }
+        val wakePhrase = inputs.optString("wake_phrase", inputs.optString("wakePhrase", ""))
+            .trim()
+            .lowercase()
+            .take(40)
+            .takeIf { it.isNotBlank() }
         val sessionId = inputs.optString("tuning_session_id", inputs.optString("tuningSessionId", "")).take(120)
         val origin = inputs.optString("origin", selectedOrigin)
             .ifBlank { prefs.getString(HermesVoiceWakeService.PREF_ORIGIN, "").orEmpty() }
@@ -3221,9 +3813,14 @@ class MainActivity : Activity() {
         transcriptCompleteSilenceMs?.let { editor.putLong(HermesVoiceWakeService.PREF_TRANSCRIPT_COMPLETE_SILENCE_MS, it) }
         transcriptPossibleSilenceMs?.let { editor.putLong(HermesVoiceWakeService.PREF_TRANSCRIPT_POSSIBLE_SILENCE_MS, it) }
         transcriptAcceptPartial?.let { editor.putBoolean(HermesVoiceWakeService.PREF_TRANSCRIPT_ACCEPT_PARTIAL, it) }
+        wakeCooldownMs?.let { editor.putLong(HermesVoiceWakeService.PREF_WAKE_COOLDOWN_MS, it) }
+        wakeConfirmationFrames?.let { editor.putInt(HermesVoiceWakeService.PREF_WAKE_CONFIRMATION_FRAMES, it) }
+        wakeConfirmationWindowMs?.let { editor.putLong(HermesVoiceWakeService.PREF_WAKE_CONFIRMATION_WINDOW_MS, it) }
+        transcriptAttemptPlan?.let { editor.putString(HermesVoiceWakeService.PREF_TRANSCRIPT_ATTEMPT_PLAN, it.toString()) }
         transcriptEngine?.let { editor.putString(HermesVoiceWakeService.PREF_TRANSCRIPT_ENGINE, it) }
+        wakePhrase?.let { editor.putString(HermesVoiceWakeService.PREF_WAKE_PHRASE, it) }
         if (sessionId.isNotBlank()) editor.putString(HermesVoiceWakeService.PREF_TUNING_SESSION_ID, sessionId)
-        editor.apply()
+        val preferencesCommitted = editor.commit()
         runOnUiThread {
             val intent = Intent(this, HermesVoiceWakeService::class.java)
                 .setAction(HermesVoiceWakeService.ACTION_STATUS)
@@ -3236,6 +3833,10 @@ class MainActivity : Activity() {
             transcriptCompleteSilenceMs?.let { intent.putExtra("transcript_complete_silence_ms", it) }
             transcriptPossibleSilenceMs?.let { intent.putExtra("transcript_possible_silence_ms", it) }
             transcriptAcceptPartial?.let { intent.putExtra("transcript_accept_partial", it) }
+            wakeCooldownMs?.let { intent.putExtra("wake_cooldown_ms", it) }
+            wakeConfirmationFrames?.let { intent.putExtra("wake_confirmation_frames", it) }
+            wakeConfirmationWindowMs?.let { intent.putExtra("wake_confirmation_window_ms", it) }
+            transcriptAttemptPlan?.let { intent.putExtra("transcript_attempt_plan", it.toString()) }
             transcriptEngine?.let { intent.putExtra("transcript_engine", it) }
             if (sessionId.isNotBlank()) intent.putExtra("tuning_session_id", sessionId)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
@@ -3245,16 +3846,36 @@ class MainActivity : Activity() {
             .put("ok", true)
             .put("applied", JSONObject()
                 .put("wakeThreshold", wakeThreshold ?: HermesVoiceWakeService.configuredWakeThreshold(this))
+                .put("wakePhrase", wakePhrase ?: HermesVoiceWakeService.configuredWakePhrase(this))
                 .put("vadRmsThreshold", vadRms ?: HermesVoiceWakeService.configuredVadRmsThreshold(this))
                 .put("vadPeakThreshold", vadPeak ?: HermesVoiceWakeService.configuredVadPeakThreshold(this))
+                .put("wakeCooldownMs", wakeCooldownMs ?: HermesVoiceWakeService.configuredWakeCooldownMs(this))
+                .put("wakeConfirmationFrames", wakeConfirmationFrames ?: HermesVoiceWakeService.configuredWakeConfirmationFrames(this))
+                .put("wakeConfirmationWindowMs", wakeConfirmationWindowMs ?: HermesVoiceWakeService.configuredWakeConfirmationWindowMs(this))
                 .put("transcriptTimeoutMs", transcriptTimeoutMs ?: HermesVoiceWakeService.configuredTranscriptTimeoutMs(this))
                 .put("transcriptMinLengthMs", transcriptPolicy.minimumLengthMs)
                 .put("transcriptCompleteSilenceMs", transcriptPolicy.completeSilenceMs)
                 .put("transcriptPossibleSilenceMs", transcriptPolicy.possiblyCompleteSilenceMs)
                 .put("transcriptAcceptPartial", transcriptPolicy.acceptPartialResults)
+                .put("transcriptPlan", transcriptAttemptPlan ?: HermesVoiceWakeService.configuredTranscriptAttemptPlan(this))
                 .put("transcriptEngine", transcriptEngine ?: HermesVoiceWakeService.configuredTranscriptEngine(this))
                 .put("tuningSessionId", sessionId.ifBlank { prefs.getString(HermesVoiceWakeService.PREF_TUNING_SESSION_ID, "").orEmpty() }))
-            .put("state", wakeWorldState())
+            .put("preferencesCommitted", preferencesCommitted)
+            .put("stateRefreshDeferred", true)
+    }
+
+    private fun normalizeTranscriptAttemptPlan(raw: Any?): JSONObject? {
+        return try {
+            val parsed = when (raw) {
+                null, JSONObject.NULL -> return null
+                is JSONObject -> raw
+                is String -> if (raw.isBlank()) return null else JSONObject(raw)
+                else -> JSONObject(raw.toString())
+            }
+            if (!parsed.has("attempts") && !parsed.has("androidSpeechLanguages") && !parsed.has("android_speech_languages")) null else parsed
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun confirmFalseWakeBatchUploaded(idsJson: String?): JSONObject {
@@ -3405,6 +4026,11 @@ class MainActivity : Activity() {
             false
         }
     }
+
+    private fun openWakeWordBundleExists(dir: File): Boolean =
+        File(dir, OpenWakeWordBundleEngine.MEL_MODEL_NAME).isFile &&
+            File(dir, OpenWakeWordBundleEngine.EMBEDDING_MODEL_NAME).isFile &&
+            File(dir, OpenWakeWordBundleEngine.CLASSIFIER_MODEL_NAME).isFile
 
     private fun sha256FileOrBlank(file: File): String {
         if (!file.isFile || file.length() <= 0L) return ""
@@ -3650,7 +4276,7 @@ class MainActivity : Activity() {
                 .put("last_exception", redactValue(snapshot.opt("last_exception")))
                 .put("events", eventList)
             file.parentFile?.mkdirs()
-            file.writeText(latest.toString(2))
+            file.writeText(safeJsonString(latest, 2))
         }
 
         @Synchronized
@@ -3679,7 +4305,7 @@ class MainActivity : Activity() {
                 .put("voice_tuning", redactValue(snapshot.opt("voice_tuning")))
                 .put("events", JSONArray())
             file.parentFile?.mkdirs()
-            file.writeText(latest.toString(2))
+            file.writeText(safeJsonString(latest, 2))
         }
 
         @Synchronized
@@ -3712,6 +4338,18 @@ class MainActivity : Activity() {
                     }
                     .replace(Regex("((Cookie|Set-Cookie):\\s*)[^\\r\\n]+", RegexOption.IGNORE_CASE), "$1[redacted]")
                     .let { if (it.length > 120_000) it.take(120_000) else it }
+            }
+
+            fun safeJsonString(value: Any?, indentSpaces: Int = 0): String {
+                return try {
+                    when (val safe = redactValue(value)) {
+                        is JSONObject -> if (indentSpaces > 0) safe.toString(indentSpaces) else safe.toString()
+                        is JSONArray -> if (indentSpaces > 0) safe.toString(indentSpaces) else safe.toString()
+                        else -> JSONObject().put("value", safe).toString()
+                    }
+                } catch (_: Exception) {
+                    JSONObject().put("available", false).put("error", "json_serialization_failed").toString()
+                }
             }
 
             private fun redactJsonObject(source: JSONObject): JSONObject {
@@ -3748,6 +4386,8 @@ class MainActivity : Activity() {
                         output
                     }
                     is String -> redactString(value)
+                    is Double -> if (java.lang.Double.isFinite(value)) value else JSONObject.NULL
+                    is Float -> if (java.lang.Float.isFinite(value)) value else JSONObject.NULL
                     is Number, is Boolean -> value
                     else -> redactString(value.toString())
                 }
@@ -3767,7 +4407,7 @@ class MainActivity : Activity() {
                 val output = JSONArray()
                 for (index in 0 until events.length()) {
                     val event = events.optJSONObject(index) ?: continue
-                    val text = event.toString()
+                    val text = safeJsonString(event)
                     if (text.contains("accounts.google.com") ||
                         text.contains("/auth/google") ||
                         text.contains("/native/android/auth") ||

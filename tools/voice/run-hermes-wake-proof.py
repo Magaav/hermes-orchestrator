@@ -301,16 +301,15 @@ def stage_dev_hot_ops() -> str:
     return str(root)
 
 
-def command_payload(operation: str, wait_ms: int, wake_threshold: float | None = None) -> dict[str, Any]:
+def command_payload(operation: str, wait_ms: int, policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = policy or {}
     if operation == HOT_OPERATION:
         operation_timeout_ms = 180000
         hot_args: dict[str, Any] = {
             "waitForSpeech": True,
             "timeoutMs": wait_ms,
         }
-        if wake_threshold is not None:
-            hot_args["wakeThreshold"] = wake_threshold
-            hot_args["wake_threshold"] = wake_threshold
+        hot_args.update(policy)
         return {
             "operationName": NEW_OPERATION,
             "timeoutMs": operation_timeout_ms,
@@ -320,9 +319,7 @@ def command_payload(operation: str, wait_ms: int, wake_threshold: float | None =
         "packageName": "com.colmeio.wasmagent",
         "waitMs": wait_ms,
     }
-    if wake_threshold is not None:
-        payload["wakeThreshold"] = wake_threshold
-        payload["wake_threshold"] = wake_threshold
+    payload.update(policy)
     if operation == COMPAT_OPERATION:
         payload.update({
             "clearData": False,
@@ -334,7 +331,7 @@ def command_payload(operation: str, wait_ms: int, wake_threshold: float | None =
     return payload
 
 
-def queue_local(state_dir: Path, device_id: str, operation: str, wait_ms: int, reason: str, wake_threshold: float | None = None) -> tuple[str, Path]:
+def queue_local(state_dir: Path, device_id: str, operation: str, wait_ms: int, reason: str, policy: dict[str, Any] | None = None) -> tuple[str, Path]:
     command_id = f"cmd-hermes-wake-proof-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
     record = {
         "ok": True,
@@ -342,7 +339,7 @@ def queue_local(state_dir: Path, device_id: str, operation: str, wait_ms: int, r
         "id": command_id,
         "device_id": device_id,
         "type": operation,
-        "payload": command_payload(operation, wait_ms, wake_threshold),
+        "payload": command_payload(operation, wait_ms, policy),
         "status": "pending",
         "created_at": iso_timestamp(),
         "created_by": "localhost-direct",
@@ -353,7 +350,7 @@ def queue_local(state_dir: Path, device_id: str, operation: str, wait_ms: int, r
     return command_id, path
 
 
-def queue_remote(origin: str, key: str, device_id: str, operation: str, wait_ms: int, reason: str, wake_threshold: float | None = None) -> tuple[str, dict[str, Any]]:
+def queue_remote(origin: str, key: str, device_id: str, operation: str, wait_ms: int, reason: str, policy: dict[str, Any] | None = None) -> tuple[str, dict[str, Any]]:
     queued = request_json(
         "POST",
         f"{origin}/native/frontier/command",
@@ -362,7 +359,7 @@ def queue_remote(origin: str, key: str, device_id: str, operation: str, wait_ms:
             "command": operation,
             "device_id": device_id,
             "reason": reason,
-            "payload": command_payload(operation, wait_ms, wake_threshold),
+            "payload": command_payload(operation, wait_ms, policy),
         },
     )
     for item in queued.get("queued", []):
@@ -464,18 +461,51 @@ def main() -> int:
     parser.add_argument("--env-file", default=os.getenv("WASM_AGENT_ENV_FILE", ""))
     parser.add_argument("--device-id", default=os.getenv("WASM_AGENT_NATIVE_DEVICE_ID", ""))
     parser.add_argument("--wait-ms", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_WAIT_MS", "30000")))
-    parser.add_argument("--wake-threshold", type=float, default=float(os.getenv("HERMES_WAKE_PROOF_WAKE_THRESHOLD", "nan")), help="Optional downloaded-operation wake threshold policy, 0.05..0.99.")
+    parser.add_argument("--wake-threshold", type=float, default=float(os.getenv("HERMES_WAKE_PROOF_WAKE_THRESHOLD", "nan")), help="Optional downloaded-operation wake threshold policy, 0.05..0.999.")
+    parser.add_argument("--wake-phrase", default=os.getenv("HERMES_WAKE_PROOF_WAKE_PHRASE", ""), help="Optional wake phrase policy, for example alexa.")
+    parser.add_argument("--wake-confirmation-frames", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_CONFIRMATION_FRAMES", "0")), help="Optional wake confirmation frame count, 1..5.")
+    parser.add_argument("--wake-confirmation-window-ms", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_CONFIRMATION_WINDOW_MS", "0")), help="Optional wake confirmation window, 150..2000 ms.")
+    parser.add_argument("--wake-cooldown-ms", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_COOLDOWN_MS", "0")), help="Optional wake cooldown, 500..60000 ms.")
+    parser.add_argument("--vad-rms-threshold", type=float, default=float(os.getenv("HERMES_WAKE_PROOF_VAD_RMS_THRESHOLD", "nan")), help="Optional VAD RMS threshold, 0.001..0.2.")
+    parser.add_argument("--vad-peak-threshold", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_VAD_PEAK_THRESHOLD", "0")), help="Optional VAD peak threshold, 100..30000.")
+    parser.add_argument("--production-listener", action="store_true", help="Start the Android service with proof_session=false so policy is persisted and production VAD/cooldown behavior is tested.")
     parser.add_argument("--wait-sec", type=int, default=int(os.getenv("HERMES_WAKE_PROOF_RESULT_WAIT_SEC", "150")))
     parser.add_argument("--poll-sec", type=float, default=float(os.getenv("HERMES_WAKE_PROOF_POLL_SEC", "5")))
     parser.add_argument("--operation", choices=("auto", HOT_OPERATION, NEW_OPERATION, COMPAT_OPERATION), default="auto")
     parser.add_argument("--allow-stale-command-fallback", action="store_true", help="Allow old command-specific bridge operations when run_hot_operation is missing.")
     parser.add_argument("--proof", action="store_true", help="Strict proof mode: minimal artifacts, fail fast.")
     parser.add_argument("--debug", action="store_true", help="Debug mode: collect richer diagnostics and continue past non-bridge preflight failures.")
-    parser.add_argument("--dry-run", action="store_true", help="Validate shell/hot-op/ADB/app presence without launching screens or mutating device state.")
+    parser.add_argument("--dry-run", action="store_true", help="Validate shell/hot-op/Windows-bridge ADB/app presence without launching screens or mutating device state. Local Codex/cloud adb is not authoritative for the physical device in the current setup.")
     parser.add_argument("--out", default=os.getenv("HERMES_WAKE_PROOF_OUT", "reports/sim/android/latest/hermes-wake-proof-result.json"))
     args = parser.parse_args()
     requested_hot_op_timeout_ms = 180000
-    wake_threshold = args.wake_threshold if 0.05 <= args.wake_threshold <= 0.99 else None
+    wake_threshold = args.wake_threshold if 0.05 <= args.wake_threshold <= 0.999 else None
+    policy: dict[str, Any] = {}
+    if wake_threshold is not None:
+        policy["wakeThreshold"] = wake_threshold
+        policy["wake_threshold"] = wake_threshold
+    wake_phrase = str(args.wake_phrase or "").strip().lower()
+    if wake_phrase:
+        policy["wakePhrase"] = wake_phrase
+        policy["wake_phrase"] = wake_phrase
+    if 1 <= args.wake_confirmation_frames <= 5:
+        policy["wakeConfirmationFrames"] = args.wake_confirmation_frames
+        policy["wake_confirmation_frames"] = args.wake_confirmation_frames
+    if 150 <= args.wake_confirmation_window_ms <= 2000:
+        policy["wakeConfirmationWindowMs"] = args.wake_confirmation_window_ms
+        policy["wake_confirmation_window_ms"] = args.wake_confirmation_window_ms
+    if 500 <= args.wake_cooldown_ms <= 60000:
+        policy["wakeCooldownMs"] = args.wake_cooldown_ms
+        policy["wake_cooldown_ms"] = args.wake_cooldown_ms
+    if 0.001 <= args.vad_rms_threshold <= 0.2:
+        policy["vadRmsThreshold"] = args.vad_rms_threshold
+        policy["vad_rms_threshold"] = args.vad_rms_threshold
+    if 100 <= args.vad_peak_threshold <= 30000:
+        policy["vadPeakThreshold"] = args.vad_peak_threshold
+        policy["vad_peak_threshold"] = args.vad_peak_threshold
+    if args.production_listener:
+        policy["proofSession"] = False
+        policy["proof_session"] = False
     args.wait_sec = max(args.wait_sec, int(requested_hot_op_timeout_ms / 1000) + 30)
     rid = run_id()
     artifacts = artifact_paths("sim/android", rid)
@@ -534,6 +564,7 @@ def main() -> int:
                     "origin": origin,
                     "device_id": device_id,
                     "requestedWakeThreshold": wake_threshold,
+                    "requestedPolicy": policy,
                     "queued": [],
                     "result": last_record,
                     "failedStage": failed_stage,
@@ -552,7 +583,7 @@ def main() -> int:
                 failure_classification = stable_classification(discovery["classification"])
                 failed_stage = "hot_ops_discovery"
             else:
-                command_id, path = queue_local(state_dir, device_id, HOT_OPERATION, args.wait_ms, "Hermes wake proof installed-shell dry-run", wake_threshold)
+                command_id, path = queue_local(state_dir, device_id, HOT_OPERATION, args.wait_ms, "Hermes wake proof installed-shell dry-run", policy)
                 command = read_json(path)
                 payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
                 payload["dryRun"] = True
@@ -582,6 +613,7 @@ def main() -> int:
                 "origin": origin,
                 "device_id": device_id,
                 "requestedWakeThreshold": wake_threshold,
+                "requestedPolicy": policy,
                 "queued": [],
                 "dryRun": {
                     "hotOpsDiscovery": discovery,
@@ -608,7 +640,7 @@ def main() -> int:
 
     for operation in operations:
         if local:
-            command_id, path = queue_local(state_dir, device_id, operation, args.wait_ms, reason, wake_threshold)
+            command_id, path = queue_local(state_dir, device_id, operation, args.wait_ms, reason, policy)
             if operation == HOT_OPERATION and args.debug:
                 command = read_json(path)
                 payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
@@ -619,7 +651,7 @@ def main() -> int:
                 write_json(path, command)
             queued_details.append({"operation": operation, "command_id": command_id, "path": str(path)})
         else:
-            command_id, queued = queue_remote(origin, key, device_id, operation, args.wait_ms, reason, wake_threshold)
+            command_id, queued = queue_remote(origin, key, device_id, operation, args.wait_ms, reason, policy)
             queued_details.append({"operation": operation, "command_id": command_id, "queued": queued})
         print(json.dumps({"queued": queued_details[-1], "prompt": "Speak Hermes near the connected Android device now."}, indent=2))
         record = wait_for_result(
@@ -663,6 +695,7 @@ def main() -> int:
         "transport": "local-state" if local else "remote-frontier",
         "device_id": device_id,
         "requestedWakeThreshold": wake_threshold,
+        "requestedPolicy": policy,
         "queued": queued_details,
         "result": last_record,
         "failedStage": failed_stage,

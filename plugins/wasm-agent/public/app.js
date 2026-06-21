@@ -1016,30 +1016,36 @@ const els = {
   homeFleetButton: document.querySelector("#homeFleetButton"),
   homeDevicesButton: document.querySelector("#homeDevicesButton"),
   homeGoNativeButton: document.querySelector("#homeGoNativeButton"),
-  homeTuneVoiceButton: document.querySelector("#homeWakeWorldButton"),
+  homeTuneVoiceButton: document.querySelector("#homeWakeWordButton"),
   homeTuneVoiceStatus: document.querySelector("#homeTuneVoiceStatus"),
-  wakeWorldModal: document.querySelector("#wakeWorldModal"),
-  wakeWorldStatus: document.querySelector("#wakeWorldStatus"),
-  wakeWorldState: document.querySelector("#wakeWorldState"),
-  wakeWorldOutput: document.querySelector("#wakeWorldOutput"),
-  closeWakeWorldModalButton: document.querySelector("#closeWakeWorldModalButton"),
-  wakeWorldRefreshButton: document.querySelector("#wakeWorldRefreshButton"),
-  wakeWorldCopyButton: document.querySelector("#wakeWorldCopyButton"),
-  wakeWorldFalseWakeFetchButton: document.querySelector("#wakeWorldFalseWakeFetchButton"),
-  wakeWorldFalseWakeDrainButton: document.querySelector("#wakeWorldFalseWakeDrainButton"),
-  wakeWorldRestartButton: document.querySelector("#wakeWorldRestartButton"),
-  wakeWorldStartButton: document.querySelector("#wakeWorldStartButton"),
-  wakeWorldStopButton: document.querySelector("#wakeWorldStopButton"),
-  wakeWorldProofStandbyButton: document.querySelector("#wakeWorldProofStandbyButton"),
-  wakeWorldProofAppButton: document.querySelector("#wakeWorldProofAppButton"),
-  wakeWorldTrainButton: document.querySelector("#wakeWorldTrainButton"),
+  wakeWordModal: document.querySelector("#wakeWordModal"),
+  wakeWordStatus: document.querySelector("#wakeWordStatus"),
+  wakeWordState: document.querySelector("#wakeWordState"),
+  wakeWordOutput: document.querySelector("#wakeWordOutput"),
+  closeWakeWordModalButton: document.querySelector("#closeWakeWordModalButton"),
+  wakeWordRefreshButton: document.querySelector("#wakeWordRefreshButton"),
+  wakeWordCopyButton: document.querySelector("#wakeWordCopyButton"),
+  wakeWordFalseWakeFetchButton: document.querySelector("#wakeWordFalseWakeFetchButton"),
+  wakeWordFalseWakeDrainButton: document.querySelector("#wakeWordFalseWakeDrainButton"),
+  wakeWordRestartButton: document.querySelector("#wakeWordRestartButton"),
+  wakeWordStartButton: document.querySelector("#wakeWordStartButton"),
+  wakeWordStopButton: document.querySelector("#wakeWordStopButton"),
+  wakeWordProofStandbyButton: document.querySelector("#wakeWordProofStandbyButton"),
+  wakeWordProofAppButton: document.querySelector("#wakeWordProofAppButton"),
+  wakeWordTrainButton: document.querySelector("#wakeWordTrainButton"),
   wakeWordSessionButton: document.querySelector("#wakeWordSessionButton"),
   wakeWordStepDoneButton: document.querySelector("#wakeWordStepDoneButton"),
+  wakeWordInstallModelButton: document.querySelector("#wakeWordInstallModelButton"),
   wakeWordApplyPolicyButton: document.querySelector("#wakeWordApplyPolicyButton"),
+  wakeWordPhraseInput: document.querySelector("#wakeWordPhraseInput"),
   wakeWordThresholdInput: document.querySelector("#wakeWordThresholdInput"),
   wakeWordVadRmsInput: document.querySelector("#wakeWordVadRmsInput"),
   wakeWordVadPeakInput: document.querySelector("#wakeWordVadPeakInput"),
   wakeWordInstruction: document.querySelector("#wakeWordInstruction"),
+  wakeWordAgentViewOutput: document.querySelector("#wakeWordAgentViewOutput"),
+  wakeWordLabSignal: document.querySelector("#wakeWordLabSignal"),
+  wakeWordLabStage: document.querySelector("#wakeWordLabStage"),
+  wakeWordLabPrompt: document.querySelector("#wakeWordLabPrompt"),
   tuneVoiceModal: document.querySelector("#tuneVoiceModal"),
   closeTuneVoiceModalButton: document.querySelector("#closeTuneVoiceModalButton"),
   tuneVoiceTitle: document.querySelector("#tuneVoiceTitle"),
@@ -1380,11 +1386,79 @@ const ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_DELAY_MS = 18000;
 const ANDROID_BRIDGE_DIAGNOSTIC_CHUNK_DELAY_MS = 350;
 const WAKE_WORD_STATE_CACHE_TTL_MS = 750;
 const WAKE_WORD_REFRESH_INTERVAL_MS = 2000;
-const ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS = 2500;
+const NATIVE_VOICE_WAKE_TIMELINE_POLL_MS = 1000;
+const NATIVE_VOICE_WAKE_WAO_HEARTBEAT_MS = 5000;
+const WAKE_WORD_AGENT_VIEW_REFRESH_MS = 2500;
+const WAKE_WORD_DEFAULT_PHRASE = "alexa";
+const WAKE_WORD_DEFAULT_THRESHOLD = 0.92;
+const WAKE_WORD_PLACEHOLDER_PHRASES = new Set(["", "hey jarvis", "hermes", "alexa"]);
+const ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS = 5000;
+const NATIVE_OBS_HEARTBEAT_MS = 5000;
+const NATIVE_OBS_RECONNECT_MS = 1800;
+const WAO_HEADER_BYTES = 40;
+const WAO_TLV_HEADER_BYTES = 8;
+const WAO_VERSION = 1;
+const WAO_TLV_NULL = 0;
+const WAO_TLV_BOOL = 1;
+const WAO_TLV_I64 = 2;
+const WAO_TLV_F64 = 3;
+const WAO_TLV_UTF8 = 4;
+const WAO_TLV_BYTES = 5;
+const WAO_TLV_JSON = 6;
+const WAO_FRAME_TYPES = {
+  HELLO: 1,
+  DICT: 2,
+  EVENT: 3,
+  STATE_PATCH: 4,
+  COMMAND: 5,
+  COMMAND_ACK: 6,
+  SNAPSHOT_REQ: 7,
+  SNAPSHOT: 8,
+  BLOB_CHUNK: 9,
+  HEARTBEAT: 10,
+  ERROR: 11,
+};
+const WAO_FRAME_TYPE_NAMES = Object.fromEntries(Object.entries(WAO_FRAME_TYPES).map(([key, value]) => [value, key]));
+const WAO_FIELD_IDS = {
+  device_id: 1,
+  stream: 2,
+  type: 3,
+  key: 4,
+  ts_ms: 5,
+  command_id: 6,
+  op: 7,
+  status: 8,
+  priority: 9,
+  deadline_ms: 10,
+  result_json: 11,
+  payload_json: 12,
+  reason: 13,
+  route: 14,
+  build_id: 15,
+  app_version: 16,
+  runtime: 17,
+  seq_start: 18,
+  seq_end: 19,
+  latency_ms: 20,
+  evidence_refs: 21,
+  topics: 22,
+  cursor: 23,
+  token_budget: 24,
+  snapshot_json: 25,
+  kind: 26,
+  schema: 27,
+  role: 28,
+};
+const WAO_FIELD_NAMES = Object.fromEntries(Object.entries(WAO_FIELD_IDS).map(([key, value]) => [value, key]));
 const ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS = 900;
 const ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS = 2500;
 const ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS = 1500;
 const ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS = 30;
+const ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS = 5000;
+const ANDROID_NATIVE_RESPONSIVENESS_LOOP_MS = 1000;
+const ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_INTERVAL_MS = 15000;
+const ANDROID_NATIVE_HEALTH_RTT_MIN_INTERVAL_MS = 15000;
+const AGENT_WAKE_SHINE_MS = 4200;
 const ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY = "wasmAgent.androidNativeAuthSession";
 const authDiagnosticBuffer = [];
 let authDiagnosticUploadTimer = 0;
@@ -1395,7 +1469,55 @@ let nativeAppReadyNotified = false;
 let clientBootTraceUploadTimer = 0;
 let androidNativeControlPollTimer = 0;
 let androidNativeControlPollBusy = false;
+let androidNativeResponsivenessTimer = 0;
+let androidNativeResponsivenessLoopTimer = 0;
+let androidNativeResponsivenessRaf = 0;
+let androidNativeResponsivenessObserver = null;
+let nativeObsSocket = null;
+let nativeObsHeartbeatTimer = 0;
+let nativeObsReconnectTimer = 0;
+let nativeObsConnected = false;
+let nativeObsSeq = 1;
+let wakeWordAgentViewCursor = 0;
+let wakeWordAgentViewLastAt = 0;
+let wakeWordAgentViewBusy = false;
+let wakeWordModelMetadata = null;
+let wakeWordModelMetadataPromise = null;
 let androidNativeLastUserInputAt = 0;
+let androidNativeLastControlPoll = null;
+let androidNativeLastHealthRttAt = 0;
+const androidNativeResponsiveness = {
+  schema: "hermes.wasm_agent.android_app_responsiveness.v1",
+  started_at: new Date().toISOString(),
+  started_at_ms: typeof performance !== "undefined" ? performance.now() : 0,
+  window_started_at: new Date().toISOString(),
+  sample_count: 0,
+  frame_count: 0,
+  frame_gap_over_50ms_count: 0,
+  frame_gap_over_100ms_count: 0,
+  max_frame_gap_ms: 0,
+  max_frame_drift_ms: 0,
+  last_frame_gap_ms: 0,
+  event_loop_lag_over_50ms_count: 0,
+  event_loop_lag_over_100ms_count: 0,
+  max_event_loop_lag_ms: 0,
+  last_event_loop_lag_ms: 0,
+  long_task_count: 0,
+  max_long_task_ms: 0,
+  last_long_task_ms: 0,
+  health_rtt_ms: 0,
+  max_health_rtt_ms: 0,
+  native_control_poll_latency_ms: 0,
+  native_control_poll_command_count: 0,
+  native_control_poll_skipped_count: 0,
+  native_control_poll_skip_reason: "",
+  input_pending: false,
+  recent_user_input: false,
+  document_hidden: false,
+  overloaded: false,
+  overload_reasons: [],
+  updated_at: "",
+};
 let deferAndroidBridgeDiagnostics = true;
 const pendingAndroidBridgeDiagnostics = [];
 const clientBootTrace = {
@@ -1456,6 +1578,9 @@ const state = {
 	  nativeDebugOpen: false,
 	  nativeDebugStatus: "",
   nativeVoiceWakeLastSessionId: "",
+  nativeVoiceWakeLastWakeAt: 0,
+  nativeVoiceWakeLastHitCount: 0,
+  nativeVoiceWakeShineTimer: 0,
   nativeVoiceWakePollInterval: 0,
   androidOAuthVerification: {
     available: false,
@@ -2196,10 +2321,20 @@ function androidNativeInputPending() {
   }
 }
 
+function androidNativeResponsivenessOverloadedNow() {
+  return Boolean(
+    androidNativeResponsiveness.max_frame_gap_ms >= 120
+      || androidNativeResponsiveness.max_event_loop_lag_ms >= 120
+      || androidNativeResponsiveness.max_long_task_ms >= 120
+      || androidNativeInputPending()
+  );
+}
+
 function androidNativeControlCanRun(options = {}) {
   const heavy = Boolean(options.heavy);
   const quietMs = heavy ? ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS : ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
   if (document.hidden && !options.allowHidden) return { ok: false, reason: "document_hidden" };
+  if (!options.force && androidNativeResponsivenessOverloadedNow()) return { ok: false, reason: "app_overloaded" };
   if (androidNativeRecentUserInput(quietMs)) return { ok: false, reason: "recent_user_input" };
   if (androidNativeInputPending()) return { ok: false, reason: "input_pending" };
   return { ok: true, reason: "budget_available" };
@@ -17805,6 +17940,7 @@ const VOICE_TUNING_SAFE_METHODS = [
   "resetVoiceTuningRecordings",
   "exportHermesDataset",
   "installHermesWakeModel",
+  "installOpenWakeWordBundle",
   "getVoiceTuningDiagnostics",
   "voiceTuningStatus",
   "cancelVoiceTuning",
@@ -18410,7 +18546,7 @@ function maybeOpenRequestedTuneVoiceWizard(reason = "native_request") {
   return true;
 }
 
-function maybeOpenRequestedWakeWorldModal(reason = "native_request") {
+function maybeOpenRequestedWakeWordModal(reason = "native_request") {
   let params = null;
   try {
     params = new URL(window.location.href).searchParams;
@@ -18418,10 +18554,10 @@ function maybeOpenRequestedWakeWorldModal(reason = "native_request") {
     params = new URLSearchParams();
   }
   const requested = cleanText(params.get("native_screen") || params.get("debug_screen"), "").toLowerCase();
-  if (requested !== "wake-world") return false;
+  if (requested !== "wake-word" && requested !== LEGACY_WAKE_WORD_NATIVE_SCREEN) return false;
   if (!state.authUser) return false;
-  if (els.wakeWorldModal && !els.wakeWorldModal.hidden) return true;
-  openWakeWorldModal({ source: reason, autoStart: false });
+  if (els.wakeWordModal && !els.wakeWordModal.hidden) return true;
+  openWakeWordModal({ source: reason, autoStart: false });
   return true;
 }
 
@@ -18674,7 +18810,7 @@ async function pollHermesWakeExportRequest() {
 async function pollHermesWakeInstallRequest() {
   if (hermesWakeInstallPollBusy) return;
   const bridge = androidNativeVoiceBridge();
-  if (typeof bridge?.installHermesWakeModel !== "function") return;
+  if (typeof bridge?.installHermesWakeModel !== "function" && typeof bridge?.installOpenWakeWordBundle !== "function") return;
   hermesWakeInstallPollBusy = true;
   try {
     const response = await fetch("/native/android/hermes-wake-install/request", {
@@ -18689,11 +18825,32 @@ async function pollHermesWakeInstallRequest() {
     const model = request.model && typeof request.model === "object" ? request.model : {};
     const modelUrl = cleanText(model.url, "/native/android/hermes-wake-model/latest");
     const sha256 = cleanText(model.sha256, "");
+    const wakePhrase = cleanText(model.wakePhrase || model.wake_phrase, "");
+    const engineContract = cleanText(model.engineContract || model.engine_contract, "raw_pcm_onnx_single_confidence");
     if (!payload?.pending || !requestId || requestId === hermesWakeInstallLastRequestId || !sha256) return;
     hermesWakeInstallLastRequestId = requestId;
     let result = null;
+    let policyResult = null;
     try {
-      result = parseNativeBridgePayload(bridge.installHermesWakeModel(modelUrl, sha256)) || { ok: false, error: "empty_install_result" };
+      if (engineContract === "openwakeword_bundle") {
+        if (typeof bridge?.installOpenWakeWordBundle !== "function") {
+          result = { ok: false, error: "openwakeword_bundle_bridge_missing" };
+        } else {
+          result = parseNativeBridgePayload(bridge.installOpenWakeWordBundle(modelUrl, sha256)) || { ok: false, error: "empty_install_result" };
+        }
+      } else {
+        if (typeof bridge?.installHermesWakeModel !== "function") {
+          result = { ok: false, error: "wake_model_bridge_missing" };
+        } else {
+          result = parseNativeBridgePayload(bridge.installHermesWakeModel(modelUrl, sha256)) || { ok: false, error: "empty_install_result" };
+        }
+      }
+      if (result?.ok && wakePhrase && wakePhrase !== "configured_by_wake_word_policy") {
+        policyResult = runWakeWordOperation("apply_wake_word_policy", {
+          wakePhrase,
+          origin: "wake-model-install",
+        });
+      }
     } catch (error) {
       result = { ok: false, error: errorMessage(error) || "install_failed" };
     }
@@ -18701,7 +18858,7 @@ async function pollHermesWakeInstallRequest() {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: requestId, result }),
+      body: JSON.stringify({ id: requestId, result: { ...result, policyResult, model } }),
     });
     tuneVoiceState.status = result?.status || tuneVoiceState.status;
     tuneVoiceState.statusAtMs = Date.now();
@@ -18986,17 +19143,25 @@ function androidGeneralNativeBridge() {
 
 let wakeWordLastState = {};
 let wakeWordLastStateAt = 0;
+const LEGACY_WAKE_WORD_NATIVE_SCREEN = ["wake", "world"].join("-");
+const LEGACY_WAKE_WORD_STATE_METHOD = ["getWake", "WorldState"].join("");
+const LEGACY_WAKE_WORD_STATE_PACKET_KEY = ["wake", "WorldState"].join("");
+const LEGACY_FETCH_WAKE_WORD_STATE_OPERATION = ["fetch_wake", "world_state"].join("_");
+const LEGACY_PROVE_WAKE_WORD_LOOP_OPERATION = ["prove_wake", "world_loop"].join("_");
+const LEGACY_OPEN_WAKE_WORD_COMMAND = ["open_wake", "world"].join("_");
+const LEGACY_REFRESH_WAKE_WORD_STATE_COMMAND = ["refresh_wake", "world_state"].join("_");
 
-function getWakeWorldState(options = {}) {
+function getWakeWordState(options = {}) {
   const now = Date.now();
   if (!options.force && wakeWordLastStateAt && now - wakeWordLastStateAt < WAKE_WORD_STATE_CACHE_TTL_MS) {
     return wakeWordLastState;
   }
   let nextState = {};
   const bridge = androidGeneralNativeBridge();
-  if (bridge?.getWakeWorldState) {
+  const stateReader = bridge?.getWakeWordState || bridge?.[LEGACY_WAKE_WORD_STATE_METHOD];
+  if (stateReader) {
     try {
-      nextState = parseNativeBridgePayload(bridge.getWakeWorldState()) || {};
+      nextState = parseNativeBridgePayload(stateReader.call(bridge)) || {};
       wakeWordLastState = nextState;
       wakeWordLastStateAt = now;
       return nextState;
@@ -19017,9 +19182,9 @@ let wakeWordRefreshTimer = 0;
 const wakeWordRenderedRows = new Map();
 const wakeWordTuningSteps = [
   "Place the phone on a table. Stay quiet for 10 seconds, then press Step done.",
-  "Speak random non-Hermes words for 10 seconds, then press Step done.",
-  "Say Hermes 10 times with natural spacing, then press Step done.",
-  "Say Hermes once, then say open wake word, then press Step done.",
+  "Speak random non-wake words for 10 seconds, then press Step done.",
+  "Say the wake phrase 10 times with natural spacing, then press Step done.",
+  "Say the wake phrase once, then say open wake word, then press Step done.",
   "Leave the listener running in normal room noise for 20 seconds, then press Step done.",
 ];
 const wakeWordTuningState = {
@@ -19029,12 +19194,73 @@ const wakeWordTuningState = {
 };
 
 function wakeWordLegacyState(packet = {}) {
-  return packet?.wake_word_state || packet?.wakeWorldState || packet || {};
+  return packet?.wake_word_state || packet?.wakeWordState || packet?.[LEGACY_WAKE_WORD_STATE_PACKET_KEY] || packet || {};
 }
 
-function runWakeWorldOperation(operationId, inputs = {}) {
-  const bridge = androidGeneralNativeBridge();
-  if (!bridge?.runDownloadedOperation) return null;
+function wakeWordCurrentPhrase(packet = {}) {
+  const normalized = wakeWordLegacyState(packet);
+  return cleanText(
+    normalized.wake_word
+      || normalized.wakePhrase
+      || wakeWordModelMetadata?.wakePhrase
+      || wakeWordModelMetadata?.wake_phrase
+      || els.wakeWordPhraseInput?.value,
+    WAKE_WORD_DEFAULT_PHRASE,
+  );
+}
+
+function wakeWordCurrentThreshold(packet = {}) {
+  const normalized = wakeWordLegacyState(packet);
+  const value = Number(normalized.threshold || normalized.wake_threshold || els.wakeWordThresholdInput?.value || WAKE_WORD_DEFAULT_THRESHOLD);
+  return Number.isFinite(value) ? Math.max(0.05, Math.min(0.999, value)) : WAKE_WORD_DEFAULT_THRESHOLD;
+}
+
+function wakeWordInputLooksPlaceholder() {
+  return WAKE_WORD_PLACEHOLDER_PHRASES.has(cleanText(els.wakeWordPhraseInput?.value, "").toLowerCase());
+}
+
+function wakeWordThresholdLooksPlaceholder() {
+  const value = Number(els.wakeWordThresholdInput?.value || WAKE_WORD_DEFAULT_THRESHOLD);
+  return !Number.isFinite(value) || Math.abs(value - WAKE_WORD_DEFAULT_THRESHOLD) < 0.0005 || Math.abs(value - 0.995) < 0.0005 || Math.abs(value - 0.5) < 0.0005;
+}
+
+function applyWakeWordModelMetadataToLab(metadata = {}, packet = {}) {
+  wakeWordModelMetadata = metadata && typeof metadata === "object" ? metadata : wakeWordModelMetadata;
+  const phrase = cleanText(wakeWordModelMetadata?.wakePhrase || wakeWordModelMetadata?.wake_phrase, "");
+  if (phrase && els.wakeWordPhraseInput && document.activeElement !== els.wakeWordPhraseInput && !cleanText(wakeWordLegacyState(packet).wake_word, "") && wakeWordInputLooksPlaceholder()) {
+    els.wakeWordPhraseInput.value = phrase;
+  }
+  const threshold = Number(wakeWordModelMetadata?.recommendedThreshold || wakeWordModelMetadata?.recommended_threshold || WAKE_WORD_DEFAULT_THRESHOLD);
+  if (els.wakeWordThresholdInput && document.activeElement !== els.wakeWordThresholdInput && Number.isFinite(threshold) && wakeWordThresholdLooksPlaceholder()) {
+    els.wakeWordThresholdInput.value = threshold.toFixed(3);
+  }
+}
+
+async function loadWakeWordModelMetadata(packet = {}) {
+  if (wakeWordModelMetadata) {
+    applyWakeWordModelMetadataToLab(wakeWordModelMetadata, packet);
+    return wakeWordModelMetadata;
+  }
+  if (!wakeWordModelMetadataPromise) {
+    wakeWordModelMetadataPromise = fetchJson("/native/android/hermes-wake-model/latest.json", { timeoutMs: 5000 })
+      .then((metadata) => {
+        wakeWordModelMetadata = metadata && typeof metadata === "object" ? metadata : {};
+        return wakeWordModelMetadata;
+      })
+      .catch((error) => {
+        recordUserEvent("wake_word_model_metadata_failed", { error: errorMessage(error) });
+        return null;
+      })
+      .finally(() => {
+        wakeWordModelMetadataPromise = null;
+      });
+  }
+  const metadata = await wakeWordModelMetadataPromise;
+  if (metadata) applyWakeWordModelMetadataToLab(metadata, packet);
+  return metadata;
+}
+
+function runWakeWordOperationOnce(bridge, operationId, inputs = {}) {
   try {
     return parseNativeBridgePayload(bridge.runDownloadedOperation(JSON.stringify({
       operationId,
@@ -19044,6 +19270,26 @@ function runWakeWorldOperation(operationId, inputs = {}) {
   } catch {
     return null;
   }
+}
+
+function wakeWordLegacyOperationId(operationId) {
+  if (operationId === "fetch_wake_word_state") return LEGACY_FETCH_WAKE_WORD_STATE_OPERATION;
+  if (operationId === "prove_wake_word_loop") return LEGACY_PROVE_WAKE_WORD_LOOP_OPERATION;
+  return "";
+}
+
+function wakeWordOperationUnsupported(result) {
+  const code = cleanText(result?.failureClassification || result?.error || result?.code, "");
+  return code === "downloaded_operation_not_supported" || code === "unsupported_operation";
+}
+
+function runWakeWordOperation(operationId, inputs = {}) {
+  const bridge = androidGeneralNativeBridge();
+  if (!bridge?.runDownloadedOperation) return null;
+  const result = runWakeWordOperationOnce(bridge, operationId, inputs);
+  const legacyId = wakeWordLegacyOperationId(operationId);
+  if (!legacyId || (result && !wakeWordOperationUnsupported(result))) return result;
+  return runWakeWordOperationOnce(bridge, legacyId, inputs) || result;
 }
 
 function exportAndroidNativeDiagnostics() {
@@ -30854,8 +31100,122 @@ function renderAgentVoiceWakeSettings() {
   }));
 }
 
-function wakeWorldRows(statePacket = {}) {
+function wakeWordLabState(packet = {}) {
+  const mode = cleanText(packet.listener_mode || packet.state || "", "").toLowerCase();
+  const ready = Boolean(packet.wake_service_ready || packet.foreground_service_active);
+  const engineReady = Boolean(packet.wake_engine_ready);
+  const capturing = Boolean(packet.command_capture_active) || ["command_capture", "capturing", "transcribing"].includes(mode);
+  const lastTranscript = cleanText(packet.transcript_gate_last_result || packet.last_transcript || packet.last_asr_partial_transcript || "", "");
+  const lastError = cleanText(packet.last_error || packet.disabled_reason || packet.failure_reason || "", "");
+  if (capturing) {
+    return {
+      state: "awake",
+      stage: "Awake",
+      prompt: "The avatar should be shining now. Speak the command naturally.",
+    };
+  }
+  if (!ready) {
+    return {
+      state: "idle",
+      stage: "Standby",
+      prompt: lastError || "Start the listener, say the wake phrase, then watch the avatar.",
+    };
+  }
+  if (!engineReady) {
+    return {
+      state: "blocked",
+      stage: "Model needed",
+      prompt: lastError || "Install a functional wake model before real-device testing.",
+    };
+  }
+  if (lastTranscript && !["transcript_attempt_started", "not_started"].includes(lastTranscript)) {
+    return {
+      state: "transcript",
+      stage: "Transcript",
+      prompt: lastTranscript,
+    };
+  }
+  return {
+    state: "listening",
+    stage: "Listening",
+    prompt: `Say "${wakeWordCurrentPhrase(packet)}" near the device.`,
+  };
+}
+
+function renderWakeWordLabSignal(packet = {}) {
+  const lab = wakeWordLabState(packet);
+  if (els.wakeWordLabSignal) els.wakeWordLabSignal.dataset.state = lab.state;
+  if (els.wakeWordLabStage) els.wakeWordLabStage.textContent = lab.stage;
+  if (els.wakeWordLabPrompt) els.wakeWordLabPrompt.textContent = lab.prompt;
+  return lab;
+}
+
+function setAgentAvatarWakeState(kind = "idle", packet = {}) {
+  const overlay = els.agentOverlay;
+  const button = els.agentAvatarButton;
+  if (!overlay || !button) return;
+  const cleanKind = cleanText(kind, "idle");
+  overlay.dataset.voiceWake = cleanKind;
+  button.dataset.voiceWake = cleanKind;
+  if (packet && typeof packet === "object") {
+    button.dataset.lastWakeConfidence = Number(packet.last_confidence || packet.last_wake_confidence || 0).toFixed(3);
+  }
+}
+
+function triggerAgentAvatarWakeShine(packet = {}, reason = "wake") {
+  setAgentAvatarWakeState("awake", packet);
+  if (state.nativeVoiceWakeShineTimer) window.clearTimeout(state.nativeVoiceWakeShineTimer);
+  state.nativeVoiceWakeShineTimer = window.setTimeout(() => {
+    state.nativeVoiceWakeShineTimer = 0;
+    const latest = wakeWordLegacyState(getWakeWordState());
+    const lab = wakeWordLabState(latest);
+    setAgentAvatarWakeState(lab.state === "awake" ? "listening" : lab.state, latest);
+  }, AGENT_WAKE_SHINE_MS);
+  recordUserEvent("wake_word_avatar_shine", {
+    target: "wasm-chat-avatar",
+    summary: "Wake word heard",
+    data: {
+      reason,
+      last_wake_at: Number(packet.last_wake_at || packet.last_wake_detection_at || 0),
+      wake_hit_count: Number(packet.wake_hit_count || packet.wake_detection_count || 0),
+      confidence: Number(packet.last_confidence || packet.last_wake_confidence || 0),
+      listener_mode: cleanText(packet.listener_mode, ""),
+    },
+  });
+  if (reason !== "wao") {
+    nativeObsSend("EVENT", {
+      device_id: androidNativeControlDeviceId(),
+      stream: "wake",
+      type: "wake_hit",
+      key: "wake.last_hit",
+      ts_ms: Date.now(),
+      payload_json: compactWakeWordObsPayload(packet, reason),
+    });
+  }
+}
+
+function updateWakeWordAvatarFromState(packet = {}, reason = "state") {
+  const normalized = wakeWordLegacyState(packet);
+  const lab = wakeWordLabState(normalized);
+  const lastWakeAt = Number(normalized.last_wake_at || normalized.last_wake_detection_at || 0);
+  const hitCount = Number(normalized.wake_hit_count || normalized.wake_detection_count || 0);
+  const captureActive = lab.state === "awake";
+  const newWake = (lastWakeAt > 0 && lastWakeAt !== state.nativeVoiceWakeLastWakeAt)
+    || (hitCount > 0 && hitCount !== state.nativeVoiceWakeLastHitCount)
+    || (captureActive && !state.nativeVoiceWakeShineTimer);
+  if (lastWakeAt > 0) state.nativeVoiceWakeLastWakeAt = lastWakeAt;
+  if (hitCount > 0) state.nativeVoiceWakeLastHitCount = hitCount;
+  if (newWake) {
+    triggerAgentAvatarWakeShine(normalized, reason);
+  } else if (!state.nativeVoiceWakeShineTimer) {
+    setAgentAvatarWakeState(lab.state, normalized);
+  }
+  return lab;
+}
+
+function wakeWordRows(statePacket = {}) {
   return [
+    ["wake_word", statePacket.wake_word],
     ["wake_service_ready", statePacket.wake_service_ready],
     ["wake_engine_ready", statePacket.wake_engine_ready],
     ["foreground_service_active", statePacket.foreground_service_active],
@@ -30909,21 +31269,26 @@ function wakeWorldRows(statePacket = {}) {
   ];
 }
 
-function renderWakeWorldModal(statePacket = null) {
-  if (!els.wakeWorldModal) return;
-  const packet = wakeWordLegacyState(statePacket || getWakeWorldState());
-  if (els.wakeWorldStatus) {
-    els.wakeWorldStatus.textContent = `${cleanText(packet.listener_lane, "off")} / ${cleanText(packet.listener_mode, "off")}`;
+function renderWakeWordModal(statePacket = null) {
+  if (!els.wakeWordModal) return;
+  const packet = wakeWordLegacyState(statePacket || getWakeWordState());
+  updateWakeWordAvatarFromState(packet, "wake-word-modal-render");
+  renderWakeWordLabSignal(packet);
+  if (els.wakeWordStatus) {
+    els.wakeWordStatus.textContent = `${cleanText(packet.listener_lane, "off")} / ${cleanText(packet.listener_mode, "off")}`;
   }
-  if (els.wakeWorldState) {
-    for (const [label, value] of wakeWorldRows(packet)) {
+  if (els.wakeWordPhraseInput && document.activeElement !== els.wakeWordPhraseInput && cleanText(packet.wake_word, "")) {
+    els.wakeWordPhraseInput.value = wakeWordCurrentPhrase(packet);
+  }
+  if (els.wakeWordState) {
+    for (const [label, value] of wakeWordRows(packet)) {
       const text = value === null || typeof value === "undefined" ? "" : cleanText(String(value), "");
       let row = wakeWordRenderedRows.get(label);
       if (!row) {
         const dt = document.createElement("dt");
         dt.textContent = label;
         const dd = document.createElement("dd");
-        els.wakeWorldState.append(dt, dd);
+        els.wakeWordState.append(dt, dd);
         row = { dd };
         wakeWordRenderedRows.set(label, row);
       }
@@ -30931,7 +31296,7 @@ function renderWakeWorldModal(statePacket = null) {
     }
   }
   if (els.wakeWordThresholdInput && document.activeElement !== els.wakeWordThresholdInput && Number.isFinite(Number(packet.threshold))) {
-    els.wakeWordThresholdInput.value = Number(packet.threshold).toFixed(2);
+    els.wakeWordThresholdInput.value = Number(packet.threshold).toFixed(3);
   }
   if (els.wakeWordVadRmsInput && document.activeElement !== els.wakeWordVadRmsInput && Number.isFinite(Number(packet.vad_rms_threshold))) {
     els.wakeWordVadRmsInput.value = Number(packet.vad_rms_threshold).toFixed(3);
@@ -30942,42 +31307,52 @@ function renderWakeWorldModal(statePacket = null) {
   renderWakeWordInstruction(packet);
 }
 
-function openWakeWorldModal(options = {}) {
-  if (!els.wakeWorldModal) return;
-  const packet = getWakeWorldState({ force: true });
-  els.wakeWorldModal.hidden = false;
-  renderWakeWorldModal(packet);
+function openWakeWordModal(options = {}) {
+  if (!els.wakeWordModal) return;
+  const packet = getWakeWordState({ force: true });
+  els.wakeWordModal.hidden = false;
+  void loadWakeWordModelMetadata(packet);
+  renderWakeWordModal(packet);
   renderWakeWordJsonOutput(packet);
+  void refreshWakeWordAgentView("open", { force: true });
   startWakeWordRefreshLoop();
   if (isAndroidNativeShell() && options.autoStart !== false && !packet.foreground_service_active && !packet.wake_service_ready) {
-    window.setTimeout(() => wakeWorldBridgeAction("start"), 100);
+    window.setTimeout(() => wakeWordBridgeAction("start"), 100);
   }
   if (!options.skipHistory) {
-    pushUiNavigationLayer("wake-world-modal", () => closeWakeWorldModal({ skipHistory: true, skipStack: true }));
+    pushUiNavigationLayer("wake-word-modal", () => closeWakeWordModal({ skipHistory: true, skipStack: true }));
   }
 }
 
-function closeWakeWorldModal(options = {}) {
-  if (!options.skipHistory && closeUiNavigationLayer("wake-world-modal")) return;
-  if (els.wakeWorldModal) els.wakeWorldModal.hidden = true;
+function closeWakeWordModal(options = {}) {
+  if (!options.skipHistory && closeUiNavigationLayer("wake-word-modal")) return;
+  if (els.wakeWordModal) els.wakeWordModal.hidden = true;
   stopWakeWordRefreshLoop();
   wakeWordRenderedRows.clear();
-  if (els.wakeWorldState) els.wakeWorldState.replaceChildren();
-  if (!options.skipStack) closeUiNavigationLayer("wake-world-modal", { skipHistory: true, replaceHistory: true });
+  if (els.wakeWordState) els.wakeWordState.replaceChildren();
+  if (!options.skipStack) closeUiNavigationLayer("wake-word-modal", { skipHistory: true, replaceHistory: true });
 }
 
-function renderWakeWordJsonOutput(packet = getWakeWorldState()) {
-  if (els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(wakeWordLegacyState(packet) || {}, null, 2);
+function renderWakeWordJsonOutput(packet = getWakeWordState()) {
+  if (els.wakeWordOutput) els.wakeWordOutput.textContent = JSON.stringify(wakeWordLegacyState(packet) || {}, null, 2);
+}
+
+function refreshWakeWordAvatarState(reason = "poll") {
+  if (!isAndroidNativeShell()) return;
+  const packet = wakeWordLegacyState(getWakeWordState({ force: true }));
+  updateWakeWordAvatarFromState(packet, reason);
+  nativeObsPublishWakeState(packet, reason);
 }
 
 function startWakeWordRefreshLoop() {
-  if (wakeWordRefreshTimer || !els.wakeWorldModal || els.wakeWorldModal.hidden) return;
+  if (wakeWordRefreshTimer || !els.wakeWordModal || els.wakeWordModal.hidden) return;
   wakeWordRefreshTimer = window.setInterval(() => {
-    if (!els.wakeWorldModal || els.wakeWorldModal.hidden) {
+    if (!els.wakeWordModal || els.wakeWordModal.hidden) {
       stopWakeWordRefreshLoop();
       return;
     }
-    renderWakeWorldModal();
+    renderWakeWordModal();
+    void refreshWakeWordAgentView("interval");
   }, isAndroidNativeShell() ? WAKE_WORD_REFRESH_INTERVAL_MS : 1000);
 }
 
@@ -30987,29 +31362,29 @@ function stopWakeWordRefreshLoop() {
   wakeWordRefreshTimer = 0;
 }
 
-async function copyWakeWorldJson() {
+async function copyWakeWordJson() {
   try {
-    await navigator.clipboard.writeText(els.wakeWorldOutput?.textContent || JSON.stringify(getWakeWorldState(), null, 2));
-    if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = "copied";
+    await navigator.clipboard.writeText(els.wakeWordOutput?.textContent || JSON.stringify(getWakeWordState(), null, 2));
+    if (els.wakeWordStatus) els.wakeWordStatus.textContent = "copied";
   } catch {
-    if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = "copy failed";
+    if (els.wakeWordStatus) els.wakeWordStatus.textContent = "copy failed";
   }
 }
 
-function wakeWorldBridgeAction(action) {
+function wakeWordBridgeAction(action) {
   const bridge = androidGeneralNativeBridge();
-  const renderNow = () => window.requestAnimationFrame(renderWakeWorldModal);
+  const renderNow = () => window.requestAnimationFrame(renderWakeWordModal);
   try {
     wakeWordLastStateAt = 0;
     if (action === "refresh") {
-      const result = runWakeWorldOperation("fetch_wake_world_state");
-      renderWakeWordJsonOutput(result || getWakeWorldState());
+      const result = runWakeWordOperation("fetch_wake_word_state");
+      renderWakeWordJsonOutput(result || getWakeWordState());
     } else if (action === "fetch_false_wakes") {
-      if (bridge?.getFalseWakeBatch) els.wakeWorldOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.getFalseWakeBatch()) || {}, null, 2);
+      if (bridge?.getFalseWakeBatch) els.wakeWordOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.getFalseWakeBatch()) || {}, null, 2);
     } else if (action === "drain_false_wakes") {
       const batch = bridge?.getFalseWakeBatch ? parseNativeBridgePayload(bridge.getFalseWakeBatch()) : {};
       const ids = Array.isArray(batch?.samples) ? batch.samples.map((sample) => sample.id).filter(Boolean) : [];
-      if (bridge?.confirmFalseWakeBatchUploaded) els.wakeWorldOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.confirmFalseWakeBatchUploaded(JSON.stringify(ids))) || {}, null, 2);
+      if (bridge?.confirmFalseWakeBatchUploaded) els.wakeWordOutput.textContent = JSON.stringify(parseNativeBridgePayload(bridge.confirmFalseWakeBatchUploaded(JSON.stringify(ids))) || {}, null, 2);
     } else if (action === "restart") {
       try { bridge?.disableVoiceWake?.(); } catch (error) { recordUserEvent("wake_word_bridge_error", { action: "disable", error: errorMessage(error) }); }
       window.setTimeout(() => {
@@ -31023,30 +31398,30 @@ function wakeWorldBridgeAction(action) {
     } else if (action === "stop") {
       bridge?.disableVoiceWake?.();
     } else if (action === "proof_standby" || action === "proof_app") {
-      const result = runWakeWorldOperation("prove_wake_world_loop", { appVisible: action === "proof_app" });
-      if (result && els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(result, null, 2);
+      const result = runWakeWordOperation("prove_wake_word_loop", { appVisible: action === "proof_app" });
+      if (result && els.wakeWordOutput) els.wakeWordOutput.textContent = JSON.stringify(result, null, 2);
     }
   } catch (error) {
     renderWakeWordBridgeError(action, error);
   }
   renderNow();
-  window.setTimeout(renderWakeWorldModal, 250);
-  window.setTimeout(renderWakeWorldModal, 900);
+  window.setTimeout(renderWakeWordModal, 250);
+  window.setTimeout(renderWakeWordModal, 900);
 }
 
-function queueWakeWorldBridgeAction(action, source = "native-control") {
+function queueWakeWordBridgeAction(action, source = "native-control") {
   const queuedAt = new Date().toISOString();
-  recordUserEvent("wake_world_bridge_action_queued", { action, source, queued_at: queuedAt });
+  recordUserEvent("wake_word_bridge_action_queued", { action, source, queued_at: queuedAt });
   window.setTimeout(() => {
-    recordUserEvent("wake_world_bridge_action_deferred", { action, source, queued_at: queuedAt });
-    wakeWorldBridgeAction(action);
+    recordUserEvent("wake_word_bridge_action_deferred", { action, source, queued_at: queuedAt });
+    wakeWordBridgeAction(action);
   }, ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS);
   return {
     queued: true,
     action,
     source,
     queuedAt,
-    state: wakeWordLegacyState(getWakeWorldState({ force: true })),
+    state: wakeWordLegacyState(getWakeWordState({ force: true })),
   };
 }
 
@@ -31055,30 +31430,32 @@ function renderWakeWordBridgeError(action, error) {
     ok: false,
     action,
     error: errorMessage(error) || "wake_word_bridge_error",
-    state: getWakeWorldState(),
+    state: getWakeWordState(),
   };
-  if (els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(payload, null, 2);
-  if (els.wakeWorldStatus) els.wakeWorldStatus.textContent = `${action} failed`;
+  if (els.wakeWordOutput) els.wakeWordOutput.textContent = JSON.stringify(payload, null, 2);
+  if (els.wakeWordStatus) els.wakeWordStatus.textContent = `${action} failed`;
   recordUserEvent("wake_word_bridge_error", payload);
 }
 
 function wakeWordPolicyFromInputs() {
   return {
-    wakeThreshold: Number(els.wakeWordThresholdInput?.value || 0.92),
+    wakePhrase: cleanText(els.wakeWordPhraseInput?.value, wakeWordCurrentPhrase()),
+    wakeThreshold: Number(els.wakeWordThresholdInput?.value || WAKE_WORD_DEFAULT_THRESHOLD),
     vadRmsThreshold: Number(els.wakeWordVadRmsInput?.value || 0.012),
     vadPeakThreshold: Math.round(Number(els.wakeWordVadPeakInput?.value || 1800)),
     tuningSessionId: wakeWordTuningState.sessionId,
   };
 }
 
-function applyWakeWordPolicy(extra = {}) {
+function applyWakeWordPolicy(extra = {}, options = {}) {
   wakeWordLastStateAt = 0;
-  const result = runWakeWorldOperation("apply_wake_word_policy", {
-    ...wakeWordPolicyFromInputs(),
+  const includeInputs = options.includeInputs !== false;
+  const result = runWakeWordOperation("apply_wake_word_policy", {
+    ...(includeInputs ? wakeWordPolicyFromInputs() : {}),
     ...extra,
   });
-  if (result && els.wakeWorldOutput) els.wakeWorldOutput.textContent = JSON.stringify(result, null, 2);
-  window.setTimeout(renderWakeWorldModal, 250);
+  if (result && els.wakeWordOutput) els.wakeWordOutput.textContent = JSON.stringify(result, null, 2);
+  window.setTimeout(renderWakeWordModal, 250);
   return result;
 }
 
@@ -31087,12 +31464,12 @@ function startWakeWordTuningSession() {
   wakeWordTuningState.stepIndex = 0;
   wakeWordTuningState.snapshots = [];
   applyWakeWordPolicy({ tuningSessionId: wakeWordTuningState.sessionId });
-  wakeWorldBridgeAction("start");
-  renderWakeWordInstruction(getWakeWorldState());
+  wakeWordBridgeAction("start");
+  renderWakeWordInstruction(getWakeWordState());
 }
 
 function completeWakeWordTuningStep() {
-  const packet = wakeWordLegacyState(getWakeWorldState());
+  const packet = wakeWordLegacyState(getWakeWordState());
   wakeWordTuningState.snapshots.push({
     step: wakeWordTuningState.stepIndex,
     at: new Date().toISOString(),
@@ -31115,29 +31492,148 @@ function renderWakeWordInstruction(packet = {}) {
   els.wakeWordInstruction.textContent = session ? `${step} ${counts}` : "Start session, then follow the next instruction here.";
 }
 
-function wakeWorldCommandForTranscript(transcript = "") {
-  const normalized = cleanText(transcript, "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
-  if (normalized === "open wake word" || normalized === "open wake world") return "open_wake_world";
-  if (normalized === "show diagnostics") return "show_diagnostics";
-  if (normalized === "train hermes wake" || normalized === "train hermes") return "train_hermes_wake";
-  if (normalized === "stop listening") return "stop_listening";
-  if (normalized === "go home") return "go_home";
+function renderWakeWordAgentView(view = {}, reason = "agent-view") {
+  if (!els.wakeWordAgentViewOutput) return;
+  const l1 = Array.isArray(view?.l1) ? view.l1.slice(-8) : [];
+  const commands = Array.isArray(view?.commands) ? view.commands.slice(0, 4) : [];
+  const latestSeq = Number(view?.l0?.latest_seq || 0);
+  if (latestSeq > wakeWordAgentViewCursor) wakeWordAgentViewCursor = latestSeq;
+  const commandLines = commands.map((command) => {
+    const id = cleanText(command.command_id || command.id, "").slice(0, 18);
+    const op = cleanText(command.op || command.type, "command");
+    const status = cleanText(command.status, "unknown");
+    return `${id} ${op} ${status}`.trim();
+  });
+  const lines = [
+    `WAO ${nativeObsConnected ? "socket" : "adapter"} seq ${wakeWordAgentViewCursor || "-"}`,
+    ...l1,
+    ...commandLines.map((line) => `cmd ${line}`),
+  ].filter(Boolean);
+  els.wakeWordAgentViewOutput.textContent = lines.length > 1 ? lines.join("\n") : `WAO waiting (${reason})`;
+}
+
+async function refreshWakeWordAgentView(reason = "interval", options = {}) {
+  if (!els.wakeWordModal || els.wakeWordModal.hidden || !els.wakeWordAgentViewOutput) return null;
+  if (!options.force && androidNativeResponsivenessOverloadedNow()) {
+    els.wakeWordAgentViewOutput.textContent = "WAO paused: app responsiveness gate";
+    return null;
+  }
+  const now = Date.now();
+  if (!options.force && (wakeWordAgentViewBusy || now - wakeWordAgentViewLastAt < WAKE_WORD_AGENT_VIEW_REFRESH_MS)) return null;
+  wakeWordAgentViewBusy = true;
+  wakeWordAgentViewLastAt = now;
+  try {
+    const deviceId = androidNativeControlDeviceId();
+    const view = await fetchJson("/native/obs/agent-view", {
+      method: "POST",
+      timeoutMs: 5000,
+      body: {
+        ...(deviceId ? { device_id: deviceId } : {}),
+        topics: ["wake", "commands", "android.audio", "bridge", "errors"],
+        after_seq: Math.max(0, wakeWordAgentViewCursor - 20),
+        token_budget: 1200,
+      },
+    });
+    renderWakeWordAgentView(view, reason);
+    return view;
+  } catch (error) {
+    els.wakeWordAgentViewOutput.textContent = `WAO unavailable: ${errorMessage(error) || "agent view failed"}`;
+    return null;
+  } finally {
+    wakeWordAgentViewBusy = false;
+  }
+}
+
+async function installWakeWordModelFromLab() {
+  wakeWordLastStateAt = 0;
+  if (els.wakeWordStatus) els.wakeWordStatus.textContent = "installing model";
+  const metadata = await loadWakeWordModelMetadata(wakeWordLegacyState(getWakeWordState({ force: true }))) || {};
+  const payload = {
+    bundleUrl: cleanText(metadata.url || "/native/android/openwakeword-bundle/latest.zip", ""),
+    sha256: cleanText(metadata.sha256, ""),
+    wakePhrase: cleanText(metadata.wakePhrase || metadata.wake_phrase || wakeWordCurrentPhrase(), WAKE_WORD_DEFAULT_PHRASE),
+    wakeThreshold: Math.max(0.05, Math.min(0.999, Number(els.wakeWordThresholdInput?.value || WAKE_WORD_DEFAULT_THRESHOLD) || WAKE_WORD_DEFAULT_THRESHOLD)),
+    startListener: true,
+  };
+  const result = await executeAndroidNativeControlCommand({
+    id: `lab-install-${Date.now().toString(36)}`,
+    type: "install_openwakeword_bundle",
+    payload,
+  });
+  if (els.wakeWordOutput) els.wakeWordOutput.textContent = JSON.stringify({ payload, result }, null, 2);
+  if (els.wakeWordStatus) els.wakeWordStatus.textContent = result?.ok ? "model installed" : "install failed";
+  window.setTimeout(renderWakeWordModal, 250);
+  void refreshWakeWordAgentView("model-install", { force: true });
+  return result;
+}
+
+function normalizeWakeWordCommandTranscript(transcript = "") {
+  const ignoredWords = new Set(["a", "an", "can", "could", "hey", "hermes", "now", "ok", "okay", "please", "the", "to", "would", "you"]);
+  const unknownWords = new Set(["unk", "unknown"]);
+  return cleanText(transcript, "")
+    .toLowerCase()
+    .replace(/\[(?:unk|spn|noise|sil)\]|<(?:unk|spn|noise|sil)>/g, " ")
+    .replace(/wakeword/g, "wake word")
+    .replace(/wake words/g, "wake word")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((word) => word && !ignoredWords.has(word) && !unknownWords.has(word))
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function wakeWordCommandHasPhrase(words, phrase) {
+  if (!Array.isArray(words) || !Array.isArray(phrase) || !phrase.length || words.length < phrase.length) return false;
+  for (let index = 0; index <= words.length - phrase.length; index += 1) {
+    if (phrase.every((word, offset) => words[index + offset] === word)) return true;
+  }
+  return false;
+}
+
+function wakeWordCommandForTranscript(transcript = "") {
+  const normalized = normalizeWakeWordCommandTranscript(transcript);
+  const words = normalized ? normalized.split(" ") : [];
+  if (
+    wakeWordCommandHasPhrase(words, ["stop", "listening"]) ||
+    wakeWordCommandHasPhrase(words, ["stop", "listener"]) ||
+    wakeWordCommandHasPhrase(words, ["stop", "wake", "word"])
+  ) return "stop_listening";
+  if (
+    wakeWordCommandHasPhrase(words, ["train", "wake"]) ||
+    wakeWordCommandHasPhrase(words, ["train", "wake", "word"])
+  ) return "train_hermes_wake";
+  if (
+    wakeWordCommandHasPhrase(words, ["show", "diagnostic"]) ||
+    wakeWordCommandHasPhrase(words, ["show", "diagnostics"]) ||
+    (words.includes("show") && (words.includes("diagnostic") || words.includes("diagnostics")))
+  ) return "show_diagnostics";
+  if (wakeWordCommandHasPhrase(words, ["go", "home"])) return "go_home";
+  if (
+    wakeWordCommandHasPhrase(words, ["open", "wake", "word"]) ||
+    wakeWordCommandHasPhrase(words, ["wake", "word"]) ||
+    wakeWordCommandHasPhrase(words, ["start", "listener"]) ||
+    wakeWordCommandHasPhrase(words, ["start", "listening"]) ||
+    (words.length === 1 && words[0] === "listener")
+  ) return "open_wake_word";
   return "";
 }
 
-function routeWakeWorldCommand(transcript = "") {
-  const command = wakeWorldCommandForTranscript(transcript);
-  if (command === "open_wake_world") {
-    openWakeWorldModal();
+function routeWakeWordCommand(transcript = "") {
+  const command = wakeWordCommandForTranscript(transcript);
+  if (command === "open_wake_word") {
+    openWakeWordModal();
   } else if (command === "show_diagnostics") {
-    openNativeDebugModal({ reason: "wake-world-command" });
+    openNativeDebugModal({ reason: "wake-word-command" });
   } else if (command === "train_hermes_wake") {
-    openWakeWorldModal();
+    openWakeWordModal();
     openTuneVoiceWizard();
   } else if (command === "stop_listening") {
-    wakeWorldBridgeAction("stop");
+    wakeWordBridgeAction("stop");
   } else if (command === "go_home") {
-    closeWakeWorldModal({ skipHistory: true });
+    closeWakeWordModal({ skipHistory: true });
     closeNativeDebugModal({ skipHistory: true });
     closeTuneVoiceWizard({ skipHistory: true });
     setPanel("home");
@@ -31169,17 +31665,23 @@ function androidNativeControlCapabilities() {
     build_id: cleanText(androidNativeShellInfo().buildId, ""),
     commands: [
       "get_runtime_snapshot",
-      "open_wake_world",
+      "open_wake_word",
       "start_voice_wake",
       "stop_voice_wake",
-      "refresh_wake_world_state",
+      "refresh_wake_word_state",
       "apply_wake_word_policy",
+      "install_openwakeword_bundle",
+      "play_wake_phrase_probe",
+      "score_wake_phrase_probe",
       "upload_diagnostics",
       "export_diagnostics",
       "reload",
     ],
     live_policies: [
       "wakeThreshold",
+      "wakeCooldownMs",
+      "wakeConfirmationFrames",
+      "wakeConfirmationWindowMs",
       "vadRmsThreshold",
       "vadPeakThreshold",
       "transcriptTimeoutMs",
@@ -31187,6 +31689,8 @@ function androidNativeControlCapabilities() {
       "transcriptCompleteSilenceMs",
       "transcriptPossibleSilenceMs",
       "transcriptAcceptPartial",
+      "transcriptEngine",
+      "transcriptPlan",
     ],
     ux_budgeted: true,
     heavy_commands_idle_only: true,
@@ -31197,7 +31701,7 @@ function androidNativeControlCapabilities() {
 
 function androidNativeOpenModals() {
   return [
-    ["wake_world", els.wakeWorldModal],
+    ["wake_word", els.wakeWordModal],
     ["tune_voice", els.tuneVoiceModal],
     ["native_debug", els.nativeDebugModal],
     ["login", els.loginPopover],
@@ -31246,7 +31750,7 @@ function androidNativeVisibleControlSummary(limit = 30) {
 }
 
 function androidNativeRuntimeSnapshot(options = {}) {
-  const wakeState = wakeWordLegacyState(getWakeWorldState({ force: options.forceWakeState === true }));
+  const wakeState = wakeWordLegacyState(getWakeWordState({ force: options.forceWakeState === true }));
   const nativeState = getAndroidNativeState() || {};
   return {
     schema: "hermes.wasm_agent.android_runtime_snapshot.v1",
@@ -31258,7 +31762,7 @@ function androidNativeRuntimeSnapshot(options = {}) {
     recent_user_input_ms: Date.now() - androidNativeLastUserInputAt,
     input_pending: androidNativeInputPending(),
     open_modals: androidNativeOpenModals(),
-    wake_world: {
+    wake_word: {
       listener_lane: cleanText(wakeState.listener_lane, ""),
       listener_mode: cleanText(wakeState.listener_mode, ""),
       wake_service_ready: Boolean(wakeState.wake_service_ready),
@@ -31296,6 +31800,603 @@ function androidNativeRuntimeSnapshot(options = {}) {
   };
 }
 
+function normalizeWakeWordNativeControlCommandType(commandType = "") {
+  const type = cleanText(commandType, "");
+  if (type === LEGACY_OPEN_WAKE_WORD_COMMAND) return "open_wake_word";
+  if (type === LEGACY_REFRESH_WAKE_WORD_STATE_COMMAND) return "refresh_wake_word_state";
+  return type;
+}
+
+function waoTextEncoder() {
+  if (!waoTextEncoder.instance) waoTextEncoder.instance = new TextEncoder();
+  return waoTextEncoder.instance;
+}
+
+function waoTextDecoder() {
+  if (!waoTextDecoder.instance) waoTextDecoder.instance = new TextDecoder();
+  return waoTextDecoder.instance;
+}
+
+function waoUtf8Bytes(value) {
+  return waoTextEncoder().encode(String(value ?? ""));
+}
+
+function waoJsonBytes(value) {
+  return waoUtf8Bytes(JSON.stringify(value ?? null));
+}
+
+function waoConcatBytes(chunks = []) {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function waoEncodeValue(value) {
+  if (value === null || typeof value === "undefined") return { type: WAO_TLV_NULL, payload: new Uint8Array() };
+  if (typeof value === "boolean") return { type: WAO_TLV_BOOL, payload: Uint8Array.of(value ? 1 : 0) };
+  if (Number.isInteger(value)) {
+    const payload = new Uint8Array(8);
+    new DataView(payload.buffer).setBigInt64(0, BigInt(value), true);
+    return { type: WAO_TLV_I64, payload };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const payload = new Uint8Array(8);
+    new DataView(payload.buffer).setFloat64(0, value, true);
+    return { type: WAO_TLV_F64, payload };
+  }
+  if (value instanceof ArrayBuffer) return { type: WAO_TLV_BYTES, payload: new Uint8Array(value) };
+  if (ArrayBuffer.isView(value)) return { type: WAO_TLV_BYTES, payload: new Uint8Array(value.buffer, value.byteOffset, value.byteLength) };
+  if (typeof value === "object") return { type: WAO_TLV_JSON, payload: waoJsonBytes(value) };
+  return { type: WAO_TLV_UTF8, payload: waoUtf8Bytes(value) };
+}
+
+function waoDecodeValue(type, payload) {
+  if (type === WAO_TLV_NULL) return null;
+  if (type === WAO_TLV_BOOL) return Boolean(payload[0]);
+  if (type === WAO_TLV_I64 && payload.byteLength === 8) {
+    const value = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getBigInt64(0, true);
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
+  }
+  if (type === WAO_TLV_F64 && payload.byteLength === 8) {
+    return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getFloat64(0, true);
+  }
+  if (type === WAO_TLV_BYTES) return payload.slice().buffer;
+  if (type === WAO_TLV_JSON) {
+    try {
+      return JSON.parse(waoTextDecoder().decode(payload));
+    } catch {
+      return {};
+    }
+  }
+  if (type === WAO_TLV_UTF8) return waoTextDecoder().decode(payload);
+  return payload.slice().buffer;
+}
+
+function waoEncodeTlv(fields = {}) {
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields || {})) {
+    const fieldId = WAO_FIELD_IDS[name];
+    if (!fieldId) continue;
+    const encoded = waoEncodeValue(value);
+    const header = new Uint8Array(WAO_TLV_HEADER_BYTES);
+    const view = new DataView(header.buffer);
+    view.setUint16(0, fieldId, true);
+    view.setUint8(2, encoded.type);
+    view.setUint8(3, 0);
+    view.setUint32(4, encoded.payload.byteLength, true);
+    chunks.push(header, encoded.payload);
+  }
+  return waoConcatBytes(chunks);
+}
+
+function waoDecodeTlv(payload) {
+  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload || 0);
+  const fields = {};
+  let offset = 0;
+  while (offset + WAO_TLV_HEADER_BYTES <= bytes.byteLength) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset + offset, WAO_TLV_HEADER_BYTES);
+    const fieldId = view.getUint16(0, true);
+    const type = view.getUint8(2);
+    const length = view.getUint32(4, true);
+    offset += WAO_TLV_HEADER_BYTES;
+    if (offset + length > bytes.byteLength) break;
+    const raw = bytes.subarray(offset, offset + length);
+    offset += length;
+    fields[WAO_FIELD_NAMES[fieldId] || `field_${fieldId}`] = waoDecodeValue(type, raw);
+  }
+  return fields;
+}
+
+function waoEncodeFrame(typeName, fields = {}, options = {}) {
+  const body = waoEncodeTlv(fields);
+  const output = new Uint8Array(WAO_HEADER_BYTES + body.byteLength);
+  output[0] = 87;
+  output[1] = 65;
+  output[2] = 79;
+  output[3] = 49;
+  const view = new DataView(output.buffer);
+  view.setUint8(4, WAO_VERSION);
+  view.setUint8(5, WAO_FRAME_TYPES[String(typeName || "EVENT").toUpperCase()] || WAO_FRAME_TYPES.EVENT);
+  view.setUint16(6, Number(options.schemaId || options.schema_id || 0), true);
+  view.setUint32(8, Number(options.flags || 0), true);
+  view.setUint32(12, Number(options.session || 0), true);
+  view.setBigUint64(16, BigInt(options.seq || nativeObsSeq++), true);
+  view.setBigUint64(24, BigInt(options.ack || 0), true);
+  view.setBigUint64(32, BigInt(Math.max(0, Math.round(performance.now()))), true);
+  output.set(body, WAO_HEADER_BYTES);
+  return output.buffer;
+}
+
+function waoDecodeFrame(data) {
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer || data);
+  if (bytes.byteLength < WAO_HEADER_BYTES) throw new Error("wao_frame_too_short");
+  if (bytes[0] !== 87 || bytes[1] !== 65 || bytes[2] !== 79 || bytes[3] !== 49) throw new Error("wao_bad_magic");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, WAO_HEADER_BYTES);
+  const version = view.getUint8(4);
+  if (version !== WAO_VERSION) throw new Error("wao_bad_version");
+  const typeId = view.getUint8(5);
+  const seq = view.getBigUint64(16, true);
+  const ack = view.getBigUint64(24, true);
+  return {
+    version,
+    type_id: typeId,
+    type: WAO_FRAME_TYPE_NAMES[typeId] || `UNKNOWN_${typeId}`,
+    schema_id: view.getUint16(6, true),
+    flags: view.getUint32(8, true),
+    session: view.getUint32(12, true),
+    seq: seq <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(seq) : seq.toString(),
+    ack: ack <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(ack) : ack.toString(),
+    monotonic_ms: Number(view.getBigUint64(32, true)),
+    fields: waoDecodeTlv(bytes.subarray(WAO_HEADER_BYTES)),
+  };
+}
+
+function nativeObsCanUseSocket() {
+  return typeof WebSocket === "function" && typeof ArrayBuffer === "function" && typeof DataView === "function";
+}
+
+function nativeObsSocketUrl() {
+  const url = new URL("/native/obs/v1", window.location.href);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const deviceId = androidNativeControlDeviceId();
+  if (deviceId) url.searchParams.set("device_id", deviceId);
+  url.searchParams.set("role", "android-webview");
+  url.searchParams.set("topics", "wake,commands,android.audio,bridge,errors,performance");
+  return url.toString();
+}
+
+function nativeObsSend(typeName, fields = {}, options = {}) {
+  if (!nativeObsSocket || nativeObsSocket.readyState !== WebSocket.OPEN) return false;
+  try {
+    nativeObsSocket.send(waoEncodeFrame(typeName, fields, options));
+    return true;
+  } catch (error) {
+    recordUserEvent("native_observability_send_failed", {
+      type: cleanText(typeName, ""),
+      error: errorMessage(error),
+    });
+    return false;
+  }
+}
+
+function compactWakeWordObsPayload(packet = {}, reason = "state") {
+  const normalized = wakeWordLegacyState(packet);
+  return {
+    schema: "hermes.wasm_agent.wake.compact_state.v1",
+    reason: cleanText(reason, ""),
+    wake_word: wakeWordCurrentPhrase(normalized),
+    listener_lane: cleanText(normalized.listener_lane, ""),
+    listener_mode: cleanText(normalized.listener_mode, ""),
+    wake_service_ready: Boolean(normalized.wake_service_ready),
+    wake_engine_ready: Boolean(normalized.wake_engine_ready),
+    foreground_service_active: Boolean(normalized.foreground_service_active),
+    threshold: Number(normalized.threshold || normalized.wake_threshold || 0),
+    vad_rms_threshold: Number(normalized.vad_rms_threshold || 0),
+    vad_peak_threshold: Number(normalized.vad_peak_threshold || 0),
+    inference_count: Number(normalized.inference_count || 0),
+    wake_hit_count: Number(normalized.wake_hit_count || normalized.wake_detection_count || 0),
+    false_wake_count: Number(normalized.false_wake_count || 0),
+    last_confidence: Number(normalized.last_confidence || normalized.last_wake_confidence || 0),
+    max_observed_confidence: Number(normalized.max_observed_confidence || normalized.max_confidence_since_start || 0),
+    last_wake_at: Number(normalized.last_wake_at || normalized.last_wake_detection_at || 0),
+    command_capture_active: Boolean(normalized.command_capture_active),
+    transcript_gate_last_result: cleanText(normalized.transcript_gate_last_result || "", ""),
+    last_transcript: cleanText(normalized.last_transcript || normalized.last_asr_partial_transcript || "", ""),
+    last_error: cleanText(normalized.last_error || normalized.disabled_reason || "", ""),
+  };
+}
+
+function nativeObsPublishWakeState(packet = {}, reason = "state") {
+  if (!nativeObsConnected) return false;
+  return nativeObsSend("STATE_PATCH", {
+    device_id: androidNativeControlDeviceId(),
+    stream: "wake",
+    type: "state",
+    key: "wake.latest",
+    ts_ms: Date.now(),
+    payload_json: compactWakeWordObsPayload(packet, reason),
+  });
+}
+
+function roundedPerfMs(value) {
+  return Math.max(0, Math.round(Number(value || 0)));
+}
+
+function androidNativeResponsivenessSnapshot(reason = "sample") {
+  const metric = androidNativeResponsiveness;
+  const appReasons = [];
+  const degradedReasons = [];
+  if (metric.max_frame_gap_ms >= 120 || metric.max_frame_drift_ms >= 100) appReasons.push("frame_stall");
+  if (metric.max_event_loop_lag_ms >= 120) appReasons.push("event_loop_lag");
+  if (metric.max_long_task_ms >= 120 || metric.long_task_count >= 3) appReasons.push("long_tasks");
+  if (metric.input_pending) appReasons.push("input_pending");
+  if (metric.health_rtt_ms >= 1200 || metric.max_health_rtt_ms >= 2000) degradedReasons.push("server_rtt");
+  if (metric.native_control_poll_latency_ms >= 2500) degradedReasons.push("native_control_poll_slow");
+  const overloaded = appReasons.length > 0;
+  const degraded = degradedReasons.length > 0;
+  return {
+    ...metric,
+    reason: cleanText(reason, ""),
+    updated_at: new Date().toISOString(),
+    uptime_ms: roundedPerfMs(performance.now() - metric.started_at_ms),
+    input_pending: androidNativeInputPending(),
+    recent_user_input: androidNativeRecentUserInput(),
+    document_hidden: Boolean(document.hidden),
+    native_obs_connected: Boolean(nativeObsConnected),
+    overloaded,
+    degraded,
+    overload_reasons: appReasons,
+    degradation_reasons: degradedReasons,
+    last_control_poll: androidNativeLastControlPoll || null,
+  };
+}
+
+function nativeObsPublishResponsiveness(reason = "sample") {
+  const payload = androidNativeResponsivenessSnapshot(reason);
+  if (nativeObsConnected) {
+    nativeObsSend("STATE_PATCH", {
+      device_id: androidNativeControlDeviceId(),
+      stream: "performance",
+      type: "app_responsiveness",
+      key: "performance.android_app",
+      ts_ms: Date.now(),
+      payload_json: payload,
+    });
+  }
+  return payload;
+}
+
+function resetAndroidNativeResponsivenessWindow() {
+  androidNativeResponsiveness.window_started_at = new Date().toISOString();
+  androidNativeResponsiveness.sample_count = 0;
+  androidNativeResponsiveness.frame_gap_over_50ms_count = 0;
+  androidNativeResponsiveness.frame_gap_over_100ms_count = 0;
+  androidNativeResponsiveness.max_frame_gap_ms = 0;
+  androidNativeResponsiveness.max_frame_drift_ms = 0;
+  androidNativeResponsiveness.event_loop_lag_over_50ms_count = 0;
+  androidNativeResponsiveness.event_loop_lag_over_100ms_count = 0;
+  androidNativeResponsiveness.max_event_loop_lag_ms = 0;
+  androidNativeResponsiveness.long_task_count = 0;
+  androidNativeResponsiveness.max_long_task_ms = 0;
+  androidNativeResponsiveness.max_health_rtt_ms = androidNativeResponsiveness.health_rtt_ms;
+  androidNativeResponsiveness.native_control_poll_latency_ms = 0;
+  androidNativeResponsiveness.native_control_poll_command_count = 0;
+  androidNativeResponsiveness.native_control_poll_skipped_count = 0;
+  androidNativeResponsiveness.native_control_poll_skip_reason = "";
+}
+
+async function androidNativeTrackPromise(label, promise, metadata = {}) {
+  const started = performance.now();
+  const startedAt = new Date().toISOString();
+  try {
+    const result = await promise;
+    const latency = roundedPerfMs(performance.now() - started);
+    nativeObsSend("EVENT", {
+      device_id: androidNativeControlDeviceId(),
+      stream: "performance",
+      type: "promise_settled",
+      kind: cleanText(label, "promise"),
+      ts_ms: Date.now(),
+      latency_ms: latency,
+      payload_json: {
+        schema: "hermes.wasm_agent.promise_latency.v1",
+        label: cleanText(label, "promise"),
+        ok: true,
+        latency_ms: latency,
+        started_at: startedAt,
+        settled_at: new Date().toISOString(),
+        metadata: redactValue(metadata),
+      },
+    });
+    return result;
+  } catch (error) {
+    const latency = roundedPerfMs(performance.now() - started);
+    nativeObsSend("EVENT", {
+      device_id: androidNativeControlDeviceId(),
+      stream: "performance",
+      type: "promise_settled",
+      kind: cleanText(label, "promise"),
+      ts_ms: Date.now(),
+      latency_ms: latency,
+      payload_json: {
+        schema: "hermes.wasm_agent.promise_latency.v1",
+        label: cleanText(label, "promise"),
+        ok: false,
+        latency_ms: latency,
+        started_at: startedAt,
+        settled_at: new Date().toISOString(),
+        error: errorMessage(error),
+        metadata: redactValue(metadata),
+      },
+    });
+    throw error;
+  }
+}
+
+async function postAndroidNativeResponsiveness(reason = "sample") {
+  if (!isAndroidNativeShell()) return;
+  const payload = nativeObsPublishResponsiveness(reason);
+  resetAndroidNativeResponsivenessWindow();
+  try {
+    await fetchJson("/native/events", {
+      method: "POST",
+      timeoutMs: 2500,
+      body: {
+        device_id: androidNativeControlDeviceId(),
+        kind: "app.responsiveness",
+        platform: "android",
+        runtime: "android-webview",
+        route: androidNativeControlRoute(),
+        payload,
+      },
+    });
+  } catch (error) {
+    recordUserEvent("android_app_responsiveness_upload_failed", {
+      error: errorMessage(error),
+      data: { reason },
+    });
+  }
+}
+
+async function sampleAndroidNativeHealthRtt() {
+  if (!isAndroidNativeShell()) return;
+  const now = Date.now();
+  if (now - androidNativeLastHealthRttAt < ANDROID_NATIVE_HEALTH_RTT_MIN_INTERVAL_MS) return;
+  androidNativeLastHealthRttAt = now;
+  const started = performance.now();
+  try {
+    await androidNativeTrackPromise("health.rtt", fetchJson("/health", { timeoutMs: 2500 }), { route: androidNativeControlRoute() });
+    const elapsed = roundedPerfMs(performance.now() - started);
+    androidNativeResponsiveness.health_rtt_ms = elapsed;
+    androidNativeResponsiveness.max_health_rtt_ms = Math.max(androidNativeResponsiveness.max_health_rtt_ms, elapsed);
+  } catch {
+    androidNativeResponsiveness.health_rtt_ms = 2500;
+    androidNativeResponsiveness.max_health_rtt_ms = Math.max(androidNativeResponsiveness.max_health_rtt_ms, 2500);
+  }
+}
+
+function startAndroidNativeResponsivenessMonitor() {
+  if (!isAndroidNativeShell() || androidNativeResponsivenessTimer) return;
+  let lastFrameAt = performance.now();
+  const frame = (now) => {
+    const gap = Math.max(0, now - lastFrameAt);
+    lastFrameAt = now;
+    const drift = Math.max(0, gap - 16.7);
+    androidNativeResponsiveness.frame_count += 1;
+    androidNativeResponsiveness.last_frame_gap_ms = roundedPerfMs(gap);
+    androidNativeResponsiveness.max_frame_gap_ms = Math.max(androidNativeResponsiveness.max_frame_gap_ms, roundedPerfMs(gap));
+    androidNativeResponsiveness.max_frame_drift_ms = Math.max(androidNativeResponsiveness.max_frame_drift_ms, roundedPerfMs(drift));
+    if (gap >= 50) androidNativeResponsiveness.frame_gap_over_50ms_count += 1;
+    if (gap >= 100) androidNativeResponsiveness.frame_gap_over_100ms_count += 1;
+    androidNativeResponsivenessRaf = window.requestAnimationFrame(frame);
+  };
+  androidNativeResponsivenessRaf = window.requestAnimationFrame(frame);
+  if (typeof PerformanceObserver === "function") {
+    try {
+      androidNativeResponsivenessObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          const duration = roundedPerfMs(entry.duration);
+          androidNativeResponsiveness.long_task_count += 1;
+          androidNativeResponsiveness.last_long_task_ms = duration;
+          androidNativeResponsiveness.max_long_task_ms = Math.max(androidNativeResponsiveness.max_long_task_ms, duration);
+        }
+      });
+      androidNativeResponsivenessObserver.observe({ type: "longtask", buffered: true });
+    } catch {
+      androidNativeResponsivenessObserver = null;
+    }
+  }
+  let expected = performance.now() + ANDROID_NATIVE_RESPONSIVENESS_LOOP_MS;
+  androidNativeResponsivenessLoopTimer = window.setInterval(() => {
+    const now = performance.now();
+    const lag = Math.max(0, now - expected);
+    expected = now + ANDROID_NATIVE_RESPONSIVENESS_LOOP_MS;
+    androidNativeResponsiveness.sample_count += 1;
+    androidNativeResponsiveness.last_event_loop_lag_ms = roundedPerfMs(lag);
+    androidNativeResponsiveness.max_event_loop_lag_ms = Math.max(androidNativeResponsiveness.max_event_loop_lag_ms, roundedPerfMs(lag));
+    if (lag >= 50) androidNativeResponsiveness.event_loop_lag_over_50ms_count += 1;
+    if (lag >= 100) androidNativeResponsiveness.event_loop_lag_over_100ms_count += 1;
+    androidNativeResponsiveness.input_pending = androidNativeInputPending();
+    androidNativeResponsiveness.recent_user_input = androidNativeRecentUserInput();
+    androidNativeResponsiveness.document_hidden = Boolean(document.hidden);
+  }, ANDROID_NATIVE_RESPONSIVENESS_LOOP_MS);
+  const scheduleResponsivenessPost = (delayMs) => {
+    androidNativeResponsivenessTimer = window.setTimeout(async () => {
+      const overloadedBeforeSample = androidNativeResponsivenessOverloadedNow();
+      if (!overloadedBeforeSample) await sampleAndroidNativeHealthRtt();
+      await postAndroidNativeResponsiveness(overloadedBeforeSample ? "overloaded_interval" : "interval");
+      scheduleResponsivenessPost(overloadedBeforeSample
+        ? ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_INTERVAL_MS
+        : ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS);
+    }, delayMs);
+  };
+  scheduleResponsivenessPost(ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS);
+  void sampleAndroidNativeHealthRtt().finally(() => postAndroidNativeResponsiveness("startup"));
+}
+
+function wakePacketFromNativeObsPayload(payload = {}) {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const nested = body.payload && typeof body.payload === "object" ? body.payload : body;
+  const runtime = nested.runtime_diagnostics && typeof nested.runtime_diagnostics === "object" ? nested.runtime_diagnostics : nested;
+  return runtime.voice_wake || runtime.voiceWake || nested.voice_wake || nested.voiceWake || body.wake_word_state || body.wakeWordState || body;
+}
+
+async function handleNativeObsCommand(fields = {}, frame = {}) {
+  const command = {
+    id: cleanText(fields.command_id, ""),
+    type: normalizeWakeWordNativeControlCommandType(fields.op || fields.type || ""),
+    payload: fields.payload_json && typeof fields.payload_json === "object" ? fields.payload_json : {},
+  };
+  if (!command.id) return;
+  nativeObsSend("COMMAND_ACK", {
+    device_id: androidNativeControlDeviceId(),
+    command_id: command.id,
+    op: command.type,
+    status: "accepted",
+    ts_ms: Date.now(),
+  }, { ack: frame.seq || 0 });
+  let result;
+  const started = performance.now();
+  try {
+    result = await executeAndroidNativeControlCommand(command);
+  } catch (error) {
+    result = { ok: false, command: command.type, error: errorMessage(error) };
+  }
+  nativeObsSend("COMMAND_ACK", {
+    device_id: androidNativeControlDeviceId(),
+    command_id: command.id,
+    op: command.type,
+    status: "finished",
+    latency_ms: Math.max(0, Math.round(performance.now() - started)),
+    result_json: {
+      ...result,
+      reason: "wao",
+      executedAt: new Date().toISOString(),
+      capabilities: androidNativeControlCapabilities(),
+    },
+  }, { ack: frame.seq || 0 });
+}
+
+function handleNativeObsFrame(frame = {}) {
+  const fields = frame.fields && typeof frame.fields === "object" ? frame.fields : {};
+  if (frame.type === "COMMAND") {
+    void handleNativeObsCommand(fields, frame);
+    return;
+  }
+  if (frame.type === "EVENT" || frame.type === "STATE_PATCH" || frame.type === "SNAPSHOT") {
+    const payload = fields.payload_json || fields.snapshot_json || {};
+    const stream = cleanText(fields.stream, "");
+    const eventType = cleanText(fields.type || fields.kind, "");
+    if (frame.type === "SNAPSHOT" && fields.snapshot_json) {
+      renderWakeWordAgentView(fields.snapshot_json, "snapshot");
+    }
+    if (stream === "wake" || eventType.includes("wake") || payload?.schema?.includes?.("wake")) {
+      const packet = wakePacketFromNativeObsPayload(payload);
+      wakeWordLastState = { ...wakeWordLegacyState(wakeWordLastState), ...wakeWordLegacyState(packet) };
+      wakeWordLastStateAt = Date.now();
+      updateWakeWordAvatarFromState(wakeWordLastState, "wao");
+      if (els.wakeWordModal && !els.wakeWordModal.hidden) {
+        renderWakeWordModal(wakeWordLastState);
+        renderWakeWordJsonOutput(wakeWordLastState);
+        void refreshWakeWordAgentView("wao", { force: true });
+      }
+    }
+    return;
+  }
+  if (frame.type === "ERROR") {
+    recordUserEvent("native_observability_error", {
+      status: cleanText(fields.status, ""),
+      reason: cleanText(fields.reason, ""),
+    });
+  }
+}
+
+function nativeObsSendHeartbeat() {
+  nativeObsSend("HEARTBEAT", {
+    device_id: androidNativeControlDeviceId(),
+    build_id: cleanText(androidNativeShellInfo().buildId, ""),
+    route: androidNativeControlRoute(),
+    runtime: "android-webview",
+    ts_ms: Date.now(),
+  });
+}
+
+function scheduleNativeObsReconnect(reason = "closed") {
+  if (nativeObsReconnectTimer || !isAndroidNativeShell()) return;
+  nativeObsReconnectTimer = window.setTimeout(() => {
+    nativeObsReconnectTimer = 0;
+    connectAndroidNativeObservability(reason);
+  }, NATIVE_OBS_RECONNECT_MS);
+}
+
+function connectAndroidNativeObservability(reason = "startup") {
+  if (!isAndroidNativeShell() || !nativeObsCanUseSocket()) return false;
+  const deviceId = androidNativeControlDeviceId();
+  if (!deviceId) return false;
+  if (nativeObsSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(nativeObsSocket.readyState)) return true;
+  try {
+    nativeObsSocket = new WebSocket(nativeObsSocketUrl());
+    nativeObsSocket.binaryType = "arraybuffer";
+  } catch (error) {
+    recordUserEvent("native_observability_connect_failed", {
+      reason,
+      error: errorMessage(error),
+    });
+    scheduleNativeObsReconnect("connect-error");
+    return false;
+  }
+  nativeObsSocket.addEventListener("open", () => {
+    nativeObsConnected = true;
+    clientBootMark("native_observability_socket_open");
+    nativeObsSend("HELLO", {
+      device_id: deviceId,
+      role: "android-webview",
+      topics: ["wake", "commands", "android.audio", "bridge", "errors", "performance"],
+      build_id: cleanText(androidNativeShellInfo().buildId, ""),
+      route: androidNativeControlRoute(),
+      runtime: "android-webview",
+      payload_json: androidNativeControlCapabilities(),
+    });
+    nativeObsPublishWakeState(getWakeWordState({ force: true }), "hello");
+    nativeObsSend("SNAPSHOT_REQ", {
+      device_id: deviceId,
+      topics: ["wake", "commands", "android.audio", "bridge", "errors", "performance"],
+      cursor: Math.max(0, wakeWordAgentViewCursor - 20),
+      token_budget: 1200,
+    });
+    if (nativeObsHeartbeatTimer) window.clearInterval(nativeObsHeartbeatTimer);
+    nativeObsHeartbeatTimer = window.setInterval(nativeObsSendHeartbeat, NATIVE_OBS_HEARTBEAT_MS);
+  });
+  nativeObsSocket.addEventListener("message", (event) => {
+    try {
+      const frame = typeof event.data === "string"
+        ? { type: "EVENT", fields: JSON.parse(event.data) }
+        : waoDecodeFrame(event.data);
+      handleNativeObsFrame(frame);
+    } catch (error) {
+      recordUserEvent("native_observability_decode_failed", {
+        reason,
+        error: errorMessage(error),
+      });
+    }
+  });
+  nativeObsSocket.addEventListener("close", () => {
+    nativeObsConnected = false;
+    if (nativeObsHeartbeatTimer) window.clearInterval(nativeObsHeartbeatTimer);
+    nativeObsHeartbeatTimer = 0;
+    scheduleNativeObsReconnect("closed");
+  });
+  nativeObsSocket.addEventListener("error", () => {
+    nativeObsConnected = false;
+  });
+  return true;
+}
+
 async function postAndroidNativeControlResult(command, result) {
   const deviceId = androidNativeControlDeviceId();
   if (!deviceId || !command?.id) return;
@@ -31306,7 +32407,7 @@ async function postAndroidNativeControlResult(command, result) {
       body: {
         device_id: deviceId,
         command_id: command.id,
-        command_type: command.type,
+        command_type: normalizeWakeWordNativeControlCommandType(command.type),
         result,
       },
     });
@@ -31320,7 +32421,7 @@ async function postAndroidNativeControlResult(command, result) {
 }
 
 async function executeAndroidNativeControlCommand(command = {}) {
-  const type = cleanText(command.type || command.command, "");
+  const type = normalizeWakeWordNativeControlCommandType(command.type || command.command);
   const payload = command.payload && typeof command.payload === "object" ? command.payload : {};
   const bridge = androidGeneralNativeBridge();
   wakeWordLastStateAt = 0;
@@ -31335,35 +32436,156 @@ async function executeAndroidNativeControlCommand(command = {}) {
       timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
     });
   }
-  if (type === "open_wake_world") {
-    openWakeWorldModal({ source: "native-control" });
+  if (type === "open_wake_word") {
+    openWakeWordModal({ source: "native-control" });
     const queued = payload.startListener !== false
-      ? queueWakeWorldBridgeAction("start", "native-control-open-wake-world")
+      ? queueWakeWordBridgeAction("start", "native-control-open-wake-word")
       : null;
-    return { ok: true, command: type, opened: true, started: payload.startListener !== false, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+    return { ok: true, command: type, opened: true, started: payload.startListener !== false, queued, state: wakeWordLegacyState(getWakeWordState({ force: true })) };
   }
   if (type === "start_voice_wake") {
-    const queued = queueWakeWorldBridgeAction("start", "native-control-start-voice-wake");
-    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+    if (payload.restart === true || payload.forceRestart === true || payload.force_restart === true) {
+      try { bridge?.disableVoiceWake?.(); } catch {}
+      await new Promise((resolve) => setTimeout(resolve, Number(payload.stopSettleMs || payload.stop_settle_ms || 800)));
+      try { bridge?.requestVoiceWakePermission?.(); } catch {}
+      try { bridge?.enableVoiceWake?.(); } catch (error) {
+        return { ok: false, command: type, restarted: false, error: errorMessage(error), state: wakeWordLegacyState(getWakeWordState({ force: true })) };
+      }
+      await new Promise((resolve) => setTimeout(resolve, Number(payload.settleMs || payload.settle_ms || 1800)));
+      wakeWordLastStateAt = 0;
+      const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+      renderWakeWordModal(statePacket);
+      renderWakeWordJsonOutput(statePacket);
+      return { ok: true, command: type, restarted: true, state: wakeWordLegacyState(statePacket) };
+    }
+    const queued = queueWakeWordBridgeAction("start", "native-control-start-voice-wake");
+    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWordState({ force: true })) };
   }
   if (type === "stop_voice_wake") {
-    const queued = queueWakeWorldBridgeAction("stop", "native-control-stop-voice-wake");
-    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+    const queued = queueWakeWordBridgeAction("stop", "native-control-stop-voice-wake");
+    return { ok: true, command: type, queued, state: wakeWordLegacyState(getWakeWordState({ force: true })) };
   }
-  if (type === "refresh_wake_world_state") {
-    const statePacket = runWakeWorldOperation("fetch_wake_world_state") || getWakeWorldState({ force: true });
-    renderWakeWorldModal(statePacket);
+  if (type === "refresh_wake_word_state") {
+    const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+    renderWakeWordModal(statePacket);
     renderWakeWordJsonOutput(statePacket);
     return { ok: true, command: type, state: wakeWordLegacyState(statePacket) };
   }
   if (type === "apply_wake_word_policy") {
-    const result = applyWakeWordPolicy(payload);
-    return { ok: Boolean(result?.ok !== false), command: type, result, state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+    const result = applyWakeWordPolicy(payload, { includeInputs: false });
+    return { ok: Boolean(result?.ok !== false), command: type, result, stateRefreshDeferred: true };
+  }
+  if (type === "install_openwakeword_bundle") {
+    if (typeof bridge?.installOpenWakeWordBundle !== "function") {
+      return { ok: false, command: type, error: "native_openwakeword_install_unavailable" };
+    }
+    const bundleUrl = cleanText(payload.bundleUrl || payload.bundle_url || "/native/android/openwakeword-bundle/latest.zip", "");
+    const sha256 = cleanText(payload.sha256 || payload.bundleSha256 || payload.bundle_sha256 || "", "");
+    const install = parseNativeBridgePayload(bridge.installOpenWakeWordBundle(bundleUrl, sha256)) || { ok: false, error: "empty_openwakeword_install_result" };
+    const policy = applyWakeWordPolicy({
+      wakePhrase: cleanText(payload.wakePhrase || payload.wake_phrase || install.wakePhrase || wakeWordCurrentPhrase(), WAKE_WORD_DEFAULT_PHRASE),
+      wakeThreshold: Number(payload.wakeThreshold || payload.wake_threshold || WAKE_WORD_DEFAULT_THRESHOLD),
+      startListener: payload.startListener !== false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, Number(payload.settleMs || 1200)));
+    const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+    renderWakeWordModal(statePacket);
+    renderWakeWordJsonOutput(statePacket);
+    return { ok: Boolean(install.ok), command: type, install, policy, state: wakeWordLegacyState(statePacket) };
+  }
+  if (type === "play_wake_phrase_probe") {
+    const phrase = cleanText(payload.phrase || payload.wakePhrase || payload.wake_phrase || wakeWordCurrentPhrase(), WAKE_WORD_DEFAULT_PHRASE);
+    const before = wakeWordLegacyState(getWakeWordState({ force: true }));
+    openWakeWordModal({ source: "native-control-probe" });
+    if (payload.startListener !== false) queueWakeWordBridgeAction("start", "native-control-wake-phrase-probe");
+    if (typeof bridge?.playWakePhraseProbe === "function") {
+      const playback = parseNativeBridgePayload(bridge.playWakePhraseProbe(JSON.stringify({
+        phrase,
+        language: cleanText(payload.lang || payload.language, "en-US"),
+        rate: Number(payload.rate || 0.9),
+        pitch: Number(payload.pitch || 1),
+        timeoutMs: Number(payload.timeoutMs || 7000),
+      }))) || { ok: false, error: "empty_native_tts_result" };
+      await new Promise((resolve) => setTimeout(resolve, Number(payload.settleMs || 1800)));
+      const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+      renderWakeWordModal(statePacket);
+      renderWakeWordJsonOutput(statePacket);
+      return {
+        ok: Boolean(playback.ok),
+        command: type,
+        phrase,
+        nativePlayback: playback,
+        before,
+        after: wakeWordLegacyState(statePacket),
+      };
+    }
+    const synth = window.speechSynthesis;
+    if (!synth || typeof window.SpeechSynthesisUtterance !== "function") {
+      return { ok: false, command: type, error: "speech_synthesis_unavailable", phrase, state: before };
+    }
+    try {
+      synth.cancel?.();
+      await new Promise((resolve, reject) => {
+        const utterance = new SpeechSynthesisUtterance(phrase);
+        utterance.lang = cleanText(payload.lang || payload.language, "en-US");
+        utterance.rate = Number(payload.rate || 0.92);
+        utterance.pitch = Number(payload.pitch || 1);
+        utterance.volume = Number(payload.volume || 1);
+        const timer = setTimeout(() => reject(new Error("speech_synthesis_timeout")), Number(payload.timeoutMs || 6000));
+        utterance.onend = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        utterance.onerror = (event) => {
+          clearTimeout(timer);
+          reject(new Error(cleanText(event?.error, "speech_synthesis_error")));
+        };
+        synth.speak(utterance);
+      });
+    } catch (error) {
+      return { ok: false, command: type, error: errorMessage(error) || "speech_synthesis_failed", phrase, state: before };
+    }
+    await new Promise((resolve) => setTimeout(resolve, Number(payload.settleMs || 1400)));
+    const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+    renderWakeWordModal(statePacket);
+    renderWakeWordJsonOutput(statePacket);
+    return {
+      ok: true,
+      command: type,
+      phrase,
+      spoken: true,
+      before,
+      after: wakeWordLegacyState(statePacket),
+    };
+  }
+  if (type === "score_wake_phrase_probe") {
+    const before = wakeWordLegacyState(getWakeWordState({ force: true }));
+    openWakeWordModal({ source: "native-control-score-probe" });
+    if (typeof bridge?.scoreWakePhraseProbe !== "function") {
+      return { ok: false, command: type, error: "native_score_probe_unavailable", before };
+    }
+    const score = parseNativeBridgePayload(bridge.scoreWakePhraseProbe(JSON.stringify({
+      durationMs: Number(payload.durationMs || payload.duration_ms || 3500),
+      restartListener: payload.restartListener !== false,
+      stopListenerFirst: payload.stopListenerFirst !== false,
+      includePcmBase64: payload.includePcmBase64 === true || payload.include_pcm_base64 === true,
+    }))) || { ok: false, error: "empty_native_score_result" };
+    await new Promise((resolve) => setTimeout(resolve, Number(payload.settleMs || 1200)));
+    const statePacket = runWakeWordOperation("fetch_wake_word_state") || getWakeWordState({ force: true });
+    renderWakeWordModal(statePacket);
+    renderWakeWordJsonOutput(statePacket);
+    return {
+      ok: Boolean(score.ok),
+      command: type,
+      score,
+      before,
+      after: wakeWordLegacyState(statePacket),
+    };
   }
   if (type === "upload_diagnostics" || type === "export_diagnostics") {
     return runAndroidNativeIdleTask(() => {
       const exported = exportAndroidNativeDiagnostics();
-      return { ok: true, command: type, exported: Boolean(exported), state: wakeWordLegacyState(getWakeWorldState({ force: true })) };
+      return { ok: true, command: type, exported: Boolean(exported), state: wakeWordLegacyState(getWakeWordState({ force: true })) };
     }, {
       force: payload.force === true,
       allowHidden: payload.allowHidden === true,
@@ -31378,20 +32600,42 @@ async function executeAndroidNativeControlCommand(command = {}) {
 }
 
 async function pollAndroidNativeControl(reason = "interval") {
-  if (!isAndroidNativeShell() || androidNativeControlPollBusy) return;
+  if (!isAndroidNativeShell() || androidNativeControlPollBusy) {
+    if (androidNativeControlPollBusy) {
+      androidNativeResponsiveness.native_control_poll_skipped_count += 1;
+      androidNativeResponsiveness.native_control_poll_skip_reason = "poll_busy";
+    }
+    return;
+  }
+  if (nativeObsConnected && reason !== "startup") {
+    androidNativeResponsiveness.native_control_poll_skipped_count += 1;
+    androidNativeResponsiveness.native_control_poll_skip_reason = "wao_connected";
+    return;
+  }
   const deviceId = androidNativeControlDeviceId();
   if (!deviceId) return;
   const budget = androidNativeControlCanRun({ allowHidden: reason === "startup" });
-  if (!budget.ok) return;
+  if (!budget.ok) {
+    androidNativeResponsiveness.native_control_poll_skipped_count += 1;
+    androidNativeResponsiveness.native_control_poll_skip_reason = budget.reason;
+    return;
+  }
   androidNativeControlPollBusy = true;
+  const started = performance.now();
+  let commandCount = 0;
   try {
     const query = new URLSearchParams({
       device_id: deviceId,
       build_id: cleanText(androidNativeShellInfo().buildId, ""),
       route: androidNativeControlRoute(),
     });
-    const payload = await fetchJson(`/native/control/poll?${query.toString()}`, { timeoutMs: 5000 });
+    const payload = await androidNativeTrackPromise(
+      "native_control.poll",
+      fetchJson(`/native/control/poll?${query.toString()}`, { timeoutMs: 5000 }),
+      { reason, route: androidNativeControlRoute() },
+    );
     const commands = Array.isArray(payload?.commands) ? payload.commands : [];
+    commandCount = commands.length;
     for (const command of commands) {
       let result;
       try {
@@ -31411,7 +32655,17 @@ async function pollAndroidNativeControl(reason = "interval") {
       reason,
       error: errorMessage(error),
     });
+    androidNativeResponsiveness.native_control_poll_skip_reason = "poll_failed";
   } finally {
+    const latency = roundedPerfMs(performance.now() - started);
+    androidNativeResponsiveness.native_control_poll_latency_ms = latency;
+    androidNativeResponsiveness.native_control_poll_command_count = commandCount;
+    androidNativeLastControlPoll = {
+      reason,
+      latency_ms: latency,
+      command_count: commandCount,
+      finished_at: new Date().toISOString(),
+    };
     androidNativeControlPollBusy = false;
   }
 }
@@ -31419,6 +32673,8 @@ async function pollAndroidNativeControl(reason = "interval") {
 function startAndroidNativeControlAgent() {
   if (!isAndroidNativeShell() || androidNativeControlPollTimer) return;
   installAndroidNativeUxBudgetGuards();
+  startAndroidNativeResponsivenessMonitor();
+  connectAndroidNativeObservability("startup");
   void pollAndroidNativeControl("startup");
   androidNativeControlPollTimer = window.setInterval(() => {
     void pollAndroidNativeControl("interval");
@@ -31427,14 +32683,37 @@ function startAndroidNativeControlAgent() {
 
 async function pollNativeVoiceWakeTimeline(reason = "poll") {
   if (!isAndroidNativeShell()) return;
+  if (reason !== "startup" && androidNativeResponsivenessOverloadedNow()) return;
   try {
     const payload = await fetchJson("/native/events/voice/latest", { timeoutMs: 5000 });
     const event = payload?.event || null;
     if (!payload?.available || !event) return;
     const sessionId = cleanText(event.session_id, "");
-    if (!sessionId || sessionId === state.nativeVoiceWakeLastSessionId) return;
+    const eventType = cleanText(event.type || event.kind, "voice_command");
+    const eventKey = sessionId || `${eventType}:${cleanText(event.received_at || event.started_at || event.ended_at, "")}`;
+    if (!eventKey || eventKey === state.nativeVoiceWakeLastSessionId) return;
+    state.nativeVoiceWakeLastSessionId = eventKey;
+    if (eventType === "wake_detected" || eventType === "command_capture_started") {
+      triggerAgentAvatarWakeShine({
+        last_confidence: Number(event.wake_confidence || event.confidence || 0),
+        last_wake_confidence: Number(event.wake_confidence || event.confidence || 0),
+        last_wake_at: Number(event.started_at || Date.parse(event.received_at || "") || Date.now()),
+        wake_hit_count: Number(state.nativeVoiceWakeLastHitCount || 0) + 1,
+        listener_mode: eventType === "command_capture_started" ? "transcribing" : "awake",
+      }, eventType);
+      return;
+    }
+    if (eventType !== "voice_command" || !sessionId) return;
     state.nativeVoiceWakeLastSessionId = sessionId;
-    const command = routeWakeWorldCommand(event.transcript || "");
+    const command = routeWakeWordCommand(event.command || event.transcript || "");
+    triggerAgentAvatarWakeShine({
+      last_confidence: Number(event.wake_confidence || event.confidence || 0),
+      last_wake_confidence: Number(event.wake_confidence || event.confidence || 0),
+      last_wake_at: Number(event.started_at || event.received_at || Date.now()),
+      wake_hit_count: Number(state.nativeVoiceWakeLastHitCount || 0) + 1,
+      listener_mode: "transcribing",
+      transcript_gate_last_result: cleanText(event.transcript, ""),
+    }, "voice_event");
     recordUserEvent("voice_command", {
       target: "android-native",
       summary: cleanText(event.transcript, "Voice command"),
@@ -31458,10 +32737,22 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
 function startNativeVoiceWakeTimelinePolling() {
   if (!isAndroidNativeShell() || state.nativeVoiceWakePollInterval) return;
   clientBootMark("native_voice_timeline_polling_start");
+  refreshWakeWordAvatarState("startup");
   void pollNativeVoiceWakeTimeline("startup");
   state.nativeVoiceWakePollInterval = window.setInterval(() => {
-    void pollNativeVoiceWakeTimeline("interval");
-  }, 5000);
+    if (!androidNativeResponsivenessOverloadedNow()) {
+      if (nativeObsConnected) {
+        const now = Date.now();
+        if (now - Number(state.nativeVoiceWakeLastWaoHeartbeatAt || 0) >= NATIVE_VOICE_WAKE_WAO_HEARTBEAT_MS) {
+          state.nativeVoiceWakeLastWaoHeartbeatAt = now;
+          refreshWakeWordAvatarState("wao-heartbeat");
+        }
+        return;
+      }
+      refreshWakeWordAvatarState("interval");
+      void pollNativeVoiceWakeTimeline("interval");
+    }
+  }, NATIVE_VOICE_WAKE_TIMELINE_POLL_MS);
 }
 
 function renderNativeDebugModal() {
@@ -36987,7 +38278,7 @@ function wireEvents() {
   els.homeFleetButton?.addEventListener("click", openFleetModal);
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
   els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
-  els.homeTuneVoiceButton?.addEventListener("click", () => openWakeWorldModal());
+  els.homeTuneVoiceButton?.addEventListener("click", () => openWakeWordModal());
   els.closeTuneVoiceModalButton?.addEventListener("click", closeTuneVoiceWizard);
   els.tuneVoiceBackButton?.addEventListener("click", () => {
     if (tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown") return cancelTuneVoiceRecording();
@@ -37039,19 +38330,20 @@ function wireEvents() {
   els.agentVoiceWakeDisableButton?.addEventListener("click", () => {
     callNativeDebugBridge("disableVoiceWake", "Hermes voice disabled");
   });
-  els.closeWakeWorldModalButton?.addEventListener("click", () => closeWakeWorldModal());
-  els.wakeWorldRefreshButton?.addEventListener("click", () => wakeWorldBridgeAction("refresh"));
-  els.wakeWorldCopyButton?.addEventListener("click", () => void copyWakeWorldJson());
-  els.wakeWorldFalseWakeFetchButton?.addEventListener("click", () => wakeWorldBridgeAction("fetch_false_wakes"));
-  els.wakeWorldFalseWakeDrainButton?.addEventListener("click", () => wakeWorldBridgeAction("drain_false_wakes"));
-  els.wakeWorldRestartButton?.addEventListener("click", () => wakeWorldBridgeAction("restart"));
-  els.wakeWorldStartButton?.addEventListener("click", () => wakeWorldBridgeAction("start"));
-  els.wakeWorldStopButton?.addEventListener("click", () => wakeWorldBridgeAction("stop"));
-  els.wakeWorldProofStandbyButton?.addEventListener("click", () => wakeWorldBridgeAction("proof_standby"));
-  els.wakeWorldProofAppButton?.addEventListener("click", () => wakeWorldBridgeAction("proof_app"));
-  els.wakeWorldTrainButton?.addEventListener("click", openTuneVoiceWizard);
+  els.closeWakeWordModalButton?.addEventListener("click", () => closeWakeWordModal());
+  els.wakeWordRefreshButton?.addEventListener("click", () => wakeWordBridgeAction("refresh"));
+  els.wakeWordCopyButton?.addEventListener("click", () => void copyWakeWordJson());
+  els.wakeWordFalseWakeFetchButton?.addEventListener("click", () => wakeWordBridgeAction("fetch_false_wakes"));
+  els.wakeWordFalseWakeDrainButton?.addEventListener("click", () => wakeWordBridgeAction("drain_false_wakes"));
+  els.wakeWordRestartButton?.addEventListener("click", () => wakeWordBridgeAction("restart"));
+  els.wakeWordStartButton?.addEventListener("click", () => wakeWordBridgeAction("start"));
+  els.wakeWordStopButton?.addEventListener("click", () => wakeWordBridgeAction("stop"));
+  els.wakeWordProofStandbyButton?.addEventListener("click", () => wakeWordBridgeAction("proof_standby"));
+  els.wakeWordProofAppButton?.addEventListener("click", () => wakeWordBridgeAction("proof_app"));
+  els.wakeWordTrainButton?.addEventListener("click", openTuneVoiceWizard);
   els.wakeWordSessionButton?.addEventListener("click", startWakeWordTuningSession);
   els.wakeWordStepDoneButton?.addEventListener("click", completeWakeWordTuningStep);
+  els.wakeWordInstallModelButton?.addEventListener("click", () => void installWakeWordModelFromLab());
   els.wakeWordApplyPolicyButton?.addEventListener("click", () => applyWakeWordPolicy());
   els.androidConnectionCheckButton?.addEventListener("click", () => void checkAndroidConnection());
   els.androidVoiceTuningProofButton?.addEventListener("click", () => void runAndroidVoiceTuningDiagnostic("prove_android_voice_tuning", {
@@ -37118,7 +38410,7 @@ function wireEvents() {
   installModalBackdropDismiss(els.nativeModal, closeNativeModal);
   installModalBackdropDismiss(els.nativeDebugModal, closeNativeDebugModal);
   installModalBackdropDismiss(els.tuneVoiceModal, closeTuneVoiceWizard);
-  installModalBackdropDismiss(els.wakeWorldModal, closeWakeWorldModal);
+  installModalBackdropDismiss(els.wakeWordModal, closeWakeWordModal);
   window.setTimeout(pollHermesWakeExportRequest, 1500);
   window.setInterval(pollHermesWakeExportRequest, 5000);
   window.setTimeout(pollHermesWakeInstallRequest, 1800);
@@ -37394,7 +38686,7 @@ async function bootstrapAuthenticatedApp() {
   if (state.authenticatedBootstrapped) {
     renderAuthGate();
     maybeOpenRequestedTuneVoiceWizard("authenticated_bootstrapped");
-    maybeOpenRequestedWakeWorldModal("authenticated_bootstrapped");
+    maybeOpenRequestedWakeWordModal("authenticated_bootstrapped");
     notifyNativeAppReady("authenticated-app-ready");
     return;
   }
@@ -37434,7 +38726,7 @@ async function bootstrapAuthenticatedApp() {
     state.refreshInterval = window.setInterval(refresh, isAndroidNativeShell() ? ANDROID_NATIVE_REFRESH_INTERVAL_MS : 15000);
   }
   maybeOpenRequestedTuneVoiceWizard("bootstrap_complete");
-  maybeOpenRequestedWakeWorldModal("bootstrap_complete");
+  maybeOpenRequestedWakeWordModal("bootstrap_complete");
   notifyNativeAppReady("authenticated-app-ready", {
     refresh_interval: Boolean(state.refreshInterval),
   });

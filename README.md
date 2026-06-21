@@ -98,6 +98,27 @@ Detailed registry: `docs/context/CLAIMS.md`.
 
 Build success is not runtime proof. Missing proof demotes the claim.
 
+## Verified Loop-Aware Engineering
+
+For meaningful native, bridge, wake-word, hot-op, runtime-control, release, or
+rebuild-heavy work, use Rule-of-Three Prime Checkpoints:
+
+| Role | Owns |
+| --- | --- |
+| Builder | Patch, shortcut, hot-op, HMR path, diagnostics, or validation approach. |
+| Watcher | Independent truth checks from tests, logs, runtime state, diagnostics, counters, app/device state, or reproducible proof. |
+| Gatekeeper | Authorization: accept shortcut, require rebuild, rollback, block, or escalate. |
+
+The same Codex/Frontier instance may perform all three roles, but the report
+must keep Builder intent, Watcher evidence, and Gatekeeper decision separate.
+Prefer three evidence classes for rebuild-heavy/native/runtime work: static
+evidence, runtime evidence, and behavioral evidence.
+
+Prime checkpoints must be atomic, independent, falsifiable, observable, and
+non-redundant. Examples: service running, permission granted, model SHA matches,
+hot-op returned success, recent wake event visible, false-wake counter stable,
+or simulator smoke passed. Do not treat "looks good" or build success as proof.
+
 ## Durable Next Actions
 
 Canonical current next actions live in `docs/context/MAP.md` and the nearest
@@ -122,7 +143,7 @@ owning child README. Update both together when a next action changes.
 
 ## Windows Hot-Op Shell
 
-The Windows native app is a minimal bridge shell for live Android/Hermes proof
+The Windows native app is a minimal bridge shell for live Android wake proof
 iteration. It exposes stable primitives and manifest-scanned hot ops instead of
 embedding workflow logic in the installed shell. With a verified installer
 already present, run `python3 tools/windows/check-windows-release-feed.py`,
@@ -151,11 +172,37 @@ tests can verify the contract shape, but installed runtime proof still requires
 the Windows/Android commands above.
 
 This layer can change launcher/runtime UI, diagnostics schemas/classifiers,
-proof/debug scripts, config, model metadata, operation routing, and Hermes wake
+proof/debug scripts, config, model metadata, operation routing, and wake-word
 threshold policy without a native rebuild when required capabilities already
 exist. Native rebuilds are still required for new OS permissions, native
 libraries, manifest/service declarations, installer/APK behavior, package
 identity, signing, or a new hardware/OS primitive.
+
+## Current Android Wake Loop
+
+The current shortest production-candidate wake phrase is `alexa`, using the
+installed OpenWakeWord bundle and Windows native-control bridge as the control
+plane. `hey jarvis` did not fire with the installed model, and Hermes is a later
+personalized/custom-word path rather than the active baseline target.
+
+Physical device ADB is Windows-bridge-only in this setup. The Codex/cloud
+workspace may have an `adb` binary, but `adb devices` from here is expected to
+show no Android device and is not evidence that the USB Android device is gone.
+Use Windows bridge hot ops/native-control for ADB-backed Android checks,
+stimulus, app launch/recovery, reinstall, diagnostics, and wake proof.
+
+Current live policy evidence on 2026-06-20 used `wakePhrase=alexa`,
+`wakeThreshold=0.985`, `wakeConfirmationFrames=1`,
+`wakeConfirmationWindowMs=700`, and `wakeCooldownMs=8000`. A real-device proof
+on Xiaomi Mi 9 SE through the Windows bridge heard `alexa. open wake word`,
+transcribed `open wake word`, routed `open_wake_word`, and dispatched HTTP 200
+to the active session while `open settings` did not increment wake or false-wake
+counters. Baseline is not accepted yet: the avatar shine is still too late
+because the PWA currently reacts after post-transcript voice events, the faster
+balanced ASR plan degraded to `word` after about 10.5s, and installed APK event
+metadata still reports `wake_word: hermes` until the native metadata patch is
+rebuilt/reinstalled. Hard-environment tests with music/noise are phase two after
+the Alexa wake, transcript, and immediate avatar feedback loop is stable.
 
 ## Copilotability Fast Path
 
@@ -165,6 +212,10 @@ knobs, prefer those channels before asking the user to describe the screen or
 before proposing rebuild/reinstall loops. Heavy access such as screenshots, log
 bundles, or full diagnostics must be explicit, idle-gated, bounded, redacted,
 and allowed to skip during active user interaction.
+
+Observability and controlled accessibility are core engineering infrastructure:
+they let agents understand live app state, validate hypotheses, reduce rebuild
+dependency, and shorten slow loops without bypassing safety gates.
 
 Every substantive reply should end with a concrete next-step phase: name the
 next command/action, say whether it is live introspection/control, static check,
@@ -186,7 +237,7 @@ identity requires it.
 
 <!-- BEGIN ACTIVE_STATE -->
 <!-- This block is generated by tools/context/check-context-sync.py --fix. -->
-**Active goal:** Install the feed-published Windows hot-op shell, prove the installed bridge, then use hot ops to classify why spoken Hermes does not trigger an action.
+**Active goal:** Use the installed Windows native-control bridge to tune the Android Alexa wake loop until wake, transcript, command routing, and avatar feedback are stable enough for phase-two hard-environment tests.
 
 **Canonical proof order:**
 
@@ -194,14 +245,15 @@ identity requires it.
 2. `python3 tools/windows/check-windows-release-feed.py`
 3. `python3 tools/windows/prove-hot-shell.py`
 4. `python3 tools/doctor/wasm-agent-doctor.py`
-5. `python3 tools/voice/run-hermes-wake-proof.py --dry-run`
-6. `python3 tools/voice/run-hermes-wake-proof.py --debug`
+5. `native/android/scripts/watch-wake-state.sh`
+6. `python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase "alexa. open wake word" --observe-sec 24 --settle-sec 2 --state-source command --label alexa-command --volume 100 --rate -2`
+7. `python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source command --label alexa-negative --volume 100 --rate -2`
 
 **Windows hot-op shell protocol:** `shellProtocolVersion: 2`, `hotOpsProtocolVersion: 1`
 
 **Required shell capabilities:** `get_bridge_status`, `list_hot_operations`, `run_shell_self_test`, `run_hot_operation`, `canary_echo`
 
-**Hermes wake question:** Does spoken Hermes fail because threshold is not crossed, wake event is not emitted, or command capture/UI routing does not start?
+**Alexa wake question:** Can the installed OpenWakeWord Alexa loop fire promptly, start post-wake transcription without long linger, route `open wake word`, and trigger avatar shine at wake/capture time instead of waiting for the final transcript?
 
 **Proof guards:**
 
@@ -210,5 +262,7 @@ identity requires it.
 - Go Native / Check Update depends on the Windows release feed, and same-semver Windows updates must compare buildId.
 - Do not claim Android runtime proof from APK package proof alone.
 - Do not treat bridge_update_required or hot_operation_missing as Android wake failures.
-- Do not use old command-specific Windows bridge handlers as the canonical Hermes wake proof path.
+- Do not use old command-specific Windows bridge handlers as the canonical wake proof path.
+- Do not treat Hermes as the active baseline phrase unless a new installed model/runtime proof makes it current again.
+- Do not use Codex/cloud-local ADB as Android connectivity evidence; this setup reaches the device only through the installed Windows bridge.
 <!-- END ACTIVE_STATE -->

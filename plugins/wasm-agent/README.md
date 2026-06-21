@@ -19,7 +19,7 @@ download/update, and bridge work.
 | Frontier operator loop | implemented-unverified | focused server/control tests or gated curl proof | Commands must remain authenticated, audited, bounded, and operation-based. |
 | Dev HMR | implemented-unverified | `horc simulate web`; JS smoke tests | Local developer convenience, not production sync contract. |
 | Hermes Wake data/model loop | implemented-unverified | Android bridge/model tests and device proof | Prefer dataset/model iteration over APK rebuilds. |
-| Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWorldState()`; `apply_wake_word_policy`; `GET /native/android/wake-world-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside. |
+| Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWordState()`; `apply_wake_word_policy`; `GET /native/android/wake-word-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside and avatar wake feedback from live state. |
 | Host Browser/CDP | implemented-unverified | security-loop/browser tests | Disabled by default on public HTTPS unless explicitly reviewed. |
 | Windows installed-app behavior | implemented-unverified | Windows verifier in `native/windows` | Do not claim fixed from PWA/source tests. |
 | Android runtime behavior | implemented-unverified | `horc simulate android` | Report must name the behavior proven. |
@@ -100,27 +100,90 @@ The active Hermes wake debug question is whether spoken "Hermes" fails because
 the wake threshold is not crossed, the wake event is not emitted, or command
 capture/UI routing does not start.
 
-Wake Word is the PWA control center for Hermes wake behavior. It reads the
+Wake Word is the PWA control center for device-aware wake behavior. It reads the
 same Android foreground-service state packet used by Frontier:
 `files/native-diagnostics/voice-wake.json`,
-`WasmAgentNative.getWakeWorldState()`, downloaded operation
-`fetch_wake_world_state`, and backend endpoint
-`GET /native/android/wake-world-state` after native diagnostics upload. The
-Wake World state endpoint is an idempotent public native-diagnostics read that
+`WasmAgentNative.getWakeWordState()`, downloaded operation
+`fetch_wake_word_state`, and backend endpoint
+`GET /native/android/wake-word-state` after native diagnostics upload. The
+Wake Word state endpoint is an idempotent public native-diagnostics read that
 returns redacted summary state only. It selects the newest uploaded diagnostics
 record that contains Android `voice_wake` state, so later boot-trace uploads do
-not hide the latest wake packet. Train Hermes Wake remains the existing sample
-wizard and is launched from inside Wake Word. On Android native, opening Wake
-Word auto-requests/starts the listener when it is not already active, while the
+not hide the latest wake packet. It also merges newer non-null
+native-control command result overlays, such as `refresh_wake_word_state`
+counters and `apply_wake_word_policy` results, so agent views do not lag behind
+fresh command proof. Its compact state includes the configured wake phrase,
+proof-session flag, model source, ONNX/runtime readiness, service/audio-read
+counters, wake/false-wake counts, transcript plan, and live policy thresholds
+so agents and hot ops can classify the wake loop without fetching the full
+native diagnostics blob. Train Hermes Wake remains the existing sample wizard
+and is launched from inside Wake Word. On Android native, opening Wake Word
+auto-requests/starts the listener when it is not already active, while the
 explicit Stop control remains available.
+
+The Wake Word modal is also the live lab. It shows a compact stage/prompt panel,
+tracks the configured wake phrase, and lights the embedded `wasm-chat-avatar`
+when `last_wake_at`, `wake_hit_count`, or `command_capture_active` indicates
+the device heard the wake phrase. Existing open-source wake phrases are valid
+first-test candidates when their model satisfies the Android raw-PCM ONNX
+contract; the endpoint name `/native/android/hermes-wake-model/latest` remains
+for bridge compatibility. This is UI feedback only until Android runtime proof
+shows a functional packaged/installed model, wake hit, avatar shine, and bounded
+transcription handoff.
+
+The current fast-path lab flow uses WAO-backed live evidence: the modal's
+Install model action reads `/native/android/hermes-wake-model/latest.json`,
+installs the staged bundle through the Android bridge, applies live
+`wakePhrase`/`wakeThreshold` policy, and starts the listener. The compact agent
+view in the modal reads `/native/obs/agent-view` and WAO socket snapshots so
+Codex can follow ordered wake/command evidence without dumping the full native
+JSON packet. The staged openWakeWord first-test bundle is currently metadata
+`wakePhrase: alexa`; the Android classifier filename may still be
+`hey_jarvis.onnx` because that is the engine contract path, not the spoken
+phrase claim. The lab default threshold is `0.92`; lower it only as a temporary
+proof policy when confidence evidence shows the wake phrase is below threshold.
+
+Stage a compatible candidate for the install queue with:
+
+```bash
+tools/voice/stage-wake-model-candidate.py \
+  --model path/to/model.onnx \
+  --wake-phrase "hey jarvis" \
+  --model-name "open-source hey jarvis"
+```
+
+The staging script writes the current candidate and metadata under
+`state/native-diagnostics/android-hermes-wake-models/latest/`; the install
+request includes that phrase metadata so the Android-hosted PWA can install the
+model and apply the wake phrase policy without another APK rebuild.
+
+For the open-source openWakeWord lane, stage the full Android bundle instead of
+only the wake classifier:
+
+```bash
+tools/voice/stage-openwakeword-bundle.py \
+  --source-dir path/to/openwakeword-onnx-files \
+  --wake-phrase "hey jarvis" \
+  --model-name "openWakeWord hey jarvis"
+```
+
+The bundle must contain `melspectrogram.onnx`, `embedding_model.onnx`, and
+`hey_jarvis.onnx`. When `openwakeword.zip` is staged, the install request uses
+`engineContract: openwakeword_bundle` and the Android bridge installs it into
+`files/voice/openwakeword`.
 
 Android native app steering is server-core and bounded through
 `/native/control/*`. The Android-hosted PWA polls `/native/control/poll` with
-its native device id, executes Wake World commands through the existing bridge
+its native device id, executes Wake Word commands through the existing bridge
 methods, and posts `/native/control/result`. Initial server-controlled commands
-are `open_wake_world`, `start_voice_wake`, `stop_voice_wake`,
-`refresh_wake_world_state`, and `apply_wake_word_policy`; this lets an operator
+are `open_wake_word`, `start_voice_wake`, `stop_voice_wake`,
+`refresh_wake_word_state`, and `apply_wake_word_policy`; this lets an operator
 open Wake Word and start the listener without relying on local taps.
+Native voice events also normalize post-Hermes command transcripts before UI
+routing: Vosk `[unk]` markers and filler words are stripped, grammar aliases
+such as `wake word`, `start listener`, `stop listener`, and clipped `listener`
+map to canonical commands, and backend artifacts keep both raw and normalized
+transcript fields.
 
 Android native bootstrap favors first-touch responsiveness over eager admin
 hydration. On Android Home, renderer diagnostics are compacted/chunk-flushed to
@@ -134,11 +197,48 @@ explicit proof/debug work rather than tab-open work.
 The Wake Word modal also starts a guided tuning session. During a session, the
 PWA can apply live policy through downloaded operation `apply_wake_word_policy`
 without rebuilding the APK. The first live knobs are `wakeThreshold`,
-`vadRmsThreshold`, `vadPeakThreshold`, and `tuningSessionId`; Android stores
+`wakeConfirmationFrames`, `wakeConfirmationWindowMs`, `vadRmsThreshold`,
+`vadPeakThreshold`, and `tuningSessionId`; Android stores
 them in app preferences, refreshes the foreground-service provider set, and
-continues listening. A 2026-06-17 installed run showed threshold `0.58`
+continues listening. The confirmation knobs distinguish raw model spikes from
+accepted wake hits so background children, notifications, or video speech can be
+recorded as hard negatives without immediately starting command capture. The
+local closed-loop runner `tools/voice/run-wake-room-loop.py` can queue Windows
+speech/system-sound stimuli and read Android wake deltas through
+native-control/WAO state. A 2026-06-17 installed run showed threshold `0.58`
 over-triggered (`wake_hit_count: 910`, `false_wake_count: 909`), so the
-conservative baseline is `wakeThreshold: 0.92` plus a short wake cooldown.
+conservative baseline is a high threshold plus normal VAD/cooldown. A
+2026-06-19 live recovery found proof mode latched on after acceptance testing;
+proof mode bypasses VAD by design and made the listener appear to wake on
+ordinary sound. Stop/start returned the installed service to
+`proof_session_active: false`, `wake_hits: 0`, `false_wake_count: 0`; a short
+ambient hold admitted only five VAD frames with max confidence `0.487` below
+threshold `0.99`. Source now clears proof mode on any non-proof start/status,
+but installed APK runtime proof is still required before claiming that fix is
+deployed.
+The same 2026-06-19 live loop proved the first normal-mode wake/transcript path:
+spoken `alexa` peaked at `0.9993` against threshold `0.99`, command capture
+started, and Android SpeechRecognizer returned `can you hear me`. The installed
+APK still counted that nonblank freeform transcript as `unknown_command` and
+false-wake evidence. Source now leaves blank transcripts as false wakes but
+routes nonblank transcripts with no canonical command as active-session
+freeform input; APK install/runtime proof remains required before treating that
+behavior as deployed.
+After the freeform patch was installed as
+`android-universal-20260619T192505Z`, WAO evidence showed `can you hear me`
+dispatched as active-session freeform input with `command: ""`, but lab/proof
+mode also allowed duplicate wake hits from the same utterance tail. Source now
+honors cooldown during proof/lab mode and adds a post-transcript cooldown before
+standby so duplicate detections do not become false-wake samples. A later
+`android-universal-20260619T194451Z` install proved freeform routing but also
+showed ordinary room/video speech crossing the old `0.99` proof clamp with
+confidence as high as `0.9997707605` and being dispatched as active-session
+input. WAO live policy `wakeThreshold=0.999`, `vadRmsThreshold=0.04`, and
+`vadPeakThreshold=5000` stopped new wake events during a 40 second
+background-video hold at `20:01:50Z`. Source now exposes `wakeCooldownMs` as a
+live policy, and the Windows proof helper no longer clamps requested threshold
+to `0.99`. Install and real-device runtime proof are still required for the
+cooldown patch and any two-stage verifier/model replacement.
 
 ## Claim Boundaries
 
@@ -156,22 +256,20 @@ conservative baseline is `wakeThreshold: 0.92` plus a short wake cooldown.
 
 <!-- BEGIN ACTIVE_STATE -->
 <!-- This block is generated by tools/context/check-context-sync.py --fix. -->
-**Active goal:** Install the feed-published Windows hot-op shell, prove the installed bridge, then use hot ops to classify why spoken Hermes does not trigger an action.
+**Active goal:** Use the installed Windows native-control bridge to tune the Android Alexa wake loop until wake, transcript, command routing, and avatar feedback are stable enough for phase-two hard-environment tests.
 
 **Canonical proof order:**
 
-1. `cd native/windows/src && npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe`
-2. `python3 tools/windows/check-windows-release-feed.py`
-3. `python3 tools/windows/prove-hot-shell.py`
-4. `python3 tools/doctor/wasm-agent-doctor.py`
-5. `python3 tools/voice/run-hermes-wake-proof.py --dry-run`
-6. `python3 tools/voice/run-hermes-wake-proof.py --debug`
+1. `python3 tools/windows/prove-hot-shell.py --wait-sec 120`
+2. Inspect latest Android WAO/native-control state for `app.responsiveness`, wake policy, audio freshness, and inference movement.
+3. `python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "alexa. open wake word" --observe-sec 28 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-positive --volume 100 --rate -2`
+4. `python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-negative-open-settings --volume 100 --rate -2`
 
 **Windows hot-op shell protocol:** `shellProtocolVersion: 2`, `hotOpsProtocolVersion: 1`
 
 **Required shell capabilities:** `get_bridge_status`, `list_hot_operations`, `run_shell_self_test`, `run_hot_operation`, `canary_echo`
 
-**Hermes wake question:** Does spoken Hermes fail because threshold is not crossed, wake event is not emitted, or command capture/UI routing does not start?
+**Alexa wake question:** Can the installed OpenWakeWord Alexa loop fire promptly, keep inference moving during room stimulus, start post-wake transcription without long linger, route `open wake word`, and trigger avatar shine at wake/capture time instead of waiting for the final transcript?
 
 **Proof guards:**
 
@@ -180,5 +278,39 @@ conservative baseline is `wakeThreshold: 0.92` plus a short wake cooldown.
 - Go Native / Check Update depends on the Windows release feed, and same-semver Windows updates must compare buildId.
 - Do not claim Android runtime proof from APK package proof alone.
 - Do not treat bridge_update_required or hot_operation_missing as Android wake failures.
-- Do not use old command-specific Windows bridge handlers as the canonical Hermes wake proof path.
+- Do not treat Codex/cloud-local `adb devices` as Android connectivity evidence; this setup reaches the phone only through the installed Windows bridge.
+- Do not treat Hermes or Hey Jarvis as the active baseline phrase unless a new installed model/runtime proof makes one current again.
+- Do not move to music/noise/hard-environment phase two until baseline Alexa wake, transcript, routing, avatar feedback latency, duplicate-wake control, and app responsiveness are accepted.
 <!-- END ACTIVE_STATE -->
+
+**Current wake loop gate, 2026-06-20T12:46Z:** Android device control/ADB for
+the physical phone is through the installed Windows bridge only; cloud-local
+ADB is not authoritative. The active baseline is Alexa on
+`android-universal-20260620T115820Z`, not Hermes/Hey Jarvis. Timeline-aware
+room proof routed `alexa. open wake word` to `open_wake_word` with transcript
+`open wake word`. A later confirmation-2 trial still routed the positive
+utterance but produced duplicate wake events in the same room loop; the
+`open settings` negative then produced no timeline wake. Direct ADB service
+start from the hot-op is rejected by Android because `HermesVoiceWakeService`
+is non-exported (`Requires permission not exported from uid 10130`), so
+production policy must go through the Android app/WAO `apply_wake_word_policy`
+control path. That app-mediated path now proves `proof_session_active=false`,
+Alexa, confirmation frames `2`, confirmation window `700ms`, and cooldown
+`8000ms`; however the installed service still reports `wake_threshold=0.92`
+after requesting `0.999`, so threshold propagation remains unresolved. Do not
+move to music/noise phase two yet: the Android WebView is currently overloaded,
+with fresh `app.responsiveness` evidence showing multi-second frame gaps,
+event-loop lag, long tasks, and `/health` RTT/timeouts around 2500ms.
+Wake tuning is gated on restoring fluid app responsiveness and then rerunning
+positive/negative proofs with the `responsiveness` section from
+`tools/voice/run-wake-room-loop.py` healthy.
+
+**Resume commands for tomorrow:**
+
+```bash
+python3 tools/windows/prove-hot-shell.py --wait-sec 120
+# Direct hot-op service start should classify as service_start_rejected until an app-mediated service control route replaces it.
+python3 tools/voice/run-hermes-wake-proof.py --debug --production-listener --wake-phrase alexa --wake-threshold 0.999 --wake-confirmation-frames 2 --wake-confirmation-window-ms 700 --wake-cooldown-ms 8000 --wait-ms 5000
+python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "alexa. open wake word" --observe-sec 28 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-positive --volume 100 --rate -2
+python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-negative-open-settings --volume 100 --rate -2
+```

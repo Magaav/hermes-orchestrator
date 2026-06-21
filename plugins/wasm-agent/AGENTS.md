@@ -25,6 +25,10 @@ state, and product UI surfaces.
 - Frontier/control routes must stay authenticated, audited, bounded, and
   operation-based. Do not add arbitrary shell execution or unauthenticated
   global reload controls.
+- For Frontier, native bridge, release feed, hot-op, diagnostics, and runtime
+  control changes, use the repo-wide Verified Loop-Aware Engineering doctrine:
+  separate Builder intent, Watcher evidence, and Gatekeeper decision; prefer
+  static, runtime, and behavioral evidence when possible.
 - Generated reports, diagnostics, uploaded datasets, pid files, and mutable
   caches stay under `state/` or `reports/` unless a reviewed fixture is needed.
 
@@ -36,6 +40,9 @@ state, and product UI surfaces.
 - For server/API work, also read `server/README.md`.
 - For config defaults, also read `conf/README.md`.
 - For generated/local state handling, also read `state/README.md`.
+- Before rebuild-heavy or runtime-control work, prefer live introspection,
+  HMR, hot-op, runtime config, downloaded runtime/model metadata, or a small
+  diagnostic probe when that safely shortens the loop.
 - Keep durable next actions short and actionable. If the handoff grows into a
   log, move details to the nearest focused doc and leave a pointer.
 

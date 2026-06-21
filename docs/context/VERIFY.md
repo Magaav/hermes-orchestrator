@@ -35,6 +35,34 @@ make context-fix
 Use `REVIEW.md` to answer the JSON test from docs only. If any field requires
 guessing, update the route map, claim registry, or nearest child docs.
 
+## Loop-Aware Evidence
+
+For meaningful native, bridge, wake-word, hot-op, runtime-control, release, or
+rebuild-heavy work, verification should include prime checkpoints and, whenever
+possible, the 3 x evidence triangle.
+
+Prime checkpoint quality:
+
+| Requirement | Meaning |
+| --- | --- |
+| Atomic | Checks one clear behavior or fact. |
+| Independent | Does not depend only on the Builder's claim. |
+| Falsifiable | Can produce a pass/fail or matching/missing result. |
+| Observable | Has command output, report path, log, counter, runtime state, or diagnostic evidence. |
+| Non-redundant | Does not duplicate another checkpoint under a different name. |
+
+Preferred evidence triangle:
+
+| Evidence class | Examples |
+| --- | --- |
+| Static | Type check, lint, unit test, build output, syntax check, source/feed contract test. |
+| Runtime | App/native status, service state, bridge status, diagnostics, permissions, model path/SHA, counters, recent events, ADB/logcat. |
+| Behavioral | Simulator pass, hot-op result, UI flow, wake simulation, command execution, replay, regression check. |
+
+Do not use vague checkpoints such as "looks good", "probably works", "agent
+verified it", or "it compiled, so it works". Build success is static evidence
+only; it is not runtime proof.
+
 ## wasm-agent
 
 ```bash
@@ -144,14 +172,14 @@ Preferred first reads/actions:
 
 ```text
 native control command: get_runtime_snapshot
-GET https://wa.colmeio.com/native/android/wake-world-state
-native control command: open_wake_world
+GET https://wa.colmeio.com/native/android/wake-word-state
+native control command: open_wake_word
 native control command: start_voice_wake
 native control command: apply_wake_word_policy
 ```
 
 `get_runtime_snapshot` is intentionally compact: active panel, open modals,
-Wake World status, capabilities, recent redacted events, recent interaction
+Wake Word status, capabilities, recent redacted events, recent interaction
 trace, and at most 30 visible controls. It is UX-budgeted and may return a
 skipped result during active touch/typing/scrolling. Treat skipped as a reason
 to retry later, not as a user-facing failure.
@@ -169,7 +197,7 @@ transcriptPossibleSilenceMs
 transcriptAcceptPartial
 ```
 
-The cloud Wake World state may include `diagnosis` and `policy_presets`.
+The cloud Wake Word state may include `diagnosis` and `policy_presets`.
 Treat them as loop-shortening guidance, not installed runtime proof. A preset
 still needs a native control `apply_wake_word_policy` result and a fresh
 post-speech upload to prove behavior.

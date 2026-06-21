@@ -24,6 +24,14 @@ CLI wrappers.
   default so each release-promotion rebuild publishes a fresh update identity
   into the native release feed; use `HORC_ANDROID_PRESERVE_BUILD_ID=1` only for
   intentional reproducible rebuilds.
+- `horc build android-fast` is the debug APK inner-loop lane. It uses the same
+  Android toolchain selection as the release lane, then skips release signing,
+  promotion, package proof, and native feed publication.
+- `horc build win-fast` is the Windows native inner-loop lane. It runs local
+  Node checks and optional `win-unpacked` packaging, then skips the NSIS
+  installer, installer verification, installed-app proof, and native feed
+  publication. On Linux aarch64 it also skips Wine resource editing unless
+  `HORC_WIN_FAST_RESOURCE_EDIT=1` is set.
 - `delete` prompts interactively unless `--yes` or `HERMES_HORC_ASSUME_YES=1`
   is used.
 - `purge-node` is intentionally two-step: request first, then confirm with the

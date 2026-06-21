@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import base64
 import calendar
+from datetime import datetime, timezone
 from html import escape as html_escape
 import hashlib
 import hmac
@@ -42,6 +43,12 @@ except Exception:  # pragma: no cover - optional runtime guard
 
 PLUGIN_NAME = "wasm-agent"
 PLUGIN_VERSION = "0.1.0"
+ANDROID_WAKE_WORD_STATE_PATH = "/native/android/wake-word-state"
+LEGACY_ANDROID_WAKE_WORD_STATE_PATH = "/native/android/" + "wake-" + "world-state"
+LEGACY_ANDROID_WAKE_WORD_SCHEMA_KEY = "wake_" + "world_schema"
+LEGACY_ANDROID_WAKE_WORD_SCHEMA_PREFIX = "hermes.wasm_agent.android_wake_" + "world_state"
+LEGACY_ANDROID_OPEN_WAKE_WORD_COMMAND = "open_wake_" + "world"
+LEGACY_ANDROID_REFRESH_WAKE_WORD_STATE_COMMAND = "refresh_wake_" + "world_state"
 ANDROID_PACKAGE_NAME = "com.colmeio.wasmagent"
 ANDROID_SIGNING_CERT_SHA256 = "70:6F:93:2F:4A:1E:F8:95:FD:73:76:D9:97:06:F7:87:12:D0:F5:CC:00:43:71:7A:FA:0B:8A:95:86:19:B1:CE"
 DEPLOYMENT_MODE_LOCAL = "local"
@@ -92,6 +99,9 @@ DEFAULT_CAMERA_PUSH_PLAYBACK_GAP_SEC = 5.0
 NATIVE_CONTROL_DEFAULT_COMMAND_TIMEOUT_SEC = 30
 NATIVE_CONTROL_COMMAND_TIMEOUT_SEC = {
     "run_shell_self_test": 10,
+    "play_wake_phrase_probe": 20,
+    "play_audio_stimulus": 20,
+    "score_wake_phrase_probe": 90,
 }
 DEFAULT_CAMERA_PUSH_TIMELINE_SAMPLE_SEC = 30
 CAMERA_PUSH_MJPEG_BOUNDARY = "wasm-agent-push"
@@ -114,6 +124,7 @@ WASM_AGENT_SNOWFLAKE_EPOCH_MS = 1767225600000
 DEFAULT_WA_ENV_PATH = Path(__file__).resolve().parents[1] / "conf" / "wa.env"
 DEFAULT_AUTH_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_db.sqlite3"
 DEFAULT_AUTH_SECRET_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_auth_secret"
+DEFAULT_OBSERVABILITY_DB_PATH = Path(__file__).resolve().parents[1] / "state" / "db" / "sqlite" / "wa_observability.sqlite3"
 AUTH_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 30
 ACTIVE_BRIDGE_TASK_STATUSES = {"active", "in_progress", "pending", "queued", "running", "started", "stopping", "submitted", "working"}
 PROVIDER_MODELS_URLS = {
@@ -168,6 +179,65 @@ SHARED_SPACE_POINTER_BINARY_MAGIC = b"WAPB"
 SHARED_SPACE_POINTER_BINARY_HEADER_BYTES = 36
 SHARED_SPACE_POINTER_BINARY_SAMPLE_BYTES = 10
 SHARED_SPACE_POINTER_BINARY_MAX_SAMPLES = 32
+WAO_MAGIC = b"WAO1"
+WAO_VERSION = 1
+WAO_HEADER = struct.Struct("<4sBBHIIQQQ")
+WAO_HEADER_BYTES = WAO_HEADER.size
+WAO_TLV_HEADER = struct.Struct("<HBBI")
+WAO_TLV_NULL = 0
+WAO_TLV_BOOL = 1
+WAO_TLV_I64 = 2
+WAO_TLV_F64 = 3
+WAO_TLV_UTF8 = 4
+WAO_TLV_BYTES = 5
+WAO_TLV_JSON = 6
+WAO_FRAME_TYPES = {
+    "HELLO": 1,
+    "DICT": 2,
+    "EVENT": 3,
+    "STATE_PATCH": 4,
+    "COMMAND": 5,
+    "COMMAND_ACK": 6,
+    "SNAPSHOT_REQ": 7,
+    "SNAPSHOT": 8,
+    "BLOB_CHUNK": 9,
+    "HEARTBEAT": 10,
+    "ERROR": 11,
+}
+WAO_FRAME_TYPE_NAMES = {value: key for key, value in WAO_FRAME_TYPES.items()}
+WAO_FIELD_IDS = {
+    "device_id": 1,
+    "stream": 2,
+    "type": 3,
+    "key": 4,
+    "ts_ms": 5,
+    "command_id": 6,
+    "op": 7,
+    "status": 8,
+    "priority": 9,
+    "deadline_ms": 10,
+    "result_json": 11,
+    "payload_json": 12,
+    "reason": 13,
+    "route": 14,
+    "build_id": 15,
+    "app_version": 16,
+    "runtime": 17,
+    "seq_start": 18,
+    "seq_end": 19,
+    "latency_ms": 20,
+    "evidence_refs": 21,
+    "topics": 22,
+    "cursor": 23,
+    "token_budget": 24,
+    "snapshot_json": 25,
+    "kind": 26,
+    "schema": 27,
+    "role": 28,
+}
+WAO_FIELD_NAMES = {value: key for key, value in WAO_FIELD_IDS.items()}
+WAO_RING_LIMIT = 4096
+WAO_RETENTION_SEC = 24 * 60 * 60
 SHARED_SPACE_PRESENCE_TTL_SEC = 20
 SHARED_SPACE_EVENT_LIMIT = 240
 SHARED_SPACE_ROOM_PUBLIC_EVENT_LIMIT = 80
@@ -271,6 +341,13 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.remote_control_live_clients_lock = threading.Lock()
         self.shared_space_live_clients: dict[str, set[Any]] = {}
         self.shared_space_live_clients_lock = threading.Lock()
+        self.observability_hub = ObservabilityHub(self)
+
+    def server_close(self) -> None:
+        try:
+            self.observability_hub.close()
+        finally:
+            super().server_close()
 
 
 def endpoint_path(path: str, endpoint: str) -> bool:
@@ -378,6 +455,21 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 )
                 return
             serve_shared_space_room_live(self, user)
+            return
+        if path == "/native/obs/v1":
+            if not native_observability_ws_allowed(self, user):
+                self._json(
+                    HTTPStatus.FORBIDDEN,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "native_observability_forbidden",
+                            "message": "Native observability WebSocket requires same-origin auth or native-control operator access.",
+                        },
+                    },
+                )
+                return
+            serve_native_observability_ws(self, user)
             return
         if path == "/camera/stream":
             try:
@@ -559,9 +651,9 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
-        if path == "/native/android/wake-world-state":
+        if path in {ANDROID_WAKE_WORD_STATE_PATH, LEGACY_ANDROID_WAKE_WORD_STATE_PATH}:
             try:
-                self._json(HTTPStatus.OK, latest_native_android_wake_world_state(self.server))
+                self._json(HTTPStatus.OK, latest_native_android_wake_word_state(self.server))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -604,6 +696,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/native/android/hermes-wake-model/latest":
             try:
                 serve_native_android_hermes_wake_model(self.server, self)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/native/android/openwakeword-bundle/latest.zip":
+            try:
+                serve_native_android_openwakeword_bundle(self.server, self)
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -1206,6 +1304,30 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 {"ok": True, "authenticated": False, "user": None},
                 headers={"Set-Cookie": auth_cookie("", max_age=0, handler=self)},
             )
+            return
+        if path == "/native/obs/query":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, native_observability_query(self.server, body, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_observability_query_error", "message": str(exc)}},
+                )
+            return
+        if path == "/native/obs/agent-view":
+            try:
+                body = self._read_json(max_bytes=64 * 1024)
+                self._json(HTTPStatus.OK, native_observability_agent_view(self.server, body, self, user))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except Exception as exc:
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": {"code": "native_observability_agent_view_error", "message": str(exc)}},
+                )
             return
         if path == "/native/diagnostics":
             try:
@@ -5495,6 +5617,505 @@ def write_json_file(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
+def observability_db_path(server: WasmAgentServer | None = None) -> Path:
+    raw = os.getenv("HERMES_WASM_AGENT_OBS_DB_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    if server is not None:
+        return (server.state_dir / "db" / "sqlite" / "wa_observability.sqlite3").resolve()
+    if wasm_agent_deployment_mode() == DEPLOYMENT_MODE_CLOUD:
+        return (default_private_state_dir() / "db" / "sqlite" / "wa_observability.sqlite3").resolve()
+    return DEFAULT_OBSERVABILITY_DB_PATH.resolve()
+
+
+def ensure_observability_schema(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.DatabaseError:
+        pass
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_event (
+          seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          device_id TEXT NOT NULL,
+          ts_ms INTEGER NOT NULL,
+          stream TEXT NOT NULL,
+          type TEXT NOT NULL,
+          schema_id INTEGER NOT NULL DEFAULT 0,
+          flags INTEGER NOT NULL DEFAULT 0,
+          payload_blob BLOB NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_latest (
+          device_id TEXT NOT NULL,
+          key TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          value_blob BLOB NOT NULL,
+          updated_ts_ms INTEGER NOT NULL,
+          PRIMARY KEY(device_id, key)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_command (
+          command_id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          op TEXT NOT NULL,
+          status TEXT NOT NULL,
+          priority INTEGER NOT NULL DEFAULT 0,
+          deadline_ms INTEGER NOT NULL DEFAULT 0,
+          issued_seq INTEGER NOT NULL DEFAULT 0,
+          ack_seq INTEGER NOT NULL DEFAULT 0,
+          result_blob BLOB NOT NULL DEFAULT X''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_blob (
+          blob_id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          created_ts_ms INTEGER NOT NULL,
+          metadata_blob BLOB NOT NULL DEFAULT X''
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS obs_blob_chunk (
+          blob_id TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          payload_blob BLOB NOT NULL,
+          PRIMARY KEY(blob_id, chunk_index)
+        )
+        """
+    )
+    for statement in (
+        "CREATE INDEX IF NOT EXISTS obs_event_device_seq_idx ON obs_event(device_id, seq)",
+        "CREATE INDEX IF NOT EXISTS obs_event_stream_ts_idx ON obs_event(stream, ts_ms)",
+        "CREATE INDEX IF NOT EXISTS obs_event_type_ts_idx ON obs_event(type, ts_ms)",
+        "CREATE INDEX IF NOT EXISTS obs_command_device_status_idx ON obs_command(device_id, status, deadline_ms)",
+    ):
+        conn.execute(statement)
+
+
+def observability_connect(server: WasmAgentServer | None = None) -> sqlite3.Connection:
+    path = observability_db_path(server)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=5, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    ensure_observability_schema(conn)
+    return conn
+
+
+def wao_compact_json_bytes(payload: Any) -> bytes:
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=True).encode("utf-8")
+
+
+def wao_value_to_tlv(value: Any) -> tuple[int, bytes]:
+    if value is None:
+        return WAO_TLV_NULL, b""
+    if isinstance(value, bool):
+        return WAO_TLV_BOOL, b"\x01" if value else b"\x00"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return WAO_TLV_I64, struct.pack("<q", int(value))
+    if isinstance(value, float):
+        return WAO_TLV_F64, struct.pack("<d", float(value))
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return WAO_TLV_BYTES, bytes(value)
+    if isinstance(value, (dict, list, tuple)):
+        return WAO_TLV_JSON, wao_compact_json_bytes(value)
+    return WAO_TLV_UTF8, str(value).encode("utf-8")
+
+
+def wao_tlv_to_value(value_type: int, payload: bytes) -> Any:
+    if value_type == WAO_TLV_NULL:
+        return None
+    if value_type == WAO_TLV_BOOL:
+        return bool(payload and payload[0])
+    if value_type == WAO_TLV_I64 and len(payload) == 8:
+        return struct.unpack("<q", payload)[0]
+    if value_type == WAO_TLV_F64 and len(payload) == 8:
+        return struct.unpack("<d", payload)[0]
+    if value_type == WAO_TLV_BYTES:
+        return payload
+    if value_type == WAO_TLV_JSON:
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except Exception:
+            return {}
+    if value_type == WAO_TLV_UTF8:
+        return payload.decode("utf-8", "replace")
+    return payload
+
+
+def wao_encode_tlv(fields: dict[str, Any]) -> bytes:
+    encoded = bytearray()
+    for name, value in fields.items():
+        field_id = WAO_FIELD_IDS.get(name)
+        if not field_id:
+            continue
+        value_type, payload = wao_value_to_tlv(value)
+        encoded.extend(WAO_TLV_HEADER.pack(field_id, value_type, 0, len(payload)))
+        encoded.extend(payload)
+    return bytes(encoded)
+
+
+def wao_decode_tlv(payload: bytes) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    offset = 0
+    while offset + WAO_TLV_HEADER.size <= len(payload):
+        field_id, value_type, _flags, length = WAO_TLV_HEADER.unpack_from(payload, offset)
+        offset += WAO_TLV_HEADER.size
+        if length < 0 or offset + length > len(payload):
+            break
+        raw = payload[offset:offset + length]
+        offset += length
+        name = WAO_FIELD_NAMES.get(field_id, f"field_{field_id}")
+        fields[name] = wao_tlv_to_value(value_type, raw)
+    return fields
+
+
+def wao_frame_type_id(value: str | int) -> int:
+    if isinstance(value, int):
+        return value
+    return WAO_FRAME_TYPES.get(str(value or "").strip().upper(), WAO_FRAME_TYPES["EVENT"])
+
+
+def wao_encode_frame(
+    frame_type: str | int,
+    fields: dict[str, Any] | None = None,
+    *,
+    schema_id: int = 0,
+    flags: int = 0,
+    session: int = 0,
+    seq: int = 0,
+    ack: int = 0,
+    monotonic_ms: int | None = None,
+    payload: bytes | None = None,
+) -> bytes:
+    body = payload if payload is not None else wao_encode_tlv(fields or {})
+    header = WAO_HEADER.pack(
+        WAO_MAGIC,
+        WAO_VERSION,
+        wao_frame_type_id(frame_type),
+        int(schema_id) & 0xFFFF,
+        int(flags) & 0xFFFFFFFF,
+        int(session) & 0xFFFFFFFF,
+        int(seq) & 0xFFFFFFFFFFFFFFFF,
+        int(ack) & 0xFFFFFFFFFFFFFFFF,
+        int(monotonic_ms if monotonic_ms is not None else time.monotonic() * 1000) & 0xFFFFFFFFFFFFFFFF,
+    )
+    return header + body
+
+
+def wao_decode_frame(frame: bytes) -> dict[str, Any]:
+    if len(frame) < WAO_HEADER_BYTES:
+        raise BrowserError("wao_frame_too_short", "WAO frame is shorter than the fixed header.")
+    magic, version, frame_type, schema_id, flags, session, seq, ack, monotonic_ms = WAO_HEADER.unpack_from(frame, 0)
+    if magic != WAO_MAGIC:
+        raise BrowserError("wao_bad_magic", "WAO frame magic mismatch.")
+    if version != WAO_VERSION:
+        raise BrowserError("wao_bad_version", "Unsupported WAO frame version.")
+    return {
+        "magic": magic.decode("ascii"),
+        "version": version,
+        "type_id": frame_type,
+        "type": WAO_FRAME_TYPE_NAMES.get(frame_type, f"UNKNOWN_{frame_type}"),
+        "schema_id": schema_id,
+        "flags": flags,
+        "session": session,
+        "seq": seq,
+        "ack": ack,
+        "monotonic_ms": monotonic_ms,
+        "fields": wao_decode_tlv(frame[WAO_HEADER_BYTES:]),
+    }
+
+
+class ObservabilityHub:
+    def __init__(self, server: WasmAgentServer) -> None:
+        self.server = server
+        self.conn = observability_connect(server)
+        self.lock = threading.Lock()
+        self.clients_lock = threading.Lock()
+        self.clients: dict[BrowserClientWebSocket, dict[str, Any]] = {}
+        self.ring: list[dict[str, Any]] = []
+
+    def close(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+
+    def register_client(self, client_ws: BrowserClientWebSocket, *, device_id: str = "", role: str = "", topics: str = "") -> None:
+        with self.clients_lock:
+            self.clients[client_ws] = {
+                "device_id": native_device_id_from_value(device_id, ""),
+                "role": clipped_verbatim(role or "device", 40),
+                "topics": clipped_verbatim(topics, 400),
+                "connected_at": int(time.time() * 1000),
+            }
+
+    def unregister_client(self, client_ws: BrowserClientWebSocket) -> None:
+        with self.clients_lock:
+            self.clients.pop(client_ws, None)
+
+    def client_count(self, device_id: str = "") -> int:
+        safe_device = native_device_id_from_value(device_id, "")
+        with self.clients_lock:
+            if not safe_device:
+                return len(self.clients)
+            return sum(1 for meta in self.clients.values() if meta.get("device_id") == safe_device)
+
+    def broadcast(self, frame: bytes, *, device_id: str = "", source: BrowserClientWebSocket | None = None) -> int:
+        safe_device = native_device_id_from_value(device_id, "")
+        stale: list[BrowserClientWebSocket] = []
+        sent = 0
+        with self.clients_lock:
+            targets = [
+                client
+                for client, meta in self.clients.items()
+                if client is not source and (not safe_device or meta.get("device_id") in {"", safe_device} or meta.get("role") == "observer")
+            ]
+        for client in targets:
+            try:
+                client.send_frame(0x2, frame)
+                sent += 1
+            except Exception:
+                stale.append(client)
+        for client in stale:
+            self.unregister_client(client)
+        return sent
+
+    def record_event(
+        self,
+        device_id: str,
+        stream: str,
+        event_type: str,
+        payload: Any,
+        *,
+        schema_id: int = 0,
+        flags: int = 0,
+        latest_key: str = "",
+        source: BrowserClientWebSocket | None = None,
+    ) -> dict[str, Any]:
+        safe_device = native_device_id_from_value(device_id, "unknown")
+        clean_stream = clipped_verbatim(str(stream or "native"), 120)
+        clean_type = clipped_verbatim(str(event_type or "event"), 120)
+        ts_ms = int(time.time() * 1000)
+        payload_blob = bytes(payload) if isinstance(payload, (bytes, bytearray, memoryview)) else wao_compact_json_bytes(payload)
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO obs_event(device_id, ts_ms, stream, type, schema_id, flags, payload_blob) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (safe_device, ts_ms, clean_stream, clean_type, int(schema_id), int(flags), payload_blob),
+            )
+            seq = int(self.conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            key = latest_key or f"{clean_stream}.{clean_type}"
+            self.conn.execute(
+                """
+                INSERT INTO obs_latest(device_id, key, seq, value_blob, updated_ts_ms)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, key) DO UPDATE SET
+                  seq=excluded.seq,
+                  value_blob=excluded.value_blob,
+                  updated_ts_ms=excluded.updated_ts_ms
+                """,
+                (safe_device, key, seq, payload_blob, ts_ms),
+            )
+            self.conn.execute("DELETE FROM obs_event WHERE ts_ms < ?", (ts_ms - WAO_RETENTION_SEC * 1000,))
+            self.conn.commit()
+            item = {"seq": seq, "device_id": safe_device, "ts_ms": ts_ms, "stream": clean_stream, "type": clean_type}
+            self.ring.append(item)
+            if len(self.ring) > WAO_RING_LIMIT:
+                del self.ring[: len(self.ring) - WAO_RING_LIMIT]
+        frame = wao_encode_frame("EVENT", {
+            "device_id": safe_device,
+            "stream": clean_stream,
+            "type": clean_type,
+            "ts_ms": ts_ms,
+            "payload_json": payload if isinstance(payload, (dict, list, tuple)) else {"bytes": len(payload_blob)},
+        }, schema_id=schema_id, flags=flags, seq=seq)
+        self.broadcast(frame, device_id=safe_device, source=source)
+        return {**item, "ok": True}
+
+    def record_command(self, command: dict[str, Any], *, status: str = "pending", ack_seq: int = 0, result: Any = None) -> None:
+        device_id = native_device_id_from_value(command.get("device_id"), "unknown")
+        command_id = safe_state_id(str(command.get("id") or command.get("command_id") or "unknown"), "unknown")
+        op = clipped_verbatim(str(command.get("type") or command.get("command") or ""), 120)
+        payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+        deadline_ms = int(native_control_iso_to_epoch(command.get("deadline_at")) * 1000) if command.get("deadline_at") else 0
+        blob = wao_compact_json_bytes(result if result is not None else payload)
+        with self.lock:
+            self.conn.execute(
+                """
+                INSERT INTO obs_command(command_id, device_id, op, status, priority, deadline_ms, issued_seq, ack_seq, result_blob)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(command_id) DO UPDATE SET
+                  device_id=excluded.device_id,
+                  op=excluded.op,
+                  status=excluded.status,
+                  priority=excluded.priority,
+                  deadline_ms=excluded.deadline_ms,
+                  ack_seq=excluded.ack_seq,
+                  result_blob=excluded.result_blob
+                """,
+                (command_id, device_id, op, status, int(payload.get("priority") or 0), deadline_ms, 0, int(ack_seq), blob),
+            )
+            self.conn.commit()
+
+    def pending_commands(self, device_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        safe_device = native_device_id_from_value(device_id, "")
+        if not safe_device:
+            return []
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT command_id, device_id, op, status, priority, deadline_ms, result_blob
+                  FROM obs_command
+                 WHERE device_id = ? AND status = 'pending'
+                 ORDER BY deadline_ms ASC, command_id ASC
+                 LIMIT ?
+                """,
+                (safe_device, int(limit)),
+            ).fetchall()
+        commands: list[dict[str, Any]] = []
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(bytes(row["result_blob"]).decode("utf-8")) if row["result_blob"] else {}
+            except Exception:
+                payload = {}
+            commands.append({
+                "id": row["command_id"],
+                "device_id": row["device_id"],
+                "type": row["op"],
+                "payload": payload if isinstance(payload, dict) else {},
+                "deadline_ms": row["deadline_ms"],
+                "priority": row["priority"],
+            })
+        return commands
+
+    def query_events(self, body: dict[str, Any]) -> dict[str, Any]:
+        device_id = native_device_id_from_value(body.get("device_id") or body.get("deviceId") or "", "")
+        stream = clipped_verbatim(str(body.get("stream") or ""), 120)
+        after_seq = int(body.get("after_seq") or body.get("afterSeq") or 0)
+        limit = max(1, min(int(body.get("limit") or 80), 500))
+        clauses = ["seq > ?"]
+        params: list[Any] = [after_seq]
+        if device_id:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        if stream:
+            clauses.append("stream = ?")
+            params.append(stream)
+        params.append(limit)
+        with self.lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT seq, device_id, ts_ms, stream, type, schema_id, flags, payload_blob
+                  FROM obs_event
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY seq ASC
+                 LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        events = []
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(bytes(row["payload_blob"]).decode("utf-8"))
+            except Exception:
+                payload = {"bytes": len(row["payload_blob"] or b"")}
+            events.append({
+                "seq": row["seq"],
+                "device_id": row["device_id"],
+                "ts_ms": row["ts_ms"],
+                "stream": row["stream"],
+                "type": row["type"],
+                "schema_id": row["schema_id"],
+                "flags": row["flags"],
+                "payload": payload,
+            })
+        return {"ok": True, "schema": "hermes.wasm_agent.observability.query.v1", "events": events, "count": len(events)}
+
+    def agent_view(self, body: dict[str, Any]) -> dict[str, Any]:
+        token_budget = max(256, min(int(body.get("token_budget") or body.get("tokenBudget") or 2000), 12000))
+        topics = body.get("topics") if isinstance(body.get("topics"), list) else []
+        stream_filter = {str(item) for item in topics if str(item).strip()}
+        payload = self.query_events({
+            "device_id": body.get("device_id") or body.get("deviceId") or "",
+            "after_seq": body.get("after_seq") or body.get("afterSeq") or 0,
+            "limit": min(120, max(20, token_budget // 40)),
+        })
+        events = [
+            event for event in payload.get("events", [])
+            if not stream_filter or event.get("stream") in stream_filter or event.get("type") in stream_filter
+        ]
+        commands = self.latest_commands(body.get("device_id") or body.get("deviceId") or "", limit=12)
+        lines = []
+        for event in events[-40:]:
+            summary = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            detail = ""
+            if summary:
+                for key in ("status", "reason", "command", "wake_word", "last_confidence", "max_observed_confidence", "error"):
+                    if key in summary:
+                        detail = f" {key}={summary[key]}"
+                        break
+            lines.append(f"#{event['seq']} {event['stream']}.{event['type']}{detail}")
+        return {
+            "ok": True,
+            "schema": "hermes.wasm_agent.observability.agent_view.v1",
+            "l0": {
+                "event_count": len(events),
+                "latest_seq": events[-1]["seq"] if events else 0,
+                "command_count": len(commands),
+            },
+            "l1": lines,
+            "l2": "\n".join(lines)[-token_budget:],
+            "commands": commands,
+        }
+
+    def latest_commands(self, device_id: Any = "", limit: int = 12) -> list[dict[str, Any]]:
+        safe_device = native_device_id_from_value(device_id, "")
+        clauses: list[str] = []
+        params: list[Any] = []
+        if safe_device:
+            clauses.append("device_id = ?")
+            params.append(safe_device)
+        params.append(max(1, min(int(limit), 50)))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self.lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT command_id, device_id, op, status, deadline_ms, ack_seq, result_blob
+                  FROM obs_command
+                  {where}
+                 ORDER BY rowid DESC
+                 LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+        commands = []
+        for row in rows:
+            commands.append({
+                "command_id": row["command_id"],
+                "device_id": row["device_id"],
+                "op": row["op"],
+                "status": row["status"],
+                "deadline_ms": row["deadline_ms"],
+                "ack_seq": row["ack_seq"],
+            })
+        return commands
+
+
 def parse_cookies(raw: str) -> dict[str, str]:
     cookies: dict[str, str] = {}
     for part in str(raw or "").split(";"):
@@ -6611,24 +7232,127 @@ def native_events_dir(server: WasmAgentServer) -> Path:
     return path
 
 
+NATIVE_VOICE_COMMANDS = {
+    "open_wake_word",
+    "show_diagnostics",
+    "train_hermes_wake",
+    "stop_listening",
+    "go_home",
+}
+
+NATIVE_VOICE_COMMAND_LABELS = {
+    "open_wake_word": "open wake word",
+    "show_diagnostics": "show diagnostics",
+    "train_hermes_wake": "train hermes wake",
+    "stop_listening": "stop listening",
+    "go_home": "go home",
+}
+
+NATIVE_VOICE_IGNORED_WORDS = {
+    "a",
+    "an",
+    "can",
+    "could",
+    "hermes",
+    "hey",
+    "now",
+    "ok",
+    "okay",
+    "please",
+    "the",
+    "to",
+    "would",
+    "you",
+}
+
+NATIVE_VOICE_UNKNOWN_WORDS = {"unk", "unknown"}
+
+
+def normalize_native_voice_command(command: Any) -> str:
+    value = str(command or "").strip().lower().replace("-", "_")
+    value = re.sub(r"[^a-z0-9_]+", "_", value).strip("_")
+    return value if value in NATIVE_VOICE_COMMANDS else ""
+
+
+def normalize_native_voice_transcript(transcript: Any) -> str:
+    text = str(transcript or "").lower()
+    text = re.sub(r"\[(?:unk|spn|noise|sil)\]|<(?:unk|spn|noise|sil)>", " ", text, flags=re.I)
+    text = text.replace("wakeword", "wake word").replace("wake words", "wake word")
+    text = re.sub(r"[^a-z0-9 ]+", " ", text)
+    words = [
+        word
+        for word in re.sub(r"\s+", " ", text).strip().split(" ")
+        if word and word not in NATIVE_VOICE_IGNORED_WORDS and word not in NATIVE_VOICE_UNKNOWN_WORDS
+    ]
+    return " ".join(words)
+
+
+def native_voice_words_have_phrase(words: list[str], phrase: list[str]) -> bool:
+    if not phrase or len(words) < len(phrase):
+        return False
+    size = len(phrase)
+    return any(words[index:index + size] == phrase for index in range(0, len(words) - size + 1))
+
+
+def native_voice_command_for_transcript(transcript: Any) -> str:
+    normalized = normalize_native_voice_transcript(transcript)
+    words = [word for word in normalized.split(" ") if word]
+    if (
+        native_voice_words_have_phrase(words, ["stop", "listening"])
+        or native_voice_words_have_phrase(words, ["stop", "listener"])
+        or native_voice_words_have_phrase(words, ["stop", "wake", "word"])
+    ):
+        return "stop_listening"
+    if (
+        native_voice_words_have_phrase(words, ["train", "wake"])
+        or native_voice_words_have_phrase(words, ["train", "wake", "word"])
+    ):
+        return "train_hermes_wake"
+    if (
+        native_voice_words_have_phrase(words, ["show", "diagnostic"])
+        or native_voice_words_have_phrase(words, ["show", "diagnostics"])
+        or ("show" in words and ("diagnostic" in words or "diagnostics" in words))
+    ):
+        return "show_diagnostics"
+    if native_voice_words_have_phrase(words, ["go", "home"]):
+        return "go_home"
+    if (
+        native_voice_words_have_phrase(words, ["open", "wake", "word"])
+        or native_voice_words_have_phrase(words, ["wake", "word"])
+        or native_voice_words_have_phrase(words, ["start", "listener"])
+        or native_voice_words_have_phrase(words, ["start", "listening"])
+        or words == ["listener"]
+    ):
+        return "open_wake_word"
+    return ""
+
+
 def append_native_voice_timeline_event(server: WasmAgentServer, record: dict[str, Any]) -> None:
     payload = record.get("payload") if isinstance(record, dict) else {}
     if not isinstance(payload, dict):
         return
     event_type = str(payload.get("type") or payload.get("kind") or "")
-    if event_type != "voice_command":
+    if event_type not in {"wake_detected", "command_capture_started", "voice_command"}:
         return
+    transcript = clipped_verbatim(str(payload.get("transcript") or ""), 1000)
+    normalized_transcript = normalize_native_voice_transcript(transcript)
+    command = normalize_native_voice_command(payload.get("command")) or native_voice_command_for_transcript(transcript)
     item = {
         "schema": "hermes.wasm_agent.voice_timeline_event.v1",
         "received_at": record.get("received_at"),
         "device_id": record.get("device_id"),
-        "type": "voice_command",
+        "type": event_type,
         "wake_word": payload.get("wake_word") or "hermes",
-        "transcript": clipped_verbatim(str(payload.get("transcript") or ""), 1000),
-        "confidence": payload.get("confidence"),
+        "transcript": transcript,
+        "normalized_transcript": normalized_transcript,
+        "command": command,
+        "confidence": payload.get("wake_confidence", payload.get("confidence")),
+        "wake_confidence": payload.get("wake_confidence", payload.get("confidence")),
         "source": payload.get("source") or "android-native",
         "build_id": payload.get("build_id"),
         "session_id": payload.get("session_id"),
+        "started_at": payload.get("started_at", payload.get("timestamp")),
+        "ended_at": payload.get("ended_at", payload.get("timestamp")),
         "privacy_mode": payload.get("privacy_mode"),
         "audio_retained": payload.get("audio_retained") is True,
     }
@@ -6636,7 +7360,10 @@ def append_native_voice_timeline_event(server: WasmAgentServer, record: dict[str
     timeline_path = root / "voice-command-timeline.jsonl"
     with timeline_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(redact_native_diagnostics(item), sort_keys=True, ensure_ascii=True) + "\n")
-    write_json_file(root / "latest-voice-command.json", redact_native_diagnostics(item))
+    redacted = redact_native_diagnostics(item)
+    write_json_file(root / "latest-voice-event.json", redacted)
+    if event_type == "voice_command":
+        write_json_file(root / "latest-voice-command.json", redacted)
 
 
 def route_native_voice_command_to_active_session(server: WasmAgentServer, record: dict[str, Any]) -> dict[str, Any]:
@@ -6647,6 +7374,9 @@ def route_native_voice_command_to_active_session(server: WasmAgentServer, record
     transcript = clipped_verbatim(str(payload.get("transcript") or "").strip(), 4000)
     if event_type != "voice_command" or not transcript:
         return {"ok": False, "routed": False, "reason": "not_voice_command"}
+    normalized_transcript = normalize_native_voice_transcript(transcript)
+    command = normalize_native_voice_command(payload.get("command")) or native_voice_command_for_transcript(transcript)
+    message = NATIVE_VOICE_COMMAND_LABELS.get(command, transcript)
     item = {
         "schema": "hermes.wasm_agent.voice_command_dispatch.v1",
         "received_at": record.get("received_at"),
@@ -6655,10 +7385,12 @@ def route_native_voice_command_to_active_session(server: WasmAgentServer, record
         "wake_word": payload.get("wake_word") or "hermes",
         "wake_confidence": payload.get("wake_confidence", payload.get("confidence")),
         "transcript": transcript,
+        "normalized_transcript": normalized_transcript,
+        "command": command,
         "asr_provider": payload.get("asr_provider") or "",
         "session_id": payload.get("session_id") or "",
         "dispatch": "active_session_user_input",
-        "message": transcript,
+        "message": message,
     }
     root = native_events_dir(server)
     dispatch_path = root / "voice-command-dispatch.jsonl"
@@ -6670,7 +7402,10 @@ def route_native_voice_command_to_active_session(server: WasmAgentServer, record
 
 
 def latest_native_voice_command(server: WasmAgentServer) -> dict[str, Any]:
-    latest = read_json_file(native_events_dir(server) / "latest-voice-command.json", {})
+    root = native_events_dir(server)
+    latest = read_json_file(root / "latest-voice-event.json", {})
+    if not isinstance(latest, dict) or not latest:
+        latest = read_json_file(root / "latest-voice-command.json", {})
     if not isinstance(latest, dict) or not latest:
         return {"ok": True, "available": False, "event": None}
     return {"ok": True, "available": True, "event": redact_native_diagnostics(latest)}
@@ -6742,11 +7477,15 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "export_hermes_wake_dataset",
     "run_android_hermes_wake_proof",
     "get_runtime_snapshot",
-    "open_wake_world",
+    "open_wake_word",
     "start_voice_wake",
     "stop_voice_wake",
-    "refresh_wake_world_state",
+    "refresh_wake_word_state",
     "apply_wake_word_policy",
+    "install_openwakeword_bundle",
+    "play_wake_phrase_probe",
+    "play_audio_stimulus",
+    "score_wake_phrase_probe",
     "prove_android_voice_tuning",
     "read_latest_android_report",
     "request_windows_client_update",
@@ -6782,6 +7521,7 @@ FRONTIER_OPERATOR_COMMAND_TYPES = {
     "debug_android_voice_tuning_runtime",
     "export_hermes_wake_dataset",
     "run_android_hermes_wake_proof",
+    "play_audio_stimulus",
     "prove_android_voice_tuning",
     "read_latest_android_report",
     "request_windows_client_update",
@@ -6817,6 +7557,7 @@ FRONTIER_OPERATOR_NATIVE_COMMAND = {
     "debug_android_voice_tuning_runtime": "debug_android_voice_tuning_runtime",
     "export_hermes_wake_dataset": "export_hermes_wake_dataset",
     "run_android_hermes_wake_proof": "run_android_hermes_wake_proof",
+    "play_audio_stimulus": "play_audio_stimulus",
     "prove_android_voice_tuning": "prove_android_voice_tuning",
     "read_latest_android_report": "read_latest_android_report",
     "request_windows_client_update": "request_windows_client_update",
@@ -6830,6 +7571,14 @@ FRONTIER_OPERATOR_NATIVE_COMMAND = {
     "open_devtools": "open_devtools",
     "export_diagnostics": "export_diagnostics",
 }
+
+
+def normalize_native_control_command_type(command_type: str) -> str:
+    if command_type == LEGACY_ANDROID_OPEN_WAKE_WORD_COMMAND:
+        return "open_wake_word"
+    if command_type == LEGACY_ANDROID_REFRESH_WAKE_WORD_STATE_COMMAND:
+        return "refresh_wake_word_state"
+    return command_type
 
 
 def native_device_id_from_value(value: Any, fallback: str = "unknown") -> str:
@@ -6860,6 +7609,40 @@ def native_control_operator_allowed(handler: WasmAgentHandler, user: dict[str, A
     except ValueError:
         return False
     return remote_addr.is_loopback and host in {"127.0.0.1", "localhost", "::1"}
+
+
+def native_observability_ws_allowed(handler: WasmAgentHandler, user: dict[str, Any] | None) -> bool:
+    if same_origin_websocket(handler):
+        return True
+    return native_control_operator_allowed(handler, user)
+
+
+def native_observability_operator_allowed(handler: WasmAgentHandler, user: dict[str, Any] | None) -> bool:
+    if user and same_origin_post(handler):
+        return True
+    return native_control_operator_allowed(handler, user)
+
+
+def native_observability_query(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not native_observability_operator_allowed(handler, user):
+        raise BrowserError("native_observability_forbidden", "Native observability queries require same-origin auth or native-control operator access.", status=HTTPStatus.FORBIDDEN)
+    return server.observability_hub.query_events(body if isinstance(body, dict) else {})
+
+
+def native_observability_agent_view(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    handler: WasmAgentHandler,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not native_observability_operator_allowed(handler, user):
+        raise BrowserError("native_observability_forbidden", "Native observability agent views require same-origin auth or native-control operator access.", status=HTTPStatus.FORBIDDEN)
+    return server.observability_hub.agent_view(body if isinstance(body, dict) else {})
 
 
 def append_native_control_audit(server: WasmAgentServer, event: dict[str, Any]) -> dict[str, Any]:
@@ -6909,6 +7692,15 @@ def save_native_event(server: WasmAgentServer, body: dict[str, Any], handler: Wa
     write_json_file(target, bundled)
     write_json_file(root / "latest.json", record)
     append_native_voice_timeline_event(server, record)
+    observability_hub = getattr(server, "observability_hub", None)
+    if observability_hub is not None:
+        observability_hub.record_event(
+            device_id,
+            "native.events",
+            record["kind"],
+            record,
+            latest_key=f"native.events.{record['kind']}",
+        )
     dispatch_result = route_native_voice_command_to_active_session(server, record)
     return {"ok": True, "stored": True, "deviceId": device_id, "receivedAt": record["received_at"], "dispatch": dispatch_result}
 
@@ -6917,6 +7709,21 @@ def native_control_command_path(server: WasmAgentServer, device_id: str, command
     root = native_control_dir(server) / "commands" / device_id
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{command_id}.json"
+
+
+def resolve_native_control_command_path(server: WasmAgentServer, device_id: str, command_id: str) -> Path:
+    path = native_control_command_path(server, device_id, command_id)
+    if path.exists():
+        return path
+    root = path.parent
+    needle = f"{command_id}.json".lower()
+    try:
+        for candidate in root.glob("*.json"):
+            if candidate.name.lower() == needle:
+                return candidate
+    except Exception:
+        pass
+    return path
 
 
 def native_control_iso_to_epoch(value: Any) -> float:
@@ -6963,6 +7770,7 @@ def native_control_timeout_result(command: dict[str, Any], now: str) -> dict[str
 def expire_native_control_command(server: WasmAgentServer, path: Path, command: dict[str, Any], now: str, reason: str = "server_deadline") -> dict[str, Any]:
     device_id = native_device_id_from_value(command.get("device_id"), path.parent.name)
     command_id = safe_state_id(str(command.get("id") or path.stem), path.stem)
+    command_type = clipped_verbatim(str(command.get("type") or "unknown"), 80)
     result_payload = native_control_timeout_result(command, now)
     result = {
         "ok": True,
@@ -6981,6 +7789,19 @@ def expire_native_control_command(server: WasmAgentServer, path: Path, command: 
     command["timeout_reason"] = reason
     command["result"] = result_payload
     write_json_file(path, command)
+    server.observability_hub.record_command(command, status="timeout", result=result_payload)
+    server.observability_hub.record_event(
+        device_id,
+        "native.control",
+        "command_timeout",
+        {
+            "command_id": command_id,
+            "op": command_type,
+            "status": "timeout",
+            "reason": reason,
+            "result": result_payload,
+        },
+    )
     append_native_control_audit(server, {
         "action": "command_timeout",
         "device_id": device_id,
@@ -7008,6 +7829,63 @@ def expire_stale_native_control_commands(server: WasmAgentServer, command_root: 
             expire_native_control_command(server, path, command, now)
 
 
+def native_control_deliver_pending_commands(server: WasmAgentServer, device_id: str, now: str, limit: int = 8) -> list[dict[str, Any]]:
+    root = native_control_dir(server)
+    command_root = root / "commands" / device_id
+    expire_stale_native_control_commands(server, command_root, now)
+    commands: list[dict[str, Any]] = []
+    if not command_root.exists():
+        return commands
+    for path in sorted(command_root.glob("*.json"), key=lambda item: item.stat().st_mtime):
+        command = read_json_file(path, {})
+        if not isinstance(command, dict) or command.get("status") != "pending":
+            continue
+        command["status"] = "delivered"
+        command["delivered_at"] = now
+        timeout_sec = int(command.get("timeout_sec") or native_control_command_timeout_sec(str(command.get("type") or ""), command.get("payload") if isinstance(command.get("payload"), dict) else {}))
+        command["deadline_at"] = iso_timestamp_from_epoch(native_control_iso_to_epoch(now) + timeout_sec)
+        write_json_file(path, command)
+        server.observability_hub.record_command(command, status="delivered")
+        server.observability_hub.record_event(
+            native_device_id_from_value(command.get("device_id"), device_id),
+            "native.control",
+            "command_delivered",
+            {
+                "command_id": command.get("id") or path.stem,
+                "op": command.get("type") or "unknown",
+                "status": "delivered",
+                "deadline_at": command.get("deadline_at") or "",
+            },
+        )
+        commands.append(command)
+        if len(commands) >= limit:
+            break
+    return commands
+
+
+def native_observability_command_frame(command: dict[str, Any]) -> bytes:
+    payload = command.get("payload") if isinstance(command.get("payload"), dict) else {}
+    deadline_ms = int(native_control_iso_to_epoch(command.get("deadline_at")) * 1000) if command.get("deadline_at") else 0
+    return wao_encode_frame("COMMAND", {
+        "device_id": native_device_id_from_value(command.get("device_id"), "unknown"),
+        "command_id": command.get("id") or command.get("command_id") or "",
+        "op": command.get("type") or command.get("command") or "",
+        "status": command.get("status") or "pending",
+        "priority": int(payload.get("priority") or 0),
+        "deadline_ms": deadline_ms,
+        "payload_json": payload,
+        "reason": command.get("reason") or "",
+    })
+
+
+def native_observability_send_pending_commands(server: WasmAgentServer, client_ws: BrowserClientWebSocket, device_id: str, now: str | None = None) -> int:
+    sent = 0
+    for command in native_control_deliver_pending_commands(server, native_device_id_from_value(device_id), now or iso_timestamp()):
+        client_ws.send_frame(0x2, native_observability_command_frame(command))
+        sent += 1
+    return sent
+
+
 def create_native_control_command(
     server: WasmAgentServer,
     body: dict[str, Any],
@@ -7018,7 +7896,7 @@ def create_native_control_command(
         raise BrowserError("native_control_forbidden", "Native control commands require admin or localhost operator access.", status=HTTPStatus.FORBIDDEN)
     actor = native_control_operator_actor(handler, user)
     device_id = native_device_id_from_value(body.get("device_id"))
-    command_type = clipped_verbatim(str(body.get("type") or body.get("command") or ""), 80)
+    command_type = normalize_native_control_command_type(clipped_verbatim(str(body.get("type") or body.get("command") or ""), 80))
     if command_type not in NATIVE_CONTROL_COMMAND_TYPES:
         raise BrowserError("invalid_native_control_command", f"Unsupported native control command: {command_type}")
     command_id = safe_state_id(str(body.get("command_id") or f"cmd-{uuid.uuid4().hex[:16]}"), f"cmd-{uuid.uuid4().hex[:16]}")
@@ -7039,6 +7917,19 @@ def create_native_control_command(
         "reason": reason,
     }
     write_json_file(native_control_command_path(server, device_id, command_id), record)
+    server.observability_hub.record_command(record, status="pending")
+    server.observability_hub.record_event(
+        device_id,
+        "native.control",
+        "command_queued",
+        {
+            "command_id": command_id,
+            "op": command_type,
+            "status": "pending",
+            "reason": reason,
+            "timeout_sec": timeout_sec,
+        },
+    )
     append_native_control_audit(server, {
         "action": "command_queued",
         "actor": actor,
@@ -7049,7 +7940,15 @@ def create_native_control_command(
         "reason": reason,
         "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
     })
-    return {"ok": True, "queued": True, "deviceId": device_id, "command": record}
+    if server.observability_hub.client_count(device_id) > 0:
+        delivered = dict(record)
+        delivered["status"] = "delivered"
+        delivered["delivered_at"] = iso_timestamp()
+        delivered["deadline_at"] = iso_timestamp_from_epoch(native_control_iso_to_epoch(delivered["delivered_at"]) + timeout_sec)
+        write_json_file(native_control_command_path(server, device_id, command_id), delivered)
+        server.observability_hub.record_command(delivered, status="delivered")
+        server.observability_hub.broadcast(native_observability_command_frame(delivered), device_id=device_id)
+    return {"ok": True, "queued": True, "deviceId": device_id, "device_id": device_id, "commandId": command_id, "command_id": command_id, "command": record}
 
 
 def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
@@ -7069,21 +7968,8 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
     }
     root = native_control_dir(server)
     write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
-    command_root = root / "commands" / device_id
-    expire_stale_native_control_commands(server, command_root, now)
-    commands: list[dict[str, Any]] = []
-    if command_root.exists():
-        for path in sorted(command_root.glob("*.json"), key=lambda item: item.stat().st_mtime):
-            command = read_json_file(path, {})
-            if not isinstance(command, dict) or command.get("status") != "pending":
-                continue
-            command["status"] = "delivered"
-            command["delivered_at"] = now
-            command["deadline_at"] = iso_timestamp_from_epoch(native_control_iso_to_epoch(now) + int(command.get("timeout_sec") or native_control_command_timeout_sec(str(command.get("type") or ""), command.get("payload") if isinstance(command.get("payload"), dict) else {})))
-            write_json_file(path, command)
-            commands.append(command)
-            if len(commands) >= 8:
-                break
+    server.observability_hub.record_event(device_id, "native.control", "heartbeat", heartbeat, latest_key="native.control.heartbeat")
+    commands = native_control_deliver_pending_commands(server, device_id, now)
     return {"ok": True, "deviceId": device_id, "commands": commands, "serverTime": now}
 
 
@@ -7104,13 +7990,37 @@ def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], ha
     }
     root = native_control_dir(server)
     write_json_file(root / "results" / device_id / f"{command_id}.json", result)
-    command_path = native_control_command_path(server, device_id, command_id)
+    command_path = resolve_native_control_command_path(server, device_id, command_id)
     command = read_json_file(command_path, {})
     if isinstance(command, dict) and command:
         command["status"] = "finished"
         command["finished_at"] = now
         command["result"] = result["result"]
         write_json_file(command_path, command)
+        observability_hub = getattr(server, "observability_hub", None)
+        if observability_hub is not None:
+            observability_hub.record_command(command, status="finished", result=result["result"])
+    else:
+        observability_hub = getattr(server, "observability_hub", None)
+        if observability_hub is not None:
+            observability_hub.record_command(
+                {"id": command_id, "device_id": device_id, "type": body.get("command_type") or "unknown", "payload": {}},
+                status="finished",
+                result=result["result"],
+            )
+    observability_hub = getattr(server, "observability_hub", None)
+    if observability_hub is not None:
+        observability_hub.record_event(
+            device_id,
+            "native.control",
+            "command_result",
+            {
+                "command_id": command_id,
+                "op": clipped_verbatim(str(body.get("command_type") or (command.get("type") if isinstance(command, dict) else "") or "unknown"), 80),
+                "status": "finished",
+                "result": result["result"],
+            },
+        )
     append_native_control_audit(server, {
         "action": "command_result",
         "device_id": device_id,
@@ -7172,6 +8082,16 @@ def save_native_diagnostics(server: WasmAgentServer, body: dict[str, Any], handl
         write_json_file(boot_root / f"{boot_id}.json", record)
         write_json_file(boot_root / "latest.json", record)
         write_json_file(root / "latest-client-boot-trace.json", record)
+    stream = "native.diagnostics"
+    if native_diagnostics_voice_wake_payload(record):
+        stream = "wake"
+    server.observability_hub.record_event(
+        device_id,
+        stream,
+        clipped_verbatim(str(body.get("kind") or body.get("schema") or "diagnostics"), 120),
+        record,
+        latest_key=f"{stream}.latest",
+    )
     return {
         "ok": True,
         "stored": True,
@@ -7195,25 +8115,146 @@ def native_diagnostics_voice_wake_payload(diagnostics: dict[str, Any]) -> dict[s
         return runtime["voice_wake"]
     if isinstance(payload, dict) and isinstance(payload.get("voice_wake"), dict):
         return payload["voice_wake"]
-    if isinstance(runtime, dict) and (
-        str(runtime.get("wake_world_schema") or "").startswith("hermes.wasm_agent.android_wake_world_state")
-        or str(runtime.get("proof_schema") or "").startswith("hermes.wasm_agent.android_wake_proof")
-        or (
-            ("wake_threshold" in runtime or "threshold" in runtime)
-            and ("wake_engine_ready" in runtime or "wake_service_ready" in runtime)
-            and ("inference_count" in runtime or "wake_detection_count" in runtime)
-        )
-    ):
-        return runtime
+    if isinstance(runtime, dict):
+        schema = str(runtime.get("wake_word_schema") or "")
+        legacy_schema = str(runtime.get(LEGACY_ANDROID_WAKE_WORD_SCHEMA_KEY) or "")
+        if (
+            schema.startswith("hermes.wasm_agent.android_wake_word_state")
+            or legacy_schema.startswith(LEGACY_ANDROID_WAKE_WORD_SCHEMA_PREFIX)
+            or str(runtime.get("proof_schema") or "").startswith("hermes.wasm_agent.android_wake_proof")
+            or (
+                ("wake_threshold" in runtime or "threshold" in runtime)
+                and ("wake_engine_ready" in runtime or "wake_service_ready" in runtime)
+                and ("inference_count" in runtime or "wake_detection_count" in runtime)
+            )
+        ):
+            return runtime
     return {}
 
 
-def latest_native_android_wake_world_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
+def android_wake_word_applied_policy_overlay(applied: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(applied, dict):
+        return {}
+    overlay: dict[str, Any] = {}
+    mappings = {
+        "wakeThreshold": ("wake_threshold", "threshold"),
+        "wake_threshold": ("wake_threshold", "threshold"),
+        "threshold": ("wake_threshold", "threshold"),
+        "wakePhrase": ("wake_word", "wake_phrase"),
+        "wake_phrase": ("wake_word", "wake_phrase"),
+        "wake_word": ("wake_word", "wake_phrase"),
+        "wakeCooldownMs": ("wake_cooldown_ms",),
+        "wake_cooldown_ms": ("wake_cooldown_ms",),
+        "wakeConfirmationFrames": ("wake_confirmation_frames", "wake_confirmation_required_frames"),
+        "wake_confirmation_frames": ("wake_confirmation_frames", "wake_confirmation_required_frames"),
+        "wakeConfirmationWindowMs": ("wake_confirmation_window_ms",),
+        "wake_confirmation_window_ms": ("wake_confirmation_window_ms",),
+        "transcriptEngine": ("transcript_engine",),
+        "transcript_engine": ("transcript_engine",),
+        "transcriptPlan": ("transcript_attempt_plan",),
+        "transcript_attempt_plan": ("transcript_attempt_plan",),
+        "transcriptTimeoutMs": ("transcript_timeout_ms",),
+        "transcript_timeout_ms": ("transcript_timeout_ms",),
+        "transcriptMinLengthMs": ("transcript_min_length_ms",),
+        "transcript_min_length_ms": ("transcript_min_length_ms",),
+        "transcriptCompleteSilenceMs": ("transcript_complete_silence_ms",),
+        "transcript_complete_silence_ms": ("transcript_complete_silence_ms",),
+        "transcriptPossibleSilenceMs": ("transcript_possible_silence_ms",),
+        "transcript_possible_silence_ms": ("transcript_possible_silence_ms",),
+        "transcriptAcceptPartial": ("transcript_accept_partial",),
+        "transcript_accept_partial": ("transcript_accept_partial",),
+    }
+    for source_key, target_keys in mappings.items():
+        if source_key not in applied:
+            continue
+        value = applied.get(source_key)
+        if value is None:
+            continue
+        for target_key in target_keys:
+            overlay[target_key] = value
+    return overlay
+
+
+def merge_android_wake_word_overlay(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base) if isinstance(base, dict) else {}
+    for key, value in (overlay or {}).items():
+        if key.startswith("_") or value is None:
+            continue
+        merged[key] = value
+    return merged
+
+
+def native_control_result_payload_state_overlay(result: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    overlay: dict[str, Any] = {}
+    nested_result = result.get("result") if isinstance(result.get("result"), dict) else {}
+    applied = nested_result.get("applied") if isinstance(nested_result.get("applied"), dict) else result.get("applied")
+    if isinstance(applied, dict):
+        overlay = merge_android_wake_word_overlay(overlay, android_wake_word_applied_policy_overlay(applied))
+    for key in ("wake_word_state", "wakeWordState", "state", "status"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            overlay = merge_android_wake_word_overlay(overlay, value)
+    for key in ("nativePlayback", "score"):
+        nested = result.get(key)
+        if isinstance(nested, dict) and isinstance(nested.get("status"), dict):
+            overlay = merge_android_wake_word_overlay(overlay, nested["status"])
+    return overlay
+
+
+def latest_native_android_wake_word_command_overlay(server: WasmAgentServer) -> dict[str, Any]:
+    root = native_control_dir(server)
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for family in ("commands", "results"):
+        family_root = root / family
+        if not family_root.exists():
+            continue
+        for path in family_root.glob("android-*/*.json"):
+            record = read_json_file(path, {})
+            if not isinstance(record, dict):
+                continue
+            result = record.get("result") if isinstance(record.get("result"), dict) else record
+            overlay = native_control_result_payload_state_overlay(result)
+            if not overlay:
+                continue
+            received_at = (
+                record.get("finished_at")
+                or record.get("received_at")
+                or result.get("completed_at")
+                or result.get("executedAt")
+                or ""
+            )
+            score = native_control_iso_to_epoch(received_at)
+            if score <= 0:
+                try:
+                    score = path.stat().st_mtime
+                except OSError:
+                    score = 0.0
+            if not received_at and score > 0:
+                received_at = datetime.fromtimestamp(score, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            overlay["_received_at"] = received_at
+            candidates.append((score, overlay))
+    if not candidates:
+        return {}
+    merged: dict[str, Any] = {}
+    latest_received_at = ""
+    for _, overlay in sorted(candidates, key=lambda item: item[0])[-30:]:
+        latest_received_at = str(overlay.get("_received_at") or latest_received_at)
+        merged = merge_android_wake_word_overlay(merged, overlay)
+    if latest_received_at:
+        merged["_received_at"] = latest_received_at
+    return merged
+
+
+def latest_native_android_wake_word_diagnostics(server: WasmAgentServer) -> dict[str, Any]:
     root = native_diagnostics_dir(server)
     latest = read_json_file(root / "latest.json", {})
-    if isinstance(latest, dict) and native_diagnostics_voice_wake_payload(latest):
-        return latest
     candidates: list[tuple[float, dict[str, Any]]] = []
+    if isinstance(latest, dict) and native_diagnostics_voice_wake_payload(latest):
+        received = native_control_iso_to_epoch(latest.get("received_at"))
+        score = received if received > 0 else 0.0
+        candidates.append((score, latest))
     for path in root.glob("*.json"):
         if path.name == "latest.json":
             continue
@@ -7229,7 +8270,7 @@ def latest_native_android_wake_world_diagnostics(server: WasmAgentServer) -> dic
     return candidates[0][1]
 
 
-ANDROID_WAKE_WORLD_POLICY_PRESETS = {
+ANDROID_WAKE_WORD_POLICY_PRESETS = {
     "fast_transcript": {
         "description": "Short command capture for quick post-Hermes phrases.",
         "payload": {
@@ -7294,10 +8335,30 @@ ANDROID_WAKE_WORLD_POLICY_PRESETS = {
             "transcriptAcceptPartial": True,
         },
     },
+    "planned_transcript_probe": {
+        "description": "Hot-swappable post-Hermes transcript plan: Android Speech locales, Vosk grammar, then Vosk free.",
+        "payload": {
+            "transcriptEngine": "auto",
+            "transcriptTimeoutMs": 18000,
+            "transcriptMinLengthMs": 700,
+            "transcriptCompleteSilenceMs": 1200,
+            "transcriptPossibleSilenceMs": 700,
+            "transcriptAcceptPartial": True,
+            "transcriptPlan": {
+                "attempts": [
+                    {"engine": "android_speech", "language": "en-US"},
+                    {"engine": "android_speech", "language": "pt-PT"},
+                    {"engine": "android_speech"},
+                    {"engine": "vosk", "mode": "grammar"},
+                    {"engine": "vosk", "mode": "free"},
+                ]
+            },
+        },
+    },
 }
 
 
-def android_wake_world_policy_presets() -> list[dict[str, Any]]:
+def android_wake_word_policy_presets() -> list[dict[str, Any]]:
     return [
         {
             "id": preset_id,
@@ -7305,16 +8366,40 @@ def android_wake_world_policy_presets() -> list[dict[str, Any]]:
             "command": "apply_wake_word_policy",
             "payload": preset["payload"],
         }
-        for preset_id, preset in ANDROID_WAKE_WORLD_POLICY_PRESETS.items()
+        for preset_id, preset in ANDROID_WAKE_WORD_POLICY_PRESETS.items()
     ]
 
 
-def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
+def android_wake_word_listener_active(state: dict[str, Any]) -> bool:
+    if not isinstance(state, dict) or not state:
+        return False
+    if any(
+        state.get(key) is True
+        for key in (
+            "wake_service_ready",
+            "foreground_service_active",
+            "foreground_service_started",
+            "foreground_service_running",
+            "service_running",
+            "voice_service_running",
+            "audio_record_started",
+            "audio_capture_alive",
+        )
+    ):
+        return True
+    try:
+        return int(state.get("audio_read_calls") or 0) > 0 and int(state.get("inference_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def android_wake_word_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
+    wake_phrase = str(state.get("wake_word") or state.get("wakePhrase") or "the wake phrase")
     if not state:
         return {
-            "label": "no_wake_world_state",
+            "label": "no_wake_word_state",
             "severity": "blocked",
-            "summary": "No uploaded Android Wake World state is available.",
+            "summary": "No uploaded Android Wake Word state is available.",
             "next_action": "Install/open the app and upload native diagnostics or run get_runtime_snapshot.",
             "next_action_type": "live introspection/control",
         }
@@ -7323,16 +8408,16 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
         return {
             "label": "record_audio_permission_missing",
             "severity": "blocked",
-            "summary": "Microphone permission is missing, so Wake World cannot listen.",
+            "summary": "Microphone permission is missing, so Wake Word cannot listen.",
             "next_action": "Open the app and grant microphone permission.",
             "next_action_type": "runtime proof",
         }
-    if state.get("wake_service_ready") is not True or state.get("foreground_service_active") is not True:
+    if not android_wake_word_listener_active(state):
         return {
             "label": "listener_not_running",
             "severity": "actionable",
             "summary": "The foreground wake listener is not active.",
-            "next_action": "Queue native control start_voice_wake or open_wake_world with startListener=true.",
+            "next_action": "Queue native control start_voice_wake or open_wake_word with startListener=true.",
             "next_action_type": "live introspection/control",
             "suggested_command": {"type": "start_voice_wake", "payload": {}},
         }
@@ -7357,7 +8442,7 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
                 "label": "inference_not_observed",
                 "severity": "blocked",
                 "summary": "The listener is active but no wake inference has been observed.",
-                "next_action": "Keep Wake World open and refresh state after saying Hermes.",
+                "next_action": f"Keep Wake Word open and refresh state after saying {wake_phrase}.",
                 "next_action_type": "runtime proof",
             }
         if threshold and max_confidence < threshold:
@@ -7365,7 +8450,7 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
                 "label": "wake_threshold_not_crossed",
                 "severity": "tunable",
                 "summary": "Wake inference is running, but observed confidence is below threshold.",
-                "next_action": "Apply a temporary wakeThreshold policy only for proof, then retry spoken Hermes.",
+                "next_action": f"Apply a temporary wakeThreshold policy only for proof, then retry spoken {wake_phrase}.",
                 "next_action_type": "live introspection/control",
                 "suggested_command": {"type": "apply_wake_word_policy", "payload": {"wakeThreshold": max(0.05, min(0.99, round(max_confidence + 0.05, 2)))}},
             }
@@ -7373,7 +8458,7 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
             "label": "wake_not_detected",
             "severity": "unknown",
             "summary": "Wake inference is running but no wake hit has been uploaded yet.",
-            "next_action": "Say Hermes once near the device, then refresh Wake World state.",
+            "next_action": f"Say {wake_phrase} once near the device, then refresh Wake Word state.",
             "next_action_type": "runtime proof",
         }
     if state.get("command_capture_active") is True or listener_mode == "command_capture":
@@ -7381,20 +8466,27 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
             "label": "command_capture_active",
             "severity": "observing",
             "summary": "Wake was detected and command capture is currently active.",
-            "next_action": "Wait for transcript result, then refresh Wake World state.",
+            "next_action": "Wait for transcript result, then refresh Wake Word state.",
             "next_action_type": "live introspection/control",
         }
     if transcript_result:
         lowered = transcript_result.lower()
-        if "android_speech_error_7" in lowered or "no_match" in lowered or "timeout" in lowered or "transcription_empty" in lowered:
+        if (
+            "android_speech_error_7" in lowered
+            or "no_match" in lowered
+            or "timeout" in lowered
+            or "transcription_empty" in lowered
+            or "transcript_plan_empty" in lowered
+            or lowered.endswith("_empty")
+        ):
             return {
                 "label": "wake_heard_no_transcript",
                 "severity": "tunable",
                 "summary": "Wake was detected, but Android speech recognition did not produce usable text.",
-                "next_action": "Apply preset forgiving_transcript or partial_first, then retry Hermes plus a short command.",
+                "next_action": f"Apply preset forgiving_transcript or partial_first, then retry {wake_phrase} plus a short command.",
                 "next_action_type": "live introspection/control",
                 "suggested_preset": "forgiving_transcript",
-                "suggested_command": {"type": "apply_wake_word_policy", "payload": ANDROID_WAKE_WORLD_POLICY_PRESETS["forgiving_transcript"]["payload"]},
+                "suggested_command": {"type": "apply_wake_word_policy", "payload": ANDROID_WAKE_WORD_POLICY_PRESETS["forgiving_transcript"]["payload"]},
             }
         if rejection == "unknown_command":
             return {
@@ -7415,38 +8507,56 @@ def android_wake_world_diagnosis(state: dict[str, Any]) -> dict[str, Any]:
         "label": "wake_heard_transcript_pending",
         "severity": "observing",
         "summary": "Wake was detected; transcript result has not been uploaded yet.",
-        "next_action": "Refresh Wake World state or request get_runtime_snapshot.",
+        "next_action": "Refresh Wake Word state or request get_runtime_snapshot.",
         "next_action_type": "live introspection/control",
     }
 
 
-def latest_native_android_wake_world_state(server: WasmAgentServer) -> dict[str, Any]:
-    diagnostics = latest_native_android_wake_world_diagnostics(server)
+def latest_native_android_wake_word_state(server: WasmAgentServer) -> dict[str, Any]:
+    diagnostics = latest_native_android_wake_word_diagnostics(server)
     if not isinstance(diagnostics, dict) or not diagnostics:
         return {"ok": True, "available": False, "state": None}
     voice = native_diagnostics_voice_wake_payload(diagnostics)
     if not isinstance(voice, dict):
         return {"ok": True, "available": False, "state": None, "diagnostics": redact_native_diagnostics(diagnostics)}
+    command_overlay = latest_native_android_wake_word_command_overlay(server)
+    overlay_received_at = str(command_overlay.get("_received_at") or "") if command_overlay else ""
+    diagnostics_received_at = str(diagnostics.get("received_at") or "")
+    diagnostics_score = native_control_iso_to_epoch(diagnostics_received_at)
+    overlay_score = native_control_iso_to_epoch(overlay_received_at)
+    use_command_overlay = bool(command_overlay) and (
+        diagnostics_score <= 0 or (overlay_score > 0 and overlay_score >= diagnostics_score)
+    )
+    if use_command_overlay:
+        voice = merge_android_wake_word_overlay(voice, command_overlay)
     recent_events = voice.get("recent_events") if isinstance(voice.get("recent_events"), list) else []
     state = {
-        "schema": "hermes.wasm_agent.android_wake_world_state.v1",
+        "schema": "hermes.wasm_agent.android_wake_word_state.v1",
         "ok": True,
         "available": True,
         "build_id": voice.get("build_id") or diagnostics.get("build_id") or "",
         "app_version": voice.get("app_version") or "",
         "android_build_id": voice.get("android_build_id") or voice.get("build_id") or diagnostics.get("build_id") or "",
+        "wake_word": voice.get("wake_word") or voice.get("wakePhrase") or voice.get("wake_phrase") or "",
+        "wake_phrase": voice.get("wake_phrase") or voice.get("wakePhrase") or voice.get("wake_word") or "",
         "loaded_model_sha": voice.get("loaded_model_sha") or voice.get("model_sha") or "",
         "expected_model_sha": voice.get("expected_model_sha") or voice.get("expected_model_sha256") or "",
         "model_source": voice.get("model_source") or "unknown",
+        "status_source": voice.get("status_source") or "",
+        "proof_session_active": voice.get("proof_session_active") is True,
         "threshold": voice.get("threshold") or voice.get("wake_threshold"),
+        "wake_threshold": voice.get("wake_threshold") or voice.get("threshold"),
         "vad_rms_threshold": voice.get("vad_rms_threshold"),
         "vad_peak_threshold": voice.get("vad_peak_threshold"),
+        "wake_cooldown_ms": voice.get("wake_cooldown_ms"),
+        "wake_cooldown_until": voice.get("wake_cooldown_until"),
         "transcript_timeout_ms": voice.get("transcript_timeout_ms"),
         "transcript_min_length_ms": voice.get("transcript_min_length_ms"),
         "transcript_complete_silence_ms": voice.get("transcript_complete_silence_ms"),
         "transcript_possible_silence_ms": voice.get("transcript_possible_silence_ms"),
         "transcript_accept_partial": voice.get("transcript_accept_partial") is not False,
         "transcript_engine": voice.get("transcript_engine") or "",
+        "transcript_attempt_plan": voice.get("transcript_attempt_plan") if isinstance(voice.get("transcript_attempt_plan"), dict) else {},
         "local_asr_engine": voice.get("local_asr_engine") or "",
         "local_asr_preferred_engine": voice.get("local_asr_preferred_engine") or voice.get("transcript_engine") or "",
         "local_asr_vosk_ready": voice.get("local_asr_vosk_ready") is True,
@@ -7458,8 +8568,19 @@ def latest_native_android_wake_world_state(server: WasmAgentServer) -> dict[str,
         "last_asr_partial_transcript": voice.get("last_asr_partial_transcript") or "",
         "prototype_threshold": voice.get("prototype_threshold") if "prototype_threshold" in voice else voice.get("proof_threshold_override"),
         "wake_engine_ready": voice.get("wake_engine_ready") is True,
+        "onnx_model_ready": voice.get("onnx_model_ready") is True,
+        "onnx_runtime_available": voice.get("onnx_runtime_available") is not False,
+        "openwakeword_bundle_exists": voice.get("openwakeword_bundle_exists") is True,
+        "permission_record_audio": voice.get("permission_record_audio") is not False,
+        "audio_record_started": voice.get("audio_record_started") is True,
+        "audio_capture_alive": voice.get("audio_capture_alive") is not False,
+        "audio_read_calls": voice.get("audio_read_calls") or 0,
         "wake_service_ready": voice.get("wake_service_ready") is True,
         "foreground_service_active": voice.get("foreground_service_active") is True or voice.get("foreground_service_started") is True,
+        "foreground_service_started": voice.get("foreground_service_started") is True,
+        "foreground_service_running": voice.get("foreground_service_running") is True,
+        "service_running": voice.get("service_running") is True,
+        "voice_service_running": voice.get("voice_service_running") is True,
         "listener_lane": voice.get("listener_lane") or ("foreground_service" if voice.get("foreground_service_started") is True else "off"),
         "listener_mode": voice.get("listener_mode") or ("command_capture" if voice.get("command_capture_active") is True else "standby" if voice.get("foreground_service_started") is True else "off"),
         "app_visible": voice.get("app_visible") is not False,
@@ -7472,6 +8593,7 @@ def latest_native_android_wake_world_state(server: WasmAgentServer) -> dict[str,
         "inference_count": voice.get("inference_count") or 0,
         "last_confidence": voice.get("last_confidence") or 0,
         "max_confidence_since_start": voice.get("max_confidence_since_start") or voice.get("max_observed_confidence") or 0,
+        "wake_detection_count": voice.get("wake_detection_count") or voice.get("wake_hit_count") or 0,
         "wake_hit_count": voice.get("wake_hit_count") or voice.get("wake_detection_count") or 0,
         "false_wake_count": voice.get("false_wake_count") or 0,
         "false_wake_buffer_count": voice.get("false_wake_buffer_count") or 0,
@@ -7484,10 +8606,13 @@ def latest_native_android_wake_world_state(server: WasmAgentServer) -> dict[str,
         "last_false_wake_at": voice.get("last_false_wake_at") or 0,
         "last_error": voice.get("last_error") or voice.get("failure_reason") or "",
         "recent_events": recent_events[-50:],
-        "received_at": diagnostics.get("received_at") or "",
+        "received_at": overlay_received_at if use_command_overlay else diagnostics_received_at,
     }
-    state["diagnosis"] = android_wake_world_diagnosis(state)
-    state["policy_presets"] = android_wake_world_policy_presets()
+    if use_command_overlay:
+        state["state_overlay_source"] = "native_control_command_result"
+    state["listener_active"] = android_wake_word_listener_active(state)
+    state["diagnosis"] = android_wake_word_diagnosis(state)
+    state["policy_presets"] = android_wake_word_policy_presets()
     return {"ok": True, "available": True, "state": redact_native_diagnostics(state), "diagnostics": redact_native_diagnostics(diagnostics)}
 
 
@@ -7674,6 +8799,10 @@ def queue_native_android_hermes_wake_install(server: WasmAgentServer, handler: W
             "url": model["url"],
             "sha256": model["sha256"],
             "sizeBytes": model["sizeBytes"],
+            "modelRole": model.get("modelRole", "wake_phrase_candidate"),
+            "modelName": model.get("modelName", ""),
+            "wakePhrase": model.get("wakePhrase", "configured_by_wake_word_policy"),
+            "engineContract": model.get("engineContract", "raw_pcm_onnx_single_confidence"),
         },
     }
     write_json_file(native_android_hermes_wake_install_request_path(server), record)
@@ -7824,6 +8953,23 @@ def native_android_hermes_wake_model_candidates(server: WasmAgentServer) -> list
     ]
 
 
+def native_android_openwakeword_bundle_candidates(server: WasmAgentServer) -> list[Path]:
+    return [
+        native_diagnostics_dir(server) / "android-hermes-wake-models" / "latest" / "openwakeword.zip",
+        repo_root(server) / "build" / "voice" / "openwakeword.zip",
+    ]
+
+
+def latest_native_android_openwakeword_bundle_path(server: WasmAgentServer) -> Path:
+    for candidate in native_android_openwakeword_bundle_candidates(server):
+        try:
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        except OSError:
+            continue
+    raise BrowserError("openwakeword_bundle_missing", "No OpenWakeWord Android bundle is available yet.", status=HTTPStatus.NOT_FOUND)
+
+
 def latest_native_android_hermes_wake_model_path(server: WasmAgentServer) -> Path:
     for candidate in native_android_hermes_wake_model_candidates(server):
         try:
@@ -7834,15 +8980,72 @@ def latest_native_android_hermes_wake_model_path(server: WasmAgentServer) -> Pat
     raise BrowserError("hermes_wake_model_missing", "No trained Hermes wake model is available yet.", status=HTTPStatus.NOT_FOUND)
 
 
+def native_android_wake_model_sidecar(model: Path) -> dict[str, Any]:
+    candidates = [
+        model.with_name("metadata.json"),
+        model.with_suffix(model.suffix + ".json"),
+    ]
+    for candidate in candidates:
+        payload = read_json_file(candidate, {})
+        if isinstance(payload, dict) and payload:
+            return payload
+    return {}
+
+
+def latest_native_android_openwakeword_bundle_metadata(server: WasmAgentServer) -> dict[str, Any]:
+    bundle = latest_native_android_openwakeword_bundle_path(server)
+    data = bundle.read_bytes()
+    sidecar = native_android_wake_model_sidecar(bundle)
+    wake_phrase = clipped_verbatim(str(
+        sidecar.get("wakePhrase")
+        or sidecar.get("wake_phrase")
+        or sidecar.get("target_phrase")
+        or "hey jarvis"
+    ), 80)
+    model_name = clipped_verbatim(str(sidecar.get("modelName") or sidecar.get("model_name") or "openWakeWord bundle"), 120)
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.android_openwakeword_bundle.v1",
+        "url": "/native/android/openwakeword-bundle/latest.zip",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "sizeBytes": len(data),
+        "modelRole": clipped_verbatim(str(sidecar.get("modelRole") or sidecar.get("model_role") or "wake_phrase_candidate"), 80),
+        "modelName": model_name,
+        "installPath": "files/voice/openwakeword",
+        "wakePhrase": wake_phrase,
+        "engineContract": "openwakeword_bundle",
+        "source": clipped_verbatim(str(sidecar.get("source") or sidecar.get("source_url") or "openWakeWord"), 300),
+        "sourcePath": str(bundle),
+    }
+
+
 def latest_native_android_hermes_wake_model_metadata(server: WasmAgentServer) -> dict[str, Any]:
+    try:
+        return latest_native_android_openwakeword_bundle_metadata(server)
+    except BrowserError:
+        pass
     model = latest_native_android_hermes_wake_model_path(server)
     data = model.read_bytes()
+    sidecar = native_android_wake_model_sidecar(model)
+    wake_phrase = clipped_verbatim(str(
+        sidecar.get("wakePhrase")
+        or sidecar.get("wake_phrase")
+        or sidecar.get("target_phrase")
+        or "configured_by_wake_word_policy"
+    ), 80)
+    model_name = clipped_verbatim(str(sidecar.get("modelName") or sidecar.get("model_name") or model.stem), 120)
     return {
         "ok": True,
         "schema": "hermes.wasm_agent.android_hermes_wake_model.v1",
         "url": "/native/android/hermes-wake-model/latest",
         "sha256": hashlib.sha256(data).hexdigest(),
         "sizeBytes": len(data),
+        "modelRole": clipped_verbatim(str(sidecar.get("modelRole") or sidecar.get("model_role") or "wake_phrase_candidate"), 80),
+        "modelName": model_name,
+        "installPath": "files/voice/hermes.onnx",
+        "wakePhrase": wake_phrase,
+        "engineContract": "raw_pcm_onnx_single_confidence",
+        "source": clipped_verbatim(str(sidecar.get("source") or sidecar.get("source_url") or ""), 300),
         "sourcePath": str(model),
     }
 
@@ -7860,6 +9063,22 @@ def serve_native_android_hermes_wake_model(server: WasmAgentServer, handler: Was
     handler.send_header("Content-Length", str(size))
     handler.end_headers()
     with model.open("rb") as fh:
+        shutil.copyfileobj(fh, handler.wfile)
+
+
+def serve_native_android_openwakeword_bundle(server: WasmAgentServer, handler: WasmAgentHandler) -> None:
+    bundle = latest_native_android_openwakeword_bundle_path(server)
+    size = bundle.stat().st_size
+    digest = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/zip")
+    handler.send_header("Content-Disposition", 'attachment; filename="openwakeword.zip"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Wasm-Agent-OpenWakeWord-Bundle-Sha256", digest)
+    handler.send_header("X-Wasm-Agent-OpenWakeWord-Bundle-Bytes", str(size))
+    handler.send_header("Content-Length", str(size))
+    handler.end_headers()
+    with bundle.open("rb") as fh:
         shutil.copyfileobj(fh, handler.wfile)
 
 
@@ -12409,7 +13628,11 @@ def is_public_request(method: str, path: str) -> bool:
     if method == "GET":
         if path == "/native/download":
             return True
-        if path in {"/native/android/hermes-wake-model/latest", "/native/android/hermes-wake-model/latest.json"}:
+        if path in {
+            "/native/android/hermes-wake-model/latest",
+            "/native/android/hermes-wake-model/latest.json",
+            "/native/android/openwakeword-bundle/latest.zip",
+        }:
             return True
         if path.startswith("/native/releases/"):
             return True
@@ -12444,8 +13667,10 @@ def is_public_request(method: str, path: str) -> bool:
             "/config.json",
             "/auth/session",
             "/native/diagnostics/latest",
-            "/native/android/wake-world-state",
+            ANDROID_WAKE_WORD_STATE_PATH,
+            LEGACY_ANDROID_WAKE_WORD_STATE_PATH,
             "/native/debug",
+            "/native/obs/v1",
             "/native/control/poll",
             "/native/control/clients",
             "/native/android/auth/poll",
@@ -12477,6 +13702,8 @@ def is_public_request(method: str, path: str) -> bool:
             "/native/android/hermes-wake-install/result",
             "/native/diagnostics",
             "/native/events",
+            "/native/obs/query",
+            "/native/obs/agent-view",
             "/native/control/command",
             "/native/frontier/command",
             "/native/control/result",
@@ -17964,6 +19191,253 @@ class BrowserClientWebSocket:
                 raise BrowserError("browser_ws_closed", "Browser websocket closed.")
             chunks.extend(chunk)
         return bytes(chunks)
+
+
+def accept_browser_client_websocket(handler: WasmAgentHandler) -> BrowserClientWebSocket | None:
+    key = handler.headers.get("Sec-WebSocket-Key", "").strip()
+    upgrade = handler.headers.get("Upgrade", "").lower()
+    if upgrade != "websocket" or not key:
+        handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
+        return None
+    accept = base64.b64encode(
+        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
+    ).decode("ascii")
+    handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    handler.close_connection = True
+    return BrowserClientWebSocket(handler)
+
+
+def native_observability_dict_payload() -> dict[str, Any]:
+    return {
+        "schema": "hermes.wasm_agent.observability.dictionary.v1",
+        "frame_types": WAO_FRAME_TYPES,
+        "field_ids": WAO_FIELD_IDS,
+        "tlv_types": {
+            "null": WAO_TLV_NULL,
+            "bool": WAO_TLV_BOOL,
+            "i64": WAO_TLV_I64,
+            "f64": WAO_TLV_F64,
+            "utf8": WAO_TLV_UTF8,
+            "bytes": WAO_TLV_BYTES,
+            "json": WAO_TLV_JSON,
+        },
+    }
+
+
+def native_observability_decode_message(opcode: int, payload: bytes) -> dict[str, Any]:
+    if opcode == 0x2:
+        return wao_decode_frame(payload)
+    try:
+        message = json.loads(payload.decode("utf-8"))
+    except Exception as exc:
+        raise BrowserError("invalid_native_observability_json", "Native observability text frame was not valid JSON.") from exc
+    if not isinstance(message, dict):
+        raise BrowserError("invalid_native_observability_json", "Native observability text frame must be an object.")
+    frame_type = str(message.get("type") or "EVENT").strip().upper()
+    fields = message.get("fields") if isinstance(message.get("fields"), dict) else message
+    return {
+        "type": frame_type,
+        "type_id": wao_frame_type_id(frame_type),
+        "schema_id": int(message.get("schema_id") or 0),
+        "flags": int(message.get("flags") or 0),
+        "session": int(message.get("session") or 0),
+        "seq": int(message.get("seq") or 0),
+        "ack": int(message.get("ack") or 0),
+        "monotonic_ms": int(time.monotonic() * 1000),
+        "fields": fields,
+    }
+
+
+def native_observability_send_error(client_ws: BrowserClientWebSocket, code: str, message: str) -> None:
+    client_ws.send_frame(0x2, wao_encode_frame("ERROR", {"status": code, "reason": message}))
+
+
+def native_observability_record_heartbeat(
+    server: WasmAgentServer,
+    handler: WasmAgentHandler,
+    fields: dict[str, Any],
+    device_id: str,
+) -> None:
+    now = iso_timestamp()
+    heartbeat = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.native_observability_heartbeat.v1",
+        "device_id": device_id,
+        "build_id": clipped_verbatim(str(fields.get("build_id") or ""), 120),
+        "route": clipped_verbatim(str(fields.get("route") or ""), 600),
+        "runtime": clipped_verbatim(str(fields.get("runtime") or ""), 120),
+        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
+        "received_at": now,
+        "transport": "wao1",
+    }
+    root = native_control_dir(server)
+    write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
+    server.observability_hub.record_event(device_id, "native.control", "heartbeat", heartbeat, latest_key="native.control.heartbeat")
+
+
+def native_observability_command_ack_is_final(status: str) -> bool:
+    return status.strip().lower() in {"done", "final", "finished", "complete", "completed", "ok", "error", "failed", "timeout", "cancelled"}
+
+
+def serve_native_observability_ws(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:
+    client_ws = accept_browser_client_websocket(handler)
+    if client_ws is None:
+        return
+    try:
+        handle_native_observability_ws(handler, client_ws, user)
+    finally:
+        handler.server.observability_hub.unregister_client(client_ws)
+        client_ws.close()
+
+
+def handle_native_observability_ws(
+    handler: WasmAgentHandler,
+    client_ws: BrowserClientWebSocket,
+    user: dict[str, Any] | None,
+) -> None:
+    server = handler.server
+    query = parse_qs(urlparse(handler.path).query)
+    device_id = native_device_id_from_value((query.get("device_id") or query.get("deviceId") or ["observer"])[0], "observer")
+    role = clipped_verbatim(str((query.get("role") or ["device"])[0]), 40)
+    topics = clipped_verbatim(str((query.get("topics") or [""])[0]), 400)
+    session = secrets.randbits(32)
+
+    try:
+        opcode, raw = client_ws.recv_message(wait=8)
+        frame = native_observability_decode_message(opcode, raw)
+        fields = frame.get("fields") if isinstance(frame.get("fields"), dict) else {}
+        if str(frame.get("type") or "").upper() == "HELLO":
+            device_id = native_device_id_from_value(fields.get("device_id") or device_id, device_id)
+            role = clipped_verbatim(str(fields.get("role") or role or "device"), 40)
+            topics = clipped_verbatim(str(fields.get("topics") or topics or ""), 400)
+    except BrowserError as exc:
+        if exc.code == "browser_ws_timeout":
+            fields = {}
+        else:
+            native_observability_send_error(client_ws, exc.code, exc.message)
+            return
+
+    server.observability_hub.register_client(client_ws, device_id=device_id, role=role, topics=topics)
+    client_ws.send_frame(0x2, wao_encode_frame("HELLO", {
+        "device_id": device_id,
+        "status": "ready",
+        "role": "server",
+        "session": session,
+        "payload_json": {
+            "schema": "hermes.wasm_agent.observability.hello.v1",
+            "server_time_ms": int(time.time() * 1000),
+            "retention_ms": WAO_RETENTION_SEC * 1000,
+        },
+    }, session=session))
+    client_ws.send_frame(0x2, wao_encode_frame("DICT", {"payload_json": native_observability_dict_payload()}, session=session))
+    native_observability_record_heartbeat(server, handler, fields, device_id)
+    native_observability_send_pending_commands(server, client_ws, device_id)
+
+    while True:
+        try:
+            opcode, raw = client_ws.recv_message(wait=10)
+            frame = native_observability_decode_message(opcode, raw)
+        except BrowserError as exc:
+            if exc.code == "browser_ws_timeout":
+                client_ws.send_frame(0x2, wao_encode_frame("HEARTBEAT", {
+                    "device_id": device_id,
+                    "status": "ok",
+                    "ts_ms": int(time.time() * 1000),
+                }, session=session))
+                native_observability_send_pending_commands(server, client_ws, device_id)
+                continue
+            if exc.code == "browser_ws_closed":
+                break
+            native_observability_send_error(client_ws, exc.code, exc.message)
+            continue
+        fields = frame.get("fields") if isinstance(frame.get("fields"), dict) else {}
+        frame_type = str(frame.get("type") or "EVENT").upper()
+        frame_device = native_device_id_from_value(fields.get("device_id") or device_id, device_id)
+        if frame_type == "HELLO":
+            device_id = frame_device
+            server.observability_hub.register_client(client_ws, device_id=device_id, role=str(fields.get("role") or role), topics=str(fields.get("topics") or topics))
+            native_observability_record_heartbeat(server, handler, fields, device_id)
+            native_observability_send_pending_commands(server, client_ws, device_id)
+            continue
+        if frame_type == "HEARTBEAT":
+            native_observability_record_heartbeat(server, handler, fields, frame_device)
+            native_observability_send_pending_commands(server, client_ws, frame_device)
+            continue
+        if frame_type in {"EVENT", "STATE_PATCH", "BLOB_CHUNK"}:
+            payload = fields.get("payload_json")
+            if not isinstance(payload, (dict, list)):
+                payload = {key: value for key, value in fields.items() if key not in {"device_id", "stream", "type", "key"}}
+            event = server.observability_hub.record_event(
+                frame_device,
+                clipped_verbatim(str(fields.get("stream") or ("native.blob" if frame_type == "BLOB_CHUNK" else "native")), 120),
+                clipped_verbatim(str(fields.get("type") or fields.get("kind") or frame_type.lower()), 120),
+                payload,
+                schema_id=int(frame.get("schema_id") or 0),
+                flags=int(frame.get("flags") or 0),
+                latest_key=clipped_verbatim(str(fields.get("key") or ""), 120),
+                source=client_ws,
+            )
+            client_ws.send_frame(0x2, wao_encode_frame("COMMAND_ACK", {
+                "device_id": frame_device,
+                "status": "stored",
+                "seq_start": event.get("seq", 0),
+                "seq_end": event.get("seq", 0),
+            }, session=session, ack=int(frame.get("seq") or 0)))
+            continue
+        if frame_type == "COMMAND_ACK":
+            command_id = safe_state_id(str(fields.get("command_id") or ""), "")
+            status = clipped_verbatim(str(fields.get("status") or "ack"), 80)
+            op = clipped_verbatim(str(fields.get("op") or fields.get("type") or "unknown"), 120)
+            result_payload = fields.get("result_json")
+            if not isinstance(result_payload, dict):
+                result_payload = fields.get("payload_json") if isinstance(fields.get("payload_json"), dict) else {"status": status}
+            server.observability_hub.record_command(
+                {"id": command_id or "unknown", "device_id": frame_device, "type": op, "payload": {}},
+                status=status,
+                ack_seq=int(frame.get("seq") or 0),
+                result=result_payload,
+            )
+            if command_id and native_observability_command_ack_is_final(status):
+                save_native_control_result(server, {
+                    "device_id": frame_device,
+                    "command_id": command_id,
+                    "command_type": op,
+                    "result": {
+                        **result_payload,
+                        "ok": result_payload.get("ok", status.lower() in {"done", "final", "finished", "complete", "completed", "ok"}),
+                        "waoStatus": status,
+                    },
+                }, handler)
+            else:
+                server.observability_hub.record_event(frame_device, "native.control", "command_ack", {
+                    "command_id": command_id,
+                    "op": op,
+                    "status": status,
+                    "result": result_payload,
+                })
+            client_ws.send_frame(0x2, wao_encode_frame("COMMAND_ACK", {
+                "device_id": frame_device,
+                "command_id": command_id,
+                "status": "stored",
+            }, session=session, ack=int(frame.get("seq") or 0)))
+            continue
+        if frame_type == "SNAPSHOT_REQ":
+            view = server.observability_hub.agent_view({
+                "device_id": frame_device,
+                "topics": fields.get("topics") if isinstance(fields.get("topics"), list) else [],
+                "after_seq": fields.get("cursor") or 0,
+                "token_budget": fields.get("token_budget") or 2000,
+            })
+            client_ws.send_frame(0x2, wao_encode_frame("SNAPSHOT", {
+                "device_id": frame_device,
+                "snapshot_json": view,
+            }, session=session, ack=int(frame.get("seq") or 0)))
+            continue
+        native_observability_send_error(client_ws, "unsupported_native_observability_frame", f"Unsupported WAO frame type: {frame_type}")
 
 
 def serve_shared_space_room_live(handler: WasmAgentHandler, user: dict[str, Any] | None) -> None:

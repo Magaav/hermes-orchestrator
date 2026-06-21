@@ -1,6 +1,6 @@
-# Hermes Android Wake Model Contract
+# Android Wake Model Contract
 
-Place the production Hermes wake-word ONNX model here as:
+Place the production/base wake-word ONNX model here as:
 
   base_hermes.onnx
 
@@ -44,8 +44,11 @@ Diagnostics:
 - hermes_wake_model_incompatible: the model loads but input/output metadata does
   not match the raw PCM contract above
 
-Real wake-on-Hermes is not complete until a genuine Hermes-trained hermes.onnx is
-present and verified against positive and negative audio fixtures.
+Real wake-on-device is not complete until a compatible wake-phrase model is
+present and verified against positive and negative audio fixtures. The wake
+phrase is policy metadata, not a hardcoded product brand; an existing
+open-source phrase such as "hey jarvis" is acceptable when the model is
+compatible with this raw-PCM ONNX contract.
 
 Training sample persistence:
 
@@ -96,8 +99,9 @@ Artifact types:
   native/android/scripts/generate-wake-test-onnx.py. It uses mean absolute
   waveform amplitude as confidence, so it proves ONNX loader, evaluator, and APK
   packaging mechanics only. It is not trained on the Hermes wake word.
-- Production model: named hermes.onnx and trained/exported for the Hermes wake
-  word. This is required before real wake-on-Hermes can be claimed.
+- Production/personalized model: named hermes.onnx for the existing app-private
+  install bridge. It may target any configured wake phrase, but must be a real
+  compatible wake detector and not a fixture.
 
 Use native/android/scripts/install-wake-model.sh --model path/to/hermes.onnx to
 install a production model into this directory. Installing a dev/test fixture

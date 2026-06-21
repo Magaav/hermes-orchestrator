@@ -224,9 +224,16 @@ function main() {
   fs.mkdirSync(releaseRoot, { recursive: true });
   const signingLevel = ensureSideloadSigningKey(env);
   const gradle = gradleCommand();
-  const gradleArgs = [...gradle.args, "--no-daemon", "--build-cache"];
+  const gradleArgs = [...gradle.args];
+  if (env.HORC_ANDROID_GRADLE_DAEMON !== "1") {
+    gradleArgs.push("--no-daemon");
+  }
+  gradleArgs.push("--build-cache");
   if (env.HORC_ANDROID_GRADLE_PARALLEL !== "0") {
     gradleArgs.push("--parallel");
+  }
+  if (env.HORC_ANDROID_CONFIGURATION_CACHE === "1") {
+    gradleArgs.push("--configuration-cache");
   }
   if (env.HORC_ANDROID_KOTLIN_IN_PROCESS === "1") {
     gradleArgs.push("-Pkotlin.compiler.execution.strategy=in-process");

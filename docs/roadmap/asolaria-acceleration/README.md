@@ -73,6 +73,41 @@ Rules:
   lowercase field names, no raw `|` or newlines in values, and IDs instead of
   free-text where the value may contain spaces or punctuation.
 
+## Major Improvement Indexing
+
+When an agent discovers a major improvement, do not leave it only in chat. Index
+it as a proposal/status-bearing receipt so future agents can route, verify, or
+reject it without rediscovering the same idea.
+
+Major improvement means a finding that changes one of these boundaries:
+
+- route or ownership map;
+- claim status or proof boundary;
+- verification command or artifact;
+- rebuild avoidance or hot-op strategy;
+- observability, diagnostics, or live-control surface;
+- rollback, safety, auth, or production guard;
+- durable next action for an active area.
+
+Prototype improvement receipt:
+
+```text
+WAIMPROVE|schema=hermes.improvement.v1|status=<proposal|implemented-unverified|verified|stale|unknown>|area=<route-id>|kind=<route|claim|verify|loop|observability|safety|next>|subject=<tuple-hash>|evidence=<static|runtime|behavioral|missing>|proof=<command-or-report-id>|next=<next-action-id>|json=0
+```
+
+Rules:
+
+- Default new ideas to `proposal` unless the owning verifier has already passed.
+- `area` must route to `docs/context/MAP.md` or a nearest owner README/AGENTS.
+- `subject` is a tuple hash over stable fields such as area, kind, claim id,
+  artifact id, and proof id; it is a dedup/routing key, not proof by itself.
+- `evidence` names the strongest available evidence class and may be `missing`.
+- Promotion to `verified` still requires the exact proof boundary named by the
+  owning docs; the receipt cannot upgrade a claim by itself.
+- If the idea affects production guards, auth, native runtime proof, installer
+  proof, OAuth, or Android wake proof, keep it in roadmap/proposal state until
+  the owning runtime/package proof passes.
+
 ## Faster Agent Loop
 
 Before rebuilding or asking the user to narrate runtime state, agents should:

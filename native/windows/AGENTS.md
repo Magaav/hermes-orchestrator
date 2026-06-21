@@ -31,6 +31,13 @@ Agent Native.
 - Before editing, read `/local/AGENTS.md`, `/local/README.md`,
   `/local/docs/context/MAP.md`, `/local/native/AGENTS.md`,
   `/local/native/NATIVE_SHELL_CONTRACT.md`, this file, and `README.md`.
+- For installer, preload bridge, hot-op, diagnostics, release-feed, or
+  installed-app proof work, use Verified Loop-Aware Engineering: separate
+  Builder intent, Watcher evidence, and Gatekeeper decision; prefer static,
+  runtime, and behavioral evidence instead of source/build proof alone.
+- Before rebuilding Windows, check whether a downloaded runtime/hot-op,
+  bounded diagnostic, HMR, reload, config, or existing bridge command can prove
+  the hypothesis without repackaging.
 - Keep backend probing, Google login, cookie persistence, service-worker cache
   clearing, and preload bridge changes aligned with the cloud PWA contract.
 - Keep diagnostics bridges bounded to named operations with fixed arguments and

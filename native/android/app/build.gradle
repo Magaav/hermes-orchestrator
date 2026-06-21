@@ -16,10 +16,13 @@ def androidKeystore = envOrDefault("WASM_AGENT_ANDROID_KEYSTORE", "${rootProject
 def androidKeystorePassword = envOrDefault("WASM_AGENT_ANDROID_KEYSTORE_PASSWORD", "wasm-agent-sideload")
 def androidKeyAlias = envOrDefault("WASM_AGENT_ANDROID_KEY_ALIAS", "wasm-agent-sideload")
 def androidKeyPassword = envOrDefault("WASM_AGENT_ANDROID_KEY_PASSWORD", androidKeystorePassword)
+def androidVoskModelDir = envOrDefault("WASM_AGENT_ANDROID_VOSK_MODEL_DIR", "${rootProject.projectDir}/build/generated/asr/vosk-model")
+def generatedVoskAssetsDir = layout.buildDirectory.dir("generated/assets/vosk")
 
 android {
     namespace = "com.colmeio.wasmagent"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.colmeio.wasmagent"
@@ -37,6 +40,12 @@ android {
 
     buildFeatures {
         buildConfig = true
+    }
+
+    sourceSets {
+        main {
+            assets.srcDir(generatedVoskAssetsDir)
+        }
     }
 
     compileOptions {
@@ -77,8 +86,20 @@ android {
 dependencies {
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
     implementation("com.alphacephei:vosk-android:0.3.75")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20250517")
+}
+
+tasks.register("syncBundledVoskModel", Sync) {
+    def sourceDir = file(androidVoskModelDir)
+    onlyIf { sourceDir.exists() && sourceDir.isDirectory() && sourceDir.listFiles()?.length > 0 }
+    from(sourceDir)
+    into(generatedVoskAssetsDir.map { it.dir("asr/vosk-model") })
+}
+
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn("syncBundledVoskModel")
 }
 
 tasks.register("verifyReleaseWakeAssets", Exec) {

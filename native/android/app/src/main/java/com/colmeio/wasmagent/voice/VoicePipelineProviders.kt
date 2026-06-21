@@ -103,6 +103,63 @@ object VoiceProviderSelector {
     }
 }
 
+private fun safeJsonConfidence(value: Double): Any =
+    if (java.lang.Double.isFinite(value)) value else JSONObject.NULL
+
+object VoiceCommandNormalizer {
+    private val taggedUnknownPattern = Regex("""\[(?:unk|spn|noise|sil)\]|<(?:unk|spn|noise|sil)>""", RegexOption.IGNORE_CASE)
+    private val nonCommandCharacterPattern = Regex("[^a-z0-9 ]")
+    private val whitespacePattern = Regex("\\s+")
+    private val ignoredWords = setOf("a", "an", "can", "could", "hey", "hermes", "now", "ok", "okay", "please", "the", "to", "would", "you")
+    private val unknownWords = setOf("unk", "unknown")
+
+    fun normalizeTranscript(transcript: String): String {
+        val text = transcript
+            .lowercase()
+            .replace(taggedUnknownPattern, " ")
+            .replace("wakeword", "wake word")
+            .replace("wake words", "wake word")
+            .replace(nonCommandCharacterPattern, " ")
+            .replace(whitespacePattern, " ")
+            .trim()
+        if (text.isBlank()) return ""
+        return text
+            .split(" ")
+            .filter { word -> word.isNotBlank() && word !in ignoredWords && word !in unknownWords }
+            .joinToString(" ")
+            .replace(whitespacePattern, " ")
+            .trim()
+    }
+
+    fun commandForTranscript(transcript: String): String {
+        val normalized = normalizeTranscript(transcript)
+        if (normalized.isBlank()) return ""
+        val words = normalized.split(" ").filter { it.isNotBlank() }
+        return when {
+            hasPhrase(words, "stop", "listening") ||
+                hasPhrase(words, "stop", "listener") ||
+                hasPhrase(words, "stop", "wake", "word") -> "stop_listening"
+            hasPhrase(words, "train", "wake") ||
+                hasPhrase(words, "train", "wake", "word") -> "train_hermes_wake"
+            hasPhrase(words, "show", "diagnostic") ||
+                hasPhrase(words, "show", "diagnostics") ||
+                (words.contains("show") && (words.contains("diagnostic") || words.contains("diagnostics"))) -> "show_diagnostics"
+            hasPhrase(words, "go", "home") -> "go_home"
+            hasPhrase(words, "open", "wake", "word") ||
+                hasPhrase(words, "wake", "word") ||
+                hasPhrase(words, "start", "listener") ||
+                hasPhrase(words, "start", "listening") ||
+                words == listOf("listener") -> "open_wake_word"
+            else -> ""
+        }
+    }
+
+    private fun hasPhrase(words: List<String>, vararg phrase: String): Boolean {
+        if (phrase.isEmpty() || words.size < phrase.size) return false
+        return words.windowed(phrase.size).any { window -> window == phrase.toList() }
+    }
+}
+
 data class VoiceDispatchResult(
     val ok: Boolean,
     val statusCode: Int = 0,
@@ -120,9 +177,9 @@ class VoiceCommandRouter {
             .put("type", "wake_detected")
             .put("kind", "wake_detected")
             .put("platform", "android")
-            .put("wake_word", "hermes")
-            .put("wake_confidence", event.confidence)
-            .put("confidence", event.confidence)
+            .put("wake_word", event.wakeWord.ifBlank { "hermes" })
+            .put("wake_confidence", safeJsonConfidence(event.confidence))
+            .put("confidence", safeJsonConfidence(event.confidence))
             .put("source", "android_native_voice_wake")
             .put("wake_provider", wakeProvider)
             .put("device_id", "android-${BuildConfig.NATIVE_BUILD_ID}")

@@ -51,7 +51,7 @@ object NativeBridgeContract {
         "forceSyncDownloadedRuntime",
         "rollbackDownloadedRuntime",
         "runDownloadedOperation",
-        "getWakeWorldState",
+        "getWakeWordState",
     )
 
     val voiceTuningMethods = listOf(
@@ -63,6 +63,9 @@ object NativeBridgeContract {
         "deleteLastVoiceTuningSample",
         "exportHermesDataset",
         "installHermesWakeModel",
+        "installOpenWakeWordBundle",
+        "playWakePhraseProbe",
+        "scoreWakePhraseProbe",
         "getVoiceTuningDiagnostics",
         "beginHermesWakeProof",
         "getHermesWakeProof",
@@ -89,6 +92,9 @@ object NativeBridgeContract {
      *   window.WasmAgentNativeVoiceTuning.deleteLastVoiceTuningSample(categoryId)
      *   window.WasmAgentNativeVoiceTuning.exportHermesDataset()
      *   window.WasmAgentNativeVoiceTuning.installHermesWakeModel(modelUrl, sha256)
+     *   window.WasmAgentNativeVoiceTuning.installOpenWakeWordBundle(bundleUrl, sha256)
+     *   window.WasmAgentNativeVoiceTuning.playWakePhraseProbe(JSON.stringify({ phrase: "hey jarvis" }))
+     *   window.WasmAgentNativeVoiceTuning.scoreWakePhraseProbe(JSON.stringify({ durationMs: 3500 }))
      *   window.WasmAgentNativeVoiceTuning.getVoiceTuningDiagnostics()
      *
      * Native bridge method:

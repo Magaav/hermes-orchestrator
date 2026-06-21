@@ -54,6 +54,60 @@ class VoiceWakeStateMachineTest {
     }
 
     @Test
+    fun wakeConfirmationGateRejectsSingleSpike() {
+        val gate = WakeConfirmationGate()
+
+        val decision = gate.observe(
+            WakeWordResult(detected = true, confidence = 0.99),
+            now = 1_000L,
+            requiredFrames = 2,
+            windowMs = 700L,
+        )
+
+        assertTrue(decision.rawDetected)
+        assertFalse(decision.accepted)
+        assertFalse(decision.wake.detected)
+        assertEquals("wake_confirmation_pending", decision.rejectionReason)
+        assertEquals(1, decision.frames)
+    }
+
+    @Test
+    fun wakeConfirmationGateAcceptsConsecutiveFrames() {
+        val gate = WakeConfirmationGate()
+        gate.observe(WakeWordResult(detected = true, confidence = 0.93), now = 1_000L, requiredFrames = 2, windowMs = 700L)
+
+        val decision = gate.observe(
+            WakeWordResult(detected = true, confidence = 0.97),
+            now = 1_120L,
+            requiredFrames = 2,
+            windowMs = 700L,
+        )
+
+        assertTrue(decision.accepted)
+        assertTrue(decision.wake.detected)
+        assertEquals(2, decision.frames)
+        assertEquals(0.97, decision.wake.confidence, 0.0)
+    }
+
+    @Test
+    fun wakeConfirmationGateExpiresOldCandidate() {
+        val gate = WakeConfirmationGate()
+        gate.observe(WakeWordResult(detected = true, confidence = 0.96), now = 1_000L, requiredFrames = 2, windowMs = 300L)
+
+        val decision = gate.observe(
+            WakeWordResult(detected = true, confidence = 0.98),
+            now = 1_500L,
+            requiredFrames = 2,
+            windowMs = 300L,
+        )
+
+        assertFalse(decision.accepted)
+        assertFalse(decision.wake.detected)
+        assertEquals(1, decision.frames)
+        assertEquals(1_500L, decision.candidateStartedAt)
+    }
+
+    @Test
     fun hermesWakeCapturesAndEmitsTranscriptEvent() {
         val machine = VoiceWakeStateMachine()
         machine.enable()
@@ -225,6 +279,69 @@ class VoiceWakeStateMachineTest {
     }
 
     @Test
+    fun commandNormalizerStripsVoskUnknownTokenAndRoutesWakeWordOpen() {
+        val transcript = "[unk] open wake word"
+
+        assertEquals("open wake word", VoiceCommandNormalizer.normalizeTranscript(transcript))
+        assertEquals("open_wake_word", VoiceCommandNormalizer.commandForTranscript(transcript))
+        assertEquals("open_wake_word", VoiceCommandNormalizer.commandForTranscript("Hermes, please open the Wake Word"))
+        assertEquals("open_wake_word", VoiceCommandNormalizer.commandForTranscript("wake word"))
+    }
+
+    @Test
+    fun commandNormalizerAcceptsVoskGrammarAliases() {
+        assertEquals("open_wake_word", VoiceCommandNormalizer.commandForTranscript("start listener"))
+        assertEquals("open_wake_word", VoiceCommandNormalizer.commandForTranscript("listener"))
+        assertEquals("stop_listening", VoiceCommandNormalizer.commandForTranscript("stop listener"))
+        assertEquals("stop_listening", VoiceCommandNormalizer.commandForTranscript("stop wake word"))
+        assertEquals("show_diagnostics", VoiceCommandNormalizer.commandForTranscript("show diagnostics"))
+        assertEquals("train_hermes_wake", VoiceCommandNormalizer.commandForTranscript("train Hermes wake"))
+        assertEquals("go_home", VoiceCommandNormalizer.commandForTranscript("go home"))
+        assertEquals("", VoiceCommandNormalizer.commandForTranscript("open"))
+    }
+
+    @Test
+    fun voiceCommandPayloadCarriesCanonicalCommand() {
+        val command = VoiceCommandNormalizer.commandForTranscript("[unk] open wake word")
+        val event = VoiceWakeEvent(
+            transcript = "[unk] open wake word",
+            command = command,
+            confidence = 0.88,
+            startedAt = 100,
+            endedAt = 200,
+            buildId = "test-build",
+            sessionId = "route-session",
+        )
+        val payload = VoiceCommandRouter().payload(event, "VoskOfflineEngine")
+
+        assertEquals("open_wake_word", payload.getString("command"))
+        assertEquals("[unk] open wake word", payload.getString("transcript"))
+        assertEquals("VoskOfflineEngine", payload.getString("asr_provider"))
+    }
+
+    @Test
+    fun voiceCommandPayloadPreservesFreeformTranscriptWithoutFalseCommand() {
+        val transcript = "can you hear me"
+        val command = VoiceCommandNormalizer.commandForTranscript(transcript)
+        val event = VoiceWakeEvent(
+            transcript = transcript,
+            command = command,
+            confidence = 0.99,
+            startedAt = 300,
+            endedAt = 700,
+            buildId = "test-build",
+            sessionId = "freeform-session",
+        )
+        val payload = VoiceCommandRouter().payload(event, "AndroidSpeechRecognizer")
+
+        assertEquals("", command)
+        assertEquals("hear me", VoiceCommandNormalizer.normalizeTranscript(transcript))
+        assertEquals("", payload.getString("command"))
+        assertEquals(transcript, payload.getString("transcript"))
+        assertEquals("AndroidSpeechRecognizer", payload.getString("asr_provider"))
+    }
+
+    @Test
     fun noModelProductionSelectionStaysSafe() {
         val model = File("build/test-provider-missing-${System.nanoTime()}.onnx")
         val providers = VoiceProviderSelector.select(
@@ -283,6 +400,29 @@ class VoiceWakeStateMachineTest {
         assertFalse(selection.baseModelExists)
         assertEquals("none", selection.engine.diagnostics().getString("model_source"))
         assertEquals("hermes_wake_model_missing", selection.engine.diagnosticReason)
+    }
+
+    @Test
+    fun wakeModelSelectorRecognizesOpenWakeWordBundleCandidate() {
+        val root = File("build/test-selector-openwakeword-${System.nanoTime()}")
+        val bundle = File(root, "voice/openwakeword")
+        bundle.mkdirs()
+        File(bundle, "melspectrogram.onnx").writeText("not an onnx mel model")
+        File(bundle, "embedding_model.onnx").writeText("not an onnx embedding model")
+        File(bundle, "hey_jarvis.onnx").writeText("not an onnx classifier model")
+        try {
+            val selection = WakeModelSelector.select(
+                File(root, "voice/hermes.onnx"),
+                File(root, "voice/base_hermes.onnx"),
+            )
+
+            assertTrue(selection.openWakeWordBundleExists)
+            assertEquals("openwakeword_bundle", selection.attempted[0].diagnostics().getString("model_source"))
+            assertEquals("openwakeword_bundle_load_error", selection.attempted[0].diagnosticReason)
+            assertEquals("none", selection.source)
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test

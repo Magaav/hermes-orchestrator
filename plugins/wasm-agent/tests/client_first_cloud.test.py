@@ -249,6 +249,48 @@ class ClientFirstCloudTest(unittest.TestCase):
             timeline = Path(tmp) / "native-events" / "voice-command-timeline.jsonl"
             self.assertIn("voice-session-test", timeline.read_text(encoding="utf-8"))
 
+    def test_native_voice_command_strips_vosk_unknown_for_wake_word_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            handler = SimpleNamespace(
+                headers={"X-Wasm-Agent-Native-Device-Id": "android-test-device"},
+                client_address=("127.0.0.1", 45678),
+            )
+
+            result = static_server.save_native_event(
+                server,
+                {
+                    "kind": "voice_command",
+                    "device_id": "android-test-device",
+                    "type": "voice_command",
+                    "wake_word": "hermes",
+                    "transcript": "[unk] open wake word",
+                    "confidence": 0.74,
+                    "source": "android_native_voice_wake",
+                    "asr_provider": "LocalCommandTranscriptionEngine(VoskOfflineEngine)",
+                    "build_id": "android-test",
+                    "session_id": "voice-session-vosk-unk",
+                    "privacy_mode": "wake-word-local-transcript-only",
+                    "audio_retained": False,
+                },
+                handler,
+            )
+
+            self.assertTrue(result["stored"])
+            self.assertTrue(result["dispatch"]["routed"])
+            latest = static_server.latest_native_voice_command(server)
+            event = latest["event"]
+            self.assertEqual(event["transcript"], "[unk] open wake word")
+            self.assertEqual(event["normalized_transcript"], "open wake word")
+            self.assertEqual(event["command"], "open_wake_word")
+            dispatch = Path(tmp) / "native-events" / "latest-voice-command-dispatch.json"
+            dispatched = json.loads(dispatch.read_text(encoding="utf-8"))
+            self.assertEqual(dispatched["transcript"], "[unk] open wake word")
+            self.assertEqual(dispatched["normalized_transcript"], "open wake word")
+            self.assertEqual(dispatched["command"], "open_wake_word")
+            self.assertEqual(dispatched["message"], "open wake word")
+            self.assertEqual(static_server.native_voice_command_for_transcript("listener"), "open_wake_word")
+
     def test_android_hermes_wake_dataset_operator_can_read_latest_upload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = SimpleNamespace(state_dir=Path(tmp))
@@ -279,16 +321,55 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertIn("android_hermes_wake_dataset_latest_read", audit.read_text(encoding="utf-8"))
 
     def test_android_hermes_wake_dataset_upload_is_public_for_native_bridge(self) -> None:
-        self.assertTrue(static_server.is_public_request("GET", "/native/android/wake-world-state"))
+        legacy_wake_word_state_path = "/native/android/" + "wake-" + "world-state"
+        legacy_open_wake_word_command = "open_wake_" + "world"
+        legacy_refresh_wake_word_command = "refresh_wake_" + "world_state"
+        self.assertTrue(static_server.is_public_request("GET", "/native/android/wake-word-state"))
+        self.assertTrue(static_server.is_public_request("GET", legacy_wake_word_state_path))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-dataset"))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/request"))
         self.assertTrue(static_server.is_public_request("POST", "/native/android/hermes-wake-export/result"))
-        self.assertIn("open_wake_world", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("open_wake_word", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertNotIn(legacy_open_wake_word_command, static_server.NATIVE_CONTROL_COMMAND_TYPES)
         self.assertIn("start_voice_wake", static_server.NATIVE_CONTROL_COMMAND_TYPES)
-        self.assertIn("refresh_wake_world_state", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("refresh_wake_word_state", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertNotIn(legacy_refresh_wake_word_command, static_server.NATIVE_CONTROL_COMMAND_TYPES)
         self.assertIn("apply_wake_word_policy", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertIn("play_audio_stimulus", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        self.assertEqual(static_server.normalize_native_control_command_type(legacy_open_wake_word_command), "open_wake_word")
+        self.assertEqual(static_server.normalize_native_control_command_type(legacy_refresh_wake_word_command), "refresh_wake_word_state")
 
-    def test_wake_world_state_uses_latest_voice_wake_packet_when_boot_trace_is_latest(self) -> None:
+    def test_native_control_result_finishes_command_with_case_variant_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp))
+            device_id = "android-test-device"
+            command_id = "cmd-codex-policy-20260618T204710Z"
+            command_dir = Path(tmp) / "native-control" / "commands" / device_id
+            command_dir.mkdir(parents=True)
+            command_path = command_dir / f"{command_id}.json"
+            command_path.write_text(json.dumps({
+                "id": command_id,
+                "device_id": device_id,
+                "type": "apply_wake_word_policy",
+                "status": "delivered",
+                "delivered_at": "2026-06-18T20:47:21Z",
+            }), encoding="utf-8")
+            handler = SimpleNamespace(headers={}, client_address=("127.0.0.1", 45678))
+
+            result = static_server.save_native_control_result(server, {
+                "device_id": device_id,
+                "command_id": command_id.lower(),
+                "command_type": "apply_wake_word_policy",
+                "result": {"ok": True, "command": "apply_wake_word_policy"},
+            }, handler)
+
+            self.assertTrue(result["ok"])
+            updated = json.loads(command_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["status"], "finished")
+            self.assertIn("finished_at", updated)
+            self.assertTrue(updated["result"]["ok"])
+
+    def test_wake_word_state_uses_latest_voice_wake_packet_when_boot_trace_is_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = SimpleNamespace(state_dir=Path(tmp))
             root = Path(tmp) / "native-diagnostics"
@@ -328,7 +409,7 @@ class ClientFirstCloudTest(unittest.TestCase):
             static_server.write_json_file(root / "android-voice-device.json", voice_record)
             static_server.write_json_file(root / "latest.json", boot_record)
 
-            result = static_server.latest_native_android_wake_world_state(server)
+            result = static_server.latest_native_android_wake_word_state(server)
 
             self.assertTrue(result["available"])
             self.assertEqual(result["state"]["received_at"], "2026-06-17T17:33:55Z")
@@ -339,7 +420,7 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertEqual(result["state"]["diagnosis"]["label"], "wake_threshold_not_crossed")
             self.assertTrue(any(item["id"] == "forgiving_transcript" for item in result["state"]["policy_presets"]))
 
-    def test_wake_world_state_diagnoses_post_wake_transcript_failure(self) -> None:
+    def test_wake_word_state_diagnoses_post_wake_transcript_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = SimpleNamespace(state_dir=Path(tmp))
             root = Path(tmp) / "native-diagnostics"
@@ -366,12 +447,93 @@ class ClientFirstCloudTest(unittest.TestCase):
             static_server.write_json_file(root / "android-voice-device.json", voice_record)
             static_server.write_json_file(root / "latest.json", voice_record)
 
-            result = static_server.latest_native_android_wake_world_state(server)
+            result = static_server.latest_native_android_wake_word_state(server)
 
             self.assertTrue(result["available"])
             self.assertEqual(result["state"]["diagnosis"]["label"], "wake_heard_no_transcript")
             self.assertEqual(result["state"]["diagnosis"]["suggested_preset"], "forgiving_transcript")
             self.assertEqual(result["state"]["diagnosis"]["suggested_command"]["type"], "apply_wake_word_policy")
+
+    def test_wake_model_metadata_reads_candidate_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp), plugin_root=PLUGIN_ROOT)
+            model_dir = Path(tmp) / "native-diagnostics" / "android-hermes-wake-models" / "latest"
+            model_dir.mkdir(parents=True)
+            model = model_dir / "hermes.onnx"
+            model.write_bytes(b"fake-onnx-candidate")
+            static_server.write_json_file(model_dir / "metadata.json", {
+                "wakePhrase": "hey jarvis",
+                "modelName": "open-source hey jarvis",
+                "source": "unit-test",
+            })
+
+            metadata = static_server.latest_native_android_hermes_wake_model_metadata(server)
+
+            self.assertTrue(metadata["ok"])
+            self.assertEqual(metadata["wakePhrase"], "hey jarvis")
+            self.assertEqual(metadata["modelName"], "open-source hey jarvis")
+            self.assertEqual(metadata["modelRole"], "wake_phrase_candidate")
+            self.assertEqual(metadata["engineContract"], "raw_pcm_onnx_single_confidence")
+
+    def test_wake_model_install_request_carries_candidate_phrase(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp), plugin_root=PLUGIN_ROOT)
+            handler = SimpleNamespace(headers={"Host": "127.0.0.1:8877"}, client_address=("127.0.0.1", 45678))
+            model_dir = Path(tmp) / "native-diagnostics" / "android-hermes-wake-models" / "latest"
+            model_dir.mkdir(parents=True)
+            (model_dir / "hermes.onnx").write_bytes(b"fake-onnx-candidate")
+            static_server.write_json_file(model_dir / "metadata.json", {
+                "wakePhrase": "hey jarvis",
+                "modelName": "open-source hey jarvis",
+            })
+
+            request = static_server.queue_native_android_hermes_wake_install(server, handler, None)
+
+            self.assertTrue(request["ok"])
+            self.assertEqual(request["model"]["wakePhrase"], "hey jarvis")
+            self.assertEqual(request["model"]["modelName"], "open-source hey jarvis")
+            self.assertEqual(request["model"]["engineContract"], "raw_pcm_onnx_single_confidence")
+
+    def test_openwakeword_bundle_metadata_wins_when_staged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp), plugin_root=PLUGIN_ROOT)
+            model_dir = Path(tmp) / "native-diagnostics" / "android-hermes-wake-models" / "latest"
+            model_dir.mkdir(parents=True)
+            (model_dir / "hermes.onnx").write_bytes(b"raw-onnx-candidate")
+            bundle = model_dir / "openwakeword.zip"
+            bundle.write_bytes(b"zip-candidate")
+            static_server.write_json_file(model_dir / "openwakeword.zip.json", {
+                "wakePhrase": "hey jarvis",
+                "modelName": "openWakeWord hey jarvis",
+                "source": "unit-test",
+            })
+
+            metadata = static_server.latest_native_android_hermes_wake_model_metadata(server)
+
+            self.assertEqual(metadata["url"], "/native/android/openwakeword-bundle/latest.zip")
+            self.assertEqual(metadata["engineContract"], "openwakeword_bundle")
+            self.assertEqual(metadata["installPath"], "files/voice/openwakeword")
+            self.assertEqual(metadata["wakePhrase"], "hey jarvis")
+            self.assertTrue(static_server.is_public_request("GET", "/native/android/openwakeword-bundle/latest.zip"))
+
+    def test_openwakeword_bundle_install_request_carries_bundle_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            server = SimpleNamespace(state_dir=Path(tmp), plugin_root=PLUGIN_ROOT)
+            handler = SimpleNamespace(headers={"Host": "127.0.0.1:8877"}, client_address=("127.0.0.1", 45678))
+            model_dir = Path(tmp) / "native-diagnostics" / "android-hermes-wake-models" / "latest"
+            model_dir.mkdir(parents=True)
+            (model_dir / "openwakeword.zip").write_bytes(b"zip-candidate")
+            static_server.write_json_file(model_dir / "openwakeword.zip.json", {
+                "wakePhrase": "hey jarvis",
+                "modelName": "openWakeWord hey jarvis",
+            })
+
+            request = static_server.queue_native_android_hermes_wake_install(server, handler, None)
+
+            self.assertTrue(request["ok"])
+            self.assertEqual(request["model"]["url"], "/native/android/openwakeword-bundle/latest.zip")
+            self.assertEqual(request["model"]["wakePhrase"], "hey jarvis")
+            self.assertEqual(request["model"]["engineContract"], "openwakeword_bundle")
 
     def test_android_hermes_wake_dataset_operator_rejects_remote_without_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

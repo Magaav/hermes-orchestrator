@@ -45,6 +45,32 @@ upgrade a claim.
 | Claim proof gained, missing, stale, or contradicted | `docs/context/CLAIMS.md` |
 | Verification command changes | `docs/context/VERIFY.md` and nearest owning docs |
 
+## Verified Loop-Aware Engineering
+
+Use this doctrine for meaningful native, bridge, wake-word, hot-op,
+runtime-control, release, or rebuild-heavy work. The goal is to shorten future
+loops without letting a shortcut authorize itself.
+
+| Phase | Required check |
+| --- | --- |
+| Before patch | Ask whether architecture, live control, HMR, hot-op, config, downloaded runtime/model, feature flag, replay, or diagnostics can avoid or shrink a rebuild. |
+| Before rebuild | Check whether logs, counters, state, recent events, permissions, diagnostics, or a status command will explain success/failure without manual inspection. |
+| During rebuild | Record command, target, start/end or approximate duration, validation command, evidence inspected, and whether rebuild was avoidable. |
+| After rebuild | Note what slowed the loop, whether proof was sufficient, and the next loop-shortening opportunity. |
+
+Rule of Three:
+
+| Role | Responsibility |
+| --- | --- |
+| Builder | Proposes and implements the patch, shortcut, hot-op, diagnostic, or validation path. |
+| Watcher | Independently verifies truth from tests, logs, counters, runtime/app/device state, diagnostics, or reproducible reports. |
+| Gatekeeper | Accepts, blocks, rolls back, requires rebuild, or escalates based on Builder intent plus Watcher evidence. |
+
+If one Codex/Frontier instance performs all roles, keep the sections separate in
+the report. Prefer three evidence classes whenever possible: static evidence,
+runtime evidence, and behavioral evidence. Prime checkpoints must be atomic,
+independent, falsifiable, observable, and non-redundant.
+
 ## Copilotability Fast Path
 
 Fresh agents should use product/runtime introspection before guessing. When an

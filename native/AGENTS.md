@@ -29,6 +29,21 @@ and Linux.
 - Read `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`, this
   file, and `NATIVE_SHELL_CONTRACT.md` before platform native edits.
 - Then read the platform child `AGENTS.md` and README.
+- For native shell, bridge, installer/APK, permission, service, hot-op, or
+  runtime-proof work, use Verified Loop-Aware Engineering: separate Builder
+  intent, Watcher evidence, and Gatekeeper decision; prefer static, runtime, and
+  behavioral evidence when possible.
+- Before implementing a native feature, classify behavior into stable native
+  primitives versus live-updatable policy/downloaded operations. Native shells
+  should expose durable primitives and diagnostics; tunable sequencing,
+  thresholds, provider choice, retry order, command mapping, model metadata, and
+  proof strategy should live in server/PWA policy, downloaded runtime/hot-op
+  bundles, or native-control inputs whenever the installed capability surface
+  can support it.
+- Hard-coding tunable feature behavior in compiled native code is a loop-time
+  regression unless the Builder report states why a live policy/downloaded-op
+  boundary would be unsafe, missing a required primitive, or more complex/risky
+  than the native change.
 - Keep shared product behavior in `plugins/wasm-agent`; rebuild native shells
   only for OS shell, packaging, bridge, permission, service, icon, installer, or
   bundled native capability changes.

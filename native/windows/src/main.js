@@ -25,10 +25,68 @@ const {
   stagedInstallerPath,
   validateDownloadedInstaller,
   validateReleaseArtifact,
+  windowsArtifactFromFeed,
 } = require("./windows-self-update");
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NATIVE_CONTROL_POLL_INTERVAL_MS = 15_000;
+const NATIVE_OBS_HEARTBEAT_INTERVAL_MS = 1000;
+const NATIVE_OBS_RECONNECT_MS = 2500;
+const WAO_HEADER_BYTES = 40;
+const WAO_TLV_HEADER_BYTES = 8;
+const WAO_VERSION = 1;
+const WAO_TLV_NULL = 0;
+const WAO_TLV_BOOL = 1;
+const WAO_TLV_I64 = 2;
+const WAO_TLV_F64 = 3;
+const WAO_TLV_UTF8 = 4;
+const WAO_TLV_BYTES = 5;
+const WAO_TLV_JSON = 6;
+const WAO_FRAME_TYPES = {
+  HELLO: 1,
+  DICT: 2,
+  EVENT: 3,
+  STATE_PATCH: 4,
+  COMMAND: 5,
+  COMMAND_ACK: 6,
+  SNAPSHOT_REQ: 7,
+  SNAPSHOT: 8,
+  BLOB_CHUNK: 9,
+  HEARTBEAT: 10,
+  ERROR: 11,
+};
+const WAO_FRAME_TYPE_NAMES = Object.fromEntries(Object.entries(WAO_FRAME_TYPES).map(([key, value]) => [value, key]));
+const WAO_FIELD_IDS = {
+  device_id: 1,
+  stream: 2,
+  type: 3,
+  key: 4,
+  ts_ms: 5,
+  command_id: 6,
+  op: 7,
+  status: 8,
+  priority: 9,
+  deadline_ms: 10,
+  result_json: 11,
+  payload_json: 12,
+  reason: 13,
+  route: 14,
+  build_id: 15,
+  app_version: 16,
+  runtime: 17,
+  seq_start: 18,
+  seq_end: 19,
+  latency_ms: 20,
+  evidence_refs: 21,
+  topics: 22,
+  cursor: 23,
+  token_budget: 24,
+  snapshot_json: 25,
+  kind: 26,
+  schema: 27,
+  role: 28,
+};
+const WAO_FIELD_NAMES = Object.fromEntries(Object.entries(WAO_FIELD_IDS).map(([key, value]) => [value, key]));
 const AUTH_COOKIE_WAIT_TIMEOUT_MS = 5000;
 const AUTH_COOKIE_WAIT_INTERVAL_MS = 200;
 const NATIVE_APP_ORIGIN = "wasm-agent://app";
@@ -49,6 +107,8 @@ const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
   "debug_android_voice_tuning_runtime",
   "export_hermes_wake_dataset",
   "run_android_hermes_wake_proof",
+  "play_wake_phrase_probe",
+  "play_audio_stimulus",
   "prove_android_voice_tuning",
   "run_android_voice_tuning_goal_loop",
   "verify_android_oauth",
@@ -81,6 +141,7 @@ const ALL_NATIVE_KERNEL_CAPABILITIES = [
   "native.capabilities.auditLog.v1",
   "native.capabilities.releaseFeedValidation.v1",
   "native.capabilities.nativeControlPolling.v1",
+  "native.capabilities.speaker.v1",
   "native.capabilities.crashSafeStatus.v1",
   "native.capabilities.capabilityManifest.v1",
 ];
@@ -118,6 +179,11 @@ const NATIVE_CONTROL_DEFAULT_TIMEOUT_MS = 60_000;
 const NATIVE_CONTROL_MAX_TIMEOUT_MS = 240_000;
 let selectedBackendOrigin = "";
 let nativeControlPollBusy = false;
+let nativeObsSocket = null;
+let nativeObsConnected = false;
+let nativeObsHeartbeatTimer = null;
+let nativeObsReconnectTimer = null;
+let nativeObsSeq = 1;
 let activeNativeCommandCount = 0;
 let activeWindowsSelfUpdate = null;
 let lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: "", syncedAt: "", feedUrl: "", error: "", status: "not_attempted", feedBundleId: "", cachedBundleId: "", activeRuntimeId: "", activeRuntimeSha: "", activeRuntimePath: "", staleReason: "", fallbackReason: "", files: [] };
@@ -601,9 +667,11 @@ async function collectAdbDiagnostics(options = {}) {
     commandResults.activity = await runAdbDiagnosticCommand(adbPath, ["shell", "dumpsys", "activity", "activities"], { timeoutMs: 8000, maxBuffer: 2 * 1024 * 1024 });
     commandResults.window = await runAdbDiagnosticCommand(adbPath, ["shell", "dumpsys", "window"], { timeoutMs: 8000, maxBuffer: 1024 * 1024 });
     commandResults.packages = await runAdbDiagnosticCommand(adbPath, ["shell", "pm", "list", "packages"], { timeoutMs: 8000, maxBuffer: 512 * 1024 });
-    commandResults.logcat = await runAdbDiagnosticCommand(adbPath, ["logcat", "-d", "-v", "time"], { timeoutMs: 12000, maxBuffer: 4 * 1024 * 1024 });
+    commandResults.logcat = await runAdbDiagnosticCommand(adbPath, ["logcat", "-d", "-t", "2500", "-v", "time"], { timeoutMs: 12000, maxBuffer: 2 * 1024 * 1024 });
+    commandResults.logcatCrash = await runAdbDiagnosticCommand(adbPath, ["logcat", "-b", "crash", "-d", "-t", "800", "-v", "time"], { timeoutMs: 12000, maxBuffer: 2 * 1024 * 1024 });
   }
-  const interestingLogPattern = /com\.colmeio\.wasmagent|wasmagent|WASM Agent|wa\.colmeio\.com|android-auth-return|native\/android\/auth|accounts\.google\.com|ActivityTaskManager|START u0|ChromeTabbedActivity|webapk|MIUILOG|Permission Denied/i;
+  const interestingLogPattern = /com\.colmeio\.wasmagent|wasmagent|WASM Agent|wa\.colmeio\.com|android-auth-return|native\/android\/auth|accounts\.google\.com|ActivityTaskManager|START u0|ChromeTabbedActivity|webapk|MIUILOG|Permission Denied|AndroidRuntime|FATAL EXCEPTION|SpeechRecognizer|RecognitionService|HermesVoiceWakeService/i;
+  const crashLogPattern = /AndroidRuntime|FATAL EXCEPTION|Process:\s*com\.colmeio\.wasmagent|Process\s+com\.colmeio\.wasmagent.*has died|Force finishing activity.*com\.colmeio\.wasmagent|SpeechRecognizer.*(?:Exception|Error|crash|died)|RecognitionService.*(?:Exception|Error|crash|died)|HermesVoiceWakeService.*(?:Exception|Error|crash|died)/i;
   const activityPattern = /mResumedActivity|mFocusedRootTask|Hist #|Intent|dat=|cmp=com\.colmeio|cmp=com\.android\.chrome|webapk|wa\.colmeio|android-auth-return/i;
   const packagePattern = /android-auth-return|wasm-agent|intent|VIEW|BROWSABLE|com\.colmeio\.wasmagent/i;
   const payload = {
@@ -617,6 +685,7 @@ async function collectAdbDiagnostics(options = {}) {
     commands: commandResults,
     filtered: {
       logcat: filterDiagnosticLines(commandResults.logcat?.stdout || "", interestingLogPattern, 300),
+      crashLogcat: filterDiagnosticLines(`${commandResults.logcatCrash?.stdout || ""}\n${commandResults.logcat?.stdout || ""}`, crashLogPattern, 260),
       activity: filterDiagnosticLines(commandResults.activity?.stdout || "", activityPattern, 180),
       packageWasmAgent: filterDiagnosticLines(commandResults.packageWasmAgent?.stdout || "", packagePattern, 220),
       webApkPackages: filterDiagnosticLines(commandResults.packages?.stdout || "", /webapk|colmeio|wasm/i, 120),
@@ -2563,6 +2632,10 @@ function parseJsonObjectSafe(value, fallback = {}) {
   }
 }
 
+function powershellSingleQuoted(value) {
+  return `'${String(value || "").replace(/'/g, "''")}'`;
+}
+
 function latestAndroidEvent(nativeDiagnostics = {}, kind = "") {
   const events = Array.isArray(nativeDiagnostics.events) ? nativeDiagnostics.events : [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -2984,17 +3057,39 @@ function parseJsonDiagnosticText(text = "") {
   }
 }
 
+function voiceWakeModelSource(status = {}) {
+  return String(status.model_source || status.modelSource || status.wake_model_source || status.wakeProvider || status.wake_provider || "").toLowerCase();
+}
+
+function voiceWakeOpenWakeWordReady(status = {}) {
+  const source = voiceWakeModelSource(status);
+  return Boolean(
+    (source === "openwakeword_bundle" || source.includes("openwakeword"))
+      && status.onnx_runtime_available !== false
+      && (status.wake_engine_ready === true || status.onnx_model_ready === true)
+      && status.openwakeword_bundle_exists !== false
+  );
+}
+
+function voiceWakeModelReady(status = {}) {
+  return Boolean(
+    status.onnx_model_ready === true
+      || voiceWakeOpenWakeWordReady(status)
+      || (status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match)
+  );
+}
+
 function classifyHermesWakeProof(status = {}) {
   const metrics = status.confidence_metrics || {};
   const latestWindow = status.latest_inference_window || {};
-  const lastConfidence = Number(status.last_wake_confidence ?? metrics.last_confidence ?? latestWindow.confidence ?? 0);
-  const maxConfidence = Number(status.max_observed_confidence ?? metrics.max_confidence ?? latestWindow.max_confidence ?? lastConfidence);
+  const lastConfidence = Number(status.last_wake_confidence ?? status.last_confidence ?? metrics.last_confidence ?? latestWindow.confidence ?? 0);
+  const maxConfidence = Number(status.max_observed_confidence ?? status.max_confidence_since_start ?? status.max_confidence ?? metrics.max_confidence ?? latestWindow.max_confidence ?? lastConfidence);
   const threshold = Number(status.wake_threshold ?? status.threshold ?? metrics.threshold ?? latestWindow.threshold ?? 0.58);
   const inferenceCount = Number(status.inference_count || 0);
-  const wakeDetectionCount = Number(status.wake_detection_count || latestWindow.detection_count || (status.last_wake_at ? 1 : 0));
-  const serviceAlive = Boolean(status.status_source === "live_service" && status.proof_session_active && (status.foreground_service_started || status.foreground_service_running || status.service_running));
-  const audioCaptureAlive = Boolean(status.permission_record_audio && status.audio_record_started && Number(status.audio_read_calls || 0) > 0);
-  const onnxModelReady = Boolean(status.onnx_runtime_available && status.wake_engine_ready && status.personalized_model_exists && status.model_sha_match);
+  const wakeDetectionCount = Number(status.wake_detection_count || status.wake_hit_count || latestWindow.detection_count || (status.last_wake_at ? 1 : 0));
+  const serviceAlive = Boolean((status.status_source === "live_service" || status.status_source === "lightweight_no_model_load" || !status.status_source) && status.proof_session_active !== false && (status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running));
+  const audioCaptureAlive = Boolean(status.permission_record_audio !== false && status.audio_capture_alive !== false && (status.audio_record_started || Number(status.audio_read_calls || 0) > 0 || inferenceCount > 0));
+  const onnxModelReady = voiceWakeModelReady(status);
   const inferenceRunning = inferenceCount > 0;
   const confidenceObserved = Boolean(status.wake_confidence_observed || inferenceRunning || maxConfidence > 0);
   const thresholdCrossed = Boolean(status.threshold_crossed || status.last_inference_threshold_crossed || metrics.threshold_crossed || latestWindow.threshold_crossed || maxConfidence >= threshold);
@@ -3027,6 +3122,31 @@ function classifyHermesWakeProof(status = {}) {
 async function fetchAndroidHermesWakeStatusFromBackend() {
   const backendOrigin = normalizeServerUrl(selectedBackendOrigin || DEFAULT_SERVER_URL);
   if (!backendOrigin) return { ok: false, error: "backend_origin_unavailable" };
+  try {
+    const response = await fetchWithTimeout(`${backendOrigin}/native/android/wake-word-state`, {
+      method: "GET",
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+    }, 12000);
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = JSON.parse(text || "{}");
+    } catch {
+      payload = { raw: clipDiagnosticText(text, 16000) };
+    }
+    const state = payload.state && typeof payload.state === "object" ? payload.state : {};
+    if (response.ok && payload.available !== false && Object.keys(state).length) {
+      return {
+        ok: true,
+        status: response.status,
+        backendOrigin,
+        payload: state,
+        diagnostics: sanitizeRendererDiagnosticValue({ schema: payload.schema, available: payload.available, state }),
+      };
+    }
+  } catch {
+    // Fall through to the legacy diagnostics snapshot.
+  }
   try {
     const response = await fetchWithTimeout(`${backendOrigin}/native/diagnostics/latest`, {
       method: "GET",
@@ -3091,6 +3211,125 @@ async function resolveBestVoiceWakeDiagnostics(sender, opId, payload = {}) {
     result.error = String(error && error.message ? error.message : error);
     return result;
   }
+}
+
+async function playWindowsWakePhraseProbe(payload = {}) {
+  const phrase = String(payload.phrase || payload.wakePhrase || payload.wake_phrase || "alexa")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "alexa";
+  const rate = Math.max(-5, Math.min(Math.round(Number(payload.rate ?? -1)), 5));
+  const volume = Math.max(0, Math.min(Math.round(Number(payload.volume ?? 100)), 100));
+  const timeoutMs = Math.max(1000, Math.min(Math.round(Number(payload.timeoutMs || payload.timeout_ms || 8000)), 15000));
+  if (process.platform !== "win32") {
+    return {
+      ok: false,
+      operation: "play_wake_phrase_probe",
+      error: "windows_native_shell_required",
+      phrase,
+    };
+  }
+  const script = [
+    "Add-Type -AssemblyName System.Speech;",
+    `$phrase = ${powershellSingleQuoted(phrase)};`,
+    "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;",
+    `$synth.Rate = ${rate};`,
+    `$synth.Volume = ${volume};`,
+    "try { $synth.Speak($phrase) } finally { $synth.Dispose() }",
+  ].join(" ");
+  const startedAt = Date.now();
+  const result = await execFileBounded("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script,
+  ], { timeoutMs, maxBuffer: 64 * 1024 });
+  return {
+    ok: result.ok,
+    operation: "play_wake_phrase_probe",
+    source: "windows_speech_synthesizer",
+    phrase,
+    rate,
+    volume,
+    timeoutMs,
+    elapsedMs: Date.now() - startedAt,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    error: result.error || result.stderr || "",
+  };
+}
+
+async function playWindowsAudioStimulus(payload = {}) {
+  const rawKind = String(payload.kind || payload.stimulus || payload.type || "speech").toLowerCase();
+  const kind = ["speech", "system_sound", "beep", "silence"].includes(rawKind) ? rawKind : "speech";
+  const label = String(payload.label || payload.stimulusId || payload.stimulus_id || kind)
+    .replace(/[^A-Za-z0-9_.:-]+/g, "_")
+    .slice(0, 80) || kind;
+  const durationMs = Math.max(100, Math.min(Math.round(Number(payload.durationMs || payload.duration_ms || 700)), 5000));
+  const timeoutMs = Math.max(1000, Math.min(Math.round(Number(payload.timeoutMs || payload.timeout_ms || durationMs + 5000)), 15000));
+  if (kind === "speech") {
+    const speech = await playWindowsWakePhraseProbe({
+      phrase: payload.phrase || payload.text || payload.wakePhrase || payload.wake_phrase || "alexa",
+      rate: payload.rate,
+      volume: payload.volume,
+      timeoutMs,
+    });
+    return {
+      ...speech,
+      operation: "play_audio_stimulus",
+      stimulusKind: kind,
+      stimulusLabel: label,
+      nestedOperation: "play_wake_phrase_probe",
+    };
+  }
+  if (process.platform !== "win32") {
+    return {
+      ok: false,
+      operation: "play_audio_stimulus",
+      error: "windows_native_shell_required",
+      stimulusKind: kind,
+      stimulusLabel: label,
+    };
+  }
+  const startedAt = Date.now();
+  let script = "";
+  if (kind === "silence") {
+    script = `Start-Sleep -Milliseconds ${durationMs};`;
+  } else if (kind === "system_sound") {
+    const sound = String(payload.sound || payload.systemSound || payload.system_sound || "Exclamation").replace(/[^A-Za-z]/g, "");
+    const safeSound = ["Asterisk", "Beep", "Exclamation", "Hand", "Question"].includes(sound) ? sound : "Exclamation";
+    script = [
+      "Add-Type -AssemblyName System.Windows.Forms;",
+      `[System.Media.SystemSounds]::${safeSound}.Play();`,
+      `Start-Sleep -Milliseconds ${durationMs};`,
+    ].join(" ");
+  } else {
+    const frequencyHz = Math.max(120, Math.min(Math.round(Number(payload.frequencyHz || payload.frequency_hz || payload.frequency || 880)), 4000));
+    script = `[Console]::Beep(${frequencyHz}, ${durationMs});`;
+  }
+  const result = await execFileBounded("powershell.exe", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    script,
+  ], { timeoutMs, maxBuffer: 64 * 1024 });
+  return {
+    ok: result.ok,
+    operation: "play_audio_stimulus",
+    source: "windows_fixed_audio_stimulus",
+    stimulusKind: kind,
+    stimulusLabel: label,
+    durationMs,
+    timeoutMs,
+    elapsedMs: Date.now() - startedAt,
+    exitCode: result.exitCode,
+    timedOut: result.timedOut,
+    error: result.error || result.stderr || "",
+  };
 }
 
 async function runAndroidHermesWakeProof(sender, opId, payload = {}) {
@@ -3310,7 +3549,19 @@ function createHotOperationContext(sender, opId, payload = {}, moduleInfo = {}) 
     progress,
     markPhase,
     dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
-    args: payload.args && typeof payload.args === "object" ? { ...payload.args, dryRun: Boolean(payload.dryRun || payload.dry_run || payload.args.dryRun || payload.args.dry_run) } : { dryRun: Boolean(payload.dryRun || payload.dry_run) },
+    args: {
+      ...Object.fromEntries(Object.entries(payload || {}).filter(([key]) => ![
+        "operationName",
+        "operation",
+        "name",
+        "operationVersion",
+        "dryRun",
+        "dry_run",
+        "args",
+      ].includes(key))),
+      ...(payload.args && typeof payload.args === "object" ? payload.args : {}),
+      dryRun: Boolean(payload.dryRun || payload.dry_run || (payload.args && (payload.args.dryRun || payload.args.dry_run))),
+    },
     adb: {
       findAuthorizedDevice: async () => {
         requireHotOperationCapability(capabilities, "adb.device");
@@ -4083,6 +4334,9 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
   if (opName === "run_android_hermes_wake_proof") {
     return runAndroidHermesWakeProof(event.sender, opId, payload);
   }
+  if (opName === "play_audio_stimulus") {
+    return playWindowsAudioStimulus(payload);
+  }
   if (opName === "prove_android_voice_tuning") {
     return runAndroidVoiceTuningProof(event.sender, opId, payload);
   }
@@ -4823,6 +5077,274 @@ function registerNativeAppProtocol() {
   });
 }
 
+function waoEncodeValue(value) {
+  if (value === null || typeof value === "undefined") return { type: WAO_TLV_NULL, payload: Buffer.alloc(0) };
+  if (typeof value === "boolean") return { type: WAO_TLV_BOOL, payload: Buffer.from([value ? 1 : 0]) };
+  if (Number.isInteger(value)) {
+    const payload = Buffer.alloc(8);
+    payload.writeBigInt64LE(BigInt(value), 0);
+    return { type: WAO_TLV_I64, payload };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const payload = Buffer.alloc(8);
+    payload.writeDoubleLE(value, 0);
+    return { type: WAO_TLV_F64, payload };
+  }
+  if (Buffer.isBuffer(value)) return { type: WAO_TLV_BYTES, payload: value };
+  if (value instanceof ArrayBuffer) return { type: WAO_TLV_BYTES, payload: Buffer.from(value) };
+  if (ArrayBuffer.isView(value)) return { type: WAO_TLV_BYTES, payload: Buffer.from(value.buffer, value.byteOffset, value.byteLength) };
+  if (typeof value === "object") return { type: WAO_TLV_JSON, payload: Buffer.from(JSON.stringify(value), "utf8") };
+  return { type: WAO_TLV_UTF8, payload: Buffer.from(String(value), "utf8") };
+}
+
+function waoDecodeValue(type, payload) {
+  if (type === WAO_TLV_NULL) return null;
+  if (type === WAO_TLV_BOOL) return Boolean(payload && payload[0]);
+  if (type === WAO_TLV_I64 && payload.length === 8) {
+    const value = payload.readBigInt64LE(0);
+    return value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : value.toString();
+  }
+  if (type === WAO_TLV_F64 && payload.length === 8) return payload.readDoubleLE(0);
+  if (type === WAO_TLV_BYTES) return payload;
+  if (type === WAO_TLV_JSON) {
+    try {
+      return JSON.parse(payload.toString("utf8"));
+    } catch {
+      return {};
+    }
+  }
+  if (type === WAO_TLV_UTF8) return payload.toString("utf8");
+  return payload;
+}
+
+function waoEncodeTlv(fields = {}) {
+  const chunks = [];
+  for (const [name, value] of Object.entries(fields || {})) {
+    const fieldId = WAO_FIELD_IDS[name];
+    if (!fieldId) continue;
+    const encoded = waoEncodeValue(value);
+    const header = Buffer.alloc(WAO_TLV_HEADER_BYTES);
+    header.writeUInt16LE(fieldId, 0);
+    header.writeUInt8(encoded.type, 2);
+    header.writeUInt8(0, 3);
+    header.writeUInt32LE(encoded.payload.length, 4);
+    chunks.push(header, encoded.payload);
+  }
+  return Buffer.concat(chunks);
+}
+
+function waoDecodeTlv(payload) {
+  const buffer = Buffer.isBuffer(payload) ? payload : Buffer.from(payload || []);
+  const fields = {};
+  let offset = 0;
+  while (offset + WAO_TLV_HEADER_BYTES <= buffer.length) {
+    const fieldId = buffer.readUInt16LE(offset);
+    const type = buffer.readUInt8(offset + 2);
+    const length = buffer.readUInt32LE(offset + 4);
+    offset += WAO_TLV_HEADER_BYTES;
+    if (offset + length > buffer.length) break;
+    fields[WAO_FIELD_NAMES[fieldId] || `field_${fieldId}`] = waoDecodeValue(type, buffer.subarray(offset, offset + length));
+    offset += length;
+  }
+  return fields;
+}
+
+function waoEncodeFrame(typeName, fields = {}, options = {}) {
+  const body = waoEncodeTlv(fields);
+  const header = Buffer.alloc(WAO_HEADER_BYTES);
+  header.write("WAO1", 0, 4, "ascii");
+  header.writeUInt8(WAO_VERSION, 4);
+  header.writeUInt8(WAO_FRAME_TYPES[String(typeName || "EVENT").toUpperCase()] || WAO_FRAME_TYPES.EVENT, 5);
+  header.writeUInt16LE(Number(options.schemaId || options.schema_id || 0), 6);
+  header.writeUInt32LE(Number(options.flags || 0), 8);
+  header.writeUInt32LE(Number(options.session || 0), 12);
+  header.writeBigUInt64LE(BigInt(options.seq || nativeObsSeq++), 16);
+  header.writeBigUInt64LE(BigInt(options.ack || 0), 24);
+  header.writeBigUInt64LE(BigInt(Math.max(0, Math.round(performance.now()))), 32);
+  return Buffer.concat([header, body]);
+}
+
+function waoDecodeFrame(data) {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data || []);
+  if (buffer.length < WAO_HEADER_BYTES) throw new Error("wao_frame_too_short");
+  if (buffer.subarray(0, 4).toString("ascii") !== "WAO1") throw new Error("wao_bad_magic");
+  const version = buffer.readUInt8(4);
+  if (version !== WAO_VERSION) throw new Error("wao_bad_version");
+  const typeId = buffer.readUInt8(5);
+  const seq = buffer.readBigUInt64LE(16);
+  const ack = buffer.readBigUInt64LE(24);
+  return {
+    version,
+    type_id: typeId,
+    type: WAO_FRAME_TYPE_NAMES[typeId] || `UNKNOWN_${typeId}`,
+    schema_id: buffer.readUInt16LE(6),
+    flags: buffer.readUInt32LE(8),
+    session: buffer.readUInt32LE(12),
+    seq: seq <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(seq) : seq.toString(),
+    ack: ack <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(ack) : ack.toString(),
+    monotonic_ms: Number(buffer.readBigUInt64LE(32)),
+    fields: waoDecodeTlv(buffer.subarray(WAO_HEADER_BYTES)),
+  };
+}
+
+function nativeObsCanUseSocket() {
+  return typeof WebSocket === "function";
+}
+
+function nativeObsSocketUrl() {
+  const config = ensureConfig();
+  const url = new URL("/native/obs/v1", selectedBackendOrigin);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("device_id", config.deviceId);
+  url.searchParams.set("role", "windows-native");
+  url.searchParams.set("topics", "commands,bridge,errors,windows.native");
+  return url.toString();
+}
+
+function nativeObsSend(typeName, fields = {}, options = {}) {
+  if (!nativeObsSocket || nativeObsSocket.readyState !== WebSocket.OPEN) return false;
+  try {
+    nativeObsSocket.send(waoEncodeFrame(typeName, fields, options));
+    return true;
+  } catch (error) {
+    writeNativeControlAudit({ action: "native_obs_send_failed", type: typeName, error: String(error && error.message ? error.message : error) });
+    return false;
+  }
+}
+
+function nativeObsSendHeartbeat() {
+  const config = ensureConfig();
+  const kernel = nativeKernelStatus();
+  nativeObsSend("HEARTBEAT", {
+    device_id: config.deviceId,
+    build_id: String(config.buildId || ""),
+    app_version: app.getVersion(),
+    route: currentRendererUrl(),
+    runtime: "electron",
+    ts_ms: Date.now(),
+    payload_json: {
+      platform: "windows",
+      activeNativeCommandCount,
+      nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION,
+      downloadedRuntime: kernel.downloadedRuntime,
+      activeDownloadedRuntimeId: kernel.activeDownloadedRuntimeId,
+      activeHotOpBundleId: kernel.activeHotOpBundleId,
+    },
+  });
+}
+
+async function executeNativeObsCommand(fields = {}, frame = {}) {
+  const config = ensureConfig();
+  const command = {
+    id: String(fields.command_id || ""),
+    type: String(fields.op || fields.type || ""),
+    payload: fields.payload_json && typeof fields.payload_json === "object" ? fields.payload_json : {},
+    reason: String(fields.reason || "wao"),
+  };
+  if (!command.id) return;
+  nativeObsSend("COMMAND_ACK", {
+    device_id: config.deviceId,
+    command_id: command.id,
+    op: command.type,
+    status: "accepted",
+    ts_ms: Date.now(),
+  }, { ack: frame.seq || 0 });
+  const started = performance.now();
+  let result = {};
+  try {
+    result = await executeNativeControlCommandWithWatchdog(command);
+  } catch (error) {
+    result = { ok: false, error: String(error && error.message ? error.message : error), failureClassification: "handler_threw" };
+  }
+  nativeObsSend("COMMAND_ACK", {
+    device_id: config.deviceId,
+    command_id: command.id,
+    op: command.type,
+    status: "finished",
+    latency_ms: Math.max(0, Math.round(performance.now() - started)),
+    result_json: {
+      ...result,
+      reason: "wao",
+      executedAt: new Date().toISOString(),
+    },
+  }, { ack: frame.seq || 0 });
+  writeNativeControlAudit({ action: "native_obs_command_result_sent", id: command.id, type: command.type, ok: Boolean(result && result.ok) });
+}
+
+function handleNativeObsFrame(frame = {}) {
+  const fields = frame.fields && typeof frame.fields === "object" ? frame.fields : {};
+  if (frame.type === "COMMAND") {
+    void executeNativeObsCommand(fields, frame);
+    return;
+  }
+  if (frame.type === "ERROR") {
+    writeNativeControlAudit({ action: "native_obs_error", status: fields.status || "", reason: fields.reason || "" });
+  }
+}
+
+function scheduleNativeObsReconnect(reason = "closed") {
+  if (nativeObsReconnectTimer || !selectedBackendOrigin || !nativeObsCanUseSocket()) return;
+  nativeObsReconnectTimer = setTimeout(() => {
+    nativeObsReconnectTimer = null;
+    startNativeObservabilitySocket(reason);
+  }, NATIVE_OBS_RECONNECT_MS);
+  nativeObsReconnectTimer.unref();
+}
+
+function startNativeObservabilitySocket(reason = "startup") {
+  if (!selectedBackendOrigin || !nativeObsCanUseSocket()) return false;
+  if (nativeObsSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(nativeObsSocket.readyState)) return true;
+  const config = ensureConfig();
+  try {
+    nativeObsSocket = new WebSocket(nativeObsSocketUrl());
+    nativeObsSocket.binaryType = "arraybuffer";
+  } catch (error) {
+    writeNativeControlAudit({ action: "native_obs_connect_failed", reason, error: String(error && error.message ? error.message : error) });
+    scheduleNativeObsReconnect("connect_failed");
+    return false;
+  }
+  nativeObsSocket.addEventListener("open", () => {
+    nativeObsConnected = true;
+    writeNativeControlAudit({ action: "native_obs_socket_open", reason, backend: selectedBackendOrigin });
+    nativeObsSend("HELLO", {
+      device_id: config.deviceId,
+      role: "windows-native",
+      topics: ["commands", "bridge", "errors", "windows.native"],
+      build_id: String(config.buildId || ""),
+      app_version: app.getVersion(),
+      route: currentRendererUrl(),
+      runtime: "electron",
+      payload_json: {
+        platform: "windows",
+        capabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES,
+        nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION,
+      },
+    });
+    nativeObsSendHeartbeat();
+    if (nativeObsHeartbeatTimer) clearInterval(nativeObsHeartbeatTimer);
+    nativeObsHeartbeatTimer = setInterval(nativeObsSendHeartbeat, NATIVE_OBS_HEARTBEAT_INTERVAL_MS);
+    nativeObsHeartbeatTimer.unref();
+  });
+  nativeObsSocket.addEventListener("message", (event) => {
+    try {
+      const frame = typeof event.data === "string" ? { type: "EVENT", fields: JSON.parse(event.data) } : waoDecodeFrame(event.data);
+      handleNativeObsFrame(frame);
+    } catch (error) {
+      writeNativeControlAudit({ action: "native_obs_decode_failed", error: String(error && error.message ? error.message : error) });
+    }
+  });
+  nativeObsSocket.addEventListener("close", () => {
+    nativeObsConnected = false;
+    if (nativeObsHeartbeatTimer) clearInterval(nativeObsHeartbeatTimer);
+    nativeObsHeartbeatTimer = null;
+    scheduleNativeObsReconnect("closed");
+  });
+  nativeObsSocket.addEventListener("error", () => {
+    nativeObsConnected = false;
+  });
+  return true;
+}
+
 async function postNativeEvent(kind, payload = {}) {
   const config = ensureConfig();
   if (!selectedBackendOrigin) return { ok: false, error: "backend_identity_unresolved" };
@@ -4837,6 +5359,14 @@ async function postNativeEvent(kind, payload = {}) {
     account_id: config.accountId,
     payload,
   };
+  nativeObsSend("EVENT", {
+    device_id: config.deviceId,
+    stream: "windows.native",
+    type: kind,
+    key: `windows.native.${kind}`,
+    ts_ms: Date.now(),
+    payload_json: body,
+  });
   try {
     const headers = { "Content-Type": "application/json", "X-Wasm-Agent-Native-Device-Id": config.deviceId };
     if (config.deviceToken) headers.Authorization = `Bearer ${config.deviceToken}`;
@@ -5362,6 +5892,27 @@ async function executeNativeControlCommand(command = {}) {
       nativeBundlePath: nativeBundle.bundlePath,
       nativeSummaryPath: nativeBundle.summaryPath,
       deviceDetected: Boolean(adbBundle.payload.hasDevice),
+      adbDiagnostics: {
+        schema: adbBundle.payload.schema,
+        generated_at: adbBundle.payload.generated_at,
+        reason: adbBundle.payload.reason,
+        adbPath: adbBundle.payload.adbPath,
+        hasDevice: Boolean(adbBundle.payload.hasDevice),
+        commandStatus: Object.fromEntries(Object.entries(adbBundle.payload.commands || {}).map(([name, value]) => [name, {
+          ok: value?.ok === true,
+          exitCode: value?.exitCode ?? null,
+          timedOut: value?.timedOut === true,
+          elapsedMs: value?.elapsedMs ?? null,
+          error: value?.error || "",
+        }])),
+        filtered: {
+          crashLogcat: clipDiagnosticText(adbBundle.payload.filtered?.crashLogcat || "", 80_000),
+          logcat: clipDiagnosticText(adbBundle.payload.filtered?.logcat || "", 80_000),
+          activity: clipDiagnosticText(adbBundle.payload.filtered?.activity || "", 40_000),
+          packageWasmAgent: clipDiagnosticText(adbBundle.payload.filtered?.packageWasmAgent || "", 40_000),
+          webApkPackages: clipDiagnosticText(adbBundle.payload.filtered?.webApkPackages || "", 20_000),
+        },
+      },
       uploaded: upload,
     };
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
@@ -5454,6 +6005,16 @@ async function executeNativeControlCommand(command = {}) {
     const sender = win?.webContents || { send: () => {} };
     const opId = `control-hermes-wake-proof-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const result = await runAndroidHermesWakeProof(sender, opId, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "play_wake_phrase_probe") {
+    const result = await playWindowsWakePhraseProbe(payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
+  if (type === "play_audio_stimulus") {
+    const result = await playWindowsAudioStimulus(payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -5627,6 +6188,7 @@ async function executeNativeControlCommand(command = {}) {
 
 async function pollNativeControl(reason = "interval") {
   if (nativeControlPollBusy || !selectedBackendOrigin) return { ok: false, error: "not_ready" };
+  if (nativeObsConnected && reason !== "startup") return { ok: true, skipped: "native_obs_connected" };
   nativeControlPollBusy = true;
   const config = ensureConfig();
   try {
@@ -5691,6 +6253,7 @@ async function pollNativeControl(reason = "interval") {
 }
 
 function startNativeControlPolling() {
+  startNativeObservabilitySocket("startup");
   setTimeout(() => {
     void pollNativeControl("startup");
   }, 5000).unref();

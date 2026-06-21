@@ -20,21 +20,126 @@ data class WakeWordResult(
     val audioWindow: ShortArray = ShortArray(0),
 )
 
+data class WakeConfirmationDecision(
+    val wake: WakeWordResult,
+    val rawDetected: Boolean,
+    val accepted: Boolean,
+    val frames: Int,
+    val requiredFrames: Int,
+    val windowMs: Long,
+    val candidateStartedAt: Long,
+    val acceptedAt: Long,
+    val maxConfidence: Double,
+    val rejectionReason: String,
+)
+
+class WakeConfirmationGate {
+    @Volatile var candidateStartedAt: Long = 0
+        private set
+    @Volatile var candidateFrames: Int = 0
+        private set
+    @Volatile var acceptedAt: Long = 0
+        private set
+    @Volatile var candidateMaxConfidence: Double = 0.0
+        private set
+    @Volatile var rejectionReason: String = "not_started"
+        private set
+
+    fun reset(reason: String = "not_started") {
+        candidateStartedAt = 0
+        candidateFrames = 0
+        acceptedAt = 0
+        candidateMaxConfidence = 0.0
+        rejectionReason = reason.ifBlank { "not_started" }.take(120)
+    }
+
+    fun observe(
+        wake: WakeWordResult,
+        now: Long = System.currentTimeMillis(),
+        requiredFrames: Int = 2,
+        windowMs: Long = 700L,
+    ): WakeConfirmationDecision {
+        val required = requiredFrames.coerceIn(1, 5)
+        val window = windowMs.coerceIn(150L, 2_000L)
+        if (!wake.detected) {
+            if (candidateFrames > 0) reset("below_threshold")
+            rejectionReason = "below_threshold"
+            return decision(wake.copy(detected = false), false, false, required, window)
+        }
+        val confidence = wake.confidence.coerceIn(0.0, 1.0)
+        if (candidateStartedAt <= 0L || now - candidateStartedAt > window) {
+            candidateStartedAt = now
+            candidateFrames = 1
+            candidateMaxConfidence = confidence
+        } else {
+            candidateFrames += 1
+            candidateMaxConfidence = maxOf(candidateMaxConfidence, confidence)
+        }
+        if (candidateFrames >= required) {
+            acceptedAt = now
+            rejectionReason = ""
+            return decision(
+                wake.copy(detected = true, confidence = candidateMaxConfidence),
+                true,
+                true,
+                required,
+                window,
+            )
+        }
+        rejectionReason = "wake_confirmation_pending"
+        return decision(wake.copy(detected = false), true, false, required, window)
+    }
+
+    fun snapshot(requiredFrames: Int = 2, windowMs: Long = 700L): JSONObject = JSONObject()
+        .put("required_frames", requiredFrames.coerceIn(1, 5))
+        .put("window_ms", windowMs.coerceIn(150L, 2_000L))
+        .put("candidate_started_at", candidateStartedAt)
+        .put("candidate_frames", candidateFrames)
+        .put("candidate_max_confidence", candidateMaxConfidence)
+        .put("accepted_at", acceptedAt)
+        .put("rejection_reason", rejectionReason)
+
+    private fun decision(
+        wake: WakeWordResult,
+        rawDetected: Boolean,
+        accepted: Boolean,
+        requiredFrames: Int,
+        windowMs: Long,
+    ): WakeConfirmationDecision = WakeConfirmationDecision(
+        wake = wake,
+        rawDetected = rawDetected,
+        accepted = accepted,
+        frames = candidateFrames,
+        requiredFrames = requiredFrames,
+        windowMs = windowMs,
+        candidateStartedAt = candidateStartedAt,
+        acceptedAt = acceptedAt,
+        maxConfidence = candidateMaxConfidence,
+        rejectionReason = rejectionReason,
+    )
+}
+
 data class VoiceWakeEvent(
     val transcript: String,
     val confidence: Double,
     val startedAt: Long,
     val endedAt: Long,
     val buildId: String,
+    val command: String = "",
+    val wakeWord: String = "hermes",
     val sessionId: String = UUID.randomUUID().toString(),
     val privacyMode: String = "wake-word-local-transcript-only",
 ) {
+    private fun safeConfidence(): Any =
+        if (java.lang.Double.isFinite(confidence)) confidence else JSONObject.NULL
+
     fun toJson(): JSONObject = JSONObject()
         .put("type", "voice_command")
-        .put("wake_word", "hermes")
-        .put("wake_confidence", confidence)
+        .put("wake_word", wakeWord.ifBlank { "hermes" })
+        .put("wake_confidence", safeConfidence())
         .put("transcript", transcript)
-        .put("confidence", confidence)
+        .put("command", command)
+        .put("confidence", safeConfidence())
         .put("started_at", startedAt)
         .put("ended_at", endedAt)
         .put("source", "android_native_voice_wake")

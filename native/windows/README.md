@@ -166,6 +166,8 @@ Native kernel/control commands:
 | `list_hot_operations` | Inspect effective hot-op roots and manifests. |
 | `run_shell_self_test` | Verify bridge, runtime, hot-op, path, SHA, capability, ADB, and upload primitives. |
 | `run_hot_operation` | Execute a manifest-scanned operation such as `canary_echo`, `classify_native_diagnostics`, or `run_android_hermes_wake_proof`. |
+| `play_wake_phrase_probe` | Fixed, bounded Windows SpeechSynthesizer playback for wake-word lab probes. |
+| `play_audio_stimulus` | Fixed, bounded room-state stimuli: speech, system sound, beep, or silence. New source support still requires an installed shell update before runtime use. |
 
 Native-control command handlers are wrapped by an executor watchdog in the
 Windows shell. Every command receives a bounded timeout, timeout results are
@@ -179,6 +181,67 @@ watchdog and is already wedged at `handler_never_resolved`, a hot op cannot
 repair the queue loop. Install the verified shell, fully reopen the app, then
 rerun `python3 tools/windows/prove-hot-shell.py --wait-sec 120` before Hermes
 wake proof.
+
+Manual command-file contract: command files dropped directly into
+`plugins/wasm-agent/state/native-control/commands/<device-id>/` must use the
+top-level `type` field. Do not use only `command`. The backend API normalizes
+`command` into `type` when it creates the file, but a hand-written file bypasses
+that normalizer; Electron reads `command.type`, so `command`-only files execute
+as an empty verb and return `unsupported_command:`.
+
+Correct ADB bridge probes:
+
+```json
+{
+  "id": "cmd-check-android-connection",
+  "deviceId": "win-desktop-...",
+  "type": "check_android_connection",
+  "status": "pending",
+  "createdAt": "2026-06-18T20:00:20Z",
+  "payload": {}
+}
+```
+
+```json
+{
+  "id": "cmd-collect-adb-diagnostics",
+  "deviceId": "win-desktop-...",
+  "type": "collect_adb_diagnostics",
+  "status": "pending",
+  "reason": "after_wake_transcript_crash_bounded_logcat",
+  "payload": {
+    "reason": "after_wake_transcript_crash_bounded_logcat",
+    "nativeControlTimeoutMs": 120000
+  }
+}
+```
+
+Correct Hermes proof probe:
+
+```json
+{
+  "id": "cmd-hermes-proof",
+  "deviceId": "win-desktop-...",
+  "type": "run_android_hermes_wake_proof",
+  "status": "pending",
+  "reason": "wake_transcript_crash_repro",
+  "payload": {
+    "waitMs": 25000,
+    "wakeThreshold": 0.58,
+    "timeoutMs": 90000,
+    "nativeControlTimeoutMs": 120000,
+    "args": {
+      "waitMs": 25000,
+      "wakeThreshold": 0.58,
+      "timeoutMs": 90000
+    }
+  }
+}
+```
+
+If the result has `result.error: "unsupported_command:"`, first inspect the
+queued command shape for missing `type` before concluding the installed bridge
+lacks ADB or hot-op capability.
 
 The downloaded runtime format is
 `hermes.wasm_agent.downloaded_runtime.v1` with `runtime-manifest.json`,
@@ -333,6 +396,22 @@ visible when the heartbeat lists ops, and queues compact manifest-based
 lacks `run_hot_operation`, lacks `list_hot_operations`, or exposes an old/missing
 hot-op protocol. It reports `hot_operation_missing` separately. Stale
 command-specific fallback is opt-in with `--allow-stale-command-fallback`.
+
+Wake proof diagnostics should prefer compact Wake Word state from
+`/native/android/wake-word-state` before reading the larger native diagnostics
+snapshot. The classifier accepts `model_source: "openwakeword_bundle"` when
+ONNX Runtime and the wake engine are ready, even though the legacy personalized
+Hermes model SHA fields may be empty or mismatched.
+
+For fully autonomous wake-loop tests, the source tree includes a bounded Windows
+speaker primitive under native-control command `play_wake_phrase_probe`. It uses
+the fixed Windows SpeechSynthesizer path with phrase/rate/volume inputs only.
+Source also adds `play_audio_stimulus` for non-speech hard negatives such as
+system sounds, beeps, and silence. Use `play_wake_phrase_probe` first when the
+installed shell already proves it; do not claim `play_audio_stimulus` is live in
+an installed app until the native shell containing that handler is rebuilt,
+installed, and proven through `get_native_kernel_status` or a successful command
+result.
 
 Common diagnoses:
 

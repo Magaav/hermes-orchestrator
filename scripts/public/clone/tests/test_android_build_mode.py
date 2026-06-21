@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -215,6 +216,123 @@ fi
         self.assertIn("build_id=\n", log)
         self.assertIn("version_code=\n", log)
         self.assertIn("generated_at=\n", log)
+
+    def test_android_fast_uses_gradle_without_release_promotion(self) -> None:
+        aapt2 = "#!/usr/bin/env bash\necho 'Android Asset Packaging Tool (aapt) 2.0'\n"
+        made = self.make_root(aapt2)
+        tmp, root, android = made
+        try:
+            gradle = android / ".gradle-dist" / "gradle-8.9" / "bin" / "gradle"
+            gradle.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"${HORC_TEST_GRADLE_LOG}\"\n"
+                "mkdir -p app/build/outputs/apk/debug\n"
+                "printf apk > app/build/outputs/apk/debug/app-debug.apk\n",
+                encoding="utf-8",
+            )
+            os.chmod(gradle, 0o755)
+            log_path = root / "gradle-args.log"
+            node_log = root / "node-env.log"
+            bin_dir = self.make_bin(root, node_body="#!/usr/bin/env bash\necho node-called > \"${HORC_TEST_NODE_LOG}\"\nexit 9\n")
+            result = self.run_horc(
+                root,
+                ["build", "android-fast"],
+                {
+                    "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                    "HERMES_WASM_AGENT_ANDROID_ROOT": str(android),
+                    "HORC_TEST_HOST_KERNEL": "Linux",
+                    "HORC_TEST_HOST_MACHINE": "x86_64",
+                    "HORC_ANDROID_BUILD_MODE": "local",
+                    "HORC_TEST_GRADLE_LOG": str(log_path),
+                    "HORC_TEST_NODE_LOG": str(node_log),
+                },
+            )
+            log = log_path.read_text(encoding="utf-8")
+            benchmark_log = root / "reports" / "build" / "android" / "build-benchmarks.jsonl"
+            benchmark = json.loads(benchmark_log.read_text(encoding="utf-8").splitlines()[-1])
+        finally:
+            tmp.cleanup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("selected mode local", result.stdout)
+        self.assertIn(":app:assembleDebug", log)
+        self.assertIn("--build-cache", log)
+        self.assertIn("debug build only; no release feed", result.stdout)
+        self.assertEqual(benchmark["lane"], "android-fast")
+        self.assertTrue(benchmark["ok"])
+        self.assertGreaterEqual(benchmark["durationMs"], 0)
+        self.assertFalse(node_log.exists(), "android-fast must not invoke release-android.js through node")
+
+    def test_windows_fast_runs_local_npm_tasks_without_installer_release(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="horc-windows-fast-")
+        root = Path(tmp.name)
+        windows_src = root / "native" / "windows" / "src"
+        windows_src.mkdir(parents=True)
+        (windows_src / "package.json").write_text('{"scripts":{}}\n', encoding="utf-8")
+        (windows_src / "node_modules" / ".bin").mkdir(parents=True)
+        for tool in ("electron-builder", "asar"):
+            path = windows_src / "node_modules" / ".bin" / tool
+            path.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            os.chmod(path, 0o755)
+        try:
+            log_path = root / "npm-tasks.log"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            npm = bin_dir / "npm"
+            npm.write_text(
+                "#!/usr/bin/env bash\n"
+                "if [[ \"${1:-}\" == \"run\" ]]; then\n"
+                "  echo \"${2:-}\" >> \"${HORC_TEST_NPM_TASK_LOG}\"\n"
+                "  if [[ \"${2:-}\" == \"pack:win:x64\" ]]; then\n"
+                "    mkdir -p ../release/win-unpacked/resources\n"
+                "    printf app > ../release/win-unpacked/WASM\\ Agent.exe\n"
+                "  fi\n"
+                "  exit 0\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            os.chmod(npm, 0o755)
+            for tool in ("node", "npx"):
+                stub = bin_dir / tool
+                stub.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+                os.chmod(stub, 0o755)
+
+            result = self.run_horc(
+                root,
+                ["build", "win-fast"],
+                {
+                    "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+                    "HORC_TEST_HOST_KERNEL": "Linux",
+                    "HORC_TEST_HOST_MACHINE": "aarch64",
+                    "HORC_TEST_NPM_TASK_LOG": str(log_path),
+                    "HORC_WIN_FAST_TASKS": "test:windows-hot-ops pack:win:x64",
+                    "HORC_GENERATE_NATIVE_RELEASE_FEED": "1",
+                },
+            )
+            tasks = log_path.read_text(encoding="utf-8").splitlines()
+            benchmark_log = root / "reports" / "build" / "windows" / "build-benchmarks.jsonl"
+            benchmark = json.loads(benchmark_log.read_text(encoding="utf-8").splitlines()[-1])
+        finally:
+            tmp.cleanup()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("selected mode local-node", result.stdout)
+        self.assertIn("source/package checks only; no NSIS installer", result.stdout)
+        self.assertIn("skipping Wine rcedit on Linux ARM64", result.stdout)
+        self.assertNotIn("generating native release feed", result.stdout)
+        self.assertEqual(tasks, ["test:windows-hot-ops", "pack:win:x64"])
+        self.assertEqual(benchmark["lane"], "win-fast")
+        self.assertTrue(benchmark["ok"])
+        self.assertIn("pack:win:x64", benchmark["tasks"])
+
+    def test_android_docker_lanes_share_common_setup(self) -> None:
+        script = HORC.read_text(encoding="utf-8")
+        self.assertEqual(script.count("android_docker_common_script()"), 1)
+        self.assertIn("android_docker_build_script() {\n  android_docker_common_script", script)
+        self.assertIn("android_fast_docker_script() {\n  android_docker_common_script", script)
+        self.assertEqual(script.count('export ANDROID_HOME="${PWD}/.android-sdk"'), 1)
+        self.assertEqual(script.count('export GRADLE_USER_HOME="${PWD}/.gradle-home"'), 1)
 
 
 if __name__ == "__main__":
