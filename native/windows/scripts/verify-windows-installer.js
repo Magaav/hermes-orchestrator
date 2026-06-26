@@ -302,7 +302,7 @@ const verifyReport = {
     { name: "frontier native commands present", ok: true, evidence: "main.js" },
     { name: "bundled local horc runner present", ok: true, evidence: resourceHorcRunnerPath ? path.relative(extractRoot, resourceHorcRunnerPath) : "" },
     { name: "bundled app simulator present", ok: true, evidence: resourceAppSimulatorPath ? path.relative(extractRoot, resourceAppSimulatorPath) : "" },
-    { name: "Android APK release-feed download support present", ok: true, evidence: resourceAndroidApkPath ? `optional bundled APK present: ${path.relative(extractRoot, resourceAndroidApkPath)}` : "no bundled APK; release feed download path verified" },
+    { name: "bundled Android APK or release-feed download support present", ok: true, evidence: resourceAndroidApkPath ? `bundled Android APK present: ${path.relative(extractRoot, resourceAndroidApkPath)}` : "no bundled Android APK; release feed download path verified" },
     { name: "old Windows installers excluded from resources", ok: true, evidence: "public/native/releases/windows excluded" },
     { name: "icon metadata present", ok: true, evidence: resourceIconPath ? `${path.relative(extractRoot, resourceIconPath)} ${fs.statSync(resourceIconPath).size} bytes` : "" },
     { name: "preload bridge does not conflict with PWA bridge", ok: true, evidence: "__wasmAgentDevHmr + __wasmAgentAppDevHmr" },

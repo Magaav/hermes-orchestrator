@@ -57,6 +57,7 @@ download/update, and bridge work.
 | Start PWA only | `/local/plugins/wasm-agent/scripts/start_wasm_agent.sh` |
 | Stop PWA | `/local/plugins/wasm-agent/scripts/stop_wasm_agent.sh` |
 | Doctor | `/local/plugins/wasm-agent/scripts/doctor.sh` |
+| Android lite performance budget | `node plugins/wasm-agent/tests/android_lite_performance_budget.test.js` |
 | Web simulation | `horc simulate web` |
 | Android simulation | `horc simulate android` |
 | Native feed build | `horc build all` |
@@ -186,13 +187,51 @@ map to canonical commands, and backend artifacts keep both raw and normalized
 transcript fields.
 
 Android native bootstrap favors first-touch responsiveness over eager admin
-hydration. On Android Home, renderer diagnostics are compacted/chunk-flushed to
-native, full native `latest.json` snapshots are debounced off the synchronous
-bridge path, admin bridge refresh/render work is deferred until an admin panel
-or manual refresh needs it, nonessential Home module/message DOM work waits
-until after the shell is visible, and Wake Word state reads use a short cache
-over a lightweight native status packet. Heavy ONNX/model diagnostics remain
-explicit proof/debug work rather than tab-open work.
+hydration. The Android WebView loader defaults to the lean Android runtime and
+keeps the full shared PWA bundle as an explicit `android_runtime=full` /
+`android_shell=full` diagnostic opt-in. On Android Home, cached config/auth is applied synchronously by a
+tiny pre-module shell in `index.html`, then the PWA paints one minimal
+authenticated Home surface before full event wiring. The
+authoritative startup read is `GET /app/bootstrap`, which returns config,
+session/user, spaces, devices, fleet, credits, readiness, and models in one
+JSON payload with per-section errors. Android boot no longer starts
+`/auth/session`; bootstrap owns session reconciliation, and service-worker
+fallbacks must bypass `/app/bootstrap` so a production HTML response is treated
+as a routing/deploy failure. The Android lite runtime is a bootstrap adapter,
+not a parallel product fork: it may attach first-input-safe handlers to the
+shared Home DOM and native bridge, but Home feature behavior must remain
+bootstrap-backed and reusable by the shared PWA mainframe so future product
+features are not implemented twice. The cached-auth shell visible mark is emitted from
+the pre-module after-paint boundary when available, with `app.js` ingesting that
+historical timestamp before bootstrap reconciliation; the cached path skips the
+pre-shell anonymous auth-gate render. Renderer diagnostics are compacted/chunk-flushed to native,
+full native `latest.json` snapshots are debounced off the synchronous bridge
+path, admin bridge refresh/render work is deferred until an admin panel or
+manual refresh needs it, nonessential Home module/message DOM work waits until
+after the shell is visible, and the heavy WIS camera artifact runtime is loaded
+with a dynamic import after bootstrap instead of as a startup dependency.
+Android touch-first mode now extends the first-input quiet window, backs off
+native-control polling and `/health` RTT sampling while the renderer is busy,
+postpones deferred Home hydration when responsiveness is overloaded, starts
+wake telemetry in a light background mode, and uses cached Wake Word state for
+background budget checks instead of synchronous bridge reads. Wake Word state
+reads use a short cache over a lightweight native status packet. Android
+lite runtime snapshots and diagnostics include compact architecture metrics for
+render counts, listener ownership, repeated fetch paths, and same-window render
+bursts so duplicate work is visible before another rebuild loop. Android
+native-control exposes `probe_input_latency`, `probe_canvas_pan_latency`, and
+`get_android_native_ux_report` as commandable probes. Boot traces embed
+`android_native_ux_report`, including first-load timing, bridge/console
+diagnostic counts, long-task/frame-gap summaries, touch/pan counters, and
+minimap requested/executed/skipped counts. `perfSafeMode=1` carries
+`wake=off`, `bridgeDiagnostics=off`, and post-paint health probing so wake,
+bridge diagnostics, and `/health` can be isolated from first paint. Real touch
+proof still requires native/ADB tap or swipe evidence through the Windows
+bridge or Android native-control.
+Heavy ONNX/model diagnostics remain explicit proof/debug work rather than
+tab-open work. This is implemented-unverified until Android native-control
+reload evidence proves the cached shell, bootstrap, long-task, input-delay, and
+authenticated-home budgets.
 
 The Wake Word modal also starts a guided tuning session. During a session, the
 PWA can apply live policy through downloaded operation `apply_wake_word_policy`
@@ -260,16 +299,19 @@ cooldown patch and any two-stage verifier/model replacement.
 
 **Canonical proof order:**
 
-1. `python3 tools/windows/prove-hot-shell.py --wait-sec 120`
-2. Inspect latest Android WAO/native-control state for `app.responsiveness`, wake policy, audio freshness, and inference movement.
-3. `python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "alexa. open wake word" --observe-sec 28 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-positive --volume 100 --rate -2`
-4. `python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-negative-open-settings --volume 100 --rate -2`
+1. `cd native/windows/src && npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe`
+2. `python3 tools/windows/check-windows-release-feed.py`
+3. `python3 tools/windows/prove-hot-shell.py`
+4. `python3 tools/doctor/wasm-agent-doctor.py`
+5. `native/android/scripts/watch-wake-state.sh`
+6. `python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase "alexa. open wake word" --observe-sec 24 --settle-sec 2 --state-source command --label alexa-command --volume 100 --rate -2`
+7. `python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source command --label alexa-negative --volume 100 --rate -2`
 
 **Windows hot-op shell protocol:** `shellProtocolVersion: 2`, `hotOpsProtocolVersion: 1`
 
 **Required shell capabilities:** `get_bridge_status`, `list_hot_operations`, `run_shell_self_test`, `run_hot_operation`, `canary_echo`
 
-**Alexa wake question:** Can the installed OpenWakeWord Alexa loop fire promptly, keep inference moving during room stimulus, start post-wake transcription without long linger, route `open wake word`, and trigger avatar shine at wake/capture time instead of waiting for the final transcript?
+**Alexa wake question:** Can the installed OpenWakeWord Alexa loop fire promptly, start post-wake transcription without long linger, route `open wake word`, and trigger avatar shine at wake/capture time instead of waiting for the final transcript?
 
 **Proof guards:**
 
@@ -278,9 +320,10 @@ cooldown patch and any two-stage verifier/model replacement.
 - Go Native / Check Update depends on the Windows release feed, and same-semver Windows updates must compare buildId.
 - Do not claim Android runtime proof from APK package proof alone.
 - Do not treat bridge_update_required or hot_operation_missing as Android wake failures.
-- Do not treat Codex/cloud-local `adb devices` as Android connectivity evidence; this setup reaches the phone only through the installed Windows bridge.
-- Do not treat Hermes or Hey Jarvis as the active baseline phrase unless a new installed model/runtime proof makes one current again.
-- Do not move to music/noise/hard-environment phase two until baseline Alexa wake, transcript, routing, avatar feedback latency, duplicate-wake control, and app responsiveness are accepted.
+- Do not use old command-specific Windows bridge handlers as the canonical wake proof path.
+- Do not treat Hermes as the active baseline phrase unless a new installed model/runtime proof makes it current again.
+- Do not use Codex/cloud-local ADB as Android connectivity evidence; this setup reaches the device only through the installed Windows bridge.
+- When manually dropping Windows native-control command files, set the command verb in top-level `type`, not only `command`; direct file commands bypass the backend normalizer and `command`-only files reach Electron as `unsupported_command:`.
 <!-- END ACTIVE_STATE -->
 
 **Current wake loop gate, 2026-06-20T12:46Z:** Android device control/ADB for
@@ -298,9 +341,12 @@ control path. That app-mediated path now proves `proof_session_active=false`,
 Alexa, confirmation frames `2`, confirmation window `700ms`, and cooldown
 `8000ms`; however the installed service still reports `wake_threshold=0.92`
 after requesting `0.999`, so threshold propagation remains unresolved. Do not
-move to music/noise phase two yet: the Android WebView is currently overloaded,
-with fresh `app.responsiveness` evidence showing multi-second frame gaps,
-event-loop lag, long tasks, and `/health` RTT/timeouts around 2500ms.
+move to music/noise phase two yet: the Android WebView had fresh
+`app.responsiveness` evidence showing multi-second frame gaps, event-loop lag,
+long tasks, and `/health` RTT/timeouts around 2500ms. Source now applies a
+touch-first Android budget in the shared PWA layer, but this remains
+installed-runtime-unverified until Android native-control reload/tap evidence
+shows healthy frame gaps, event-loop lag, long tasks, and input-delay budgets.
 Wake tuning is gated on restoring fluid app responsiveness and then rerunning
 positive/negative proofs with the `responsiveness` section from
 `tools/voice/run-wake-room-loop.py` healthy.
@@ -308,9 +354,21 @@ positive/negative proofs with the `responsiveness` section from
 **Resume commands for tomorrow:**
 
 ```bash
+python3 tools/voice/run-shell-v2-wake-loop.py
+
+# Legacy/manual fallback only when isolating a sub-step:
 python3 tools/windows/prove-hot-shell.py --wait-sec 120
 # Direct hot-op service start should classify as service_start_rejected until an app-mediated service control route replaces it.
 python3 tools/voice/run-hermes-wake-proof.py --debug --production-listener --wake-phrase alexa --wake-threshold 0.999 --wake-confirmation-frames 2 --wake-confirmation-window-ms 700 --wake-cooldown-ms 8000 --wait-ms 5000
 python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "alexa. open wake word" --observe-sec 28 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-positive --volume 100 --rate -2
 python3 tools/voice/run-wake-room-loop.py --android-device-id android-android-universal-20260620t115820z-35c236de2c2b3c67b1147c41 --stimulus speech --phrase "open settings" --observe-sec 18 --settle-sec 2 --state-source endpoint --label alexa-responsiveness-gated-negative-open-settings --volume 100 --rate -2
 ```
+
+For the shell-v2 production loop, the canonical command is
+`python3 tools/voice/run-shell-v2-wake-loop.py`. It requires Android build
+`android-universal-20260622T193436Z` or newer, proves the shell-v2 launch path,
+starts wake through `WasmAgentNative.enableVoiceWake`, applies
+`apply_wake_word_policy`, and uses Windows synthesized speech for the positive
+room trial. Do not claim shipped wake-word evidence from the legacy Hermes
+proof command, old `MainActivity`, direct ADB service start, or source-only
+checks.

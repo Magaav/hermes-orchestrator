@@ -146,14 +146,14 @@ function modelReady(status) {
 
 function normalizeFailureClassification(status, stable, firstMissing) {
   if (!status || !Object.keys(status).length) return "diagnostics_status_missing";
-  if (numberValue(status.service_start_exit_code, 0) !== 0) return "service_start_rejected";
   if (status.requested_proof_session === false && status.proof_session_active === true) return "production_policy_not_applied";
-  if (stable) return "pass";
   const reason = String(status.failure_reason || status.disabled_reason || "").trim();
   if (reason && NEXT_ACTION_BY_CLASSIFICATION[reason]) return reason;
   if (status.permission_record_audio === false) return "record_audio_permission_missing";
   const serviceVisible = Boolean(status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running);
-  if (!serviceVisible && status.status_source && status.status_source !== "live_service" && status.status_source !== "lightweight_no_model_load") return "diagnostics_status_missing";
+  if (Object.prototype.hasOwnProperty.call(status, "service_start_exit_code") && numberValue(status.service_start_exit_code, 0) !== 0) return "service_start_rejected";
+  if (status.status_source && status.status_source !== "live_service") return "diagnostics_status_missing";
+  if (stable) return "pass";
   if (status.proof_session_active === false && !serviceVisible) return "service_command_not_received";
   if (!serviceVisible) return "foreground_service_not_started";
   if (status.audio_record_error) return status.audio_record_started ? "audio_record_start_failed" : "audio_record_init_failed";
@@ -173,7 +173,7 @@ function classify(status) {
   const wakeThreshold = numberValue(status.wake_threshold, status.threshold, metrics.threshold, window.threshold, 0.58);
   const inferenceCount = numberValue(status.inference_count, metrics.inference_count, window.inference_count, 0);
   const wakeDetectedCount = numberValue(status.wake_detection_count, status.wake_hit_count, window.detection_count, status.last_wake_at ? 1 : 0);
-  const serviceAlive = Boolean((status.status_source === "live_service" || status.status_source === "lightweight_no_model_load" || !status.status_source) && (status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running));
+  const serviceAlive = Boolean((status.status_source === "live_service" || !status.status_source) && (status.foreground_service_started || status.foreground_service_running || status.foreground_service_active || status.service_running || status.voice_service_running));
   const audioStarted = Boolean(status.permission_record_audio !== false && (status.audio_record_started || status.audio_capture_alive || numberValue(status.audio_read_calls, 0) > 0 || inferenceCount > 0));
   const stages = {
     service_alive: serviceAlive,

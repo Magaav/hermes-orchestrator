@@ -30,6 +30,37 @@ authenticated `/auth/session`.
 Build success is not runtime proof. Roadmap/future/proposal claims must not be
 presented as current software.
 
+## Pre-Code Performance Law
+
+Before applying code, perform a simplification and performance reflection. The
+default architecture is the shortest correct path: fewer lifecycle phases,
+listeners, renders, reflows, recalculations, bridge calls, polling loops, and
+rebuild/runtime cycles when they produce the same correct observable result.
+
+Doing two steps when one step produces the same correct result is architecture
+waste. If reflection identifies duplicated state, redundant listeners,
+avoidable recalculation, layout thrash, bloated control flow, unnecessary
+abstraction, or delayed feedback, simplify the design before editing or include
+the simplification in the edit.
+
+Keep the simpler path readable and owned. Extra work is allowed only when it is
+explicitly justified by correctness, safety, compatibility, or observability
+that shortens future proof/debug loops.
+
+## Self-Improving Harness Loop
+
+After intent/context routing and before slow investigation, rebuilds, runtime
+control, or source edits, check whether repeated uncertainty is already covered
+by `docs/context/HARNESS_PROMISES.json`. Use
+`docs/context/HARNESS.md` as the contract for Harness Factory Reflection,
+promise results, invalidation, and post-loop harvest.
+
+Novel diagnosis can stay in the exploration lane. Repeated manual inference
+must be harvested: the second repeat needs a promise candidate or a named block;
+the third repeat must be promoted into the registry or blocked on missing
+primitive/access/observability. Validate the registry with
+`python3 tools/context/check-harness-promises.py`.
+
 ## Verified Loop-Aware Engineering
 
 For meaningful native, bridge, wake-word, hot-op, runtime-control, release, or

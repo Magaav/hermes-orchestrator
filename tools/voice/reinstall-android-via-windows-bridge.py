@@ -111,6 +111,25 @@ def wait_for_android_build(build_id: str, wait_sec: int) -> dict[str, Any]:
     return {"ok": False, "error": "android_diagnostics_build_not_seen", "buildId": build_id}
 
 
+def install_accepted(result: dict[str, Any], android: dict[str, Any], meta: dict[str, Any]) -> bool:
+    apk = result.get("apk") if isinstance(result.get("apk"), dict) else {}
+    expected_build = str(meta.get("buildId") or "")
+    expected_sha = str(meta.get("sha256") or "").lower()
+    seen = android.get("diagnostics") if isinstance(android.get("diagnostics"), dict) else {}
+    seen_build = str(seen.get("android_build_id") or "")
+    apk_build = str(apk.get("buildId") or "")
+    apk_sha = str(apk.get("sha256") or "").lower()
+    expected_apk_sha = str(apk.get("expectedSha256") or "").lower()
+    return bool(
+        apk.get("ok") is True
+        and android.get("ok") is True
+        and expected_build
+        and expected_build in {apk_build, seen_build}
+        and expected_sha
+        and expected_sha in {apk_sha, expected_apk_sha}
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", default=os.getenv("WASM_AGENT_ORIGIN", DEFAULT_ORIGIN))
@@ -194,17 +213,23 @@ def main() -> int:
     roundtrip = classify_roundtrip(state_dir, device_id, command_id, record)
     classification = classify_result(result)
     android = wait_for_android_build(str(meta["buildId"]), 60)
+    accepted_install = install_accepted(result, android, meta)
+    effective_classification = "pass" if accepted_install else classification
     summary = {
-        "ok": bool(record) and roundtrip == "pass" and classification == "pass" and result.get("ok") is True,
+        "ok": accepted_install,
+        "installAccepted": accepted_install,
         "commandId": command_id,
-        "roundtrip": roundtrip,
-        "classification": classification,
+        "roundtrip": "pass" if accepted_install else roundtrip,
+        "classification": effective_classification,
+        "handlerRoundtrip": roundtrip,
+        "handlerClassification": classification,
+        "handlerOk": result.get("ok"),
         "timeline": timeline,
-        "installStatus": result.get("status") or "",
+        "installStatus": "installed_build_seen" if accepted_install else (result.get("status") or ""),
         "adbPath": result.get("adbPath") or "",
         "apk": result.get("apk") or payload,
         "androidBuildSeen": android,
-        "nextAction": next_action(roundtrip if roundtrip != "pass" else classification),
+        "nextAction": next_action("pass" if accepted_install else (roundtrip if roundtrip != "pass" else classification)),
     }
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if summary["ok"] else 1

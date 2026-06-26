@@ -1,0 +1,500 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-06-22",
+  "resultStatuses": [
+    "pass",
+    "fail",
+    "running",
+    "blocked",
+    "stale",
+    "inconclusive",
+    "invalid-environment",
+    "needs-human-proof"
+  ],
+  "evidenceClasses": [
+    "static",
+    "runtime",
+    "behavioral",
+    "package",
+    "production",
+    "human"
+  ],
+  "promotionRule": {
+    "secondRepeat": "Add a promise candidate or explain why it cannot be deterministic yet.",
+    "thirdRepeat": "Promote the promise or record the missing primitive, access, or observability that blocks promotion."
+  },
+  "promises": [
+    {
+      "id": "harness-promise-registry-valid",
+      "owner": "docs/context",
+      "claim": "The self-improving harness promise registry is structurally valid.",
+      "whenToUse": "After editing docs/context/HARNESS_PROMISES.json or the harness contract.",
+      "command": [
+        "python3",
+        "tools/context/check-harness-promises.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "registry JSON parses",
+        "promise ids are unique and stable",
+        "required fields are present",
+        "evidence classes and cost values are canonical",
+        "report JSON has ok true"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/harness-promises-result.json"
+      ],
+      "invalidatedBy": [
+        "docs/context/HARNESS_PROMISES.json",
+        "tools/context/check-harness-promises.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first reported registry error and rerun the validator."
+      ]
+    },
+    {
+      "id": "context-sync",
+      "owner": "docs/context",
+      "claim": "Durable context docs agree with docs/context/ACTIVE_STATE.json and current proof-order rules.",
+      "whenToUse": "After context edits or before trusting durable next actions from docs.",
+      "command": [
+        "python3",
+        "tools/context/check-context-sync.py"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "context sync command exits 0",
+        "reports/context/latest/context-sync-result.json has ok true",
+        "no stale current next actions are reported"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/context-sync-result.json"
+      ],
+      "invalidatedBy": [
+        "AGENTS.md",
+        "README.md",
+        "docs/context/**",
+        "plugins/wasm-agent/README.md",
+        "native/windows/README.md",
+        "native/android/README.md"
+      ],
+      "nextSuggestedSteps": [
+        "Run with --fix only for generated ACTIVE_STATE drift.",
+        "Demote or rewrite stale claims instead of trusting narrative text."
+      ]
+    },
+    {
+      "id": "loop-copilot-signals",
+      "owner": "docs/context",
+      "claim": "The active agent loop has no cheap local loop-copilot blocker before slow runtime work, rebuild-heavy work, or final claims.",
+      "whenToUse": "Before meaningful native, bridge, wake-word, hot-op, runtime-control, release, rebuild-heavy work, or final claims.",
+      "command": [
+        "python3",
+        "tools/context/watch-loop-copilot.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime"
+      ],
+      "passRequires": [
+        "loop copilot command exits 0",
+        "reports/context/latest/loop-copilot-signals.json has ok true",
+        "no blocker signal is present",
+        "the worker treats any warning as checkpoint guidance, not runtime proof"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/loop-copilot-signals.json",
+        "reports/context/latest/loop-copilot-signals.jsonl"
+      ],
+      "invalidatedBy": [
+        "tools/context/watch-loop-copilot.py",
+        "docs/context/HARNESS.md",
+        "docs/context/HARNESS_PROMISES.json",
+        "AGENTS.md",
+        "README.md",
+        "docs/context/**",
+        "current process state",
+        "current git diff"
+      ],
+      "nextSuggestedSteps": [
+        "If a blocker is emitted, run the named proof or demote the claim before proceeding.",
+        "If only warnings are emitted, include the warning in Builder/Watcher/Gatekeeper review before final claims.",
+        "If runtime-control work is visible, prefer compact live introspection/control before rebuilding."
+      ]
+    },
+    {
+      "id": "windows-release-feed-consistency",
+      "owner": "native/windows",
+      "claim": "The Windows release feed matches the verified final NSIS installer metadata.",
+      "whenToUse": "Before asking Go Native or Check Update to see a Windows build.",
+      "command": [
+        "python3",
+        "tools/windows/check-windows-release-feed.py"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "package"
+      ],
+      "passRequires": [
+        "native/windows/release/VERIFY.json exists",
+        "feed buildId matches verified installer buildId",
+        "feed SHA-256 matches verified installer SHA-256",
+        "local published installer bytes match feed metadata"
+      ],
+      "outputArtifacts": [
+        "reports/windows/latest/windows-release-feed-check.json"
+      ],
+      "invalidatedBy": [
+        "native/windows/release/VERIFY.json",
+        "native/windows/release/*.exe",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "plugins/wasm-agent/scripts/generate-native-release-feed.js"
+      ],
+      "nextSuggestedSteps": [
+        "If VERIFY.json is missing, rebuild and verify the final NSIS installer before claiming feed proof.",
+        "If the feed mismatches, regenerate the release feed from verified package metadata."
+      ]
+    },
+    {
+      "id": "windows-hot-shell-proof",
+      "owner": "native/windows",
+      "claim": "The installed Windows native-control bridge exposes the required hot-op shell capabilities.",
+      "whenToUse": "Before doctor, Android wake proof, or any ADB-backed Android work through the Windows bridge.",
+      "command": [
+        "python3",
+        "tools/windows/prove-hot-shell.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "installed Windows app is running",
+        "local bridge responds",
+        "shellProtocolVersion and hotOpsProtocolVersion match docs",
+        "required shell capabilities are present",
+        "canary hot operation returns success"
+      ],
+      "outputArtifacts": [
+        "reports/windows/latest/hot-shell-proof.json"
+      ],
+      "invalidatedBy": [
+        "native/windows/**",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "installed Windows app update",
+        "hot-op bundle SHA change"
+      ],
+      "nextSuggestedSteps": [
+        "If bridge_update_required or hot_operation_missing appears, fix bridge/hot-op loading before blaming Android runtime.",
+        "If the installed app is absent, install the feed-published shell first."
+      ]
+    },
+    {
+      "id": "android-runtime-simulation",
+      "owner": "native/android",
+      "claim": "The Android runtime behavior named by the simulator report passed.",
+      "whenToUse": "When a claim depends on Android runtime behavior rather than APK package metadata.",
+      "command": [
+        "horc",
+        "simulate",
+        "android"
+      ],
+      "timeoutSec": 180,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "simulator command exits 0",
+        "report names the exact behavior proven",
+        "report status is PASS",
+        "claim does not exceed the behavior named by the report"
+      ],
+      "outputArtifacts": [
+        "reports/sim/android/latest/result.json",
+        "reports/sim/android/latest/summary.md"
+      ],
+      "invalidatedBy": [
+        "native/android/**",
+        "plugins/wasm-agent/public/**",
+        "plugins/wasm-agent/server/**",
+        "installed APK change",
+        "simulator fixture change"
+      ],
+      "nextSuggestedSteps": [
+        "If the simulator is unavailable, classify as invalid-environment instead of Android-disconnected.",
+        "Run a behavior-specific local report when reusing external device evidence."
+      ]
+    },
+    {
+      "id": "android-ux-rebuild-gate",
+      "owner": "native/android",
+      "claim": "Android Gradle rebuilds run the UX performance regression guard before build work proceeds.",
+      "whenToUse": "Before any Android rebuild, after changing Android startup/touch/shell code, or when checking that incremental native work cannot skip the UX regression guard.",
+      "command": [
+        "python3",
+        "tools/android/check-android-ux-rebuild-gate.py"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime"
+      ],
+      "passRequires": [
+        "native/android/app/build.gradle declares verifyAndroidUxPerformanceRegression",
+        "preBuild depends on verifyAndroidUxPerformanceRegression",
+        "the guard command is plugins/wasm-agent/tests/android_lite_performance_budget.test.js",
+        "the guard includes Android shell v2 size, bridge, loadUrl, and forbidden-startup budgets",
+        "the guard requires NativeShellV2Activity to own the installed launcher/auth-return routes while legacy MainActivity is not the normal relaunch path",
+        "the guard requires Android input-budget proof to budget Activity launch timings",
+        "the guard requires the deterministic release loop to reuse the existing feed on --skip-build unless --publish-feed is explicit",
+        "the guard requires the deterministic release loop to accept install proof only when APK SHA/build diagnostics match the promoted release",
+        "the guard requires shell-v2 ADB relaunch proof to be explicit opt-in and launch-only without force-stop or synthetic swipe",
+        "the guard requires the UX release-loop install phase to use the Android UI input hot-op install action rather than the legacy voice-tuning reinstall command",
+        "Gradle :app:preBuild executes :app:verifyAndroidUxPerformanceRegression",
+        "the guard prints android lite performance budget ok"
+      ],
+      "outputArtifacts": [
+        "reports/android/rebuild-guard/latest/android-ux-rebuild-gate.json"
+      ],
+      "invalidatedBy": [
+        "native/android/app/build.gradle",
+        "plugins/wasm-agent/tests/android_lite_performance_budget.test.js",
+        "native/android/app/src/main/java/com/colmeio/wasmagent/shell/**",
+        "native/android/app/src/main/AndroidManifest.xml",
+        "tools/android/check-android-ux-rebuild-gate.py",
+        "tools/android/prove-android-input-budget.py",
+        "tools/android/prove-android-native-ux-release-loop.py"
+      ],
+      "nextSuggestedSteps": [
+        "If the promise fails, fix the guard or the Gradle preBuild hook before rebuilding.",
+        "If an Android feature needs to exceed a budget, split it into a later v2 layer with a new explicit gate instead of raising layer-0 budgets silently.",
+        "This promise is not runtime UX proof; after an installed APK change, still run android-native-input-budget or android-native-ux-release-loop."
+      ]
+    },
+    {
+      "id": "android-native-input-budget",
+      "owner": "native/android",
+      "claim": "Android native canvas/navigation input stays inside the configured frame/input budget after a real ADB swipe through the Windows bridge.",
+      "whenToUse": "When Android native feels laggy, after changing PWA/native interaction code, or before resuming wake-word tuning that depends on responsive UI.",
+      "command": [
+        "python3",
+        "tools/android/prove-android-input-budget.py"
+      ],
+      "timeoutSec": 180,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "Windows native-control bridge is reachable",
+        "run_android_ui_input_proof hot operation is available",
+        "gfxinfo reset succeeds",
+        "Activity launch total/wait time is present and within the configured budget when launched through am start -W",
+        "real ADB swipe succeeds unless --launch-only is explicitly selected",
+        "post-swipe gfxinfo has high input latency, slow UI thread, missed frame deadline, slow draw-command, jank, and p95 values at or below configured budget unless --launch-only is explicitly selected"
+      ],
+      "outputArtifacts": [
+        "reports/android-input-budget/latest/result.json",
+        "reports/android-input-budget/latest/logs.txt"
+      ],
+      "invalidatedBy": [
+        "native/android/**",
+        "native/windows/ops/android/android-ui-input-proof.js",
+        "native/windows/ops/android/android-ui-input-proof.manifest.json",
+        "plugins/wasm-agent/public/**",
+        "installed APK change",
+        "hot-op bundle SHA change",
+        "Android device/WebView update"
+      ],
+      "nextSuggestedSteps": [
+        "Use --launch-component com.colmeio.wasmagent/.shell.NativeShellV2Activity only to isolate shell-v2 proof; normal app icon/relaunch proof must still resolve to shell v2.",
+        "If high input latency is nonzero, inspect event/listener/main-thread pressure before wake tuning.",
+        "If slow draw commands or missed deadlines dominate, simplify canvas paint/layout/scroll invalidation before adding more handlers.",
+        "If the bridge is unavailable, run windows-hot-shell-proof first instead of treating Android as disconnected."
+      ]
+    },
+    {
+      "id": "android-native-ux-release-loop",
+      "owner": "native/android",
+      "claim": "The Android native UX release candidate was built or reused, published, installed through the Windows bridge, and proven against the real-device input budget as one deterministic loop.",
+      "whenToUse": "After Android native responsiveness source changes, before repeating any build/install/input-proof sequence, or whenever a source fix needs installed Android runtime proof.",
+      "command": [
+        "python3",
+        "tools/android/prove-android-native-ux-release-loop.py"
+      ],
+      "timeoutSec": 900,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "high",
+        "rebuildCost": "required",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "package",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "exactly one aggregate release-loop report is emitted under reports/android/responsiveness",
+        "local wasm-agent backend starts and /native/control/clients becomes reachable, or startup is explicitly skipped only when already reachable",
+        "the promoted APK/feed has a build id, SHA-256, and size",
+        "Windows hot-shell proof passes or is explicitly skipped only when already proven in the same active loop",
+        "--skip-build reuses the existing release feed unless --publish-feed is explicitly requested",
+        "shell-v2 proof blocks when the release feed still publishes an older Android UI input-proof hot-op without component launch support",
+        "shell-v2 mode does not perform a second ADB relaunch/input proof unless --run-shell-v2-adb-proof is explicit",
+        "the release-loop install phase uses run_android_ui_input_proof install_apk and does not perform a post-install monkey launch",
+        "explicit shell-v2 ADB proof is launch-only and avoids force-stop, swipe, and gfxinfo probes",
+        "the APK install through the Windows bridge passes, or the install phase/reused report shows matching APK SHA and Android build diagnostics for the promoted build, unless the run is explicitly --skip-install",
+        "real-device Android input-budget proof passes unless the run is explicitly --skip-input-budget",
+        "manual repeated rebuild/reinstall/proof commands are not used as the primary evidence for the same loop"
+      ],
+      "outputArtifacts": [
+        "reports/android/responsiveness/latest-android-native-ux-release-loop.json",
+        "reports/android/responsiveness/*-android-native-ux-release-loop.json",
+        "reports/android/responsiveness/runs/*/*.log"
+      ],
+      "invalidatedBy": [
+        "native/android/**",
+        "native/windows/ops/android/android-ui-input-proof.js",
+        "native/windows/ops/android/android-ui-input-proof.manifest.json",
+        "plugins/wasm-agent/public/**",
+        "plugins/wasm-agent/scripts/start_wasm_agent.sh",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "tools/android/prove-android-native-ux-release-loop.py",
+        "tools/android/prove-android-input-budget.py",
+        "tools/voice/reinstall-android-via-windows-bridge.py",
+        "installed APK change",
+        "Windows bridge app restart/update",
+        "hot-op bundle SHA change",
+        "Android device/WebView update"
+      ],
+      "nextSuggestedSteps": [
+        "Use --skip-build only when the promoted APK/feed already contains the source change under test.",
+        "Do not refresh the feed during --skip-build unless --publish-feed is explicitly needed; feed refresh can invalidate reused install proof by changing APK metadata.",
+        "Use --reuse-install-report only when the named report proves the same promoted build id and APK SHA in Android diagnostics.",
+        "If this aggregate loop lacks a needed knob, add the knob to the script instead of hand-running the same sequence again.",
+        "If input budget fails after install, inspect the aggregate report metrics before rebuilding again."
+      ]
+    },
+    {
+      "id": "android-shell-v2-wake-loop",
+      "owner": "native/android",
+      "claim": "The Android wake-word production loop runs on the installed shell-v2 launcher, starts wake through the app bridge, applies live policy, and routes a Windows synthesized wake phrase.",
+      "whenToUse": "When closing or tuning the Android wake-word production loop on shell v2, after shell-v2 APK/package proof exists, or before claiming wake-word shipped.",
+      "command": [
+        "python3",
+        "tools/voice/run-shell-v2-wake-loop.py"
+      ],
+      "timeoutSec": 900,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "high",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "package",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "release feed Android build id is android-universal-20260622T193436Z or newer",
+        "Windows hot-shell preflight passes through the installed Windows app",
+        "android-native-ux-release-loop runs with --skip-build --shell-v2 --run-shell-v2-adb-proof, or responsiveness is explicitly accepted with --accept-responsiveness-incomplete",
+        "shell-v2 control relaunch uses the local Windows bridge for ADB hot ops and a key-authorized Android command origin matching the WebView/control URL origin",
+        "shell-v2 control relaunch produces a fresh current-build Android WebView v2 native-control client on the Android command origin",
+        "installed Android wake state reports build id android-universal-20260622T193436Z or newer",
+        "wake is started through start_voice_wake / WasmAgentNative.enableVoiceWake rather than direct ADB service start",
+        "apply_wake_word_policy completes through the Android app bridge",
+        "refreshed wake state reports the foreground wake service active",
+        "Windows SpeechSynthesizer stimulus runs through play_wake_phrase_probe via tools/voice/run-wake-room-loop.py",
+        "room-loop timeline includes routed voice command evidence for the synthesized wake phrase"
+      ],
+      "outputArtifacts": [
+        "reports/android/wake-shell-v2/latest-shell-v2-wake-loop.json",
+        "reports/android/wake-shell-v2/*-shell-v2-wake-loop.json",
+        "reports/android/wake-shell-v2/runs/*/*.log",
+        "reports/android/responsiveness/latest-android-native-ux-release-loop.json"
+      ],
+      "invalidatedBy": [
+        "native/android/**",
+        "plugins/wasm-agent/public/**",
+        "native/windows/ops/android/**",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "tools/voice/run-shell-v2-wake-loop.py",
+        "tools/voice/run-wake-room-loop.py",
+        "tools/android/prove-android-native-ux-release-loop.py",
+        "tools/windows/prove-hot-shell.py",
+        "installed APK change",
+        "Windows bridge app restart/update",
+        "hot-op bundle SHA change",
+        "Android device/WebView update",
+        "wake model or live policy change"
+      ],
+      "nextSuggestedSteps": [
+        "If preflight fails with handler_timeout, fully restart/reopen the installed Windows app and rerun.",
+        "If responsiveness proof fails, fix or explicitly accept that gate before wake tuning.",
+        "If wake state build id is stale, install android-universal-20260622T193436Z or newer through the Windows bridge.",
+        "If speech produces no timeline evidence, tune live wake policy/model without rebuilding unless a missing native primitive is proven."
+      ]
+    }
+  ]
+}

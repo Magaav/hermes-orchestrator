@@ -24,6 +24,7 @@ assert(manifest.artifacts.android.arm64, "arm64 Android APK must be present in f
 assert(manifest.artifacts.android.universal, "universal Android APK must be present in feed");
 assert(manifest.artifacts.runtime.launcher, "downloaded launcher runtime bundle must be present in feed");
 assert(manifest.artifacts.hotOps.android.hermesWakeProof, "Hermes wake hot-op bundle must be present in feed");
+assert(manifest.artifacts.hotOps.android.uiInputProof, "Android UI input hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier, "diagnostics classifier hot-op bundle must be present in feed");
 
 const androidBuildConfigPath = path.join(repoRoot, "native", "android", "app", "build", "generated", "source", "buildConfig", "release", "com", "colmeio", "wasmagent", "BuildConfig.java");
@@ -69,6 +70,20 @@ for (const artifact of hermesHotOp.files) {
   assert.strictEqual(artifact.sha256, hash, "hot-op sha256 must match file hash");
   assert(artifact.url.startsWith("/native/releases/hot-ops/"), "hot-op URLs must be served from /native/releases/hot-ops/");
   assert(!path.isAbsolute(artifact.targetPath), "hot-op targetPath must be relative");
+}
+
+const uiInputHotOp = manifest.artifacts.hotOps.android.uiInputProof;
+assert.strictEqual(uiInputHotOp.kind, "windows-hot-op-bundle");
+assert.strictEqual(uiInputHotOp.operationName, "run_android_ui_input_proof");
+assert.match(uiInputHotOp.bundleSha, /^[a-f0-9]{64}$/i, "Android UI input hot-op bundle must expose a bundle SHA");
+assert(Array.isArray(uiInputHotOp.files) && uiInputHotOp.files.length === 2, "Android UI input hot-op bundle must include module and manifest files");
+for (const artifact of uiInputHotOp.files) {
+  const filePath = path.resolve(artifact.path);
+  assert(fs.existsSync(filePath), `Android UI input hot-op file path must exist: ${filePath}`);
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  assert.strictEqual(artifact.sha256, hash, "Android UI input hot-op sha256 must match file hash");
+  assert(artifact.url.startsWith("/native/releases/hot-ops/"), "Android UI input hot-op URLs must be served from /native/releases/hot-ops/");
+  assert(!path.isAbsolute(artifact.targetPath), "Android UI input hot-op targetPath must be relative");
 }
 
 const diagnosticsHotOp = manifest.artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier;

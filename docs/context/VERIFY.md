@@ -7,6 +7,8 @@ Run the smallest command that proves the claim being made. Record proof paths in
 
 ```bash
 python3 tools/context/check-context-sync.py
+python3 tools/context/check-harness-promises.py
+python3 tools/context/watch-loop-copilot.py
 make context-check
 rg -n "127\\.0\\.0\\.1:8877|localhost:8877|0\\.0\\.0\\.0:8877|10\\.0\\.2\\.2:8877|win-unpacked|Durable Next Step|current next action|TODO|FIXME|proposal|future|verified|unverified|stale|unknown|fixed|done|complete" \
   README.md AGENTS.md docs/context docs/README.md docs/roadmap plugins/wasm-agent native scripts/public
@@ -22,6 +24,25 @@ durable docs, verifies the current hot-shell proof order, and writes:
 reports/context/latest/context-sync-result.json
 ```
 
+The harness promise registry validator reads
+`docs/context/HARNESS_PROMISES.json` and writes:
+
+```text
+reports/context/latest/harness-promises-result.json
+```
+
+The loop copilot watcher reads cheap local process, git, and harness evidence
+and writes:
+
+```text
+reports/context/latest/loop-copilot-signals.json
+reports/context/latest/loop-copilot-signals.jsonl
+```
+
+It is a checkpoint aid only. A pass means no blocker was emitted by this cheap
+scan; it does not prove runtime behavior, installed packages, production auth,
+or Android wake success.
+
 Use conservative generated-block repair only when the durable active state
 changes:
 
@@ -34,6 +55,26 @@ make context-fix
 
 Use `REVIEW.md` to answer the JSON test from docs only. If any field requires
 guessing, update the route map, claim registry, or nearest child docs.
+
+## Harness Promises
+
+Before repeated manual investigation, run or compose the smallest promise from
+`docs/context/HARNESS_PROMISES.json`. If no promise exists, use the Harness
+Factory Reflection in `HARNESS.md` and harvest useful repeated inference after
+the loop.
+
+```bash
+python3 tools/context/check-harness-promises.py
+```
+
+Expected report:
+
+```text
+reports/context/latest/harness-promises-result.json
+```
+
+The validator proves only registry structure. Each listed promise still proves
+only the claim and evidence classes declared by that promise.
 
 ## Loop-Aware Evidence
 
@@ -66,6 +107,7 @@ only; it is not runtime proof.
 ## wasm-agent
 
 ```bash
+node plugins/wasm-agent/tests/android_lite_performance_budget.test.js
 horc simulate web
 /local/plugins/wasm-agent/scripts/doctor.sh
 ```
@@ -126,6 +168,24 @@ durable cookie expiration metadata, and authenticated `/auth/session`.
 
 ## Android Native
 
+Rebuild UX regression gate:
+
+```bash
+python3 tools/android/check-android-ux-rebuild-gate.py
+```
+
+Expected report:
+
+```text
+reports/android/rebuild-guard/latest/android-ux-rebuild-gate.json
+```
+
+This proves Gradle rebuilds run the Android UX performance regression guard
+before build work proceeds. It also checks shell-v2 size/startup budgets,
+Activity launch-time budget wiring, deterministic skip-build/feed semantics,
+strict install acceptance, and the explicit shell-v2 proof path. It is still
+not installed runtime proof.
+
 ```bash
 apksigner verify --verbose native/android/release/WASM-Agent-arm64.apk
 sha256sum native/android/release/WASM-Agent-arm64.apk
@@ -146,9 +206,30 @@ Runtime proof:
 ```bash
 horc simulate android
 horc simulate android --local-report <path>
+python3 tools/android/prove-android-native-ux-release-loop.py
+python3 tools/android/prove-android-native-ux-release-loop.py --shell-v2
 ```
 
 The report must name the behavior proven. Voice wake PASS is not OAuth PASS.
+The deterministic release loop writes:
+
+```text
+reports/android/responsiveness/latest-android-native-ux-release-loop.json
+reports/android/responsiveness/*-android-native-ux-release-loop.json
+```
+
+Use `--skip-build` only when the promoted APK/feed already contains the source
+change under test. It reuses the existing feed unless `--publish-feed` is
+explicit.
+
+The release loop install path uses the Android UI input hot-op `install_apk`
+action, not the legacy voice-tuning reinstall command that force-stops and
+monkey-launches the default Activity. `--shell-v2` intentionally stops after
+build/install by default so the harness does not perform a second ADB
+relaunch/input pass.
+Use `--run-shell-v2-adb-proof` only when that explicit component launch is
+acceptable; the opt-in path is launch-only and avoids force-stop, synthetic
+swipe, and gfxinfo probes.
 
 ### Copilotability / Live Introspection
 

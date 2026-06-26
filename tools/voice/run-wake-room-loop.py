@@ -13,20 +13,25 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
 
-def request_json(method: str, url: str, body: dict[str, Any] | None = None, timeout: int = 10) -> dict[str, Any]:
+def request_json(method: str, url: str, body: dict[str, Any] | None = None, *, key: str = "", timeout: int = 10) -> dict[str, Any]:
     data = json.dumps(body).encode("utf-8") if body is not None else None
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if key:
+        headers["X-Wasm-Agent-Native-Control-Key"] = key
     req = urllib.request.Request(
         url,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
@@ -40,8 +45,8 @@ def request_json(method: str, url: str, body: dict[str, Any] | None = None, time
         return {"ok": False, "status": error.code, "error": payload}
 
 
-def native_clients(origin: str) -> list[dict[str, Any]]:
-    payload = request_json("GET", f"{origin.rstrip('/')}/native/control/clients", timeout=8)
+def native_clients(origin: str, key: str = "") -> list[dict[str, Any]]:
+    payload = request_json("GET", f"{origin.rstrip('/')}/native/control/clients", key=key, timeout=8)
     return payload.get("clients") if isinstance(payload.get("clients"), list) else []
 
 
@@ -59,8 +64,8 @@ def pick_device(clients: list[dict[str, Any]], wanted: str, role: str) -> str:
     return ""
 
 
-def wake_state(origin: str) -> dict[str, Any]:
-    payload = request_json("GET", f"{origin.rstrip('/')}/native/android/wake-word-state", timeout=8)
+def wake_state(origin: str, key: str = "") -> dict[str, Any]:
+    payload = request_json("GET", f"{origin.rstrip('/')}/native/android/wake-word-state", key=key, timeout=8)
     state = payload.get("state") if isinstance(payload.get("state"), dict) else payload
     return state if isinstance(state, dict) else {}
 
@@ -268,16 +273,16 @@ def classify_trial(
     return "no_wake_evidence"
 
 
-def queue_command(origin: str, device_id: str, command_type: str, payload: dict[str, Any], reason: str) -> dict[str, Any]:
+def queue_command(origin: str, key: str, device_id: str, command_type: str, payload: dict[str, Any], reason: str) -> dict[str, Any]:
     return request_json("POST", f"{origin.rstrip('/')}/native/control/command", {
         "device_id": device_id,
         "type": command_type,
         "payload": payload,
         "reason": reason,
-    }, timeout=10)
+    }, key=key, timeout=10)
 
 
-def wait_command_result(origin: str, command_id: str, timeout_sec: int, state_dir: Path | None = None) -> dict[str, Any]:
+def wait_command_result(origin: str, key: str, command_id: str, timeout_sec: int, state_dir: Path | None = None) -> dict[str, Any]:
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
         if state_dir is not None:
@@ -286,7 +291,7 @@ def wait_command_result(origin: str, command_id: str, timeout_sec: int, state_di
                     return json.loads(path.read_text(encoding="utf-8"))
                 except Exception as error:
                     return {"ok": False, "error": str(error), "path": str(path)}
-        clients = native_clients(origin)
+        clients = native_clients(origin, key)
         # The server does not expose a direct result lookup, so use the command
         # proof returned by later state polling when direct lookup is absent.
         for client in clients:
@@ -298,42 +303,45 @@ def wait_command_result(origin: str, command_id: str, timeout_sec: int, state_di
     return {"ok": False, "error": "result_lookup_timeout", "command_id": command_id}
 
 
-def refresh_wake_state_via_command(origin: str, android_device_id: str, state_dir: Path | None, timeout_sec: int = 8) -> dict[str, Any]:
+def refresh_wake_state_via_command(origin: str, key: str, android_device_id: str, state_dir: Path | None, timeout_sec: int = 8) -> dict[str, Any]:
     if not android_device_id:
         return {}
     # Android's fetch operation reads the latest service status file. A duplicate
     # start is the current low-impact way to ask the foreground service to write
     # a fresh status packet before we read it.
-    start = queue_command(origin, android_device_id, "start_voice_wake", {}, "wake room loop live status write")
+    start = queue_command(origin, key, android_device_id, "start_voice_wake", {}, "wake room loop live status write")
     start_command_id = start.get("command_id") or start.get("commandId") or ""
     if start_command_id:
-        wait_command_result(origin, start_command_id, timeout_sec, state_dir)
+        wait_command_result(origin, key, start_command_id, timeout_sec, state_dir)
         time.sleep(1.2)
-    queued = queue_command(origin, android_device_id, "refresh_wake_word_state", {}, "wake room loop state refresh")
+    queued = queue_command(origin, key, android_device_id, "refresh_wake_word_state", {}, "wake room loop state refresh")
     command_id = queued.get("command_id") or queued.get("commandId") or ""
     if not command_id:
         return {}
-    record = wait_command_result(origin, command_id, timeout_sec, state_dir)
+    record = wait_command_result(origin, key, command_id, timeout_sec, state_dir)
     return command_wake_state(record)
 
 
-def resolved_wake_state(origin: str, android_device_id: str, state_dir: Path | None, source: str) -> dict[str, Any]:
+def resolved_wake_state(origin: str, key: str, android_device_id: str, state_dir: Path | None, source: str) -> dict[str, Any]:
     if source == "command":
-        return refresh_wake_state_via_command(origin, android_device_id, state_dir) or wake_state(origin)
-    endpoint_state = wake_state(origin)
+        return refresh_wake_state_via_command(origin, key, android_device_id, state_dir) or wake_state(origin, key)
+    endpoint_state = wake_state(origin, key)
     endpoint_counters = counters(endpoint_state)
     if source == "endpoint" or (
         endpoint_counters.get("has_wake_confirmation")
         and endpoint_counters.get("has_raw_wake_detection_count")
     ):
         return endpoint_state
-    command_state = refresh_wake_state_via_command(origin, android_device_id, state_dir)
+    command_state = refresh_wake_state_via_command(origin, key, android_device_id, state_dir)
     return command_state or endpoint_state
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--origin", default="http://127.0.0.1:8877")
+    parser.add_argument("--windows-origin", default="")
+    parser.add_argument("--android-origin", default="")
+    parser.add_argument("--control-key", default=os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY", ""))
     parser.add_argument("--windows-device-id", default="auto")
     parser.add_argument("--android-device-id", default="auto")
     parser.add_argument("--label", default="wake-room-loop")
@@ -348,12 +356,14 @@ def main() -> int:
     args = parser.parse_args()
 
     origin = args.origin.rstrip("/")
+    windows_origin = (args.windows_origin or origin).rstrip("/")
+    android_origin = (args.android_origin or origin).rstrip("/")
+    control_key = args.control_key or ""
     state_dir = Path(args.state_dir) if args.state_dir else None
-    clients = native_clients(origin)
-    windows_device_id = pick_device(clients, args.windows_device_id, "windows")
-    android_device_id = pick_device(clients, args.android_device_id, "android")
+    windows_device_id = pick_device(native_clients(windows_origin, control_key), args.windows_device_id, "windows")
+    android_device_id = pick_device(native_clients(android_origin, control_key), args.android_device_id, "android")
     trial_started_at = iso_now()
-    before_state = resolved_wake_state(origin, android_device_id, state_dir, args.state_source)
+    before_state = resolved_wake_state(android_origin, control_key, android_device_id, state_dir, args.state_source)
     before = counters(before_state)
 
     stimulus_result: dict[str, Any] = {"ok": True, "skipped": args.stimulus == "none"}
@@ -377,7 +387,7 @@ def main() -> int:
                     "volume": args.volume,
                     "nativeControlTimeoutSec": 20,
                 }
-            queued = queue_command(origin, windows_device_id, command_type, payload, f"wake room loop stimulus {args.label}")
+            queued = queue_command(windows_origin, control_key, windows_device_id, command_type, payload, f"wake room loop stimulus {args.label}")
             command_id = queued.get("command_id") or queued.get("commandId") or ""
             stimulus_result = {
                 "queued": queued.get("ok") is True,
@@ -386,15 +396,15 @@ def main() -> int:
                 "device_id": windows_device_id,
             }
             if command_id:
-                stimulus_result["result_probe"] = wait_command_result(origin, command_id, 25, state_dir)
+                stimulus_result["result_probe"] = wait_command_result(windows_origin, control_key, command_id, 25, state_dir)
 
     time.sleep(max(0.0, args.settle_sec))
     samples: list[dict[str, Any]] = []
     deadline = time.time() + max(0.0, args.observe_sec)
     while time.time() < deadline:
-        samples.append(counters(resolved_wake_state(origin, android_device_id, state_dir, args.state_source)))
+        samples.append(counters(resolved_wake_state(android_origin, control_key, android_device_id, state_dir, args.state_source)))
         time.sleep(0.5)
-    after = samples[-1] if samples else counters(wake_state(origin))
+    after = samples[-1] if samples else counters(wake_state(android_origin, control_key))
     timeline_events = timeline_events_since(state_dir, android_device_id, trial_started_at)
     timeline = summarize_timeline(timeline_events)
     responsiveness = summarize_responsiveness(
@@ -412,6 +422,8 @@ def main() -> int:
         "label": args.label,
         "stimulus": args.stimulus,
         "phrase": args.phrase if args.stimulus == "speech" else "",
+        "windows_origin": windows_origin,
+        "android_origin": android_origin,
         "windows_device_id": windows_device_id,
         "android_device_id": android_device_id,
         "stimulus_result": stimulus_result,

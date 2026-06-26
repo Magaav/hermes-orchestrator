@@ -25,6 +25,11 @@ state, and product UI surfaces.
 - Frontier/control routes must stay authenticated, audited, bounded, and
   operation-based. Do not add arbitrary shell execution or unauthenticated
   global reload controls.
+- Before applying app code, use the repo-wide Pre-Code Performance Reflection:
+  prefer the shortest correct path with fewer phases, listeners, renders,
+  reflows, recalculations, bridge calls, polling loops, and rebuild/runtime
+  cycles. If a safe simplification is visible inside the touched boundary,
+  apply it as part of the change.
 - For Frontier, native bridge, release feed, hot-op, diagnostics, and runtime
   control changes, use the repo-wide Verified Loop-Aware Engineering doctrine:
   separate Builder intent, Watcher evidence, and Gatekeeper decision; prefer

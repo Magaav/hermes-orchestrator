@@ -52,7 +52,7 @@ Canonical route table: `docs/context/MAP.md`.
 | Area | Owns | Read first | Status | Verify |
 | --- | --- | --- | --- | --- |
 | `/local` | Repo-wide safety, routing, lifecycle, docs-sync rules | `AGENTS.md`, `README.md`, `docs/context/README.md` | verified | `rg -n "Production backend|Context Routing|Claim Status" README.md AGENTS.md docs/context` |
-| `docs/context` | Context protocol, route map, claims, verification, review loop | `docs/context/README.md` | verified | docs smell scan in `docs/context/VERIFY.md` |
+| `docs/context` | Context protocol, route map, claims, verification, review loop, self-improving harness | `docs/context/README.md`, `docs/context/HARNESS.md` | verified | docs smell scan and `python3 tools/context/check-harness-promises.py` |
 | `plugins/wasm-agent` | PWA, backend, account state, native bridge, release feed, Frontier | `plugins/wasm-agent/AGENTS.md` | implemented-unverified | `horc simulate web`; focused tests under `plugins/wasm-agent/tests` |
 | `native` | Shared native shell policy across platforms | `native/AGENTS.md`, `native/NATIVE_SHELL_CONTRACT.md` | implemented-unverified | platform-specific package/runtime proof |
 | `native/windows` | Electron shell, NSIS installer, installed-app verification | `native/windows/AGENTS.md` | implemented-unverified | `cd native/windows/src && npm run verify:win-installer -- <installer>` plus installed-app PowerShell proof |
@@ -73,6 +73,7 @@ Detailed registry: `docs/context/CLAIMS.md`.
 | Claim | Status | Proof or missing proof |
 | --- | --- | --- |
 | Configured production native target is cloud-only at `https://wa.colmeio.com` | verified | Root guard, native defaults, Android sidecar, release feed; config evidence only |
+| Self-improving harness contract exists for repeated inference | verified | `docs/context/HARNESS.md`; `docs/context/HARNESS_PROMISES.json`; `python3 tools/context/check-harness-promises.py` |
 | Windows release feed points at `win-x64-20260613T003310Z` | verified feed | `plugins/wasm-agent/public/native/releases/latest.json`; `https://wa.colmeio.com/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json`; package/runtime proof still required |
 | Windows login persistence fix status | implemented-unverified | Must not be claimed fixed until installed-app proof passes |
 | Android build `android-universal-20260612T131155Z` exists | implemented-unverified | `native/android/release/release-manifest.json` and SHA; `apksigner` unavailable in this session |
@@ -83,7 +84,7 @@ Detailed registry: `docs/context/CLAIMS.md`.
 
 | Behavior | Command or proof |
 | --- | --- |
-| Context sync and smell scan | `python3 tools/context/check-context-sync.py`; see `docs/context/VERIFY.md` |
+| Context sync, harness registry, and smell scan | `python3 tools/context/check-context-sync.py`; `python3 tools/context/check-harness-promises.py`; see `docs/context/VERIFY.md` |
 | Fresh-agent structured test | See `docs/context/REVIEW.md` |
 | PWA/browser behavior | `horc simulate web` |
 | wasm-agent focused checks | `/local/plugins/wasm-agent/scripts/doctor.sh` or focused tests under `plugins/wasm-agent/tests` |
@@ -97,6 +98,37 @@ Detailed registry: `docs/context/CLAIMS.md`.
 | Public script smoke | `horc status`, `horc build doctor`, or the script's focused doctor/help mode |
 
 Build success is not runtime proof. Missing proof demotes the claim.
+
+## Architecture Performance Law
+
+Before code changes, agents must reflect on whether the same correct observable
+result can be reached with fewer phases, listeners, renders, reflows,
+recalculations, bridge calls, polling loops, rebuilds, or runtime cycles. The
+shortest correct path is the default architecture.
+
+If that reflection finds duplicated state, avoidable lifecycle work, redundant
+event listeners, layout thrash, unnecessary abstraction, bloated control flow,
+or delayed feedback, simplify it before editing or include the simplification
+in the edit. Extra work must be justified by correctness, safety,
+compatibility, or observability that shortens future proof/debug loops.
+
+The product target is a fluid, native, game-like app feel across devices. Code
+that works but adds avoidable latency, jitter, duplicate rendering, late UI
+feedback, or unnecessary runtime work is incomplete until the waste is removed
+or explicitly justified.
+
+## Self-Improving Harness
+
+Use `docs/context/HARNESS.md` after intent/context routing and before slow
+investigation, rebuilds, runtime control, or source edits. Repeated uncertainty
+should prefer a deterministic promise from
+`docs/context/HARNESS_PROMISES.json`; novel uncertainty can stay in the
+exploration lane until it repeats.
+
+The second repeated manual inference needs a promise candidate or a named reason
+it cannot be deterministic yet. The third repeat must be promoted or blocked on
+a missing primitive, access, or observability field. Validate the promise
+registry with `python3 tools/context/check-harness-promises.py`.
 
 ## Verified Loop-Aware Engineering
 
@@ -265,4 +297,5 @@ identity requires it.
 - Do not use old command-specific Windows bridge handlers as the canonical wake proof path.
 - Do not treat Hermes as the active baseline phrase unless a new installed model/runtime proof makes it current again.
 - Do not use Codex/cloud-local ADB as Android connectivity evidence; this setup reaches the device only through the installed Windows bridge.
+- When manually dropping Windows native-control command files, set the command verb in top-level `type`, not only `command`; direct file commands bypass the backend normalizer and `command`-only files reach Electron as `unsupported_command:`.
 <!-- END ACTIVE_STATE -->

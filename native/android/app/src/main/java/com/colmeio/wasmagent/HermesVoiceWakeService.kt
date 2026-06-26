@@ -7,6 +7,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -14,17 +15,22 @@ import android.content.res.AssetManager
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.IBinder
 import android.os.SystemClock
+import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
+import com.colmeio.wasmagent.shell.NativeShellV2Activity
 import com.colmeio.wasmagent.observability.NativeTelemetryBus
 import com.colmeio.wasmagent.voice.EnergyVoiceVad
 import com.colmeio.wasmagent.voice.FalseWakeStore
 import com.colmeio.wasmagent.voice.LocalCommandTranscriptionEngine
 import com.colmeio.wasmagent.voice.OpenWakeWordBundleEngine
 import com.colmeio.wasmagent.voice.OpenWakeWordOnnxEngine
+import com.colmeio.wasmagent.voice.PartialTranscriptionEngine
 import com.colmeio.wasmagent.voice.WakeWordResult
 import com.colmeio.wasmagent.voice.WakeConfirmationGate
 import com.colmeio.wasmagent.voice.WakeModelSelection
@@ -41,6 +47,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -80,10 +87,11 @@ class HermesVoiceWakeService : Service() {
         const val PREF_TRANSCRIPT_ACCEPT_PARTIAL = "voice_wake_transcript_accept_partial"
         const val PREF_TRANSCRIPT_ENGINE = "voice_wake_transcript_engine"
         const val PREF_TRANSCRIPT_ATTEMPT_PLAN = "voice_wake_transcript_attempt_plan"
-        const val DEFAULT_WAKE_THRESHOLD = OpenWakeWordOnnxEngine.DEFAULT_CONFIDENCE_THRESHOLD
+        const val PREF_FOREGROUND_UI_ACTIVE_UNTIL = "voice_wake_foreground_ui_active_until"
+        const val DEFAULT_WAKE_THRESHOLD = 0.98
         const val DEFAULT_WAKE_PHRASE = "alexa"
-        const val DEFAULT_VAD_RMS_THRESHOLD = 0.012
-        const val DEFAULT_VAD_PEAK_THRESHOLD = 1800
+        const val DEFAULT_VAD_RMS_THRESHOLD = 0.001
+        const val DEFAULT_VAD_PEAK_THRESHOLD = 100
         const val DEFAULT_TRANSCRIPT_TIMEOUT_MS = 12_000L
         const val DEFAULT_TRANSCRIPT_MIN_LENGTH_MS = 900L
         const val DEFAULT_TRANSCRIPT_COMPLETE_SILENCE_MS = 1_500L
@@ -97,19 +105,22 @@ class HermesVoiceWakeService : Service() {
         private const val MAX_CAPTURE_MS = 12_000L
         private const val FALSE_WAKE_AUDIO_WINDOW_MS = 3_000
         private const val RECENT_EVENT_MAX = 50
-        const val DEFAULT_WAKE_COOLDOWN_MS = 12_000L
+        const val DEFAULT_WAKE_COOLDOWN_MS = 3_000L
         const val DEFAULT_WAKE_CONFIRMATION_FRAMES = 2
-        const val DEFAULT_WAKE_CONFIRMATION_WINDOW_MS = 700L
+        const val DEFAULT_WAKE_CONFIRMATION_WINDOW_MS = 1_800L
         private const val AUDIO_CAPTURE_ALIVE_WINDOW_MS = 5_000L
         private const val AUDIO_FRAME_STALE_RESTART_MS = 8_000L
         private const val AUDIO_WATCHDOG_INTERVAL_MS = 2_000L
         private const val FALSE_WAKE_STORM_WINDOW_MS = 120_000L
         private const val FALSE_WAKE_STORM_LIMIT = 5
+        private const val FOREGROUND_UI_INFERENCE_SKIP_MS = 2_500L
+        private const val FOREGROUND_UI_ACTIVE_PREF_READ_INTERVAL_MS = 250L
         private const val MIN_WAKE_THRESHOLD = 0.05
         private const val MAX_WAKE_THRESHOLD = 0.999
         private const val ACCEPTANCE_MODEL_SHA256 = "2abbebf21610f91f8d1fcfc12ac92f8ec19dc1191f3c90dbda4cba46e71027b2"
 
         fun statusFile(context: Context): File = File(context.filesDir, "native-diagnostics/voice-wake.json")
+        fun lifecycleFile(context: Context): File = File(context.filesDir, "native-diagnostics/voice-wake-lifecycle.json")
 
         fun normalizedWakeThreshold(value: Double): Double? =
             if (value.isFinite() && value in MIN_WAKE_THRESHOLD..MAX_WAKE_THRESHOLD) value else null
@@ -336,6 +347,11 @@ class HermesVoiceWakeService : Service() {
     @Volatile private var running = false
     @Volatile private var worker: Thread? = null
     @Volatile private var watchdogWorker: Thread? = null
+    @Volatile private var watchdogGeneration: Long = 0L
+    @Volatile private var activeWatchdogGeneration: Long = 0L
+    @Volatile private var watchdogLastProgressAt: Long = 0L
+    @Volatile private var watchdogLastAudioReadCalls: Long = 0L
+    @Volatile private var watchdogLastInferenceCount: Long = 0L
     @Volatile private var activeRecorder: AudioRecord? = null
     private val personalizedModelFile by lazy { File(filesDir, "voice/hermes.onnx") }
     private val baseModelFile by lazy { File(filesDir, "voice/base_hermes.onnx") }
@@ -353,10 +369,17 @@ class HermesVoiceWakeService : Service() {
     @Volatile private var audioReadErrors: Long = 0
     @Volatile private var audioLoopStallCount: Long = 0
     @Volatile private var lastAudioLoopStallAt: Long = 0
+    @Volatile private var audioSourceIndex: Int = 0
+    @Volatile private var activeAudioSource: Int = MediaRecorder.AudioSource.VOICE_RECOGNITION
+    @Volatile private var activeAudioSourceName: String = "VOICE_RECOGNITION"
+    @Volatile private var audioSourceRestartCount: Long = 0
     @Volatile private var lastWakeFramePeak: Int = 0
     @Volatile private var maxWakeFramePeak: Int = 0
     @Volatile private var lastWakeFrameRms: Double = 0.0
     @Volatile private var maxWakeFrameRms: Double = 0.0
+    @Volatile private var vadPassCount: Long = 0
+    @Volatile private var vadRejectCount: Long = 0
+    @Volatile private var lastVadSpeech: Boolean = false
     @Volatile private var lastInferenceAt: Long = 0
     @Volatile private var inferenceCount: Long = 0
     @Volatile private var lastInferenceConfidence: Double = 0.0
@@ -369,6 +392,7 @@ class HermesVoiceWakeService : Service() {
     @Volatile private var lastWakeDetectionAt: Long = 0
     @Volatile private var wakeCooldownUntil: Long = 0
     @Volatile private var lastProofStatusWriteAt: Long = 0
+    @Volatile private var lastLifecycleInferenceWriteAt: Long = 0
     @Volatile private var wakeDetectedEventEmittedAt: Long = 0
     @Volatile private var commandCaptureStartedAt: Long = 0
     @Volatile private var voiceCommandEventDispatchedAt: Long = 0
@@ -398,11 +422,16 @@ class HermesVoiceWakeService : Service() {
     @Volatile private var standbyRestoredAt: Long = 0
     @Volatile private var lastListenerLoopStartedAt: Long = 0
     @Volatile private var lastListenerLoopEndedAt: Long = 0
+    @Volatile private var lastListenExitReason: String = ""
+    @Volatile private var lastListenExitDetail: String = ""
+    @Volatile private var foregroundUiActiveUntilCache: Long = 0L
+    @Volatile private var foregroundUiActiveUntilCacheReadAt: Long = 0L
     private val recentEvents = ArrayDeque<JSONObject>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        writeLifecycleMarker("on_start_command_entered", intent, startId)
         val requestedProofSession = intent?.getBooleanExtra(EXTRA_PROOF_SESSION, false) == true
         val proofSessionChanged = proofSessionActive != requestedProofSession
         if (proofSessionChanged) {
@@ -423,12 +452,14 @@ class HermesVoiceWakeService : Service() {
         val transcriptPolicyChanged = applyTranscriptPolicyExtra(intent)
         when (intent?.action) {
             ACTION_STOP -> {
+                writeLifecycleMarker("action_stop", intent, startId)
                 rememberEvent("service_stopped", JSONObject().put("reason", "user_disabled"))
                 stopListening("user_disabled")
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_STATUS -> {
+                writeLifecycleMarker(if (running) "action_status_running" else "action_status_start_listening", intent, startId)
                 if (running) {
                     writeStatus(
                         if (thresholdChanged || vadPolicyChanged || cooldownPolicyChanged || confirmationPolicyChanged || transcriptPolicyChanged) "wake_policy_updated"
@@ -441,11 +472,15 @@ class HermesVoiceWakeService : Service() {
                     startListening(intent?.getStringExtra(EXTRA_ORIGIN).orEmpty())
                 }
             }
-            else -> startListening(
-                intent?.getStringExtra(EXTRA_ORIGIN).orEmpty(),
-                intent?.getBooleanExtra(EXTRA_DEBUG_VOICE_MODE, false) == true,
-            )
+            else -> {
+                writeLifecycleMarker("action_start_listening", intent, startId)
+                startListening(
+                    intent?.getStringExtra(EXTRA_ORIGIN).orEmpty(),
+                    intent?.getBooleanExtra(EXTRA_DEBUG_VOICE_MODE, false) == true,
+                )
+            }
         }
+        writeLifecycleMarker("on_start_command_returning_sticky", intent, startId)
         return START_STICKY
     }
 
@@ -738,9 +773,39 @@ class HermesVoiceWakeService : Service() {
             return
         }
         if (running) {
-            rememberEvent("duplicate_listener_prevented", JSONObject().put("requested_origin", selectedOrigin))
-            writeStatus()
-            return
+            val activeWorker = worker
+            val now = System.currentTimeMillis()
+            val audioStartAgeMs = if (audioRecordStartedAt > 0L) now - audioRecordStartedAt else 0L
+            val staleStartedCapture = audioRecordStartedAt > 0L &&
+                lastAudioFrameAt <= 0L &&
+                audioStartAgeMs >= AUDIO_FRAME_STALE_RESTART_MS
+            if (activeWorker == null || !activeWorker.isAlive || staleStartedCapture) {
+                rememberEvent("stale_listener_worker_recovered", JSONObject().put("requested_origin", selectedOrigin))
+                running = false
+                if (staleStartedCapture) {
+                    lastAudioRecordError = "audio_capture_no_frames:${audioStartAgeMs}ms"
+                    lastFailureReason = "audio_capture_no_frames"
+                    rotateWakeAudioSource(lastFailureReason)
+                    try {
+                        activeRecorder?.stop()
+                    } catch (_: Exception) {
+                    }
+                }
+                if (activeWorker != null && activeWorker.isAlive) {
+                    try {
+                        activeWorker.join(1_000)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return
+                    }
+                }
+                if (worker === activeWorker) worker = null
+                activeRecorder = null
+            } else {
+                rememberEvent("duplicate_listener_prevented", JSONObject().put("requested_origin", selectedOrigin))
+                writeStatus()
+                return
+            }
         }
         try {
             startForeground(NOTIFICATION_ID, notification("Listening for Hermes"))
@@ -762,6 +827,7 @@ class HermesVoiceWakeService : Service() {
         rememberEvent("service_started", JSONObject().put("origin", selectedOrigin))
         rememberEvent("listener_started", JSONObject().put("listener_lane", "foreground_service"))
         Log.i(LOG_TAG, "foreground_service_started=true audio_record_permission_granted=true")
+        watchdogGeneration += 1L
         if (providers?.wake?.ready != true) {
             machine.blocked(activeSelection.engine.diagnosticReason)
             Log.w(LOG_TAG, "wake_engine_ready=false onnx_runtime_available=${activeSelection.engine.onnxRuntimeAvailable} reason=${activeSelection.engine.diagnosticReason}")
@@ -796,9 +862,14 @@ class HermesVoiceWakeService : Service() {
 
     private fun startAudioWatchdog() {
         val activeWatchdog = watchdogWorker
-        if (activeWatchdog != null && activeWatchdog.isAlive) return
+        val generation = watchdogGeneration
+        if (activeWatchdog != null && activeWatchdog.isAlive && activeWatchdogGeneration == generation) return
+        activeWatchdogGeneration = generation
+        watchdogLastProgressAt = System.currentTimeMillis()
+        watchdogLastAudioReadCalls = audioReadCalls
+        watchdogLastInferenceCount = inferenceCount
         watchdogWorker = thread(name = "hermes-voice-wake-watchdog", isDaemon = true) {
-            while (running) {
+            while (running && activeWatchdogGeneration == generation) {
                 try {
                     Thread.sleep(AUDIO_WATCHDOG_INTERVAL_MS)
                 } catch (_: InterruptedException) {
@@ -807,25 +878,69 @@ class HermesVoiceWakeService : Service() {
                 }
                 val now = System.currentTimeMillis()
                 val lastFrameAt = lastAudioFrameAt
-                if (!running || audioRecordStartedAt <= 0L || lastFrameAt <= 0L) continue
-                val staleMs = now - lastFrameAt
+                if (!running) continue
+                val reads = audioReadCalls
+                val inferences = inferenceCount
+                if (reads != watchdogLastAudioReadCalls || inferences != watchdogLastInferenceCount) {
+                    watchdogLastAudioReadCalls = reads
+                    watchdogLastInferenceCount = inferences
+                    watchdogLastProgressAt = now
+                    continue
+                }
+                val progressBase = maxOf(watchdogLastProgressAt, audioRecordStartedAt, lastListenerLoopStartedAt)
+                if (progressBase <= 0L) continue
+                val staleMs = if (lastFrameAt > 0L) maxOf(now - lastFrameAt, now - progressBase) else now - progressBase
                 if (staleMs < AUDIO_FRAME_STALE_RESTART_MS) continue
                 if (now - lastAudioLoopStallAt < AUDIO_FRAME_STALE_RESTART_MS) continue
                 lastAudioLoopStallAt = now
                 audioLoopStallCount += 1
-                lastAudioRecordError = "audio_capture_stalled:${staleMs}ms"
-                lastFailureReason = "audio_capture_stalled"
+                val reason = when {
+                    audioRecordStartedAt <= 0L -> "audio_capture_no_frames"
+                    reads > 0L -> "audio_capture_progress_stalled"
+                    else -> "audio_capture_stalled"
+                }
+                lastAudioRecordError = "$reason:${staleMs}ms"
+                lastFailureReason = reason
                 rememberEvent("audio_capture_stalled", JSONObject()
+                    .put("reason", reason)
                     .put("stale_ms", staleMs)
+                    .put("audio_read_calls", reads)
+                    .put("inference_count", inferences)
                     .put("stall_count", audioLoopStallCount))
-                Log.w(LOG_TAG, "audio_capture_stalled=true stale_ms=$staleMs stall_count=$audioLoopStallCount")
-                writeStatus("audio_capture_stalled")
+                Log.w(LOG_TAG, "audio_capture_stalled=true reason=$reason stale_ms=$staleMs stall_count=$audioLoopStallCount")
+                writeStatus(reason)
                 try {
                     activeRecorder?.stop()
                 } catch (_: Exception) {
                 }
+                try {
+                    activeRecorder?.release()
+                } catch (_: Exception) {
+                }
+                restartListenerAfterAudioStall(reason)
             }
         }
+    }
+
+    private fun restartListenerAfterAudioStall(reason: String) {
+        val origin = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(PREF_ORIGIN, BuildConfig.DEFAULT_SERVER_URL)
+            .orEmpty()
+            .ifBlank { BuildConfig.DEFAULT_SERVER_URL }
+        val activeWorker = worker
+        running = false
+        if (activeWorker != null && activeWorker != Thread.currentThread() && activeWorker.isAlive) {
+            try {
+                activeWorker.join(1_000)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+        if (worker === activeWorker) worker = null
+        activeRecorder = null
+        rememberEvent("listener_restart_requested", JSONObject().put("reason", reason))
+        startListening(origin)
     }
 
     private fun telemetryDeviceId(): String {
@@ -858,6 +973,9 @@ class HermesVoiceWakeService : Service() {
         maxWakeFramePeak = 0
         lastWakeFrameRms = 0.0
         maxWakeFrameRms = 0.0
+        vadPassCount = 0L
+        vadRejectCount = 0L
+        lastVadSpeech = false
         lastInferenceAt = 0L
         inferenceCount = 0L
         lastInferenceConfidence = 0.0
@@ -912,18 +1030,31 @@ class HermesVoiceWakeService : Service() {
         try {
         while (running) {
             val wake = listenForWake()
-            if (wake == null || !running) continue
+            if (wake == null || !running) {
+                writeLifecycleMarker(if (running) "listen_loop_null_wake_continue" else "listen_loop_running_false")
+                continue
+            }
             val startedAt = System.currentTimeMillis()
+            val voiceSessionId = UUID.randomUUID().toString()
             val falseWakeAudio = wake.audioWindow.copyOf()
             commandCaptureStartedAt = startedAt
             activeTranscriptCaptureId = startedAt
             rememberEvent("command_capture_started", JSONObject().put("wake_hit_count", wakeDetectionCount))
             Log.i(LOG_TAG, "command_capture_started=true wake_detection_count=$wakeDetectionCount last_confidence=$lastInferenceConfidence")
-            bringAppToForegroundAfterWake(wake)
             machine.beginTranscribing()
             val transcriptProviders = currentProviders()
             val transcriptTimeoutMs = configuredTranscriptTimeoutMs(this)
             val transcriptPolicy = configuredTranscriptPolicy(this)
+            val captureEvent = VoiceWakeEvent(
+                transcript = "",
+                command = "",
+                confidence = wake.confidence.coerceIn(0.0, 1.0),
+                startedAt = startedAt,
+                endedAt = startedAt,
+                buildId = BuildConfig.NATIVE_BUILD_ID,
+                wakeWord = configuredWakePhrase(this),
+                sessionId = voiceSessionId,
+            )
             lastTranscriptResult = "transcript_attempt_started"
             lastAsrEngine = transcriptProviders.transcriber.name
             lastAsrLatencyMs = 0L
@@ -940,13 +1071,24 @@ class HermesVoiceWakeService : Service() {
                 .put("engine", transcriptProviders.transcriber.name)
                 .put("timeout_ms", transcriptTimeoutMs))
             writeStatus("transcript_attempt_started")
+            writeLifecycleMarker("transcript_attempt_started")
+            postCommandCaptureStartedEvent(origin, captureEvent, transcriptProviders.transcriber.name)
+            bringAppToForegroundAfterWakeAsync(wake)
+            val partialEngine = transcriptProviders.transcriber as? PartialTranscriptionEngine
+            partialEngine?.setPartialTranscriptListener { partial ->
+                postVoicePartialEvent(origin, captureEvent, transcriptProviders.transcriber.name, partial)
+            }
             startTranscriptWatchdog(startedAt, transcriptProviders.transcriber.name, transcriptTimeoutMs, transcriptPolicy)
-            val transcript = transcribeWithTimeout(
-                transcriptProviders.transcriber,
-                transcriptTimeoutMs,
-                transcriptPolicy,
-                falseWakeAudio,
-            )
+            val transcript = try {
+                transcribeWithTimeout(
+                    transcriptProviders.transcriber,
+                    transcriptTimeoutMs,
+                    transcriptPolicy,
+                    falseWakeAudio,
+                )
+            } finally {
+                partialEngine?.setPartialTranscriptListener(null)
+            }
             if (activeTranscriptCaptureId != startedAt) {
                 rememberEvent("transcript_late_result_ignored", JSONObject()
                     .put("engine", transcript.engine.ifBlank { transcriptProviders.transcriber.name })
@@ -969,6 +1111,17 @@ class HermesVoiceWakeService : Service() {
                 val reason = falseWakeReasonForTranscript(transcript.error)
                 val runawayPaused = captureFalseWake(wake, falseWakeAudio, transcript.transcript, reason, startedAt)
                 rememberEvent("transcript_rejected", JSONObject().put("reason", reason))
+                writeLifecycleMarker("transcript_rejected")
+                postVoiceEvent(origin, VoiceWakeEvent(
+                    transcript = transcript.transcript,
+                    command = "",
+                    confidence = wake.confidence.coerceIn(0.0, 1.0),
+                    startedAt = startedAt,
+                    endedAt = endedAt,
+                    buildId = BuildConfig.NATIVE_BUILD_ID,
+                    wakeWord = configuredWakePhrase(this),
+                    sessionId = voiceSessionId,
+                ), falseWakeAudio)
                 if (runawayPaused) {
                     writeStatus("false_wake_runaway_paused")
                     continue
@@ -995,7 +1148,7 @@ class HermesVoiceWakeService : Service() {
                 endedAt = endedAt,
                 buildId = BuildConfig.NATIVE_BUILD_ID,
                 wakeWord = configuredWakePhrase(this),
-                sessionId = UUID.randomUUID().toString(),
+                sessionId = voiceSessionId,
             )
             machine.complete(event)
             resetFalseWakeStorm()
@@ -1003,6 +1156,7 @@ class HermesVoiceWakeService : Service() {
                 .put("command", command)
                 .put("normalized_transcript", lastNormalizedTranscript))
             writeStatus()
+            writeLifecycleMarker("transcript_accepted")
             postVoiceEvent(origin, event, falseWakeAudio)
             val wakeCooldownMs = configuredWakeCooldownMs(this)
             wakeCooldownUntil = maxOf(wakeCooldownUntil, System.currentTimeMillis() + wakeCooldownMs)
@@ -1016,11 +1170,35 @@ class HermesVoiceWakeService : Service() {
         }
         } finally {
             lastListenerLoopEndedAt = System.currentTimeMillis()
+            writeLifecycleMarker("listen_loop_ended")
+            recoverUnexpectedListenerExit(origin)
+        }
+    }
+
+    private fun recoverUnexpectedListenerExit(origin: String) {
+        if (running || lastListenExitReason != "running_false") return
+        val enabled = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean(PREF_ENABLED, false)
+        if (!enabled || falseWakeRunawayReason.isNotBlank()) return
+        rememberEvent("listener_unexpected_exit_recovery_scheduled", JSONObject()
+            .put("last_listen_exit_reason", lastListenExitReason)
+            .put("audio_read_calls", audioReadCalls)
+            .put("inference_count", inferenceCount))
+        thread(name = "hermes-voice-wake-exit-recovery", isDaemon = true) {
+            try {
+                Thread.sleep(350L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@thread
+            }
+            if (!running) startListening(origin)
         }
     }
 
     private fun listenForWake(): WakeWordResult? {
         var recorder: AudioRecord? = null
+        lastListenExitReason = "listen_for_wake_entered"
+        lastListenExitDetail = ""
+        writeLifecycleMarker("listen_for_wake_entered")
         try {
             val rawMinBuffer = AudioRecord.getMinBufferSize(
                 OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ,
@@ -1034,11 +1212,15 @@ class HermesVoiceWakeService : Service() {
                 machine.fail("audio_record_init_failed")
                 Log.e(LOG_TAG, "audio_record_initialized=false audio_record_last_error=$lastAudioRecordError")
                 writeStatus("audio_record_init_failed")
+                markListenExit("audio_record_min_buffer_failed", lastAudioRecordError)
                 return null
             }
             val minBuffer = rawMinBuffer.coerceAtLeast(OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ)
+            val audioSource = selectedWakeAudioSource()
+            activeAudioSource = audioSource.first
+            activeAudioSourceName = audioSource.second
             recorder = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                audioSource.first,
                 OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -1051,11 +1233,12 @@ class HermesVoiceWakeService : Service() {
                 machine.fail("audio_record_init_failed")
                 Log.e(LOG_TAG, "audio_record_initialized=false audio_record_last_error=$lastAudioRecordError")
                 writeStatus("audio_record_init_failed")
+                markListenExit("audio_record_init_failed", lastAudioRecordError)
                 return null
             }
             audioRecordInitializedAt = System.currentTimeMillis()
             activeRecorder = recorder
-            Log.i(LOG_TAG, "audio_record_initialized=true min_buffer=$minBuffer")
+            Log.i(LOG_TAG, "audio_record_initialized=true min_buffer=$minBuffer audio_source=${audioSource.second}")
             audioRecordStartCalledAt = System.currentTimeMillis()
             Log.i(LOG_TAG, "audio_record_start_called=true")
             recorder.startRecording()
@@ -1066,6 +1249,7 @@ class HermesVoiceWakeService : Service() {
                 machine.fail("audio_record_start_failed")
                 Log.e(LOG_TAG, "audio_record_started=false audio_record_last_error=$lastAudioRecordError")
                 writeStatus("audio_record_start_failed")
+                markListenExit("audio_record_start_failed", lastAudioRecordError)
                 return null
             }
             audioRecordStartedAt = System.currentTimeMillis()
@@ -1077,20 +1261,50 @@ class HermesVoiceWakeService : Service() {
             writeStatus("audio_record_started")
             val buffer = ShortArray(1024)
             val rollingAudio = RollingPcm16Window((OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ * FALSE_WAKE_AUDIO_WINDOW_MS) / 1000)
+            var zeroReadStartedAt = 0L
             while (running) {
-                val count = recorder.read(buffer, 0, buffer.size)
+                val count = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    recorder.read(buffer, 0, buffer.size, AudioRecord.READ_NON_BLOCKING)
+                } else {
+                    recorder.read(buffer, 0, buffer.size)
+                }
                 if (count <= 0) {
-                    val restartRequested = lastAudioRecordError.startsWith("audio_capture_stalled")
+                    if (count == 0) {
+                        val now = System.currentTimeMillis()
+                        if (zeroReadStartedAt <= 0L) zeroReadStartedAt = now
+                        if (now - zeroReadStartedAt < 1_500L &&
+                            !lastAudioRecordError.startsWith("audio_capture_stalled") &&
+                            !lastAudioRecordError.startsWith("audio_capture_no_frames")) {
+                            Thread.sleep(10)
+                            continue
+                        }
+                        lastAudioRecordError = "audio_capture_no_frames:${now - zeroReadStartedAt}ms"
+                    }
+                    val restartRequested = lastAudioRecordError.startsWith("audio_capture_stalled") ||
+                        lastAudioRecordError.startsWith("audio_capture_no_frames")
+                    if (count == 0 && !restartRequested) {
+                        Thread.sleep(10)
+                        continue
+                    }
                     audioReadErrors += 1
                     if (!restartRequested) lastAudioRecordError = "AudioRecord.read returned $count"
                     Log.w(LOG_TAG, "audio_record_read_error_count=$audioReadErrors audio_record_last_error=$lastAudioRecordError")
                     if (restartRequested || recorder.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-                        lastFailureReason = if (restartRequested) "audio_capture_stalled" else "audio_capture_restart_requested"
+                        lastFailureReason = if (restartRequested) {
+                            if (lastAudioRecordError.startsWith("audio_capture_no_frames")) "audio_capture_no_frames" else "audio_capture_stalled"
+                        } else {
+                            "audio_capture_restart_requested"
+                        }
+                        if (lastFailureReason == "audio_capture_no_frames" || lastFailureReason == "audio_capture_stalled") {
+                            rotateWakeAudioSource(lastFailureReason)
+                        }
                         writeStatus(lastFailureReason)
+                        markListenExit(lastFailureReason, lastAudioRecordError)
                         return null
                     }
                     continue
                 }
+                zeroReadStartedAt = 0L
                 audioReadCalls += 1
                 audioSamplesRead += count.toLong()
                 lastAudioFrameAt = System.currentTimeMillis()
@@ -1108,9 +1322,25 @@ class HermesVoiceWakeService : Service() {
                 val frame = buffer.copyOf(count)
                 recordWakeFrameAudioMetrics(frame)
                 rollingAudio.append(frame)
-                if (System.currentTimeMillis() < wakeCooldownUntil) continue
+                val nowMs = System.currentTimeMillis()
+                if (!proofSessionActive && foregroundUiInferenceShouldYield(nowMs)) {
+                    Thread.sleep(FOREGROUND_UI_INFERENCE_SKIP_MS)
+                    continue
+                }
+                if (nowMs < wakeCooldownUntil) continue
                 val activeProviders = currentProviders()
-                if (!proofSessionActive && !activeProviders.vad.isSpeech(frame, OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ)) continue
+                val vadSpeech = proofSessionActive || activeProviders.vad.isSpeech(frame, OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ)
+                lastVadSpeech = vadSpeech
+                if (vadSpeech) vadPassCount += 1L else vadRejectCount += 1L
+                if (!vadSpeech) {
+                    if (vadRejectCount == 1L || vadRejectCount % 100L == 0L) {
+                        rememberEvent("vad_rejected_frame", JSONObject()
+                            .put("vad_reject_count", vadRejectCount)
+                            .put("audio_peak", lastWakeFramePeak)
+                            .put("audio_rms", lastWakeFrameRms))
+                    }
+                    continue
+                }
                 val wake = activeProviders.wake.processPcm16(frame, OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ)
                 val confirmedWake = wakeConfirmationGate.observe(
                     wake,
@@ -1125,6 +1355,10 @@ class HermesVoiceWakeService : Service() {
                 }
                 if (inferenceCount == 1L || inferenceCount % 20L == 0L || wake.detected || confirmedWake.detected) {
                     Log.i(LOG_TAG, "inference_count=$inferenceCount last_confidence=$lastInferenceConfidence raw_wake_detected=${wake.detected} wake_confirmed=${confirmedWake.detected}")
+                }
+                if (nowMs - lastLifecycleInferenceWriteAt >= 1000L || wake.detected || confirmedWake.detected) {
+                    lastLifecycleInferenceWriteAt = nowMs
+                    writeLifecycleMarker(if (confirmedWake.detected) "wake_confirmed" else if (wake.detected) "raw_wake_detected" else "inference_observed")
                 }
                 if (proofSessionActive) {
                     if (confirmedWake.detected) {
@@ -1142,6 +1376,7 @@ class HermesVoiceWakeService : Service() {
                             lastWakeProofResult = "pass"
                             writeStatus("proof_wake_detected")
                             postWakeDetectedEvent(confirmedWake)
+                            markListenExit("proof_wake_detected", "confidence=${confirmedWake.confidence}")
                             return confirmedWake.copy(audioWindow = rollingAudio.snapshot())
                         }
                         continue
@@ -1166,9 +1401,11 @@ class HermesVoiceWakeService : Service() {
                     lastWakeProofResult = "pass"
                     writeStatus()
                     postWakeDetectedEvent(confirmedWake)
+                    markListenExit("wake_detected", "confidence=${confirmedWake.confidence}")
                     return confirmedWake.copy(audioWindow = rollingAudio.snapshot())
                 }
             }
+            markListenExit("running_false", "audio_read_calls=$audioReadCalls inference_count=$inferenceCount")
         } catch (error: Exception) {
             lastException = formatException(error)
             lastAudioRecordError = lastException
@@ -1177,6 +1414,7 @@ class HermesVoiceWakeService : Service() {
             machine.fail(lastFailureReason)
             Log.e(LOG_TAG, "audio_record_last_error=$lastAudioRecordError failure_reason=$lastFailureReason")
             writeStatus(lastFailureReason)
+            markListenExit(lastFailureReason, lastException)
         } finally {
             if (activeRecorder === recorder) activeRecorder = null
             try {
@@ -1184,8 +1422,45 @@ class HermesVoiceWakeService : Service() {
             } catch (_: Exception) {
             }
             recorder?.release()
+            writeLifecycleMarker("listen_for_wake_finally")
         }
         return null
+    }
+
+    private fun markListenExit(reason: String, detail: String = "") {
+        lastListenExitReason = reason
+        lastListenExitDetail = detail.take(500)
+        rememberEvent("listen_for_wake_exit", JSONObject()
+            .put("reason", lastListenExitReason)
+            .put("detail", lastListenExitDetail)
+            .put("audio_read_calls", audioReadCalls)
+            .put("audio_samples_read", audioSamplesRead)
+            .put("inference_count", inferenceCount)
+            .put("running", running))
+        writeLifecycleMarker("listen_for_wake_exit")
+    }
+
+    private fun wakeAudioSources(): List<Pair<Int, String>> = listOf(
+        MediaRecorder.AudioSource.VOICE_RECOGNITION to "VOICE_RECOGNITION",
+        MediaRecorder.AudioSource.MIC to "MIC",
+        MediaRecorder.AudioSource.CAMCORDER to "CAMCORDER",
+        MediaRecorder.AudioSource.DEFAULT to "DEFAULT",
+    )
+
+    private fun selectedWakeAudioSource(): Pair<Int, String> {
+        val sources = wakeAudioSources()
+        return sources[audioSourceIndex.coerceIn(0, sources.lastIndex)]
+    }
+
+    private fun rotateWakeAudioSource(reason: String) {
+        val sources = wakeAudioSources()
+        audioSourceIndex = (audioSourceIndex + 1) % sources.size
+        audioSourceRestartCount += 1L
+        val next = selectedWakeAudioSource()
+        rememberEvent("audio_source_rotated", JSONObject()
+            .put("reason", reason)
+            .put("audio_source", next.second)
+            .put("restart_count", audioSourceRestartCount))
     }
 
     private fun recordInference(rawWake: WakeWordResult, confirmedWake: WakeWordResult) {
@@ -1269,6 +1544,21 @@ class HermesVoiceWakeService : Service() {
         maxWakeFrameRms = maxOf(maxWakeFrameRms, rms)
     }
 
+    private fun foregroundUiActiveUntil(forceRefresh: Boolean = false, nowMs: Long = System.currentTimeMillis()): Long {
+        val shouldRefresh = forceRefresh ||
+            foregroundUiActiveUntilCacheReadAt <= 0L ||
+            nowMs - foregroundUiActiveUntilCacheReadAt >= FOREGROUND_UI_ACTIVE_PREF_READ_INTERVAL_MS
+        if (!shouldRefresh) return foregroundUiActiveUntilCache
+        val activeUntil = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(PREF_FOREGROUND_UI_ACTIVE_UNTIL, 0L)
+        foregroundUiActiveUntilCache = activeUntil
+        foregroundUiActiveUntilCacheReadAt = nowMs
+        return activeUntil
+    }
+
+    private fun foregroundUiInferenceShouldYield(nowMs: Long = System.currentTimeMillis()): Boolean =
+        foregroundUiActiveUntil(nowMs = nowMs) > nowMs
+
     private fun postWakeDetectedEvent(wake: WakeWordResult) {
         val origin = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getString(PREF_ORIGIN, BuildConfig.DEFAULT_SERVER_URL)
@@ -1301,13 +1591,8 @@ class HermesVoiceWakeService : Service() {
     private fun bringAppToForegroundAfterWake(wake: WakeWordResult) {
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(PREF_LAUNCH_APP_ON_WAKE, true)) return
-        val intent = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            .putExtra("native_screen", "wake-word")
-            .putExtra("wake_source", "hermes_voice_wake")
-            .putExtra("wake_confidence", wake.confidence)
         try {
-            startActivity(intent)
+            startActivity(wakeForegroundIntent(wake))
             rememberEvent("wake_app_foreground_requested", JSONObject().put("confidence", wake.confidence))
             Log.i(LOG_TAG, "wake_app_foreground_requested=true confidence=${wake.confidence}")
         } catch (error: Exception) {
@@ -1315,6 +1600,49 @@ class HermesVoiceWakeService : Service() {
             rememberEvent("wake_app_foreground_failed", JSONObject().put("error", error.javaClass.simpleName))
             Log.w(LOG_TAG, "wake_app_foreground_requested=false error=$lastException")
         }
+    }
+
+    private fun bringAppToForegroundAfterWakeAsync(wake: WakeWordResult) {
+        thread(name = "hermes-wake-foreground-after-asr-start", isDaemon = true) {
+            try {
+                Thread.sleep(250L)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return@thread
+            }
+            bringAppToForegroundAfterWake(wake)
+        }
+    }
+
+    private fun wakeForegroundIntent(wake: WakeWordResult? = null): Intent {
+        val uri = wakeForegroundUri(wake)
+        return Intent(this, NativeShellV2Activity::class.java)
+            .setData(uri)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            .putExtra("native_screen", "wake-word")
+            .putExtra("wake_source", "hermes_voice_wake")
+            .also { intent ->
+                wake?.let { intent.putExtra("wake_confidence", it.confidence) }
+            }
+    }
+
+    private fun wakeForegroundUri(wake: WakeWordResult? = null): Uri {
+        val origin = BuildConfig.DEFAULT_SERVER_URL.trim().trimEnd('/').ifBlank { "https://wa.colmeio.com" }
+        val builder = Uri.parse("$origin/home").buildUpon()
+            .appendQueryParameter("native", "android")
+            .appendQueryParameter("shell", "android-webview-v2")
+            .appendQueryParameter("android_shell", "android-webview-v2")
+            .appendQueryParameter("android_runtime", "user-full")
+            .appendQueryParameter("android_startup", if (wake == null) "notification" else "wake-foreground")
+            .appendQueryParameter("native_screen", "wake-word")
+            .appendQueryParameter("wake_source", "hermes_voice_wake")
+            .appendQueryParameter("wake", "off")
+            .appendQueryParameter("bridgeDiagnostics", "off")
+            .appendQueryParameter("healthProbes", "off")
+            .appendQueryParameter("nativeControl", "off")
+            .appendQueryParameter("buildId", BuildConfig.NATIVE_BUILD_ID)
+        wake?.let { builder.appendQueryParameter("wake_confidence", it.confidence.coerceIn(0.0, 1.0).toString()) }
+        return builder.build()
     }
 
     private fun scheduleSelfRestart(reason: String) {
@@ -1357,6 +1685,37 @@ class HermesVoiceWakeService : Service() {
             }
             writeStatus(if (result.ok) "voice_command_event_dispatched" else "voice_command_event_dispatch_failed")
         }
+    }
+
+    private fun postCommandCaptureStartedEvent(origin: String, event: VoiceWakeEvent, asrProvider: String) {
+        thread(name = "hermes-command-capture-event") {
+            val result = router.dispatchCommandCaptureStarted(origin, event, asrProvider)
+            rememberEvent("wake_event_delivered_to_app", JSONObject()
+                .put("delivery", if (result.ok) "backend" else "none")
+                .put("event_type", "command_capture_started"))
+        }
+    }
+
+    private fun postVoicePartialEvent(origin: String, event: VoiceWakeEvent, asrProvider: String, partialTranscript: String) {
+        val partial = partialTranscript.trim().take(240)
+        if (!nativeVoicePartialLooksUsable(partial)) return
+        if (partial.isBlank()) return
+        thread(name = "hermes-voice-partial-event") {
+            router.dispatchPartial(origin, event, asrProvider, partial)
+        }
+    }
+
+    private fun nativeVoicePartialLooksUsable(transcript: String): Boolean {
+        val normalized = transcript
+            .replace(Regex("\\[(unk|spn|noise|sil)]|<(unk|spn|noise|sil)>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("[^A-Za-z0-9 ?!.,'’-]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .lowercase(Locale.US)
+        if (normalized.isBlank()) return false
+        val weak = setOf("word", "words", "uh", "um", "hmm", "noise", "unknown", "open")
+        val meaningful = normalized.split(" ").filter { it.isNotBlank() && it !in weak }
+        return meaningful.joinToString(" ").length >= 3
     }
 
     private fun rememberEvent(type: String, detail: JSONObject = JSONObject()) {
@@ -1403,6 +1762,7 @@ class HermesVoiceWakeService : Service() {
             modelExists = modelExists,
         )
         val now = System.currentTimeMillis()
+        val foregroundUiActiveUntil = foregroundUiActiveUntil(forceRefresh = true, nowMs = now)
         val audioRecordStarted = audioRecordStartedAt > 0L && lastAudioRecordError.isBlank()
         val audioCaptureStaleMs = if (lastAudioFrameAt > 0L) maxOf(0L, now - lastAudioFrameAt) else 0L
         val inferenceStaleMs = if (lastInferenceAt > 0L) maxOf(0L, now - lastInferenceAt) else 0L
@@ -1468,6 +1828,10 @@ class HermesVoiceWakeService : Service() {
             .put("audio_capture_alive_window_ms", AUDIO_CAPTURE_ALIVE_WINDOW_MS)
             .put("audio_loop_stall_count", audioLoopStallCount)
             .put("last_audio_loop_stall_at", lastAudioLoopStallAt)
+            .put("audio_source", activeAudioSourceName)
+            .put("audio_source_id", activeAudioSource)
+            .put("audio_source_index", audioSourceIndex)
+            .put("audio_source_restart_count", audioSourceRestartCount)
             .put("audio_watchdog_active", watchdogWorker?.isAlive == true)
             .put("active_audio_recorder_present", activeRecorder != null)
             .put("foreground_service_started", running)
@@ -1483,9 +1847,14 @@ class HermesVoiceWakeService : Service() {
             .put("max_wake_frame_peak", maxWakeFramePeak)
             .put("last_wake_frame_rms", lastWakeFrameRms)
             .put("max_wake_frame_rms", maxWakeFrameRms)
+            .put("vad_pass_count", vadPassCount)
+            .put("vad_reject_count", vadRejectCount)
+            .put("last_vad_speech", lastVadSpeech)
             .put("audio_sample_rate_hz", OpenWakeWordOnnxEngine.SAMPLE_RATE_HZ)
             .put("audio_channels", 1)
             .put("audio_format", "pcm16_mono_16khz")
+            .put("foreground_ui_inference_paused", foregroundUiActiveUntil > now)
+            .put("foreground_ui_active_until", foregroundUiActiveUntil)
             .put("last_inference_at", lastInferenceAt)
             .put("last_inference_timestamp", lastInferenceAt)
             .put("inference_running", inferenceAlive)
@@ -1641,6 +2010,115 @@ class HermesVoiceWakeService : Service() {
             parentFile?.mkdirs()
             writeText((sanitizeJsonValue(status) as? JSONObject ?: JSONObject()).toString(2))
         }
+    }
+
+    private fun writeLifecycleMarker(stage: String, intent: Intent? = null, startId: Int = 0) {
+        val activeProviders = providers
+        val marker = JSONObject()
+            .put("schema", "hermes.wasm_agent.android_wake_lifecycle.v1")
+            .put("build_id", BuildConfig.NATIVE_BUILD_ID)
+            .put("stage", stage)
+            .put("action", intent?.action.orEmpty())
+            .put("start_id", startId)
+            .put("running", running)
+            .put("worker_alive", worker?.isAlive == true)
+            .put("audio_record_started", audioRecordStartedAt > 0L && lastAudioRecordError.isBlank())
+            .put("audio_read_calls", audioReadCalls)
+            .put("audio_samples_read", audioSamplesRead)
+            .put("inference_count", inferenceCount)
+            .put("last_confidence", lastInferenceConfidence)
+            .put("max_observed_confidence", maxObservedConfidence)
+            .put("wake_threshold", currentWakeThreshold())
+            .put("wake_confirmation_frames", configuredWakeConfirmationFrames(this))
+            .put("wake_confirmation_window_ms", configuredWakeConfirmationWindowMs(this))
+            .put("wake_cooldown_ms", configuredWakeCooldownMs(this))
+            .put("raw_wake_detection_count", rawWakeDetectionCount)
+            .put("wake_detection_count", wakeDetectionCount)
+            .put("last_wake_frame_peak", lastWakeFramePeak)
+            .put("max_wake_frame_peak", maxWakeFramePeak)
+            .put("last_wake_frame_rms", lastWakeFrameRms)
+            .put("max_wake_frame_rms", maxWakeFrameRms)
+            .put("vad_rms_threshold", configuredVadRmsThreshold(this))
+            .put("vad_peak_threshold", configuredVadPeakThreshold(this))
+            .put("vad_pass_count", vadPassCount)
+            .put("vad_reject_count", vadRejectCount)
+            .put("last_vad_speech", lastVadSpeech)
+            .put("wake_provider", activeProviders?.wake?.name.orEmpty())
+            .put("vad_provider", activeProviders?.vad?.name.orEmpty())
+            .put("model_source", activeProviders?.modelSource.orEmpty())
+            .put("last_listen_exit_reason", lastListenExitReason)
+            .put("last_listen_exit_detail", lastListenExitDetail)
+            .put("last_failure_reason", lastFailureReason)
+            .put("last_audio_record_error", lastAudioRecordError)
+            .put("voice_state", machine.state.name.lowercase(Locale.US))
+            .put("last_wake_at", machine.lastWakeAt)
+            .put("last_wake_confidence", machine.lastWakeConfidence)
+            .put("command_capture_started", commandCaptureStartedAt > 0L)
+            .put("command_capture_started_at", commandCaptureStartedAt)
+            .put("active_transcript_capture_id", activeTranscriptCaptureId)
+            .put("last_transcript_status", machine.lastTranscriptStatus)
+            .put("last_transcript_result", lastTranscriptResult)
+            .put("last_asr_engine", lastAsrEngine)
+            .put("last_asr_latency_ms", lastAsrLatencyMs)
+            .put("last_asr_audio_captured_ms", lastAsrAudioCapturedMs)
+            .put("last_asr_partial_transcript", lastAsrPartialTranscript)
+            .put("last_asr_diagnostics", parseJsonObject(lastAsrDiagnostics))
+            .put("last_normalized_transcript", lastNormalizedTranscript)
+            .put("last_voice_command", lastVoiceCommand)
+            .put("voice_command_event_dispatched", voiceCommandEventDispatchedAt > 0L)
+            .put("voice_command_event_dispatched_at", voiceCommandEventDispatchedAt)
+            .put("last_voice_command_event", machine.lastEvent?.toJson() ?: JSONObject.NULL)
+            .put("last_error", machine.lastError)
+            .put("last_exception", if (lastException.isBlank()) JSONObject.NULL else lastException)
+            .put("timestamp_ms", System.currentTimeMillis())
+        try {
+            lifecycleFile(this).apply {
+                parentFile?.mkdirs()
+                writeText(marker.toString(2))
+            }
+        } catch (_: Exception) {
+        }
+        try {
+            writePublicLifecycleMarker(marker)
+        } catch (_: Exception) {
+        }
+        Log.i(LOG_TAG, "wake_lifecycle_marker=${marker.toString().take(1200)}")
+    }
+
+    private fun writePublicLifecycleMarker(marker: JSONObject) {
+        val json = marker.toString(2)
+        try {
+            getExternalFilesDir(null)?.resolve("native-diagnostics/wake-lifecycle.json")?.apply {
+                parentFile?.mkdirs()
+                writeText(json)
+            }
+        } catch (_: Exception) {
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = contentResolver
+            val collection = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/WASM-Agent"
+            resolver.delete(
+                collection,
+                "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND ${MediaStore.MediaColumns.RELATIVE_PATH}=?",
+                arrayOf("wake-lifecycle.json", "$relativePath/"),
+            )
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "wake-lifecycle.json")
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(collection, values) ?: return
+            resolver.openOutputStream(uri, "wt")?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+            return
+        }
+        val file = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "WASM-Agent/wake-lifecycle.json")
+        file.parentFile?.mkdirs()
+        file.writeText(json)
     }
 
     private fun confidenceMetricsJson(): JSONObject = JSONObject()
@@ -1817,16 +2295,8 @@ class HermesVoiceWakeService : Service() {
             lastAsrPartialTranscript = ""
             lastAsrDiagnostics = safeJsonString(diagnostics)
             lastException = "transcript_watchdog_timeout"
-            activeTranscriptCaptureId = 0L
-            commandCaptureStartedAt = 0L
             rememberEvent("transcript_watchdog_timeout", diagnostics)
-            machine.fail("transcript_watchdog_timeout")
             writeStatus("transcript_watchdog_timeout")
-            machine.listenAgain()
-            standbyRestoredAt = System.currentTimeMillis()
-            rememberEvent("standby_restored")
-            writeStatus("standby_restored_after_transcript_watchdog")
-            worker?.interrupt()
         }
     }
 
@@ -2216,7 +2686,7 @@ class HermesVoiceWakeService : Service() {
             .setContentIntent(PendingIntent.getActivity(
                 this,
                 0,
-                Intent(this, MainActivity::class.java),
+                wakeForegroundIntent(),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             ))
             .build()
@@ -2224,6 +2694,7 @@ class HermesVoiceWakeService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        writeLifecycleMarker("on_create")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(NotificationChannel(
@@ -2232,5 +2703,6 @@ class HermesVoiceWakeService : Service() {
                 NotificationManager.IMPORTANCE_LOW,
             ))
         }
+        writeLifecycleMarker("on_create_complete")
     }
 }

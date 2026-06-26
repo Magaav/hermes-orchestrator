@@ -54,6 +54,7 @@ for (const artifact of artifacts) {
     assert(mainJs.includes("collectNativeDiagnosticsBundle") && mainJs.includes("captureNativeScreenshot") && mainJs.includes("controlledNativeReload") && mainJs.includes("frontier_operator_commands_ready"), `${artifact} must include the Frontier operator command layer`);
     assert(mainJs.includes("rendererConsoleDiagnosticsPath") && mainJs.includes("nativeControlAuditPath") && mainJs.includes("nativeFatalDiagnosticsPath"), `${artifact} must persist renderer console, native control audit, and fatal diagnostics`);
     assert(mainJs.includes("function readJsonFile"), `${artifact} must keep native diagnostics upload working when reading runtime diagnostics`);
+    assert(mainJs.includes("const defaults = readNativeDefaults();") && mainJs.includes("buildId: config.buildId || defaults.buildId || \"\""), `${artifact} native config must expose bundled buildId when saved config lacks it`);
     assert(resolverJs.includes('"config_json_unavailable"'), `${artifact} must reject backend candidates whose /config.json is unavailable`);
     assert(resolverJs.includes("googleClientIdConfigured") && resolverJs.includes("preference: 0"), `${artifact} must prefer backend candidates configured for Google login`);
     assert(mainJs.includes('url.searchParams.set("native", "electron")'), `${artifact} must load the remote PWA with native=electron`);

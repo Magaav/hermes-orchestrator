@@ -191,6 +191,32 @@ class VoiceCommandRouter {
             .put("privacy_mode", event.privacyMode)
             .put("audio_retained", false)
 
+    fun commandCaptureStartedPayload(event: VoiceWakeEvent, asrProvider: String): JSONObject =
+        JSONObject()
+            .put("type", "command_capture_started")
+            .put("kind", "command_capture_started")
+            .put("platform", "android")
+            .put("wake_word", event.wakeWord.ifBlank { "hermes" })
+            .put("wake_confidence", safeJsonConfidence(event.confidence))
+            .put("confidence", safeJsonConfidence(event.confidence))
+            .put("source", "android_native_voice_wake")
+            .put("asr_provider", asrProvider)
+            .put("device_id", "android-${BuildConfig.NATIVE_BUILD_ID}")
+            .put("build_id", event.buildId)
+            .put("session_id", event.sessionId)
+            .put("timestamp", System.currentTimeMillis())
+            .put("started_at", event.startedAt)
+            .put("ended_at", event.endedAt)
+            .put("privacy_mode", event.privacyMode)
+            .put("audio_retained", false)
+
+    fun partialPayload(event: VoiceWakeEvent, asrProvider: String, partialTranscript: String): JSONObject =
+        commandCaptureStartedPayload(event, asrProvider)
+            .put("type", "voice_partial")
+            .put("kind", "voice_partial")
+            .put("transcript", partialTranscript)
+            .put("partial_transcript", partialTranscript)
+
     fun payload(event: VoiceWakeEvent, asrProvider: String): JSONObject =
         event.toJson()
             .put("kind", "voice_command")
@@ -201,6 +227,12 @@ class VoiceCommandRouter {
 
     fun dispatchWakeDetected(origin: String, event: VoiceWakeEvent, wakeProvider: String): VoiceDispatchResult =
         dispatchPayload(origin, wakeDetectedPayload(event, wakeProvider))
+
+    fun dispatchCommandCaptureStarted(origin: String, event: VoiceWakeEvent, asrProvider: String): VoiceDispatchResult =
+        dispatchPayload(origin, commandCaptureStartedPayload(event, asrProvider))
+
+    fun dispatchPartial(origin: String, event: VoiceWakeEvent, asrProvider: String, partialTranscript: String): VoiceDispatchResult =
+        dispatchPayload(origin, partialPayload(event, asrProvider, partialTranscript))
 
     fun dispatch(origin: String, event: VoiceWakeEvent, asrProvider: String): VoiceDispatchResult {
         return dispatchPayload(origin, payload(event, asrProvider))

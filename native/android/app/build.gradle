@@ -98,8 +98,14 @@ tasks.register("syncBundledVoskModel", Sync) {
     into(generatedVoskAssetsDir.map { it.dir("asr/vosk-model") })
 }
 
+tasks.register("verifyAndroidUxPerformanceRegression", Exec) {
+    workingDir = rootProject.projectDir.parentFile.parentFile
+    commandLine("node", "plugins/wasm-agent/tests/android_lite_performance_budget.test.js")
+}
+
 tasks.matching { it.name == "preBuild" }.configureEach {
     dependsOn("syncBundledVoskModel")
+    dependsOn("verifyAndroidUxPerformanceRegression")
 }
 
 tasks.register("verifyReleaseWakeAssets", Exec) {

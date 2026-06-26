@@ -1,5 +1,7 @@
 # wasm-agent Android Native
 
+Shared shell contract: `../NATIVE_SHELL_CONTRACT.md`.
+
 `native/android` owns the Android APK shell, WebView/native bridge, foreground
 service, voice wake pipeline, sideload/update metadata, and Android runtime
 proof lane for WASM Agent Native.
@@ -36,13 +38,229 @@ Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 | Latest Wake model export | implemented-unverified | `/native/android/hermes-wake-model/latest` is the compatibility endpoint for the app-private `files/voice/hermes.onnx` install bridge. A model may target any configured wake phrase if it satisfies the Android raw-PCM ONNX contract. The previous Hermes-trained SHA remains calibration evidence, not a generic readiness gate. Installed runtime restart/debug proof is still required. |
 | Latest Android simulation report | verified | `reports/sim/android/latest/summary.md` PASS for voice wake fixture, run `android-20260608T154817920Z`; separate from current installed proof. |
 | Android OAuth native return | implemented-unverified | Requires connected-device/emulator report proving native return and authenticated WebView/session. |
-| Alexa wake baseline | implemented-unverified | 2026-06-20 Windows-bridge proof on Xiaomi Mi 9 SE with build `android-universal-20260620T115820Z` routed `alexa. open wake word` to `open_wake_word` from timeline evidence. Confirmation-2 hot-op policy reached service diagnostics, and the latest `open settings` negative produced no timeline wake, but the positive confirmation-2 room loop still produced duplicate wake events. Direct ADB service start is rejected because `HermesVoiceWakeService` is non-exported; app-mediated WAO/native-control policy now clears proof mode and applies confirmation/cooldown, but installed service status still reports threshold `0.92` after requesting `0.999`. Baseline is not accepted: fresh `app.responsiveness` WAO/native-event evidence shows the Android WebView overloaded with multi-second frame gaps/event-loop lag/long tasks, so wake tuning must pause until responsiveness is healthy. |
+| Alexa wake baseline | implemented-unverified | 2026-06-20 Windows-bridge proof on Xiaomi Mi 9 SE with build `android-universal-20260620T115820Z` routed `alexa. open wake word` to `open_wake_word` from timeline evidence. Confirmation-2 hot-op policy reached service diagnostics, and the latest `open settings` negative produced no timeline wake, but the positive confirmation-2 room loop still produced duplicate wake events. Direct ADB service start is rejected because `HermesVoiceWakeService` is non-exported; app-mediated WAO/native-control policy now clears proof mode and applies confirmation/cooldown, but installed service status still reports threshold `0.92` after requesting `0.999`. Baseline is not accepted: source now adds shared-PWA Android touch-first budgets for polling, hydration, health checks, and light wake telemetry, but installed Android responsiveness proof must pass before wake tuning resumes. |
+| Android native UX source gate | implemented-unverified | Source now opens `https://wa.colmeio.com/home?native=android` immediately, moves `/config.json`/`/health`/`/healthz` probing to diagnostics after first load, and targets `android_runtime=user-full` for production Android instead of the old `debug-lite` shell. Android perf safe mode remains a full-runtime flag layer. The PWA/full and lite diagnostic runtimes expose `perfSafeMode=1`, sampled/off bridge diagnostics, wake-off isolation, touch/pan/minimap counters, and `get_android_native_ux_report`. Source checks use `node plugins/wasm-agent/tests/android_lite_performance_budget.test.js` and browser JS syntax checks; `android-fast` is not accepted as wake-loop proof. Installed release APK/runtime proof is still required. |
 
 ## Build
 
 ```bash
 HORC_ANDROID_BUILD_MODE=auto horc build android-apk
 ```
+
+Every Gradle rebuild runs the Android UX performance regression guard before
+compilation through `:app:verifyAndroidUxPerformanceRegression`. The guard
+executes:
+
+```bash
+node plugins/wasm-agent/tests/android_lite_performance_budget.test.js
+```
+
+It blocks the build if Android startup regresses by adding duplicate bootstrap
+fetches, excess first-layer listeners/renders, JS-synthesized Android finger
+pan, v2 shell bloat, extra JavaScript bridge methods, extra WebView bridge
+objects, backend/health/release-feed/native-control work, wake/service/model
+work, file chooser code, or threaded startup delays in shell v2 layer 0.
+
+## Clean Shell V2
+
+`native/android/app/src/main/java/com/colmeio/wasmagent/shell/` is the restart
+lane for Android native. It is intentionally separate from the legacy
+`MainActivity` because that Activity grew into a mixed launcher, OAuth,
+diagnostics, wake, model, runtime-control, and proof surface.
+
+Layer 0 is `NativeShellV2Activity`: a production-only WebView launcher. Its
+startup contract is:
+
+- create the WebView
+- attach a tiny status bridge
+- call `loadUrl("https://wa.colmeio.com/home?...")`
+- do no backend health probe, wake work, diagnostics upload, native-control
+  polling, release-feed check, model work, or delayed service reconciliation
+  before first load
+
+### Live Web Runtime Refresh
+
+Android shell v2 exposes `WasmAgentNative.hardReloadWebRuntime(...)` for PWA
+runtime fixes that are already published by the validated backend. Use this
+before considering an APK rebuild when the change is JavaScript, CSS, HTML,
+manifest, service-worker, or backend-served UI behavior.
+
+The hard refresh keeps cookies and app WebStorage intact, clears WebView HTTP
+cache, unregisters service workers, clears Cache Storage, and reloads the
+current app URL with a `native_refresh` cache buster. The web native-control
+commands `hard_reload_web_runtime`, `refresh_web_runtime`, and `reload` use
+this primitive when the installed shell exposes it, falling back to soft reload
+only on older shells.
+
+This path is not a replacement for APK rebuilds when the change needs a new OS
+permission, native library, manifest entry, service, package identity, signing
+change, or a missing native primitive.
+
+`NativeShellV2Bridge` exposes explicit wake status/start/stop/policy controls
+without starting wake during `NativeShellV2Activity.onCreate`. Downloaded
+runtime and unrelated hot-op methods still return unsupported results. Wake and
+later features must be copied from the legacy shell only one layer at a time
+after the layer below has package proof and real-device behavioral proof. The
+v2 Activity is the installed launcher and auth-return target; the legacy
+`MainActivity` is not exported and must not own the normal relaunch path. This
+prevents an explicit shell-v2 proof from passing while the app icon still
+reopens the legacy wake/diagnostics-heavy shell.
+
+Copy order:
+
+1. Launch/WebView/status bridge.
+2. Native auth return.
+3. Cookie/session persistence.
+4. Bounded diagnostics snapshot.
+5. Native-control polling.
+6. Wake service controls. Current source exposes explicit bridge commands and
+   status/policy operations only; startup remains wake-off.
+7. Voice/model/tuning.
+
+The guard for this lane is part of:
+
+```bash
+node plugins/wasm-agent/tests/android_lite_performance_budget.test.js
+```
+
+The Windows bridge Android input hot-op now accepts `componentName` /
+`component_name` for launch actions. Use explicit component launch only when
+you need to isolate shell-v2 proof from Android launcher resolution:
+
+```json
+{
+  "operationName": "run_android_ui_input_proof",
+  "operationInputs": {
+    "action": "launch",
+    "packageName": "com.colmeio.wasmagent",
+    "componentName": "com.colmeio.wasmagent/.shell.NativeShellV2Activity",
+    "stopFirst": true
+  }
+}
+```
+
+The installed app icon and Android relaunch path must resolve to
+`NativeShellV2Activity`. If a proof passes only through explicit component
+launch while a normal relaunch opens `MainActivity`, the proof is invalid for
+user usability.
+
+The canonical input-budget script exposes the same launch override:
+
+```bash
+python3 tools/android/prove-android-input-budget.py \
+  --launch-component 'com.colmeio.wasmagent/.shell.NativeShellV2Activity' \
+  --no-prepare-space
+```
+
+The input-budget proof also parses Android `am start -W` output and fails when
+Activity launch total/wait time exceeds the configured budget. Slow starts such
+as multi-second launcher stalls must fail even if later swipe metrics happen to
+fit the frame budget.
+
+For layer-0 shell v2, prefer launch-only proof when ADB proof is explicitly
+needed:
+
+```bash
+python3 tools/android/prove-android-input-budget.py \
+  --launch-component 'com.colmeio.wasmagent/.shell.NativeShellV2Activity' \
+  --launch-only \
+  --no-stop-first \
+  --no-prepare-space
+```
+
+### Deterministic UX Release Loop
+
+Do not manually repeat build, feed, reinstall, and input-proof commands while
+debugging Android native responsiveness. Use the deterministic harness:
+
+```bash
+python3 tools/android/prove-android-native-ux-release-loop.py
+```
+
+If `horc build android-apk` already produced and published the APK containing
+the change under test, reuse it without another rebuild or feed refresh:
+
+```bash
+python3 tools/android/prove-android-native-ux-release-loop.py --skip-build
+```
+
+Use `--publish-feed` with `--skip-build` only when the intended proof is to
+refresh release metadata or downloaded hot-op/runtime bundles. A feed refresh
+can change Android APK metadata and invalidate a reused install report, so do
+not combine it casually with `--reuse-install-report`.
+
+For clean shell v2 proof, use the first-class target flag instead of manually
+stacking input-budget pass-through options. This builds/installs and then
+stops before a second ADB relaunch/input pass. The release-loop install phase
+uses the Android UI input hot-op `install_apk` action instead of the legacy
+voice-tuning reinstall command, so it does not force-stop and monkey-launch any
+Activity after install:
+
+```bash
+python3 tools/android/prove-android-native-ux-release-loop.py --shell-v2
+```
+
+Only opt into the ADB launch proof when the device can tolerate an explicit
+component launch. The opt-in path is launch-only and avoids force-stop, swipe,
+and gfxinfo probes:
+
+```bash
+python3 tools/android/prove-android-native-ux-release-loop.py \
+  --shell-v2 \
+  --run-shell-v2-adb-proof
+```
+
+If the APK containing v2 is already installed and the only stale artifact is
+the Windows Android input hot-op feed, make the feed refresh explicit:
+
+```bash
+python3 tools/android/prove-android-native-ux-release-loop.py \
+  --skip-build \
+  --publish-feed \
+  --shell-v2 \
+  --reuse-install-report reports/android/responsiveness/<report>.json
+```
+
+Use `--skip-start-backend` only when the local WASM Agent backend is already
+running and reachable.
+
+The harness emits one aggregate report under
+`reports/android/responsiveness/*-android-native-ux-release-loop.json` and
+chains the existing proof primitives in order: local backend startup/readiness,
+release APK/feed, Windows hot-shell proof, Windows-bridge Android install, then
+real-device input-budget proof. Treat any need to hand-run the same sequence a
+second time as a harness gap and promote the missing option into this script or
+`docs/context/HARNESS_PROMISES.json`.
+
+### Shell V2 Wake Loop
+
+After `android-universal-20260622T193436Z` or newer is installed, use the
+single shell-v2 wake harness instead of repeating preflight, launch, policy, and
+room-stimulus commands by hand:
+
+```bash
+python3 tools/voice/run-shell-v2-wake-loop.py
+```
+
+The harness is no-rebuild by default. It runs Windows hot-shell preflight,
+reuses the promoted APK/feed with
+`prove-android-native-ux-release-loop.py --skip-build --shell-v2 --run-shell-v2-adb-proof`,
+uses the local Windows bridge origin for ADB hot ops, requires
+`WASM_AGENT_NATIVE_CONTROL_KEY` for production Android command queueing, waits
+for a fresh shell-v2 `nativeControl=on` Android WebView client on the control
+URL origin, starts wake through `start_voice_wake` /
+`WasmAgentNative.enableVoiceWake`, applies `apply_wake_word_policy`, refreshes
+wake state, and then speaks `alexa open wake word` through the Windows
+SpeechSynthesizer path in `tools/voice/run-wake-room-loop.py`. Use
+`--control-url` and `--android-origin` only for an explicit dev-origin proof;
+localhost output is not production evidence.
+
+Passing evidence is one aggregate report under
+`reports/android/wake-shell-v2/*-shell-v2-wake-loop.json`. The loop must not
+claim success from direct ADB service start, legacy `MainActivity`, source
+tests, or old Hermes wake proof. If responsiveness proof is intentionally
+accepted while tuning, the run must say so explicitly with
+`--accept-responsiveness-incomplete`.
 
 Before choosing a rebuild, run a short loop reflection:
 
@@ -73,7 +291,7 @@ cd native/android
 node scripts/release-android.js
 ```
 
-Fast inner-loop build:
+Optional debug-only compiler sanity check:
 
 ```bash
 horc build android-fast
@@ -92,11 +310,12 @@ count, ASR engine, transcript result, and compact SpeechRecognizer/Vosk
 diagnostics.
 
 `android-fast` uses the same local-vs-Docker Android toolchain selection but
-stops at the debug APK under `app/build/outputs/apk`. It does not sign release
-artifacts, promote `release/`, publish the native release feed, or prove package
-or runtime behavior. Use `HORC_ANDROID_FAST_TASKS` to narrow Gradle tasks, and
-lab `HORC_ANDROID_GRADLE_DAEMON=1` or `HORC_ANDROID_CONFIGURATION_CACHE=1` there
-before considering them for the release lane.
+stops at the debug APK under `app/build/outputs/apk`. It is not part of the
+wake-word proof loop because it does not sign release artifacts, promote
+`release/`, publish the native release feed, install the production APK, or
+prove package/runtime behavior. Use it only when a narrow compiler check is
+worth the extra loop time; otherwise move straight to no-rebuild bridge proof or
+`horc build android-apk` when release packaging is required.
 
 Both `horc build android` and `horc build android-fast` append benchmark JSONL
 records to `reports/build/android/build-benchmarks.jsonl`. Track duration,
@@ -442,16 +661,36 @@ a short self-restart after task removal, and restores after boot, user unlock,
 or app package replacement. A user force-stop remains an Android OS boundary:
 the app cannot keep listening or auto-launch again until the user opens it.
 
-Android WebView bootstrap must keep first touch responsive. Renderer diagnostic
-bridge calls append quickly, while full `latest.json` snapshots and uploads are
-debounced off the JavaScript bridge call path. The PWA compacts queued startup
-diagnostics before flushing them to native, defers admin bridge refresh/render
-work while Android Home is active, delays nonessential Home module/message DOM
-work until after the shell is visible, and caches Wake Word state briefly so
-opening the Wake Word modal performs one lightweight bridge read instead of
-repeated synchronous reads.
-Remote-control access must follow the same rule. Polling is compact and may be
-skipped while the user is touching, typing, scrolling, or when input is pending.
+Android WebView bootstrap must keep first touch responsive. Cached config/auth
+is applied synchronously by a tiny pre-module shell in `index.html`, and the
+remote PWA paints one minimal authenticated Home shell before full event wiring.
+Android startup uses `GET /app/bootstrap` as the
+authoritative JSON read for config, session/user, spaces, devices, fleet,
+credits, readiness, and models with per-section errors; it must not start the
+old `/auth/session` request during cached-auth boot. If `/app/bootstrap` returns
+HTML in production, fix the server/proxy/deploy route before treating bootstrap
+as proven. Android-specific JavaScript must stay a boot/native-bridge adapter,
+not a second feature implementation. First-shell Home controls can be wired
+early, but their data and behavior should come from shared DOM contracts,
+`/app/bootstrap`, explicit user-triggered endpoints, or a future shared
+home-lite module so feature evolution does not require Android-only patches.
+The PWA marks cached shell visibility from the pre-module after-paint
+boundary when available, and skips the pre-shell anonymous auth-gate render when
+cached auth is present.
+Renderer diagnostic bridge calls append quickly, while full `latest.json`
+snapshots and uploads are debounced off the JavaScript bridge call path. The PWA
+compacts queued startup diagnostics before flushing them to native, defers admin
+bridge refresh/render work while Android Home is active, delays nonessential
+Home module/message DOM work until after the shell is visible, and caches Wake
+Word state briefly so opening the Wake Word modal performs one lightweight
+bridge read instead of repeated synchronous reads. The heavy WIS camera artifact
+runtime is dynamically imported after bootstrap rather than statically parsed
+before the Android shell. Remote-control access must follow the same rule.
+Polling is compact and may be skipped while the user is touching, typing,
+scrolling, or when input is pending. The web runtime also advertises
+`probe_input_latency` for native-control synthetic DOM dispatch measurement,
+while accepted touch/click latency proof still requires a real native/ADB tap
+through Android native-control or the Windows bridge.
 Heavy work such as diagnostics export, screenshots, UI tree captures, or log
 bundles must be command-triggered, idle-scheduled, bounded, and allowed to
 return a skipped result instead of competing with app rendering or wake capture.
@@ -498,10 +737,11 @@ install paths.
 ## Durable Next Step
 
 Treat Android WebView responsiveness as the next gate before further wake
-tuning. Inspect `app.responsiveness` native events and the `responsiveness`
-section emitted by `tools/voice/run-wake-room-loop.py`; do not accept wake-word
-policy while the app reports multi-second frame gaps, event-loop lag, long
-tasks, or slow native-control polling. Also fix/prove threshold propagation
+tuning. Inspect `app.responsiveness` native events, `get_android_native_ux_report`,
+and the `responsiveness` section emitted by `tools/voice/run-wake-room-loop.py`;
+do not accept wake-word policy while the app reports multi-second frame gaps,
+event-loop lag, long tasks, touch starvation, minimap render storms, or slow
+native-control polling. Also fix/prove threshold propagation
 through the app-mediated `apply_wake_word_policy` path: production mode is now
 cleared with `proof_session_active=false`, but the installed service still
 reports `wake_threshold=0.92` after a `0.999` request. Once responsiveness and

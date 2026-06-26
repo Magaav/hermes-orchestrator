@@ -2077,13 +2077,13 @@ function classifyAdbDevices(stdout = "") {
 function androidConnectionInstructions(status = "") {
   if (status === "adb_missing") return adbMissingInstructions();
   if (status === "unauthorized") {
-    return "Unlock the phone and accept the USB debugging authorization prompt.";
+    return "Unlock the phone and accept the USB debugging authorization prompt. If it does not appear, revoke USB debugging authorizations on the phone and reconnect.";
   }
   if (status === "offline") {
     return "Reconnect USB, toggle USB debugging, then retry.";
   }
   if (status === "no_device") {
-    return "Phone not visible to Windows ADB. Check cable, USB mode, driver, and debugging.";
+    return "Phone not visible to Windows ADB. Check cable, set USB mode to File Transfer / Android Auto, confirm the driver, and keep USB debugging enabled.";
   }
   if (status === "multiple_devices") return "Disconnect extra Android devices or emulators, then retry with exactly one authorized phone.";
   if (status === "one_authorized_device") return "One authorized Android device is visible to Windows ADB.";
@@ -4937,6 +4937,7 @@ async function recoverReachableServerUrl(current = ensureConfig()) {
 async function nativeConfigPayload() {
   const config = ensureConfig();
   const nativeDefaults = nativeDefaultsDiagnostics();
+  const defaults = readNativeDefaults();
   let backendConfig = {};
   const serverUrl = selectedBackendOrigin || await recoverReachableServerUrl(config);
   if (serverUrl) {
@@ -4976,9 +4977,9 @@ async function nativeConfigPayload() {
       appVersion: app.getVersion(),
       wasmAgentVersion: config.wasmAgentVersion || app.getVersion(),
       nativeShellVersion: config.nativeShellVersion || app.getVersion(),
-      installableVersion: config.installableVersion || app.getVersion(),
-      buildId: config.buildId || "",
-      buildGeneratedAt: config.buildGeneratedAt || "",
+      installableVersion: config.installableVersion || defaults.installableVersion || app.getVersion(),
+      buildId: config.buildId || defaults.buildId || "",
+      buildGeneratedAt: config.buildGeneratedAt || defaults.buildGeneratedAt || "",
       packagedDefaultServerUrl: config.packagedDefaultServerUrl || DEFAULT_SERVER_URL,
       appAsarFingerprint: config.appAsarFingerprint || appAsarFingerprint(),
       buildPlatform: config.buildPlatform || "windows",

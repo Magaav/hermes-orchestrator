@@ -175,6 +175,28 @@ class ReadinessCreditsProvisioningTest(unittest.TestCase):
             self.assertIn("Missing dependency: `account_sandbox_api_url`", result["reply"])
             self.assertTrue(any(action["id"] == "agent_readiness" and action["status"] == "error" for action in result["actions"]))
 
+    def test_frontier_alias_resolves_to_runnable_target(self) -> None:
+        with patch.dict(os.environ, self.env, clear=True):
+            self.seed_accounts()
+
+            def ready_admin_bridge(server, method, path, body):
+                if method == "GET" and path == "/health":
+                    return {"ok": True, "health": {"status": "ok"}}
+                if method == "GET" and path == "/nodes/orchestrator":
+                    return {"ok": True, "node": {"id": "orchestrator", "running": True, "status": "running"}}
+                raise AssertionError((method, path, body))
+
+            with patch.object(static_server, "bridge_proxy", side_effect=ready_admin_bridge):
+                ready = static_server.agent_readiness(self.server, self.admin, target_node="frontier")
+            self.assertEqual(ready["requested_target_node"], "frontier")
+            self.assertEqual(ready["target_node"], "orchestrator")
+            self.assertEqual(ready["status"], "ready")
+
+            missing = static_server.agent_readiness(self.server, self.user, target_node="frontier")
+            self.assertEqual(missing["requested_target_node"], "frontier")
+            self.assertEqual(missing["target_node"], static_server.account_main_node_id(self.user))
+            self.assertEqual(missing["status"], "sandbox_not_provisioned")
+
     def test_embedded_agent_receives_current_space_name(self) -> None:
         body = {
             "message": "what is the current space name?",

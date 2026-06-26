@@ -716,6 +716,41 @@ button:disabled {
   display: grid;
 }
 
+.os-shell[data-android-prepaint="authenticated"] .auth-gate {
+  display: none;
+}
+
+.os-shell[data-android-prepaint="authenticated"] .space-frame {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.os-shell[data-android-prepaint="authenticated"] .space-viewport {
+  overflow: auto;
+  touch-action: none;
+}
+
+.os-shell[data-android-prepaint="authenticated"] .space-board {
+  cursor: default;
+}
+
+.os-shell[data-android-prepaint="authenticated"] .widget,
+.os-shell[data-android-prepaint="authenticated"] #appLayer,
+.os-shell[data-android-prepaint="authenticated"] #spaceCanvas,
+.os-shell[data-android-prepaint="authenticated"] .side-panel,
+.os-shell[data-android-prepaint="authenticated"] #sharedVoiceBar,
+.os-shell.android-prepaint-authenticated .widget,
+.os-shell.android-prepaint-authenticated #appLayer,
+.os-shell.android-prepaint-authenticated #spaceCanvas,
+.os-shell.android-prepaint-authenticated .side-panel,
+.os-shell.android-prepaint-authenticated #sharedVoiceBar {
+  display: none !important;
+}
+
+.os-shell[data-android-prepaint="authenticated"][data-panel="home"] .home-actions,
+.os-shell.android-prepaint-authenticated[data-panel="home"] .home-actions {
+  display: grid;
+}
+
 .auth-card {
   width: min(280px, 100%);
   display: grid;
@@ -881,6 +916,40 @@ h2 {
     inset -18px 0 20px -22px var(--space-edge-right),
     inset 0 18px 20px -22px var(--space-edge-top),
     inset 0 -18px 20px -22px var(--space-edge-bottom);
+}
+
+.os-shell.native-android .space-viewport {
+  touch-action: none;
+  box-shadow: none;
+  contain: layout paint style;
+  overscroll-behavior: contain;
+}
+
+.os-shell.native-android .space-board,
+.os-shell.native-android #spaceCanvas,
+.os-shell.native-android .app-layer {
+  touch-action: none;
+}
+
+.os-shell.native-android .space-viewport.can-scroll-left,
+.os-shell.native-android .space-viewport.can-scroll-right,
+.os-shell.native-android .space-viewport.can-scroll-up,
+.os-shell.native-android .space-viewport.can-scroll-down {
+  --space-edge-left: transparent;
+  --space-edge-right: transparent;
+  --space-edge-top: transparent;
+  --space-edge-bottom: transparent;
+}
+
+.os-shell.native-android .space-board {
+  cursor: default;
+}
+
+.os-shell.native-android .space-minimap,
+.os-shell.native-android .space-zoom-info,
+.os-shell.native-android .widget {
+  backdrop-filter: none;
+  box-shadow: none;
 }
 
 .space-viewport::-webkit-scrollbar {
@@ -5051,6 +5120,7 @@ textarea:focus {
   display: none;
   overflow: auto;
   padding: 13px;
+  contain: layout paint style;
 }
 
 .panel-view.active {
@@ -5541,6 +5611,27 @@ textarea:focus {
 
 .agent-overlay[data-open="true"] .agent-panel {
   display: grid;
+}
+
+.agent-overlay[data-android-lite="true"][data-open="true"] {
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: var(--agent-app-width, 100vw) !important;
+  height: var(--agent-app-height, var(--wasm-visual-height, 100dvh)) !important;
+}
+
+.agent-overlay[data-android-lite="true"][data-open="true"] .agent-panel {
+  left: 0 !important;
+  top: 0 !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  height: 100% !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
 }
 
 .agent-panel-head,

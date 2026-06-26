@@ -1,14 +1,15 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-06-13T12:32:57Z",
-  "activeGoal": "Install the feed-published Windows hot-op shell, prove the installed bridge, then use hot ops to classify why spoken Hermes does not trigger an action.",
+  "updatedAt": "2026-06-22T13:37:22Z",
+  "activeGoal": "Use the installed Windows native-control bridge to tune the Android Alexa wake loop until wake, transcript, command routing, and avatar feedback are stable enough for phase-two hard-environment tests.",
   "canonicalProofOrder": [
     "cd native/windows/src && npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe",
     "python3 tools/windows/check-windows-release-feed.py",
     "python3 tools/windows/prove-hot-shell.py",
     "python3 tools/doctor/wasm-agent-doctor.py",
-    "python3 tools/voice/run-hermes-wake-proof.py --dry-run",
-    "python3 tools/voice/run-hermes-wake-proof.py --debug"
+    "native/android/scripts/watch-wake-state.sh",
+    "python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase \"alexa. open wake word\" --observe-sec 24 --settle-sec 2 --state-source command --label alexa-command --volume 100 --rate -2",
+    "python3 tools/voice/run-wake-room-loop.py --stimulus speech --phrase \"open settings\" --observe-sec 18 --settle-sec 2 --state-source command --label alexa-negative --volume 100 --rate -2"
   ],
   "protocols": {
     "shellProtocolVersion": 2,
@@ -27,10 +28,15 @@
     "Go Native / Check Update depends on the Windows release feed, and same-semver Windows updates must compare buildId.",
     "Do not claim Android runtime proof from APK package proof alone.",
     "Do not treat bridge_update_required or hot_operation_missing as Android wake failures.",
-    "Do not use old command-specific Windows bridge handlers as the canonical Hermes wake proof path."
+    "Do not use old command-specific Windows bridge handlers as the canonical wake proof path.",
+    "Do not treat Hermes as the active baseline phrase unless a new installed model/runtime proof makes it current again.",
+    "Do not use Codex/cloud-local ADB as Android connectivity evidence; this setup reaches the device only through the installed Windows bridge.",
+    "When manually dropping Windows native-control command files, set the command verb in top-level `type`, not only `command`; direct file commands bypass the backend normalizer and `command`-only files reach Electron as `unsupported_command:`."
   ],
-  "currentHermesWakeQuestion": "Does spoken Hermes fail because threshold is not crossed, wake event is not emitted, or command capture/UI routing does not start?",
+  "wakeQuestionLabel": "Alexa wake question",
+  "currentHermesWakeQuestion": "Can the installed OpenWakeWord Alexa loop fire promptly, start post-wake transcription without long linger, route `open wake word`, and trigger avatar shine at wake/capture time instead of waiting for the final transcript?",
   "stalePatterns": [
+    "win-x64-20260612T152322Z",
     "tools/voice/ship-hermes-wake.sh",
     "onnx_runtime_available=false",
     "wake_engine_ready=false",

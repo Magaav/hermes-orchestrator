@@ -8,6 +8,7 @@ Set-Location (Resolve-Path (Join-Path $PSScriptRoot "..\.."))
 
 Write-Host "WASM Agent Android OAuth verification fallback"
 Write-Host "Preferred path: Open wasm-agent Windows app -> Diagnostics -> Verify Android OAuth."
+# Fallback commands: adb devices -l; horc simulate android --device --interactive-oauth
 Write-Host ""
 
 function Resolve-RequiredCommand {

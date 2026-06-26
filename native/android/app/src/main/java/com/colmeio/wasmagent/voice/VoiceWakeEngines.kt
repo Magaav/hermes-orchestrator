@@ -46,6 +46,10 @@ interface TranscriptionEngine {
         transcribePcm16(ShortArray(0), 16_000, timeoutMs)
 }
 
+interface PartialTranscriptionEngine {
+    fun setPartialTranscriptListener(listener: ((String) -> Unit)?)
+}
+
 data class TranscriptionPolicy(
     val acceptPartialResults: Boolean = true,
     val minimumLengthMs: Long = 900,
@@ -623,8 +627,13 @@ object WakeModelSelector {
     private fun validFile(file: File): Boolean = file.exists() && file.isFile && file.length() > 0L
 }
 
-class AndroidSpeechRecognizerEngine(private val context: Context) : TranscriptionEngine {
+class AndroidSpeechRecognizerEngine(private val context: Context) : TranscriptionEngine, PartialTranscriptionEngine {
     override val name: String = "AndroidSpeechRecognizerEngine"
+    @Volatile private var partialListener: ((String) -> Unit)? = null
+
+    override fun setPartialTranscriptListener(listener: ((String) -> Unit)?) {
+        partialListener = listener
+    }
 
     override fun transcribePcm16(samples: ShortArray, sampleRateHz: Int, timeoutMs: Long): TranscriptionResult =
         TranscriptionResult("", 0.0, "android_speech_recognizer_requires_live_capture", engine = name)
@@ -760,6 +769,7 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
                             ?.firstOrNull()
                             .orEmpty()
                         partialCount += 1
+                        if (partialTranscript.isNotBlank()) partialListener?.invoke(partialTranscript)
                     }
                     override fun onEvent(eventType: Int, params: Bundle?) {}
                     override fun onError(code: Int) {
@@ -771,7 +781,7 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
                     override fun onResults(results: Bundle?) {
                         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
                         val scores = results?.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
-                        transcript = matches.firstOrNull().orEmpty()
+                        transcript = firstUsableSpeechTranscript(matches)
                         confidence = scores?.firstOrNull()?.toDouble()?.coerceIn(0.0, 1.0) ?: if (transcript.isBlank()) 0.0 else 0.72
                         resultCount = matches.size
                         latch.countDown()
@@ -800,7 +810,7 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
             }
             recognizer?.destroy()
         }
-        if (policy.acceptPartialResults && transcript.isBlank() && partialTranscript.isNotBlank()) {
+        if (policy.acceptPartialResults && transcript.isBlank() && speechTranscriptLooksUsable(partialTranscript)) {
             transcript = partialTranscript
             confidence = 0.55
             error = ""
@@ -874,6 +884,20 @@ class AndroidSpeechRecognizerEngine(private val context: Context) : Transcriptio
         return attempts
     }
 
+    private fun firstUsableSpeechTranscript(matches: List<String>): String =
+        matches.firstOrNull { speechTranscriptLooksUsable(it) }.orEmpty()
+
+    private fun speechTranscriptLooksUsable(transcript: String): Boolean {
+        val normalized = transcript
+            .replace(Regex("\\[(unk|spn|noise|sil)]|<(unk|spn|noise|sil)>", RegexOption.IGNORE_CASE), " ")
+            .replace(Regex("[^A-Za-z0-9 ?!.,'’-]+"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .lowercase(Locale.US)
+        if (normalized.isBlank()) return false
+        return normalized.split(" ").any { word -> word.length >= 2 && word !in setOf("unk", "unknown") }
+    }
+
     private fun androidSpeechDiagnostics(
         language: Locale,
         languageTag: String = language.toLanguageTag(),
@@ -944,7 +968,7 @@ class LocalCommandTranscriptionEngine(
     private val context: Context,
     private val fallback: TranscriptionEngine = AndroidSpeechRecognizerEngine(context),
     private val preferredEngine: String = PREF_ENGINE_VOSK,
-) : TranscriptionEngine {
+) : TranscriptionEngine, PartialTranscriptionEngine {
     companion object {
         const val PREF_ENGINE_ANDROID = "android_speech"
         const val PREF_ENGINE_VOSK = "vosk"
@@ -952,10 +976,17 @@ class LocalCommandTranscriptionEngine(
         const val SAMPLE_RATE_HZ = 16_000
         const val MODEL_PATH = "asr/vosk-model"
         const val ASSET_MODEL_PATH = "asr/vosk-model"
-        private const val COMMAND_GRAMMAR = "[\"open wake word\", \"wake word\", \"open\", \"start listener\", \"stop listener\", \"[unk]\"]"
+        private const val COMMAND_GRAMMAR = "[\"alexa can you hear me\", \"alexa do you hear me\", \"alexa hear me\", \"can you hear me\", \"do you hear me\", \"can hear me\", \"hear me\", \"hello\", \"hello frontier\", \"frontier\", \"open wake word\", \"wake word\", \"open\", \"start listener\", \"stop listener\", \"[unk]\"]"
     }
 
     private val vosk by lazy { VoskOfflineEngine(File(context.filesDir, MODEL_PATH), COMMAND_GRAMMAR) }
+    @Volatile private var partialListener: ((String) -> Unit)? = null
+
+    override fun setPartialTranscriptListener(listener: ((String) -> Unit)?) {
+        partialListener = listener
+        (fallback as? PartialTranscriptionEngine)?.setPartialTranscriptListener(listener)
+        vosk.setPartialTranscriptListener(listener)
+    }
 
     override val name: String
         get() = when (preferredEngine) {
@@ -1191,7 +1222,7 @@ class LocalCommandTranscriptionEngine(
 class VoskOfflineEngine(
     private val modelDir: File,
     private val grammar: String = "",
-) : TranscriptionEngine {
+) : TranscriptionEngine, PartialTranscriptionEngine {
     companion object {
         private const val MAX_DIAGNOSTIC_RESULTS = 8
     }
@@ -1199,6 +1230,11 @@ class VoskOfflineEngine(
     override val name: String = "VoskOfflineEngine"
     @Volatile var lastError: String = ""
         private set
+    @Volatile private var partialListener: ((String) -> Unit)? = null
+
+    override fun setPartialTranscriptListener(listener: ((String) -> Unit)?) {
+        partialListener = listener
+    }
     val ready: Boolean
         get() = modelDir.exists() && modelDir.isDirectory && modelDir.list()?.isNotEmpty() == true
 
@@ -1332,6 +1368,7 @@ class VoskOfflineEngine(
                         val partialJson = JSONObject(recognizer.partialResult ?: "{}")
                         val partial = partialJson.optString("partial", "").trim()
                         if (partial.isNotBlank()) bestPartial = partial
+                        if (partial.isNotBlank()) partialListener?.invoke(partial)
                         putBounded(partials, partialJson)
                         partialCount += 1
                     }

@@ -27,6 +27,7 @@ import android.util.Base64
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -108,6 +109,9 @@ class MainActivity : Activity() {
         private const val REQUEST_GEOLOCATION_PERMISSION = 8803
         private const val REQUEST_VOICE_WAKE_PERMISSION = 8804
         private const val HERMES_WAKE_ACCEPTANCE_MODEL_SHA256 = "2abbebf21610f91f8d1fcfc12ac92f8ec19dc1191f3c90dbda4cba46e71027b2"
+        private const val VOICE_WAKE_UI_ACTIVE_WINDOW_MS = 4_000L
+        private const val BOOT_CONSOLE_FORWARD_LIMIT = 12
+        private const val CONSOLE_FORWARD_MIN_INTERVAL_MS = 1_200L
         private const val BRAND_BG = 0xFF050A12.toInt()
         private const val BRAND_PANEL = 0xFF0E1726.toInt()
         private const val BRAND_TEXT = 0xFFEFF6FF.toInt()
@@ -127,11 +131,27 @@ class MainActivity : Activity() {
     @Volatile private var selectedOrigin: String = ""
     @Volatile private var latestWebViewUrl: String = ""
     @Volatile private var activityCreatedAt: Long = 0
+    @Volatile private var firstLoadUrlAt: Long = 0
     @Volatile private var webViewPageStartedAt: Long = 0
     @Volatile private var webViewPageFinishedAt: Long = 0
     @Volatile private var webViewPageCommitVisibleAt: Long = 0
     @Volatile private var webViewMainFrameError: JSONObject? = null
     @Volatile private var lastRendererReadiness: JSONObject? = null
+    @Volatile private var backendProbeStartedAt: Long = 0
+    @Volatile private var backendProbeFinishedAt: Long = 0
+    @Volatile private var backendProbeSelectedOrigin: String = ""
+    @Volatile private var backendProbeResult: String = "not_started"
+    @Volatile private var bridgeCallsDuringBoot: Long = 0
+    @Volatile private var rendererDiagnosticsDuringBoot: Long = 0
+    @Volatile private var nativeDiagnosticsWritesDuringBoot: Long = 0
+    @Volatile private var webViewConsoleSeenCount: Long = 0
+    @Volatile private var webViewConsoleForwardedCount: Long = 0
+    @Volatile private var webViewConsoleDroppedCount: Long = 0
+    @Volatile private var lastConsoleForwardAt: Long = 0
+    @Volatile private var pendingPerfSafeMode: Boolean = false
+    @Volatile private var pendingWakeParam: String = ""
+    @Volatile private var pendingBridgeDiagnosticsParam: String = ""
+    @Volatile private var postFirstLoadBootDiagnosticsScheduled: Boolean = false
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     private val diagnostics by lazy { NativeDiagnostics(File(filesDir, "native-diagnostics/latest.json")) }
     private val modelShaCacheLock = Any()
@@ -150,6 +170,7 @@ class MainActivity : Activity() {
     @Volatile private var diagnosticsSnapshotPending: Boolean = false
     @Volatile private var diagnosticsSnapshotReason: String = ""
     @Volatile private var diagnosticsUploadReason: String = ""
+    @Volatile private var lastVoiceWakeUiActivityMarkAt: Long = 0
     @Volatile private var cachedModelShaPath: String = ""
     @Volatile private var cachedModelShaModifiedAt: Long = -1L
     @Volatile private var cachedModelShaSize: Long = -1L
@@ -186,19 +207,19 @@ class MainActivity : Activity() {
         androidAuthSessionId = getOrCreateAndroidAuthSessionId()
         nativeCorrelationId = getOrCreateNativeCorrelationId()
         installDeviceHash = getOrCreateInstallDeviceHash()
-        val voiceWakeBootReconciliation = reconcileStaleVoiceWakeStatus("boot")
         logDiagnostic("activity_on_create", JSONObject()
             .put("has_saved_state", savedInstanceState != null)
             .put("build_id", BuildConfig.NATIVE_BUILD_ID)
             .put("shell", "android-webview")
-            .put("voice_wake_boot_reconciliation", voiceWakeBootReconciliation))
+            .put("voice_wake_boot_reconciliation", "deferred_until_after_first_load"))
         handleLaunchIntent(intent, "activity_create")
 
-        val restoredOrigin = savedInstanceState?.getString(STATE_SELECTED_ORIGIN).orEmpty()
-        val restoredWebViewState = savedInstanceState?.getBundle(STATE_WEBVIEW)
-        if (restoredOrigin.isNotBlank() && restoredWebViewState != null) {
+        val savedOrigin = savedInstanceState?.getString(STATE_SELECTED_ORIGIN).orEmpty()
+        if (savedOrigin.isNotBlank()) {
+            val restoredOrigin = immediateLaunchOrigin(savedOrigin)
             selectedOrigin = restoredOrigin
-            openRemotePwaWebView(restoredOrigin, restoredWebViewState)
+            openRemotePwaWebView(restoredOrigin, null)
+            scheduleBackendProbeDiagnostics("restore_state")
             return
         }
         resolveBackend()
@@ -231,10 +252,11 @@ class MainActivity : Activity() {
             .put("screenHeightDp", newConfig.screenHeightDp))
     }
 
-    override fun onResume() {
-        super.onResume()
-        webView?.onResume()
-        logDiagnostic("activity_resume", JSONObject()
+	    override fun onResume() {
+	        super.onResume()
+	        webView?.onResume()
+	        markVoiceWakeUiActivity("activity_resume")
+	        logDiagnostic("activity_resume", JSONObject()
             .put("waiting_for_android_auth", waitingForAndroidAuth)
             .put("selected_origin", selectedOrigin))
         if (waitingForAndroidAuth && selectedOrigin.isNotBlank()) {
@@ -251,10 +273,11 @@ class MainActivity : Activity() {
         }
     }
 
-    override fun onPause() {
-        CookieManager.getInstance().flush()
-        webView?.onPause()
-        logDiagnostic("activity_pause", JSONObject()
+	    override fun onPause() {
+	        CookieManager.getInstance().flush()
+	        webView?.onPause()
+	        clearVoiceWakeUiActivity("activity_pause")
+	        logDiagnostic("activity_pause", JSONObject()
             .put("url", latestWebViewUrl)
             .put("selected_origin", selectedOrigin))
         super.onPause()
@@ -317,6 +340,7 @@ class MainActivity : Activity() {
                 .put("debug_screen", debugScreen))
         }
         val data = intent?.data ?: return
+        captureNativePerformanceFlags(data)
         lastDeepLinkSummary = JSONObject()
             .put("reason", reason)
             .put("data", data.toString())
@@ -387,7 +411,7 @@ class MainActivity : Activity() {
         return super.onKeyDown(keyCode, event)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+	    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         if (requestCode == REQUEST_FILE_CHOOSER) {
             val result = if (resultCode == RESULT_OK) {
                 WebChromeClient.FileChooserParams.parseResult(resultCode, data)
@@ -401,10 +425,40 @@ class MainActivity : Activity() {
                 .put("uri_count", result?.size ?: 0))
             return
         }
-        super.onActivityResult(requestCode, resultCode, data)
-    }
+	        super.onActivityResult(requestCode, resultCode, data)
+	    }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+	    override fun dispatchTouchEvent(event: MotionEvent?): Boolean {
+	        if (event?.actionMasked == MotionEvent.ACTION_DOWN || event?.actionMasked == MotionEvent.ACTION_MOVE) {
+	            markVoiceWakeUiActivity("native_touch")
+	        }
+	        return super.dispatchTouchEvent(event)
+	    }
+
+	    private fun markVoiceWakeUiActivity(reason: String = "ui") {
+	        val now = System.currentTimeMillis()
+	        if (now - lastVoiceWakeUiActivityMarkAt < 650L) return
+	        lastVoiceWakeUiActivityMarkAt = now
+	        thread(name = "voice-wake-ui-activity") {
+	            prefs.edit()
+	                .putLong(HermesVoiceWakeService.PREF_FOREGROUND_UI_ACTIVE_UNTIL, now + VOICE_WAKE_UI_ACTIVE_WINDOW_MS)
+	                .apply()
+	            logDiagnostic("voice_wake_ui_activity_marked", JSONObject()
+	                .put("reason", reason)
+	                .put("active_for_ms", VOICE_WAKE_UI_ACTIVE_WINDOW_MS))
+	        }
+	    }
+
+	    private fun clearVoiceWakeUiActivity(reason: String = "ui_idle") {
+	        thread(name = "voice-wake-ui-activity-clear") {
+	            prefs.edit()
+	                .putLong(HermesVoiceWakeService.PREF_FOREGROUND_UI_ACTIVE_UNTIL, 0L)
+	                .apply()
+	            logDiagnostic("voice_wake_ui_activity_cleared", JSONObject().put("reason", reason))
+	        }
+	    }
+
+	    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         when (requestCode) {
             REQUEST_WEB_PERMISSIONS -> finishPendingWebPermissionRequest(permissions, grantResults)
@@ -479,29 +533,142 @@ class MainActivity : Activity() {
     }
 
     private fun resolveBackend() {
-        showSplash("WASM Agent", "Connecting to wa.colmeio.com")
-        logDiagnostic("backend_resolve_started", JSONObject()
+        val immediateOrigin = immediateLaunchOrigin()
+        val selected = immediateOrigin
+        selectedOrigin = selected
+        prefs.edit().putString(PREF_SELECTED_ORIGIN, selected).apply()
+        logDiagnostic("backend_resolve_bypassed_for_instant_load", JSONObject()
+            .put("selected_origin", selected)
             .put("candidates", JSONArray(candidates))
-            .put("allow_local_dev", BuildConfig.ALLOW_LOCAL_DEV))
+            .put("allow_local_dev", BuildConfig.ALLOW_LOCAL_DEV)
+            .put("first_load_not_blocked_by_probe", true))
+        openRemotePwaWebView(selected)
+        scheduleBackendProbeDiagnostics("post_first_load")
+    }
+
+    private fun immediateLaunchOrigin(candidate: String = ""): String {
+        val restored = candidate.trim()
+        val persisted = prefs.getString(PREF_SELECTED_ORIGIN, "").orEmpty().trim()
+        val selected = restored.ifBlank { persisted }.ifBlank { BuildConfig.DEFAULT_SERVER_URL }.trimEnd('/')
+        if (BuildConfig.ALLOW_LOCAL_DEV) return selected
+        val defaultOrigin = BuildConfig.DEFAULT_SERVER_URL.trimEnd('/')
+        val selectedHost = runCatching { Uri.parse(selected).host.orEmpty().lowercase() }.getOrDefault("")
+        val defaultHost = runCatching { Uri.parse(defaultOrigin).host.orEmpty().lowercase() }.getOrDefault("")
+        return if (selectedHost == defaultHost && selected.startsWith("https://")) selected else defaultOrigin
+    }
+
+    private fun captureNativePerformanceFlags(data: Uri) {
+        val perfSafeMode = data.getQueryParameter("perfSafeMode")
+            ?: data.getQueryParameter("perf_safe_mode")
+        if (perfSafeMode != null) {
+            pendingPerfSafeMode = perfSafeMode == "1" ||
+                perfSafeMode.equals("true", ignoreCase = true) ||
+                perfSafeMode.equals("yes", ignoreCase = true)
+        }
+        pendingWakeParam = data.getQueryParameter("wake").orEmpty().take(32)
+        pendingBridgeDiagnosticsParam = data.getQueryParameter("bridgeDiagnostics")
+            .orEmpty()
+            .ifBlank { data.getQueryParameter("bridge_diagnostics").orEmpty() }
+            .take(32)
+    }
+
+    private fun scheduleBackendProbeDiagnostics(reason: String) {
+        if (backendProbeStartedAt > 0L) return
+        backendProbeStartedAt = System.currentTimeMillis()
+        backendProbeResult = "running"
+        logDiagnostic("backend_probe_diagnostics_scheduled", JSONObject()
+            .put("reason", reason)
+            .put("first_load_url_at", firstLoadUrlAt)
+            .put("probe_blocks_first_load", false))
         thread(name = "wasm-agent-origin-probe") {
             val selected = candidates.firstOrNull { candidate -> identifiesWasmAgent(candidate) }
-            runOnUiThread {
-                if (selected == null) {
-                    logDiagnostic("backend_resolve_failed", JSONObject()
-                        .put("candidates", JSONArray(candidates)))
-                    showErrorScreen(
-                        "WASM Agent is offline",
-                        "The Android shell could not reach wa.colmeio.com. Check your connection and retry.",
-                    )
-                } else {
-                    selectedOrigin = selected
-                    prefs.edit().putString(PREF_SELECTED_ORIGIN, selected).apply()
-                    logDiagnostic("backend_resolve_finished", JSONObject()
-                        .put("selected_origin", selected))
-                    openRemotePwaWebView(selected)
-                }
+            backendProbeFinishedAt = System.currentTimeMillis()
+            backendProbeSelectedOrigin = selected.orEmpty()
+            backendProbeResult = if (selected == null) "no_candidate_identified" else "identified"
+            if (selected != null && BuildConfig.ALLOW_LOCAL_DEV && selected != selectedOrigin) {
+                selectedOrigin = selected
+                prefs.edit().putString(PREF_SELECTED_ORIGIN, selected).apply()
             }
+            logDiagnostic("backend_probe_diagnostics_finished", JSONObject()
+                .put("reason", reason)
+                .put("selected_origin", selected.orEmpty())
+                .put("result", backendProbeResult)
+                .put("elapsed_ms", backendProbeFinishedAt - backendProbeStartedAt)
+                .put("first_load_url_at", firstLoadUrlAt)
+                .put("probe_blocks_first_load", false))
         }
+    }
+
+    private fun noteBridgeCall(name: String) {
+        if (webViewPageCommitVisibleAt == 0L) bridgeCallsDuringBoot += 1
+        if (name.contains("diagnostic", ignoreCase = true)) rendererDiagnosticsDuringBoot += 1
+    }
+
+    private fun shouldForwardConsoleDiagnostic(level: String): Boolean {
+        val now = System.currentTimeMillis()
+        webViewConsoleSeenCount += 1
+        val important = level == "error" || level == "warning"
+        val booting = webViewPageCommitVisibleAt == 0L || now - activityCreatedAt < 12_000L
+        val underBootLimit = booting && webViewConsoleForwardedCount < BOOT_CONSOLE_FORWARD_LIMIT
+        val intervalElapsed = now - lastConsoleForwardAt >= CONSOLE_FORWARD_MIN_INTERVAL_MS
+        val forward = important || underBootLimit || (!booting && intervalElapsed)
+        if (forward) {
+            webViewConsoleForwardedCount += 1
+            lastConsoleForwardAt = now
+        } else {
+            webViewConsoleDroppedCount += 1
+        }
+        return forward
+    }
+
+    private fun bridgeDiagnosticsMode(): String {
+        return pendingBridgeDiagnosticsParam.ifBlank { if (pendingPerfSafeMode) "off" else "sampled" }
+    }
+
+    private fun wakeStartupMode(): String {
+        return pendingWakeParam.ifBlank { if (pendingPerfSafeMode) "off" else "deferred" }
+    }
+
+    private fun healthProbesMode(): String {
+        return if (pendingPerfSafeMode) "off" else "afterFirstPaint"
+    }
+
+    private fun bootPerformanceFlags(): JSONObject {
+        return JSONObject()
+            .put("perfSafeMode", pendingPerfSafeMode)
+            .put("wake", wakeStartupMode())
+            .put("bridgeDiagnostics", bridgeDiagnosticsMode())
+            .put("healthProbes", healthProbesMode())
+            .put("startup", "instant")
+    }
+
+    private fun webViewBootMetrics(): JSONObject {
+        val now = System.currentTimeMillis()
+        return JSONObject()
+            .put("activity_created_at", activityCreatedAt)
+            .put("first_load_url_at", firstLoadUrlAt)
+            .put("first_load_url_delta_ms", if (firstLoadUrlAt > 0L) firstLoadUrlAt - activityCreatedAt else JSONObject.NULL)
+            .put("page_started_delta_ms", if (webViewPageStartedAt > 0L) webViewPageStartedAt - activityCreatedAt else JSONObject.NULL)
+            .put("page_commit_visible_delta_ms", if (webViewPageCommitVisibleAt > 0L) webViewPageCommitVisibleAt - activityCreatedAt else JSONObject.NULL)
+            .put("page_finished_delta_ms", if (webViewPageFinishedAt > 0L) webViewPageFinishedAt - activityCreatedAt else JSONObject.NULL)
+            .put("backend_probe_started_at", backendProbeStartedAt)
+            .put("backend_probe_finished_at", backendProbeFinishedAt)
+            .put("backend_probe_result", backendProbeResult)
+            .put("backend_probe_selected_origin", backendProbeSelectedOrigin)
+            .put("backend_probe_blocks_first_load", false)
+            .put("bridge_calls_during_boot", bridgeCallsDuringBoot)
+            .put("renderer_diagnostics_during_boot", rendererDiagnosticsDuringBoot)
+            .put("diagnostics_writes_during_boot", nativeDiagnosticsWritesDuringBoot)
+            .put("console_messages_seen", webViewConsoleSeenCount)
+            .put("console_messages_forwarded", webViewConsoleForwardedCount)
+            .put("console_messages_dropped", webViewConsoleDroppedCount)
+            .put("boot_flags", bootPerformanceFlags())
+            .put("age_ms", if (activityCreatedAt > 0L) now - activityCreatedAt else 0)
+    }
+
+    private fun resolveBackendLegacyGateDisabled() {
+        // Kept as a named breadcrumb for source checks: backend probing is now diagnostics-only.
+        scheduleBackendProbeDiagnostics("legacy_gate_disabled")
     }
 
     private fun identifiesWasmAgent(origin: String): Boolean {
@@ -539,11 +706,20 @@ class MainActivity : Activity() {
         val builder = Uri.parse(origin.trimEnd('/') + "/home").buildUpon()
             .appendQueryParameter("native", "android")
             .appendQueryParameter("shell", "android-webview")
+            .appendQueryParameter("android_shell", "android-webview")
+            .appendQueryParameter("android_runtime", "user-full")
+            .appendQueryParameter("android_startup", "instant")
+            .appendQueryParameter("healthProbes", healthProbesMode())
+            .appendQueryParameter("wake", wakeStartupMode())
+            .appendQueryParameter("bridgeDiagnostics", bridgeDiagnosticsMode())
             .appendQueryParameter("buildId", BuildConfig.NATIVE_BUILD_ID)
             .appendQueryParameter("webBuildHint", BuildConfig.BUILD_GENERATED_AT)
             .appendQueryParameter("native_correlation_id", nativeCorrelationId)
             .appendQueryParameter("android_auth_session", androidAuthSessionId)
             .appendQueryParameter("install_device_hash", installDeviceHash)
+        if (pendingPerfSafeMode) {
+            builder.appendQueryParameter("perfSafeMode", "1")
+        }
         if (pendingDebugScreen.isNotBlank()) {
             builder.appendQueryParameter("native_screen", pendingDebugScreen)
         }
@@ -590,12 +766,41 @@ class MainActivity : Activity() {
             webViewPageCommitVisibleAt = 0
             webViewMainFrameError = null
             lastRendererReadiness = null
+            if (firstLoadUrlAt == 0L) firstLoadUrlAt = System.currentTimeMillis()
             prefs.edit().putString(PREF_LAST_URL, url).apply()
             logDiagnostic("webview_load_url", JSONObject()
                 .put("url", url)
-                .put("deterministic_boot", true))
+                .put("deterministic_boot", true)
+                .put("first_load_url_at", firstLoadUrlAt)
+                .put("activity_created_at", activityCreatedAt)
+                .put("delta_ms", firstLoadUrlAt - activityCreatedAt)
+                .put("boot_flags", bootPerformanceFlags()))
             view.alpha = 0f
             view.loadUrl(url)
+            schedulePostFirstLoadBootDiagnostics("webview_load_url")
+        }
+    }
+
+    private fun schedulePostFirstLoadBootDiagnostics(reason: String) {
+        if (postFirstLoadBootDiagnosticsScheduled) return
+        postFirstLoadBootDiagnosticsScheduled = true
+        thread(name = "wasm-agent-post-first-load-boot-diagnostics") {
+            Thread.sleep(900L)
+            val wakeMode = wakeStartupMode()
+            if (wakeMode.equals("off", ignoreCase = true)) {
+                logDiagnostic("voice_wake_boot_reconciliation_skipped", JSONObject()
+                    .put("reason", reason)
+                    .put("wake", wakeMode)
+                    .put("first_load_url_at", firstLoadUrlAt)
+                    .put("status", "wake_disabled"))
+                return@thread
+            }
+            val reconciliation = reconcileStaleVoiceWakeStatus("boot")
+            logDiagnostic("voice_wake_boot_reconciliation", JSONObject()
+                .put("reason", reason)
+                .put("wake", wakeMode)
+                .put("first_load_url_at", firstLoadUrlAt)
+                .put("reconciliation", reconciliation))
         }
     }
 
@@ -824,11 +1029,20 @@ class MainActivity : Activity() {
             }
 
             override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage): Boolean {
-                logDiagnostic("webview_console_message", JSONObject()
-                    .put("level", consoleMessage.messageLevel().name.lowercase())
-                    .put("message", consoleMessage.message().take(500))
-                    .put("source", consoleMessage.sourceId().orEmpty())
-                    .put("line", consoleMessage.lineNumber()))
+                val level = consoleMessage.messageLevel().name.lowercase()
+                if (bridgeDiagnosticsMode() != "off" && shouldForwardConsoleDiagnostic(level)) {
+                    logDiagnostic("webview_console_message", JSONObject()
+                        .put("level", level)
+                        .put("message", consoleMessage.message().take(500))
+                        .put("source", consoleMessage.sourceId().orEmpty())
+                        .put("line", consoleMessage.lineNumber())
+                        .put("console_messages_seen", webViewConsoleSeenCount)
+                        .put("console_messages_forwarded", webViewConsoleForwardedCount)
+                        .put("console_messages_dropped", webViewConsoleDroppedCount))
+                } else {
+                    webViewConsoleSeenCount += if (bridgeDiagnosticsMode() == "off") 1 else 0
+                    webViewConsoleDroppedCount += if (bridgeDiagnosticsMode() == "off") 1 else 0
+                }
                 return super.onConsoleMessage(consoleMessage)
             }
         }
@@ -1792,13 +2006,20 @@ class MainActivity : Activity() {
 
     private inner class AndroidBridge(private val origin: String) {
         @JavascriptInterface
-        fun authSessionId(): String = androidAuthSessionId
+        fun authSessionId(): String {
+            noteBridgeCall("authSessionId")
+            return androidAuthSessionId
+        }
 
         @JavascriptInterface
-        fun shellInfo(): String = nativeShellConfig(origin).toString()
+        fun shellInfo(): String {
+            noteBridgeCall("shellInfo")
+            return nativeShellConfig(origin).toString()
+        }
 
         @JavascriptInterface
         fun logDiagnostic(kind: String, payloadJson: String?) {
+            noteBridgeCall("logDiagnostic:$kind")
             val payload = parseJsonPayload(payloadJson)
             rememberRendererReadiness(kind, payload)
             logDiagnostic("renderer_$kind", payload)
@@ -1806,6 +2027,7 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun appReady(payloadJson: String?) {
+            noteBridgeCall("appReady")
             val payload = parseJsonPayload(payloadJson)
             logDiagnostic("renderer_app_ready", payload)
             runOnUiThread {
@@ -1835,10 +2057,16 @@ class MainActivity : Activity() {
 
     private inner class AndroidNativeBridge(private val origin: String) {
         @JavascriptInterface
-        fun config(): String = nativeShellConfig(origin).toString()
+        fun config(): String {
+            noteBridgeCall("config")
+            return nativeShellConfig(origin).toString()
+        }
 
         @JavascriptInterface
-        fun getKernelStatus(): String = this@MainActivity.nativeKernelStatus().toString()
+        fun getKernelStatus(): String {
+            noteBridgeCall("getKernelStatus")
+            return this@MainActivity.nativeKernelStatus().toString()
+        }
 
         @JavascriptInterface
         fun syncDownloadedRuntime(manifestJson: String?): String =
@@ -1856,11 +2084,24 @@ class MainActivity : Activity() {
         fun runDownloadedOperation(operationManifestJson: String?, inputsJson: String?): String =
             this@MainActivity.runDownloadedOperation(operationManifestJson, inputsJson).toString()
 
-        @JavascriptInterface
-        fun getWakeWordState(): String = this@MainActivity.wakeWordState().toString()
+	        @JavascriptInterface
+	        fun getWakeWordState(): String {
+            noteBridgeCall("getWakeWordState")
+            return this@MainActivity.wakeWordState().toString()
+        }
 
-        @JavascriptInterface
-        fun reload() {
+	        @JavascriptInterface
+	        fun noteUserInteraction(reason: String?): String {
+            noteBridgeCall("noteUserInteraction")
+	            this@MainActivity.markVoiceWakeUiActivity(reason?.take(80) ?: "renderer_input")
+	            return JSONObject()
+	                .put("ok", true)
+	                .put("voiceWakeUiActiveUntil", prefs.getLong(HermesVoiceWakeService.PREF_FOREGROUND_UI_ACTIVE_UNTIL, 0L))
+	                .toString()
+	        }
+
+	        @JavascriptInterface
+	        fun reload() {
             runOnUiThread {
                 logDiagnostic("renderer_reload_requested")
                 webView?.reload()
@@ -1876,6 +2117,7 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun logDiagnostic(kind: String, payloadJson: String?) {
+            noteBridgeCall("nativeBridgeDiagnostic:$kind")
             val payload = parseJsonPayload(payloadJson)
             rememberRendererReadiness(kind, payload)
             this@MainActivity.logDiagnostic("renderer_$kind", payload)
@@ -1919,7 +2161,10 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun getNativeState(): String = diagnosticsSnapshot().toString()
+        fun getNativeState(): String {
+            noteBridgeCall("getNativeState")
+            return diagnosticsSnapshot().toString()
+        }
 
         @JavascriptInterface
         fun exportLatest(): String = diagnostics.latestString()
@@ -3018,6 +3263,7 @@ class MainActivity : Activity() {
                 .put("density_dpi", display.densityDpi)
                 .put("display_width_px", display.widthPixels)
                 .put("display_height_px", display.heightPixels)
+                .put("boot", webViewBootMetrics())
         }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             collect()
@@ -3114,14 +3360,19 @@ class MainActivity : Activity() {
     }
 
     private fun scheduleDiagnosticsSnapshot(kind: String) {
+        val important = diagnosticsUploadImportant(kind)
         var shouldStartWorker = false
         synchronized(diagnosticsSnapshotLock) {
             diagnosticsSnapshotReason = kind
-            if (diagnosticsUploadImportant(kind)) diagnosticsUploadReason = kind
+            if (important) diagnosticsUploadReason = kind
             diagnosticsSnapshotPending = true
             if (!diagnosticsSnapshotScheduled) {
-                diagnosticsSnapshotScheduled = true
-                shouldStartWorker = true
+                val deferRoutineSnapshot = !important &&
+                    (firstLoadUrlAt == 0L || webViewPageCommitVisibleAt == 0L)
+                if (!deferRoutineSnapshot) {
+                    diagnosticsSnapshotScheduled = true
+                    shouldStartWorker = true
+                }
             }
         }
         if (!shouldStartWorker) return
@@ -3138,6 +3389,9 @@ class MainActivity : Activity() {
                 }
                 try {
                     diagnostics.writeSnapshot(reason, diagnosticsSnapshot())
+                    if (webViewPageCommitVisibleAt == 0L) {
+                        nativeDiagnosticsWritesDuringBoot += 1
+                    }
                     if (uploadReason.isNotBlank()) maybeUploadNativeDiagnostics(uploadReason)
                 } catch (_: Exception) {
                     // Diagnostics are best-effort and must never block app input.

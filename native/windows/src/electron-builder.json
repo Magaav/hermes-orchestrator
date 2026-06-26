@@ -67,6 +67,14 @@
         "!tests/**",
         "!test/**"
       ]
+    },
+    {
+      "from": "../../android/release/WASM-Agent-arm64.apk",
+      "to": "android/WASM-Agent-arm64.apk"
+    },
+    {
+      "from": "../../android/release/WASM-Agent-arm64.native-defaults.json",
+      "to": "android/WASM-Agent-arm64.native-defaults.json"
     }
   ],
   "files": [

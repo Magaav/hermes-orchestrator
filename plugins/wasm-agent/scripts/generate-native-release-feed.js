@@ -318,6 +318,18 @@ function hotOperationArtifacts() {
       moduleName: "hermes-wake-proof.js",
       manifestName: "hermes-wake-proof.manifest.json",
     },
+    {
+      id: "android-ui-input-proof",
+      platform: "android",
+      name: "uiInputProof",
+      operationName: "run_android_ui_input_proof",
+      sourceModule: path.join(opsRoot, "android", "android-ui-input-proof.js"),
+      sourceManifest: path.join(opsRoot, "android", "android-ui-input-proof.manifest.json"),
+      publicDir: path.join(releaseRoot, "android"),
+      publicBase: "/native/releases/hot-ops/android",
+      moduleName: "android-ui-input-proof.js",
+      manifestName: "android-ui-input-proof.manifest.json",
+    },
   ];
   const artifacts = {};
   for (const spec of specs) {

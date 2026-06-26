@@ -1,5 +1,7 @@
-const CACHE_NAME = "wasm-agent-v146-hermes-wake-direct";
+const CACHE_NAME = "wasm-agent-v169-android-responsive35";
 const ASSETS = [
+  "/android-app.js",
+  "/app-loader.js",
   "/auth-redirect.js",
   "/composer-lab",
   "/composer-lab.html",
@@ -69,11 +71,15 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/" ||
     url.pathname === "/home" ||
     url.pathname === "/index.html" ||
+    url.pathname === "/boot.js" ||
+    url.pathname === "/app-loader.js" ||
+    url.pathname === "/android-app.js" ||
     url.pathname === "/app.js" ||
     url.pathname === "/styles.css" ||
     url.pathname === "/sw.js" ||
     url.pathname === "/config.json" ||
     url.pathname === "/auth/session" ||
+    url.pathname === "/app/bootstrap" ||
     url.pathname === "/account/friends" ||
     url.pathname === "/account/users/lookup" ||
     url.pathname === "/sync/events" ||

@@ -5,6 +5,7 @@ cd /d "%~dp0\..\.."
 
 echo WASM Agent Android OAuth verification fallback
 echo Preferred path: Open wasm-agent Windows app ^> Diagnostics ^> Verify Android OAuth.
+rem Fallback commands: adb devices -l; horc simulate android --device --interactive-oauth
 echo.
 
 where adb >nul 2>nul

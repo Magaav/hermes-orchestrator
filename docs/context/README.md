@@ -12,6 +12,8 @@ future empty-context agent cheap, fast, and hard to mislead.
 | `CLAIMS.md` | Claim registry with proof status and demotions |
 | `VERIFY.md` | Exact commands and proof artifacts |
 | `REVIEW.md` | Writer/watcher pass, fresh-agent test, scorecard |
+| `HARNESS.md` | Self-improving harness contract and promotion rules |
+| `HARNESS_PROMISES.json` | Machine-readable deterministic promise registry |
 
 ## Status Enum
 
@@ -44,6 +46,35 @@ upgrade a claim.
 | Global guard, context rule, area ownership, status enum, or route | `/local/README.md` and `docs/context/*` |
 | Claim proof gained, missing, stale, or contradicted | `docs/context/CLAIMS.md` |
 | Verification command changes | `docs/context/VERIFY.md` and nearest owning docs |
+
+## Pre-Code Performance Reflection
+
+Before applying code, agents must ask whether the proposed change can reach the
+same correct observable result with fewer lifecycle phases, event listeners,
+renders, reflows, recalculations, bridge calls, polling loops, rebuilds, or
+runtime cycles. The shortest correct path is the default architecture.
+
+Doing two steps when one step is sufficient is architecture waste. If the
+reflection identifies duplicated state, avoidable recalculation, layout thrash,
+redundant listeners, bloated control flow, unnecessary abstraction, or delayed
+feedback, simplify before editing or include the simplification in the edit.
+
+The simpler path must stay readable, owned, and verifiable. Extra work is valid
+only when it is explicitly justified by correctness, safety, compatibility, or
+observability that shortens future proof/debug loops.
+
+## Harness Factory Reflection
+
+After intent/context routing and before slow investigation, rebuilds, runtime
+control, or source edits, check `HARNESS.md` and prefer an existing deterministic
+promise from `HARNESS_PROMISES.json` when it answers the uncertainty. Use
+freeform agent reasoning for novel diagnosis, contract design, and promise
+promotion, not for repeated checks that already have a bounded command.
+
+Repeated manual inference should be harvested: the second repeat needs a
+promise candidate or a reason it cannot be deterministic yet; the third repeat
+must be promoted or blocked on a named missing primitive, access, or
+observability field.
 
 ## Verified Loop-Aware Engineering
 

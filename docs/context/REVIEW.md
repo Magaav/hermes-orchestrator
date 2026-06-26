@@ -14,6 +14,7 @@ future empty-context agent.
 | Next actions | One durable next action per active area. |
 | Reply loop | Generic copilotability rule is discoverable: use live introspection/control before guessing, and end substantive replies with a concrete next-step phase. |
 | Loop-aware doctrine | Meaningful native/bridge/wake/hot-op/rebuild-heavy work has Builder, Watcher, Gatekeeper, prime checkpoints, and static/runtime/behavioral evidence where possible. |
+| Harness loop | Repeated inference routes through `HARNESS.md`, `HARNESS_PROMISES.json`, and the registry validator before slow manual loops. |
 | Active state | `docs/context/ACTIVE_STATE.json` matches generated blocks and current next actions. |
 | Compression | Delete diary text, repeated philosophy, and stale debug history. |
 
@@ -31,9 +32,13 @@ Attack the docs as if starting from zero context:
 7. Can I find the generic live-introspection rule and the reply next-step requirement without reading Android feature docs?
 8. Does `python3 tools/context/check-context-sync.py` pass and write
    `reports/context/latest/context-sync-result.json`?
-9. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
+9. Does `python3 tools/context/check-harness-promises.py` pass and write
+   `reports/context/latest/harness-promises-result.json`?
+10. Do latest reports agree with `docs/context/ACTIVE_STATE.json`, and do I
    refuse stale next actions if narrative docs disagree?
-10. Can I find the loop-aware report structure and tell whether evidence is
+11. Can I find the harness factory reflection and the promotion rule for
+    repeated manual inference?
+12. Can I find the loop-aware report structure and tell whether evidence is
     static, runtime, behavioral, or missing?
 
 Demote or rewrite any ambiguous answer.
@@ -49,6 +54,7 @@ release, or rebuild-heavy work.
 
 ### Phase 0 - Architecture Loop Reflection
 - Loop speed improvement considered:
+- Harness promise checked or candidate created:
 - Decision:
 
 ### Phase 1 - Rebuild Avoidance

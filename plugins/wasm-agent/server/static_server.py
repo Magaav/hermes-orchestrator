@@ -275,6 +275,7 @@ VOICE_LAB_EVENT_LIMIT = 240
 VOICE_LAB_ROOM_PUBLIC_EVENT_LIMIT = 120
 GLOBAL_AGENT_NODE_IDS = {"admin-orchestrator", "hermes-orchestrator", "orchestrator"}
 AGENT_DEFAULT_SANDBOX_NODE_ID = "account-sandbox"
+AGENT_FRONTIER_NODE_ID = "frontier"
 AGENT_READINESS_READY = "ready"
 AGENT_READINESS_BACKEND_UNAVAILABLE = "backend_unavailable"
 AGENT_READINESS_SANDBOX_NOT_PROVISIONED = "sandbox_not_provisioned"
@@ -325,6 +326,7 @@ class WasmAgentServer(ThreadingHTTPServer):
         bridge_url: str,
         browser_timeout_sec: float,
     ) -> None:
+        self.observability_hub: ObservabilityHub | None = None
         super().__init__(server_address, handler_class)
         self.plugin_root = plugin_root
         self.public_root = public_root
@@ -345,7 +347,9 @@ class WasmAgentServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         try:
-            self.observability_hub.close()
+            observability_hub = getattr(self, "observability_hub", None)
+            if observability_hub is not None:
+                observability_hub.close()
         finally:
             super().server_close()
 
@@ -645,6 +649,12 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
+        if path == "/app/bootstrap":
+            try:
+                self._json(HTTPStatus.OK, app_bootstrap_payload(self.server, self))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
         if path == "/native/diagnostics/latest":
             try:
                 self._json(HTTPStatus.OK, latest_native_diagnostics(self.server))
@@ -775,47 +785,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             self._redirect("/home")
             return
         if path == "/config.json":
-            self._json(
-                HTTPStatus.OK,
-                {
-                    "appId": PLUGIN_NAME,
-                    "service": PLUGIN_NAME,
-                    "name": PLUGIN_NAME,
-                    "version": PLUGIN_VERSION,
-                    "bridgeUrl": self.server.bridge_url,
-                    "agentTurnTimeoutSec": agent_bridge_timeout_sec(),
-                    "auth": {
-                        "googleClientId": google_client_id(),
-                        "googleClientIdConfigured": bool(google_client_id()),
-                        "googleLoginUri": google_login_uri(self),
-                        "publicOrigin": public_origin(),
-                        "required": True,
-                        "userTable": "user_tb",
-                    },
-                    "deployment": {
-                        "mode": wasm_agent_deployment_mode(),
-                        "instanceId": cloud_instance_id(),
-                        "clientFirst": True,
-                        "serverRole": "auth-sync-relay-backup-fleet",
-                    },
-                    "features": {
-                        "hostBrowser": {
-                            "enabled": browser_feature_enabled(self),
-                            "publicDefaultDisabled": public_deployment(self),
-                        },
-                        "sharedVoice": {
-                            "enabled": shared_voice_enabled(),
-                            "productionDefaultDisabled": True,
-                            "iceServers": shared_voice_ice_servers(),
-                            "signalingPollMs": 900,
-                        },
-                    },
-                    "bridge": {
-                        "owner": "wasm-agent",
-                        "url": self.server.bridge_url,
-                    },
-                },
-            )
+            self._json(HTTPStatus.OK, app_config_payload(self.server, self))
             return
         if path == "/observation/latest":
             try:
@@ -1824,7 +1794,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
 
     def end_headers(self) -> None:
         path = self.path.split("?", 1)[0]
-        if path in {"/", "/home", "/index.html", "/app.js", "/auth-redirect.js", "/boot.js", "/sw.js", "/config.json", "/auth/session"}:
+        if path in {"/", "/home", "/index.html", "/app-loader.js", "/android-app.js", "/app.js", "/auth-redirect.js", "/boot.js", "/sw.js", "/config.json", "/auth/session", "/app/bootstrap"}:
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
             self.send_header("Pragma", "no-cache")
         self.send_header("Cross-Origin-Opener-Policy", "same-origin-allow-popups")
@@ -5058,6 +5028,13 @@ def node_has_global_authority(target_node: str, user: dict[str, Any] | None) -> 
 
 
 def default_agent_target_node(user: dict[str, Any] | None) -> str:
+    return AGENT_FRONTIER_NODE_ID
+
+
+def resolve_frontier_agent_node(user: dict[str, Any] | None, target_node: str) -> str:
+    node = str(target_node or "").strip()
+    if node.lower() != AGENT_FRONTIER_NODE_ID:
+        return node
     return "orchestrator" if user_is_admin(user) else AGENT_DEFAULT_SANDBOX_NODE_ID
 
 
@@ -5065,13 +5042,15 @@ def ensure_agent_target_allowed(user: dict[str, Any] | None, target_node: str) -
     if user_is_admin(user):
         return
     node = str(target_node or "").strip().lower()
+    if node == AGENT_FRONTIER_NODE_ID:
+        return
     if node in GLOBAL_AGENT_NODE_IDS:
         raise BrowserError(
             "agent_target_denied",
             "Only an admin can route embedded chat turns to the global orchestrator. Select an account-owned sandbox node.",
             status=HTTPStatus.FORBIDDEN,
         )
-    allowed = {AGENT_DEFAULT_SANDBOX_NODE_ID, *account_main_node_id_candidates(user)}
+    allowed = {AGENT_DEFAULT_SANDBOX_NODE_ID, AGENT_FRONTIER_NODE_ID, *account_main_node_id_candidates(user)}
     if node not in allowed:
         raise BrowserError(
             "agent_target_denied",
@@ -6181,6 +6160,84 @@ def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
     if user and not is_allowed_account_email(str(user.get("email") or "")):
         user = None
     return {"ok": True, "authenticated": bool(user), "user": user}
+
+
+def app_config_payload(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
+    self = handler
+    return {
+        "appId": PLUGIN_NAME,
+        "service": PLUGIN_NAME,
+        "name": PLUGIN_NAME,
+        "version": PLUGIN_VERSION,
+        "bridgeUrl": server.bridge_url,
+        "agentTurnTimeoutSec": agent_bridge_timeout_sec(),
+        "auth": {
+            "googleClientId": google_client_id(),
+            "googleClientIdConfigured": bool(google_client_id()),
+            "googleLoginUri": google_login_uri(self),
+            "publicOrigin": public_origin(),
+            "required": True,
+            "userTable": "user_tb",
+        },
+        "deployment": {
+            "mode": wasm_agent_deployment_mode(),
+            "instanceId": cloud_instance_id(),
+            "clientFirst": True,
+            "serverRole": "auth-sync-relay-backup-fleet",
+        },
+        "features": {
+            "hostBrowser": {
+                "enabled": browser_feature_enabled(handler),
+                "publicDefaultDisabled": public_deployment(handler),
+            },
+            "sharedVoice": {
+                "enabled": shared_voice_enabled(),
+                "productionDefaultDisabled": True,
+                "iceServers": shared_voice_ice_servers(),
+                "signalingPollMs": 900,
+            },
+        },
+        "bridge": {
+            "owner": "wasm-agent",
+            "url": server.bridge_url,
+        },
+    }
+
+
+def app_bootstrap_payload(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
+    session = auth_session(server, handler.headers.get("Cookie", ""))
+    user = session.get("user") if isinstance(session, dict) else None
+    payload: dict[str, Any] = {
+        "ok": True,
+        "schema": "hermes.wasm_agent.app_bootstrap.v1",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "session": session,
+        "user": user,
+        "sections": {},
+        "errors": {},
+    }
+    payload["config"] = app_config_payload(server, handler)
+    payload["sections"]["config"] = payload["config"]
+    payload["sections"]["session"] = session
+    payload["sections"]["user"] = user
+    if not user:
+        return payload
+
+    def add_section(name: str, loader: Any) -> None:
+        try:
+            payload["sections"][name] = loader()
+        except BrowserError as exc:
+            payload["errors"][name] = {"code": exc.code, "message": exc.message, "status": int(exc.status)}
+        except Exception as exc:
+            payload["errors"][name] = {"code": f"{name}_bootstrap_error", "message": str(exc), "status": 500}
+
+    add_section("spaces", lambda: list_user_spaces(server, user, handler))
+    add_section("devices", lambda: list_account_devices(server, user, handler))
+    add_section("fleet", lambda: list_user_fleet(user))
+    add_section("credits", lambda: account_credits(user))
+    add_section("readiness", lambda: agent_readiness(server, user, target_node=default_agent_target_node(user)))
+    add_section("models", lambda: bridge_proxy(server, "GET", "/v1/models", None))
+    return payload
 
 
 def create_auth_redirect_code(user_id: str, *, ttl_sec: int = 120) -> str:
@@ -7327,12 +7384,24 @@ def native_voice_command_for_transcript(transcript: Any) -> str:
     return ""
 
 
+def native_voice_transcript_usable(transcript: Any) -> bool:
+    normalized = normalize_native_voice_transcript(transcript)
+    if not normalized:
+        return False
+    words = [word for word in normalized.split(" ") if word]
+    if not words:
+        return False
+    weak_words = {"word", "words", "uh", "um", "hmm", "noise", "unknown"}
+    meaningful = [word for word in words if word not in weak_words]
+    return bool(meaningful and len(" ".join(meaningful)) >= 3)
+
+
 def append_native_voice_timeline_event(server: WasmAgentServer, record: dict[str, Any]) -> None:
     payload = record.get("payload") if isinstance(record, dict) else {}
     if not isinstance(payload, dict):
         return
     event_type = str(payload.get("type") or payload.get("kind") or "")
-    if event_type not in {"wake_detected", "command_capture_started", "voice_command"}:
+    if event_type not in {"wake_detected", "command_capture_started", "voice_command", "voice_partial"}:
         return
     transcript = clipped_verbatim(str(payload.get("transcript") or ""), 1000)
     normalized_transcript = normalize_native_voice_transcript(transcript)
@@ -7375,6 +7444,28 @@ def route_native_voice_command_to_active_session(server: WasmAgentServer, record
     if event_type != "voice_command" or not transcript:
         return {"ok": False, "routed": False, "reason": "not_voice_command"}
     normalized_transcript = normalize_native_voice_transcript(transcript)
+    if not native_voice_transcript_usable(transcript):
+        item = {
+            "schema": "hermes.wasm_agent.voice_command_dispatch.v1",
+            "received_at": record.get("received_at"),
+            "type": "voice_command",
+            "source": payload.get("source") or "android_native_voice_wake",
+            "wake_word": payload.get("wake_word") or "hermes",
+            "wake_confidence": payload.get("wake_confidence", payload.get("confidence")),
+            "transcript": transcript,
+            "normalized_transcript": normalized_transcript,
+            "command": "",
+            "asr_provider": payload.get("asr_provider") or "",
+            "session_id": payload.get("session_id") or "",
+            "dispatch": "rejected_low_quality_transcript",
+            "message": "",
+        }
+        root = native_events_dir(server)
+        redacted = redact_native_diagnostics(item)
+        with (root / "voice-command-dispatch.jsonl").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(redacted, sort_keys=True, ensure_ascii=True) + "\n")
+        write_json_file(root / "latest-voice-command-dispatch.json", redacted)
+        return {"ok": False, "routed": False, "reason": "low_quality_transcript", "dispatch": "rejected_low_quality_transcript"}
     command = normalize_native_voice_command(payload.get("command")) or native_voice_command_for_transcript(transcript)
     message = NATIVE_VOICE_COMMAND_LABELS.get(command, transcript)
     item = {
@@ -7477,6 +7568,7 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "export_hermes_wake_dataset",
     "run_android_hermes_wake_proof",
     "get_runtime_snapshot",
+    "get_android_native_ux_report",
     "open_wake_word",
     "start_voice_wake",
     "stop_voice_wake",
@@ -7486,6 +7578,15 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "play_wake_phrase_probe",
     "play_audio_stimulus",
     "score_wake_phrase_probe",
+    "probe_input_latency",
+    "probe_scroll_latency",
+    "probe_canvas_pan_latency",
+    "probe_modal_latency",
+    "probe_space_switch_latency",
+    "arm_real_interaction_probe",
+    "get_real_interaction_probe",
+    "get_resource_profile",
+    "reset_resource_profile",
     "prove_android_voice_tuning",
     "read_latest_android_report",
     "request_windows_client_update",
@@ -11559,6 +11660,7 @@ def agent_readiness(
         raise BrowserError("auth_required", "Account sign-in is required.", status=HTTPStatus.UNAUTHORIZED)
     requested = safe_state_id(str(target_node or default_agent_target_node(user)), default_agent_target_node(user))
     ensure_agent_target_allowed(user, requested)
+    resolved_requested = resolve_frontier_agent_node(user, requested)
     if user_is_admin(user):
         try:
             health = bridge_health_probe(server)
@@ -11576,12 +11678,12 @@ def agent_readiness(
                 backend={"error": exc.code, "detail": exc.message},
             )
         try:
-            node = bridge_node_probe(server, requested)
+            node = bridge_node_probe(server, resolved_requested)
         except BrowserError as exc:
             return readiness_payload(
                 user=user,
                 requested_target_node=requested,
-                target_node=requested,
+                target_node=resolved_requested,
                 resolved_account_node="",
                 status=AGENT_READINESS_BACKEND_UNAVAILABLE,
                 bridge_url_source="global_bridge_url",
@@ -11594,7 +11696,7 @@ def agent_readiness(
             return readiness_payload(
                 user=user,
                 requested_target_node=requested,
-                target_node=requested,
+                target_node=resolved_requested,
                 resolved_account_node="",
                 status=AGENT_READINESS_BACKEND_UNAVAILABLE,
                 bridge_url_source="global_bridge_url",
@@ -11606,7 +11708,7 @@ def agent_readiness(
         return readiness_payload(
             user=user,
             requested_target_node=requested,
-            target_node=requested,
+            target_node=resolved_requested,
             resolved_account_node="",
             status=AGENT_READINESS_READY,
             bridge_url_source="global_bridge_url",
@@ -13659,6 +13761,8 @@ def is_public_request(method: str, path: str) -> bool:
             "/index.html",
             "/styles.css",
             "/boot.js",
+            "/app-loader.js",
+            "/android-app.js",
             "/auth-redirect.js",
             "/app.js",
             "/provider-model-catalog.js",
@@ -13666,6 +13770,7 @@ def is_public_request(method: str, path: str) -> bool:
             "/sw.js",
             "/config.json",
             "/auth/session",
+            "/app/bootstrap",
             "/native/diagnostics/latest",
             ANDROID_WAKE_WORD_STATE_PATH,
             LEGACY_ANDROID_WAKE_WORD_STATE_PATH,
@@ -17753,10 +17858,25 @@ def embedded_space_context_prompt(space_context: dict[str, Any]) -> str:
 def embedded_node_config_prompt(node_config: dict[str, str]) -> str:
     name = str(node_config.get("name") or "Embedded agent")
     node_type = str(node_config.get("type") or "hermes")
+    node_id = str(node_config.get("node_id") or "")
+    if node_id == AGENT_FRONTIER_NODE_ID:
+        return "\n".join([
+            "You are `frontier`, the user's direct chat assistant inside wasm-agent.",
+            "You should feel like the Codex-style collaborator the user is trying to talk to through the app.",
+            "Do not present yourself as Hermes, orchestrator, or a background harness.",
+            "Default to English unless the latest user message explicitly asks for another language.",
+            "If a voice transcript looks garbled or uncertain, say that plainly and ask for a retry instead of inventing intent.",
+            "Active node configuration:",
+            "- node id: frontier",
+            "- node name: frontier",
+            "- node type: direct assistant alias",
+            f"- resolved runtime node: {node_config.get('resolved_node_id') or node_config.get('runtime_node_id') or 'runtime default'}",
+        ]).strip()
     lines = [
         f"You are `{name}`, the configured `{node_type}` agent for this wasm-agent run.",
+        "Default to English unless the latest user message explicitly asks for another language.",
         "Active node configuration:",
-        f"- node id: {node_config.get('node_id') or ''}",
+        f"- node id: {node_id}",
         f"- node name: {name}",
         f"- node type: {node_type}",
         f"- instruction source: {node_config.get('instruction_source') or 'none'}",
@@ -18286,10 +18406,11 @@ def embedded_agent_message(
         raise BrowserError("agent_invalid_mode", "Agent mode must be auto, local, or bridge.")
     requested_target_node = _safe_agent_node_id(body.get("target_node") or body.get("node_id") or default_agent_target_node(user))
     ensure_agent_target_allowed(user, requested_target_node)
+    resolved_requested_target_node = resolve_frontier_agent_node(user, requested_target_node)
     target_node = (
         resolve_account_main_node_id(server, user)
-        if not user_is_admin(user) and requested_target_node == AGENT_DEFAULT_SANDBOX_NODE_ID
-        else requested_target_node
+        if not user_is_admin(user) and resolved_requested_target_node == AGENT_DEFAULT_SANDBOX_NODE_ID
+        else resolved_requested_target_node
     )
     selected_model = requested_agent_model(body)
     node_config = embedded_node_config_from_body(body, user=user, target_node=target_node, selected_model=selected_model)

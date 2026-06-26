@@ -1,64 +1,358 @@
-import { MODULE_DEFINITIONS } from "./modules/index.js";
+import { MODULE_DEFINITIONS } from "./modules/index.js?v=20260622-android-responsive35";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
-import {
-  WIS_CAMERA_ARTIFACT_SCHEMA,
-  WIS_CAMERA_ARTIFACT_BUILD,
-  WIS_CAMERA_CONTROLLER_SCHEMA,
-  WIS_CAMERA_TIMELINE_OWNER_STATES,
-  cameraSlotFromNode as wisCameraSlotFromNode,
-  claimMediaWriter,
-  createCameraArtifactController,
-  createWisCameraArtifactState,
-  createWisCameraControllerContract,
-  createWisCameraPendingTimelineSeek,
-  createWisCameraPushConfig,
-  createWisCameraPushEndpoints,
-  createWisCameraToolButton,
-  createWisDefaultPushCameraConfigForSlot,
-  createWisFocusedCameraArtifact,
-  formatWisCameraTimelineRange,
-  focusedWisCameraSlot as focusedWisCameraSlotFromSurface,
-  isWisCameraPushConfig,
-  isWisFocusedCameraSurface,
-  normalizeWisCameraConfigForSlot as normalizeWisCameraConfigForSlotContract,
-  normalizeWisCameraSlot,
-  noteWisCameraPerf,
-  readWisCameraConfigs as readWisCameraArtifactConfigs,
-  rememberWisCameraLastGoodFrameFromImage,
-  renderWisCameraArtifactHeader,
-  renderWisCameraPushArchiveFrame as renderWisCameraPushArchiveFrameContract,
-  releaseMediaStreamWriter,
-  resolveWisCameraPendingTimelineSeek,
-  sampleWisCameraPerf,
-  saveWisCameraConfigs as saveWisCameraArtifactConfigs,
-  setWisCameraVisibilityState,
-  setWisCameraTimelineOwnerState,
-  shouldLoadWisCameraTimeline as shouldLoadWisCameraTimelineContract,
-  wisCameraActivePlaybackLoop,
-  wisCameraBaseStreamId as wisCameraBaseStreamIdContract,
-  wisCameraPerformanceBudget as wisCameraPerformanceBudgetContract,
-  wisCameraPushFramePollMs as wisCameraPushFramePollMsContract,
-  wisCameraQualityStreamId as wisCameraQualityStreamIdContract,
-  wisCameraMonotonicNow,
-  wisCameraPlaybackClockMs as wisCameraPlaybackClockMsContract,
-  wisCameraPlaybackState as wisCameraPlaybackStateContract,
-  wisCameraRecordedTimelineTitle,
-  wisCameraRecordedOwnsTimeline as wisCameraRecordedOwnsTimelineContract,
-  wisCameraTimelineOwnerState as wisCameraTimelineOwnerStateContract,
-  pauseWisCameraPlaybackState,
-  resumeWisCameraPlaybackState,
-  startWisCameraPlaybackSeek,
-  stopWisCameraPlaybackState,
-  traceWisCameraBoundary,
-  wisCameraTimelineFrameClosestToTime,
-  wisCameraTimelineFrameAtRatio,
-  wisCameraTimelineFrameLabel as wisCameraTimelineFrameLabelContract,
-  wisCameraTimelineFramePlaybackKey as wisCameraTimelineFramePlaybackKeyContract,
-  wisCameraTimelinePlaybackStartMs,
-  wisCameraTimelineTimeWindow,
-  isMediaWriterCurrent,
-} from "./modules/wis/artifacts/camera.js";
+
+const RESOURCE_PROFILE_MAX_ENTRIES = 320;
+const RESOURCE_PROFILE_SLOW_MS = 24;
+const RESOURCE_PROFILE_LONG_MS = 80;
+
+function installResourceProfiler() {
+  if (typeof window === "undefined" || window.__wasmAgentResourceProfiler?.installed) return window.__wasmAgentResourceProfiler;
+  const profiler = {
+    installed: true,
+    startedAt: Date.now(),
+    seq: 0,
+    entries: new Map(),
+    slow: [],
+    originals: {},
+  };
+  const cleanLabel = (value = "", fallback = "anonymous") => String(value || fallback).replace(/\s+/g, " ").slice(0, 180);
+  const remember = (label, durationMs, detail = {}) => {
+    const duration = Number(durationMs || 0);
+    const key = cleanLabel(label);
+    const existing = profiler.entries.get(key) || {
+      label: key,
+      count: 0,
+      total_ms: 0,
+      max_ms: 0,
+      slow_count: 0,
+      last_ms: 0,
+      last_at: 0,
+      detail,
+    };
+    existing.count += 1;
+    existing.total_ms = Math.round((existing.total_ms + duration) * 100) / 100;
+    existing.max_ms = Math.max(existing.max_ms, Math.round(duration * 100) / 100);
+    existing.last_ms = Math.round(duration * 100) / 100;
+    existing.last_at = Date.now();
+    existing.detail = { ...existing.detail, ...detail };
+    if (duration >= RESOURCE_PROFILE_SLOW_MS) existing.slow_count += 1;
+    profiler.entries.set(key, existing);
+    if (profiler.entries.size > RESOURCE_PROFILE_MAX_ENTRIES) {
+      const oldest = Array.from(profiler.entries.values()).sort((a, b) => Number(a.last_at || 0) - Number(b.last_at || 0))[0];
+      if (oldest) profiler.entries.delete(oldest.label);
+    }
+    if (duration >= RESOURCE_PROFILE_LONG_MS) {
+      profiler.slow.push({
+        at: new Date().toISOString(),
+        label: key,
+        duration_ms: Math.round(duration * 100) / 100,
+        detail,
+      });
+      while (profiler.slow.length > 80) profiler.slow.shift();
+    }
+  };
+  const wrapCallback = (callback, label, detail = {}) => {
+    if (typeof callback !== "function" || callback.__wasmAgentProfileWrapped) return callback;
+    const wrapped = function wasmAgentProfiledCallback(...args) {
+      const started = performance.now();
+      try {
+        return callback.apply(this, args);
+      } finally {
+        remember(label, performance.now() - started, detail);
+      }
+    };
+    try {
+      Object.defineProperty(wrapped, "__wasmAgentProfileWrapped", { value: true });
+      Object.defineProperty(wrapped, "__wasmAgentOriginalCallback", { value: callback });
+    } catch {}
+    return wrapped;
+  };
+  const callbackName = (callback) => cleanLabel(callback?.name || "anonymous");
+  const creationSite = () => {
+    try {
+      const lines = String(new Error().stack || "").split("\n").map((line) => line.trim());
+      const site = lines.find((line) => line.includes("/app.js")
+        && !line.includes("creationSite")
+        && !line.includes("wrapCallback")
+        && !line.includes("profiledAddEventListener")
+        && !line.includes("profiledSetTimeout")
+        && !line.includes("profiledSetInterval")
+        && !line.includes("profiledRequestAnimationFrame"));
+      return cleanLabel(site || lines[3] || "", "");
+    } catch {
+      return "";
+    }
+  };
+  const targetName = (target) => {
+    if (target === window) return "window";
+    if (target === document) return "document";
+    if (target?.id) return `#${target.id}`;
+    if (target?.className && typeof target.className === "string") return `.${target.className.split(/\s+/)[0]}`;
+    if (target?.tagName) return target.tagName.toLowerCase();
+    return target?.constructor?.name || "EventTarget";
+  };
+  profiler.originals.addEventListener = EventTarget.prototype.addEventListener;
+  profiler.originals.removeEventListener = EventTarget.prototype.removeEventListener;
+  profiler.originals.setTimeout = window.setTimeout;
+  profiler.originals.setInterval = window.setInterval;
+  profiler.originals.requestAnimationFrame = window.requestAnimationFrame;
+  profiler.listenerMap = new WeakMap();
+  EventTarget.prototype.addEventListener = function profiledAddEventListener(type, listener, options) {
+    let nextListener = listener;
+    if (typeof listener === "function") {
+      const name = callbackName(listener);
+      const site = name === "anonymous" ? creationSite() : "";
+      nextListener = wrapCallback(listener, `listener:${targetName(this)}:${type}:${name}${site ? `:${site}` : ""}`, {
+        kind: "listener",
+        target: targetName(this),
+        type: String(type || ""),
+        callback: name,
+        site,
+      });
+      let targetMap = profiler.listenerMap.get(this);
+      if (!targetMap) {
+        targetMap = new WeakMap();
+        profiler.listenerMap.set(this, targetMap);
+      }
+      targetMap.set(listener, nextListener);
+    }
+    return profiler.originals.addEventListener.call(this, type, nextListener, options);
+  };
+  EventTarget.prototype.removeEventListener = function profiledRemoveEventListener(type, listener, options) {
+    const mapped = profiler.listenerMap.get(this)?.get(listener) || listener?.__wasmAgentOriginalCallback || listener;
+    return profiler.originals.removeEventListener.call(this, type, mapped, options);
+  };
+  window.setTimeout = function profiledSetTimeout(callback, delay, ...args) {
+    const name = callbackName(callback);
+    const site = name === "anonymous" ? creationSite() : "";
+    return profiler.originals.setTimeout.call(window, wrapCallback(callback, `timer:setTimeout:${name}${site ? `:${site}` : ""}`, {
+      kind: "timer",
+      delay_ms: Number(delay || 0),
+      site,
+    }), delay, ...args);
+  };
+  window.setInterval = function profiledSetInterval(callback, delay, ...args) {
+    const name = callbackName(callback);
+    const site = name === "anonymous" ? creationSite() : "";
+    return profiler.originals.setInterval.call(window, wrapCallback(callback, `timer:setInterval:${name}${site ? `:${site}` : ""}`, {
+      kind: "interval",
+      delay_ms: Number(delay || 0),
+      site,
+    }), delay, ...args);
+  };
+  if (typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame = function profiledRequestAnimationFrame(callback) {
+      return profiler.originals.requestAnimationFrame.call(window, wrapCallback(callback, `raf:${callbackName(callback)}`, {
+        kind: "raf",
+      }));
+    };
+  }
+  profiler.snapshot = (options = {}) => {
+    const entries = Array.from(profiler.entries.values());
+    const sortKey = options.sort || "total_ms";
+    return {
+      schema: "hermes.wasm_agent.resource_profile.v1",
+      captured_at: new Date().toISOString(),
+      started_at: new Date(profiler.startedAt).toISOString(),
+      entry_count: entries.length,
+      top_total: entries.slice().sort((a, b) => Number(b.total_ms || 0) - Number(a.total_ms || 0)).slice(0, Number(options.limit || 24)),
+      top_max: entries.slice().sort((a, b) => Number(b.max_ms || 0) - Number(a.max_ms || 0)).slice(0, Number(options.limit || 24)),
+      top_count: entries.slice().sort((a, b) => Number(b.count || 0) - Number(a.count || 0)).slice(0, Number(options.limit || 24)),
+      sorted: entries.slice().sort((a, b) => Number(b[sortKey] || 0) - Number(a[sortKey] || 0)).slice(0, Number(options.limit || 24)),
+      slow_tail: profiler.slow.slice(-Number(options.slowLimit || 24)),
+    };
+  };
+  profiler.reset = () => {
+    profiler.entries.clear();
+    profiler.slow = [];
+    profiler.startedAt = Date.now();
+    return profiler.snapshot();
+  };
+  window.__wasmAgentResourceProfiler = profiler;
+  return profiler;
+}
+
+installResourceProfiler();
+let WIS_CAMERA_ARTIFACT_SCHEMA = "hermes.wasm_agent.wis.camera_artifact.v1";
+let WIS_CAMERA_ARTIFACT_BUILD = "lazy-camera-runtime-pending";
+let WIS_CAMERA_CONTROLLER_SCHEMA = "hermes.wasm_agent.wis.camera_controller.v1";
+let WIS_CAMERA_TIMELINE_OWNER_STATES = Object.freeze({
+  LIVE: "LIVE",
+  RECORDED_SEEKING: "RECORDED_SEEKING",
+  RECORDED_PLAYING: "RECORDED_PLAYING",
+  RECORDED_PAUSED: "RECORDED_PAUSED",
+});
+let wisCameraArtifactRuntimePromise = null;
+const WIS_CAMERA_PUSH_ENDPOINT_FALLBACKS = Object.freeze({
+  status: "/camera/push/status",
+  frame: "/camera/push-frame",
+  stream: "/camera/push-stream",
+  replay: "/camera/push-replay",
+  playback: "/camera/push-playback",
+  timeline: "/camera/push-timeline",
+  archiveFrame: "/camera/push-archive-frame",
+});
+const clonePlain = (value) => {
+  try {
+    return JSON.parse(JSON.stringify(value ?? null));
+  } catch {
+    return value ?? null;
+  }
+};
+const lazyCleanText = (value = "", fallback = "") => String(value ?? "").trim() || String(fallback ?? "").trim();
+const lazyEndpointWithQuery = (endpoint = "", params = {}) => {
+  const path = lazyCleanText(endpoint, "");
+  if (!path) return "";
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    const text = lazyCleanText(value, "");
+    if (text) query.set(key, text);
+  });
+  const suffix = query.toString();
+  return suffix ? `${path}${path.includes("?") ? "&" : "?"}${suffix}` : path;
+};
+let traceWisCameraBoundary = () => null;
+let wisCameraSlotFromNode = (node = {}, fallback = "camera") => lazyCleanText(node?.props?.slot || node?.props?.data?.slot || node?.slot || node?.id, fallback);
+let claimMediaWriter = () => true;
+let createCameraArtifactController = () => ({ destroy() {}, update() {} });
+let createWisCameraArtifactState = (configs = {}) => {
+  const playbackStates = new Map();
+  return {
+    wisCameraConfigs: configs && typeof configs === "object" && !Array.isArray(configs) ? configs : {},
+    wisCameraStreams: new Map(),
+    wisCameraTimers: new Map(),
+    wisCameraDebugEvents: new Map(),
+    wisCameraRtspRetryAfter: new Map(),
+    wisCameraTimelineModes: new Map(),
+    wisCameraTimelineOwnerStates: new Map(),
+    wisCameraZoomSelections: new Map(),
+    wisCameraAudioMuted: new Map(),
+    wisCameraQualityModes: new Map(),
+    wisCameraQualityPrimed: new Set(),
+    wisCameraNotices: new Map(),
+    wisCameraRecordedSessions: playbackStates,
+    wisCameraPlaybackStates: playbackStates,
+    wisCameraPlaybackGenerations: new Map(),
+    wisCameraArtifactControllers: new Map(),
+    wisCameraRecordedTickTimers: new Map(),
+    wisCameraPlaybackRenderTimers: new Map(),
+    wisCameraPlaybackAbortControllers: new Map(),
+    wisCameraPlaybackObjectUrls: new Map(),
+    wisCameraPlaybackLoops: new Map(),
+    wisCameraPlaybackPerf: new Map(),
+    wisCameraVisibility: new Map(),
+    wisCameraVisualScheduler: null,
+    wisCameraLastGoodFrames: new Map(),
+    wisCameraTimeline: {
+      streamId: "",
+      mode: "live",
+      day: "",
+      frames: [],
+      range: null,
+      availableRange: null,
+      loadedAt: 0,
+      loadingStartedAt: 0,
+      loading: false,
+      error: "",
+    },
+    wisCameraTimelinePendingSeeks: new Map(),
+    wisCameraTimelineSelections: new Map(),
+  };
+};
+let createWisCameraControllerContract = ({ endpoints = WIS_CAMERA_PUSH_ENDPOINT_FALLBACKS, controls = ["zoom", "snapshot", "audio", "quality", "timeline"], modes = ["live-last-10-minutes", "recorded-retained-range"] } = {}) => ({
+  schema: WIS_CAMERA_CONTROLLER_SCHEMA,
+  artifactSchema: WIS_CAMERA_ARTIFACT_SCHEMA,
+  nodeType: "webcam_placeholder",
+  focusSchema: "hermes.wasm_agent.wis.camera_focus.v1",
+  pushMediaMode: "rtmp-push-ingest",
+  controls,
+  modes,
+  endpoints: { ...WIS_CAMERA_PUSH_ENDPOINT_FALLBACKS, ...(clonePlain(endpoints) || {}) },
+});
+let createWisCameraPendingTimelineSeek = (detail = {}) => ({ ...detail, pending: true });
+let createWisCameraPushConfig = (config = {}) => ({ ...config, kind: "push", mediaMode: "rtmp-push-ingest", element: "push-frame" });
+let createWisCameraPushEndpoints = (streamId = "cam-1", endpoints = {}, options = {}) => {
+  const cleanStreamId = lazyCleanText(streamId, "cam-1");
+  const merged = { ...WIS_CAMERA_PUSH_ENDPOINT_FALLBACKS, ...(endpoints || {}) };
+  return {
+    statusUrl: lazyEndpointWithQuery(merged.status || merged.pushStatus, { stream_id: cleanStreamId }),
+    frameUrl: lazyEndpointWithQuery(merged.frame || merged.pushFrame, { stream_id: cleanStreamId }),
+    streamUrl: lazyEndpointWithQuery(merged.stream || merged.pushStream, { stream_id: cleanStreamId }),
+    replayUrl: lazyEndpointWithQuery(merged.replay || merged.pushReplay, { stream_id: cleanStreamId, seconds: options.replaySeconds || options.seconds || 300 }),
+    playbackUrl: lazyEndpointWithQuery(merged.playback || merged.pushPlayback, { stream_id: cleanStreamId, from_ms: options.fromMs || options.from_ms || "", frame: options.frame || options.frameId || "" }),
+    timelineUrl: lazyEndpointWithQuery(merged.timeline || merged.pushTimeline, { stream_id: cleanStreamId, seconds: options.timelineSeconds || options.seconds || "" }),
+    archiveFrameUrl: lazyEndpointWithQuery(merged.archiveFrame || merged.pushArchiveFrame, { stream_id: cleanStreamId, frame: options.frame || options.frameId || "" }),
+  };
+};
+let createWisCameraToolButton = (doc, label, title, onClick, options = {}) => {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.title = title || label;
+  if (options.className) button.className = options.className;
+  if (typeof onClick === "function") button.addEventListener("click", onClick);
+  return button;
+};
+let createWisDefaultPushCameraConfigForSlot = (slot = "", options = {}) => createWisCameraPushConfig({ slot: lazyCleanText(slot, "cam-1"), ...options });
+let createWisFocusedCameraArtifact = (detail = {}) => detail;
+let formatWisCameraTimelineRange = () => "";
+let focusedWisCameraSlotFromSurface = (surface = null, fallback = "cam-1") => {
+  const cameras = surface?.state?.cameras;
+  const slots = cameras && typeof cameras === "object" ? Object.keys(cameras).filter(Boolean) : [];
+  return slots.length === 1 ? slots[0] : fallback;
+};
+let isWisCameraPushConfig = (camera = {}) => Boolean(camera?.kind === "push" || camera?.element === "push-frame" || camera?.mediaMode === "rtmp-push-ingest" || String(camera?.url || "").toLowerCase().startsWith("rtmp://"));
+let isWisFocusedCameraSurface = (surface = null) => Boolean(surface?.state?.cameraFocus || Object.keys(surface?.state?.cameras || {}).length === 1);
+let normalizeWisCameraConfigForSlotContract = (slot, camera = {}) => ({ ...camera, _slot: lazyCleanText(slot, camera?._slot || "cam-1") });
+let normalizeWisCameraSlot = (slot = "", fallback = "cam-1") => lazyCleanText(slot, fallback);
+let noteWisCameraPerf = () => null;
+let readWisCameraArtifactConfigs = (storage = localStorage) => {
+  try {
+    const raw = JSON.parse(storage.getItem("wasmAgent.wisCameraConfigs.v1") || "{}");
+    return raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  } catch {
+    return {};
+  }
+};
+let rememberWisCameraLastGoodFrameFromImage = () => null;
+let renderWisCameraArtifactHeader = () => null;
+let renderWisCameraPushArchiveFrameContract = () => null;
+let releaseMediaStreamWriter = () => null;
+let resolveWisCameraPendingTimelineSeek = (seek = null) => seek;
+let sampleWisCameraPerf = () => ({});
+let saveWisCameraArtifactConfigs = (configs = {}, storage = localStorage) => {
+  try {
+    storage.setItem("wasmAgent.wisCameraConfigs.v1", JSON.stringify(configs || {}));
+  } catch {
+    // Camera config persistence is best effort until the runtime is loaded.
+  }
+};
+let setWisCameraVisibilityState = () => null;
+let setWisCameraTimelineOwnerState = () => null;
+let shouldLoadWisCameraTimelineContract = () => false;
+let wisCameraActivePlaybackLoop = () => null;
+let wisCameraBaseStreamIdContract = (slot = "cam-1") => lazyCleanText(slot, "cam-1");
+let wisCameraPerformanceBudgetContract = () => ({ allowNetwork: false, allowVisualWork: false, allowTimeline: false });
+let wisCameraPushFramePollMsContract = () => 2000;
+let wisCameraQualityStreamIdContract = (slot = "cam-1", _camera = {}, mode = "primary") => `${lazyCleanText(slot, "cam-1")}:${lazyCleanText(mode, "primary")}`;
+let wisCameraMonotonicNow = () => performance.now();
+let wisCameraPlaybackClockMsContract = () => Date.now();
+let wisCameraPlaybackStateContract = () => null;
+let wisCameraRecordedTimelineTitle = () => "Recorded footage";
+let wisCameraRecordedOwnsTimelineContract = () => false;
+let wisCameraTimelineOwnerStateContract = () => WIS_CAMERA_TIMELINE_OWNER_STATES.LIVE;
+let pauseWisCameraPlaybackState = () => null;
+let resumeWisCameraPlaybackState = () => null;
+let startWisCameraPlaybackSeek = () => null;
+let stopWisCameraPlaybackState = () => null;
+let wisCameraTimelineFrameClosestToTime = (frames = []) => frames[0] || null;
+let wisCameraTimelineFrameAtRatio = (frames = []) => frames[0] || null;
+let wisCameraTimelineFrameLabelContract = (frame = null) => lazyCleanText(frame?.label || frame?.timestamp || frame?.timestamp_ms, "");
+let wisCameraTimelineFramePlaybackKeyContract = (frame = null) => lazyCleanText(frame?.id || frame?.timestamp_ms || frame?.timestampMs, "");
+let wisCameraTimelinePlaybackStartMs = (frame = null, fallback = Date.now()) => Number(frame?.timestamp_ms || frame?.timestampMs || fallback);
+let wisCameraTimelineTimeWindow = (_timeline = {}, frames = []) => ({ frames, startMs: 0, endMs: 0 });
+let isMediaWriterCurrent = () => true;
 import { createClientFirstStore } from "./modules/client-state/client-store.js";
 import { createChatComposer } from "./modules/chat-composer/chat-composer.js";
 import { createCommandPalette } from "./modules/chat-composer/chat-commands.js";
@@ -124,6 +418,112 @@ try {
   // Build marker is diagnostic only.
 }
 
+function applyWisCameraArtifactRuntime(module = {}) {
+  WIS_CAMERA_ARTIFACT_SCHEMA = module.WIS_CAMERA_ARTIFACT_SCHEMA || WIS_CAMERA_ARTIFACT_SCHEMA;
+  WIS_CAMERA_ARTIFACT_BUILD = module.WIS_CAMERA_ARTIFACT_BUILD || WIS_CAMERA_ARTIFACT_BUILD;
+  WIS_CAMERA_CONTROLLER_SCHEMA = module.WIS_CAMERA_CONTROLLER_SCHEMA || WIS_CAMERA_CONTROLLER_SCHEMA;
+  WIS_CAMERA_TIMELINE_OWNER_STATES = module.WIS_CAMERA_TIMELINE_OWNER_STATES || WIS_CAMERA_TIMELINE_OWNER_STATES;
+  wisCameraSlotFromNode = module.cameraSlotFromNode || wisCameraSlotFromNode;
+  claimMediaWriter = module.claimMediaWriter || claimMediaWriter;
+  createCameraArtifactController = module.createCameraArtifactController || createCameraArtifactController;
+  createWisCameraArtifactState = module.createWisCameraArtifactState || createWisCameraArtifactState;
+  createWisCameraControllerContract = module.createWisCameraControllerContract || createWisCameraControllerContract;
+  createWisCameraPendingTimelineSeek = module.createWisCameraPendingTimelineSeek || createWisCameraPendingTimelineSeek;
+  createWisCameraPushConfig = module.createWisCameraPushConfig || createWisCameraPushConfig;
+  createWisCameraPushEndpoints = module.createWisCameraPushEndpoints || createWisCameraPushEndpoints;
+  createWisCameraToolButton = module.createWisCameraToolButton || createWisCameraToolButton;
+  createWisDefaultPushCameraConfigForSlot = module.createWisDefaultPushCameraConfigForSlot || createWisDefaultPushCameraConfigForSlot;
+  createWisFocusedCameraArtifact = module.createWisFocusedCameraArtifact || createWisFocusedCameraArtifact;
+  formatWisCameraTimelineRange = module.formatWisCameraTimelineRange || formatWisCameraTimelineRange;
+  focusedWisCameraSlotFromSurface = module.focusedWisCameraSlot || focusedWisCameraSlotFromSurface;
+  isWisCameraPushConfig = module.isWisCameraPushConfig || isWisCameraPushConfig;
+  isWisFocusedCameraSurface = module.isWisFocusedCameraSurface || isWisFocusedCameraSurface;
+  normalizeWisCameraConfigForSlotContract = module.normalizeWisCameraConfigForSlot || normalizeWisCameraConfigForSlotContract;
+  normalizeWisCameraSlot = module.normalizeWisCameraSlot || normalizeWisCameraSlot;
+  noteWisCameraPerf = module.noteWisCameraPerf || noteWisCameraPerf;
+  readWisCameraArtifactConfigs = module.readWisCameraConfigs || readWisCameraArtifactConfigs;
+  rememberWisCameraLastGoodFrameFromImage = module.rememberWisCameraLastGoodFrameFromImage || rememberWisCameraLastGoodFrameFromImage;
+  renderWisCameraArtifactHeader = module.renderWisCameraArtifactHeader || renderWisCameraArtifactHeader;
+  renderWisCameraPushArchiveFrameContract = module.renderWisCameraPushArchiveFrame || renderWisCameraPushArchiveFrameContract;
+  releaseMediaStreamWriter = module.releaseMediaStreamWriter || releaseMediaStreamWriter;
+  resolveWisCameraPendingTimelineSeek = module.resolveWisCameraPendingTimelineSeek || resolveWisCameraPendingTimelineSeek;
+  sampleWisCameraPerf = module.sampleWisCameraPerf || sampleWisCameraPerf;
+  saveWisCameraArtifactConfigs = module.saveWisCameraConfigs || saveWisCameraArtifactConfigs;
+  setWisCameraVisibilityState = module.setWisCameraVisibilityState || setWisCameraVisibilityState;
+  setWisCameraTimelineOwnerState = module.setWisCameraTimelineOwnerState || setWisCameraTimelineOwnerState;
+  shouldLoadWisCameraTimelineContract = module.shouldLoadWisCameraTimeline || shouldLoadWisCameraTimelineContract;
+  wisCameraActivePlaybackLoop = module.wisCameraActivePlaybackLoop || wisCameraActivePlaybackLoop;
+  wisCameraBaseStreamIdContract = module.wisCameraBaseStreamId || wisCameraBaseStreamIdContract;
+  wisCameraPerformanceBudgetContract = module.wisCameraPerformanceBudget || wisCameraPerformanceBudgetContract;
+  wisCameraPushFramePollMsContract = module.wisCameraPushFramePollMs || wisCameraPushFramePollMsContract;
+  wisCameraQualityStreamIdContract = module.wisCameraQualityStreamId || wisCameraQualityStreamIdContract;
+  wisCameraMonotonicNow = module.wisCameraMonotonicNow || wisCameraMonotonicNow;
+  wisCameraPlaybackClockMsContract = module.wisCameraPlaybackClockMs || wisCameraPlaybackClockMsContract;
+  wisCameraPlaybackStateContract = module.wisCameraPlaybackState || wisCameraPlaybackStateContract;
+  wisCameraRecordedTimelineTitle = module.wisCameraRecordedTimelineTitle || wisCameraRecordedTimelineTitle;
+  wisCameraRecordedOwnsTimelineContract = module.wisCameraRecordedOwnsTimeline || wisCameraRecordedOwnsTimelineContract;
+  wisCameraTimelineOwnerStateContract = module.wisCameraTimelineOwnerState || wisCameraTimelineOwnerStateContract;
+  pauseWisCameraPlaybackState = module.pauseWisCameraPlaybackState || pauseWisCameraPlaybackState;
+  resumeWisCameraPlaybackState = module.resumeWisCameraPlaybackState || resumeWisCameraPlaybackState;
+  startWisCameraPlaybackSeek = module.startWisCameraPlaybackSeek || startWisCameraPlaybackSeek;
+  stopWisCameraPlaybackState = module.stopWisCameraPlaybackState || stopWisCameraPlaybackState;
+  traceWisCameraBoundary = module.traceWisCameraBoundary || traceWisCameraBoundary;
+  wisCameraTimelineFrameClosestToTime = module.wisCameraTimelineFrameClosestToTime || wisCameraTimelineFrameClosestToTime;
+  wisCameraTimelineFrameAtRatio = module.wisCameraTimelineFrameAtRatio || wisCameraTimelineFrameAtRatio;
+  wisCameraTimelineFrameLabelContract = module.wisCameraTimelineFrameLabel || wisCameraTimelineFrameLabelContract;
+  wisCameraTimelineFramePlaybackKeyContract = module.wisCameraTimelineFramePlaybackKey || wisCameraTimelineFramePlaybackKeyContract;
+  wisCameraTimelinePlaybackStartMs = module.wisCameraTimelinePlaybackStartMs || wisCameraTimelinePlaybackStartMs;
+  wisCameraTimelineTimeWindow = module.wisCameraTimelineTimeWindow || wisCameraTimelineTimeWindow;
+  isMediaWriterCurrent = module.isMediaWriterCurrent || isMediaWriterCurrent;
+  WIS_CAMERA_CONTROLLER_CONTRACT = createWisCameraControllerContract({
+    endpoints: WIS_CAMERA_CONTROLLER_CONTRACT.endpoints,
+  });
+  try {
+    document.documentElement.dataset.cameraArtifactBuild = WIS_CAMERA_ARTIFACT_BUILD;
+  } catch {
+    // Build marker is diagnostic only.
+  }
+  traceWisCameraBoundary("app.cameraArtifactBuild.loaded", {
+    module: "app.js",
+    cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD,
+    lazyLoaded: true,
+  });
+}
+
+function loadWisCameraArtifactRuntime(reason = "lazy") {
+  if (wisCameraArtifactRuntimePromise) return wisCameraArtifactRuntimePromise;
+  wisCameraArtifactRuntimePromise = import("./modules/wis/artifacts/camera.js")
+    .then((module) => {
+      applyWisCameraArtifactRuntime(module);
+      clientBootMark("wis_camera_runtime_loaded", {
+        reason,
+        build: WIS_CAMERA_ARTIFACT_BUILD,
+      });
+      return module;
+    })
+    .catch((error) => {
+      wisCameraArtifactRuntimePromise = null;
+      clientBootMark("wis_camera_runtime_load_failed", {
+        reason,
+        message: errorMessage(error),
+      });
+      throw error;
+    });
+  return wisCameraArtifactRuntimePromise;
+}
+
+function scheduleWisCameraArtifactRuntimeLoad(reason = "idle") {
+  if (wisCameraArtifactRuntimePromise) return;
+  const run = async () => {
+    if (isAndroidNativeShell()) {
+      await waitForAndroidNativeFirstShellQuiet(`wis_camera_runtime:${reason}`, { maxWaitMs: 30000 });
+      await androidNativeYield(ANDROID_NATIVE_HYDRATION_STEP_DELAY_MS);
+    }
+    void loadWisCameraArtifactRuntime(reason).catch(() => {});
+  };
+  window.setTimeout(() => void run(), isAndroidNativeShell() ? ANDROID_NATIVE_HYDRATION_START_DELAY_MS : 0);
+}
+
 const CORE_WASM_BASE64 = "AGFzbQEAAAABBwFgAn9/AX8DAgEABwcBA2FkZAAACgkBBwAgACABags=";
 const SPACE_LAYOUT_SCHEMA = "hermes.wasm_agent.space_layout.v1";
 const WIS_PATCH_SCHEMA = "hermes.wasm_agent.wis.patch.v1";
@@ -148,6 +548,8 @@ const MODULE_SETTINGS_STORAGE_KEY = "wasmAgent.modules.v1";
 const LAUNCHER_PREF_STORAGE_KEY = "wasmAgent.launcherPreference.v1";
 const RESERVED_USER_SPACE_IDS = new Set(["home", "admin", "space-home", "space-admin"]);
 const CLIENT_DEVICE_STORAGE_KEY = "wasmAgent.clientDevice.v1";
+const CLIENT_CONFIG_STORAGE_KEY = "wasmAgent.clientConfig.v1";
+const CLIENT_AUTH_USER_STORAGE_KEY = "wasmAgent.authUser.v1";
 const CHAT_QUERY_KEY = "chat";
 const CHAT_QUERY_VALUE = "wasm-agent-chat";
 const WIDGET_Z_BASE = 20;
@@ -179,6 +581,9 @@ const INTERACTION_TRACE_LIMIT = 96;
 const POINTER_MOVE_SAMPLE_MS = 80;
 const WHEEL_TRACE_SAMPLE_MS = 120;
 const SCROLL_TRACE_SAMPLE_MS = 180;
+const ANDROID_INTERACTION_TRACE_LIMIT = 24;
+const ANDROID_POINTER_MOVE_SAMPLE_MS = 400;
+const ANDROID_CANVAS_INTERACTION_RELEASE_MS = 140;
 const SHARED_SPACE_SYNC_POLL_MS = 2500;
 const CLIENT_SNAPSHOT_REQUEST_POLL_MS = 2500;
 const SOCIAL_SYNC_POLL_MS = 2500;
@@ -267,7 +672,7 @@ const SHARED_VOICE_DEFAULT_ICE_SERVERS = [{ urls: "stun:stun.l.google.com:19302"
 const SHARED_VOICE_LOCAL_CLIENT_ID = `voice_client_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 const SHARED_VOICE_LOCAL_DEVICE_ID = `voice_device_${SHARED_VOICE_LOCAL_CLIENT_ID}`.slice(0, 72);
 const WIS_EXPORT_PREVIEW_LIMIT = 16000;
-const WIS_CAMERA_CONTROLLER_CONTRACT = createWisCameraControllerContract({
+let WIS_CAMERA_CONTROLLER_CONTRACT = createWisCameraControllerContract({
   endpoints: {
     pushStatus: "/camera/push/status",
     pushFrame: "/camera/push-frame",
@@ -296,6 +701,10 @@ const AGENT_NEW_CONFIG_TARGET_ID = "__target:new__";
 const AGENT_EDIT_CONFIG_TARGET_ID = "__target:edit__";
 const AGENT_OWNED_AGENT_TARGET_ID = "__agent:owned__";
 const AGENT_MODEL_TARGET_PREFIX = "__target:model:";
+const AGENT_FRONTIER_NODE_ID = "frontier";
+const VOICE_CHAT_TRANSCRIPT_BREAK_MS = 2400;
+const VOICE_CHAT_DEDUPE_MS = 8000;
+const VOICE_CHAT_DRAFT_STALE_MS = 20000;
 const AGENT_MESSAGE_MENU_WIDTH_PX = 156;
 const AGENT_MESSAGE_MENU_HEIGHT_PX = 44;
 const AGENT_PROVIDER_IMAGE_PART_MAX_CHARS = 1024 * 1024;
@@ -1373,12 +1782,21 @@ const CLIENT_BOOT_TRACE_SLOW_RESOURCE_LIMIT = 24;
 const CLIENT_BOOT_TRACE_SLOW_FETCH_MS = 1200;
 const CLIENT_BOOT_TRACE_INPUT_LIMIT = 80;
 const CLIENT_BOOT_TRACE_LONG_TASK_LIMIT = 80;
-const CLIENT_BOOT_TRACE_LONG_TASK_MS = 250;
+const CLIENT_BOOT_TRACE_LONG_TASK_MS = 100;
+const ANDROID_CLIENT_BOOT_TRACE_INPUT_LIMIT = 18;
+const ANDROID_CLIENT_BOOT_TRACE_INPUT_SAMPLE_MS = 6000;
+const ANDROID_CLIENT_BOOT_TRACE_LONG_TASK_UPLOAD_MS = 1000;
+const ANDROID_CLIENT_BOOT_TRACE_LONG_TASK_UPLOAD_COOLDOWN_MS = 180000;
 const CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS = 350;
+const ANDROID_CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS = 3500;
+const ANDROID_CLIENT_BOOT_TRACE_UPLOAD_IDLE_QUIET_MS = 1200;
+const ANDROID_CLIENT_BOOT_TRACE_UPLOAD_MAX_WAIT_MS = 30000;
 const AUTH_REDIRECT_PRELOAD_WAIT_MS = 1500;
 const ANDROID_AUTH_REDEEM_TIMEOUT_MS = 2500;
-const ANDROID_CONFIG_TIMEOUT_MS = 2200;
-const ANDROID_AUTH_SESSION_TIMEOUT_MS = 3000;
+const ANDROID_CONFIG_TIMEOUT_MS = 10000;
+const ANDROID_AUTH_SESSION_TIMEOUT_MS = 10000;
+const ANDROID_APP_BOOTSTRAP_TIMEOUT_MS = 10000;
+const ANDROID_APP_BOOTSTRAP_RECONCILE_QUIET_MS = 700;
 const ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS = 3500;
 const ANDROID_NATIVE_REFRESH_INTERVAL_MS = 60000;
 const ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT = 8;
@@ -1392,8 +1810,9 @@ const WAKE_WORD_AGENT_VIEW_REFRESH_MS = 2500;
 const WAKE_WORD_DEFAULT_PHRASE = "alexa";
 const WAKE_WORD_DEFAULT_THRESHOLD = 0.92;
 const WAKE_WORD_PLACEHOLDER_PHRASES = new Set(["", "hey jarvis", "hermes", "alexa"]);
-const ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS = 5000;
-const NATIVE_OBS_HEARTBEAT_MS = 5000;
+const ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS = 60000;
+const ANDROID_NATIVE_CONTROL_POLL_OVERLOADED_MS = 120000;
+const NATIVE_OBS_HEARTBEAT_MS = 30000;
 const NATIVE_OBS_RECONNECT_MS = 1800;
 const WAO_HEADER_BYTES = 40;
 const WAO_TLV_HEADER_BYTES = 8;
@@ -1450,14 +1869,22 @@ const WAO_FIELD_IDS = {
   role: 28,
 };
 const WAO_FIELD_NAMES = Object.fromEntries(Object.entries(WAO_FIELD_IDS).map(([key, value]) => [value, key]));
-const ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS = 900;
-const ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS = 2500;
-const ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS = 1500;
-const ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS = 30;
-const ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS = 5000;
+const ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS = 1600;
+const ANDROID_NATIVE_VISUAL_SETTLE_MS = 96;
+const ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS = 6500;
+const ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS = 3500;
+const ANDROID_NATIVE_CONTROL_DEFERRED_ACTION_DELAY_MS = 80;
+const ANDROID_NATIVE_INPUT_FIRST_QUIET_MS = 0;
+const ANDROID_NATIVE_HYDRATION_START_DELAY_MS = 0;
+const ANDROID_NATIVE_HYDRATION_STEP_DELAY_MS = 0;
+const ANDROID_NATIVE_BACKGROUND_SYNC_POLL_MS = 60000;
+const ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS = 60000;
 const ANDROID_NATIVE_RESPONSIVENESS_LOOP_MS = 1000;
-const ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_INTERVAL_MS = 15000;
-const ANDROID_NATIVE_HEALTH_RTT_MIN_INTERVAL_MS = 15000;
+const ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_INTERVAL_MS = 90000;
+const ANDROID_NATIVE_RESPONSIVENESS_DEGRADED_MS = 120;
+const ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS = 2000;
+const ANDROID_NATIVE_RESPONSIVENESS_GAP_SAMPLE_LIMIT = 240;
+const ANDROID_NATIVE_HEALTH_RTT_MIN_INTERVAL_MS = 45000;
 const AGENT_WAKE_SHINE_MS = 4200;
 const ANDROID_NATIVE_AUTH_SESSION_STORAGE_KEY = "wasmAgent.androidNativeAuthSession";
 const authDiagnosticBuffer = [];
@@ -1467,6 +1894,10 @@ let nativeAuthDiagnosticHeartbeatStartedAt = 0;
 let nativeShellUiApplied = false;
 let nativeAppReadyNotified = false;
 let clientBootTraceUploadTimer = 0;
+let androidClientBootLastInputSampleAt = 0;
+let androidSpaceMiniMapRenderTimer = 0;
+let androidSpaceMiniMapViewportFrame = 0;
+let androidSpaceMomentumTapCancelInstalled = false;
 let androidNativeControlPollTimer = 0;
 let androidNativeControlPollBusy = false;
 let androidNativeResponsivenessTimer = 0;
@@ -1478,6 +1909,8 @@ let nativeObsHeartbeatTimer = 0;
 let nativeObsReconnectTimer = 0;
 let nativeObsConnected = false;
 let nativeObsSeq = 1;
+let androidNativeLastBootPhase = "";
+let androidNativeLastBootPhaseAtMs = 0;
 let wakeWordAgentViewCursor = 0;
 let wakeWordAgentViewLastAt = 0;
 let wakeWordAgentViewBusy = false;
@@ -1486,6 +1919,7 @@ let wakeWordModelMetadataPromise = null;
 let androidNativeLastUserInputAt = 0;
 let androidNativeLastControlPoll = null;
 let androidNativeLastHealthRttAt = 0;
+let androidNativeLastLongTaskTraceUploadAt = 0;
 const androidNativeResponsiveness = {
   schema: "hermes.wasm_agent.android_app_responsiveness.v1",
   started_at: new Date().toISOString(),
@@ -1495,6 +1929,7 @@ const androidNativeResponsiveness = {
   frame_count: 0,
   frame_gap_over_50ms_count: 0,
   frame_gap_over_100ms_count: 0,
+  frame_gap_samples: [],
   max_frame_gap_ms: 0,
   max_frame_drift_ms: 0,
   last_frame_gap_ms: 0,
@@ -1511,6 +1946,17 @@ const androidNativeResponsiveness = {
   native_control_poll_command_count: 0,
   native_control_poll_skipped_count: 0,
   native_control_poll_skip_reason: "",
+  touch_event_count: 0,
+  ignored_touch_count: 0,
+  ignored_touch_reasons: {},
+  canvas_pan_start_count: 0,
+  canvas_pan_move_count: 0,
+  canvas_pan_end_count: 0,
+  minimap_render_requested_count: 0,
+  minimap_render_executed_count: 0,
+  minimap_render_skipped_count: 0,
+  minimap_render_skip_reasons: {},
+  momentum_tap_trace: [],
   input_pending: false,
   recent_user_input: false,
   document_hidden: false,
@@ -1547,6 +1993,8 @@ const state = {
   googleButtonRenderedFor: "",
   androidNativeAuthDoneFor: "",
   androidNativeAuthStartedFor: "",
+  appBootstrapPromise: null,
+  appBootstrapPayload: null,
   configLoadPromise: null,
   configChecked: false,
   authUser: null,
@@ -1555,6 +2003,8 @@ const state = {
   loginMessage: "",
   authenticatedBootstrapped: false,
   postInteractiveStartupScheduled: false,
+  androidNativeFirstShellVisibleAtMs: 0,
+  androidNativeCachedShellPaintPromise: null,
   refreshInterval: 0,
   wasm: null,
   wasmReady: false,
@@ -1858,7 +2308,14 @@ const state = {
   clientSnapshotRequestBusy: false,
   clientSnapshotRequestInterval: 0,
   clientSnapshotHandledRequests: new Set(),
-  agentTargetNode: "orchestrator",
+  agentTargetNode: "frontier",
+  nativeVoiceChatLastTranscript: "",
+  nativeVoiceChatLastTranscriptAt: 0,
+  nativeVoiceChatLastSessionId: "",
+  nativeVoiceChatRetryTimer: 0,
+  nativeVoiceChatDraftMessageId: "",
+  nativeVoiceChatDraftSessionId: "",
+  nativeVoiceChatDraftUpdatedAt: 0,
   agentLayout: readAgentLayout(),
   agentPanelSide: "",
   appButtonCache: new Map(),
@@ -1870,6 +2327,8 @@ const state = {
   spacePanMomentumActive: false,
   spacePanActive: false,
   spaceNavigationInputAt: 0,
+  androidNativeScrollPanActive: false,
+  androidSpaceScrollMaintenanceTimer: 0,
   spaceDistanceCommitTimer: 0,
   spaceZoomMiniMapTimer: 0,
   spaceGesturePointers: new Map(),
@@ -2165,16 +2624,37 @@ function pointerTraceEntry(event, phase) {
   };
 }
 
+function androidFastPointerTraceEntry(event, phase) {
+  const started = state.activePointers.get(event.pointerId);
+  const clientX = roundedNumber(event.clientX);
+  const clientY = roundedNumber(event.clientY);
+  return {
+    kind: "pointer",
+    phase,
+    pointer_id: Number(event.pointerId || 0),
+    pointer_type: event.pointerType || "",
+    is_primary: event.isPrimary !== false,
+    button: Number(event.button ?? -1),
+    buttons: Number(event.buttons || 0),
+    client: { x: clientX, y: clientY },
+    target: started?.target || summarizeEventTarget(event.target),
+    duration_ms: started ? roundedNumber(performance.now() - started.startedAt) : 0,
+    distance_px: started ? roundedNumber(Math.hypot(clientX - started.startX, clientY - started.startY)) : 0,
+    android_fast_trace: true,
+  };
+}
+
 function appendInteractionTrace(entry, options = {}) {
   state.interactionTrace.push({
     schema: "hermes.space_os.interaction_event.v1",
     id: `int_${Date.now().toString(36)}_${(state.interactionSeq += 1).toString(36)}`,
     timestamp: new Date().toISOString(),
     active_panel: state.activePanel,
-    ...redactValue(entry),
+    ...(options.redact === false ? entry : redactValue(entry)),
   });
-  if (state.interactionTrace.length > INTERACTION_TRACE_LIMIT) {
-    state.interactionTrace.splice(0, state.interactionTrace.length - INTERACTION_TRACE_LIMIT);
+  const traceLimit = isAndroidNativeShell() ? ANDROID_INTERACTION_TRACE_LIMIT : INTERACTION_TRACE_LIMIT;
+  if (state.interactionTrace.length > traceLimit) {
+    state.interactionTrace.splice(0, state.interactionTrace.length - traceLimit);
   }
   if (options.publish !== false) {
     scheduleObservationRender();
@@ -2188,7 +2668,7 @@ function recordPointerInteraction(event, phase) {
     state.activePointers.set(event.pointerId, {
       pointerId: event.pointerId,
       pointerType: event.pointerType || "",
-      target: summarizeEventTarget(eventElementAtPoint(event)),
+      target: summarizeEventTarget(event.target || eventElementAtPoint(event)),
       startX: roundedNumber(event.clientX),
       startY: roundedNumber(event.clientY),
       currentX: roundedNumber(event.clientX),
@@ -2198,13 +2678,28 @@ function recordPointerInteraction(event, phase) {
     });
   }
   const pointer = state.activePointers.get(event.pointerId);
-  if (phase === "move") {
+	  if (phase === "move") {
+	    if (isAndroidNativeShell()) {
+	      if (androidCanvasNavigationActive(now)) return;
+	      if (!pointer || now - pointer.lastMoveAt < ANDROID_POINTER_MOVE_SAMPLE_MS) return;
+      pointer.lastMoveAt = now;
+      pointer.currentX = roundedNumber(event.clientX);
+      pointer.currentY = roundedNumber(event.clientY);
+      appendInteractionTrace(androidFastPointerTraceEntry(event, phase), { publish: false, redact: false });
+      return;
+    }
     if (!pointer || now - pointer.lastMoveAt < POINTER_MOVE_SAMPLE_MS) return;
     pointer.lastMoveAt = now;
     pointer.currentX = roundedNumber(event.clientX);
     pointer.currentY = roundedNumber(event.clientY);
     appendInteractionTrace(pointerTraceEntry(event, phase), { publish: false });
     scheduleObservationPublish();
+    return;
+  }
+  if (isAndroidNativeShell()) {
+    appendInteractionTrace(androidFastPointerTraceEntry(event, phase), { publish: false, redact: false });
+    if (["up", "cancel"].includes(phase)) state.activePointers.delete(event.pointerId);
+    if (["up", "cancel"].includes(phase)) window.setTimeout(scheduleObservationPublish, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
     return;
   }
   appendInteractionTrace(pointerTraceEntry(event, phase));
@@ -2265,6 +2760,12 @@ function recordViewportInteraction(kind = "viewport.resize") {
 function installInteractionTrace() {
   if (state.pointerTraceInstalled) return;
   state.pointerTraceInstalled = true;
+  if (isAndroidNativeShell()) {
+    window.addEventListener("wheel", recordWheelInteraction, { capture: true, passive: true });
+    window.addEventListener("resize", () => recordViewportInteraction("viewport.resize"), { passive: true });
+    window.visualViewport?.addEventListener("resize", () => recordViewportInteraction("visual_viewport.resize"), { passive: true });
+    return;
+  }
   window.addEventListener("pointerdown", (event) => recordPointerInteraction(event, "down"), { capture: true, passive: true });
   window.addEventListener("pointermove", (event) => recordPointerInteraction(event, "move"), { capture: true, passive: true });
   window.addEventListener("pointerup", (event) => recordPointerInteraction(event, "up"), { capture: true, passive: true });
@@ -2276,6 +2777,7 @@ function installInteractionTrace() {
 }
 
 function recordUserEvent(type, options = {}) {
+  const deferPublish = Boolean(options.deferPublish);
   const event = {
     schema: "hermes.space_os.user_event.v1",
     id: `evt_${Date.now().toString(36)}_${(state.eventSeq += 1).toString(36)}`,
@@ -2284,7 +2786,7 @@ function recordUserEvent(type, options = {}) {
     source: options.source || "wasm-agent",
     target: options.target || "",
     summary: truncateText(options.summary || type, 160),
-    data: redactValue(options.data || {}),
+    data: options.redact === false ? (options.data || {}) : redactValue(options.data || {}),
     redacted: Boolean(options.redacted),
     duration_ms: Number.isFinite(options.duration_ms) ? Math.round(options.duration_ms) : null,
   };
@@ -2292,8 +2794,18 @@ function recordUserEvent(type, options = {}) {
   if (state.userEvents.length > USER_EVENT_LIMIT) {
     state.userEvents.splice(0, state.userEvents.length - USER_EVENT_LIMIT);
   }
-  scheduleObservationRender();
-  scheduleObservationPublish();
+  if (deferPublish && isAndroidNativeShell() && androidNativePerfSafeMode()) {
+    return event;
+  }
+  if (deferPublish) {
+    window.setTimeout(() => {
+      scheduleObservationRender();
+      scheduleObservationPublish();
+    }, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+  } else {
+    scheduleObservationRender();
+    scheduleObservationPublish();
+  }
   return event;
 }
 
@@ -2307,6 +2819,91 @@ function installAndroidNativeUxBudgetGuards() {
   ["pointerdown", "pointermove", "pointerup", "touchstart", "touchmove", "keydown", "input", "wheel"].forEach((type) => {
     window.addEventListener(type, markAndroidNativeUserInput, { capture: true, passive: true });
   });
+}
+
+function androidNativeQueryParam(name, fallback = "") {
+  try {
+    const params = new URL(window.location.href).searchParams;
+    return cleanText(params.get(name), fallback);
+  } catch {
+    return fallback;
+  }
+}
+
+function androidNativeFlagParam(name) {
+  const value = androidNativeQueryParam(name, "").toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function androidNativePerfSafeMode() {
+  return Boolean(window.__WASM_AGENT_ANDROID_PERF_SAFE_MODE__ === true || androidNativeFlagParam("perfSafeMode") || androidNativeFlagParam("perf_safe_mode"));
+}
+
+function androidNativeWakeDisabled() {
+  return androidNativePerfSafeMode() || androidNativeQueryParam("wake", "").toLowerCase() === "off";
+}
+
+function androidNativeBridgeDiagnosticsOff() {
+  return androidNativePerfSafeMode() || androidNativeQueryParam("bridgeDiagnostics", androidNativeQueryParam("bridge_diagnostics", "")).toLowerCase() === "off";
+}
+
+function androidNativeControlAutoStartEnabled() {
+  const mode = androidNativeQueryParam("nativeControl", androidNativeQueryParam("native_control", "")).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(mode)) return true;
+  if (["0", "false", "no", "off"].includes(mode)) return false;
+  return !androidNativePerfSafeMode();
+}
+
+function androidNativeCountReason(map, reason = "unknown") {
+  const key = cleanText(reason, "unknown").slice(0, 80);
+  map[key] = (Number(map[key]) || 0) + 1;
+}
+
+function androidNativeRecordTouch(kind = "touch", reason = "") {
+  if (!isAndroidNativeShell()) return;
+  if (kind !== "ignored") androidNativeResponsiveness.touch_event_count += 1;
+  if (reason) {
+    androidNativeResponsiveness.ignored_touch_count += 1;
+    androidNativeCountReason(androidNativeResponsiveness.ignored_touch_reasons, reason);
+  }
+  if (kind === "pan_start") androidNativeResponsiveness.canvas_pan_start_count += 1;
+  if (kind === "pan_move") androidNativeResponsiveness.canvas_pan_move_count += 1;
+  if (kind === "pan_end") androidNativeResponsiveness.canvas_pan_end_count += 1;
+}
+
+function androidNativeRecordMiniMap(kind = "requested", reason = "") {
+  if (!isAndroidNativeShell()) return;
+  if (kind === "requested") androidNativeResponsiveness.minimap_render_requested_count += 1;
+  else if (kind === "executed") androidNativeResponsiveness.minimap_render_executed_count += 1;
+  else if (kind === "viewport") androidNativeResponsiveness.minimap_render_executed_count += 1;
+  else {
+    androidNativeResponsiveness.minimap_render_skipped_count += 1;
+    androidNativeCountReason(androidNativeResponsiveness.minimap_render_skip_reasons, reason || kind);
+  }
+}
+
+function androidNativeRecordMomentumTapEvent(phase = "event", event = null, extra = {}) {
+  if (!isAndroidNativeShell()) return;
+  const trace = Array.isArray(androidNativeResponsiveness.momentum_tap_trace)
+    ? androidNativeResponsiveness.momentum_tap_trace
+    : [];
+  const point = event ? androidEventClientPoint(event) : { x: 0, y: 0 };
+  trace.push({
+    at_ms: roundedPerfMs(performance.now()),
+    phase: cleanText(phase, "").slice(0, 60),
+    type: cleanText(event?.type || "", "").slice(0, 40),
+    target: cleanText(event ? summarizeEventTarget(event.target) : "", "").slice(0, 120),
+    x: Math.round(Number(point.x || 0)),
+    y: Math.round(Number(point.y || 0)),
+    momentum_active: Boolean(state.spacePanMomentumActive),
+    minimap_visible: Boolean(state.spaceMiniMapVisible),
+    minimap_hidden: Boolean(els.spaceMiniMap?.hidden),
+    android_scroll_deferred_ms: Math.max(0, Math.round(Number(state.androidSpaceScrollDeferredUntil || 0) - performance.now())),
+    recent_navigation_ms: Math.max(0, Math.round(performance.now() - Number(state.spaceNavigationInputAt || 0))),
+    active_panel: cleanText(state.activePanel, ""),
+    ...extra,
+  });
+  androidNativeResponsiveness.momentum_tap_trace = trace.slice(-24);
 }
 
 function androidNativeRecentUserInput(ms = ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) {
@@ -2323,9 +2920,9 @@ function androidNativeInputPending() {
 
 function androidNativeResponsivenessOverloadedNow() {
   return Boolean(
-    androidNativeResponsiveness.max_frame_gap_ms >= 120
-      || androidNativeResponsiveness.max_event_loop_lag_ms >= 120
-      || androidNativeResponsiveness.max_long_task_ms >= 120
+    androidNativeResponsiveness.max_frame_gap_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS
+      || androidNativeResponsiveness.max_event_loop_lag_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS
+      || androidNativeResponsiveness.max_long_task_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS
       || androidNativeInputPending()
   );
 }
@@ -2342,10 +2939,24 @@ function androidNativeControlCanRun(options = {}) {
 
 function runAndroidNativeIdleTask(task, options = {}) {
   return new Promise((resolve) => {
+    const startedAt = Date.now();
     const run = () => {
       const budget = androidNativeControlCanRun({ heavy: true, allowHidden: options.allowHidden });
       if (!budget.ok && !options.force) {
-        resolve({ ok: false, skipped: true, reason: budget.reason });
+        const maxWaitMs = Number.isFinite(Number(options.maxWaitMs))
+          ? Math.max(0, Number(options.maxWaitMs))
+          : 30000;
+        if (Date.now() - startedAt < maxWaitMs) {
+          window.setTimeout(() => {
+            if (typeof window.requestIdleCallback === "function") {
+              window.requestIdleCallback(run, { timeout: ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS });
+            } else {
+              run();
+            }
+          }, ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS);
+          return;
+        }
+        resolve({ ok: false, skipped: true, reason: budget.reason, waited_ms: Date.now() - startedAt });
         return;
       }
       try {
@@ -2363,6 +2974,144 @@ function runAndroidNativeIdleTask(task, options = {}) {
       window.setTimeout(run, 0);
     }
   });
+}
+
+function androidNativeYield(ms = 0) {
+  const delayMs = Math.max(0, Number(ms) || 0);
+  if (delayMs > 0) return new Promise((resolve) => window.setTimeout(resolve, delayMs));
+  if (typeof window.scheduler?.postTask === "function") {
+    return window.scheduler.postTask(() => undefined, { priority: "user-blocking" }).catch(() => {});
+  }
+  if (typeof MessageChannel === "function") {
+    return new Promise((resolve) => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(0);
+    });
+  }
+  return Promise.resolve();
+}
+
+function androidNativeAfterPaint() {
+  return new Promise((resolve) => {
+    const raf = window.requestAnimationFrame || ((callback) => window.setTimeout(() => callback(performance.now()), 16));
+    raf(() => raf(resolve));
+  });
+}
+
+function androidNativeRunVisual(task, label = "visual") {
+  if (!isAndroidNativeShell()) return task?.();
+  markAndroidNativeUserInput();
+  state.androidNativeVisualLaneUntil = Date.now() + ANDROID_NATIVE_VISUAL_SETTLE_MS;
+  const started = performance.now();
+  try {
+    return task?.();
+  } finally {
+    state.androidNativeLastVisualTask = {
+      label: cleanText(label, "visual"),
+      duration_ms: Math.max(0, Math.round(performance.now() - started)),
+      at: new Date().toISOString(),
+    };
+  }
+}
+
+function androidNativeAfterQuiet(task, label = "quiet") {
+  if (!isAndroidNativeShell()) return window.setTimeout(() => task?.(), 0);
+  return window.setTimeout(() => {
+    if (androidNativeRecentUserInput(ANDROID_NATIVE_VISUAL_SETTLE_MS) || androidNativeInputPending()) {
+      androidNativeAfterQuiet(task, label);
+      return;
+    }
+    void androidNativeAfterPaint().then(async () => {
+      if (androidNativeRecentUserInput(ANDROID_NATIVE_VISUAL_SETTLE_MS) || androidNativeInputPending()) {
+        androidNativeAfterQuiet(task, label);
+        return;
+      }
+      const started = performance.now();
+      try {
+        await task?.();
+      } finally {
+        state.androidNativeLastQuietTask = {
+          label: cleanText(label, "quiet"),
+          duration_ms: Math.max(0, Math.round(performance.now() - started)),
+          at: new Date().toISOString(),
+        };
+      }
+    });
+  }, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+}
+
+function androidNativeAfterPaintTask(task, label = "after-paint") {
+  if (!isAndroidNativeShell()) {
+    window.requestAnimationFrame?.(() => task?.()) || window.setTimeout(() => task?.(), 0);
+    return 0;
+  }
+  void androidNativeAfterPaint().then(() => {
+    const started = performance.now();
+    try {
+      task?.();
+    } finally {
+      state.androidNativeLastAfterPaintTask = {
+        label: cleanText(label, "after-paint"),
+        duration_ms: Math.max(0, Math.round(performance.now() - started)),
+        at: new Date().toISOString(),
+      };
+    }
+  });
+  return 0;
+}
+
+async function waitForAndroidNativeInputQuiet(quietMs = ANDROID_NATIVE_INPUT_FIRST_QUIET_MS, options = {}) {
+  if (!isAndroidNativeShell()) return;
+  if (Number(quietMs) <= 0) return;
+  const maxWaitMs = Number.isFinite(Number(options.maxWaitMs)) ? Number(options.maxWaitMs) : 20000;
+  const startedAt = Date.now();
+  while (
+    !document.hidden
+      && (androidNativeRecentUserInput(quietMs) || androidNativeInputPending())
+      && Date.now() - startedAt < maxWaitMs
+  ) {
+    await androidNativeYield(250);
+  }
+}
+
+async function waitForAndroidNativeFirstShellQuiet(reason = "startup", options = {}) {
+  if (!isAndroidNativeShell()) return;
+  if (!state.androidNativeFirstShellVisibleAtMs && state.androidNativeCachedShellPaintPromise) {
+    await state.androidNativeCachedShellPaintPromise.catch(() => null);
+  }
+  const quietMs = Number.isFinite(Number(options.quietMs))
+    ? Math.max(0, Number(options.quietMs))
+    : ANDROID_NATIVE_INPUT_FIRST_QUIET_MS;
+  if (quietMs <= 0) {
+    clientBootMark("android_first_shell_quiet_window", {
+      reason,
+      quiet_ms: 0,
+    });
+    return;
+  }
+  const shellVisibleAt = Number(state.androidNativeFirstShellVisibleAtMs || 0);
+  if (shellVisibleAt > 0) {
+    const remaining = quietMs - Math.max(0, performance.now() - shellVisibleAt);
+    if (remaining > 0) await androidNativeYield(remaining);
+  }
+  await waitForAndroidNativeInputQuiet(quietMs, {
+    maxWaitMs: Number.isFinite(Number(options.maxWaitMs)) ? Number(options.maxWaitMs) : 20000,
+  });
+  clientBootMark("android_first_shell_quiet_window", {
+    reason,
+    quiet_ms: Math.round(quietMs),
+  });
+}
+
+async function androidNativeHydrationYield(reason = "hydration") {
+  if (!isAndroidNativeShell()) return;
+  await waitForAndroidNativeInputQuiet(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS, { maxWaitMs: 20000 });
+  clientBootMark("android_input_first_yield", { reason });
+  await androidNativeYield(ANDROID_NATIVE_HYDRATION_STEP_DELAY_MS);
 }
 
 function eventCounts() {
@@ -2533,12 +3282,20 @@ function buildObservationSnapshot() {
 
 function scheduleObservationRender() {
   window.clearTimeout(state.observationRenderTimer);
-  state.observationRenderTimer = window.setTimeout(renderObservation, 80);
+  if (isAndroidNativeShell() && state.activePanel !== "observe") return;
+  state.observationRenderTimer = window.setTimeout(renderObservation, isAndroidNativeShell() ? ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS : 80);
 }
 
 function scheduleObservationPublish() {
   window.clearTimeout(state.observationPublishTimer);
-  state.observationPublishTimer = window.setTimeout(publishObservationSnapshot, 250);
+  const delayMs = isAndroidNativeShell() ? ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS : 250;
+  state.observationPublishTimer = window.setTimeout(() => {
+    if (isAndroidNativeShell() && androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_HEAVY_QUIET_MS)) {
+      scheduleObservationPublish();
+      return;
+    }
+    void publishObservationSnapshot();
+  }, delayMs);
 }
 
 async function publishObservationSnapshot() {
@@ -2637,6 +3394,14 @@ function wisArtifactTargets() {
     shared_space_id: active.shared_space_id || "",
   });
   return Array.from(targets.values());
+}
+
+function wisArtifactTargetsForOrigin(origin = "auto") {
+  const allTargets = wisArtifactTargets();
+  if (!isAndroidNativeShell()) return allTargets;
+  if (!["startup", "bootstrap", "auto", "poll"].includes(String(origin || ""))) return allTargets;
+  if (state.activePanel === "wis" || widgetById("wis")?.classList?.contains("is-widget-active")) return allTargets;
+  return [];
 }
 
 function decorateWisArtifact(artifact, payload, target, sourceLabel) {
@@ -2838,9 +3603,10 @@ async function loadWisArtifacts(origin = "auto") {
   state.wisArtifactsBusy = true;
   renderArtifacts();
   try {
+    await loadWisCameraArtifactRuntime(`wis_artifacts:${origin}`);
     const requests = [];
     const seen = new Set();
-    for (const target of wisArtifactTargets()) {
+    for (const target of wisArtifactTargetsForOrigin(origin)) {
       const localKey = `${target.id}:local`;
       if (!seen.has(localKey)) {
         seen.add(localKey);
@@ -8334,7 +9100,8 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
   if (!metadataArea) syncSpaceAreaMetadata(panel, area);
   applyCanvasGeometry({ renderMiniMap: false });
   applyWidgetLayout();
-  renderSpaceMiniMap();
+  if (isAndroidNativeShell()) scheduleAndroidSpaceMiniMapRender("panel");
+  else renderSpaceMiniMap();
 }
 
 function defaultModuleSettings() {
@@ -10626,10 +11393,16 @@ function stepSharedSpacePointerNavigationFollow() {
   if (Math.abs(dx) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX && Math.abs(dy) <= SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX) return;
   const stepX = clamp(dx * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
   const stepY = clamp(dy * SHARED_SPACE_POINTER_FOLLOW_EASE, -SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX, SHARED_SPACE_POINTER_FOLLOW_MAX_STEP_PX);
+  if (isAndroidNativeShell()) state.androidSharedPointerFollowScrollAt = performance.now();
   viewport.scrollLeft += Math.abs(stepX) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dx : stepX;
   viewport.scrollTop += Math.abs(stepY) < SHARED_SPACE_POINTER_FOLLOW_SETTLE_PX ? dy : stepY;
-  updateSpaceNavigationHints();
-  renderSpaceMiniMap();
+  if (isAndroidNativeShell()) {
+    updateSpaceNavigationHints();
+    scheduleSpaceMiniMapViewportSync("shared-pointer-follow");
+  } else {
+    updateSpaceNavigationHints();
+    renderSpaceMiniMap();
+  }
   scheduleSharedSpacePointerNavigationFollow();
 }
 
@@ -10691,6 +11464,8 @@ function isSharedSpacePointerDragMove(event) {
 function queueSharedSpacePointerMove(event, options = {}) {
   if (!isSharedSpacePointerMove(event)) return;
   const now = performance.now();
+  if (androidCanvasNavigationActive(now)) return;
+  if (isAndroidNativeShell() && isSharedSpacePointerDragMove(event)) return;
   if (options.raw) {
     state.sharedSpacePointerRawInputAt = now;
     state.sharedSpacePointerInputMode = "raw";
@@ -12943,12 +13718,14 @@ async function respondToClientSnapshotRequest(request = {}) {
 
 async function pollClientSnapshotRequests(origin = "poll") {
   if (!state.authUser || state.clientSnapshotRequestBusy) return;
+  if (androidNativeBackgroundSyncDeferred(origin)) return;
   state.clientSnapshotRequestBusy = true;
   try {
     const payload = await fetchJson("/client/snapshot/request", { timeoutMs: 8000 });
     const requests = Array.isArray(payload.requests) ? payload.requests : [];
     for (const request of requests) {
       await respondToClientSnapshotRequest(request);
+      if (isAndroidNativeShell()) await androidNativeHydrationYield("client-snapshot-request");
     }
     if (requests.length && origin !== "poll") {
       recordUserEvent("client.snapshot_requests_loaded", {
@@ -12973,8 +13750,13 @@ function syncClientSnapshotRequestPolling() {
     return;
   }
   if (!state.clientSnapshotRequestInterval) {
-    state.clientSnapshotRequestInterval = window.setInterval(() => void pollClientSnapshotRequests("poll"), CLIENT_SNAPSHOT_REQUEST_POLL_MS);
-    void pollClientSnapshotRequests("start");
+    const pollMs = isAndroidNativeShell() ? Math.max(CLIENT_SNAPSHOT_REQUEST_POLL_MS, ANDROID_NATIVE_BACKGROUND_SYNC_POLL_MS) : CLIENT_SNAPSHOT_REQUEST_POLL_MS;
+    state.clientSnapshotRequestInterval = window.setInterval(() => {
+      if (isAndroidNativeShell()) androidNativeAfterQuiet(() => void pollClientSnapshotRequests("poll"), "client-snapshot-poll");
+      else void pollClientSnapshotRequests("poll");
+    }, pollMs);
+    if (isAndroidNativeShell()) androidNativeAfterQuiet(() => void pollClientSnapshotRequests("start"), "client-snapshot-start");
+    else window.setTimeout(() => void pollClientSnapshotRequests("start"), 0);
   }
 }
 
@@ -14043,6 +14825,7 @@ function userFleetAgentNodes() {
 
 function agentNodeDisplayLabel(nodeId) {
   const id = cleanText(nodeId, "");
+  if (id === AGENT_FRONTIER_NODE_ID) return "frontier";
   if (id === AGENT_SANDBOX_NODE_ID) return "My agent";
   return id;
 }
@@ -14692,6 +15475,7 @@ function providerRequestMessages(message, transcript = [], imageEntries = []) {
       role: "system",
       content: [
         "You are a browser/provider-backed chat model in wasm-agent. Answer directly. Backend source-file tools are unavailable on this path, but validated WIS/userland artifact patches can be applied by the client.",
+        "Default to English unless the latest user message explicitly asks for another language.",
         harnessLines.length ? `Act through this optional node agent harness:\n${harnessLines.join("\n")}` : "",
         wisPatchClientSystemHint(),
         agentCapabilitySystemHint(),
@@ -14999,7 +15783,7 @@ function isGlobalAgentNodeId(nodeId) {
 }
 
 function defaultAgentTargetNode() {
-  return isAdminUser() ? "orchestrator" : AGENT_SANDBOX_NODE_ID;
+  return AGENT_FRONTIER_NODE_ID;
 }
 
 function agentTargetNode() {
@@ -16300,6 +17084,31 @@ function applyMiniMapPixelRect(element, rect, plot) {
   element.style.height = `${pixels.height}px`;
 }
 
+function syncSpaceMiniMapViewportBox(reason = "viewport-sync") {
+  const map = els.spaceMiniMap;
+  if (!map || map.hidden || !state.spaceMiniMapVisible) return false;
+  const viewportBox = map.querySelector?.(".space-minimap-viewport");
+  if (!viewportBox) return false;
+  const metrics = spaceMapMetrics();
+  if (!metrics || !spaceMiniMapCanRender(metrics)) return false;
+  const mapWidth = cssPixelValue(map, "--space-minimap-max-width", 184);
+  const mapHeight = cssPixelValue(map, "--space-minimap-max-height", 112);
+  const plot = miniMapPlotMetrics(metrics, mapWidth, mapHeight);
+  applyMiniMapPixelRect(viewportBox, miniMapProjectRect(visibleBoardRect(metrics), plot), plot);
+  androidNativeRecordMiniMap("viewport", reason);
+  return true;
+}
+
+function scheduleSpaceMiniMapViewportSync(reason = "viewport-sync") {
+  if (!state.spaceMiniMapVisible) return false;
+  if (androidSpaceMiniMapViewportFrame) return true;
+  androidSpaceMiniMapViewportFrame = requestAnimationFrame(() => {
+    androidSpaceMiniMapViewportFrame = 0;
+    syncSpaceMiniMapViewportBox(reason);
+  });
+  return true;
+}
+
 function boardRectContains(outer, inner, tolerance = 0.75) {
   return inner.left >= outer.left - tolerance
     && inner.top >= outer.top - tolerance
@@ -16403,14 +17212,54 @@ function miniMapEntityClassName(entity) {
   return classes.join(" ");
 }
 
-function renderSpaceMiniMap() {
+function androidCanvasNavigationActive(now = performance.now()) {
+  return Boolean(isAndroidNativeShell() && (
+    state.spacePanActive
+    || state.spacePanMomentumActive
+    || state.spacePinchActive
+    || state.activePointers?.size
+    || now - Number(state.spaceNavigationInputAt || 0) < ANDROID_CANVAS_INTERACTION_RELEASE_MS
+  ));
+}
+
+function scheduleAndroidSpaceMiniMapRender(reason = "android-navigation") {
+  if (!isAndroidNativeShell()) return false;
+  androidNativeRecordMiniMap("requested", reason);
+  if (!androidCanvasNavigationActive()) {
+    androidNativeRecordMiniMap("skipped", "inactive");
+    if (state.spaceMiniMapVisible) setSpaceMiniMapVisible(false);
+    return false;
+  }
+  if (androidSpaceMiniMapRenderTimer) {
+    androidNativeRecordMiniMap("skipped", "coalesced");
+    return true;
+  }
+  androidSpaceMiniMapRenderTimer = window.setTimeout(() => {
+    androidSpaceMiniMapRenderTimer = 0;
+    if (androidCanvasNavigationActive() || androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS)) {
+      androidNativeRecordMiniMap("skipped", "interaction_active");
+      scheduleAndroidSpaceMiniMapRender(reason);
+      return;
+    }
+    renderSpaceMiniMap({ force: true, reason });
+  }, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS * 2);
+  return true;
+}
+
+function renderSpaceMiniMap(options = {}) {
+  if (options.force !== true && scheduleAndroidSpaceMiniMapRender(options.reason || "render")) return;
   const map = els.spaceMiniMap;
   const metrics = spaceMapMetrics();
-  if (!map || !metrics) return;
-  if (!spaceMiniMapCanRender(metrics)) {
-    map.replaceChildren();
+  if (!map || !metrics) {
+    androidNativeRecordMiniMap("skipped", "missing_map_or_metrics");
     return;
   }
+  if (!spaceMiniMapCanRender(metrics)) {
+    map.replaceChildren();
+    androidNativeRecordMiniMap("skipped", "not_pannable");
+    return;
+  }
+  androidNativeRecordMiniMap("executed", options.reason || "render");
   const mapWidth = cssPixelValue(map, "--space-minimap-max-width", 184);
   const mapHeight = cssPixelValue(map, "--space-minimap-max-height", 112);
   const plot = miniMapPlotMetrics(metrics, mapWidth, mapHeight);
@@ -16462,6 +17311,183 @@ function stopSpacePanMomentum() {
   els.spaceViewport?.classList.remove("is-momentum");
 }
 
+function clearAndroidCanvasInputDeferral() {
+  if (!isAndroidNativeShell()) return;
+  state.androidSpaceScrollDeferredUntil = 0;
+  state.spacePinchSuppressPanUntil = 0;
+  state.spaceNavigationInputAt = 0;
+  if (state.androidSpaceScrollMaintenanceTimer) {
+    window.clearTimeout(state.androidSpaceScrollMaintenanceTimer);
+    state.androidSpaceScrollMaintenanceTimer = 0;
+  }
+  if (state.androidNativeScrollPanActive) {
+    state.androidNativeScrollPanActive = false;
+    androidNativeRecordTouch("pan_end");
+  }
+}
+
+function isCanvasPanBlockedTarget(target) {
+  return Boolean(target?.closest?.([
+    ".widget",
+    ".space-app-button",
+    ".home-actions",
+    ".space-title",
+    ".space-config-button",
+    ".space-minimap",
+    ".space-zoom-info",
+    ".modal-backdrop",
+    ".agent-overlay",
+  ].join(",")));
+}
+
+function androidMomentumTapClickTarget(target) {
+  return target?.closest?.([
+    "button",
+    "a",
+    "input",
+    "textarea",
+    "select",
+    "[role='button']",
+    "[data-panel]",
+    ".space-app-button",
+    ".space-launch-button",
+    ".home-actions button",
+    ".space-config-button",
+    ".widget[data-widget-id]",
+  ].join(",")) || null;
+}
+
+function androidEventClientPoint(event) {
+  const touch = event.changedTouches?.[0] || event.touches?.[0] || null;
+  return {
+    x: Number(touch?.clientX ?? event.clientX ?? 0),
+    y: Number(touch?.clientY ?? event.clientY ?? 0),
+  };
+}
+
+function rememberAndroidMomentumInterruptedTap(event, clickTarget = androidMomentumTapClickTarget(event.target)) {
+  if (!clickTarget) {
+    state.androidMomentumInterruptedTap = null;
+    return null;
+  }
+  const point = androidEventClientPoint(event);
+  const touch = event.changedTouches?.[0] || event.touches?.[0] || null;
+  const pointerId = Number(event.pointerId || touch?.identifier || 0);
+  const pending = {
+    pointerId,
+    target: clickTarget,
+    x: point.x,
+    y: point.y,
+    at: performance.now(),
+    clicked: false,
+  };
+  state.androidMomentumInterruptedTap = pending;
+  return pending;
+}
+
+function cancelAndroidMomentumForInteractiveTap(event) {
+  if (!isAndroidNativeShell() || !state.spacePanMomentumActive) return false;
+  if (event.pointerType && event.pointerType !== "touch") return false;
+  if (!isSpaceInteractiveTapTarget(event.target) && !isCanvasPanBlockedTarget(event.target)) return false;
+  androidNativeRecordMomentumTapEvent("cancel_pointerdown_before", event);
+  stopSpacePanMomentum();
+  clearAndroidCanvasInputDeferral();
+  rememberAndroidMomentumInterruptedTap(event);
+  androidNativeRecordTouch("ignored", "momentum_cancel_for_interactive_tap");
+  androidNativeRecordMomentumTapEvent("cancel_pointerdown_after", event);
+  return true;
+}
+
+function clearAndroidCanvasDeferralForScreenOpen(reason = "screen_open") {
+  if (!isAndroidNativeShell()) return false;
+  const hadMomentum = Boolean(state.spacePanMomentumActive);
+  stopSpacePanMomentum();
+  clearAndroidCanvasInputDeferral();
+  androidNativeRecordTouch("ignored", reason);
+  androidNativeRecordMomentumTapEvent(reason);
+  return hadMomentum;
+}
+
+function finishAndroidMomentumInterruptedTap(event, reason = "momentum_synthetic_click_fallback") {
+  const pending = state.androidMomentumInterruptedTap;
+  if (!pending) return false;
+  const touch = event.changedTouches?.[0] || event.touches?.[0] || null;
+  const pointerId = Number(event.pointerId || touch?.identifier || 0);
+  if (pending.pointerId && pointerId && pointerId !== pending.pointerId) return false;
+  const point = androidEventClientPoint(event);
+  const moved = Math.hypot(point.x - pending.x, point.y - pending.y);
+  if (moved > 16 || performance.now() - Number(pending.at || 0) > 900) {
+    androidNativeRecordMomentumTapEvent("fallback_cancelled", event, { moved_px: Math.round(moved) });
+    state.androidMomentumInterruptedTap = null;
+    return false;
+  }
+  androidNativeRecordMomentumTapEvent("fallback_scheduled", event, { moved_px: Math.round(moved), reason });
+  window.setTimeout(() => {
+    if (state.androidMomentumInterruptedTap !== pending || pending.clicked || !document.contains(pending.target)) return;
+    state.androidMomentumInterruptedTap = null;
+    androidNativeRecordMomentumTapEvent("fallback_click_dispatch", null, { reason, fallback_target: summarizeEventTarget(pending.target) });
+    pending.target.click?.();
+    androidNativeRecordTouch("ignored", reason);
+  }, 32);
+  return true;
+}
+
+function isSpaceInteractiveTapTarget(target) {
+  return Boolean(target?.closest?.([
+    "button",
+    "a",
+    "input",
+    "textarea",
+    "select",
+    "[role='button']",
+    "[data-panel]",
+    ".space-app-button",
+    ".space-launch-button",
+    ".home-actions",
+    ".space-config-button",
+    ".modal-backdrop",
+    ".agent-overlay",
+  ].join(",")));
+}
+
+function installAndroidMomentumInteractiveTapCancel() {
+  if (!isAndroidNativeShell() || androidSpaceMomentumTapCancelInstalled) return;
+  androidSpaceMomentumTapCancelInstalled = true;
+  document.addEventListener("pointerdown", (event) => {
+    cancelAndroidMomentumForInteractiveTap(event);
+  }, { capture: true, passive: true });
+  document.addEventListener("touchstart", (event) => {
+    if (state.spacePanMomentumActive) androidNativeRecordMomentumTapEvent("touchstart_during_momentum", event);
+    if (!state.spacePanMomentumActive) return;
+    if (!isSpaceInteractiveTapTarget(event.target) && !isCanvasPanBlockedTarget(event.target)) return;
+    rememberAndroidMomentumInterruptedTap(event);
+    clearAndroidCanvasDeferralForScreenOpen("momentum_cancel_for_touchstart");
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerdown", (event) => {
+    if (!event.target?.closest?.("[data-panel],.space-launch-button,.space-app-button,.home-actions button")) return;
+    androidNativeRecordMomentumTapEvent("screen_open_pointerdown", event);
+    if (state.spacePanMomentumActive) rememberAndroidMomentumInterruptedTap(event);
+    clearAndroidCanvasDeferralForScreenOpen("screen_open_tap");
+  }, { capture: true, passive: true });
+  document.addEventListener("click", (event) => {
+    const pending = state.androidMomentumInterruptedTap;
+    if (!pending) return;
+    if (pending.target === event.target || pending.target.contains?.(event.target)) {
+      pending.clicked = true;
+      state.androidMomentumInterruptedTap = null;
+      androidNativeRecordMomentumTapEvent("real_click_arrived", event);
+    }
+  }, { capture: true, passive: true });
+  document.addEventListener("pointerup", (event) => {
+    if (state.androidMomentumInterruptedTap) androidNativeRecordMomentumTapEvent("pointerup_pending", event);
+    finishAndroidMomentumInterruptedTap(event);
+  }, { capture: true, passive: true });
+  document.addEventListener("touchend", (event) => {
+    if (state.androidMomentumInterruptedTap) androidNativeRecordMomentumTapEvent("touchend_pending", event);
+    finishAndroidMomentumInterruptedTap(event, "momentum_touch_synthetic_click_fallback");
+  }, { capture: true, passive: true });
+}
+
 function weightedSpacePanVelocity(samples) {
   const recent = samples.filter((sample) => sample.dt > 0);
   const totalMs = recent.reduce((total, sample) => total + sample.dt, 0);
@@ -16493,8 +17519,13 @@ function startSpacePanMomentum(viewport, velocityX, velocityY, canPanX, canPanY)
     const previousTop = viewport.scrollTop;
     if (canPanX) viewport.scrollLeft -= vx * dt;
     if (canPanY) viewport.scrollTop -= vy * dt;
-    updateSpaceNavigationHints();
-    renderSpaceMiniMap();
+    if (isAndroidNativeShell()) {
+      state.androidSpaceScrollDeferredUntil = now + ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+      scheduleSpaceMiniMapViewportSync("momentum");
+    } else {
+      updateSpaceNavigationHints();
+      renderSpaceMiniMap();
+    }
     const atHorizontalEdge = !canPanX || viewport.scrollLeft <= 0 || viewport.scrollLeft + viewport.clientWidth >= viewport.scrollWidth - 1;
     const atVerticalEdge = !canPanY || viewport.scrollTop <= 0 || viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 1;
     const movedX = !canPanX || Math.abs(viewport.scrollLeft - previousLeft) > 0.2;
@@ -16507,13 +17538,32 @@ function startSpacePanMomentum(viewport, velocityX, velocityY, canPanX, canPanY)
       state.spacePanMomentumFrame = 0;
       state.spacePanMomentumActive = false;
       viewport.classList.remove("is-momentum");
-      setSpaceMiniMapVisible(false);
+      if (isAndroidNativeShell()) {
+        window.setTimeout(() => {
+          state.androidSpaceScrollDeferredUntil = 0;
+          updateSpaceNavigationHints();
+          applyMaximizedWidgetLayouts();
+          if (state.spaceMiniMapVisible) renderSpaceMiniMap({ force: true, reason: "momentum-end" });
+          setSpaceMiniMapVisible(false);
+        }, ANDROID_CANVAS_INTERACTION_RELEASE_MS);
+      } else {
+        setSpaceMiniMapVisible(false);
+      }
       return;
     }
     state.spacePanMomentumFrame = requestAnimationFrame(tick);
   };
   if (Math.hypot(vx, vy) < SPACE_PAN_MOMENTUM_MIN_VELOCITY) {
-    setSpaceMiniMapVisible(false);
+    if (isAndroidNativeShell()) {
+      window.setTimeout(() => {
+        updateSpaceNavigationHints();
+        applyMaximizedWidgetLayouts();
+        if (state.spaceMiniMapVisible) renderSpaceMiniMap({ force: true, reason: "pan-end-static" });
+        setSpaceMiniMapVisible(false);
+      }, ANDROID_CANVAS_INTERACTION_RELEASE_MS);
+    } else {
+      setSpaceMiniMapVisible(false);
+    }
     return;
   }
   state.spacePanMomentumActive = true;
@@ -16538,7 +17588,11 @@ function setSpaceMiniMapVisible(visible) {
   if (nextVisible) {
     state.spaceMiniMapVisible = true;
     map.hidden = false;
-    renderSpaceMiniMap();
+    if (isAndroidNativeShell() && androidCanvasNavigationActive()) {
+      scheduleAndroidSpaceMiniMapRender("show");
+    } else {
+      renderSpaceMiniMap();
+    }
     window.requestAnimationFrame(() => {
       if (state.spaceMiniMapVisible) map.classList.add("is-visible");
     });
@@ -16550,6 +17604,41 @@ function setSpaceMiniMapVisible(visible) {
   state.spaceMiniMapHideTimer = window.setTimeout(() => {
     if (!state.spaceMiniMapVisible) map.hidden = true;
   }, SPACE_MINIMAP_HIDE_MS);
+}
+
+function forceSpaceMiniMapForPrint() {
+  const map = els.spaceMiniMap;
+  if (!map || !spaceMiniMapCanRender()) return () => {};
+  const wasHidden = map.hidden;
+  const wasVisible = state.spaceMiniMapVisible;
+  const hadVisibleClass = map.classList.contains("is-visible");
+  window.clearTimeout(state.spaceMiniMapHideTimer);
+  state.spaceMiniMapHideTimer = 0;
+  state.spaceMiniMapVisible = true;
+  map.hidden = false;
+  renderSpaceMiniMap({ force: true, reason: "print" });
+  map.classList.add("is-visible");
+  els.spaceConfigButton?.classList.add("is-minimap-suppressed");
+  return () => {
+    state.spaceMiniMapVisible = wasVisible;
+    map.hidden = wasHidden;
+    map.classList.toggle("is-visible", hadVisibleClass);
+    els.spaceConfigButton?.classList.toggle("is-minimap-suppressed", wasVisible || state.spaceZoomInfoVisible);
+  };
+}
+
+function installSpaceMiniMapPrintCapture() {
+  if (state.spaceMiniMapPrintCaptureInstalled) return;
+  state.spaceMiniMapPrintCaptureInstalled = true;
+  let restoreMiniMap = null;
+  window.addEventListener("beforeprint", () => {
+    restoreMiniMap?.();
+    restoreMiniMap = forceSpaceMiniMapForPrint();
+  });
+  window.addEventListener("afterprint", () => {
+    restoreMiniMap?.();
+    restoreMiniMap = null;
+  });
 }
 
 function renderSpaceZoomInfo() {
@@ -17850,6 +18939,7 @@ function androidDiagnosticsBridge() {
 }
 
 function queueAndroidBridgeDiagnostic(kind, payload = {}, target = "diagnostics") {
+  if (androidNativeBridgeDiagnosticsOff()) return;
   pendingAndroidBridgeDiagnostics.push({
     kind: cleanText(kind, "event").slice(0, 120),
     target,
@@ -17860,6 +18950,11 @@ function queueAndroidBridgeDiagnostic(kind, payload = {}, target = "diagnostics"
 
 function flushAndroidBridgeDiagnostics(reason = "flush") {
   deferAndroidBridgeDiagnostics = false;
+  if (androidNativeBridgeDiagnosticsOff()) {
+    pendingAndroidBridgeDiagnostics.length = 0;
+    clientBootMark("android_bridge_diagnostics_disabled", { reason });
+    return;
+  }
   if (!pendingAndroidBridgeDiagnostics.length) return;
   const pendingCount = pendingAndroidBridgeDiagnostics.length;
   const droppedCount = Math.max(0, pendingCount - ANDROID_BRIDGE_DIAGNOSTIC_FLUSH_LIMIT);
@@ -18556,6 +19651,11 @@ function maybeOpenRequestedWakeWordModal(reason = "native_request") {
   const requested = cleanText(params.get("native_screen") || params.get("debug_screen"), "").toLowerCase();
   if (requested !== "wake-word" && requested !== LEGACY_WAKE_WORD_NATIVE_SCREEN) return false;
   if (!state.authUser) return false;
+  triggerAgentAvatarWakeShine({
+    listener_mode: "awake",
+    last_wake_at: Date.now(),
+    wake_hit_count: Number(state.nativeVoiceWakeLastHitCount || 0) + 1,
+  }, reason);
   if (els.wakeWordModal && !els.wakeWordModal.hidden) return true;
   openWakeWordModal({ source: reason, autoStart: false });
   return true;
@@ -18746,6 +19846,7 @@ let hermesWakeInstallPollBusy = false;
 let hermesWakeInstallLastRequestId = "";
 
 async function pollHermesWakeExportRequest() {
+  if (isAndroidNativeShell() && androidNativeWakeDisabled()) return;
   if (hermesWakeExportPollBusy) return;
   const bridge = androidNativeVoiceBridge();
   if (typeof bridge?.exportHermesDataset !== "function") return;
@@ -18808,6 +19909,7 @@ async function pollHermesWakeExportRequest() {
 }
 
 async function pollHermesWakeInstallRequest() {
+  if (isAndroidNativeShell() && androidNativeWakeDisabled()) return;
   if (hermesWakeInstallPollBusy) return;
   const bridge = androidNativeVoiceBridge();
   if (typeof bridge?.installHermesWakeModel !== "function" && typeof bridge?.installOpenWakeWordBundle !== "function") return;
@@ -19153,6 +20255,20 @@ const LEGACY_REFRESH_WAKE_WORD_STATE_COMMAND = ["refresh_wake", "world_state"].j
 
 function getWakeWordState(options = {}) {
   const now = Date.now();
+  if (androidNativeWakeDisabled() && options.force !== true) {
+    wakeWordLastState = {
+      schema: "hermes.wasm_agent.android_wake_word_state.v1",
+      enabled: false,
+      listener_lane: "disabled",
+      listener_mode: "perf_safe_mode",
+      wake_service_ready: false,
+      wake_engine_ready: false,
+      foreground_service_active: false,
+      wake_disabled_by_query: true,
+    };
+    wakeWordLastStateAt = now;
+    return wakeWordLastState;
+  }
   if (!options.force && wakeWordLastStateAt && now - wakeWordLastStateAt < WAKE_WORD_STATE_CACHE_TTL_MS) {
     return wakeWordLastState;
   }
@@ -19331,6 +20447,11 @@ function androidNativeShellInfo() {
     native,
     shell: shell || (isAndroid ? "android-webview" : ""),
     platform: platform || (isAndroid ? "android" : ""),
+    runtimeMode: cleanText(window.__WASM_AGENT_ANDROID_RUNTIME_MODE__ || "", isAndroid ? "user-full" : ""),
+    debugShell: window.__WASM_AGENT_ANDROID_DEBUG_SHELL__ === true,
+    perfSafeMode: androidNativePerfSafeMode(),
+    wakeStartupMode: androidNativeQueryParam("wake", androidNativePerfSafeMode() ? "off" : "deferred"),
+    bridgeDiagnostics: androidNativeQueryParam("bridgeDiagnostics", androidNativePerfSafeMode() ? "off" : "sampled"),
     buildId: cleanText(params.get("buildId") || bridgeInfo?.buildId, ""),
     androidAuthSession: cleanText(params.get("android_auth_session") || bridgeInfo?.androidAuthSession, ""),
     nativeCorrelationId: cleanText(params.get("native_correlation_id") || bridgeInfo?.nativeCorrelationId, ""),
@@ -19355,6 +20476,9 @@ function nativeShellDiagnostic(kind, payload = {}) {
     shell,
     ...payload,
   };
+  if (shell.isAndroidNativeShell && androidNativeBridgeDiagnosticsOff() && !/error|failed|app_ready|auth/i.test(kind)) {
+    return diagnostic;
+  }
   if (deferAndroidBridgeDiagnostics) {
     queueAndroidBridgeDiagnostic(kind, diagnostic, "shell");
     return diagnostic;
@@ -19402,6 +20526,25 @@ function installAndroidNativeShellEventDiagnostics() {
   window.addEventListener("wasm-agent:native-external-url", (event) => nativeShellDiagnostic("native_external_url_event", event.detail || {}));
   window.addEventListener("wasm-agent:native-permission", (event) => nativeShellDiagnostic("native_permission_event", event.detail || {}));
   window.addEventListener("wasm-agent:native-configuration", (event) => nativeShellDiagnostic("native_configuration_event", event.detail || {}));
+  window.addEventListener("wasm-agent:native-wake-detected", (event) => {
+    const detail = event.detail || {};
+    const receivedAt = Number(detail.received_at || Date.now());
+    if (receivedAt > 0 && state.nativeVoiceWakeLastEventAt && receivedAt - state.nativeVoiceWakeLastEventAt < 1200) {
+      nativeShellDiagnostic("native_wake_detected_event_debounced", detail);
+      return;
+    }
+    state.nativeVoiceWakeLastEventAt = receivedAt || Date.now();
+    nativeShellDiagnostic("native_wake_detected_event", detail);
+    triggerAgentAvatarWakeShine({
+      listener_mode: "awake",
+      last_wake_at: receivedAt,
+      wake_hit_count: Number(state.nativeVoiceWakeLastHitCount || 0) + 1,
+      last_confidence: Number(detail.wake_confidence || detail.confidence || 0),
+      last_wake_confidence: Number(detail.wake_confidence || detail.confidence || 0),
+    }, "native-wake-detected");
+    window.setTimeout(() => void pollNativeVoiceWakeTimeline("native-wake-detected"), 900);
+    window.setTimeout(() => void pollNativeVoiceWakeTimeline("native-transcript-followup"), 3600);
+  });
   window.addEventListener("wasm-agent:native-android-auth-canceled", (event) => {
     nativeShellDiagnostic("native_android_auth_canceled_event", event.detail || {});
     resetAndroidNativeGoogleLogin("native-cancel-event", "Google sign-in was canceled. Try again.");
@@ -19524,12 +20667,28 @@ function clientBootMark(phase, data = {}) {
     active_panel: cleanText(state.activePanel, ""),
     data: redactClientBootTraceData(data),
   };
+  androidNativeLastBootPhase = mark.phase;
+  androidNativeLastBootPhaseAtMs = mark.at_ms;
   clientBootTrace.marks.push(mark);
   while (clientBootTrace.marks.length > CLIENT_BOOT_TRACE_LIMIT) clientBootTrace.marks.shift();
   try {
     performance.mark(`wasm-agent:${mark.phase}`);
   } catch {
     // Performance marks are diagnostic only.
+  }
+  return mark;
+}
+
+function clientBootMarkAt(phase, performanceNowMs, data = {}) {
+  const absoluteMs = Number(performanceNowMs || 0);
+  const mark = clientBootMark(phase, {
+    ...data,
+    historical_mark: true,
+    performance_now_ms: Number.isFinite(absoluteMs) ? Math.round(absoluteMs) : 0,
+  });
+  if (Number.isFinite(absoluteMs) && absoluteMs > 0) {
+    mark.at_ms = Math.round(absoluteMs - Number(clientBootTrace.startedAtMs || 0));
+    androidNativeLastBootPhaseAtMs = mark.at_ms;
   }
   return mark;
 }
@@ -19567,12 +20726,47 @@ function clientBootRecordFetch(entry) {
 
 function clientBootRecordInput(event, type = "") {
   if (!event) return;
+  const androidNative = isAndroidNativeShell();
+  if (androidNative) markAndroidNativeUserInput();
   const target = event.target;
+  const probeCreatedAtMs = Number(event.__wasmAgentProbeCreatedAtMs || 0);
+  const dispatchReferenceMs = Number.isFinite(probeCreatedAtMs) && probeCreatedAtMs > 0
+    ? probeCreatedAtMs
+    : Number(event.timeStamp || performance.now());
+  if (androidNative) {
+    const nowMs = performance.now();
+    const shouldSample = probeCreatedAtMs > 0
+      || androidClientBootLastInputSampleAt <= 0
+      || nowMs - androidClientBootLastInputSampleAt >= ANDROID_CLIENT_BOOT_TRACE_INPUT_SAMPLE_MS;
+    if (!shouldSample) return;
+    androidClientBootLastInputSampleAt = nowMs;
+    const input = {
+      at_ms: clientBootElapsedMs(),
+      type: clippedBootTraceValue(type || event.type || "input", "input").slice(0, 40),
+      event_time_ms: Math.round(event.timeStamp || 0),
+      dispatch_delay_ms: Math.max(0, Math.round(nowMs - dispatchReferenceMs)),
+      dispatch_delay_source: probeCreatedAtMs > 0 ? "probe_created_at" : "event_timeStamp",
+      pointer_type: clippedBootTraceValue(event.pointerType || "", ""),
+      button: Number.isFinite(event.button) ? event.button : null,
+      is_trusted: Boolean(event.isTrusted),
+      target: clippedBootTraceValue(summarizeEventTarget(target), "").slice(0, 120),
+      active_panel: cleanText(state.activePanel, ""),
+      android_fast_input: true,
+    };
+    clientBootTrace.inputs.push(input);
+    while (clientBootTrace.inputs.length > ANDROID_CLIENT_BOOT_TRACE_INPUT_LIMIT) clientBootTrace.inputs.shift();
+    if (probeCreatedAtMs > 0 && Number(input.dispatch_delay_ms || 0) >= ANDROID_CLIENT_BOOT_TRACE_LONG_TASK_UPLOAD_MS) {
+      clientBootMark("android_probe_input_slow", input);
+      scheduleClientBootTraceUpload("android_probe_input_slow");
+    }
+    return;
+  }
   const input = {
     at_ms: clientBootElapsedMs(),
     type: clippedBootTraceValue(type || event.type || "input", "input").slice(0, 40),
     event_time_ms: Math.round(event.timeStamp || 0),
-    dispatch_delay_ms: Math.max(0, Math.round(performance.now() - Number(event.timeStamp || performance.now()))),
+    dispatch_delay_ms: Math.max(0, Math.round(performance.now() - dispatchReferenceMs)),
+    dispatch_delay_source: probeCreatedAtMs > 0 ? "probe_created_at" : "event_timeStamp",
     pointer_type: clippedBootTraceValue(event.pointerType || "", ""),
     button: Number.isFinite(event.button) ? event.button : null,
     is_trusted: Boolean(event.isTrusted),
@@ -19592,6 +20786,11 @@ function clientBootRecordLongTask(entry) {
   while (clientBootTrace.longTasks.length > CLIENT_BOOT_TRACE_LONG_TASK_LIMIT) clientBootTrace.longTasks.shift();
   if (Number(entry.duration_ms || 0) >= CLIENT_BOOT_TRACE_LONG_TASK_MS) {
     clientBootMark("main_thread_long_task", entry);
+    if (isAndroidNativeShell()) {
+      const now = Date.now();
+      if (now - androidNativeLastLongTaskTraceUploadAt < ANDROID_CLIENT_BOOT_TRACE_LONG_TASK_UPLOAD_COOLDOWN_MS) return;
+      androidNativeLastLongTaskTraceUploadAt = now;
+    }
     scheduleClientBootTraceUpload("main_thread_long_task");
   }
 }
@@ -19599,9 +20798,13 @@ function clientBootRecordLongTask(entry) {
 function installClientBootInteractionProbe() {
   if (clientBootTrace.inputProbeInstalled) return;
   clientBootTrace.inputProbeInstalled = true;
+  if (isAndroidNativeShell()) {
+    return;
+  } else {
   ["pointerdown", "pointerup", "click", "touchstart", "touchend"].forEach((type) => {
     window.addEventListener(type, (event) => clientBootRecordInput(event, type), { capture: true, passive: true });
   });
+  }
   if (typeof PerformanceObserver !== "undefined") {
     try {
       const observer = new PerformanceObserver((list) => {
@@ -19611,6 +20814,9 @@ function installClientBootInteractionProbe() {
             duration_ms: Math.round(entry.duration || 0),
             name: clippedBootTraceValue(entry.name || "longtask", ""),
             entry_type: clippedBootTraceValue(entry.entryType || "", ""),
+            last_mark_phase: clippedBootTraceValue(androidNativeLastBootPhase, ""),
+            last_mark_at_ms: Math.round(androidNativeLastBootPhaseAtMs || 0),
+            input_pending: androidNativeInputPending(),
           });
         }
       });
@@ -19657,6 +20863,8 @@ function clientBootTracePayload(reason = "snapshot") {
       auth_session_load_phase: cleanText(frontierRuntimeState.authSessionLoadPhase, ""),
       load_auth_session_reached: Boolean(frontierRuntimeState.loadAuthSessionReached),
       native_app_ready_notified: Boolean(nativeAppReadyNotified),
+      android_runtime_mode: cleanText(window.__WASM_AGENT_ANDROID_RUNTIME_MODE__ || "", ""),
+      android_debug_shell: window.__WASM_AGENT_ANDROID_DEBUG_SHELL__ === true,
     },
     native_webview_boot: state.config?.native?.nativeWebViewBoot || null,
     navigation: nav ? {
@@ -19673,6 +20881,7 @@ function clientBootTracePayload(reason = "snapshot") {
     long_tasks: clientBootTrace.longTasks.slice(-CLIENT_BOOT_TRACE_LONG_TASK_LIMIT),
     errors: clientBootTrace.errors.slice(-40),
     slow_resources: resources,
+    android_native_ux_report: isAndroidNativeShell() ? androidNativeUxReport(reason) : null,
   };
 }
 
@@ -19684,15 +20893,36 @@ function exposeClientBootTrace() {
   }
 }
 
+function urgentClientBootTraceUpload(reason = "") {
+  return /fatal|error|page_hide|visibility_hidden/i.test(String(reason || ""));
+}
+
 function scheduleClientBootTraceUpload(reason = "snapshot") {
   if (clientBootTraceUploadTimer) window.clearTimeout(clientBootTraceUploadTimer);
+  const delayMs = isAndroidNativeShell() && !urgentClientBootTraceUpload(reason)
+    ? Math.max(CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS, ANDROID_CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS)
+    : CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS;
   clientBootTraceUploadTimer = window.setTimeout(() => {
     clientBootTraceUploadTimer = 0;
+    if (isAndroidNativeShell() && !urgentClientBootTraceUpload(reason) && androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS)) {
+      scheduleClientBootTraceUpload(reason);
+      return;
+    }
     void uploadClientBootTrace(reason);
-  }, CLIENT_BOOT_TRACE_UPLOAD_DEBOUNCE_MS);
+  }, delayMs);
+}
+
+async function waitForClientBootTraceUploadWindow(reason = "snapshot", options = {}) {
+  if (!isAndroidNativeShell() || urgentClientBootTraceUpload(reason) || options.immediate === true) return;
+  await waitForAndroidNativeInputQuiet(ANDROID_CLIENT_BOOT_TRACE_UPLOAD_IDLE_QUIET_MS, {
+    maxWaitMs: ANDROID_CLIENT_BOOT_TRACE_UPLOAD_MAX_WAIT_MS,
+  });
+  await androidNativeYield(0);
 }
 
 async function uploadClientBootTrace(reason = "snapshot", options = {}) {
+  if (androidNativeBootNetworkQuiet() && !urgentClientBootTraceUpload(reason)) return;
+  await waitForClientBootTraceUploadWindow(reason, options);
   const payload = clientBootTracePayload(reason);
   const body = JSON.stringify({
     schema: "hermes.wasm_agent.client_boot_trace_upload.v1",
@@ -19753,6 +20983,7 @@ function scheduleRendererAuthDiagnosticUpload(reason = "renderer-auth-diagnostic
 
 async function uploadRendererAuthDiagnostics(reason = "renderer-auth-diagnostic") {
   if (!authDiagnosticBuffer.length) return;
+  if (androidNativeBootNetworkQuiet() && !/fatal|error/i.test(reason)) return;
   const shell = androidNativeShellInfo();
   try {
     await fetch("/native/diagnostics", {
@@ -19810,9 +21041,11 @@ function nativeAuthDiagnostic(kind, payload = {}) {
   if (uploadWorthy) {
     scheduleRendererAuthDiagnosticUpload(kind);
   }
-  if (nativeShell.isAndroidNativeShell) {
+  const nativeDiagnosticSuppressed = nativeShell.isAndroidNativeShell && androidNativeBridgeDiagnosticsOff() && !uploadWorthy;
+  if (nativeShell.isAndroidNativeShell && !nativeDiagnosticSuppressed) {
     recordAndroidNativeDiagnostic(kind, diagnostic);
   }
+  if (nativeDiagnosticSuppressed) return;
   if (deferAndroidBridgeDiagnostics) {
     queueAndroidBridgeDiagnostic(kind, diagnostic, "auth");
     return;
@@ -19938,6 +21171,133 @@ function mergeNativePreloadConfig(config = {}, nativePayload = null) {
   return merged;
 }
 
+function readCachedClientConfig() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(CLIENT_CONFIG_STORAGE_KEY) || "null");
+    return cached && typeof cached === "object" && cached.config && typeof cached.config === "object"
+      ? cached.config
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedClientConfig(config = {}) {
+  if (!config || typeof config !== "object" || !config.auth?.googleClientId) return;
+  try {
+    localStorage.setItem(CLIENT_CONFIG_STORAGE_KEY, JSON.stringify({
+      cached_at: new Date().toISOString(),
+      config,
+    }));
+  } catch {
+    // Cache is only a fast reload fallback.
+  }
+}
+
+function readCachedAuthUser() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(CLIENT_AUTH_USER_STORAGE_KEY) || "null");
+    if (!cached || typeof cached !== "object" || !cached.user || typeof cached.user !== "object") return null;
+    const cachedAt = Date.parse(cached.cached_at || "");
+    if (!Number.isFinite(cachedAt) || Date.now() - cachedAt > 7 * 24 * 60 * 60 * 1000) return null;
+    return cached.user;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedAuthUser(user = null) {
+  try {
+    if (!user || typeof user !== "object") {
+      localStorage.removeItem(CLIENT_AUTH_USER_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(CLIENT_AUTH_USER_STORAGE_KEY, JSON.stringify({
+      cached_at: new Date().toISOString(),
+      user,
+    }));
+  } catch {
+    // Cached auth is only used for a fast stale-while-revalidate shell.
+  }
+}
+
+function readAndroidPrepaintShell() {
+  try {
+    const shell = window.__WASM_AGENT_PREPAINT_SHELL;
+    if (!shell || typeof shell !== "object" || !shell.authenticated) return null;
+    return shell.user && typeof shell.user === "object" ? shell : null;
+  } catch {
+    return null;
+  }
+}
+
+function markAndroidPrepaintShellVisible(shell = null, user = null) {
+  const prepaint = shell || readAndroidPrepaintShell();
+  if (!prepaint || prepaint.__app_marked) return Boolean(prepaint?.__app_marked);
+  prepaint.__app_marked = true;
+  const visibleAtMs = Number(prepaint.visibleAtMs || 0);
+  const afterPaintAtMs = Number(prepaint.afterPaintAtMs || visibleAtMs || performance.now());
+  const markData = {
+    user_id: cleanText(user?.id || prepaint.user?.id, ""),
+    email_present: Boolean(user?.email || prepaint.user?.email),
+    pre_module: true,
+    after_paint: Boolean(prepaint.afterPaintAtMs),
+    pre_module_visible_at_ms: Math.round(visibleAtMs || afterPaintAtMs),
+    pre_module_after_paint_at_ms: Math.round(afterPaintAtMs),
+    pre_module_decorated_at_ms: Math.round(Number(prepaint.decoratedAtMs || 0)),
+    config_cached: Boolean(prepaint.configCached),
+    route: cleanText(prepaint.route, ""),
+  };
+  if (visibleAtMs) {
+    clientBootMarkAt("pre_module_cached_authenticated_shell_visible", visibleAtMs, markData);
+  }
+  state.androidNativeFirstShellVisibleAtMs = afterPaintAtMs || performance.now();
+  clientBootMarkAt("cached_authenticated_shell_visible", afterPaintAtMs || performance.now(), markData);
+  return true;
+}
+
+function clearAndroidPrepaintShell(reason = "render") {
+  const app = els.app || document.querySelector("#app");
+  if (!app?.dataset?.androidPrepaint) return false;
+  delete app.dataset.androidPrepaint;
+  delete app.dataset.androidPrepaintAfterPaint;
+  app.classList.remove("android-prepaint-authenticated");
+  clientBootMark("pre_module_cached_authenticated_shell_released", {
+    reason,
+  });
+  return true;
+}
+
+function applyClientConfigPayload(config = {}, options = {}) {
+  const nativePayload = options.nativePayload || null;
+  const merged = mergeNativePreloadConfig(config || {}, nativePayload);
+  state.config = merged;
+  if (merged.bridgeUrl) state.bridgeUrl = String(merged.bridgeUrl).replace(/\/$/, "");
+  state.googleClientId = String(merged.auth?.googleClientId || "").trim();
+  state.googleLoginUri = String(merged.auth?.googleLoginUri || "").trim();
+  state.adminEmail = cleanText(merged.auth?.adminEmail, state.adminEmail);
+  const timeoutSec = Number(merged.agentTurnTimeoutSec);
+  if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
+    state.agentTurnTimeoutMs = timeoutSec * 1000;
+  }
+  state.configChecked = true;
+  if (merged.auth?.googleClientId) writeCachedClientConfig(merged);
+  return merged;
+}
+
+function applyCachedClientConfigForBoot(reason = "cached_config") {
+  const cachedConfig = readCachedClientConfig();
+  if (!cachedConfig) return false;
+  applyClientConfigPayload(cachedConfig, {
+    nativePayload: state.config?.native ? { native: state.config.native } : null,
+  });
+  clientBootMark("cached_config_applied", {
+    reason,
+    has_google_client_id: Boolean(state.googleClientId),
+  });
+  return true;
+}
+
 async function loadConfig() {
   if (state.configLoadPromise) return state.configLoadPromise;
   state.configLoadPromise = loadConfigOnce();
@@ -19952,13 +21312,14 @@ async function loadConfigOnce() {
   clientBootMark("config_load_started");
   nativeAuthDiagnostic("config_load_started");
   const nativeConfigPromise = loadNativePreloadConfig();
-  let config = {};
+  let config = readCachedClientConfig() || {};
   let configFetchFailed = false;
   const startedAt = performance.now();
   try {
     config = await fetchJson("/config.json", {
       timeoutMs: isAndroidNativeShell() ? ANDROID_CONFIG_TIMEOUT_MS : window.wasmAgentNative ? 5000 : 10000,
     });
+    writeCachedClientConfig(config);
     nativeAuthDiagnostic("config_fetch_resolved", {
       elapsed_ms: Math.round(performance.now() - startedAt),
       has_google_client_id: Boolean(config.auth?.googleClientId),
@@ -19966,26 +21327,18 @@ async function loadConfigOnce() {
     });
   } catch (error) {
     configFetchFailed = true;
-    config = {};
+    config = readCachedClientConfig() || {};
     nativeAuthDiagnostic("config_fetch_error", {
       elapsed_ms: Math.round(performance.now() - startedAt),
       message: errorMessage(error),
+      using_cached_config: Boolean(config.auth?.googleClientId),
     });
   }
   const nativeConfig = await nativeConfigPromise;
-  config = window.wasmAgentNative && configFetchFailed
+  config = window.wasmAgentNative && configFetchFailed && !config.auth?.googleClientId
     ? mergeNativePreloadConfig({ native: nativeConfig?.native || nativeConfig || {} }, nativeConfig && { native: nativeConfig.native || nativeConfig })
     : mergeNativePreloadConfig(config, nativeConfig);
-  state.config = config;
-  if (config.bridgeUrl) state.bridgeUrl = String(config.bridgeUrl).replace(/\/$/, "");
-  state.googleClientId = String(config.auth?.googleClientId || "").trim();
-  state.googleLoginUri = String(config.auth?.googleLoginUri || "").trim();
-  state.adminEmail = cleanText(config.auth?.adminEmail, state.adminEmail);
-  const timeoutSec = Number(config.agentTurnTimeoutSec);
-  if (Number.isFinite(timeoutSec) && timeoutSec >= 30) {
-    state.agentTurnTimeoutMs = timeoutSec * 1000;
-  }
-  state.configChecked = true;
+  config = applyClientConfigPayload(config);
   nativeAuthDiagnostic("config_load_finished", {
     config_fetch_failed: configFetchFailed,
     has_google_client_id: Boolean(state.googleClientId),
@@ -19999,8 +21352,15 @@ async function loadConfigOnce() {
     native_server_url: cleanText(config?.native?.serverUrl, ""),
     elapsed_ms: Math.round(performance.now() - startedAt),
   });
-  if (window.wasmAgentNative && configFetchFailed) {
-    state.loginMessage = "Backend connected incorrectly: /config.json unavailable";
+  if (window.wasmAgentNative && configFetchFailed && !state.googleClientId) {
+    state.loginMessage = isAndroidNativeShell()
+      ? "Loading Google login..."
+      : "Backend connected incorrectly: /config.json unavailable";
+    if (isAndroidNativeShell()) {
+      window.setTimeout(() => {
+        if (!state.googleClientId) void loadConfig();
+      }, 1500);
+    }
   } else if (!state.googleClientId && window.wasmAgentNative) {
     state.loginMessage = nativeBackendUnresolved()
       ? "No validated wasm-agent backend was selected."
@@ -20048,25 +21408,32 @@ function windowsNativeShellNeedsDiagnosticsUpdate() {
   return isWindowsNativeShellHost() && !window.wasmAgentNative?.nativeDiagnostics;
 }
 
+function windowsNativeShellDiagnosticsBridgeMissing() {
+  return isWindowsNativeShellHost() && !window.wasmAgentNative?.nativeDiagnostics;
+}
+
 function nativeInstalledBuildId() {
   const androidInfo = androidNativeShellInfo();
   if (androidInfo.isAndroidNativeShell) {
-    return cleanText(androidInfo.packageInfo?.buildId || androidInfo.buildId || nativeConfigState()?.buildId, "");
+    return cleanText(androidInfo.packageInfo?.buildId || androidInfo.buildId || androidInfo.build_id || nativeConfigState()?.buildId, "");
   }
-  return cleanText(nativeConfigState()?.buildId || window.wasmAgentNative?.buildId || androidInfo.buildId, "");
+  return cleanText(nativeConfigState()?.buildId || window.wasmAgentNative?.buildId || androidInfo.buildId || androidInfo.build_id, "");
 }
 
 function nativeResolutionBuildId(resolution = state.nativeInstallerResolution) {
   return cleanText(resolution?.buildId || resolution?.nativeBuildId || state.nativeUpdateState?.latestBuildId, "");
 }
 
-function nativeInstallerUpdateAvailable(resolution = state.nativeInstallerResolution) {
-  if (state.nativeUpdateState) return state.nativeUpdateState.status === "update_available";
+function nativeInstallerUpdateAvailable(resolution = state.nativeInstallerResolution, profile = state.nativeInstallProfile || detectNativeDeviceProfileSync()) {
+  const platform = cleanText(resolution?.platform || profile?.platform || nativePackageInfoSync().platform, "unknown").toLowerCase();
+  if (state.nativeUpdateState) {
+    return state.nativeUpdateState.status === "update_available"
+      && cleanText(state.nativeUpdateState.platform, "").toLowerCase() === platform;
+  }
   if (!isWindowsNativeShellHost()) return false;
-  if (windowsNativeShellNeedsDiagnosticsUpdate()) return true;
   const installed = nativeInstalledBuildId();
   const latest = nativeResolutionBuildId(resolution);
-  return Boolean(resolution?.available && installed && latest && installed !== latest);
+  return platform === "windows" && Boolean(resolution?.available && installed && latest && installed !== latest);
 }
 
 function nativePackageInfoSync() {
@@ -20128,7 +21495,7 @@ function compareNativeUpdateState(current, artifact, profile = state.nativeInsta
     const currentRank = currentBuildId.replace(/^win-x64-/i, "");
     const latestRank = latestBuildId.replace(/^win-x64-/i, "");
     const sameBuild = currentBuildId && latestBuildId && currentBuildId === latestBuildId;
-    const newerBuild = latestBuildId && (!currentBuildId || latestRank > currentRank);
+    const newerBuild = currentBuildId && latestBuildId && latestRank > currentRank;
     const olderBuild = currentBuildId && latestBuildId && latestRank < currentRank;
     const safeUpdatePath = Boolean(artifact.url);
     return {
@@ -20173,6 +21540,7 @@ async function loadNativeReleaseManifest() {
 function nativeInstallProfileForContext(profile = null) {
   const base = profile || detectNativeDeviceProfileSync();
   if (!isWindowsNativeShellHost() || (!windowsNativeShellNeedsDiagnosticsUpdate() && !nativeInstallerUpdateAvailable())) return base;
+  if (!windowsNativeShellNeedsDiagnosticsUpdate() && !nativeInstallerUpdateAvailable(null, base)) return base;
   return {
     ...base,
     platform: "windows",
@@ -20187,6 +21555,18 @@ function nativeInstallProfileForContext(profile = null) {
 function nativeBackendUnresolved() {
   const native = nativeConfigState();
   return Boolean(native) && !cleanText(native.serverUrl, "");
+}
+
+function androidNativeBootNetworkQuiet() {
+  return isAndroidNativeShell() && (!state.configChecked || !state.authChecked);
+}
+
+function googleLoginConfigPending() {
+  return !state.googleClientId && (
+    !state.configChecked
+      || Boolean(state.configLoadPromise)
+      || (isAndroidNativeShell() && state.loginMessage === "Loading Google login...")
+  );
 }
 
 function nativeInstallVersionLabel() {
@@ -20233,6 +21613,8 @@ function renderAuthGate() {
   if (els.authGateCopy) {
     els.authGateCopy.textContent = nativeBackendUnresolved()
       ? "Connect this native app to a validated wasm-agent backend to continue."
+      : googleLoginConfigPending()
+      ? "Loading Google login..."
       : state.googleClientId
       ? "Sign in with an allowlisted Google account to open wasm-agent."
       : `Google login is not configured on this server yet. Origin: ${window.location.origin}`;
@@ -20240,6 +21622,7 @@ function renderAuthGate() {
   if (els.authGateMessage) {
     els.authGateMessage.textContent = authenticated
       ? ""
+      : googleLoginConfigPending() ? "Loading Google login..."
       : state.authChecked ? state.loginMessage || (nativeBackendUnresolved() ? "No validated wasm-agent backend was selected." : state.googleClientId ? "" : "Google login is not configured.") : "";
   }
 }
@@ -20249,6 +21632,8 @@ function renderLogin() {
   const user = state.authUser;
   const missingGoogleLoginMessage = nativeBackendUnresolved()
     ? "No validated wasm-agent backend was selected."
+    : googleLoginConfigPending()
+      ? "Loading Google login..."
     : state.configChecked || state.authChecked
       ? `Google login is not configured on this server. Origin: ${window.location.origin}`
       : "Loading Google login...";
@@ -20648,6 +22033,7 @@ async function redeemAuthRedirectCode() {
       timeoutMs: isAndroidNativeShell() ? ANDROID_AUTH_REDEEM_TIMEOUT_MS : 8000,
     });
     state.authUser = payload.user || null;
+    writeCachedAuthUser(state.authUser);
     state.authRedirectMessage = "";
     state.loginMessage = "";
     void flushNativeAuthCookies("auth_redirect_redeem");
@@ -20844,6 +22230,7 @@ async function loadAuthSession() {
       phase: frontierRuntimeState.authSessionLoadPhase,
     });
     if (state.authUser) {
+      writeCachedAuthUser(state.authUser);
       recordAndroidNativeDiagnostic("authenticated_ui_visible", {
         reason: "auth_session_load_finished",
         android_auth_session: androidNativeAuthSessionId(),
@@ -20854,6 +22241,7 @@ async function loadAuthSession() {
       state.authRedirectMessage = "";
       void completeAndroidNativeAuthIfNeeded("auth_session_loaded");
     } else if (!state.authRedirectMessage) {
+      writeCachedAuthUser(null);
       state.loginMessage = "";
     }
   } catch (error) {
@@ -20895,6 +22283,7 @@ async function handleGoogleCredential(response) {
       timeoutMs: 15000,
     });
     state.authUser = payload.user || null;
+    writeCachedAuthUser(state.authUser);
     loadAgentDirectProviderForUser();
     loadAgentOwnedAgentForUser();
     state.loginMessage = "";
@@ -20922,6 +22311,7 @@ async function logout() {
     // Clearing local session state keeps the UI honest even if the server is restarting.
   }
   state.authUser = null;
+  writeCachedAuthUser(null);
   state.agentDirectProviders = [];
   state.agentDirectProvider = null;
   state.agentOwnedAgent = null;
@@ -21349,25 +22739,34 @@ function setAgentOpen(open, options = {}) {
   if (nextOpen) {
     placeAgentPanel();
     if (isAndroidNativeShell()) {
+      androidNativeAfterPaintTask(() => {
+        renderAgentSessions();
+        renderAgentMessages({ forceBottom: true });
+      }, "agent-open-render");
+    } else {
       window.requestAnimationFrame(() => {
         renderAgentSessions();
         renderAgentMessages({ forceBottom: true });
       });
     }
-    window.setTimeout(() => {
+    const focusAgent = () => {
       placeAgentPanel();
       queueAgentScrollToBottom();
       els.agentInput.focus();
-    }, 0);
+    };
+    if (isAndroidNativeShell()) androidNativeAfterQuiet(focusAgent, "agent-open-focus");
+    else window.setTimeout(focusAgent, 0);
   } else {
     setAgentBalloon("");
   }
   if (!changed && !options.forceEvent) return;
-  recordUserEvent(nextOpen ? "agent.opened" : "agent.closed", {
+  const recordAgentEvent = () => recordUserEvent(nextOpen ? "agent.opened" : "agent.closed", {
     target: "agent-overlay",
     summary: nextOpen ? "Opened embedded assistant" : "Minimized embedded assistant",
     data: { panel: state.activePanel },
   });
+  if (isAndroidNativeShell()) androidNativeAfterQuiet(recordAgentEvent, "agent-open-event");
+  else recordAgentEvent();
 }
 
 function chatQueryIsOpen() {
@@ -21406,6 +22805,10 @@ function uiNavigationUrl() {
 }
 
 function replaceCurrentUiNavigationState() {
+  if (isAndroidNativeShell() && Date.now() < Number(state.androidNativeVisualLaneUntil || 0)) {
+    androidNativeAfterQuiet(() => window.history.replaceState(uiNavigationState(), "", uiNavigationUrl()), "replace-ui-navigation-state");
+    return;
+  }
   window.history.replaceState(uiNavigationState(), "", uiNavigationUrl());
 }
 
@@ -21430,7 +22833,8 @@ function pushUiNavigationLayer(layer, close, options = {}) {
     locationKey: uiNavigationLocationKey(url),
   };
   state.uiNavigationStack.push(entry);
-  window.history.pushState(uiNavigationState(entry), "", url);
+  if (isAndroidNativeShell()) androidNativeAfterQuiet(() => window.history.pushState(uiNavigationState(entry), "", url), `push-ui-layer:${layer}`);
+  else window.history.pushState(uiNavigationState(entry), "", url);
   return entry;
 }
 
@@ -21439,7 +22843,7 @@ function closeUiNavigationLayer(layer, options = {}) {
   if (!entry) return false;
   const currentEntryIsLayer = uiNavigationId() === entry.id;
   const currentEntryIsOriginalLayerUrl = currentEntryIsLayer && entry.locationKey === uiNavigationLocationKey();
-  if (!options.skipHistory && currentEntryIsOriginalLayerUrl) {
+  if (!options.skipHistory && currentEntryIsOriginalLayerUrl && !isAndroidNativeShell()) {
     window.history.back();
     return true;
   }
@@ -26413,9 +27817,11 @@ async function syncSharedSpaceChatEvents(sharedSpaceId, origin = "poll") {
 
 async function syncSocialLayer(origin = "poll") {
   if (!state.authUser || state.socialSyncBusy) return;
+  if (androidNativeBackgroundSyncDeferred(origin)) return;
   state.socialSyncBusy = true;
   try {
     await loadAgentPeople(origin, { silent: origin === "poll" || origin === "focus" });
+    if (isAndroidNativeShell()) await androidNativeHydrationYield("social-people");
     await syncDirectMessages(origin);
   } finally {
     state.socialSyncBusy = false;
@@ -26426,9 +27832,14 @@ function startSocialSync() {
   if (!state.authUser) return;
   startRemoteControlLiveSocket("social-start");
   if (!state.socialSyncInterval) {
-    state.socialSyncInterval = window.setInterval(() => void syncSocialLayer("poll"), SOCIAL_SYNC_POLL_MS);
+    const pollMs = isAndroidNativeShell() ? Math.max(SOCIAL_SYNC_POLL_MS, ANDROID_NATIVE_BACKGROUND_SYNC_POLL_MS) : SOCIAL_SYNC_POLL_MS;
+    state.socialSyncInterval = window.setInterval(() => {
+      if (isAndroidNativeShell()) androidNativeAfterQuiet(() => void syncSocialLayer("poll"), "social-poll");
+      else void syncSocialLayer("poll");
+    }, pollMs);
   }
-  void syncSocialLayer("startup");
+  if (isAndroidNativeShell()) androidNativeAfterQuiet(() => void syncSocialLayer("startup"), "social-startup");
+  else window.setTimeout(() => void syncSocialLayer("startup"), 0);
 }
 
 async function loadCachedSocialState() {
@@ -29188,6 +30599,7 @@ function installDevHmrBridge() {
   const bridge = {
     requestReload(paths = []) {
       if (!state.agentBusy) {
+        if (requestAndroidNativeWebRuntimeReload(paths, "dev_hmr")) return true;
         const nativeBridge = (window.__wasmAgentNativeDevHmr && window.__wasmAgentNativeDevHmr !== bridge)
           ? window.__wasmAgentNativeDevHmr
           : (window.__wasmAgentDevHmr && window.__wasmAgentDevHmr !== bridge)
@@ -29278,11 +30690,72 @@ function flushDeferredHmrReload() {
       summary: "Applying deferred dev HMR reload",
       data: { paths: deferred.paths.slice(0, 12) },
     });
-    window.location.reload();
+    if (!requestAndroidNativeWebRuntimeReload(deferred.paths, "deferred_dev_hmr")) {
+      window.location.reload();
+    }
   }, 240);
 }
 
+function requestAndroidNativeWebRuntimeReload(paths = [], reason = "dev_hmr") {
+  if (!isAndroidNativeShell()) return false;
+  const bridge = window.wasmAgentNative || window.wasmAgentAndroid;
+  if (typeof bridge?.hardReloadWebRuntime !== "function") {
+    void clearAndroidWebRuntimeCachesAndReload(paths, reason);
+    return true;
+  }
+  try {
+    const result = parseNativeBridgePayload(bridge.hardReloadWebRuntime(JSON.stringify({
+      reason,
+      paths: Array.isArray(paths) ? paths.slice(0, 20) : [],
+    })));
+    nativeAuthDiagnostic("dev_hmr_android_hard_reload_requested", {
+      ok: result?.ok !== false,
+      reason,
+      path_count: Array.isArray(paths) ? paths.length : 0,
+    });
+    return result?.ok !== false;
+  } catch (error) {
+    nativeAuthDiagnostic("dev_hmr_android_hard_reload_error", {
+      message: errorMessage(error),
+      name: cleanText(error?.name, ""),
+    });
+    return false;
+  }
+}
+
+async function clearAndroidWebRuntimeCachesAndReload(paths = [], reason = "dev_hmr_fallback") {
+  nativeAuthDiagnostic("dev_hmr_android_web_fallback_reload_started", {
+    reason,
+    path_count: Array.isArray(paths) ? paths.length : 0,
+  });
+  try {
+    if (navigator.serviceWorker?.getRegistrations) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+    }
+  } catch (error) {
+    nativeAuthDiagnostic("dev_hmr_android_web_fallback_sw_error", {
+      message: errorMessage(error),
+    });
+  }
+  try {
+    if (window.caches?.keys) {
+      const keys = await window.caches.keys();
+      await Promise.all(keys.map((key) => window.caches.delete(key)));
+    }
+  } catch (error) {
+    nativeAuthDiagnostic("dev_hmr_android_web_fallback_cache_error", {
+      message: errorMessage(error),
+    });
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("native_refresh", Date.now().toString());
+  url.searchParams.set("hmr_reason", reason);
+  window.location.replace(url.toString());
+}
+
 function shouldStartDevHmr() {
+  if (isAndroidNativeShell()) return !window.__WASM_AGENT_DISABLE_HMR__;
   return !window.__WASM_AGENT_DISABLE_HMR__ && (window.__WASM_AGENT_DISABLE_SW__ || isModuleEnabled("dev-hmr"));
 }
 
@@ -30500,11 +31973,27 @@ function taskPreview(task) {
 }
 
 function androidNativeBackgroundRefreshDeferred(origin = "auto") {
-  return isAndroidNativeShell()
-    && ["startup", "auto", "poll"].includes(origin)
-    && !isAdminPanel(state.activePanel)
+  if (!isAndroidNativeShell() || !["startup", "auto", "poll"].includes(origin)) return false;
+  if (androidNativeWakeListenerActive() || androidNativeResponsivenessOverloadedNow()) return true;
+  return !isAdminPanel(state.activePanel)
     && !resourcesWidgetIsOpen()
     && !securityLoopIsOpen();
+}
+
+function androidNativeWakeListenerActive() {
+  if (!isAndroidNativeShell()) return false;
+  const packet = wakeWordLegacyState(wakeWordLastState || {});
+  return Boolean(
+    packet.foreground_service_active
+      || packet.wake_service_ready
+      || ["standby", "listening", "transcribing", "awake"].includes(cleanText(packet.listener_mode, ""))
+  );
+}
+
+function androidNativeBackgroundSyncDeferred(origin = "poll") {
+  if (!isAndroidNativeShell()) return false;
+  if (!["startup", "start", "auto", "poll", "focus"].includes(String(origin || ""))) return false;
+  return androidNativeWakeListenerActive() || androidNativeResponsivenessOverloadedNow() || androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS);
 }
 
 function androidNativeLeanHomeBootstrap() {
@@ -30516,11 +32005,45 @@ function androidNativeLeanHomeBootstrap() {
 function scheduleAndroidNativeDeferredHomeUi(enabled = false) {
   if (!enabled) return;
   window.setTimeout(() => {
+    void (async () => {
+      await waitForAndroidNativeInputQuiet(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS, { maxWaitMs: 20000 });
+      if (androidNativeResponsivenessOverloadedNow()) {
+        clientBootMark("android_home_deferred_ui_postponed", { reason: "responsiveness_gate" });
+        scheduleAndroidNativeDeferredHomeUi(enabled);
+        return;
+      }
+      renderModules();
+      await androidNativeHydrationYield("deferred_home_modules");
+      if (androidNativeResponsivenessOverloadedNow()) {
+        clientBootMark("android_home_deferred_messages_postponed", { reason: "responsiveness_gate" });
+        scheduleAndroidNativeDeferredHomeUi(enabled);
+        return;
+      }
+      if (!state.agentOpen) renderAgentMessages({ forceBottom: true });
+      applyAgentLayout();
+      clientBootMark("android_home_deferred_ui_rendered");
+    })();
+  }, ANDROID_NATIVE_HYDRATION_START_DELAY_MS);
+}
+
+function scheduleAndroidNativeHydrationRender(reason = "hydration_render") {
+  if (!isAndroidNativeShell()) {
     renderModules();
-    if (!state.agentOpen) renderAgentMessages({ forceBottom: true });
-    applyAgentLayout();
-    clientBootMark("android_home_deferred_ui_rendered");
-  }, ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS + 700);
+    renderAll();
+    return;
+  }
+  window.setTimeout(() => {
+    void (async () => {
+      await waitForAndroidNativeInputQuiet(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS, { maxWaitMs: 20000 });
+      if (androidNativeResponsivenessOverloadedNow()) {
+        clientBootMark("android_hydration_render_postponed", { reason });
+        scheduleAndroidNativeHydrationRender(reason);
+        return;
+      }
+      renderAll();
+      clientBootMark("android_hydration_render_finished", { reason });
+    })();
+  }, ANDROID_NATIVE_HYDRATION_STEP_DELAY_MS);
 }
 
 async function refresh(origin = "auto") {
@@ -30856,9 +32379,9 @@ function downloadUrl(filename, url) {
 
 function nativePrimaryCtaLabel(resolution = state.nativeInstallerResolution, profile = state.nativeInstallProfile) {
   const platform = cleanText(resolution?.platform || profile?.platform, "unknown").toLowerCase();
-  if (platform === "windows") return nativeInstallerUpdateAvailable(resolution) ? "Update App" : "Download Windows Installer";
-  if (platform === "android") return nativeInstallerUpdateAvailable(resolution) ? "Update APK" : "Download Android APK";
-  if (platform === "web") return nativeInstallerUpdateAvailable(resolution) ? "Refresh App" : "Open Web App";
+  if (platform === "windows") return nativeInstallerUpdateAvailable(resolution, profile) ? "Update App" : "Download Windows Installer";
+  if (platform === "android") return nativeInstallerUpdateAvailable(resolution, profile) ? "Update APK" : "Download Android APK";
+  if (platform === "web") return nativeInstallerUpdateAvailable(resolution, profile) ? "Refresh App" : "Open Web App";
   if (platform === "macos") return "Download macOS Installer";
   if (platform === "linux") return "Download Linux Installer";
   if (platform === "ios") return "View iOS install options";
@@ -30900,17 +32423,26 @@ function renderNativeInstall() {
   const profile = nativeInstallProfileForContext(state.nativeInstallProfile || detectNativeDeviceProfileSync());
   const device = nativeInstallCurrentDevice();
   const resolution = state.nativeInstallerResolution || null;
-  const updateAvailable = nativeInstallerUpdateAvailable(resolution);
+  const updateAvailable = nativeInstallerUpdateAvailable(resolution, profile);
   const updateState = state.nativeUpdateState || null;
+  const updatePlatform = cleanText(updateState?.platform, "").toLowerCase();
+  const profilePlatform = cleanText(profile.platform, "").toLowerCase();
+  const updateStateForProfile = updatePlatform && updatePlatform === profilePlatform ? updateState : null;
+  const diagnosticsBridgeMissing = windowsNativeShellDiagnosticsBridgeMissing();
   const installedBuildId = nativeInstalledBuildId();
   const latestBuildId = nativeResolutionBuildId(resolution);
+  const updateSubtitle = profilePlatform === "android"
+    ? "Android APK update available"
+    : profilePlatform === "windows"
+      ? "Windows app update required"
+      : `${profile.os} update available`;
   const status = state.nativeInstallBusy
     ? "checking"
     : state.nativeInstallError
       ? "error"
-      : updateState?.status === "up_to_date"
+      : updateStateForProfile?.status === "up_to_date"
         ? "up to date"
-        : updateState?.status === "update_available"
+        : updateStateForProfile?.status === "update_available"
           ? "update"
       : resolution?.available
         ? updateAvailable ? "update" : "available"
@@ -30921,12 +32453,14 @@ function renderNativeInstall() {
   els.nativeInstallStatus.className = `widget-chip ${status === "available" ? "ok" : status === "update" ? "warn" : status === "error" || status === "missing" ? "err" : ""}`;
   if (els.nativeModalSubtitle) {
     els.nativeModalSubtitle.textContent = updateAvailable
-      ? "Windows app update required"
+      ? updateSubtitle
+      : diagnosticsBridgeMissing
+        ? "Diagnostics bridge missing; update the Windows app"
       : `${profile.os} / ${profile.device_type || profile.deviceType}`;
   }
   if (els.nativeDownloadButton) {
     els.nativeDownloadButton.textContent = nativePrimaryCtaLabel(resolution, profile);
-    els.nativeDownloadButton.disabled = !state.authUser || state.nativeInstallBusy || updateState?.status === "up_to_date" || (resolution && !resolution.available && resolution.platform !== "ios" && resolution.platform !== "unknown");
+    els.nativeDownloadButton.disabled = !state.authUser || state.nativeInstallBusy || updateStateForProfile?.status === "up_to_date" || (resolution && !resolution.available && resolution.platform !== "ios" && resolution.platform !== "unknown");
     els.nativeDownloadButton.classList.toggle("is-busy", Boolean(state.nativeInstallBusy));
   }
 
@@ -30957,10 +32491,11 @@ function renderNativeInstall() {
           metric("Build", cleanText(resolution.buildStatus, resolution.available ? "built" : "missing")),
           metric("Current", installedBuildId || updateState?.currentBuildId || "unknown"),
           metric("Latest", latestBuildId || updateState?.latestBuildId || "unknown"),
-          updateState?.artifactAvailable === false ? metric("Artifact", "unavailable") : null,
-          updateState?.message ? metric("Install", updateState.message) : null,
-          windowsNativeShellNeedsDiagnosticsUpdate() ? metric("Reason", "Diagnostics bridge missing") : null,
-          updateAvailable && !windowsNativeShellNeedsDiagnosticsUpdate() ? metric("Reason", "New Windows build available") : null,
+          updateStateForProfile?.artifactAvailable === false ? metric("Artifact", "unavailable") : null,
+          updateStateForProfile?.message ? metric("Install", updateStateForProfile.message) : null,
+          diagnosticsBridgeMissing ? metric("Bridge", "Diagnostics bridge missing") : null,
+          updateAvailable && profilePlatform === "windows" && !windowsNativeShellNeedsDiagnosticsUpdate() ? metric("Reason", "New Windows build available") : null,
+          updateAvailable && profilePlatform === "android" ? metric("Reason", "New Android APK available") : null,
           metric("Fallbacks", Array.isArray(resolution.fallbacks) && resolution.fallbacks.length ? resolution.fallbacks.map((item) => cleanText(item?.label || item?.kind, "")).filter(Boolean).join(", ") : "none"),
         ].filter(Boolean)
       : [
@@ -31023,8 +32558,18 @@ function openNativeModal(options = {}) {
   state.nativeInstallProfile = nativeInstallProfileForContext(detectNativeDeviceProfileSync());
   state.nativeInstallerResolution = null;
   state.nativeInstallError = "";
-  renderNativeInstall();
   if (els.nativeModal) els.nativeModal.hidden = false;
+  const renderAndResolve = () => {
+    renderNativeInstall();
+    void loadNativeReleaseManifest().catch(() => {});
+    if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native", { resolveOnly: true }).catch(() => {});
+  };
+  if (isAndroidNativeShell()) {
+    window.requestAnimationFrame?.(() => window.setTimeout(renderAndResolve, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS))
+      || window.setTimeout(renderAndResolve, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+  } else {
+    renderAndResolve();
+  }
   if (!options.skipHistory) {
     pushUiNavigationLayer("native-modal", () => closeNativeModal({ skipHistory: true, skipStack: true }));
   }
@@ -31035,11 +32580,10 @@ function openNativeModal(options = {}) {
       os: state.nativeInstallProfile.os,
       device_type: state.nativeInstallProfile.device_type,
       install_channel: state.nativeInstallProfile.install_channel,
-      update_required: windowsNativeShellNeedsDiagnosticsUpdate(),
+      update_required: nativeInstallerUpdateAvailable(state.nativeInstallerResolution),
+      diagnostics_bridge_missing: windowsNativeShellDiagnosticsBridgeMissing(),
     },
   });
-  void loadNativeReleaseManifest().catch(() => {});
-  if (options.autoStart !== false) void startNativeInstall(options.origin || "home-go-native", { resolveOnly: true }).catch(() => {});
 }
 
 function closeNativeModal(options = {}) {
@@ -31102,9 +32646,17 @@ function renderAgentVoiceWakeSettings() {
 
 function wakeWordLabState(packet = {}) {
   const mode = cleanText(packet.listener_mode || packet.state || "", "").toLowerCase();
-  const ready = Boolean(packet.wake_service_ready || packet.foreground_service_active);
-  const engineReady = Boolean(packet.wake_engine_ready);
-  const capturing = Boolean(packet.command_capture_active) || ["command_capture", "capturing", "transcribing"].includes(mode);
+  const lifecycleStage = cleanText(packet.voice_wake_lifecycle_stage || packet.lifecycle_stage || "", "").toLowerCase();
+  const lifecycleExit = cleanText(packet.voice_wake_lifecycle_last_listen_exit_reason || packet.last_listen_exit_reason || "", "").toLowerCase();
+  const lifecycleRunning = packet.voice_wake_lifecycle_running === true || packet.lifecycle_running === true;
+  const lifecycleWorkerAlive = packet.voice_wake_lifecycle_worker_alive === true || packet.worker_alive === true;
+  const audioStarted = packet.audio_record_started === true || packet.voice_wake_lifecycle_audio_record_started === true;
+  const inferenceCount = Number(packet.inference_count || packet.voice_wake_lifecycle_inference_count || 0);
+  const ready = Boolean(packet.wake_service_ready || packet.foreground_service_active || packet.service_alive || lifecycleRunning || lifecycleWorkerAlive || audioStarted || inferenceCount > 0);
+  const engineReady = packet.wake_engine_ready !== false;
+  const capturing = Boolean(packet.command_capture_active)
+    || ["command_capture", "capturing", "transcribing", "awake"].includes(mode)
+    || lifecycleExit === "wake_detected";
   const lastTranscript = cleanText(packet.transcript_gate_last_result || packet.last_transcript || packet.last_asr_partial_transcript || "", "");
   const lastError = cleanText(packet.last_error || packet.disabled_reason || packet.failure_reason || "", "");
   if (capturing) {
@@ -31112,6 +32664,13 @@ function wakeWordLabState(packet = {}) {
       state: "awake",
       stage: "Awake",
       prompt: "The avatar should be shining now. Speak the command naturally.",
+    };
+  }
+  if (lifecycleRunning || audioStarted || lifecycleStage.includes("listen_for_wake")) {
+    return {
+      state: "listening",
+      stage: inferenceCount > 0 ? "Detecting" : "Listening",
+      prompt: `Say "${wakeWordCurrentPhrase(packet)}" near the device.`,
     };
   }
   if (!ready) {
@@ -31197,8 +32756,9 @@ function triggerAgentAvatarWakeShine(packet = {}, reason = "wake") {
 function updateWakeWordAvatarFromState(packet = {}, reason = "state") {
   const normalized = wakeWordLegacyState(packet);
   const lab = wakeWordLabState(normalized);
-  const lastWakeAt = Number(normalized.last_wake_at || normalized.last_wake_detection_at || 0);
-  const hitCount = Number(normalized.wake_hit_count || normalized.wake_detection_count || 0);
+  const lifecycleWakeDetected = cleanText(normalized.voice_wake_lifecycle_last_listen_exit_reason || normalized.last_listen_exit_reason || "", "").toLowerCase() === "wake_detected";
+  const lastWakeAt = Number(normalized.last_wake_at || normalized.last_wake_detection_at || (lifecycleWakeDetected ? Date.now() : 0));
+  const hitCount = Number(normalized.wake_hit_count || normalized.wake_detection_count || (lifecycleWakeDetected ? 1 : 0));
   const captureActive = lab.state === "awake";
   const newWake = (lastWakeAt > 0 && lastWakeAt !== state.nativeVoiceWakeLastWakeAt)
     || (hitCount > 0 && hitCount !== state.nativeVoiceWakeLastHitCount)
@@ -31309,15 +32869,32 @@ function renderWakeWordModal(statePacket = null) {
 
 function openWakeWordModal(options = {}) {
   if (!els.wakeWordModal) return;
-  const packet = getWakeWordState({ force: true });
+  const packet = isAndroidNativeShell()
+    ? wakeWordLegacyState(wakeWordLastState || getWakeWordState())
+    : getWakeWordState({ force: true });
   els.wakeWordModal.hidden = false;
-  void loadWakeWordModelMetadata(packet);
   renderWakeWordModal(packet);
-  renderWakeWordJsonOutput(packet);
-  void refreshWakeWordAgentView("open", { force: true });
-  startWakeWordRefreshLoop();
-  if (isAndroidNativeShell() && options.autoStart !== false && !packet.foreground_service_active && !packet.wake_service_ready) {
-    window.setTimeout(() => wakeWordBridgeAction("start"), 100);
+  if (!isAndroidNativeShell()) renderWakeWordJsonOutput(packet);
+  const refreshAfterOpen = () => {
+    state.wakeWordOpenRefreshTimer = 0;
+    if (!els.wakeWordModal || els.wakeWordModal.hidden) return;
+    const freshPacket = getWakeWordState({ force: true });
+    void loadWakeWordModelMetadata(freshPacket);
+    renderWakeWordModal(freshPacket);
+    renderWakeWordJsonOutput(freshPacket);
+    void refreshWakeWordAgentView("open", { force: true });
+    startWakeWordRefreshLoop();
+    if (isAndroidNativeShell() && !androidNativeWakeDisabled() && options.autoStart !== false && !freshPacket.foreground_service_active && !freshPacket.wake_service_ready) {
+      window.setTimeout(() => wakeWordBridgeAction("start"), 100);
+    }
+  };
+  if (isAndroidNativeShell()) {
+    window.requestAnimationFrame?.(() => {
+      state.wakeWordOpenRefreshTimer = window.setTimeout(refreshAfterOpen, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+    })
+      || (state.wakeWordOpenRefreshTimer = window.setTimeout(refreshAfterOpen, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS));
+  } else {
+    refreshAfterOpen();
   }
   if (!options.skipHistory) {
     pushUiNavigationLayer("wake-word-modal", () => closeWakeWordModal({ skipHistory: true, skipStack: true }));
@@ -31327,9 +32904,17 @@ function openWakeWordModal(options = {}) {
 function closeWakeWordModal(options = {}) {
   if (!options.skipHistory && closeUiNavigationLayer("wake-word-modal")) return;
   if (els.wakeWordModal) els.wakeWordModal.hidden = true;
+  if (state.wakeWordOpenRefreshTimer) {
+    window.clearTimeout(state.wakeWordOpenRefreshTimer);
+    state.wakeWordOpenRefreshTimer = 0;
+  }
   stopWakeWordRefreshLoop();
-  wakeWordRenderedRows.clear();
-  if (els.wakeWordState) els.wakeWordState.replaceChildren();
+  const clearRows = () => {
+    wakeWordRenderedRows.clear();
+    if (els.wakeWordState) els.wakeWordState.replaceChildren();
+  };
+  if (isAndroidNativeShell()) window.setTimeout(clearRows, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+  else clearRows();
   if (!options.skipStack) closeUiNavigationLayer("wake-word-modal", { skipHistory: true, replaceHistory: true });
 }
 
@@ -31339,7 +32924,8 @@ function renderWakeWordJsonOutput(packet = getWakeWordState()) {
 
 function refreshWakeWordAvatarState(reason = "poll") {
   if (!isAndroidNativeShell()) return;
-  const packet = wakeWordLegacyState(getWakeWordState({ force: true }));
+  const force = androidNativeWakeUiActive() || reason === "command" || reason === "manual";
+  const packet = wakeWordLegacyState(getWakeWordState({ force }));
   updateWakeWordAvatarFromState(packet, reason);
   nativeObsPublishWakeState(packet, reason);
 }
@@ -31665,6 +33251,7 @@ function androidNativeControlCapabilities() {
     build_id: cleanText(androidNativeShellInfo().buildId, ""),
     commands: [
       "get_runtime_snapshot",
+      "get_android_native_ux_report",
       "open_wake_word",
       "start_voice_wake",
       "stop_voice_wake",
@@ -31672,8 +33259,17 @@ function androidNativeControlCapabilities() {
       "apply_wake_word_policy",
       "install_openwakeword_bundle",
       "play_wake_phrase_probe",
-      "score_wake_phrase_probe",
-      "upload_diagnostics",
+	      "score_wake_phrase_probe",
+	      "probe_input_latency",
+	      "probe_scroll_latency",
+	      "probe_canvas_pan_latency",
+	      "probe_modal_latency",
+	      "probe_space_switch_latency",
+	      "arm_real_interaction_probe",
+	      "get_real_interaction_probe",
+	      "get_resource_profile",
+	      "reset_resource_profile",
+	      "upload_diagnostics",
       "export_diagnostics",
       "reload",
     ],
@@ -31696,6 +33292,9 @@ function androidNativeControlCapabilities() {
     heavy_commands_idle_only: true,
     screenshots_default_enabled: false,
     ui_snapshot_max_controls: 30,
+    runtime_mode: cleanText(window.__WASM_AGENT_ANDROID_RUNTIME_MODE__ || "", "user-full"),
+    debug_shell: window.__WASM_AGENT_ANDROID_DEBUG_SHELL__ === true,
+    shared_user_shell: true,
   };
 }
 
@@ -31749,9 +33348,543 @@ function androidNativeVisibleControlSummary(limit = 30) {
   return controls;
 }
 
+function androidNativeInputProbeTarget(payload = {}) {
+  const selector = cleanText(payload.selector || payload.targetSelector || "", "").slice(0, 160);
+  if (selector) {
+    try {
+      const selected = document.querySelector(selector);
+      if (selected) return selected;
+    } catch {
+      // Invalid selectors fall through to the stable shell target.
+    }
+  }
+  return els.app || document.body || document.documentElement;
+}
+
+function eventClientPointForElement(element) {
+  const rect = element?.getBoundingClientRect?.();
+  if (!rect) return { clientX: Math.max(1, Math.round(window.innerWidth / 2)), clientY: Math.max(1, Math.round(window.innerHeight / 2)) };
+  return {
+    clientX: Math.max(1, Math.round(rect.left + Math.min(rect.width - 1, Math.max(1, rect.width / 2)))),
+    clientY: Math.max(1, Math.round(rect.top + Math.min(rect.height - 1, Math.max(1, rect.height / 2)))),
+  };
+}
+
+function createAndroidNativeProbeEvent(type, point) {
+  const eventOptions = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    button: 0,
+    buttons: type === "pointerup" || type === "mouseup" || type === "click" ? 0 : 1,
+    clientX: point.clientX,
+    clientY: point.clientY,
+  };
+  let event = null;
+  if (type.startsWith("pointer") && typeof PointerEvent === "function") {
+    event = new PointerEvent(type, {
+      ...eventOptions,
+      pointerId: 1,
+      pointerType: "touch",
+      isPrimary: true,
+      width: 1,
+      height: 1,
+      pressure: type === "pointerup" ? 0 : 0.5,
+    });
+  } else {
+    event = new MouseEvent(type.replace(/^pointer/, "mouse"), eventOptions);
+  }
+  try {
+    Object.defineProperty(event, "__wasmAgentProbeCreatedAtMs", {
+      value: performance.now(),
+      configurable: true,
+    });
+  } catch {
+    try {
+      event.__wasmAgentProbeCreatedAtMs = performance.now();
+    } catch {
+      // Synthetic probe timing falls back to event.timeStamp.
+    }
+  }
+  return event;
+}
+
+async function probeAndroidNativeInputLatency(payload = {}) {
+  const target = androidNativeInputProbeTarget(payload);
+  if (!target) return { ok: false, command: "probe_input_latency", error: "target_unavailable" };
+  const point = eventClientPointForElement(target);
+  const requestedTypes = Array.isArray(payload.events) && payload.events.length
+    ? payload.events
+    : ["pointerdown", "pointerup", "click"];
+  const types = requestedTypes
+    .map((item) => cleanText(item, "").toLowerCase())
+    .filter((item) => ["pointerdown", "pointerup", "click", "mousedown", "mouseup"].includes(item))
+    .slice(0, 5);
+  const events = [];
+  const startedAt = performance.now();
+  const capture = (event) => {
+    const probeCreatedAtMs = Number(event.__wasmAgentProbeCreatedAtMs || 0);
+    if (!(probeCreatedAtMs > 0)) return;
+    const dispatchReferenceMs = Number.isFinite(probeCreatedAtMs) && probeCreatedAtMs > 0
+      ? probeCreatedAtMs
+      : Number(event.timeStamp || performance.now());
+    events.push({
+      type: cleanText(event.type, ""),
+      at_ms: clientBootElapsedMs(),
+      event_time_ms: Math.round(event.timeStamp || 0),
+      dispatch_delay_ms: Math.max(0, Math.round(performance.now() - dispatchReferenceMs)),
+      dispatch_delay_source: probeCreatedAtMs > 0 ? "probe_created_at" : "event_timeStamp",
+      handler_elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      is_trusted: Boolean(event.isTrusted),
+      target: isAndroidNativeShell() ? { summary: summarizeEventTarget(event.target) } : describeEventTarget(event.target),
+    });
+  };
+  types.forEach((type) => window.addEventListener(type.replace(/^pointer/, "pointer"), capture, { capture: true, passive: true, once: false }));
+  try {
+    await androidNativeYield(Number(payload.beforeDispatchMs || 0));
+    for (const type of types) {
+      const event = createAndroidNativeProbeEvent(type, point);
+      target.dispatchEvent(event);
+      await androidNativeYield(Number(payload.stepDelayMs || 0));
+    }
+    await new Promise((resolve) => window.requestAnimationFrame?.(() => resolve()) || window.setTimeout(resolve, 0));
+  } finally {
+    types.forEach((type) => window.removeEventListener(type.replace(/^pointer/, "pointer"), capture, { capture: true }));
+  }
+  const maxDispatchDelay = events.reduce((max, item) => Math.max(max, Number(item.dispatch_delay_ms || 0)), 0);
+  const result = {
+    ok: true,
+    command: "probe_input_latency",
+    synthetic: true,
+    note: "Synthetic DOM dispatch probe; real touch proof still requires native/ADB tap evidence.",
+    target: isAndroidNativeShell() ? { summary: summarizeEventTarget(target) } : describeEventTarget(target),
+    point,
+    events,
+    event_count: events.length,
+    max_dispatch_delay_ms: maxDispatchDelay,
+    elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    active_panel: cleanText(state.activePanel, ""),
+    app_auth: cleanText(els.app?.dataset?.auth, ""),
+    app_status: cleanText(els.app?.dataset?.status, ""),
+  };
+  clientBootMark("android_input_latency_probe_finished", result);
+  scheduleClientBootTraceUpload("android_input_latency_probe_finished");
+  return result;
+}
+
+async function probeAndroidNativeScrollLatency(payload = {}) {
+  const selector = cleanText(payload.selector || payload.targetSelector || ".modal-card", "").slice(0, 160);
+  let target = null;
+  try {
+    target = selector ? document.querySelector(selector) : null;
+  } catch {
+    target = null;
+  }
+  target = target || document.scrollingElement || document.documentElement;
+  if (!target) return { ok: false, command: "probe_scroll_latency", error: "target_unavailable" };
+  const startedAt = performance.now();
+  const beforeTop = Number(target.scrollTop || 0);
+  const deltaY = Number.isFinite(Number(payload.deltaY)) ? Number(payload.deltaY) : 420;
+  const steps = Math.max(1, Math.min(8, Math.round(Number(payload.steps || 3) || 3)));
+  const stepDelayMs = Math.max(0, Math.min(250, Number(payload.stepDelayMs || 40) || 0));
+  const samples = [];
+  for (let index = 0; index < steps; index += 1) {
+    const stepStarted = performance.now();
+    target.scrollTop = Number(target.scrollTop || 0) + deltaY / steps;
+    target.dispatchEvent(new Event("scroll", { bubbles: true }));
+    await new Promise((resolve) => window.requestAnimationFrame?.(() => resolve()) || window.setTimeout(resolve, 0));
+    samples.push({
+      step: index + 1,
+      scroll_top: roundedNumber(target.scrollTop || 0),
+      elapsed_ms: Math.max(0, Math.round(performance.now() - stepStarted)),
+    });
+    if (stepDelayMs) await androidNativeYield(stepDelayMs);
+  }
+  const afterTop = Number(target.scrollTop || 0);
+  return {
+    ok: true,
+    command: "probe_scroll_latency",
+    synthetic: true,
+    selector,
+    target: summarizeEventTarget(target),
+    before_scroll_top: roundedNumber(beforeTop),
+    after_scroll_top: roundedNumber(afterTop),
+    scrolled_px: roundedNumber(afterTop - beforeTop),
+    elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    samples,
+	  };
+	}
+
+async function probeAndroidNativeCanvasPanLatency(payload = {}) {
+  const viewport = els.spaceViewport || document.querySelector("#spaceViewport");
+  if (!viewport) return { ok: false, command: "probe_canvas_pan_latency", error: "space_viewport_unavailable" };
+  if (payload.resetProfile !== false) window.__wasmAgentResourceProfiler?.reset?.();
+  const startedAt = performance.now();
+  const rect = viewport.getBoundingClientRect?.();
+  const startPoint = {
+    clientX: Math.max(1, Math.round((rect?.left || 0) + Math.min((rect?.width || window.innerWidth || 1) - 1, Math.max(1, Number(payload.startX || (rect?.width || window.innerWidth || 1) * 0.55))))),
+    clientY: Math.max(1, Math.round((rect?.top || 0) + Math.min((rect?.height || window.innerHeight || 1) - 1, Math.max(1, Number(payload.startY || (rect?.height || window.innerHeight || 1) * 0.55))))),
+  };
+  const deltaX = Number.isFinite(Number(payload.deltaX)) ? Number(payload.deltaX) : -220;
+  const deltaY = Number.isFinite(Number(payload.deltaY)) ? Number(payload.deltaY) : -180;
+  const steps = Math.max(1, Math.min(12, Math.round(Number(payload.steps || 5) || 5)));
+  const stepDelayMs = Math.max(0, Math.min(250, Number(payload.stepDelayMs || 16) || 0));
+  const before = {
+    scroll_left: roundedNumber(viewport.scrollLeft || 0),
+    scroll_top: roundedNumber(viewport.scrollTop || 0),
+    minimap_visible: Boolean(state.spaceMiniMapVisible),
+    minimap_hidden: Boolean(els.spaceMiniMap?.hidden),
+    momentum_active: Boolean(state.spacePanMomentumActive),
+  };
+  const samples = [];
+  const dispatchPointer = async (type, point) => {
+    const event = createAndroidNativeProbeEvent(type, point);
+    const stepStarted = performance.now();
+    viewport.dispatchEvent(event);
+    await new Promise((resolve) => window.requestAnimationFrame?.(() => resolve()) || window.setTimeout(resolve, 0));
+    samples.push({
+      type,
+      elapsed_ms: Math.max(0, Math.round(performance.now() - stepStarted)),
+      scroll_left: roundedNumber(viewport.scrollLeft || 0),
+      scroll_top: roundedNumber(viewport.scrollTop || 0),
+    });
+  };
+  await dispatchPointer("pointerdown", startPoint);
+  for (let index = 1; index <= steps; index += 1) {
+    const point = {
+      clientX: Math.round(startPoint.clientX + (deltaX * index) / steps),
+      clientY: Math.round(startPoint.clientY + (deltaY * index) / steps),
+    };
+    await dispatchPointer("pointermove", point);
+    if (stepDelayMs) await androidNativeYield(stepDelayMs);
+  }
+  await dispatchPointer("pointerup", {
+    clientX: Math.round(startPoint.clientX + deltaX),
+    clientY: Math.round(startPoint.clientY + deltaY),
+  });
+  const afterRelease = {
+    scroll_left: roundedNumber(viewport.scrollLeft || 0),
+    scroll_top: roundedNumber(viewport.scrollTop || 0),
+    minimap_visible: Boolean(state.spaceMiniMapVisible),
+    minimap_hidden: Boolean(els.spaceMiniMap?.hidden),
+    momentum_active: Boolean(state.spacePanMomentumActive),
+  };
+  const waitAfterUpMs = Math.max(0, Math.min(2000, Number(payload.waitAfterUpMs || 0) || 0));
+  if (waitAfterUpMs) await androidNativeYield(waitAfterUpMs);
+  const after = {
+    scroll_left: roundedNumber(viewport.scrollLeft || 0),
+    scroll_top: roundedNumber(viewport.scrollTop || 0),
+    minimap_visible: Boolean(state.spaceMiniMapVisible),
+    minimap_hidden: Boolean(els.spaceMiniMap?.hidden),
+    momentum_active: Boolean(state.spacePanMomentumActive),
+  };
+  return {
+    ok: true,
+    command: "probe_canvas_pan_latency",
+    synthetic: true,
+    note: "Synthetic DOM pan probe; real touch proof still requires native/ADB gesture evidence.",
+    before,
+    after_release: afterRelease,
+    after,
+    moved_px: {
+      x: roundedNumber(after.scroll_left - before.scroll_left),
+      y: roundedNumber(after.scroll_top - before.scroll_top),
+    },
+    release_moved_px: {
+      x: roundedNumber(afterRelease.scroll_left - before.scroll_left),
+      y: roundedNumber(afterRelease.scroll_top - before.scroll_top),
+    },
+    post_release_moved_px: {
+      x: roundedNumber(after.scroll_left - afterRelease.scroll_left),
+      y: roundedNumber(after.scroll_top - afterRelease.scroll_top),
+    },
+    samples,
+    max_sample_elapsed_ms: samples.reduce((max, item) => Math.max(max, Number(item.elapsed_ms || 0)), 0),
+    elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    resource_profile: window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.profileLimit || 18) }) || null,
+  };
+}
+
+function androidNativeProbeWaitFrame() {
+  return new Promise((resolve) => window.requestAnimationFrame?.(() => resolve()) || window.setTimeout(resolve, 0));
+}
+
+function androidNativeModalProbePair(name = "config") {
+  const key = cleanText(name, "config").toLowerCase();
+  const pairs = {
+    config: {
+      name: "config",
+      element: els.configModal,
+      open: () => openConfigModal(),
+      close: () => closeConfigModal(),
+    },
+    wake_word: {
+      name: "wake_word",
+      element: els.wakeWordModal,
+      open: () => openWakeWordModal({ source: "probe", autoStart: false }),
+      close: () => closeWakeWordModal(),
+    },
+    agent: {
+      name: "agent",
+      element: els.agentPanel,
+      open: () => openAgentChat(),
+      close: () => closeAgentChat(),
+      isOpen: () => Boolean(state.agentOpen),
+    },
+  };
+  return pairs[key] || pairs.config;
+}
+
+async function probeAndroidNativeModalLatency(payload = {}) {
+  const pair = androidNativeModalProbePair(payload.modal || payload.name || "config");
+  if (!pair.element && !pair.isOpen) return { ok: false, command: "probe_modal_latency", error: "modal_unavailable", modal: pair.name };
+  if (payload.resetProfile !== false) window.__wasmAgentResourceProfiler?.reset?.();
+  const samples = [];
+  const isOpen = () => pair.isOpen ? pair.isOpen() : Boolean(pair.element && !pair.element.hidden);
+  const measure = async (phase, fn) => {
+    const started = performance.now();
+    androidNativeRunVisual(fn, `modal:${pair.name}:${phase}`);
+    const syncMs = Math.max(0, Math.round(performance.now() - started));
+    await androidNativeProbeWaitFrame();
+    const firstFrameMs = Math.max(0, Math.round(performance.now() - started));
+    const settleMs = Math.max(0, Math.min(1000, Number(payload.settleMs || ANDROID_NATIVE_VISUAL_SETTLE_MS) || 0));
+    if (settleMs) await androidNativeYield(settleMs);
+    samples.push({
+      phase,
+      sync_ms: syncMs,
+      first_visual_ms: firstFrameMs,
+      elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+      open: isOpen(),
+    });
+  };
+  if (isOpen()) await measure("preclose", pair.close);
+  const startedAt = performance.now();
+  await measure("open", pair.open);
+  const holdMs = Math.max(0, Math.min(1000, Number(payload.holdMs || 80) || 0));
+  if (holdMs) await androidNativeYield(holdMs);
+  await measure("close", pair.close);
+  return {
+    ok: true,
+    command: "probe_modal_latency",
+    modal: pair.name,
+    samples,
+    elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+    open_after: isOpen(),
+    resource_profile: window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.profileLimit || 24) }) || null,
+  };
+}
+
+function androidNativeSpaceSwitchTargets(payload = {}) {
+  const current = normalizePanel(state.activePanel);
+  const requested = cleanText(payload.targetPanel || payload.panel || "", "");
+  const available = ["home", ...(Array.isArray(state.userSpaces) ? state.userSpaces.map((space) => space.id) : []), "modules", "timeline", "tasks", "diagnostics"]
+    .filter((panel) => panel && isPanelAvailable(panel));
+  const target = requested && isPanelAvailable(requested)
+    ? normalizePanel(requested)
+    : (available.find((panel) => normalizePanel(panel) !== current) || "home");
+  const back = cleanText(payload.returnPanel || "", "");
+  return {
+    current,
+    target,
+    returnPanel: back && isPanelAvailable(back) ? normalizePanel(back) : current,
+  };
+}
+
+async function probeAndroidNativeSpaceSwitchLatency(payload = {}) {
+  if (payload.resetProfile !== false) window.__wasmAgentResourceProfiler?.reset?.();
+  const targets = androidNativeSpaceSwitchTargets(payload);
+  const samples = [];
+  const measure = async (phase, panel) => {
+    const started = performance.now();
+    androidNativeRunVisual(() => setPanel(panel), `space-switch:${phase}:${panel}`);
+    const syncMs = Math.max(0, Math.round(performance.now() - started));
+    await androidNativeProbeWaitFrame();
+    const firstFrameMs = Math.max(0, Math.round(performance.now() - started));
+    const settleMs = Math.max(0, Math.min(1000, Number(payload.settleMs || ANDROID_NATIVE_VISUAL_SETTLE_MS) || 0));
+    if (settleMs) await androidNativeYield(settleMs);
+    samples.push({
+      phase,
+      panel: normalizePanel(panel),
+      active_panel: normalizePanel(state.activePanel),
+      sync_ms: syncMs,
+      first_visual_ms: firstFrameMs,
+      elapsed_ms: Math.max(0, Math.round(performance.now() - started)),
+    });
+  };
+  const startedAt = performance.now();
+  await measure("switch", targets.target);
+  const holdMs = Math.max(0, Math.min(1000, Number(payload.holdMs || 80) || 0));
+  if (holdMs) await androidNativeYield(holdMs);
+  if (payload.return !== false && targets.returnPanel !== targets.target) {
+    await measure("return", targets.returnPanel);
+  }
+  return {
+    ok: true,
+    command: "probe_space_switch_latency",
+    targets,
+	    samples,
+	    elapsed_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+	    active_panel: normalizePanel(state.activePanel),
+	    panel_switch_timing: state.androidNativeLastPanelSwitchTiming || null,
+	    resource_profile: window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.profileLimit || 24) }) || null,
+	  };
+}
+
+let androidNativeRealInteractionProbe = null;
+
+function androidNativePhysicalPoint(rect = {}) {
+  const scale = Number(window.devicePixelRatio || 1);
+  const cssX = Math.max(1, Math.round(Number(rect.left || 0) + Math.max(1, Number(rect.width || 1)) / 2));
+  const cssY = Math.max(1, Math.round(Number(rect.top || 0) + Math.max(1, Number(rect.height || 1)) / 2));
+  return {
+    css: { x: cssX, y: cssY },
+    physical: { x: Math.max(1, Math.round(cssX * scale)), y: Math.max(1, Math.round(cssY * scale)) },
+    device_pixel_ratio: scale,
+  };
+}
+
+function androidNativeRealProbeTarget(payload = {}) {
+  const selector = cleanText(payload.selector || payload.targetSelector || "", "").slice(0, 220);
+  if (selector) {
+    try {
+      const selected = document.querySelector(selector);
+      if (selected) return { element: selected, selector };
+    } catch {
+      return { element: null, selector, error: "invalid_selector" };
+    }
+  }
+  const action = cleanText(payload.action || payload.kind || "", "").toLowerCase();
+  if (action === "config_close" || action === "modal_close") {
+    return { element: els.configModal?.querySelector?.("[data-close], .modal-close, button[aria-label*='Close' i]") || els.configModal?.querySelector?.("button"), selector: "config_close:auto" };
+  }
+  if (action === "agent_toggle") {
+    return { element: document.querySelector("[data-agent-toggle], [data-action='agent'], button[aria-label*='Agent' i]"), selector: "agent_toggle:auto" };
+  }
+  if (action === "space_switch") {
+    const targets = androidNativeSpaceSwitchTargets(payload);
+    return { element: document.querySelector(`[data-panel='${CSS.escape(targets.target)}']`) || document.querySelector(`[data-space-id='${CSS.escape(targets.target)}']`), selector: `space_switch:${targets.target}` };
+  }
+  return { element: els.app || document.body || document.documentElement, selector: "app:auto" };
+}
+
+function androidNativeRealProbeEffect(payload = {}) {
+  const action = cleanText(payload.action || payload.kind || "", "").toLowerCase();
+  if (action === "space_switch") return { active_panel: normalizePanel(state.activePanel) };
+  if (action === "config_close" || action === "modal_close") return { config_open: Boolean(els.configModal && !els.configModal.hidden) };
+  if (action === "agent_toggle") return { agent_open: Boolean(state.agentOpen) };
+  return { active_panel: normalizePanel(state.activePanel), open_modals: androidNativeOpenModals() };
+}
+
+function detachAndroidNativeRealInteractionProbe() {
+  const probe = androidNativeRealInteractionProbe;
+  if (!probe?.listeners) return;
+  for (const [type, listener] of probe.listeners) {
+    window.removeEventListener(type, listener, { capture: true });
+  }
+  probe.listeners = [];
+}
+
+async function armAndroidNativeRealInteractionProbe(payload = {}) {
+  detachAndroidNativeRealInteractionProbe();
+  if (payload.resetProfile !== false) window.__wasmAgentResourceProfiler?.reset?.();
+  const target = androidNativeRealProbeTarget(payload);
+  if (!target.element) {
+    androidNativeRealInteractionProbe = {
+      ok: false,
+      command: "arm_real_interaction_probe",
+      armed: false,
+      error: target.error || "target_unavailable",
+      selector: target.selector || "",
+    };
+    return androidNativeRealInteractionProbe;
+  }
+  const rect = androidElementVisibleRect(target.element) || target.element.getBoundingClientRect?.();
+  if (!rect || Number(rect.width || 0) <= 0 || Number(rect.height || 0) <= 0) {
+    androidNativeRealInteractionProbe = {
+      ok: false,
+      command: "arm_real_interaction_probe",
+      armed: false,
+      error: "target_not_visible",
+      selector: target.selector || "",
+      target: summarizeEventTarget(target.element),
+    };
+    return androidNativeRealInteractionProbe;
+  }
+  const startedAt = performance.now();
+  const timeoutMs = Math.max(1000, Math.min(15000, Number(payload.timeoutMs || payload.timeout_ms || 8000) || 8000));
+  const probe = {
+    ok: true,
+    command: "arm_real_interaction_probe",
+    armed: true,
+    complete: false,
+    action: cleanText(payload.action || payload.kind || "", ""),
+    selector: target.selector || "",
+    target: summarizeEventTarget(target.element),
+    target_detail: describeEventTarget(target.element),
+    rect: compactRect(rect),
+    adb_tap: androidNativePhysicalPoint(rect),
+    before: androidNativeRealProbeEffect(payload),
+    after: null,
+    events: [],
+    first_visual_ms: null,
+    settled_ms: null,
+    timed_out: false,
+    timeout_ms: timeoutMs,
+    started_at_ms: clientBootElapsedMs(),
+    listeners: [],
+  };
+  const finishAfterPaint = async () => {
+    if (probe.complete) return;
+    await androidNativeProbeWaitFrame();
+    probe.first_visual_ms = Math.max(0, Math.round(performance.now() - startedAt));
+    await androidNativeProbeWaitFrame();
+    const settleMs = Math.max(0, Math.min(1000, Number(payload.settleMs || ANDROID_NATIVE_VISUAL_SETTLE_MS) || 0));
+    if (settleMs) await androidNativeYield(settleMs);
+    probe.settled_ms = Math.max(0, Math.round(performance.now() - startedAt));
+    probe.after = androidNativeRealProbeEffect(payload);
+    probe.resource_profile = window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.profileLimit || 24) }) || null;
+    probe.complete = true;
+    probe.armed = false;
+    detachAndroidNativeRealInteractionProbe();
+  };
+  const listener = (event) => {
+    if (probe.complete || probe.timed_out) return;
+    const inTarget = event.target === target.element || Boolean(target.element.contains?.(event.target));
+    if (!inTarget) return;
+    probe.events.push({
+      type: cleanText(event.type, ""),
+      is_trusted: Boolean(event.isTrusted),
+      at_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      target: summarizeEventTarget(event.target),
+    });
+    if (event.isTrusted && (event.type === "click" || event.type === "pointerup")) void finishAfterPaint();
+  };
+  ["pointerdown", "pointerup", "click"].forEach((type) => {
+    window.addEventListener(type, listener, { capture: true, passive: true });
+    probe.listeners.push([type, listener]);
+  });
+  probe.timeout = window.setTimeout(() => {
+    if (probe.complete) return;
+    probe.timed_out = true;
+    probe.armed = false;
+    probe.after = androidNativeRealProbeEffect(payload);
+    probe.resource_profile = window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.profileLimit || 24) }) || null;
+    detachAndroidNativeRealInteractionProbe();
+  }, timeoutMs);
+  androidNativeRealInteractionProbe = probe;
+  return { ...probe, listeners: undefined, timeout: undefined };
+}
+
+function getAndroidNativeRealInteractionProbe() {
+  const probe = androidNativeRealInteractionProbe;
+  if (!probe) return { ok: false, command: "get_real_interaction_probe", error: "probe_not_armed" };
+  return { ...probe, command: "get_real_interaction_probe", listeners: undefined, timeout: undefined };
+}
+
 function androidNativeRuntimeSnapshot(options = {}) {
   const wakeState = wakeWordLegacyState(getWakeWordState({ force: options.forceWakeState === true }));
   const nativeState = getAndroidNativeState() || {};
+  const responsiveness = androidNativeResponsivenessSnapshot("runtime_snapshot");
   return {
     schema: "hermes.wasm_agent.android_runtime_snapshot.v1",
     captured_at: new Date().toISOString(),
@@ -31762,6 +33895,32 @@ function androidNativeRuntimeSnapshot(options = {}) {
     recent_user_input_ms: Date.now() - androidNativeLastUserInputAt,
     input_pending: androidNativeInputPending(),
     open_modals: androidNativeOpenModals(),
+    ui_scheduler: {
+      visual_lane_active: Date.now() < Number(state.androidNativeVisualLaneUntil || 0),
+      last_visual_task: state.androidNativeLastVisualTask || null,
+      last_after_paint_task: state.androidNativeLastAfterPaintTask || null,
+      last_quiet_task: state.androidNativeLastQuietTask || null,
+      last_panel_switch_timing: state.androidNativeLastPanelSwitchTiming || null,
+    },
+    canvas_navigation: {
+      minimap_visible: Boolean(state.spaceMiniMapVisible),
+      minimap_hidden: Boolean(els.spaceMiniMap?.hidden),
+      pan_active: Boolean(state.spacePanActive),
+      momentum_active: Boolean(state.spacePanMomentumActive),
+      pinch_active: Boolean(state.spacePinchActive),
+      scroll_left: roundedNumber(els.spaceViewport?.scrollLeft || 0),
+      scroll_top: roundedNumber(els.spaceViewport?.scrollTop || 0),
+      touch_event_count: responsiveness.touch_event_count,
+      ignored_touch_count: responsiveness.ignored_touch_count,
+      ignored_touch_reasons: responsiveness.ignored_touch_reasons,
+      pan_start_count: responsiveness.canvas_pan_start_count,
+      pan_move_count: responsiveness.canvas_pan_move_count,
+      pan_end_count: responsiveness.canvas_pan_end_count,
+      minimap_requested_count: responsiveness.minimap_render_requested_count,
+      minimap_executed_count: responsiveness.minimap_render_executed_count,
+      minimap_skipped_count: responsiveness.minimap_render_skipped_count,
+      minimap_skip_reasons: responsiveness.minimap_render_skip_reasons,
+    },
     wake_word: {
       listener_lane: cleanText(wakeState.listener_lane, ""),
       listener_mode: cleanText(wakeState.listener_mode, ""),
@@ -31794,10 +33953,94 @@ function androidNativeRuntimeSnapshot(options = {}) {
       device_pixel_ratio: Number(window.devicePixelRatio || 1),
     },
     visible_controls: androidNativeVisibleControlSummary(Number(options.maxControls || 30)).slice(0, 30),
-    recent_events: latestEvents(12),
-    interaction_trace: state.interactionTrace.slice(-8),
-    capabilities: androidNativeControlCapabilities(),
+	    recent_events: latestEvents(12),
+	    interaction_trace: state.interactionTrace.slice(-8),
+	    resource_profile: options.includeResourceProfile === false
+	      ? null
+	      : window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(options.resourceProfileLimit || 24) }) || null,
+    responsiveness,
+	    capabilities: androidNativeControlCapabilities(),
+    android_runtime_mode: cleanText(window.__WASM_AGENT_ANDROID_RUNTIME_MODE__ || "", "user-full"),
+    android_debug_shell: window.__WASM_AGENT_ANDROID_DEBUG_SHELL__ === true,
   };
+}
+
+function clientBootMarkTime(phasePattern) {
+  const pattern = phasePattern instanceof RegExp ? phasePattern : new RegExp(String(phasePattern || ""), "i");
+  const entry = clientBootTrace.marks.find((item) => pattern.test(cleanText(item.phase, "")));
+  return entry ? Number(entry.at_ms || 0) : null;
+}
+
+function androidNativeUxReport(reason = "snapshot") {
+  const nativeState = getAndroidNativeState() || {};
+  const webviewMetrics = nativeState?.webview?.metrics || {};
+  const bootMetrics = webviewMetrics.boot || webviewMetrics || {};
+  const responsiveness = androidNativeResponsivenessSnapshot(reason);
+  const verdict = responsiveness.overloaded
+    ? "red"
+    : responsiveness.degraded
+      ? "yellow"
+      : "green";
+  return {
+    schema: "hermes.wasm_agent.android_native_ux_report.v1",
+    reason: cleanText(reason, ""),
+    generated_at: new Date().toISOString(),
+    report_path: "reports/android/responsiveness/<timestamp>-android-native-ux.json",
+    source: "android-webview-runtime",
+    activity_create_timestamp: Number(bootMetrics.activity_created_at || 0) || null,
+    first_webview_load_url_timestamp: Number(bootMetrics.first_load_url_at || 0) || null,
+    first_navigation_start_timestamp: Number(nativeState?.webview?.page_started_at || 0) || null,
+    first_content_paint_marker_ms: clientBootMarkTime(/cached_authenticated_shell_visible|authenticated_shell_visible|initial_auth_gate_rendered|auth_gate_ready|app_ready|main_finished/),
+    first_interactive_marker_ms: clientBootMarkTime(/cached_authenticated_shell_visible|authenticated_shell_visible|initial_auth_gate_rendered|auth_gate_ready|main_finished/),
+    full_ui_ready_marker_ms: clientBootMarkTime(/authenticated_hydration_finished|main_finished/),
+    backend_config_health_probe: {
+      result: cleanText(bootMetrics.backend_probe_result, ""),
+      started_at: Number(bootMetrics.backend_probe_started_at || 0) || null,
+      finished_at: Number(bootMetrics.backend_probe_finished_at || 0) || null,
+      blocks_first_load: false,
+    },
+    wake_service_start_timestamp: Number(nativeState?.voice_wake?.service_started_at || nativeState?.voice_wake?.started_at || 0) || null,
+    wake_model_asr_init: {
+      wake_engine_ready: Boolean(nativeState?.voice_wake?.wake_engine_ready),
+      local_asr_vosk_ready: Boolean(nativeState?.voice_wake?.local_asr_vosk_ready),
+      diagnostics_deferred: Boolean(nativeState?.voice_wake?.diagnostics_deferred || nativeState?.voice_wake?.model_diagnostics_deferred),
+    },
+    bridge_call_count_during_boot: Number(bootMetrics.bridge_calls_during_boot || 0),
+    console_messages_forwarded_during_boot: Number(bootMetrics.console_messages_forwarded || 0),
+    diagnostics_writes_during_boot: Number(
+      bootMetrics.diagnostics_writes_during_boot
+        ?? bootMetrics.renderer_diagnostics_during_boot
+        ?? 0
+    ),
+    long_tasks_count: responsiveness.long_task_count,
+    long_tasks_max_duration_ms: responsiveness.max_long_task_ms,
+    frame_gap_p50_ms: responsiveness.frame_gap?.p50_ms || 0,
+    frame_gap_p95_ms: responsiveness.frame_gap?.p95_ms || 0,
+    frame_gap_max_ms: responsiveness.frame_gap?.max_ms || responsiveness.max_frame_gap_ms || 0,
+    touch_event_count: responsiveness.touch_event_count,
+    ignored_touch_count: responsiveness.ignored_touch_count,
+    ignored_touch_reasons: responsiveness.ignored_touch_reasons,
+    minimap_requested_count: responsiveness.minimap_render_requested_count,
+    minimap_executed_count: responsiveness.minimap_render_executed_count,
+    minimap_skipped_count: responsiveness.minimap_render_skipped_count,
+    canvas_pan_start_count: responsiveness.canvas_pan_start_count,
+    canvas_pan_move_count: responsiveness.canvas_pan_move_count,
+    canvas_pan_end_count: responsiveness.canvas_pan_end_count,
+    app_responsiveness_verdict: verdict,
+    responsiveness,
+    boot_flags: bootMetrics.boot_flags || {
+      perfSafeMode: androidNativePerfSafeMode(),
+      wake: androidNativeWakeDisabled() ? "off" : androidNativeQueryParam("wake", "deferred"),
+      bridgeDiagnostics: androidNativeBridgeDiagnosticsOff() ? "off" : androidNativeQueryParam("bridgeDiagnostics", "sampled"),
+      healthProbes: androidNativeQueryParam("healthProbes", "afterFirstPaint"),
+    },
+  };
+}
+
+try {
+  window.__wasmAgentAndroidNativeUxReport = (reason = "manual") => androidNativeUxReport(reason);
+} catch {
+  // Report exposure is best effort.
 }
 
 function normalizeWakeWordNativeControlCommandType(commandType = "") {
@@ -31957,6 +34200,11 @@ function waoDecodeFrame(data) {
 }
 
 function nativeObsCanUseSocket() {
+  if (isAndroidNativeShell()) {
+    const params = new URLSearchParams(window.location.search || "");
+    const enabled = params.get("nativeObs") || params.get("wao") || localStorage.getItem("wasmAgent.androidNativeObsEnabled");
+    if (!["1", "true", "yes", "on"].includes(cleanText(enabled, "").toLowerCase())) return false;
+  }
   return typeof WebSocket === "function" && typeof ArrayBuffer === "function" && typeof DataView === "function";
 }
 
@@ -32027,14 +34275,36 @@ function roundedPerfMs(value) {
   return Math.max(0, Math.round(Number(value || 0)));
 }
 
+function androidNativePercentile(values = [], percentile = 0.5) {
+  const sorted = values.map((value) => Number(value || 0)).filter((value) => Number.isFinite(value)).sort((a, b) => a - b);
+  if (!sorted.length) return 0;
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile) - 1));
+  return roundedPerfMs(sorted[index]);
+}
+
+function androidNativeFrameGapStats() {
+  const samples = Array.isArray(androidNativeResponsiveness.frame_gap_samples)
+    ? androidNativeResponsiveness.frame_gap_samples
+    : [];
+  return {
+    count: samples.length,
+    p50_ms: androidNativePercentile(samples, 0.5),
+    p95_ms: androidNativePercentile(samples, 0.95),
+    max_ms: androidNativeResponsiveness.max_frame_gap_ms,
+  };
+}
+
 function androidNativeResponsivenessSnapshot(reason = "sample") {
   const metric = androidNativeResponsiveness;
   const appReasons = [];
   const degradedReasons = [];
-  if (metric.max_frame_gap_ms >= 120 || metric.max_frame_drift_ms >= 100) appReasons.push("frame_stall");
-  if (metric.max_event_loop_lag_ms >= 120) appReasons.push("event_loop_lag");
-  if (metric.max_long_task_ms >= 120 || metric.long_task_count >= 3) appReasons.push("long_tasks");
+  if (metric.max_frame_gap_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS) appReasons.push("frame_stall");
+  if (metric.max_event_loop_lag_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS) appReasons.push("event_loop_lag");
+  if (metric.max_long_task_ms >= ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_MS) appReasons.push("long_tasks");
   if (metric.input_pending) appReasons.push("input_pending");
+  if (metric.max_frame_gap_ms >= ANDROID_NATIVE_RESPONSIVENESS_DEGRADED_MS || metric.max_frame_drift_ms >= ANDROID_NATIVE_RESPONSIVENESS_DEGRADED_MS) degradedReasons.push("frame_jank");
+  if (metric.max_event_loop_lag_ms >= ANDROID_NATIVE_RESPONSIVENESS_DEGRADED_MS) degradedReasons.push("event_loop_jank");
+  if (metric.max_long_task_ms >= ANDROID_NATIVE_RESPONSIVENESS_DEGRADED_MS || metric.long_task_count >= 3) degradedReasons.push("long_tasks");
   if (metric.health_rtt_ms >= 1200 || metric.max_health_rtt_ms >= 2000) degradedReasons.push("server_rtt");
   if (metric.native_control_poll_latency_ms >= 2500) degradedReasons.push("native_control_poll_slow");
   const overloaded = appReasons.length > 0;
@@ -32052,6 +34322,7 @@ function androidNativeResponsivenessSnapshot(reason = "sample") {
     degraded,
     overload_reasons: appReasons,
     degradation_reasons: degradedReasons,
+    frame_gap: androidNativeFrameGapStats(),
     last_control_poll: androidNativeLastControlPoll || null,
   };
 }
@@ -32076,6 +34347,7 @@ function resetAndroidNativeResponsivenessWindow() {
   androidNativeResponsiveness.sample_count = 0;
   androidNativeResponsiveness.frame_gap_over_50ms_count = 0;
   androidNativeResponsiveness.frame_gap_over_100ms_count = 0;
+  androidNativeResponsiveness.frame_gap_samples = [];
   androidNativeResponsiveness.max_frame_gap_ms = 0;
   androidNativeResponsiveness.max_frame_drift_ms = 0;
   androidNativeResponsiveness.event_loop_lag_over_50ms_count = 0;
@@ -32088,6 +34360,16 @@ function resetAndroidNativeResponsivenessWindow() {
   androidNativeResponsiveness.native_control_poll_command_count = 0;
   androidNativeResponsiveness.native_control_poll_skipped_count = 0;
   androidNativeResponsiveness.native_control_poll_skip_reason = "";
+  androidNativeResponsiveness.touch_event_count = 0;
+  androidNativeResponsiveness.ignored_touch_count = 0;
+  androidNativeResponsiveness.ignored_touch_reasons = {};
+  androidNativeResponsiveness.canvas_pan_start_count = 0;
+  androidNativeResponsiveness.canvas_pan_move_count = 0;
+  androidNativeResponsiveness.canvas_pan_end_count = 0;
+  androidNativeResponsiveness.minimap_render_requested_count = 0;
+  androidNativeResponsiveness.minimap_render_executed_count = 0;
+  androidNativeResponsiveness.minimap_render_skipped_count = 0;
+  androidNativeResponsiveness.minimap_render_skip_reasons = {};
 }
 
 async function androidNativeTrackPromise(label, promise, metadata = {}) {
@@ -32142,6 +34424,17 @@ async function postAndroidNativeResponsiveness(reason = "sample") {
   if (!isAndroidNativeShell()) return;
   const payload = nativeObsPublishResponsiveness(reason);
   resetAndroidNativeResponsivenessWindow();
+  if (androidNativeBootNetworkQuiet()) return;
+  if (nativeObsConnected || payload.overloaded || payload.degraded || androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)) {
+    clientBootMark("android_responsiveness_http_upload_skipped", {
+      reason,
+      native_obs_connected: Boolean(nativeObsConnected),
+      overloaded: Boolean(payload.overloaded),
+      degraded: Boolean(payload.degraded),
+      recent_user_input: androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS),
+    });
+    return;
+  }
   try {
     await fetchJson("/native/events", {
       method: "POST",
@@ -32165,6 +34458,8 @@ async function postAndroidNativeResponsiveness(reason = "sample") {
 
 async function sampleAndroidNativeHealthRtt() {
   if (!isAndroidNativeShell()) return;
+  if (androidNativePerfSafeMode() || androidNativeQueryParam("healthProbes", "").toLowerCase() === "off") return;
+  if (androidNativeWakeListenerActive()) return;
   const now = Date.now();
   if (now - androidNativeLastHealthRttAt < ANDROID_NATIVE_HEALTH_RTT_MIN_INTERVAL_MS) return;
   androidNativeLastHealthRttAt = now;
@@ -32191,6 +34486,10 @@ function startAndroidNativeResponsivenessMonitor() {
     androidNativeResponsiveness.last_frame_gap_ms = roundedPerfMs(gap);
     androidNativeResponsiveness.max_frame_gap_ms = Math.max(androidNativeResponsiveness.max_frame_gap_ms, roundedPerfMs(gap));
     androidNativeResponsiveness.max_frame_drift_ms = Math.max(androidNativeResponsiveness.max_frame_drift_ms, roundedPerfMs(drift));
+    androidNativeResponsiveness.frame_gap_samples.push(roundedPerfMs(gap));
+    while (androidNativeResponsiveness.frame_gap_samples.length > ANDROID_NATIVE_RESPONSIVENESS_GAP_SAMPLE_LIMIT) {
+      androidNativeResponsiveness.frame_gap_samples.shift();
+    }
     if (gap >= 50) androidNativeResponsiveness.frame_gap_over_50ms_count += 1;
     if (gap >= 100) androidNativeResponsiveness.frame_gap_over_100ms_count += 1;
     androidNativeResponsivenessRaf = window.requestAnimationFrame(frame);
@@ -32206,7 +34505,7 @@ function startAndroidNativeResponsivenessMonitor() {
           androidNativeResponsiveness.max_long_task_ms = Math.max(androidNativeResponsiveness.max_long_task_ms, duration);
         }
       });
-      androidNativeResponsivenessObserver.observe({ type: "longtask", buffered: true });
+      androidNativeResponsivenessObserver.observe({ type: "longtask", buffered: false });
     } catch {
       androidNativeResponsivenessObserver = null;
     }
@@ -32228,7 +34527,12 @@ function startAndroidNativeResponsivenessMonitor() {
   const scheduleResponsivenessPost = (delayMs) => {
     androidNativeResponsivenessTimer = window.setTimeout(async () => {
       const overloadedBeforeSample = androidNativeResponsivenessOverloadedNow();
-      if (!overloadedBeforeSample) await sampleAndroidNativeHealthRtt();
+      if (androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) || androidNativeInputPending()) {
+        scheduleResponsivenessPost(ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS);
+        return;
+      }
+      if (!overloadedBeforeSample && !androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)) await sampleAndroidNativeHealthRtt();
+      await androidNativeAfterPaint();
       await postAndroidNativeResponsiveness(overloadedBeforeSample ? "overloaded_interval" : "interval");
       scheduleResponsivenessPost(overloadedBeforeSample
         ? ANDROID_NATIVE_RESPONSIVENESS_OVERLOADED_INTERVAL_MS
@@ -32236,7 +34540,10 @@ function startAndroidNativeResponsivenessMonitor() {
     }, delayMs);
   };
   scheduleResponsivenessPost(ANDROID_NATIVE_RESPONSIVENESS_INTERVAL_MS);
-  void sampleAndroidNativeHealthRtt().finally(() => postAndroidNativeResponsiveness("startup"));
+  window.setTimeout(() => {
+    if (androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)) return;
+    void sampleAndroidNativeHealthRtt().finally(() => postAndroidNativeResponsiveness("startup"));
+  }, ANDROID_NATIVE_INPUT_FIRST_QUIET_MS);
 }
 
 function wakePacketFromNativeObsPayload(payload = {}) {
@@ -32316,7 +34623,32 @@ function handleNativeObsFrame(frame = {}) {
   }
 }
 
+function scheduleNativeObsFrame(frame, reason = "message") {
+  const run = () => {
+    try {
+      handleNativeObsFrame(frame);
+    } catch (error) {
+      recordUserEvent("native_observability_frame_failed", {
+        reason,
+        error: errorMessage(error),
+      });
+    }
+  };
+  if (isAndroidNativeShell()) {
+    void androidNativeAfterPaint().then(() => {
+      if (frame?.type !== "COMMAND" && (androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) || androidNativeInputPending())) {
+        androidNativeAfterQuiet(run, `native-obs-${cleanText(frame?.type, "frame").toLowerCase()}`);
+        return;
+      }
+      window.setTimeout(run, 0);
+    });
+    return;
+  }
+  window.setTimeout(run, 0);
+}
+
 function nativeObsSendHeartbeat() {
+  if (androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) || androidNativeInputPending()) return;
   nativeObsSend("HEARTBEAT", {
     device_id: androidNativeControlDeviceId(),
     build_id: cleanText(androidNativeShellInfo().buildId, ""),
@@ -32370,20 +34702,34 @@ function connectAndroidNativeObservability(reason = "startup") {
       token_budget: 1200,
     });
     if (nativeObsHeartbeatTimer) window.clearInterval(nativeObsHeartbeatTimer);
-    nativeObsHeartbeatTimer = window.setInterval(nativeObsSendHeartbeat, NATIVE_OBS_HEARTBEAT_MS);
+    nativeObsHeartbeatTimer = window.setInterval(() => androidNativeAfterQuiet(nativeObsSendHeartbeat, "native-obs-heartbeat-tick"), NATIVE_OBS_HEARTBEAT_MS);
   });
   nativeObsSocket.addEventListener("message", (event) => {
-    try {
-      const frame = typeof event.data === "string"
-        ? { type: "EVENT", fields: JSON.parse(event.data) }
-        : waoDecodeFrame(event.data);
-      handleNativeObsFrame(frame);
-    } catch (error) {
-      recordUserEvent("native_observability_decode_failed", {
-        reason,
-        error: errorMessage(error),
-      });
+    const decodeAndSchedule = (data, decodeReason) => {
+      window.setTimeout(() => {
+        try {
+          const frame = typeof data === "string"
+            ? { type: "EVENT", fields: JSON.parse(data) }
+            : waoDecodeFrame(data);
+          scheduleNativeObsFrame(frame, decodeReason);
+        } catch (error) {
+          recordUserEvent("native_observability_decode_failed", {
+            reason,
+            error: errorMessage(error),
+          });
+        }
+      }, 0);
+    };
+    if (androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS) || androidNativeInputPending()) {
+      const data = event.data;
+      window.setTimeout(() => {
+        if (!androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS)) {
+          decodeAndSchedule(data, "deferred-message");
+        }
+      }, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+      return;
     }
+    decodeAndSchedule(event.data, "message");
   });
   nativeObsSocket.addEventListener("close", () => {
     nativeObsConnected = false;
@@ -32436,7 +34782,53 @@ async function executeAndroidNativeControlCommand(command = {}) {
       timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
     });
   }
-  if (type === "open_wake_word") {
+  if (type === "get_android_native_ux_report") {
+    return runAndroidNativeIdleTask(() => ({
+      ok: true,
+      command: type,
+      report: androidNativeUxReport("native_control"),
+    }), {
+      force: payload.force === true,
+      allowHidden: payload.allowHidden === true,
+      timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
+    });
+  }
+  if (type === "probe_input_latency") {
+    return probeAndroidNativeInputLatency(payload);
+  }
+	  if (type === "probe_scroll_latency") {
+	    return probeAndroidNativeScrollLatency(payload);
+	  }
+	  if (type === "probe_canvas_pan_latency") {
+	    return probeAndroidNativeCanvasPanLatency(payload);
+	  }
+	  if (type === "probe_modal_latency") {
+	    return probeAndroidNativeModalLatency(payload);
+	  }
+	  if (type === "probe_space_switch_latency") {
+	    return probeAndroidNativeSpaceSwitchLatency(payload);
+	  }
+	  if (type === "arm_real_interaction_probe") {
+	    return armAndroidNativeRealInteractionProbe(payload);
+	  }
+	  if (type === "get_real_interaction_probe") {
+	    return getAndroidNativeRealInteractionProbe();
+	  }
+	  if (type === "get_resource_profile") {
+	    return {
+	      ok: true,
+	      command: type,
+	      resource_profile: window.__wasmAgentResourceProfiler?.snapshot?.({ limit: Number(payload.limit || 32) }) || null,
+	    };
+	  }
+	  if (type === "reset_resource_profile") {
+	    return {
+	      ok: true,
+	      command: type,
+	      resource_profile: window.__wasmAgentResourceProfiler?.reset?.() || null,
+	    };
+	  }
+	  if (type === "open_wake_word") {
     openWakeWordModal({ source: "native-control" });
     const queued = payload.startListener !== false
       ? queueWakeWordBridgeAction("start", "native-control-open-wake-word")
@@ -32584,17 +34976,42 @@ async function executeAndroidNativeControlCommand(command = {}) {
   }
   if (type === "upload_diagnostics" || type === "export_diagnostics") {
     return runAndroidNativeIdleTask(() => {
+      if (type === "upload_diagnostics") {
+        void uploadClientBootTrace("native_control_upload_diagnostics", {
+          immediate: payload.immediate === true,
+          keepalive: payload.keepalive === true,
+        });
+      }
       const exported = exportAndroidNativeDiagnostics();
       return { ok: true, command: type, exported: Boolean(exported), state: wakeWordLegacyState(getWakeWordState({ force: true })) };
     }, {
-      force: payload.force === true,
+      force: payload.force === true || payload.immediate === true,
       allowHidden: payload.allowHidden === true,
       timeoutMs: Number(payload.idleTimeoutMs || ANDROID_NATIVE_CONTROL_IDLE_TIMEOUT_MS),
     });
   }
   if (type === "reload") {
+    if (typeof bridge?.hardReloadWebRuntime === "function") {
+      const result = parseNativeBridgePayload(bridge.hardReloadWebRuntime(JSON.stringify({
+        reason: cleanText(payload.reason || reason, "native_control_reload"),
+      })));
+      return { ok: result?.ok !== false, command: type, mode: "hard_web_runtime_reload", native: result || null, reloading: true };
+    }
     bridge?.reload?.();
-    return { ok: true, command: type, reloading: true };
+    return { ok: true, command: type, mode: "soft_reload", reloading: true };
+  }
+  if (type === "hard_reload_web_runtime" || type === "refresh_web_runtime") {
+    if (typeof bridge?.hardReloadWebRuntime !== "function") {
+      if (typeof bridge?.reload === "function") {
+        bridge.reload();
+        return { ok: true, command: type, mode: "soft_reload_fallback", reloading: true };
+      }
+      return { ok: false, command: type, error: "hard_reload_web_runtime_unavailable" };
+    }
+    const result = parseNativeBridgePayload(bridge.hardReloadWebRuntime(JSON.stringify({
+      reason: cleanText(payload.reason || type, "native_control_refresh"),
+    })));
+    return { ok: result?.ok !== false, command: type, mode: "hard_web_runtime_reload", native: result || null, reloading: true };
   }
   return { ok: false, command: type, error: "unsupported_android_native_control_command" };
 }
@@ -32631,7 +35048,7 @@ async function pollAndroidNativeControl(reason = "interval") {
     });
     const payload = await androidNativeTrackPromise(
       "native_control.poll",
-      fetchJson(`/native/control/poll?${query.toString()}`, { timeoutMs: 5000 }),
+      fetchJson(`/native/control/poll?${query.toString()}`, { timeoutMs: 1500 }),
       { reason, route: androidNativeControlRoute() },
     );
     const commands = Array.isArray(payload?.commands) ? payload.commands : [];
@@ -32672,13 +35089,45 @@ async function pollAndroidNativeControl(reason = "interval") {
 
 function startAndroidNativeControlAgent() {
   if (!isAndroidNativeShell() || androidNativeControlPollTimer) return;
+  if (!androidNativeControlAutoStartEnabled()) {
+    androidNativeResponsiveness.native_control_poll_skip_reason = "perf_safe_mode";
+    clientBootMark("android_native_control_agent_auto_start_skipped", {
+      perf_safe_mode: androidNativePerfSafeMode(),
+      native_control: androidNativeQueryParam("nativeControl", androidNativeQueryParam("native_control", "auto")),
+    });
+    return;
+  }
   installAndroidNativeUxBudgetGuards();
   startAndroidNativeResponsivenessMonitor();
-  connectAndroidNativeObservability("startup");
-  void pollAndroidNativeControl("startup");
-  androidNativeControlPollTimer = window.setInterval(() => {
-    void pollAndroidNativeControl("interval");
-  }, ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS);
+  window.setTimeout(() => {
+    if (!androidNativeResponsivenessOverloadedNow() && !androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)) {
+      connectAndroidNativeObservability("startup");
+    }
+  }, ANDROID_NATIVE_INPUT_FIRST_QUIET_MS);
+  window.setTimeout(() => {
+    if (!nativeObsConnected) void pollAndroidNativeControl("startup");
+    else androidNativeResponsiveness.native_control_poll_skip_reason = "wao_connected";
+  }, ANDROID_NATIVE_HYDRATION_START_DELAY_MS);
+  const schedulePoll = () => {
+    const delayMs = androidNativeResponsivenessOverloadedNow() || androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)
+      ? ANDROID_NATIVE_CONTROL_POLL_OVERLOADED_MS
+      : ANDROID_NATIVE_CONTROL_POLL_INTERVAL_MS;
+    androidNativeControlPollTimer = window.setTimeout(() => {
+      androidNativeControlPollTimer = 0;
+      schedulePoll();
+      if (nativeObsConnected) {
+        androidNativeResponsiveness.native_control_poll_skip_reason = "wao_connected";
+        return;
+      }
+      if (androidNativeResponsivenessOverloadedNow() || androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS)) {
+        androidNativeResponsiveness.native_control_poll_skipped_count += 1;
+        androidNativeResponsiveness.native_control_poll_skip_reason = "touch_first_budget";
+        return;
+      }
+      void pollAndroidNativeControl("interval");
+    }, delayMs);
+  };
+  schedulePoll();
 }
 
 async function pollNativeVoiceWakeTimeline(reason = "poll") {
@@ -32690,21 +35139,23 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
     if (!payload?.available || !event) return;
     const sessionId = cleanText(event.session_id, "");
     const eventType = cleanText(event.type || event.kind, "voice_command");
-    const eventKey = sessionId || `${eventType}:${cleanText(event.received_at || event.started_at || event.ended_at, "")}`;
+    const eventKey = sessionId ? `${eventType}:${sessionId}` : `${eventType}:${cleanText(event.received_at || event.started_at || event.ended_at, "")}`;
     if (!eventKey || eventKey === state.nativeVoiceWakeLastSessionId) return;
     state.nativeVoiceWakeLastSessionId = eventKey;
-    if (eventType === "wake_detected" || eventType === "command_capture_started") {
+    if (eventType === "wake_detected" || eventType === "command_capture_started" || eventType === "voice_partial") {
       triggerAgentAvatarWakeShine({
         last_confidence: Number(event.wake_confidence || event.confidence || 0),
         last_wake_confidence: Number(event.wake_confidence || event.confidence || 0),
         last_wake_at: Number(event.started_at || Date.parse(event.received_at || "") || Date.now()),
         wake_hit_count: Number(state.nativeVoiceWakeLastHitCount || 0) + 1,
-        listener_mode: eventType === "command_capture_started" ? "transcribing" : "awake",
+        listener_mode: eventType === "wake_detected" ? "awake" : "transcribing",
       }, eventType);
+      if (eventType === "command_capture_started" || eventType === "voice_partial") {
+        showNativeVoiceChatDraft(event, { status: "transcribing", reason });
+      }
       return;
     }
     if (eventType !== "voice_command" || !sessionId) return;
-    state.nativeVoiceWakeLastSessionId = sessionId;
     const command = routeWakeWordCommand(event.command || event.transcript || "");
     triggerAgentAvatarWakeShine({
       last_confidence: Number(event.wake_confidence || event.confidence || 0),
@@ -32729,27 +35180,212 @@ async function pollNativeVoiceWakeTimeline(reason = "poll") {
         reason,
       },
     });
+    void routeNativeVoiceCommandToFrontierChat(event, { reason, command });
   } catch {
     // Native voice wake timeline polling is best effort.
   }
 }
 
+function normalizeNativeVoiceChatTranscript(transcript = "") {
+  return cleanText(transcript, "")
+    .replace(/\[(?:unk|spn|noise|sil)\]|<(?:unk|spn|noise|sil)>/gi, " ")
+    .replace(/wakeword/gi, "wake word")
+    .replace(/[^a-z0-9 ?!.,'’-]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function nativeVoiceChatTranscriptLooksUsable(transcript = "") {
+  const normalized = normalizeNativeVoiceChatTranscript(transcript).toLowerCase();
+  if (!normalized) return false;
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return false;
+  const weakWords = new Set(["word", "words", "uh", "um", "hmm", "noise", "unknown"]);
+  const meaningfulWords = words.filter((word) => !weakWords.has(word));
+  if (meaningfulWords.length === 0) return false;
+  if (normalized.length < 3) return false;
+  return true;
+}
+
+function activeAgentMessageById(messageId = "") {
+  const session = activeAgentSession();
+  if (!messageId || !Array.isArray(session.messages)) return null;
+  return session.messages.find((message) => message?.id === messageId) || null;
+}
+
+function updateNativeVoiceChatDraft(content, extra = {}) {
+  const message = activeAgentMessageById(state.nativeVoiceChatDraftMessageId);
+  if (!message) return null;
+  Object.assign(message, extra, {
+    content,
+    timestamp: new Date().toISOString(),
+  });
+  state.nativeVoiceChatDraftUpdatedAt = Date.now();
+  activeAgentSession().updated_at = new Date().toISOString();
+  saveAgentSessions();
+  renderAgentMessages({ forceBottom: true });
+  return message;
+}
+
+function clearNativeVoiceChatDraft(sessionId = "") {
+  if (sessionId && state.nativeVoiceChatDraftSessionId && sessionId !== state.nativeVoiceChatDraftSessionId) return;
+  state.nativeVoiceChatDraftMessageId = "";
+  state.nativeVoiceChatDraftSessionId = "";
+  state.nativeVoiceChatDraftUpdatedAt = 0;
+}
+
+function discardNativeVoiceChatDraft(sessionId = "") {
+  if (sessionId && state.nativeVoiceChatDraftSessionId && sessionId !== state.nativeVoiceChatDraftSessionId) return;
+  const messageId = state.nativeVoiceChatDraftMessageId;
+  const session = activeAgentSession();
+  if (messageId && Array.isArray(session.messages)) {
+    session.messages = session.messages.filter((message) => message?.id !== messageId);
+    session.updated_at = new Date().toISOString();
+    saveAgentSessions();
+    renderAgentMessages({ forceBottom: true });
+  }
+  clearNativeVoiceChatDraft(sessionId);
+}
+
+function showNativeVoiceChatDraft(event = {}, options = {}) {
+  const sessionId = cleanText(event.session_id, "");
+  const transcript = normalizeNativeVoiceChatTranscript(event.partial_transcript || event.transcript || event.normalized_transcript || "");
+  if (options.status === "transcribing" && !nativeVoiceChatTranscriptLooksUsable(transcript)) return null;
+  const now = Date.now();
+  const stale = now - Number(state.nativeVoiceChatDraftUpdatedAt || 0) > VOICE_CHAT_DRAFT_STALE_MS;
+  const content = transcript || (options.status === "rejected" ? "I heard the wake word, but the transcript was not usable." : "Listening...");
+  if (state.agentTargetNode !== AGENT_FRONTIER_NODE_ID) setAgentTargetNode(AGENT_FRONTIER_NODE_ID);
+  openAgentChat();
+  const existing = activeAgentMessageById(state.nativeVoiceChatDraftMessageId);
+  if (existing && !stale && (!sessionId || sessionId === state.nativeVoiceChatDraftSessionId)) {
+    return updateNativeVoiceChatDraft(content, {
+      pending: options.status !== "rejected",
+      pending_state: cleanText(options.status, "transcribing"),
+      voice_session_id: sessionId,
+      source: "android-native-voice",
+    });
+  }
+  const message = appendAgentMessage("user", content, {
+    pending: options.status !== "rejected",
+    pending_state: cleanText(options.status, "transcribing"),
+    voice_session_id: sessionId,
+    source: "android-native-voice",
+  });
+  state.nativeVoiceChatDraftMessageId = message.id;
+  state.nativeVoiceChatDraftSessionId = sessionId;
+  state.nativeVoiceChatDraftUpdatedAt = now;
+  renderAgentMessages({ forceBottom: true });
+  return message;
+}
+
+async function routeNativeVoiceCommandToFrontierChat(event = {}, options = {}) {
+  const rawTranscript = cleanText(event.transcript, "").replace(/\s+/g, " ").trim();
+  const transcript = normalizeNativeVoiceChatTranscript(rawTranscript);
+  const sessionId = cleanText(event.session_id, "");
+  if (!transcript) {
+    discardNativeVoiceChatDraft(sessionId);
+    recordUserEvent("voice_command_transcript_rejected", {
+      target: "android-native",
+      summary: "Rejected empty voice transcript",
+      data: {
+        session_id: sessionId,
+        transcript: rawTranscript,
+        normalized_transcript: "",
+        reason: "empty-transcript",
+      },
+      redacted: true,
+    });
+    return;
+  }
+  if (!nativeVoiceChatTranscriptLooksUsable(rawTranscript)) {
+    discardNativeVoiceChatDraft(sessionId);
+    recordUserEvent("voice_command_transcript_rejected", {
+      target: "android-native",
+      summary: "Rejected low-quality voice transcript",
+      data: {
+        session_id: sessionId,
+        transcript: rawTranscript,
+        normalized_transcript: transcript,
+        reason: "low-quality-transcript",
+      },
+      redacted: true,
+    });
+    return;
+  }
+  if (state.agentBusy) {
+    window.clearTimeout(state.nativeVoiceChatRetryTimer);
+    state.nativeVoiceChatRetryTimer = window.setTimeout(() => {
+      state.nativeVoiceChatRetryTimer = 0;
+      void routeNativeVoiceCommandToFrontierChat(event, options);
+    }, 1200);
+    return;
+  }
+  const now = Date.now();
+  const sameTranscript = transcript.toLowerCase() === cleanText(state.nativeVoiceChatLastTranscript, "").toLowerCase();
+  const sameSession = sessionId && sessionId === state.nativeVoiceChatLastSessionId;
+  if ((sameSession || sameTranscript) && now - Number(state.nativeVoiceChatLastTranscriptAt || 0) < VOICE_CHAT_DEDUPE_MS) return;
+  const breakMs = now - Number(state.nativeVoiceChatLastTranscriptAt || 0);
+  state.nativeVoiceChatLastTranscript = transcript;
+  state.nativeVoiceChatLastTranscriptAt = now;
+  state.nativeVoiceChatLastSessionId = sessionId;
+  const previousTarget = state.agentTargetNode;
+  if (state.agentTargetNode !== AGENT_FRONTIER_NODE_ID) {
+    setAgentTargetNode(AGENT_FRONTIER_NODE_ID);
+  }
+  openAgentChat();
+  updateNativeVoiceChatDraft(transcript, {
+    pending: false,
+    pending_state: "",
+    voice_session_id: sessionId,
+    source: "android-native-voice",
+  });
+  clearNativeVoiceChatDraft(sessionId);
+  recordUserEvent("voice_command_routed_to_frontier", {
+    target: `node:${AGENT_FRONTIER_NODE_ID}`,
+    summary: truncateText(transcript, 160),
+    data: {
+      session_id: sessionId,
+      previous_target: previousTarget,
+      command: cleanText(options.command || event.command || "", ""),
+      break_ms: Number.isFinite(breakMs) ? breakMs : 0,
+      long_break: breakMs >= VOICE_CHAT_TRANSCRIPT_BREAK_MS,
+      source: cleanText(event.source, "android-native"),
+      reason: cleanText(options.reason, ""),
+    },
+    redacted: true,
+  });
+  await sendAgentMessage(transcript);
+}
+
+function androidNativeWakeUiActive() {
+  return Boolean(
+    (els.wakeWordModal && !els.wakeWordModal.hidden)
+    || (els.tuneVoiceModal && !els.tuneVoiceModal.hidden)
+    || state.activePanel === "wake-word"
+  );
+}
+
 function startNativeVoiceWakeTimelinePolling() {
   if (!isAndroidNativeShell() || state.nativeVoiceWakePollInterval) return;
+  if (androidNativeWakeDisabled()) {
+    clientBootMark("native_voice_timeline_polling_disabled", {
+      wake: androidNativeQueryParam("wake", "off"),
+      perf_safe_mode: androidNativePerfSafeMode(),
+    });
+    return;
+  }
   clientBootMark("native_voice_timeline_polling_start");
-  refreshWakeWordAvatarState("startup");
-  void pollNativeVoiceWakeTimeline("startup");
+  if (androidNativeWakeUiActive()) {
+    refreshWakeWordAvatarState("startup");
+    void pollNativeVoiceWakeTimeline("startup");
+  } else {
+    clientBootMark("native_voice_timeline_polling_startup_light", {
+      wake_ui_active: false,
+    });
+  }
   state.nativeVoiceWakePollInterval = window.setInterval(() => {
-    if (!androidNativeResponsivenessOverloadedNow()) {
-      if (nativeObsConnected) {
-        const now = Date.now();
-        if (now - Number(state.nativeVoiceWakeLastWaoHeartbeatAt || 0) >= NATIVE_VOICE_WAKE_WAO_HEARTBEAT_MS) {
-          state.nativeVoiceWakeLastWaoHeartbeatAt = now;
-          refreshWakeWordAvatarState("wao-heartbeat");
-        }
-        return;
-      }
-      refreshWakeWordAvatarState("interval");
+    if (!androidNativeResponsivenessOverloadedNow() && !androidNativeRecentUserInput(ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS)) {
+      if (androidNativeWakeUiActive()) refreshWakeWordAvatarState("interval");
       void pollNativeVoiceWakeTimeline("interval");
     }
   }, NATIVE_VOICE_WAKE_TIMELINE_POLL_MS);
@@ -35377,6 +38013,7 @@ function scheduleBrowserResizeSync() {
 }
 
 function renderAll() {
+  clearAndroidPrepaintShell("render_all");
   const deferAdminSurfaces = isAndroidNativeShell() && state.activePanel === "home";
   renderRoleVisibility();
   els.runtimeLabel.textContent = state.wasmReady ? `wasm add=${state.wasm.add(19, 23)}` : "wasm pending";
@@ -36358,10 +38995,35 @@ function renderSpaceLauncher() {
     glyph.setAttribute("aria-hidden", "true");
 
     button.append(glyph);
-    button.addEventListener("click", () => setPanel(space.id));
+    bindAndroidNativeFastTap(button, () => setPanel(space.id));
     button.addEventListener("contextmenu", (event) => showSpaceContextMenu(space, event));
     els.spaceLauncherList.append(button);
   });
+}
+
+function bindAndroidNativeFastTap(element, action, options = {}) {
+  if (!element || typeof action !== "function") return;
+  let lastFastTapAt = 0;
+  if (isAndroidNativeShell()) {
+    const pointerEventType = options.pointerEventType || "pointerup";
+    element.addEventListener(pointerEventType, (event) => {
+      if (event.pointerType && event.pointerType !== "touch") return;
+      if (Number(event.button || 0) !== 0) return;
+      lastFastTapAt = Date.now();
+      event.preventDefault();
+      event.stopPropagation();
+      clearAndroidCanvasDeferralForScreenOpen(`android-fast-tap:${pointerEventType}`);
+      androidNativeRunVisual(() => action(event, { source: "android-fast-tap" }), "android-fast-tap");
+    }, { passive: false });
+    element.addEventListener("click", (event) => {
+      if (!lastFastTapAt || Date.now() - lastFastTapAt > 700) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, { capture: true });
+  }
+  if (options.includeClick !== false) {
+    element.addEventListener("click", (event) => action(event, { source: "click" }));
+  }
 }
 
 function createUserSpace() {
@@ -36400,15 +39062,23 @@ function openHomeDevices() {
 function openConfigModal() {
   state.configAreaDraft = canvasAreaSize();
   if (els.configModal) els.configModal.hidden = false;
-  updateSharedSpaceSyncPolling();
-  renderConfigModal();
-  window.requestAnimationFrame(() => updateAreaMap());
+  const hydrateConfigModal = () => {
+    updateSharedSpaceSyncPolling();
+    renderConfigModal();
+    window.requestAnimationFrame(() => updateAreaMap());
+  };
+  if (isAndroidNativeShell()) androidNativeAfterPaintTask(hydrateConfigModal, "config-modal-hydrate");
+  else hydrateConfigModal();
   pushUiNavigationLayer("config-modal", () => closeConfigModal({ skipHistory: true, skipStack: true }));
-  void loadTimeline("config").catch(() => {});
-  recordUserEvent("home.config_opened", {
+  const finishConfigOpen = () => {
+    void loadTimeline("config").catch(() => {});
+    recordUserEvent("home.config_opened", {
     target: "home:config",
     summary: "Opened space config",
-  });
+    });
+  };
+  if (isAndroidNativeShell()) androidNativeAfterQuiet(finishConfigOpen, "config-modal-open-finish");
+  else finishConfigOpen();
 }
 
 function closeConfigModal(options = {}) {
@@ -37210,51 +39880,149 @@ function syncPanelUrl(panel) {
   window.history.pushState(uiNavigationState(), "", nextUrl);
 }
 
+function androidNativePanelSwitchTimer(enabled) {
+  if (!enabled) return null;
+  const started = performance.now();
+  let previous = started;
+  const steps = [];
+  return {
+    mark(label) {
+      const now = performance.now();
+      steps.push({
+        label: cleanText(label, "step"),
+        delta_ms: Math.max(0, Math.round((now - previous) * 10) / 10),
+        total_ms: Math.max(0, Math.round((now - started) * 10) / 10),
+      });
+      previous = now;
+    },
+    finish(panel, previousPanel) {
+      const now = performance.now();
+      const summary = {
+        panel: cleanText(panel, ""),
+        previous_panel: cleanText(previousPanel, ""),
+        total_ms: Math.max(0, Math.round((now - started) * 10) / 10),
+        steps,
+        at: new Date().toISOString(),
+      };
+      state.androidNativeLastPanelSwitchTiming = summary;
+      return summary;
+    },
+  };
+}
+
 function setPanel(panel, options = {}) {
   panel = normalizePanel(panel);
   if (!isPanelAvailable(panel)) panel = "home";
   const previous = state.activePanel;
+  const androidNative = isAndroidNativeShell();
+  const panelSwitchTimer = androidNativePanelSwitchTimer(androidNative);
+  if (androidNative) clearAndroidCanvasDeferralForScreenOpen("panel_switch");
+  if (androidNative) markAndroidNativeUserInput();
+  panelSwitchTimer?.mark("mark-input");
   const nextSharedRoomId = sharedUserSpaceForPanel(panel)?.shared_space_id || "";
+  panelSwitchTimer?.mark("shared-room-id");
   if (state.sharedVoice.active && state.sharedVoice.roomId && state.sharedVoice.roomId !== nextSharedRoomId) {
     void stopSharedVoice({ reason: "space-changed" });
   }
+  panelSwitchTimer?.mark("shared-voice");
   state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = state.widgetLayout;
-  saveLocalSpaceWidgetLayouts();
+  panelSwitchTimer?.mark("capture-layout");
+  if (!androidNative) saveLocalSpaceWidgetLayouts();
+  panelSwitchTimer?.mark(androidNative ? "defer-save-layout" : "save-layout");
   const userSpacePanel = isUserSpacePanel(panel);
   state.activePanel = panel;
   els.app.dataset.panel = panel;
   els.app.dataset.panelKind = userSpacePanel ? "user-space" : panel;
   els.app.dataset.activeSpace = userSpacePanel ? panel : "";
-  els.panelTabs.forEach((button) => button.classList.toggle("active", button.dataset.panel === panel));
-  els.panelButtons.forEach((button) => {
-    if (button.classList.contains("launch")) button.classList.toggle("active", button.dataset.panel === panel);
-    if (button.classList.contains("launcher-mark")) button.classList.toggle("active", button.dataset.panel === panel);
-  });
-  els.panelViews.forEach((view) => view.classList.toggle("active", view.dataset.view === panel));
-  applySpaceWidgetLayout(panel);
-  renderSpaceTitle();
-  renderSpaceLauncher();
-  renderSharedVoice();
-  updateSharedSpaceSyncPolling();
-  syncResourcePolling();
-  syncSecurityPolling();
-  if (isAndroidNativeShell() && isAdminPanel(panel) && previous !== panel) {
-    window.setTimeout(() => void refresh("panel").catch(() => {}), 250);
-  }
-  if (panel === "diagnostics") {
-    installWindowsAndroidOAuthDiagnostics();
-    if (!state.androidOAuthVerification.busy) void refreshAndroidOAuthReport();
-  }
-  if (panel === "modules") renderModules();
-  if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
-  if (options.updateUrl !== false) syncPanelUrl(panel);
-  if (previous !== panel) {
-    recordUserEvent("workspace.panel_selected", {
-      target: `panel:${panel}`,
-      summary: `Opened ${panel} panel`,
-      data: { panel, previous_panel: previous },
+  panelSwitchTimer?.mark("state-dataset");
+  if (androidNative) {
+    const cssEscape = window.CSS?.escape || ((value) => String(value || "").replace(/[^a-zA-Z0-9_-]/g, "\\$&"));
+    const panelSelector = [previous, panel]
+      .filter(Boolean)
+      .map((value) => `[data-panel="${cssEscape(value)}"]`)
+      .join(",");
+    const viewSelector = [previous, panel]
+      .filter(Boolean)
+      .map((value) => `[data-view="${cssEscape(value)}"]`)
+      .join(",");
+    if (panelSelector) {
+      document.querySelectorAll(panelSelector).forEach((button) => {
+        if (button.classList.contains("launch") || button.classList.contains("launcher-mark") || button.matches(".panel-tabs [data-panel]")) {
+          button.classList.toggle("active", button.dataset.panel === panel);
+        }
+      });
+    }
+    if (viewSelector) {
+      document.querySelectorAll(viewSelector).forEach((view) => {
+        view.classList.toggle("active", view.dataset.view === panel);
+      });
+    }
+    panelSwitchTimer?.mark("toggle-active-dom");
+  } else {
+    els.panelTabs.forEach((button) => button.classList.toggle("active", button.dataset.panel === panel));
+    els.panelButtons.forEach((button) => {
+      if (button.classList.contains("launch")) button.classList.toggle("active", button.dataset.panel === panel);
+      if (button.classList.contains("launcher-mark")) button.classList.toggle("active", button.dataset.panel === panel);
     });
+    els.panelViews.forEach((view) => view.classList.toggle("active", view.dataset.view === panel));
   }
+  renderSpaceTitle();
+  panelSwitchTimer?.mark("render-title");
+  const syncPanelSideEffects = () => {
+    renderSpaceLauncher();
+    renderSharedVoice();
+    updateSharedSpaceSyncPolling();
+    syncResourcePolling();
+    syncSecurityPolling();
+  };
+  const syncPanelHeavyView = () => {
+    if (panel === "modules") renderModules();
+    if (panel === "timeline" && isModuleEnabled("timeline")) void loadTimeline("panel").catch(() => {});
+  };
+  const syncPanelDiagnostics = () => {
+    if (panel === "diagnostics") {
+      installWindowsAndroidOAuthDiagnostics();
+      if (!state.androidOAuthVerification.busy) void refreshAndroidOAuthReport();
+    }
+  };
+  const syncPanelAdminRefresh = () => {
+    if (!androidNative) return;
+    if (isAdminPanel(panel) && previous !== panel) void refresh("panel").catch(() => {});
+  };
+  const syncPanelNavigationUrl = () => {
+    if (options.updateUrl !== false) syncPanelUrl(panel);
+  };
+  const recordPanelSelected = () => recordUserEvent("workspace.panel_selected", {
+    target: `panel:${panel}`,
+    summary: `Opened ${panel} panel`,
+    data: { panel, previous_panel: previous },
+  });
+  if (androidNative) {
+    window.setTimeout(() => {
+      saveLocalSpaceWidgetLayouts();
+      if (state.activePanel === panel) applySpaceWidgetLayout(panel);
+      syncPanelSideEffects();
+      syncPanelDiagnostics();
+      syncPanelHeavyView();
+      syncPanelNavigationUrl();
+      if (previous !== panel) recordPanelSelected();
+      window.setTimeout(syncPanelAdminRefresh, 170);
+    }, ANDROID_CANVAS_INTERACTION_RELEASE_MS);
+    panelSwitchTimer?.mark("schedule-settled-work");
+  } else {
+    applySpaceWidgetLayout(panel);
+    syncPanelSideEffects();
+    syncPanelDiagnostics();
+    syncPanelHeavyView();
+    syncPanelNavigationUrl();
+    if (previous !== panel) recordPanelSelected();
+    syncPanelAdminRefresh();
+    panelSwitchTimer?.mark("sync-settled-work");
+  }
+  if (previous !== panel) {
+    panelSwitchTimer?.mark("event-ready");
+  }
+  panelSwitchTimer?.finish(panel, previous);
 }
 
 function handleAppPopState() {
@@ -37911,6 +40679,11 @@ function installSpaceDistanceGestures(viewport) {
     if (event.pointerType !== "touch") return;
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
     if (spaceDistanceGestureBlocked(event.target)) return;
+    if (isAndroidNativeShell()) {
+      state.spaceNavigationInputAt = performance.now();
+      state.androidSpaceScrollDeferredUntil = performance.now() + ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+      return;
+    }
     state.spaceNavigationInputAt = performance.now();
     state.spaceGesturePointers.set(event.pointerId, {
       pointerId: event.pointerId,
@@ -37964,20 +40737,65 @@ function installSpacePanning() {
   const viewport = els.spaceViewport;
   if (!viewport) return;
   installSpaceDistanceGestures(viewport);
-  viewport.addEventListener("scroll", () => {
+  installAndroidMomentumInteractiveTapCancel();
+  if (isAndroidNativeShell()) {
+    viewport.addEventListener("scroll", () => {
+      const now = performance.now();
+      if (now - Number(state.androidSharedPointerFollowScrollAt || 0) < 120) {
+        updateSpaceNavigationHints();
+        scheduleSpaceMiniMapViewportSync("shared-pointer-follow-scroll");
+        return;
+      }
+      state.spaceNavigationInputAt = now;
+      state.androidSpaceScrollDeferredUntil = now + ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+      if (!state.androidNativeScrollPanActive) {
+        state.androidNativeScrollPanActive = true;
+        androidNativeRecordTouch("pan_start");
+      }
+      androidNativeRecordTouch("pan_move");
+      window.clearTimeout(state.androidSpaceScrollMaintenanceTimer);
+      state.androidSpaceScrollMaintenanceTimer = window.setTimeout(() => {
+        state.androidSpaceScrollMaintenanceTimer = 0;
+        state.androidSpaceScrollDeferredUntil = 0;
+        if (state.androidNativeScrollPanActive) {
+          state.androidNativeScrollPanActive = false;
+          androidNativeRecordTouch("pan_end");
+        }
+        androidNativeAfterPaintTask(() => {
+          updateSpaceNavigationHints();
+          scheduleAndroidSpaceMiniMapRender("native-scroll");
+        }, "android-native-scroll-maintenance");
+      }, ANDROID_CANVAS_INTERACTION_RELEASE_MS);
+    }, { passive: true });
     updateSpaceNavigationHints();
-    applyMaximizedWidgetLayouts();
-    renderSpaceMiniMap();
-  }, { passive: true });
+  } else {
+    viewport.addEventListener("scroll", () => {
+      updateSpaceNavigationHints();
+		      applyMaximizedWidgetLayouts();
+	      renderSpaceMiniMap();
+	    }, { passive: true });
+  }
   updateSpaceNavigationHints();
   viewport.addEventListener("pointerdown", (event) => {
     if (!isPrimaryPointer(event)) return;
+    const androidPan = isAndroidNativeShell();
+    if (androidPan) androidNativeRecordTouch("pointerdown");
     if (!event.target.closest?.(".widget[data-widget-id]")) clearActiveWidget();
-    if (event.target.closest?.(".widget,.space-app-button,.home-actions,.space-title,.space-config-button,.modal-backdrop,.agent-overlay")) return;
-    if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) return;
+    if (isCanvasPanBlockedTarget(event.target)) {
+      if (androidPan && state.spacePanMomentumActive) cancelAndroidMomentumForInteractiveTap(event);
+      if (androidPan) androidNativeRecordTouch("ignored", "interactive_target");
+      return;
+    }
+    if (state.spacePinchActive || performance.now() < state.spacePinchSuppressPanUntil) {
+      if (androidPan) androidNativeRecordTouch("ignored", "pinch_suppressed");
+      return;
+    }
     const canPanX = viewport.scrollWidth > viewport.clientWidth + 1;
     const canPanY = viewport.scrollHeight > viewport.clientHeight + 1;
-    if (!canPanX && !canPanY) return;
+    if (!canPanX && !canPanY) {
+      if (androidPan) androidNativeRecordTouch("ignored", "not_scrollable");
+      return;
+    }
     event.preventDefault();
     stopSpacePanMomentum();
     const startX = event.clientX;
@@ -37988,15 +40806,16 @@ function installSpacePanning() {
     let lastY = startY;
     let lastTime = performance.now();
     let velocitySamples = [];
-    let moved = false;
-    let finished = false;
-    state.spacePanActive = true;
-    state.spaceNavigationInputAt = performance.now();
-    viewport.classList.add("is-panning");
-    setSpaceMiniMapVisible(true);
-    try {
-      viewport.setPointerCapture(event.pointerId);
-    } catch {
+	    let moved = false;
+	    let finished = false;
+	    state.spacePanActive = true;
+	    if (androidPan) androidNativeRecordTouch("pan_start");
+	    state.spaceNavigationInputAt = performance.now();
+	    viewport.classList.add("is-panning");
+	    setSpaceMiniMapVisible(true);
+	    try {
+	      viewport.setPointerCapture(event.pointerId);
+	    } catch {
       // Window listeners below keep panning responsive when capture is unavailable.
     }
     const move = (moveEvent) => {
@@ -38005,6 +40824,26 @@ function installSpacePanning() {
       state.spaceNavigationInputAt = performance.now();
       if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
       const now = performance.now();
+      if (isAndroidNativeShell()) {
+        androidNativeRecordTouch("pan_move");
+        const dt = Math.max(1, now - lastTime);
+        const velocityX = (moveEvent.clientX - lastX) / dt;
+        const velocityY = (moveEvent.clientY - lastY) / dt;
+        velocitySamples.push({ vx: velocityX, vy: velocityY, dt });
+        let sampleWindowMs = 0;
+        velocitySamples = velocitySamples.reverse().filter((sample) => {
+          sampleWindowMs += sample.dt;
+          return sampleWindowMs <= SPACE_PAN_MOMENTUM_SAMPLE_MS;
+        }).reverse();
+	        lastX = moveEvent.clientX;
+	        lastY = moveEvent.clientY;
+	        lastTime = now;
+	        state.androidSpaceScrollDeferredUntil = now + ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+	        if (canPanX) viewport.scrollLeft = startLeft - (moveEvent.clientX - startX);
+	        if (canPanY) viewport.scrollTop = startTop - (moveEvent.clientY - startY);
+	        scheduleSpaceMiniMapViewportSync("pan-move");
+	        return;
+	      }
       const dt = Math.max(1, now - lastTime);
       const velocityX = (moveEvent.clientX - lastX) / dt;
       const velocityY = (moveEvent.clientY - lastY) / dt;
@@ -38016,19 +40855,23 @@ function installSpacePanning() {
       }).reverse();
       lastX = moveEvent.clientX;
       lastY = moveEvent.clientY;
-      lastTime = now;
-      if (canPanX) viewport.scrollLeft = startLeft - (moveEvent.clientX - startX);
-      if (canPanY) viewport.scrollTop = startTop - (moveEvent.clientY - startY);
-      updateSpaceNavigationHints();
-      renderSpaceMiniMap();
-    };
+	      lastTime = now;
+	      if (isAndroidNativeShell()) state.androidSpaceScrollDeferredUntil = performance.now() + ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS;
+	      if (canPanX) viewport.scrollLeft = startLeft - (moveEvent.clientX - startX);
+	      if (canPanY) viewport.scrollTop = startTop - (moveEvent.clientY - startY);
+	      if (!isAndroidNativeShell()) {
+	        updateSpaceNavigationHints();
+	        renderSpaceMiniMap();
+	      }
+	    };
     const end = (endEvent) => {
       if (finished) return;
       finished = true;
-      state.spacePanActive = false;
-      state.spaceNavigationInputAt = performance.now();
-      viewport.classList.remove("is-panning");
-      renderSpaceMiniMap();
+	      state.spacePanActive = false;
+	      if (isAndroidNativeShell()) androidNativeRecordTouch("pan_end");
+	      state.spaceNavigationInputAt = performance.now();
+	      viewport.classList.remove("is-panning");
+			      if (!isAndroidNativeShell()) renderSpaceMiniMap();
       viewport.removeEventListener("pointermove", move);
       viewport.removeEventListener("pointerup", end);
       viewport.removeEventListener("pointercancel", end);
@@ -38045,11 +40888,11 @@ function installSpacePanning() {
         endEvent.preventDefault();
         endEvent.stopPropagation();
         const releaseIdleMs = performance.now() - lastTime;
-        const releaseVelocity = releaseIdleMs > SPACE_PAN_MOMENTUM_SAMPLE_MS
-          ? { x: 0, y: 0 }
-          : weightedSpacePanVelocity(velocitySamples);
-        startSpacePanMomentum(viewport, releaseVelocity.x, releaseVelocity.y, canPanX, canPanY);
-        recordUserEvent("workspace.canvas_panned", {
+	        const releaseVelocity = releaseIdleMs > SPACE_PAN_MOMENTUM_SAMPLE_MS
+	          ? { x: 0, y: 0 }
+	          : weightedSpacePanVelocity(velocitySamples);
+	        startSpacePanMomentum(viewport, releaseVelocity.x, releaseVelocity.y, canPanX, canPanY);
+        const recordPanEvent = () => recordUserEvent("workspace.canvas_panned", {
           target: `space:${activeSpaceStorageId()}`,
           summary: `Panned ${activeSpaceStorageId()} canvas`,
           data: {
@@ -38060,19 +40903,25 @@ function installSpacePanning() {
             release_idle_ms: releaseIdleMs,
             momentum: state.spacePanMomentumActive,
           },
+          deferPublish: isAndroidNativeShell(),
+          redact: !isAndroidNativeShell(),
         });
+        if (isAndroidNativeShell()) window.setTimeout(recordPanEvent, ANDROID_NATIVE_CONTROL_INTERACTION_QUIET_MS);
+        else recordPanEvent();
       } else {
         setSpaceMiniMapVisible(false);
       }
     };
-    viewport.addEventListener("pointermove", move, { passive: false });
-    viewport.addEventListener("pointerup", end, { once: true });
-    viewport.addEventListener("pointercancel", end, { once: true });
-    window.addEventListener("pointermove", move, { passive: false });
-    window.addEventListener("pointerup", end, { once: true });
-    window.addEventListener("pointercancel", end, { once: true });
-  });
-}
+	    viewport.addEventListener("pointermove", move, { passive: false });
+	    viewport.addEventListener("pointerup", end, { once: true });
+	    viewport.addEventListener("pointercancel", end, { once: true });
+	    if (!isAndroidNativeShell()) {
+	      window.addEventListener("pointermove", move, { passive: false });
+	      window.addEventListener("pointerup", end, { once: true });
+	      window.addEventListener("pointercancel", end, { once: true });
+	    }
+	  });
+	}
 
 function installModalBackdropDismiss(modal, close) {
   if (!modal) return;
@@ -38086,15 +40935,68 @@ function installModalBackdropDismiss(modal, close) {
   });
 }
 
+function wireAndroidNativeFastEvents() {
+  if (!isAndroidNativeShell() || state.androidNativeFastEventsWired) return false;
+  state.androidNativeFastEventsWired = true;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  state.androidNativeFastEventController = controller;
+  const options = controller ? { signal: controller.signal } : undefined;
+  els.loginButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setLoginOpen(!state.loginOpen);
+  }, options);
+  els.authGateLoginButton?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (startAndroidNativeGoogleLoginIfAvailable("auth-gate-login-button-fast")) return;
+    setLoginOpen(true);
+  }, options);
+  els.loginPopover?.addEventListener("click", (event) => event.stopPropagation(), options);
+  els.logoutButton?.addEventListener("click", () => void logout(), options);
+  els.agentAvatarButton?.addEventListener("click", () => {
+    if (state.agentDragSuppressClick) return;
+    if (state.agentOpen) closeAgentChat();
+    else openAgentChat();
+  }, options);
+  els.agentCloseButton?.addEventListener("click", closeAgentChat, options);
+  clientBootMark("android_fast_events_wired");
+  return true;
+}
+
+function unwireAndroidNativeFastEvents() {
+  try {
+    state.androidNativeFastEventController?.abort?.();
+  } catch {
+    // Fast boot handlers are best-effort until full wiring takes over.
+  }
+  state.androidNativeFastEventController = null;
+}
+
 function wireEvents() {
+  unwireAndroidNativeFastEvents();
   syncVisualViewportSize();
   renderSocialPickers();
   installWisAutomationHook();
   installInteractionTrace();
   els.app.addEventListener("click", (event) => {
+    const targetSummary = summarizeEventTarget(event.target);
+    if (isAndroidNativeShell()) {
+      recordUserEvent("workspace.click", {
+        target: targetSummary,
+        summary: `Clicked ${targetSummary}`,
+        data: {
+          button: event.button,
+          panel: state.activePanel,
+          widget: event.target.closest?.("[data-widget-id]")?.dataset?.widgetId || "",
+          android_fast_event: true,
+        },
+        deferPublish: true,
+        redact: false,
+      });
+      return;
+    }
     recordUserEvent("workspace.click", {
-      target: summarizeEventTarget(event.target),
-      summary: `Clicked ${summarizeEventTarget(event.target)}`,
+      target: targetSummary,
+      summary: `Clicked ${targetSummary}`,
       data: {
         button: event.button,
         panel: state.activePanel,
@@ -38150,6 +41052,7 @@ function wireEvents() {
   window.visualViewport?.addEventListener("scroll", refreshViewportLayout);
   els.spaceOrganizeButton?.addEventListener("click", organizeSpaceAppsInViewport);
   els.spaceConfigButton?.addEventListener("click", openConfigModal);
+  bindAndroidNativeFastTap(els.spaceConfigButton, openConfigModal, { includeClick: false });
   els.addNodeButton?.addEventListener("click", addNodeFromTopology);
   els.promptSendButton.addEventListener("click", () => {
     const prompt = els.promptInput.value.trim();
@@ -38272,13 +41175,19 @@ function wireEvents() {
   els.timelineRefreshButton.addEventListener("click", () => void loadTimeline("manual"));
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
+  bindAndroidNativeFastTap(els.addSpaceButton, createUserSpace, { includeClick: false });
   els.joinSpaceButton?.addEventListener("click", () => openJoinSpaceModal());
+  bindAndroidNativeFastTap(els.joinSpaceButton, () => openJoinSpaceModal(), { includeClick: false });
   els.sharedVoiceButton?.addEventListener("click", toggleSharedVoice);
   els.sharedVoiceMuteButton?.addEventListener("click", toggleSharedVoiceMute);
   els.homeFleetButton?.addEventListener("click", openFleetModal);
+  bindAndroidNativeFastTap(els.homeFleetButton, openFleetModal, { includeClick: false, pointerEventType: "pointerdown" });
   els.homeDevicesButton?.addEventListener("click", openHomeDevices);
+  bindAndroidNativeFastTap(els.homeDevicesButton, openHomeDevices, { includeClick: false, pointerEventType: "pointerdown" });
   els.homeGoNativeButton?.addEventListener("click", () => openNativeModal({ origin: "home-go-native" }));
-  els.homeTuneVoiceButton?.addEventListener("click", () => openWakeWordModal());
+  bindAndroidNativeFastTap(els.homeGoNativeButton, () => openNativeModal({ origin: "home-go-native" }), { includeClick: false, pointerEventType: "pointerdown" });
+  els.homeTuneVoiceButton?.addEventListener("click", () => openWakeWordModal(isAndroidNativeShell() ? { autoStart: false } : {}));
+  bindAndroidNativeFastTap(els.homeTuneVoiceButton, () => openWakeWordModal({ autoStart: false }), { includeClick: false, pointerEventType: "pointerdown" });
   els.closeTuneVoiceModalButton?.addEventListener("click", closeTuneVoiceWizard);
   els.tuneVoiceBackButton?.addEventListener("click", () => {
     if (tuneVoiceState.phase === "recording" || tuneVoiceState.phase === "saving" || tuneVoiceState.phase === "countdown") return cancelTuneVoiceRecording();
@@ -38296,8 +41205,11 @@ function wireEvents() {
     recheckTuneVoiceBridge();
   });
   els.homeModulesButton?.addEventListener("click", openHomeModulesModal);
+  bindAndroidNativeFastTap(els.homeModulesButton, openHomeModulesModal, { includeClick: false, pointerEventType: "pointerdown" });
   els.homeArtifactsButton?.addEventListener("click", openArtifactsModal);
+  bindAndroidNativeFastTap(els.homeArtifactsButton, openArtifactsModal, { includeClick: false, pointerEventType: "pointerdown" });
   els.homeDiagnosticsButton?.addEventListener("click", () => setPanel("diagnostics"));
+  bindAndroidNativeFastTap(els.homeDiagnosticsButton, () => setPanel("diagnostics"), { includeClick: false, pointerEventType: "pointerdown" });
   els.devicesSyncButton?.addEventListener("click", () => void syncDevice());
   els.nativeDownloadButton?.addEventListener("click", () => void startNativeInstall("manual"));
   els.closeNativeModalButton?.addEventListener("click", closeNativeModal);
@@ -38411,11 +41323,19 @@ function wireEvents() {
   installModalBackdropDismiss(els.nativeDebugModal, closeNativeDebugModal);
   installModalBackdropDismiss(els.tuneVoiceModal, closeTuneVoiceWizard);
   installModalBackdropDismiss(els.wakeWordModal, closeWakeWordModal);
-  window.setTimeout(pollHermesWakeExportRequest, 1500);
-  window.setInterval(pollHermesWakeExportRequest, 5000);
-  window.setTimeout(pollHermesWakeInstallRequest, 1800);
-  window.setInterval(pollHermesWakeInstallRequest, 5000);
-  startAndroidNativeControlAgent();
+  const androidNativeControlDelayMs = isAndroidNativeShell() ? 12000 : 0;
+  if (!isAndroidNativeShell() || !androidNativeWakeDisabled()) {
+    window.setTimeout(pollHermesWakeExportRequest, isAndroidNativeShell() ? 12000 : 1500);
+    window.setInterval(pollHermesWakeExportRequest, 5000);
+    window.setTimeout(pollHermesWakeInstallRequest, isAndroidNativeShell() ? 12500 : 1800);
+    window.setInterval(pollHermesWakeInstallRequest, 5000);
+  } else {
+    clientBootMark("android_wake_request_polling_disabled", {
+      perf_safe_mode: androidNativePerfSafeMode(),
+      wake: androidNativeQueryParam("wake", "off"),
+    });
+  }
+  window.setTimeout(() => startAndroidNativeControlAgent(), androidNativeControlDelayMs);
   els.closeFleetModalButton?.addEventListener("click", closeFleetModal);
   els.fleetEnsureMainButton?.addEventListener("click", () => void ensureMainFleetNode());
   installModalBackdropDismiss(els.fleetModal, closeFleetModal);
@@ -38660,14 +41580,24 @@ function wireEvents() {
     els.agentOverlay.style.top = `${state.agentLayout.top}px`;
     placeAgentPanel();
   });
-  installWidgetWindowControls();
-  installWidgetDragging();
-  installWidgetResizing();
-  installSpacePanning();
+  const installDeferredInteractionHandlers = () => {
+    clientBootMark("deferred_interaction_handlers_started", {
+      android_native: isAndroidNativeShell(),
+    });
+    installWidgetWindowControls();
+    installWidgetDragging();
+    installWidgetResizing();
+    installSpacePanning();
   installSharedSpacePointerAwareness();
   installAgentDragging();
   installAgentPanelDragging();
   installNodesPanelDragging();
+  installSpaceMiniMapPrintCapture();
+  clientBootMark("deferred_interaction_handlers_finished", {
+    android_native: isAndroidNativeShell(),
+  });
+  };
+  installDeferredInteractionHandlers();
 }
 
 async function bootstrapAuthenticatedApp() {
@@ -38699,7 +41629,7 @@ async function bootstrapAuthenticatedApp() {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
   if (!state.configChecked && !isAndroidNativeShell()) await loadConfig();
-  if (!state.authChecked) await loadAuthSession();
+  if (!state.authChecked && !isAndroidNativeShell()) await loadAuthSession();
   if (!state.authUser) {
     state.authenticatedBootstrapped = false;
     renderAuthGate();
@@ -38732,23 +41662,91 @@ async function bootstrapAuthenticatedApp() {
   });
 }
 
+function renderAndroidNativeCachedAuthenticatedShell() {
+  if (!isAndroidNativeShell() || state.authUser || state.authenticatedBootstrapped) return false;
+  const prepaintShell = readAndroidPrepaintShell();
+  const cachedUser = readCachedAuthUser() || prepaintShell?.user;
+  if (!cachedUser) return false;
+  state.authUser = cachedUser;
+  state.authenticatedBootstrapped = true;
+  state.loginMessage = "";
+  state.authRedirectMessage = "";
+  renderAuthGate();
+  if (prepaintShell) {
+    const prepaintAfterPaint = window.__WASM_AGENT_PREPAINT_SHELL_AFTER_PAINT__ || prepaintShell;
+    state.androidNativeCachedShellPaintPromise = Promise.resolve(prepaintAfterPaint)
+      .then((shell) => markAndroidPrepaintShellVisible(shell || prepaintShell, cachedUser))
+      .catch(() => markAndroidPrepaintShellVisible(prepaintShell, cachedUser));
+  } else {
+    state.androidNativeCachedShellPaintPromise = new Promise((resolve) => {
+      const markVisible = () => {
+        state.androidNativeFirstShellVisibleAtMs = performance.now();
+        clientBootMark("cached_authenticated_shell_visible", {
+          user_id: cleanText(cachedUser.id, ""),
+          email_present: Boolean(cachedUser.email),
+          after_paint: true,
+        });
+        resolve(true);
+      };
+      if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(() => window.setTimeout(markVisible, 0));
+      } else {
+        window.setTimeout(markVisible, 0);
+      }
+    });
+  }
+  const finishCachedShell = async () => {
+    await waitForAndroidNativeFirstShellQuiet("cached_shell_finish");
+    await androidNativeYield(0);
+    renderLogin();
+    applyModuleVisibility();
+    state.activeAgentSessionId = state.agentSessions[0]?.id || "";
+    restoreActiveAgentSessionPreference();
+    updateAgentSendButton();
+    setPanel(panelFromPath(), { updateUrl: false });
+    initializeUiNavigationFromUrl();
+    maybeOpenJoinSpaceFromUrl();
+    drawCanvas();
+    clientBootMark("cached_authenticated_shell_finished");
+  };
+  window.requestAnimationFrame?.(() => window.setTimeout(() => void finishCachedShell(), 0))
+    || window.setTimeout(() => void finishCachedShell(), 0);
+  schedulePostInteractiveStartup();
+  window.setTimeout(() => {
+    void (async () => {
+      await waitForAndroidNativeFirstShellQuiet("cached_shell_native_ready");
+      await androidNativeYield(0);
+      notifyNativeAppReady("cached-authenticated-shell", {
+        cached_auth_user: true,
+      });
+    })();
+  }, 0);
+  return true;
+}
+
 function schedulePostInteractiveStartup() {
   if (state.postInteractiveStartupScheduled) return;
   state.postInteractiveStartupScheduled = true;
-  const delayMs = isAndroidNativeShell() ? ANDROID_POST_INTERACTIVE_STARTUP_DELAY_MS : 0;
+  const delayMs = 0;
   clientBootMark("post_interactive_startup_scheduled", { delay_ms: delayMs });
   window.setTimeout(() => {
-    clientBootMark("post_interactive_startup_started", { delay_ms: delayMs });
-    void hydrateAuthenticatedStartup();
-    const pollingDelayMs = isAndroidNativeShell() ? 1800 : 0;
+    void (async () => {
+      await waitForAndroidNativeFirstShellQuiet("post_interactive_startup");
+      clientBootMark("post_interactive_startup_started", { delay_ms: delayMs });
+      void hydrateAuthenticatedStartup();
+    })();
+    const pollingDelayMs = isAndroidNativeShell() ? ANDROID_NATIVE_HYDRATION_START_DELAY_MS : 0;
     window.setTimeout(() => {
-      startSocialSync();
-      syncClientSnapshotRequestPolling();
-      startNativeVoiceWakeTimelinePolling();
-      clientBootMark("native_voice_timeline_polling_started", {
-        android_native: isAndroidNativeShell(),
-        delay_ms: pollingDelayMs,
-      });
+      void (async () => {
+        await waitForAndroidNativeInputQuiet(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS, { maxWaitMs: 20000 });
+        startSocialSync();
+        syncClientSnapshotRequestPolling();
+        startNativeVoiceWakeTimelinePolling();
+        clientBootMark("native_voice_timeline_polling_started", {
+          android_native: isAndroidNativeShell(),
+          delay_ms: pollingDelayMs,
+        });
+      })();
     }, pollingDelayMs);
   }, delayMs);
 }
@@ -38756,6 +41754,10 @@ function schedulePostInteractiveStartup() {
 async function hydrateAuthenticatedStartup() {
   const startedAt = performance.now();
   clientBootMark("authenticated_hydration_started");
+  if (isAndroidNativeShell()) {
+    await hydrateAuthenticatedStartupFromBootstrap(startedAt);
+    return;
+  }
   const startupTasks = [
     () => loadCachedSocialState(),
     () => loadLocalStorageEstimate(),
@@ -38768,16 +41770,22 @@ async function hydrateAuthenticatedStartup() {
     () => loadAccountCredits("bootstrap"),
   ];
   if (isAndroidNativeShell()) {
-    for (let index = 0; index < startupTasks.length; index += 2) {
-      await Promise.allSettled(startupTasks.slice(index, index + 2).map((task) => task()));
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
+    for (let index = 0; index < startupTasks.length; index += 1) {
+      await androidNativeHydrationYield(`before_task_${index}`);
+      await Promise.allSettled([startupTasks[index]()]);
+      await androidNativeHydrationYield(`after_task_${index}`);
     }
   } else {
     await Promise.allSettled(startupTasks.map((task) => task()));
   }
-  if (isModuleEnabled("wis")) void loadWisArtifacts("bootstrap").catch(() => {});
+  if (isModuleEnabled("wis") && !isAndroidNativeShell()) void loadWisArtifacts("bootstrap").catch(() => {});
+  await androidNativeHydrationYield("before_startup_refresh");
   await refresh("startup").catch(() => {});
-  renderAll();
+  if (isAndroidNativeShell() && androidNativeRecentUserInput(ANDROID_NATIVE_INPUT_FIRST_QUIET_MS)) {
+    scheduleAndroidNativeHydrationRender("recent_input_after_hydration");
+  } else {
+    renderAll();
+  }
   clientBootMark("authenticated_hydration_finished", {
     elapsed_ms: Math.round(performance.now() - startedAt),
   });
@@ -38787,14 +41795,160 @@ async function hydrateAuthenticatedStartup() {
   });
 }
 
+function applyAppBootstrapPayload(payload = {}) {
+  const sections = payload.sections && typeof payload.sections === "object" ? payload.sections : {};
+  const config = payload.config && typeof payload.config === "object"
+    ? payload.config
+    : sections.config && typeof sections.config === "object"
+      ? sections.config
+      : null;
+  if (config) {
+    applyClientConfigPayload(config, {
+      nativePayload: state.config?.native ? { native: state.config.native } : null,
+    });
+  }
+  const session = payload.session && typeof payload.session === "object" ? payload.session : null;
+  if (session) {
+    state.authUser = payload.user || session.user || null;
+    state.authChecked = true;
+    frontierRuntimeState.authSessionLoadPhase = state.authUser ? "authenticated" : "anonymous";
+    if (state.authUser) writeCachedAuthUser(state.authUser);
+    else writeCachedAuthUser(null);
+    if (state.authUser) startRemoteControlLiveSocket("app-bootstrap");
+    else {
+      state.authenticatedBootstrapped = false;
+      closeRemoteControlLiveSocket({ reconnect: false });
+    }
+  }
+  const spaces = sections.spaces && typeof sections.spaces === "object" ? sections.spaces : null;
+  if (spaces) {
+    state.userSpaces = sanitizeUserSpaces(spaces.spaces);
+    state.userStorage = spaces.storage || null;
+    state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
+    updateSharedSpaceSyncPolling();
+  }
+  const devices = sections.devices && typeof sections.devices === "object" ? sections.devices : null;
+  if (devices) {
+    state.devices = Array.isArray(devices.devices) ? devices.devices : [];
+    state.deviceAuthority = {
+      current_device_id: devices.current_device_id || "",
+      main_device_id: devices.main_device_id || "",
+      main_device_online: Boolean(devices.main_device_online),
+      layout_policy: "client-local",
+    };
+    state.devicesLoadedAt = devices.timestamp || new Date().toISOString();
+  }
+  const fleet = sections.fleet && typeof sections.fleet === "object" ? sections.fleet : null;
+  if (fleet) {
+    state.userFleetNodes = Array.isArray(fleet.nodes) ? fleet.nodes : [];
+    state.userFleetSystemNodes = Array.isArray(fleet.system_nodes) ? fleet.system_nodes : [];
+    state.userFleetHarnesses = Array.isArray(fleet.harnesses) ? fleet.harnesses : [];
+    adoptOwnedAgentFromFleetHarnesses();
+    state.userFleetPolicy = cleanText(fleet.server_policy, "");
+    state.userFleetMode = cleanText(fleet.deployment_mode, "");
+  }
+  if (sections.credits && typeof sections.credits === "object") {
+    state.agentCredits = sections.credits;
+  }
+  if (sections.readiness && typeof sections.readiness === "object") {
+    state.agentReadiness = sections.readiness;
+    state.nodesPanelStatus = agentReadinessPanelMessage(sections.readiness);
+  }
+  const modelData = Array.isArray(sections.models?.data) ? sections.models.data : [];
+  if (modelData.length) {
+    state.agentAvailableModels = modelData.map((item) => normalizeAgentModelEntry({
+      id: item.id,
+      name: item.id,
+      label: item.id,
+    })).filter(Boolean);
+    state.agentBridgeModelsDiagnostic = null;
+  }
+}
+
+async function loadAppBootstrap(reason = "bootstrap", options = {}) {
+  if (state.appBootstrapPayload && !options.force) return state.appBootstrapPayload;
+  if (state.appBootstrapPromise) return state.appBootstrapPromise;
+  const startedAt = performance.now();
+  clientBootMark("app_bootstrap_fetch_started", { reason });
+  state.appBootstrapPromise = fetchJson("/app/bootstrap", {
+    timeoutMs: options.timeoutMs || ANDROID_APP_BOOTSTRAP_TIMEOUT_MS,
+  })
+    .then((payload) => {
+      applyAppBootstrapPayload(payload);
+      state.appBootstrapPayload = payload;
+      clientBootMark("app_bootstrap_fetch_finished", {
+        reason,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        authenticated: Boolean(state.authUser),
+        section_count: Object.keys(payload.sections || {}).length,
+        error_count: Object.keys(payload.errors || {}).length,
+      });
+      return payload;
+    })
+    .catch((error) => {
+      clientBootMark("app_bootstrap_fetch_error", {
+        reason,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        message: errorMessage(error),
+        status: Number(error?.status || 0),
+      });
+      throw error;
+    })
+    .finally(() => {
+      state.appBootstrapPromise = null;
+    });
+  return state.appBootstrapPromise;
+}
+
+async function hydrateAuthenticatedStartupFromBootstrap(startedAt = performance.now()) {
+  try {
+    await waitForAndroidNativeFirstShellQuiet("bootstrap_fetch");
+    await androidNativeYield(0);
+    const payload = await loadAppBootstrap("authenticated_hydration");
+    if (androidNativeRecentUserInput(ANDROID_APP_BOOTSTRAP_RECONCILE_QUIET_MS) || androidNativeInputPending()) {
+      await waitForAndroidNativeInputQuiet(ANDROID_APP_BOOTSTRAP_RECONCILE_QUIET_MS, { maxWaitMs: 3000 });
+    }
+    await androidNativeYield(0);
+    clientBootMark("app_bootstrap_reconcile_render_started", {
+      authenticated: Boolean(state.authUser),
+    });
+    renderAll();
+    clientBootMark("app_bootstrap_reconcile_render_finished", {
+      authenticated: Boolean(state.authUser),
+    });
+    clientBootMark("authenticated_hydration_finished", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      bootstrap: true,
+      section_count: Object.keys(payload.sections || {}).length,
+      error_count: Object.keys(payload.errors || {}).length,
+    });
+    void uploadClientBootTrace("authenticated_hydration_finished");
+    notifyNativeAppReady("authenticated-app-hydrated", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      bootstrap: true,
+    });
+    scheduleWisCameraArtifactRuntimeLoad("post_bootstrap");
+    window.setTimeout(() => void loadWasm().then(() => renderAgentReadinessStatus()), 1000);
+  } catch (error) {
+    clientBootMark("authenticated_hydration_bootstrap_error", {
+      elapsed_ms: Math.round(performance.now() - startedAt),
+      message: errorMessage(error),
+    });
+    await androidNativeHydrationYield("bootstrap_error_fallback");
+    renderAll();
+  }
+}
+
 async function main() {
   clientBootMark("main_started", {
     ready_state: document.readyState,
   });
+  installAndroidNativeUxBudgetGuards();
   nativeAuthDiagnostic("main_started");
   nativeShellDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
-  if (window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
+  const startupAuthRedirectCode = authRedirectCodeFromUrl();
+  if (startupAuthRedirectCode && window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
     const preloadStartedAt = performance.now();
     let preloadTimedOut = false;
     nativeAuthDiagnostic("main_auth_redirect_preload_wait_started");
@@ -38827,59 +41981,107 @@ async function main() {
       });
     }
   }
+  const androidNativeBoot = isAndroidNativeShell();
+  if (androidNativeBoot) applyCachedClientConfigForBoot("android_main");
+  const configPromise = androidNativeBoot ? null : loadConfig();
+  const hasAuthRedirectCode = Boolean(startupAuthRedirectCode);
+  const authSessionPromise = hasAuthRedirectCode || androidNativeBoot ? null : loadAuthSession();
   applyLauncherPreference();
   clientBootMark("apply_launcher_preference_finished");
   applyNativeShellUi();
   clientBootMark("apply_native_shell_ui_finished", {
-    android_native: isAndroidNativeShell(),
+    android_native: androidNativeBoot,
   });
   installAndroidNativeShellEventDiagnostics();
   clientBootMark("android_native_event_diagnostics_installed", {
-    android_native: isAndroidNativeShell(),
+    android_native: androidNativeBoot,
   });
   nativeAuthDiagnostic("main_apply_launcher_finished");
-  wireEvents();
-  clientBootMark("wire_events_finished");
-  installWindowsAndroidOAuthDiagnostics();
-  nativeAuthDiagnostic("main_wire_events_finished");
-  if (shouldOpenNativeDebugFromLocation()) {
-    openNativeDebugModal({ reason: "route", skipHistory: true });
-  }
-  nativeAuthDiagnostic("main_before_consume_auth_redirect_message");
-  consumeAuthRedirectMessage();
-  nativeAuthDiagnostic("main_after_consume_auth_redirect_message");
-  nativeAuthDiagnostic("main_before_install_dev_hmr_bridge");
   installDevHmrBridge();
-  nativeAuthDiagnostic("main_after_install_dev_hmr_bridge");
+  if (shouldStartDevHmr()) startDevHmr();
+  if (androidNativeBoot) {
+    window.setTimeout(() => startAndroidNativeControlAgent(), 3000);
+    wireAndroidNativeFastEvents();
+    wireEvents();
+    clientBootMark("wire_events_finished", { android_native: true });
+  } else {
+    wireEvents();
+    clientBootMark("wire_events_finished");
+  }
+  if (androidNativeBoot) {
+    window.setTimeout(() => {
+      void (async () => {
+        await waitForAndroidNativeFirstShellQuiet("android_deferred_prepaint_work");
+        await androidNativeYield(0);
+        installWindowsAndroidOAuthDiagnostics();
+        if (shouldOpenNativeDebugFromLocation()) {
+          openNativeDebugModal({ reason: "route", skipHistory: true });
+        }
+        consumeAuthRedirectMessage();
+        nativeAuthDiagnostic("main_deferred_android_prepaint_work_finished");
+      })();
+    }, 0);
+  } else {
+    installWindowsAndroidOAuthDiagnostics();
+    nativeAuthDiagnostic("main_wire_events_finished");
+    if (shouldOpenNativeDebugFromLocation()) {
+      openNativeDebugModal({ reason: "route", skipHistory: true });
+    }
+    nativeAuthDiagnostic("main_before_consume_auth_redirect_message");
+    consumeAuthRedirectMessage();
+    nativeAuthDiagnostic("main_after_consume_auth_redirect_message");
+  }
   nativeAuthDiagnostic("main_before_render_auth_gate");
-  renderAuthGate();
-  clientBootMark("initial_auth_gate_rendered");
+  const renderedCachedAuthShell = !hasAuthRedirectCode && renderAndroidNativeCachedAuthenticatedShell();
+  if (!renderedCachedAuthShell) {
+    renderAuthGate();
+    clientBootMark("initial_auth_gate_rendered");
+  }
+  if (androidNativeBoot && renderedCachedAuthShell) {
+    await state.androidNativeCachedShellPaintPromise;
+    clientBootMark("main_finished", {
+      authenticated: Boolean(state.authUser),
+      cached_shell_rendered: true,
+    });
+    window.setTimeout(() => {
+      void (async () => {
+        await waitForAndroidNativeFirstShellQuiet("cached_shell_main_finished_trace");
+        scheduleClientBootTraceUpload("main_finished");
+      })();
+    }, 0);
+    return;
+  }
   nativeAuthDiagnostic("main_after_render_auth_gate");
   nativeAuthDiagnostic("main_before_load_config");
-  const configPromise = loadConfig();
-  const hasAuthRedirectCode = Boolean(authRedirectCodeFromUrl());
-  const authSessionPromise = hasAuthRedirectCode ? null : loadAuthSession();
-  if (isAndroidNativeShell()) {
+  if (androidNativeBoot && configPromise) {
     void configPromise.finally(() => clientBootMark("main_load_config_background_finished"));
-  } else {
+  } else if (configPromise) {
     await configPromise;
     clientBootMark("main_load_config_awaited");
   }
   nativeAuthDiagnostic("main_after_load_config");
-  if (shouldStartDevHmr()) startDevHmr();
   const redeemedAuthRedirect = await redeemAuthRedirectCode();
   nativeAuthDiagnostic("main_before_load_auth_session");
   if (authSessionPromise) {
     await authSessionPromise;
-  } else if (!redeemedAuthRedirect) {
+  } else if (!redeemedAuthRedirect && !androidNativeBoot) {
     await loadAuthSession();
+  }
+  if (androidNativeBoot && !state.authUser && !state.authChecked && !redeemedAuthRedirect) {
+    try {
+      await loadAppBootstrap("android_main_session");
+    } catch (error) {
+      state.authChecked = true;
+      state.loginMessage = errorMessage(error);
+    }
   }
   clientBootMark("main_load_auth_session_awaited", {
     authenticated: Boolean(state.authUser),
+    cached_shell_rendered: Boolean(renderedCachedAuthShell),
   });
   nativeAuthDiagnostic("main_after_load_auth_session");
   if (!state.authUser) void renderGoogleSignInButton();
-  await bootstrapAuthenticatedApp();
+  if (!state.authenticatedBootstrapped) await bootstrapAuthenticatedApp();
   clientBootMark("main_finished", {
     authenticated: Boolean(state.authUser),
   });
