@@ -63,6 +63,49 @@ The simpler path must stay readable, owned, and verifiable. Extra work is valid
 only when it is explicitly justified by correctness, safety, compatibility, or
 observability that shortens future proof/debug loops.
 
+## Omni-Device Feature Default
+
+For new product features, route implementation through the shared PWA/runtime
+lane before native shells. Prefer browser APIs, WASM, WebGPU/WebNN when
+available, downloadable model/runtime artifacts, service-worker/browser cache,
+IndexedDB, immutable versioned metadata, and SHA validation.
+
+Branch into native only when the browser/PWA lane cannot satisfy the feature
+because of OS policy, background execution, permissions, signing/package
+identity, foreground services, accessibility/media-projection requirements, or
+another hardware/OS primitive. Wake-word listeners are a native-shell exception;
+local chat transcription is not automatically one if WASM/WebGPU can provide
+reliable local inference.
+
+When native is unavoidable, keep it as the smallest primitive and leave product
+behavior, model routing, UI, diagnostics, and cache/version policy in the
+shared runtime. Future agents must document the exact browser/OS constraint
+before adding a new native branch.
+
+## LLM-Native Architecture Default
+
+For every durable repo surface, ask how an LLM will inspect, reason about,
+operate, and verify it. State, telemetry, observations, transcripts, tool
+results, diagnostics, protocols, snapshots, release evidence, and control
+surfaces should expose the smallest LLM-readable contract that preserves the
+next correct decision. Do not require full UI/runtime JSON, raw logs, or manual
+screen interpretation when a tiny envelope plus bounded lookup tools can
+provide the same observable result.
+
+Optimize model input for tokenizer behavior and reasoning quality, not CPU
+serialization. Prefer stable short text keys, dense but readable field order,
+shared dictionaries, capability manifests, explicit action schemas, bounded
+status reads, and query-on-demand handles. Use structured APIs internally where
+appropriate, but provide compact LLM projections for prompt/tool contexts.
+Avoid binary, base64, protobuf, gRPC, raw screenshots, full logs, and verbose
+nested JSON as default LLM input.
+
+Before implementation, record the baseline context pressure, target budget,
+always-needed fields, pull-only fields, and proof that the new path preserves
+answer/action quality. New features that increase model context must justify
+the added tokens with correctness, safety, or observability that cannot be
+achieved through a cheaper query path.
+
 ## Harness Factory Reflection
 
 After intent/context routing and before slow investigation, rebuilds, runtime

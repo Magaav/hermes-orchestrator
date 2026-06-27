@@ -2667,6 +2667,11 @@ def _seed_code_tree(src: Path, dst: Path, *, include_git: bool = False) -> None:
         raise CloneManagerError(f"hermes source not found: {src}")
 
     dst.parent.mkdir(parents=True, exist_ok=True)
+    if not include_git:
+        stale_git = dst / ".git"
+        if stale_git.exists() or stale_git.is_symlink():
+            _remove_path(stale_git)
+
     excludes = [".venv", "__pycache__", ".pytest_cache", "*.pyc"]
     if not include_git:
         excludes.append(".git")
@@ -6696,6 +6701,24 @@ def _fetch_remote_branch(path: Path, branch: str, remote: str = "origin") -> boo
     )
 
 
+def _fetch_remote_tag(path: Path, tag: str, remote: str = "origin") -> bool:
+    normalized = str(tag or "").strip()
+    if not normalized:
+        return False
+    refspec = f"refs/tags/{normalized}:refs/tags/{normalized}"
+    proc = _run(
+        ["git", "-C", str(path), "fetch", "--prune", remote, refspec],
+        check=False,
+    )
+    return proc.returncode == 0 and (
+        _run(
+            ["git", "-C", str(path), "rev-parse", "--verify", f"refs/tags/{normalized}"],
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
 def _action_update_template(source_branch: str, *, force: bool = False) -> Dict[str, Any]:
     branch = str(source_branch or "").strip() or HERMES_AGENT_UPSTREAM_BRANCH
     source_root = HERMES_SOURCE_ROOT
@@ -6707,37 +6730,42 @@ def _action_update_template(source_branch: str, *, force: bool = False) -> Dict[
     before_branch = _git_branch(source_root) if source_root.exists() else ""
     source_mode = "snapshot_hard_mirror"
     upstream_commit = ""
+    source_ref_type = "branch"
+    remote_ref = ""
 
     if (source_root / ".git").exists():
         resolved_branch = branch
-        if not _fetch_remote_branch(source_root, resolved_branch):
+        if _fetch_remote_branch(source_root, resolved_branch):
+            source_ref_type = "branch"
+            remote_ref = f"origin/{resolved_branch}"
+        elif _fetch_remote_tag(source_root, resolved_branch):
+            source_ref_type = "tag"
+            remote_ref = f"refs/tags/{resolved_branch}"
+        else:
             fallback_branch = _resolve_git_remote_head_branch(source_root, "origin")
             if not fallback_branch:
                 raise CloneManagerError(
-                    f"unable to fetch requested branch '{branch}' and could not determine origin HEAD"
+                    f"unable to fetch requested branch or tag '{branch}' and could not determine origin HEAD"
                 )
             if not _fetch_remote_branch(source_root, fallback_branch):
                 raise CloneManagerError(
-                    f"unable to fetch requested branch '{branch}' or fallback origin HEAD '{fallback_branch}'"
+                    f"unable to fetch requested branch or tag '{branch}' or fallback origin HEAD '{fallback_branch}'"
                 )
             resolved_branch = fallback_branch
+            source_ref_type = "branch"
+            remote_ref = f"origin/{resolved_branch}"
 
-        remote_ref = f"origin/{resolved_branch}"
+        checkout_cmd = ["git", "-C", str(source_root), "checkout", *(["-f"] if force else [])]
+        if source_ref_type == "tag":
+            checkout_cmd.extend(["--detach", remote_ref])
+        else:
+            checkout_cmd.extend(["-B", resolved_branch, remote_ref])
+        _run(checkout_cmd, check=True)
+        _run(["git", "-C", str(source_root), "reset", "--hard", remote_ref], check=True)
         _run(
-            [
-                "git",
-                "-C",
-                str(source_root),
-                "checkout",
-                *(["-f"] if force else []),
-                "-B",
-                resolved_branch,
-                remote_ref,
-            ],
+            ["git", "-C", str(source_root), "clean", "-fdx", "-e", ".venv", "-e", ".gitkeep"],
             check=True,
         )
-        _run(["git", "-C", str(source_root), "reset", "--hard", remote_ref], check=True)
-        _run(["git", "-C", str(source_root), "clean", "-fdx", "-e", ".venv"], check=True)
         source_mode = "git_hard_mirror"
         upstream_commit = _git_commit(source_root)
         branch = resolved_branch
@@ -6792,9 +6820,12 @@ def _action_update_template(source_branch: str, *, force: bool = False) -> Dict[
         "force": bool(force),
         "upstream_commit": upstream_commit,
         "source_mode": source_mode,
+        "source_ref_type": source_ref_type,
+        "remote_ref": remote_ref,
         "changed": changed,
         "hard_mirror": True,
-        "preserved_paths": [".venv"] + ([".git"] if (source_root / ".git").exists() else []),
+        "preserved_paths": [".venv", ".gitkeep"]
+        + ([".git"] if (source_root / ".git").exists() else []),
         "applies_to_new_nodes": True,
     }
 
@@ -7098,7 +7129,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--source-branch",
         default=str(os.getenv("HERMES_AGENT_UPDATE_BRANCH", HERMES_AGENT_UPSTREAM_BRANCH) or HERMES_AGENT_UPSTREAM_BRANCH),
-        help="Internal branch override used when syncing /local/hermes-agent",
+        help="Internal branch or release tag override used when syncing /local/hermes-agent",
     )
     parser.add_argument(
         "--source-name",

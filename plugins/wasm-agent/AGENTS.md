@@ -22,6 +22,20 @@ state, and product UI surfaces.
 - Keep the app client-first where possible. Server work should be explicit:
   auth, presence/relay, sync, backup, provisioning, native diagnostics, or
   release metadata.
+- Keep feature work omni-device by default. Implement shared product behavior in
+  the PWA/runtime lane with browser APIs, WASM, WebGPU/WebNN where available,
+  downloaded model/runtime artifacts, browser cache/IndexedDB, and version/SHA
+  metadata before adding native shell code.
+- Keep embedded-agent and model-facing protocols LLM-native by default. Send the
+  smallest stable text envelope that lets the model decide what to query next,
+  then expose bounded lookup tools for detail. Do not make verbose JSON
+  snapshots, raw logs, screenshots, protobuf/base64 blobs, or human-debug views
+  the default prompt contract.
+- Use native shells only for non-negotiable OS/browser constraints: background
+  wake-word listeners, OS services, native permissions, package/signing
+  behavior, accessibility/media projection, foreground services, or hardware/OS
+  primitives unavailable to the browser. Keep native as the smallest primitive;
+  keep UI, model selection, diagnostics, and policy in the shared runtime.
 - Frontier/control routes must stay authenticated, audited, bounded, and
   operation-based. Do not add arbitrary shell execution or unauthenticated
   global reload controls.

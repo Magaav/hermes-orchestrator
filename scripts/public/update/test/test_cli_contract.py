@@ -95,6 +95,22 @@ def test_update_node_force_contract(tmp_path: Path) -> None:
     assert payload["argv"] == ["update-node", "--name", "orchestrator", "--force"]
 
 
+def test_update_node_source_branch_contract(tmp_path: Path) -> None:
+    proc = _run_horc(
+        tmp_path,
+        ["update", "node", "orchestrator", "--source-branch", "v2026.6.19"],
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout.strip())
+    assert payload["argv"] == [
+        "update-node",
+        "--name",
+        "orchestrator",
+        "--source-branch",
+        "v2026.6.19",
+    ]
+
+
 def test_update_node_requires_name(tmp_path: Path) -> None:
     proc = _run_horc(tmp_path, ["update", "node"])
     assert proc.returncode != 0

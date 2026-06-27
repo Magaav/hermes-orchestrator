@@ -74,6 +74,9 @@ class ProviderProxyTests(unittest.TestCase):
     def user(self) -> dict[str, Any]:
         return {"id": 123, "role": "user", "email": "normal@example.test"}
 
+    def admin(self) -> dict[str, Any]:
+        return {"id": 1, "role": "admin", "email": "admin@example.test"}
+
     def body(self, base_url: str) -> dict[str, Any]:
         return {
             "provider_config": {
@@ -154,6 +157,72 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertEqual(request["authorization"], "Bearer test-key")
             self.assertEqual(request["payload"]["model"], "stub-model")
             self.assertFalse(request["payload"]["stream"])
+
+    def test_direct_envelope_dispatches_compact_context(self) -> None:
+        with ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Use the direct lane.",
+                            "decision": "ship",
+                            "actions": [],
+                            "state_delta": {},
+                            "needs": [],
+                            "confidence": 0.91,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+            body = {
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-direct-1",
+                    "objective": "Decide the next Hermes head action.",
+                    "compact_state": {
+                        "screen": "avatar-chat",
+                        "secret_token": "super-secret",
+                    },
+                    "allowed_actions": [{"id": "answer"}],
+                    "budget": {"max_output_tokens": 256},
+                },
+            }
+            result = server_mod.provider_envelope_completion(None, body, user=self.admin())
+            self.assertEqual(result["schema"], "hermes.wasm_agent.direct_envelope_result.v1")
+            self.assertEqual(result["mode"], "direct-envelope")
+            self.assertEqual(result["content_type"], "json")
+            self.assertEqual(result["parsed"]["decision"], "ship")
+            self.assertEqual(result["envelope"]["trace_id"], "trace-direct-1")
+            request = ProviderStubHandler.requests[-1]
+            self.assertEqual(request["path"], "/v1/chat/completions")
+            self.assertEqual(request["payload"]["max_tokens"], 256)
+            self.assertEqual([message["role"] for message in request["payload"]["messages"]], ["system", "user"])
+            sent_context = request["payload"]["messages"][1]["content"]
+            self.assertIn('"objective":"Decide the next Hermes head action."', sent_context)
+            self.assertIn('"secret_token":"[redacted]"', sent_context)
+            self.assertNotIn("super-secret", sent_context)
+            self.assertNotIn("test-key", sent_context)
+
+    def test_direct_envelope_is_admin_only(self) -> None:
+        body = {
+            "provider_config": self.body("https://provider.example")["provider_config"],
+            "envelope": {"objective": "Decide whether to dispatch Hermes."},
+        }
+        with self.assertRaises(server_mod.ProviderProxyError) as ctx:
+            server_mod.provider_envelope_completion(None, body, user=self.user())
+        self.assertEqual(ctx.exception.status, server_mod.HTTPStatus.FORBIDDEN)
+        self.assertEqual(ctx.exception.diagnostic["category"], "admin-required")
+
+    def test_direct_envelope_requires_objective(self) -> None:
+        body = {
+            "provider_config": self.body("https://provider.example")["provider_config"],
+            "envelope": {"compact_state": {"screen": "avatar-chat"}},
+        }
+        with self.assertRaises(server_mod.ProviderProxyError) as ctx:
+            server_mod.provider_envelope_completion(None, body, user=self.admin())
+        self.assertEqual(ctx.exception.diagnostic["category"], "missing-objective")
 
     def test_backend_proxy_preserves_image_content_parts(self) -> None:
         with ProviderStub() as stub:

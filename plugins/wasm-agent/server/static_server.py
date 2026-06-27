@@ -339,6 +339,8 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.camera_stream_sessions_lock = threading.Lock()
         self.camera_push_processes: dict[str, subprocess.Popen[bytes]] = {}
         self.camera_push_processes_lock = threading.Lock()
+        self.chat_turn_results: dict[str, dict[str, Any]] = {}
+        self.chat_turn_results_lock = threading.Lock()
         self.remote_control_live_clients: dict[str, set[Any]] = {}
         self.remote_control_live_clients_lock = threading.Lock()
         self.shared_space_live_clients: dict[str, set[Any]] = {}
@@ -1612,17 +1614,23 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "model_setup_error", "message": str(exc)}},
                 )
             return
-        if path in {"/agent/provider/probe", "/agent/provider/chat"}:
+        if path in {"/agent/provider/probe", "/agent/provider/chat", "/agent/provider/envelope"}:
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
-                provider = provider_proxy_completion(self.server, body, user=user, probe=path.endswith("/probe"))
+                provider = (
+                    provider_envelope_completion(self.server, body, user=user)
+                    if path.endswith("/envelope")
+                    else provider_proxy_completion(self.server, body, user=user, probe=path.endswith("/probe"))
+                )
                 payload = {
                     "ok": True,
                     "provider": provider,
+                    "envelope": provider.get("envelope"),
+                    "parsed": provider.get("parsed"),
                     "reply": provider.get("reply", ""),
                     "usage": provider.get("usage"),
                     "model": provider.get("model", ""),
-                    "mode": "backend-proxy",
+                    "mode": provider.get("mode") or "backend-proxy",
                 }
                 self._json(HTTPStatus.OK, payload)
             except ProviderProxyError as exc:
@@ -2291,6 +2299,216 @@ def provider_reply_from_payload(payload: dict[str, Any]) -> str:
     return clipped(content.strip(), 120000)
 
 
+DIRECT_ENVELOPE_SCHEMA = "hermes.wasm_agent.direct_envelope.v1"
+DIRECT_ENVELOPE_RESULT_SCHEMA = "hermes.wasm_agent.direct_envelope_result.v1"
+DIRECT_ENVELOPE_MAX_JSON_CHARS = 24_000
+DIRECT_ENVELOPE_ALLOWED_KEYS = (
+    "schema",
+    "version",
+    "trace_id",
+    "objective",
+    "intent",
+    "state_summary",
+    "compact_state",
+    "capabilities",
+    "constraints",
+    "evidence",
+    "evidence_refs",
+    "allowed_actions",
+    "action_schemas",
+    "budget",
+    "output_schema",
+)
+DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["answer", "decision", "actions", "state_delta", "needs", "confidence"],
+    "properties": {
+        "answer": {"type": "string"},
+        "decision": {"type": "string"},
+        "actions": {"type": "array", "items": {"type": "object"}},
+        "state_delta": {"type": "object"},
+        "needs": {"type": "array", "items": {"type": "string"}},
+        "proof_requests": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
+    },
+    "additionalProperties": True,
+}
+DIRECT_ENVELOPE_SYSTEM_PROMPT = (
+    "You are wasm-agent's direct LLM-native head. Use only the provided compact "
+    "envelope; do not assume hidden Hermes conversation, memory, tool, or session "
+    "context exists. Prefer the shortest correct decision, request proof when "
+    "blocked, and return only JSON matching envelope.output_schema."
+)
+SENSITIVE_ENVELOPE_KEY_RE = re.compile(
+    r"(api[_-]?key|authorization|bearer|cookie|password|secret|(^|[_-])(access|auth|id|refresh|session)?[_-]?token($|[_-]))",
+    re.IGNORECASE,
+)
+
+
+def provider_proxy_payload_options(body: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+    temperature = body.get("temperature")
+    if isinstance(temperature, (int, float)) and not isinstance(temperature, bool):
+        options["temperature"] = max(0.0, min(2.0, float(temperature)))
+    raw_max_tokens = body.get("max_tokens", body.get("maxTokens"))
+    if isinstance(raw_max_tokens, str) and raw_max_tokens.strip().isdigit():
+        raw_max_tokens = int(raw_max_tokens.strip())
+    if isinstance(raw_max_tokens, (int, float)) and not isinstance(raw_max_tokens, bool):
+        options["max_tokens"] = max(1, min(64_000, int(raw_max_tokens)))
+    response_format = body.get("response_format")
+    if not isinstance(response_format, dict):
+        response_format = body.get("responseFormat")
+    if isinstance(response_format, dict):
+        options["response_format"] = direct_envelope_redact(response_format)
+    return options
+
+
+def direct_envelope_redact(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return "[depth-clipped]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 80:
+                result["__clipped_keys__"] = len(value) - index
+                break
+            clean_key = clipped(str(key), 120)
+            result[clean_key] = (
+                "[redacted]"
+                if SENSITIVE_ENVELOPE_KEY_RE.search(clean_key)
+                else direct_envelope_redact(item, depth=depth + 1)
+            )
+        return result
+    if isinstance(value, list):
+        result = [direct_envelope_redact(item, depth=depth + 1) for item in value[:80]]
+        if len(value) > 80:
+            result.append({"__clipped_items__": len(value) - 80})
+        return result
+    if isinstance(value, str):
+        return clipped(value, 6000)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return clipped(str(value), 1000)
+
+
+def direct_envelope_json(value: Any, *, limit: int = DIRECT_ENVELOPE_MAX_JSON_CHARS) -> str:
+    return clipped(json.dumps(value, ensure_ascii=True, separators=(",", ":")), limit)
+
+
+def direct_envelope_error(category: str, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
+    diagnostic = provider_diagnostic("direct-envelope", category, message, status)
+    raise ProviderProxyError(category, diagnostic["message"], diagnostic=diagnostic, status=status)
+
+
+def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    raw = body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope")
+    if not isinstance(raw, dict):
+        direct_envelope_error("missing-envelope", "Direct LLM request needs an envelope object.")
+    objective = clipped(str(raw.get("objective") or raw.get("goal") or raw.get("intent") or "").strip(), 2000)
+    if not objective:
+        direct_envelope_error("missing-objective", "Direct LLM envelope needs an objective.")
+    envelope: dict[str, Any] = {}
+    for key in DIRECT_ENVELOPE_ALLOWED_KEYS:
+        if key in raw:
+            envelope[key] = direct_envelope_redact(raw[key])
+    envelope["schema"] = clipped(str(envelope.get("schema") or DIRECT_ENVELOPE_SCHEMA), 120)
+    envelope["objective"] = objective
+    if not isinstance(envelope.get("output_schema"), dict):
+        output_schema = body.get("output_schema") if isinstance(body.get("output_schema"), dict) else None
+        envelope["output_schema"] = direct_envelope_redact(output_schema or DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA)
+    return envelope
+
+
+def direct_envelope_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    envelope = direct_envelope_from_body(body)
+    instructions = clipped(str(body.get("instructions") or "").strip(), 4000)
+    content = [
+        "Treat this compact JSON as the complete context for this decision.",
+        "Return only JSON. No markdown fences, commentary, or hidden transcript assumptions.",
+        f"Envelope JSON:\n{direct_envelope_json(envelope)}",
+    ]
+    if instructions:
+        content.insert(2, f"Additional operator instructions:\n{instructions}")
+    return [
+        {"role": "system", "content": DIRECT_ENVELOPE_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n\n".join(content)},
+    ], envelope
+
+
+def provider_config_for_proxy_body(body: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(body.get("provider_config"), dict):
+        return body["provider_config"]
+    return {
+        "base_url": body.get("base_url") or body.get("baseUrl") or "",
+        "model": body.get("model") or "",
+        "api_key": body.get("api_key") or body.get("apiKey") or "",
+        "provider": body.get("provider") or "",
+    }
+
+
+def parse_direct_envelope_reply(reply: str) -> Any:
+    text = reply.strip()
+    candidates = [text]
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    if "{" in text and "}" in text:
+        candidates.append(text[text.find("{"):text.rfind("}") + 1])
+    if "[" in text and "]" in text:
+        candidates.append(text[text.find("["):text.rfind("]") + 1])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def provider_envelope_completion(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not user_is_admin(user):
+        diagnostic = provider_diagnostic(
+            "direct-envelope",
+            "admin-required",
+            "Direct LLM-native envelopes are restricted to admin avatar-chat.",
+            HTTPStatus.FORBIDDEN,
+        )
+        raise ProviderProxyError("admin_required", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.FORBIDDEN)
+    messages, envelope = direct_envelope_messages(body)
+    proxy_body: dict[str, Any] = {
+        "provider_config": provider_config_for_proxy_body(body),
+        "messages": messages,
+    }
+    proxy_body.update(provider_proxy_payload_options(body))
+    budget = envelope.get("budget") if isinstance(envelope.get("budget"), dict) else {}
+    if "max_tokens" not in proxy_body:
+        max_output = budget.get("max_output_tokens") or budget.get("maxTokens")
+        if isinstance(max_output, (int, float)) and not isinstance(max_output, bool):
+            proxy_body["max_tokens"] = max(1, min(64_000, int(max_output)))
+    provider = provider_proxy_completion(server, proxy_body, user=user)
+    parsed = parse_direct_envelope_reply(provider.get("reply", ""))
+    return {
+        **provider,
+        "schema": DIRECT_ENVELOPE_RESULT_SCHEMA,
+        "transport_schema": provider.get("schema", ""),
+        "mode": "direct-envelope",
+        "content_type": "json" if parsed is not None else "text",
+        "parsed": parsed,
+        "envelope": {
+            "schema": envelope.get("schema", DIRECT_ENVELOPE_SCHEMA),
+            "trace_id": envelope.get("trace_id", ""),
+            "objective": envelope.get("objective", ""),
+            "budget": envelope.get("budget", {}),
+        },
+    }
+
+
 def provider_proxy_completion(
     server: WasmAgentServer,
     body: dict[str, Any],
@@ -2310,6 +2528,7 @@ def provider_proxy_completion(
         "stream": False,
         "messages": messages,
     }
+    payload.update(provider_proxy_payload_options(body))
     data = json.dumps(payload).encode("utf-8")
     request = Request(
         endpoint,
@@ -13790,6 +14009,8 @@ def is_public_request(method: str, path: str) -> bool:
             return True
         if path.startswith("/icons/"):
             return True
+        if path.startswith("/modules/speech-transcription/"):
+            return True
         if path.startswith("/modules/") and (path.endswith(".js") or path.endswith(".css")):
             return True
         return False
@@ -13821,6 +14042,8 @@ def is_public_request(method: str, path: str) -> bool:
 def requires_admin_request(method: str, path: str) -> bool:
     method = method.upper()
     if path.startswith(("/bridge/", "/browser/", "/security-loop/")):
+        return True
+    if method == "POST" and path == "/agent/provider/envelope":
         return True
     if path.startswith("/agent/models/"):
         return True
@@ -16521,17 +16744,16 @@ def agent_latest_observation(server: WasmAgentServer, user: dict[str, Any] | Non
     payload = latest_observation(server, user).get("observation") or {}
     if not isinstance(payload, dict):
         payload = {}
+    workspace = payload.get("workspace", {})
+    active_space = workspace.get("active_space", {}) if isinstance(workspace, dict) else {}
     return {
         "tool": "observation_latest",
         "timestamp": payload.get("timestamp", ""),
-        "workspace": payload.get("workspace", {}),
-        "fleet": {
-            "selected_node": payload.get("fleet", {}).get("selected_node"),
-            "node_count": payload.get("fleet", {}).get("node_count"),
-            "bridge_ready": payload.get("fleet", {}).get("bridge_ready"),
-        },
-        "requested_click_context": payload.get("requested_click_context") or payload.get("analytics", {}).get("last_non_agent_click"),
-        "last_event": (payload.get("user_events") or [{}])[0],
+        "space": active_space.get("display_name") or active_space.get("name") or workspace.get("active_space_name"),
+        "panel": workspace.get("active_panel"),
+        "viewport": workspace.get("viewport"),
+        "widget_count": workspace.get("widget_count"),
+        "events_count": len(payload.get("recent_events") or []) if isinstance(payload, dict) else 0,
     }
 
 
@@ -16540,29 +16762,11 @@ def agent_latest_client_snapshot(server: WasmAgentServer, user: dict[str, Any] |
     payload = result.get("snapshot") or {}
     if not isinstance(payload, dict):
         payload = {}
-    wis = payload.get("wis") if isinstance(payload.get("wis"), dict) else {}
-    agent = payload.get("agent") if isinstance(payload.get("agent"), dict) else {}
     return {
         "tool": "client_snapshot_latest",
         "path": result.get("path", ""),
         "snapshot_id": payload.get("snapshot_id", ""),
-        "created_at": payload.get("created_at", ""),
         "reason": payload.get("reason", ""),
-        "scope": payload.get("scope", ""),
-        "active_space": payload.get("active_space", {}),
-        "agent": {
-            "target_node": agent.get("target_node", ""),
-            "selected_node": agent.get("selected_node", ""),
-            "model": agent.get("model"),
-            "direct_provider": agent.get("direct_provider"),
-        },
-        "wis": {
-            "active_artifact": wis.get("active_artifact"),
-            "artifact_count": wis.get("artifact_count"),
-            "camera_configs": wis.get("camera_configs", []),
-            "camera_runtime": wis.get("camera_runtime", []),
-            "camera_debug_events": wis.get("camera_debug_events", []),
-        },
     }
 
 
@@ -18022,10 +18226,10 @@ def call_agent_bridge(
     model_id = str((selected_model or {}).get("id") or "embedded-hermes")
     context_label = "Image-card tool results" if image_card_focus else "Tool results"
     text_content = (
-        f"Recent transcript:\n{json.dumps(transcript, ensure_ascii=True)}\n\n"
-        f"{context_label}:\n{json.dumps(tools, ensure_ascii=True)}\n\n"
-        f"Mutation block spec:\n{json.dumps(mutation_block_spec(), ensure_ascii=True)}\n\n"
-        f"WIS/userland patch spec:\n{json.dumps(wis_patch_block_spec(), ensure_ascii=True)}\n\n"
+        f"Recent transcript:\n{json.dumps(transcript, ensure_ascii=True, separators=(',', ':'))}\n\n"
+        f"{context_label}:\n{json.dumps(tools, ensure_ascii=True, separators=(',', ':'))}\n\n"
+        f"Mutation block spec:\n{json.dumps(mutation_block_spec(), ensure_ascii=True, separators=(',', ':'))}\n\n"
+        f"WIS/userland patch spec:\n{json.dumps(wis_patch_block_spec(), ensure_ascii=True, separators=(',', ':'))}\n\n"
         f"User message:\n{message}"
     )
     if images:
@@ -18065,7 +18269,7 @@ def call_agent_bridge(
         scope = str(mutation_policy.get("scope") or "")
         system_content += (
             " Mutation policy for this turn: "
-            f"{json.dumps(mutation_policy, ensure_ascii=True)}. "
+            f"{json.dumps(mutation_policy, ensure_ascii=True, separators=(',', ':'))}. "
             "Respect this boundary exactly. Do not invent source filenames; use app_map paths when present. "
         )
         if scope == "global-orchestrator":
@@ -18398,6 +18602,25 @@ def embedded_agent_message(
     user: dict[str, Any] | None = None,
     action_callback: Any | None = None,
 ) -> dict[str, Any]:
+    turn_id = str(body.get("turn_id") or "").strip()
+    cache_key = f"{user_id(user)}:{turn_id}" if turn_id else ""
+    if cache_key:
+        with server.chat_turn_results_lock:
+            cached = server.chat_turn_results.get(cache_key)
+        if cached:
+            if cached.get("inflight"):
+                for _ in range(120):
+                    time.sleep(0.5)
+                    with server.chat_turn_results_lock:
+                        cached = server.chat_turn_results.get(cache_key)
+                    if not cached or not cached.get("inflight"):
+                        break
+                else:
+                    raise BrowserError("agent_turn_timeout", "The assistant turn is taking too long.")
+            if cached and cached.get("expires_at", 0) > time.monotonic():
+                if cached.get("error"):
+                    raise BrowserError(cached["error"]["code"], cached["error"]["message"])
+                return cached["result"]
     message = str(body.get("message") or "").strip()
     if not message:
         raise BrowserError("agent_missing_message", "Message is required.")
@@ -18507,13 +18730,42 @@ def embedded_agent_message(
     )
     tools: list[dict[str, Any]] = []
     if observation and not image_focused_turn:
+        recent = [
+            str(ev.get("type") or "")
+            for ev in observation.get("recent_events", [])[:2]
+            if isinstance(ev, dict)
+        ]
+        active_space = workspace.get("active_space") if isinstance(workspace.get("active_space"), dict) else {}
+        enabled_modules = [
+            str(m.get("id") or "")
+            for m in workspace.get("modules", [])
+            if isinstance(m, dict) and m.get("enabled")
+        ]
+        click_ctx = observation.get("requested_click_context", {}) or {}
+        compact_click_ctx = (
+            {"last_non_agent_click": click_ctx["last_non_agent_click"]}
+            if isinstance(click_ctx, dict) and click_ctx.get("last_non_agent_click")
+            else {}
+        )
+        compact_workspace = {
+            k: v for k, v in {
+                "active_space_name": workspace.get("active_space_name") or active_space.get("name") or "",
+                "active_space_display_name": workspace.get("active_space_display_name") or active_space.get("display_name") or "",
+                "active_panel": workspace.get("active_panel"),
+                "viewport": workspace.get("viewport"),
+                "widget_count": workspace.get("widget_count"),
+                "modules": enabled_modules,
+            }.items() if v not in (None, "", {}, [])
+        }
         current_observation_tool = {
-            "tool": "current_turn_observation",
-            "timestamp": observation.get("timestamp", ""),
-            "cap": observation.get("cap", {}),
-            "workspace": workspace,
-            "requested_click_context": observation.get("requested_click_context", {}),
-            "recent_events": observation.get("recent_events", [])[:6],
+            k: v for k, v in {
+                "tool": "current_turn_observation",
+                "timestamp": observation.get("timestamp", ""),
+                "cap": observation.get("cap", {}),
+                "workspace": compact_workspace,
+                "requested_click_context": compact_click_ctx,
+                "recent_events": recent,
+            }.items() if v not in (None, "", {}, [])
         }
         tools.append(current_observation_tool)
         if action_callback:
@@ -18847,6 +19099,12 @@ def stream_embedded_agent_message(
     worker = threading.Thread(target=run_turn, name="wasm-agent-chat-turn", daemon=True)
     worker.start()
 
+    turn_id = str(body.get("turn_id") or "").strip()
+    cache_key = f"{user_id(user)}:{turn_id}" if turn_id else ""
+    if cache_key:
+        with handler.server.chat_turn_results_lock:
+            handler.server.chat_turn_results[cache_key] = {"inflight": True, "expires_at": time.monotonic() + 600}
+    client_connected = True
     while True:
         try:
             payload = events.get(timeout=15)
@@ -18871,11 +19129,23 @@ def stream_embedded_agent_message(
             action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
             if action.get("label"):
                 last_action_label = clipped(str(action.get("label") or ""), 80)
-        try:
-            write_ndjson(handler, payload)
-        except (BrokenPipeError, ConnectionResetError):
-            return
+        if client_connected:
+            try:
+                write_ndjson(handler, payload)
+            except (BrokenPipeError, ConnectionResetError):
+                client_connected = False
         if payload.get("type") in {"final", "error"}:
+            if cache_key:
+                with handler.server.chat_turn_results_lock:
+                    handler.server.chat_turn_results[cache_key] = {
+                        "result": payload.get("agent") if payload.get("type") == "final" else None,
+                        "error": payload.get("error") if payload.get("type") == "error" else None,
+                        "expires_at": time.monotonic() + 120,
+                    }
+                    now = time.monotonic()
+                    for key in list(handler.server.chat_turn_results.keys()):
+                        if handler.server.chat_turn_results[key].get("expires_at", 0) < now:
+                            del handler.server.chat_turn_results[key]
             return
 
 

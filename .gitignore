@@ -29,6 +29,7 @@ scripts/private/**
 !scripts/private/.gitignore
 !scripts/private/**/*.md
 workspace/
+projects/
 hermes-agent/plugins/memory/
 hermes-agent/tests/plugins/
 backups/

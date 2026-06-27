@@ -30,6 +30,10 @@ runtime folders are not edited internally just to create coverage.
 - Preserve current node architecture and governance contract (`orchestrator` and `worker` roles).
 - Avoid changing stable path contracts (for example `/local/logs/nodes/<node>/...`) without explicit migration notes.
 - Treat automation safety as a hard requirement: bounded actions, observability, rollback-first design.
+- Treat LLM-native architecture as repo-wide product direction: every new
+  durable feature should expose compact state summaries, capability/action
+  schemas, status/error classes, redacted proof artifacts, and query-on-demand
+  detail so agents can operate without ingesting broad human-debug dumps.
 - Preserve compatibility with Hermes Agent mainline and Space Agent upstream. Prefer plugins, modules, customware bundles, components, hooks, and extension points over core edits.
 - If a roadmap goal requires core behavior that does not have a safe extension seam, design the smallest upstreamable PR/seam before implementing local patches.
 

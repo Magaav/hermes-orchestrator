@@ -100,6 +100,10 @@ extend this harness before reopening broad browser-engine or cloud-domain work.
 - Build a WASM-first Hermes UI/runtime shell as the near-term product wedge. The first goal is parity with current useful Hermes UI output, not arbitrary external browsing.
 - Keep browser-like execution as a later Space OS capability. The high-risk arbitrary browser path must use remote browser infrastructure, native desktop capabilities, or a narrowed generated-app sandbox; it is not current behavior.
 - In parallel, build toward a configurable embedded agent that inhabits the visual workspace. It should observe structured workspace/browser/fleet state and propose bounded actions through confirmation-first contracts.
+- Make embedded-agent observability LLM-native: compact text envelopes and
+  query-on-demand handles are the product direction; verbose human-debug JSON,
+  raw screenshots, logs, binary payloads, protobuf, gRPC, and base64 are
+  operator/debug artifacts, not default model input.
 
 ## Pre-Evolution Gate
 
@@ -128,7 +132,7 @@ The gate stays complete only when:
    keep private cloud state outside the public repo while testing
    `horc space backup`.
 6. Design the orchestrator-owned user-agent lifecycle: each account may create one or more agents, but exactly one main agent should mount `wasm-agent/state/users/<acc_id>/` so it can help evolve that account's spaces, widgets, workflows, and automations.
-7. Harden the embedded assistant path around compact context: keep image cards, observation snapshots, transcript clipping, and Timeline recovery visible in the action chain before adding mutation tools.
+7. Ship the LLM-native embedded assistant context ABI: replace always-pushed verbose observation/client-snapshot JSON with a tiny text envelope, shared field dictionary, transcript summary handle, context preview, and bounded lookup tools; prove lower bytes/tokens without losing answer/action quality or connection-drop recovery.
 8. Continue hardening the remote-cloud-browser-harness inside `wasm-agent`: domain changes, CPU throttling, frame health, and browser action reliability. The request/response CDP path now has bounded stale target cleanup through an idle session TTL.
 9. Continue evolving the local module management surface in `wasm-agent`: the UI can switch Dev HMR, Observation, Host Browser, Timeline, Embedded Assistant, Client State, and image-card analyzer modules in browser local storage. Module firmware lives under `public/modules`; later work should connect these descriptors to explicit module contracts before they control backend lifecycle.
 10. Validate lazy image-card analyzer evidence with real images, then move hot pixel work into small WASM modules only after the browser Canvas analyzer proves useful and stable.

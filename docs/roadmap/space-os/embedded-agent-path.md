@@ -117,7 +117,7 @@ efficiency, and simplicity before autonomy or spectacle.
 
 Default turn shape:
 
-- send a compact observation summary, not the full UI snapshot
+- send an LLM-native compact observation envelope, not the full UI snapshot
 - include the latest user message and only the last few relevant transcript
   turns
 - expose tools for context lookup instead of stuffing files, logs, screenshots,
@@ -179,6 +179,10 @@ Mutation tools come later and must be confirmation-first:
 Context budget rules:
 
 - prefer summaries under 1,000 tokens
+- use short stable text codes and a shared field dictionary for model-facing
+  envelopes
+- keep full JSON snapshots available for human diagnostics, but make them
+  pull-only for the model
 - clip tool output before model input
 - keep full transcripts in local state, but send only a short rolling summary
   plus recent turns
@@ -186,11 +190,57 @@ Context budget rules:
   screenshots by default
 - never require raw image bytes for text-only providers; send image cards first
   and use raw `image_url` forwarding only when explicitly enabled
+- do not use binary, base64, protobuf, or gRPC payloads as prompt defaults; they
+  optimize CPU transport, not LLM tokenization
 
 The first goal is not to make the embedded agent autonomous. The first goal is
 to let it answer accurately from inside the app, fetch small context on demand,
 propose small app patches from that context, and show exactly what context or
 tool result it used.
+
+## Production Prompt
+
+Use this as the next full implementation prompt:
+
+```text
+Ship the production-grade LLM-native context ABI for wasm-agent avatar-chat.
+
+Goal:
+Replace the default embedded-agent prompt context with a tiny, stable,
+LLM-readable envelope plus bounded on-demand lookup tools. Preserve answer
+quality, action-chain observability, context preview, Timeline checkpoints, and
+connection-drop resume behavior while materially reducing baseline context
+bytes/tokens.
+
+Builder intent:
+- Find every path that injects current_turn_observation, observation_latest,
+  client_snapshot_latest, transcript, mutation policy, app map, git/worktree
+  state, image cards, and Timeline state into model input.
+- Define a versioned compact text envelope with fixed field order and short
+  codes for always-needed facts: active space, viewport, selected node, mode,
+  recent event codes, transcript summary handle, and lookup handles.
+- Move expanded observation/client snapshot/log/file/screenshot/state payloads
+  behind bounded lookup tools with redaction and byte limits.
+- Keep a human-readable expanded context preview separate from the model input.
+- Keep stream/reopen resilience: turn_id replay must return the final result or
+  a bounded in-flight state after network drop.
+
+Watcher evidence:
+- Static diff shows verbose JSON no longer enters every default model turn.
+- A focused unit/smoke test compares old vs new context bytes/tokens on saved
+  avatar-chat fixtures and asserts a meaningful reduction.
+- Representative avatar-chat turns still answer correctly using lookup tools
+  only when detail is needed.
+- Context preview still shows what was sent and what was fetched.
+- Retry/reopen proof covers stream abort, fallback fetch, and cached turn result.
+
+Gatekeeper decision:
+- Pass only if the default text-only turn is LLM-native, compact, redacted,
+  inspectable, and query-on-demand.
+- Do not pass from source shape alone; require measured context reduction and
+  focused behavior tests.
+- Do not add native shell work unless a browser/PWA constraint is documented.
+```
 
 ## Contract Drafts
 
@@ -394,12 +444,14 @@ patches.
 
 1. Treat the WASM harness as the active resume branch; keep browser harness
    hardening parallel but secondary.
-2. Validate the cheap-eyes image cards and lazy analyzer evidence with real
+2. Ship the production-grade LLM-native context ABI from the prompt above before
+   adding new embedded-agent capabilities.
+3. Validate the cheap-eyes image cards and lazy analyzer evidence with real
    screenshots and user images, then decide whether any hot pixel work deserves
    a small WASM module.
-3. Harden the embedded avatar chat lifecycle: transcript storage policy,
+4. Harden the embedded avatar chat lifecycle: transcript storage policy,
    retry/error states, visible context preview, and exact action-chain status.
-4. Keep Observation and the Embedded Assistant inspect-only and locally
+5. Keep Observation and the Embedded Assistant inspect-only and locally
    switchable through the Modules panel.
-5. Add proposed action execution only after the chat surface can show exactly
+6. Add proposed action execution only after the chat surface can show exactly
    what context was sent to the agent and what action would run.

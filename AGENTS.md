@@ -47,6 +47,31 @@ Keep the simpler path readable and owned. Extra work is allowed only when it is
 explicitly justified by correctness, safety, compatibility, or observability
 that shortens future proof/debug loops.
 
+## LLM-Native Architecture Law
+
+Every durable implementation in this repo should be designed for LLM operation
+as a first-class architecture target. Humans still need readable UI and docs,
+but the system should also expose compact, explicit, bounded contracts that let
+an LLM inspect state, understand capabilities, choose actions, and verify proof
+without scraping human-only screens or ingesting large opaque dumps.
+
+Default new state/action/diagnostic surfaces to LLM-native shape:
+
+- tiny always-on summaries plus pull-on-demand detail
+- stable names, short field codes, and shared dictionaries for model-facing
+  context
+- structured APIs/tool results for machines, with compact LLM projections for
+  prompts
+- explicit capability reports, action schemas, status fields, counters, error
+  classes, and proof artifacts
+- redaction, byte/token budgets, and replayable evidence by default
+
+Avoid LLM-hostile defaults: verbose nested JSON in every prompt, raw logs,
+screenshots, base64/binary/protobuf/gRPC payloads as model input, ad hoc
+human-only debug text, broad polling, and hidden state that requires manual
+inference. Extra context is allowed only when it pays for correctness, safety,
+or observability that cannot be achieved through a cheaper lookup path.
+
 ## Self-Improving Harness Loop
 
 After intent/context routing and before slow investigation, rebuilds, runtime

@@ -12,6 +12,8 @@ download/update, and bridge work.
 | Local PWA development on `http://127.0.0.1:8877` | implemented-unverified | `horc simulate web` | Dev-only. Never use as production native claim. |
 | Production native backend target | verified | Root guards; native defaults; release feed | `https://wa.colmeio.com` only. |
 | Client-first workspace state | implemented-unverified | focused tests under `tests/` | Server is for auth, presence/relay, sync, backup, provisioning, diagnostics, release metadata. |
+| Omni-device feature default | verified | Root/context/agent docs | Ship shared PWA/runtime behavior first. Prefer browser APIs, WASM, WebGPU/WebNN, downloaded model/runtime artifacts, version/SHA metadata, browser cache, and IndexedDB before native shell code. |
+| LLM-native context default | proposal | docs only | Embedded-agent/model-facing context should become a tiny text envelope plus on-demand lookup tools, with expanded human diagnostics kept separate from prompt input. |
 | Account auth allowlist | implemented-unverified | auth tests; `conf/README.md` | `ADMIN_EMAIL` and optional `USER_EMAILS`; empty allowlists reject all Google accounts. |
 | Native release feed | implemented-unverified | `plugins/wasm-agent/public/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json` | Current local Windows feed guard fails without `native/windows/release/VERIFY.json`; feed publication is not installed runtime proof. |
 | Downloaded native runtime feed | implemented-unverified | `artifacts.runtime.launcher` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js` | Requires installed native shells with downloaded-runtime sync before runtime IDs/SHAs are installed evidence. |
@@ -20,6 +22,7 @@ download/update, and bridge work.
 | Dev HMR | implemented-unverified | `horc simulate web`; JS smoke tests | Local developer convenience, not production sync contract. |
 | Hermes Wake data/model loop | implemented-unverified | Android bridge/model tests and device proof | Prefer dataset/model iteration over APK rebuilds. |
 | Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWordState()`; `apply_wake_word_policy`; `GET /native/android/wake-word-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside and avatar wake feedback from live state. |
+| Embedded-chat speech transcription | implemented-unverified | `node --experimental-vm-modules tests/speech_transcription_module.test.mjs`; `node tests/wasm_agent_smoke.test.js`; browser/device proof still required | Shared PWA/runtime mic button and worker-owned local ASR boundary with versioned Transformers.js 4.2.0, ONNX Runtime WASM, and Whisper tiny English fp16 assets. No native dictation bridge and no remote STT; production runtime proof still requires browser/device mic validation. |
 | Host Browser/CDP | implemented-unverified | security-loop/browser tests | Disabled by default on public HTTPS unless explicitly reviewed. |
 | Windows installed-app behavior | implemented-unverified | Windows verifier in `native/windows` | Do not claim fixed from PWA/source tests. |
 | Android runtime behavior | implemented-unverified | `horc simulate android` | Report must name the behavior proven. |
@@ -64,6 +67,27 @@ download/update, and bridge work.
 | Windows feed guard | `python3 tools/windows/check-windows-release-feed.py` |
 | Hermes Wake proof | `python3 tools/voice/run-hermes-wake-proof.py --dry-run`; `python3 tools/voice/run-hermes-wake-proof.py --debug` |
 
+## LLM-Native Embedded Assistant Direction
+
+The embedded assistant should evolve toward an LLM-native context ABI. The
+production target is not "more JSON in the prompt"; it is a tiny baseline
+envelope that names the active space, viewport, selected node, recent event
+codes, transcript summary handle, and available lookup handles. The model should
+pull expanded observation, files, logs, screenshots, Timeline state, or
+diagnostics only when the next decision needs them.
+
+Model-facing protocols optimize for tokenizer cost and reasoning quality. Use
+short stable text codes, shared dictionaries, fixed field order, redaction, and
+measured byte/token budgets. Keep human-readable observation inspectors and
+debug JSON available for operators, but do not make those expanded structures
+the default model input. Binary protocols, base64 payloads, protobuf, gRPC, raw
+screenshots, full logs, and full client snapshots are not prompt defaults.
+
+Production-grade proof for this direction must show the old and new baseline
+context bytes/tokens, preserve answer/action quality on representative
+avatar-chat turns, keep context preview inspectable, and keep connection-drop
+resume behavior intact.
+
 ## Native Release Feed
 
 The feed is the native evolution control point. It publishes installer/APK
@@ -74,6 +98,13 @@ artifacts plus server-downloadable runtime and operation bundles:
 | `artifacts.runtime.launcher` | `/native/releases/runtime/launcher/` | Downloaded launcher/runtime UI, diagnostics schema, runtime config, model metadata, and operation routing. |
 | `artifacts.hotOps.android.hermesWakeProof` | `/native/releases/hot-ops/android/` | Hermes wake proof/debug operation with server-controlled `wakeThreshold` policy. |
 | `artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier` | `/native/releases/hot-ops/diagnostics/` | Non-Hermes diagnostics classifier proving the generic hot-op path. |
+
+New product features should not start here. Use the shared PWA/runtime lane
+first, with on-demand WASM/WebGPU/model artifacts cached by immutable
+version/SHA metadata. Add native feed, shell, APK, or installer work only for a
+documented OS/browser constraint. Wake-word background listening is a native
+exception; local chat transcription must first prove or disprove a local
+WASM/WebGPU path.
 
 | Platform | Current local feed/evidence | Status | Missing proof |
 | --- | --- | --- | --- |

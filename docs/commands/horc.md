@@ -416,7 +416,7 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 - `horc backup` produces lean archives and includes a shared runtime seed for reseeding nodes during restore.
 - `horc space backup` produces a client-first wasm-agent state archive and does not include public repo source.
 - `horc restore` stops included running nodes, restores payloads, and restarts nodes that were running.
-- Every update refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch before reseeding nodes.
+- Every update refreshes `/local/hermes-agent` as a hard mirror of the configured upstream repo/branch before reseeding nodes. The internal `--source-branch` override also accepts an explicit upstream release tag.
 - `horc update all` reseeds every node and reconciles `/local/agents/registry.json`.
 - `horc update node <name>` reseeds only the named node and leaves others untouched.
 - Add `--force` to discard local `/local/hermes-agent` checkout changes when the upstream refresh would otherwise fail on a dirty working tree.
@@ -432,6 +432,7 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
 - `HERMES_DEFAULT_NODE`: default node when a command omits a name; default `orchestrator`.
 - `HERMES_CLONE_MANAGER_SCRIPT`: override path for `clone_manager.py`.
 - `HERMES_CLONE_PYTHON_BIN`: override Python runtime for the wrapper.
+- `HERMES_AGENT_UPDATE_BRANCH`: update source branch or release tag passed to the clone manager; default follows `HERMES_AGENT_UPSTREAM_BRANCH`.
 - `HERMES_HORC_ASSUME_YES=1`: skip interactive `delete` confirmation.
 - `HERMES_WASM_AGENT_STATE_DIR`: local wasm-agent state root for `horc space`
   runtime state and backup fallback.

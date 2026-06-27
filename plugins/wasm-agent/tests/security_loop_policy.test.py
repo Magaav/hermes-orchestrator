@@ -32,6 +32,8 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertTrue(server_mod.requires_admin_request("GET", "/bridge/nodes"))
         self.assertTrue(server_mod.requires_admin_request("GET", "/security-loop/status"))
         self.assertTrue(server_mod.requires_admin_request("POST", "/security-loop/findings"))
+        self.assertTrue(server_mod.requires_admin_request("POST", "/agent/provider/envelope"))
+        self.assertFalse(server_mod.requires_admin_request("POST", "/agent/provider/chat"))
         self.assertFalse(server_mod.requires_admin_request("GET", "/spaces"))
         self.assertFalse(server_mod.requires_admin_request("POST", "/spaces"))
 

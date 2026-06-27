@@ -117,6 +117,58 @@ that works but adds avoidable latency, jitter, duplicate rendering, late UI
 feedback, or unnecessary runtime work is incomplete until the waste is removed
 or explicitly justified.
 
+## Omni-Device Feature Law
+
+Default new product features to the shared PWA/runtime layer first. Prefer
+browser APIs, WASM, WebGPU/WebNN where available, downloadable model/runtime
+artifacts, service-worker/browser cache, IndexedDB, and static metadata with
+version and SHA validation before adding native shell code.
+
+Native shell branching is an exception, not the default. It is allowed only when
+an OS/browser constraint makes the feature impossible or unreliable in the PWA
+lane, such as background wake-word listeners, OS services, native permissions,
+package identity, signing, foreground services, accessibility, media projection,
+or hardware/OS primitives that the browser cannot provide. When native is used,
+keep it as a minimal primitive and keep product behavior, model selection,
+diagnostics, and UI policy in the shared runtime whenever possible.
+
+For AI/audio/model features, the first production design must ask whether an
+on-demand WASM/WebGPU path can run locally across web, Android WebView, Windows
+Electron, and future shells. Load it only after user intent, cache by immutable
+version/SHA, and invalidate through metadata, not a native rebuild.
+
+Hermes-Relay v0.3.0 is the reference release pattern: version-tagged artifacts,
+SHA verification, and channel/flavor splits only where platform policy or
+capability boundaries require them. Do not use flavor/native splits for features
+that can ship as shared web/runtime/model artifacts.
+
+## LLM-Native Architecture Law
+
+Every durable feature should be shaped so an LLM can operate it well: inspect
+current state, understand available capabilities, choose bounded actions, and
+verify proof with the smallest correct context. The repo should be LLM-native
+by architecture, not merely LLM-connected at the chat surface.
+
+For state, telemetry, observations, logs, tool results, snapshots, transcripts,
+protocol payloads, diagnostics, release evidence, and control surfaces, the
+default contract is a tiny always-on summary plus on-demand lookup tools.
+Human-readable expanded views may exist, and machine APIs should remain
+structured, but prompt input must be optimized for LLM token economics and
+reasoning quality.
+
+Prefer short, stable, repetitive text codes and shared dictionaries that models
+can parse cheaply, such as `s=home|v=360x710|n=orchestrator`, over verbose
+field names, nested prompt JSON, raw logs, screenshots, binary blobs, base64,
+protobuf, or gRPC payloads inside prompts. Expose explicit capability reports,
+action schemas, status fields, counters, error classes, and proof artifacts so
+agents do not need to infer state from human-only output.
+
+Before adding a new implementation, measure or estimate baseline context
+pressure, state the minimum information required for the next decision, and ask
+whether detail can be fetched only when needed. Production-grade observability
+is LLM-first: compact, redacted, provider-aware, replayable, and precise enough
+to let the model decide which bounded tool or proof to call next.
+
 ## Self-Improving Harness
 
 Use `docs/context/HARNESS.md` after intent/context routing and before slow

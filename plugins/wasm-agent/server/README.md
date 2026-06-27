@@ -12,3 +12,17 @@
 
 The bridge routes requests through the Hermes Orchestrator CLI/API boundary.
 It must not import Hermes Agent internals or patch runtime node state directly.
+
+## LLM-Native Direct Envelope
+
+`POST /agent/provider/envelope` is the compact LLM-native head lane for admin
+avatar-chat and related embedded-agent decisions. It intentionally bypasses the
+Hermes turn/session context and sends only a bounded envelope to the configured
+provider through the existing account-gated backend proxy. Non-admin users must
+stay on the existing bridge/provider chat path.
+
+The envelope must include `objective`. Preferred fields are `trace_id`,
+`compact_state`, `capabilities`, `constraints`, `evidence_refs`,
+`allowed_actions`, `action_schemas`, `budget`, and `output_schema`. Secrets in
+the envelope are redacted before prompt assembly. This route bypasses context,
+not admin gating, auth, provider routing, diagnostics, or account gating.
