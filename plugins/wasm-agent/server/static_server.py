@@ -74,6 +74,10 @@ DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_BYTES = 64 * 1024 * 1024
 DEFAULT_AGENT_ATTACHMENT_STORE_MAX_FILES = 240
 DEFAULT_AGENT_ATTACHMENT_MAX_AGE_SEC = 14 * 24 * 60 * 60
+AGENT_RUN_EVENT_MAX_JSON_CHARS = 24_000
+AGENT_RUN_FINAL_MAX_JSON_CHARS = 256_000
+AGENT_RUN_EVENT_POLL_SEC = 0.05
+AGENT_RUN_STREAM_HEARTBEAT_SEC = 15.0
 DEFAULT_CAMERA_SNAPSHOT_PROXY_TIMEOUT_SEC = 8
 DEFAULT_CAMERA_SNAPSHOT_PROXY_MAX_BYTES = 2 * 1024 * 1024
 DEFAULT_CAMERA_STREAM_PROXY_TIMEOUT_SEC = 20
@@ -130,6 +134,24 @@ ACTIVE_BRIDGE_TASK_STATUSES = {"active", "in_progress", "pending", "queued", "ru
 PROVIDER_MODELS_URLS = {
     "openrouter": "https://openrouter.ai/api/v1/models",
     "opencode-go": "https://opencode.ai/zen/go/v1/models",
+}
+OPENAI_RESPONSES_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+OPENAI_RESPONSES_DEFAULT_MODEL = "gpt-5.5"
+OPENAI_CODEX_DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
+OPENAI_CODEX_DEFAULT_MODEL = "gpt-5.5"
+PROVIDER_DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
+    "opencode-go": "https://opencode.ai/zen/go/v1",
+    "opencode-zen": "https://opencode.ai/zen/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "moonshot": "https://api.moonshot.ai/v1",
+    "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "xai": "https://api.x.ai/v1",
+    "mistral": "https://api.mistral.ai/v1",
+    "perplexity": "https://api.perplexity.ai",
 }
 PROVIDER_MODELS_CACHE: dict[str, dict[str, Any]] = {}
 CORE_FIRMWARE_PREFIXES = (
@@ -341,11 +363,14 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.camera_push_processes_lock = threading.Lock()
         self.chat_turn_results: dict[str, dict[str, Any]] = {}
         self.chat_turn_results_lock = threading.Lock()
+        self.agent_run_workers: dict[str, threading.Thread] = {}
+        self.agent_run_workers_lock = threading.Lock()
         self.remote_control_live_clients: dict[str, set[Any]] = {}
         self.remote_control_live_clients_lock = threading.Lock()
         self.shared_space_live_clients: dict[str, set[Any]] = {}
         self.shared_space_live_clients_lock = threading.Lock()
         self.observability_hub = ObservabilityHub(self)
+        mark_interrupted_agent_runs(self)
 
     def server_close(self) -> None:
         try:
@@ -622,6 +647,31 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path.startswith("/agent/attachments/"):
             try:
                 serve_agent_attachment(self, path, user)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        if path == "/agent/runs":
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                self._json(HTTPStatus.OK, list_agent_runs(user, query))
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            return
+        agent_run_match = re.fullmatch(r"/agent/runs/([A-Za-z0-9_.:-]+)(?:/(events|stream))?", path)
+        if agent_run_match:
+            try:
+                run_id = agent_run_match.group(1)
+                query = parse_qs(urlparse(self.path).query)
+                if agent_run_match.group(2) == "events":
+                    self._json(HTTPStatus.OK, read_agent_run_events(user, run_id, query))
+                elif agent_run_match.group(2) == "stream":
+                    try:
+                        after_seq = max(0, int((query.get("after_seq") or query.get("after") or ["0"])[0] or 0))
+                    except (TypeError, ValueError):
+                        after_seq = 0
+                    serve_agent_run_stream(self, run_id, user=user, after_seq=after_seq)
+                else:
+                    self._json(HTTPStatus.OK, read_agent_run(user, run_id))
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
@@ -1614,11 +1664,37 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     {"ok": False, "error": {"code": "model_setup_error", "message": str(exc)}},
                 )
             return
+        if path == "/agent/provider/envelope/stream":
+            try:
+                body = self._read_json(max_bytes=8 * 1024 * 1024)
+                stream_provider_envelope_message(self, body, user=user)
+            except BrowserError as exc:
+                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+            except ProviderProxyError as exc:
+                self._json(
+                    exc.status,
+                    {
+                        "ok": False,
+                        "error": {"code": exc.code, "message": exc.message},
+                        "provider": {"diagnostic": exc.diagnostic},
+                    },
+                )
+            except Exception as exc:
+                diagnostic = provider_diagnostic("unreachable", "backend-proxy-error", str(exc), HTTPStatus.BAD_GATEWAY)
+                self._json(
+                    HTTPStatus.BAD_GATEWAY,
+                    {
+                        "ok": False,
+                        "error": {"code": "provider_proxy_error", "message": diagnostic["message"]},
+                        "provider": {"diagnostic": diagnostic},
+                    },
+                )
+            return
         if path in {"/agent/provider/probe", "/agent/provider/chat", "/agent/provider/envelope"}:
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
                 provider = (
-                    provider_envelope_completion(self.server, body, user=user)
+                    provider_envelope_run_completion(self.server, body, user=user)
                     if path.endswith("/envelope")
                     else provider_proxy_completion(self.server, body, user=user, probe=path.endswith("/probe"))
                 )
@@ -1631,6 +1707,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     "usage": provider.get("usage"),
                     "model": provider.get("model", ""),
                     "mode": provider.get("mode") or "backend-proxy",
+                    "run_id": provider.get("run_id", ""),
+                    "turn_id": provider.get("turn_id", ""),
+                    "hermes_dispatch": provider.get("hermes_dispatch"),
+                    "context_measurement": provider.get("context_measurement"),
+                    "provider_result": provider,
                 }
                 self._json(HTTPStatus.OK, payload)
             except ProviderProxyError as exc:
@@ -1656,7 +1737,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
         if path == "/agent/session/message":
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
-                self._json(HTTPStatus.OK, {"ok": True, "agent": embedded_agent_message(self.server, body, user=user)})
+                self._json(HTTPStatus.OK, {"ok": True, "agent": run_embedded_agent_message(self.server, body, user=user)})
             except BrowserError as exc:
                 self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             except Exception as exc:
@@ -2040,6 +2121,312 @@ def normalize_provider_model(model: str, base_url: str = "", provider: str = "")
     return clean
 
 
+def provider_api_key_env_name(provider: str) -> str:
+    clean = str(provider or "").strip().lower()
+    if clean == "openrouter":
+        return "OPENROUTER_API_KEY"
+    if clean == "opencode-go":
+        return "OPENCODE_GO_API_KEY"
+    if clean == "opencode-zen":
+        return "OPENCODE_ZEN_API_KEY"
+    if clean == "nvidia":
+        return "NVIDIA_API_KEY"
+    if clean in {"minimax", "minimax-cn"}:
+        return "MINIMAX_API_KEY"
+    return "OPENAI_API_KEY"
+
+
+def provider_env_prefix(provider: str) -> str:
+    key = provider_api_key_env_name(provider)
+    return key[:-8] if key.endswith("_API_KEY") else re.sub(r"[^A-Z0-9]+", "_", str(provider or "").upper()).strip("_")
+
+
+def server_default_provider_proxy_config() -> dict[str, Any]:
+    def configured_env(name: str) -> str:
+        return (os.getenv(name) or env_file_value(name)).strip()
+
+    provider = (
+        configured_env("HERMES_WASM_AGENT_DIRECT_HEAD_PROVIDER")
+        or configured_env("WASM_AGENT_DIRECT_HEAD_PROVIDER")
+        or configured_env("NODE_AGENT_DEFAULT_MODEL_PROVIDER")
+        or configured_env("DEFAULT_MODEL_PROVIDER")
+        or configured_env("HERMES_INFERENCE_PROVIDER")
+        or FLUX_MAIN_NODE_PROVIDER
+    ).strip().lower()
+    model = (
+        configured_env("HERMES_WASM_AGENT_DIRECT_HEAD_MODEL")
+        or configured_env("WASM_AGENT_DIRECT_HEAD_MODEL")
+        or configured_env("NODE_AGENT_DEFAULT_MODEL")
+        or configured_env("DEFAULT_MODEL")
+        or FLUX_MAIN_NODE_MODEL
+    ).strip()
+    if "/" in model and (not provider or provider == FLUX_MAIN_NODE_PROVIDER):
+        prefix, _, remainder = model.partition("/")
+        if prefix and remainder:
+            provider = prefix.strip().lower()
+            model = remainder.strip()
+    provider = provider or FLUX_MAIN_NODE_PROVIDER
+    prefix = provider_env_prefix(provider)
+    base_url = (
+        configured_env("HERMES_WASM_AGENT_DIRECT_HEAD_BASE_URL")
+        or configured_env("WASM_AGENT_DIRECT_HEAD_BASE_URL")
+        or configured_env(f"{prefix}_BASE_URL")
+        or (configured_env("OPENAI_BASE_URL") if provider in {"openai", "opencode-go", "opencode-zen"} else "")
+        or PROVIDER_DEFAULT_BASE_URLS.get(provider)
+        or ""
+    ).strip()
+    api_key = (
+        configured_env("HERMES_WASM_AGENT_DIRECT_HEAD_API_KEY")
+        or configured_env("WASM_AGENT_DIRECT_HEAD_API_KEY")
+        or configured_env(provider_api_key_env_name(provider))
+        or (configured_env("OPENAI_API_KEY") if provider == "openai" else "")
+        or ""
+    ).strip()
+    if not base_url or not model:
+        return {}
+    return {
+        "base_url": base_url,
+        "model": model,
+        "api_key": api_key,
+        "provider": provider,
+        "source": "server-default-direct-head",
+    }
+
+
+def configured_env_value(name: str) -> str:
+    return (os.getenv(name) or env_file_value(name)).strip()
+
+
+def direct_envelope_receiver(body: dict[str, Any]) -> str:
+    raw_envelope = body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope")
+    envelope_receiver = raw_envelope.get("receiver") if isinstance(raw_envelope, dict) else ""
+    explicit_receiver = (
+        body.get("receiver")
+        or body.get("envelope_receiver")
+        or body.get("target_receiver")
+        or envelope_receiver
+        or ""
+    )
+
+    def normalize_receiver(receiver: Any) -> str:
+        clean = re.sub(r"[^a-z0-9_.:-]+", "-", str(receiver or "").strip().lower()).strip("-")
+        if clean in {"openai", "openai-responses", "responses", "gpt-5.5"}:
+            return "openai-responses"
+        if clean in {"chatgpt", "codex", "openai-codex", "codex-oauth", "chatgpt-codex"}:
+            return "openai-codex"
+        if clean in {"provider", "provider-proxy", "chat-completions", "openai-compatible"}:
+            return "provider"
+        return clean
+
+    clean = normalize_receiver(explicit_receiver)
+    if clean:
+        return clean
+    if isinstance(body.get("provider_config"), dict) or body.get("use_server_provider") or body.get("provider_config_source"):
+        return "provider"
+    receiver = (
+        configured_env_value("WASM_AGENT_MASTER_FRONTIER_RECEIVER")
+        or configured_env_value("HERMES_WASM_AGENT_MASTER_FRONTIER_RECEIVER")
+        or ""
+    )
+    return normalize_receiver(receiver) or "provider"
+
+
+def openai_responses_config(body: dict[str, Any]) -> dict[str, str]:
+    model = str(
+        body.get("openai_model")
+        or body.get("model")
+        or configured_env_value("WASM_AGENT_OPENAI_MODEL")
+        or configured_env_value("HERMES_WASM_AGENT_OPENAI_MODEL")
+        or configured_env_value("OPENAI_MODEL")
+        or OPENAI_RESPONSES_DEFAULT_MODEL
+    ).strip()
+    base_url = str(
+        body.get("openai_base_url")
+        or body.get("openaiBaseUrl")
+        or configured_env_value("WASM_AGENT_OPENAI_BASE_URL")
+        or configured_env_value("HERMES_WASM_AGENT_OPENAI_BASE_URL")
+        or configured_env_value("OPENAI_BASE_URL")
+        or OPENAI_RESPONSES_DEFAULT_BASE_URL
+    ).strip().rstrip("/")
+    api_key = str(
+        body.get("openai_api_key")
+        or body.get("openaiApiKey")
+        or configured_env_value("WASM_AGENT_OPENAI_API_KEY")
+        or configured_env_value("HERMES_WASM_AGENT_OPENAI_API_KEY")
+        or configured_env_value("OPENAI_API_KEY")
+        or ""
+    ).strip()
+    if not model:
+        diagnostic = provider_diagnostic("config-missing", "missing-model", "Missing OpenAI model.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-openai-model", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    if not base_url:
+        diagnostic = provider_diagnostic("config-missing", "missing-base-url", "Missing OpenAI base URL.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-openai-base-url", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    base_url = normalize_provider_base_url(base_url)
+    if not api_key:
+        diagnostic = provider_diagnostic(
+            "config-missing",
+            "missing-api-key",
+            "Missing OpenAI API key. Set OPENAI_API_KEY or WASM_AGENT_OPENAI_API_KEY in wa.env.",
+            HTTPStatus.BAD_REQUEST,
+            endpoint=f"{base_url}/responses",
+            model=model,
+        )
+        raise ProviderProxyError("missing-openai-api-key", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    return {
+        "base_url": base_url,
+        "endpoint": f"{base_url}/responses",
+        "model": clipped(model, 180),
+        "api_key": api_key,
+    }
+
+
+def responses_endpoint_from_base_url(base_url: str) -> tuple[str, str]:
+    clean = normalize_provider_base_url(base_url).rstrip("/")
+    if clean.endswith("/responses"):
+        return clean[: -len("/responses")].rstrip("/"), clean
+    return clean, f"{clean}/responses"
+
+
+def _load_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _nested_get(value: Any, path: list[str]) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _codex_pool_access_token(payload: Any) -> str:
+    entries = _nested_get(payload, ["credential_pool", "openai-codex"])
+    if not isinstance(entries, list):
+        return ""
+    candidates: list[dict[str, Any]] = [item for item in entries if isinstance(item, dict)]
+    candidates.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
+    for item in candidates:
+        token = str(item.get("access_token") or item.get("api_key") or item.get("token") or "").strip()
+        if token:
+            return token
+        nested_token = str(_nested_get(item, ["tokens", "access_token"]) or "").strip()
+        if nested_token:
+            return nested_token
+    return ""
+
+
+def _codex_access_token_from_auth_payload(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    paths = [
+        ["providers", "openai-codex", "tokens", "access_token"],
+        ["providers", "openai-codex", "access_token"],
+        ["openai-codex", "tokens", "access_token"],
+        ["openai-codex", "access_token"],
+        ["tokens", "access_token"],
+        ["access_token"],
+    ]
+    for path in paths:
+        token = str(_nested_get(payload, path) or "").strip()
+        if token:
+            return token
+    return _codex_pool_access_token(payload)
+
+
+def codex_oauth_access_token() -> tuple[str, str]:
+    env_token = (
+        configured_env_value("WASM_AGENT_CODEX_ACCESS_TOKEN")
+        or configured_env_value("HERMES_WASM_AGENT_CODEX_ACCESS_TOKEN")
+        or configured_env_value("OPENAI_CODEX_ACCESS_TOKEN")
+        or configured_env_value("CODEX_ACCESS_TOKEN")
+    )
+    if env_token:
+        return env_token, "env"
+    paths = [
+        configured_env_value("WASM_AGENT_CODEX_AUTH_JSON"),
+        configured_env_value("HERMES_WASM_AGENT_CODEX_AUTH_JSON"),
+        configured_env_value("HERMES_AUTH_JSON"),
+        str(Path.home() / ".hermes" / "auth.json"),
+        str(Path.home() / ".codex" / "auth.json"),
+    ]
+    seen: set[str] = set()
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser()
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        payload = _load_json_file(path)
+        token = _codex_access_token_from_auth_payload(payload)
+        if token:
+            return token, key
+    return "", ""
+
+
+def codex_account_id_from_access_token(access_token: str) -> str:
+    try:
+        parts = access_token.split(".")
+        if len(parts) < 2:
+            return ""
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload_b64.encode("utf-8")))
+        auth_claims = claims.get("https://api.openai.com/auth") if isinstance(claims, dict) else {}
+        account_id = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else ""
+        return clipped(str(account_id or "").strip(), 180)
+    except Exception:
+        return ""
+
+
+def openai_codex_config(body: dict[str, Any]) -> dict[str, str]:
+    model = str(
+        body.get("codex_model")
+        or body.get("openai_codex_model")
+        or body.get("model")
+        or configured_env_value("WASM_AGENT_CODEX_MODEL")
+        or configured_env_value("HERMES_WASM_AGENT_CODEX_MODEL")
+        or configured_env_value("OPENAI_CODEX_MODEL")
+        or configured_env_value("WASM_AGENT_OPENAI_MODEL")
+        or OPENAI_CODEX_DEFAULT_MODEL
+    ).strip()
+    base_url = str(
+        body.get("codex_base_url")
+        or body.get("openai_codex_base_url")
+        or configured_env_value("WASM_AGENT_CODEX_BASE_URL")
+        or configured_env_value("HERMES_WASM_AGENT_CODEX_BASE_URL")
+        or configured_env_value("OPENAI_CODEX_BASE_URL")
+        or OPENAI_CODEX_DEFAULT_BASE_URL
+    ).strip().rstrip("/")
+    base_url, endpoint = responses_endpoint_from_base_url(base_url)
+    access_token, source = codex_oauth_access_token()
+    if not model:
+        diagnostic = provider_diagnostic("config-missing", "missing-model", "Missing Codex model.", HTTPStatus.BAD_REQUEST)
+        raise ProviderProxyError("missing-codex-model", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    if not access_token:
+        diagnostic = provider_diagnostic(
+            "config-missing",
+            "missing-codex-oauth",
+            "Missing Codex OAuth token. Run Hermes/Codex ChatGPT login or set WASM_AGENT_CODEX_ACCESS_TOKEN server-side.",
+            HTTPStatus.BAD_REQUEST,
+            endpoint=f"{base_url}/responses",
+            model=model,
+        )
+        raise ProviderProxyError("missing-codex-oauth", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_REQUEST)
+    return {
+        "base_url": base_url,
+        "endpoint": endpoint,
+        "model": clipped(model, 180),
+        "api_key": access_token,
+        "source": clipped(source, 240),
+    }
+
+
 def normalize_provider_models_name(value: str) -> str:
     raw = re.sub(r"[\s_]+", "-", str(value or "").strip().lower())
     if raw in {"openrouter", "open-router"}:
@@ -2317,6 +2704,7 @@ DIRECT_ENVELOPE_ALLOWED_KEYS = (
     "allowed_actions",
     "action_schemas",
     "budget",
+    "stream",
     "output_schema",
 )
 DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -2332,6 +2720,15 @@ DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
         "confidence": {"type": "number"},
     },
     "additionalProperties": True,
+}
+DIRECT_HEAD_HERMES_ALLOWED_CAPS = {
+    "repo.read",
+    "repo.edit",
+    "test.run",
+    "command.run",
+    "runtime.inspect",
+    "docs.update",
+    "proof.report",
 }
 DIRECT_ENVELOPE_SYSTEM_PROMPT = (
     "You are wasm-agent's direct LLM-native head. Use only the provided compact "
@@ -2395,6 +2792,64 @@ def direct_envelope_json(value: Any, *, limit: int = DIRECT_ENVELOPE_MAX_JSON_CH
     return clipped(json.dumps(value, ensure_ascii=True, separators=(",", ":")), limit)
 
 
+def compact_context_measurement(label: str, text: str, *, baseline_text: str = "") -> dict[str, Any]:
+    chars = len(text)
+    baseline_chars = len(baseline_text)
+    return {
+        "schema": "hermes.wasm_agent.context_measurement.v1",
+        "label": clipped(label, 80),
+        "chars": chars,
+        "utf8_bytes": len(text.encode("utf-8")),
+        "estimated_tokens": int(math.ceil(chars / 4)) if chars else 0,
+        "baseline_chars": baseline_chars,
+        "baseline_estimated_tokens": int(math.ceil(baseline_chars / 4)) if baseline_chars else 0,
+        "compression_ratio": round(chars / baseline_chars, 4) if baseline_chars else None,
+    }
+
+
+def direct_envelope_inline(value: Any, limit: int = 1200) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, str):
+        return clipped(value, limit)
+    return direct_envelope_json(value, limit=limit)
+
+
+def direct_envelope_names(value: Any, key: str = "id") -> str:
+    if isinstance(value, str):
+        return clipped(value, 1000)
+    if isinstance(value, list):
+        names = []
+        for item in value[:24]:
+            if isinstance(item, str):
+                names.append(item)
+            elif isinstance(item, dict):
+                names.append(str(item.get(key) or item.get("name") or item.get("type") or item.get("action") or "item"))
+        return ", ".join(clipped(str(item), 80) for item in names if str(item).strip())
+    if isinstance(value, dict):
+        return ", ".join(clipped(str(key), 80) for key in list(value.keys())[:24])
+    return clipped(str(value), 1000)
+
+
+def direct_envelope_semantic_text(envelope: dict[str, Any]) -> str:
+    refs = envelope.get("evidence_refs")
+    if not refs:
+        refs = envelope.get("evidence")
+    lines = [
+        "ENV agent-envelope-v1",
+        f"OBJ {direct_envelope_inline(envelope.get('objective'), 1600)}",
+        f"STATE {direct_envelope_inline(envelope.get('state_summary') or envelope.get('compact_state'), 1600)}",
+        f"CAPS {direct_envelope_names(envelope.get('capabilities'))}",
+        f"REFS {direct_envelope_names(refs, key='ref')}",
+        f"ACT {direct_envelope_names(envelope.get('allowed_actions'))}",
+        f"PROOF {direct_envelope_inline(envelope.get('constraints') or envelope.get('proof_requests'), 900)}",
+        f"BUDGET {direct_envelope_inline(envelope.get('budget'), 500)}",
+        "STREAM true" if envelope.get("stream") is True else "STREAM false",
+        f"OUT {direct_envelope_inline(envelope.get('output_schema'), 1200)}",
+    ]
+    return "\n".join(line for line in lines if line.split(" ", 1)[-1].strip())
+
+
 def direct_envelope_error(category: str, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
     diagnostic = provider_diagnostic("direct-envelope", category, message, status)
     raise ProviderProxyError(category, diagnostic["message"], diagnostic=diagnostic, status=status)
@@ -2422,10 +2877,11 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
 def direct_envelope_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     envelope = direct_envelope_from_body(body)
     instructions = clipped(str(body.get("instructions") or "").strip(), 4000)
+    semantic = direct_envelope_semantic_text(envelope)
     content = [
-        "Treat this compact JSON as the complete context for this decision.",
+        "Treat this compact semantic envelope as the complete context for this decision.",
         "Return only JSON. No markdown fences, commentary, or hidden transcript assumptions.",
-        f"Envelope JSON:\n{direct_envelope_json(envelope)}",
+        semantic,
     ]
     if instructions:
         content.insert(2, f"Additional operator instructions:\n{instructions}")
@@ -2435,15 +2891,294 @@ def direct_envelope_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]]
     ], envelope
 
 
+def direct_envelope_with_metrics(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], str, dict[str, Any]]:
+    messages, envelope = direct_envelope_messages(body)
+    semantic = direct_envelope_semantic_text(envelope)
+    measurement = compact_context_measurement(
+        "direct-head-envelope",
+        semantic,
+        baseline_text=direct_envelope_json(envelope),
+    )
+    return messages, envelope, semantic, measurement
+
+
+def openai_direct_envelope_text(body: dict[str, Any], envelope: dict[str, Any]) -> str:
+    raw = body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope")
+    payload = raw if isinstance(raw, dict) else envelope
+    receiver = direct_envelope_receiver(body)
+    return (
+        "ENV agent-envelope-v1\n"
+        f"RECEIVER {receiver}\n"
+        "RAW true\n"
+        f"{direct_envelope_json(payload, limit=DIRECT_ENVELOPE_MAX_JSON_CHARS)}"
+    )
+
+
+def openai_responses_text(response: Any) -> str:
+    if not isinstance(response, dict):
+        return ""
+    chunks: list[str] = []
+    output_text = response.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        chunks.append(output_text)
+    output = response.get("output") if isinstance(response.get("output"), list) else []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") if isinstance(item.get("content"), list) else []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text") or part.get("output_text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+    return "".join(chunks).strip()
+
+
+def iter_sse_json(response: Any) -> Any:
+    event_name = ""
+    data_lines: list[str] = []
+    for raw_line in response:
+        line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
+        if not line:
+            if data_lines:
+                data = "\n".join(data_lines).strip()
+                data_lines = []
+                if data and data != "[DONE]":
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        payload = {"type": event_name or "message", "data": data}
+                    if event_name and isinstance(payload, dict) and not payload.get("event"):
+                        payload["event"] = event_name
+                    yield payload
+            event_name = ""
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.split(":", 1)[1].strip()
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.split(":", 1)[1].lstrip())
+    if data_lines:
+        data = "\n".join(data_lines).strip()
+        if data and data != "[DONE]":
+            try:
+                yield json.loads(data)
+            except json.JSONDecodeError:
+                yield {"type": event_name or "message", "data": data}
+
+
+def openai_responses_completion(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    run_id: str = "",
+    user: dict[str, Any] | None = None,
+    action_callback: Any | None = None,
+) -> dict[str, Any]:
+    if not user_is_admin(user):
+        diagnostic = provider_diagnostic(
+            "openai-responses",
+            "admin-required",
+            "OpenAI direct envelope receiver is restricted to admin avatar-chat.",
+            HTTPStatus.FORBIDDEN,
+        )
+        raise ProviderProxyError("admin_required", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.FORBIDDEN)
+    receiver = direct_envelope_receiver(body)
+    if receiver == "openai-codex":
+        config = openai_codex_config(body)
+        provider_label = "openai-codex"
+        diagnostic_label = "openai-codex"
+        source_label = "codex_oauth"
+        user_agent = "codex_cli_rs/0.0.0 (wasm-agent)"
+    else:
+        config = openai_responses_config(body)
+        provider_label = "openai"
+        diagnostic_label = "openai-responses"
+        source_label = "openai_responses"
+        user_agent = f"{PLUGIN_NAME}/{PLUGIN_VERSION} openai-responses"
+    envelope_text = openai_direct_envelope_text(body, envelope)
+    measurement = compact_context_measurement(f"{receiver}-envelope", envelope_text)
+    instructions = clipped(str(body.get("instructions") or "").strip(), 4000)
+    developer = "\n".join([
+        "You are Master:frontier inside wasm-agent.",
+        "Consume the supplied envelope directly as the complete turn protocol.",
+        "Do not route through Hermes unless a wasm-agent tool explicitly asks for it.",
+        "Stream concise answer text and preserve proof/action handles from the envelope.",
+        instructions,
+    ]).strip()
+    request_body: dict[str, Any] = {
+        "model": config["model"],
+        "input": [
+            {"role": "developer", "content": developer},
+            {"role": "user", "content": envelope_text},
+        ],
+        "stream": True,
+    }
+    if receiver == "openai-codex":
+        request_body["store"] = False
+    else:
+        request_body["store"] = True
+        request_body["metadata"] = {
+            "wasm_agent_receiver": receiver,
+            "wasm_agent_run_id": clipped(run_id, 120),
+            "turn_id": clipped(str(body.get("turn_id") or envelope.get("trace_id") or ""), 120),
+        }
+    budget = envelope.get("budget") if isinstance(envelope.get("budget"), dict) else {}
+    max_output = body.get("max_output_tokens") or body.get("max_tokens") or budget.get("max_output_tokens") or budget.get("maxTokens")
+    if receiver != "openai-codex" and isinstance(max_output, (int, float)) and not isinstance(max_output, bool):
+        request_body["max_output_tokens"] = max(1, min(64_000, int(max_output)))
+    reasoning_effort = clipped(str(body.get("reasoning_effort") or body.get("reasoningEffort") or ""), 40)
+    if reasoning_effort:
+        request_body["reasoning"] = {"effort": reasoning_effort}
+    text_verbosity = clipped(str(body.get("text_verbosity") or body.get("textVerbosity") or ""), 40)
+    if text_verbosity:
+        request_body["text"] = {"verbosity": text_verbosity}
+    data = json.dumps(request_body, ensure_ascii=True).encode("utf-8")
+    headers = {
+        "Accept": "text/event-stream",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config['api_key']}",
+        "User-Agent": user_agent,
+    }
+    if receiver == "openai-codex":
+        headers["originator"] = "codex_cli_rs"
+        account_id = codex_account_id_from_access_token(config["api_key"])
+        if account_id:
+            headers["ChatGPT-Account-ID"] = account_id
+    else:
+        organization = configured_env_value("OPENAI_ORG_ID") or configured_env_value("OPENAI_ORGANIZATION")
+        project = configured_env_value("OPENAI_PROJECT_ID") or configured_env_value("OPENAI_PROJECT")
+        if organization:
+            headers["OpenAI-Organization"] = organization
+        if project:
+            headers["OpenAI-Project"] = project
+    request = Request(config["endpoint"], data=data, headers=headers, method="POST")
+    started = time.monotonic()
+    deltas: list[str] = []
+    completed_response: dict[str, Any] | None = None
+    try:
+        with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+            for event in iter_sse_json(response):
+                event_type = str(event.get("type") or event.get("event") or "")
+                delta = event.get("delta") if isinstance(event.get("delta"), str) else ""
+                if not delta and event_type == "response.output_text.delta":
+                    delta = str(event.get("text") or "")
+                if delta:
+                    deltas.append(delta)
+                    if action_callback:
+                        action_callback({
+                            "type": "head.delta",
+                            "summary": clipped(delta, 180),
+                            "payload": {
+                                "receiver": receiver,
+                                "event_type": event_type,
+                                "delta": delta,
+                            },
+                        })
+                if event_type == "response.completed" and isinstance(event.get("response"), dict):
+                    completed_response = event["response"]
+                if event_type in {"response.failed", "response.incomplete"}:
+                    error = event.get("error") if isinstance(event.get("error"), dict) else {}
+                    response_detail = event.get("response") if isinstance(event.get("response"), dict) else {}
+                    message = str(error.get("message") or response_detail.get("incomplete_details") or event_type)
+                    diagnostic = provider_diagnostic(diagnostic_label, event_type, message, HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
+                    raise ProviderProxyError(event_type, diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:2000]
+        parsed_error: Any = {}
+        try:
+            parsed_error = json.loads(detail) if detail else {}
+        except json.JSONDecodeError:
+            parsed_error = {}
+        diagnostic = provider_http_diagnostic(
+            int(exc.code),
+            provider_error_message(parsed_error, detail[:600]),
+            endpoint=config["endpoint"],
+            model=config["model"],
+        )
+        raise ProviderProxyError(diagnostic["category"], diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    except TimeoutError as exc:
+        diagnostic = provider_diagnostic(diagnostic_label, "network-timeout", "Responses request timed out.", HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
+        raise ProviderProxyError("network-timeout", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    except URLError as exc:
+        reason = str(getattr(exc, "reason", exc))
+        diagnostic = provider_diagnostic(diagnostic_label, "network-failed", reason or "Responses request failed.", HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
+        raise ProviderProxyError("network-failed", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+    reply = "".join(deltas).strip() or openai_responses_text(completed_response or {})
+    if not reply:
+        diagnostic = provider_diagnostic(diagnostic_label, "empty-response", "Responses receiver returned no output text.", HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
+        raise ProviderProxyError("openai-empty-response", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+    duration_ms = round((time.monotonic() - started) * 1000)
+    usage = completed_response.get("usage") if isinstance(completed_response, dict) and isinstance(completed_response.get("usage"), dict) else None
+    return {
+        "schema": DIRECT_ENVELOPE_RESULT_SCHEMA,
+        "transport_schema": "openai.responses.v1",
+        "mode": "direct-envelope",
+        "category": diagnostic_label,
+        "receiver": receiver,
+        "content_type": "text",
+        "parsed": parse_direct_envelope_reply(reply),
+        "reply": reply,
+        "usage": usage,
+        "provider": provider_label,
+        "model": config["model"],
+        "base_url": config["base_url"],
+        "endpoint": config["endpoint"],
+        "credential_source": config.get("source", ""),
+        "duration_ms": duration_ms,
+        "envelope": {
+            "schema": envelope.get("schema", DIRECT_ENVELOPE_SCHEMA),
+            "trace_id": envelope.get("trace_id", ""),
+            "objective": envelope.get("objective", ""),
+            "budget": envelope.get("budget", {}),
+        },
+        "envelope_text": envelope_text,
+        "context_measurement": measurement,
+        "diagnostic": provider_diagnostic(diagnostic_label, "ready", "Responses receiver completed.", HTTPStatus.OK, endpoint=config["endpoint"], model=config["model"]),
+        "openai_response": {
+            "id": completed_response.get("id", "") if isinstance(completed_response, dict) else "",
+            "status": completed_response.get("status", "") if isinstance(completed_response, dict) else "",
+        },
+        "source": source_label,
+    }
+
+
 def provider_config_for_proxy_body(body: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(body.get("provider_config"), dict):
-        return body["provider_config"]
+    raw_config = body.get("provider_config") if isinstance(body.get("provider_config"), dict) else {}
+    use_server_provider = bool(
+        body.get("use_server_provider")
+        or body.get("useServerProvider")
+        or body.get("server_provider")
+        or body.get("serverProvider")
+        or body.get("provider_config_source") == "server-default"
+    )
+    if raw_config and not use_server_provider:
+        return raw_config
+    if use_server_provider or not raw_config:
+        fallback = server_default_provider_proxy_config()
+        if fallback:
+            return fallback
     return {
         "base_url": body.get("base_url") or body.get("baseUrl") or "",
         "model": body.get("model") or "",
         "api_key": body.get("api_key") or body.get("apiKey") or "",
         "provider": body.get("provider") or "",
     }
+
+
+def direct_head_server_provider_requested(body: dict[str, Any]) -> bool:
+    return bool(
+        body.get("use_server_provider")
+        or body.get("useServerProvider")
+        or body.get("server_provider")
+        or body.get("serverProvider")
+        or body.get("provider_config_source") == "server-default"
+        or not isinstance(body.get("provider_config"), dict)
+    )
 
 
 def parse_direct_envelope_reply(reply: str) -> Any:
@@ -2471,6 +3206,7 @@ def provider_envelope_completion(
     body: dict[str, Any],
     *,
     user: dict[str, Any] | None = None,
+    action_callback: Any | None = None,
 ) -> dict[str, Any]:
     if not user_is_admin(user):
         diagnostic = provider_diagnostic(
@@ -2480,7 +3216,10 @@ def provider_envelope_completion(
             HTTPStatus.FORBIDDEN,
         )
         raise ProviderProxyError("admin_required", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.FORBIDDEN)
-    messages, envelope = direct_envelope_messages(body)
+    messages, envelope, semantic_envelope, measurement = direct_envelope_with_metrics(body)
+    receiver = direct_envelope_receiver(body)
+    if receiver in {"openai-responses", "openai-codex"}:
+        return openai_responses_completion(server, body, envelope, user=user)
     proxy_body: dict[str, Any] = {
         "provider_config": provider_config_for_proxy_body(body),
         "messages": messages,
@@ -2491,7 +3230,7 @@ def provider_envelope_completion(
         max_output = budget.get("max_output_tokens") or budget.get("maxTokens")
         if isinstance(max_output, (int, float)) and not isinstance(max_output, bool):
             proxy_body["max_tokens"] = max(1, min(64_000, int(max_output)))
-    provider = provider_proxy_completion(server, proxy_body, user=user)
+    provider = provider_proxy_completion(server, proxy_body, user=user, action_callback=action_callback)
     parsed = parse_direct_envelope_reply(provider.get("reply", ""))
     return {
         **provider,
@@ -2506,7 +3245,726 @@ def provider_envelope_completion(
             "objective": envelope.get("objective", ""),
             "budget": envelope.get("budget", {}),
         },
+        "envelope_text": semantic_envelope,
+        "context_measurement": measurement,
     }
+
+
+def direct_head_action_name(action: dict[str, Any]) -> str:
+    return clipped(str(action.get("act") or action.get("action") or action.get("type") or action.get("id") or ""), 120).lower()
+
+
+def direct_head_hermes_dispatch_action(parsed: Any) -> dict[str, Any] | None:
+    if not isinstance(parsed, dict):
+        return None
+    actions = parsed.get("actions") if isinstance(parsed.get("actions"), list) else []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        if direct_head_action_name(action) == "dispatch.hermes":
+            return action
+    return None
+
+
+def direct_head_dispatch_caps(action: dict[str, Any]) -> list[str]:
+    raw = action.get("caps") or action.get("capabilities") or action.get("CAPS") or []
+    if isinstance(raw, str):
+        raw = [item.strip() for item in raw.split(",")]
+    if not isinstance(raw, list):
+        return []
+    caps: list[str] = []
+    for item in raw[:24]:
+        cap = clipped(str(item or "").strip(), 80)
+        if cap:
+            caps.append(cap)
+    return caps
+
+
+def validate_direct_head_hermes_caps(action: dict[str, Any]) -> list[str]:
+    caps = direct_head_dispatch_caps(action)
+    unknown = [cap for cap in caps if cap not in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
+    if unknown:
+        direct_envelope_error(
+            "unknown-hermes-capability",
+            f"Direct-head Hermes dispatch requested unsupported capabilities: {', '.join(unknown[:8])}.",
+            HTTPStatus.BAD_REQUEST,
+        )
+    return caps
+
+
+def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[str, Any]) -> str:
+    objective = clipped(str(action.get("obj") or action.get("objective") or action.get("OBJ") or envelope.get("objective") or ""), 2000)
+    refs = action.get("refs") or action.get("REFS") or envelope.get("evidence_refs") or []
+    proof = action.get("proof") or action.get("PROOF") or action.get("proof_requests") or []
+    payload = {
+        "schema": "hermes.wasm_agent.direct_head_dispatch.v1",
+        "objective": objective,
+        "caps": validate_direct_head_hermes_caps(action),
+        "refs": direct_envelope_redact(refs),
+        "proof": direct_envelope_redact(proof),
+        "stream": bool(action.get("stream") or action.get("STREAM")),
+    }
+    return (
+        "Direct-head requested Hermes capability dispatch. Act only within the listed CAPS, "
+        "use REFS as handles rather than hidden context, and return compact answer/proof summary.\n"
+        f"{direct_envelope_json(payload, limit=6000)}"
+    )
+
+
+def direct_head_fallback_dispatch_action(envelope: dict[str, Any]) -> dict[str, Any]:
+    raw_caps = envelope.get("capabilities")
+    caps = direct_head_dispatch_caps({"caps": raw_caps})
+    if not caps:
+        caps = ["repo.read", "runtime.inspect", "proof.report"]
+    caps = [cap for cap in caps if cap in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
+    if not caps:
+        caps = ["repo.read", "proof.report"]
+    return {
+        "action": "dispatch.hermes",
+        "objective": envelope.get("objective") or "Answer the avatar-chat turn.",
+        "caps": caps,
+        "refs": envelope.get("evidence_refs") or envelope.get("evidence") or [],
+        "proof": envelope.get("proof_requests") or envelope.get("constraints") or ["answer"],
+        "stream": bool(envelope.get("stream")),
+        "target_node": AGENT_FRONTIER_NODE_ID,
+        "fallback_reason": "server direct-head provider API key is not configured",
+    }
+
+
+def execute_direct_head_hermes_dispatch(
+    server: WasmAgentServer,
+    action: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+) -> dict[str, Any]:
+    caps = validate_direct_head_hermes_caps(action)
+    target_node = _safe_agent_node_id(action.get("target_node") or action.get("node_id") or default_agent_target_node(user))
+    ensure_agent_target_allowed(user, target_node)
+    target_node = resolve_frontier_agent_node(user, target_node)
+    prompt = direct_head_hermes_dispatch_prompt(action, envelope)
+    measurement = compact_context_measurement("hermes-dispatch-envelope", prompt)
+    append_agent_run_event(
+        server,
+        run_id,
+        "hermes.dispatch",
+        summary=clipped(str(action.get("objective") or action.get("obj") or envelope.get("objective") or "Hermes dispatch"), 180),
+        payload={
+            "target_node": target_node,
+            "caps": caps,
+            "context_measurement": measurement,
+        },
+    )
+
+    def emit_action(progress: dict[str, Any]) -> None:
+        record_agent_run_action(server, run_id, progress)
+
+    reply, source, usage, bridge_trace = call_agent_bridge_runs(
+        server,
+        system_content="You are Hermes acting through wasm-agent's plugin-safe bridge/Runs API surface.",
+        text_content=prompt,
+        target_node=target_node,
+        model_id=clipped(str(action.get("model") or "embedded-hermes"), 160),
+        selected_model=None,
+        timeout_sec=agent_bridge_timeout_sec(),
+        action_callback=emit_action,
+    )
+    return {
+        "schema": "hermes.wasm_agent.direct_head_dispatch_result.v1",
+        "reply": reply,
+        "source": source,
+        "target_node": target_node,
+        "caps": caps,
+        "usage": usage,
+        "bridge_trace": bridge_trace,
+        "context_measurement": measurement,
+    }
+
+
+def provider_envelope_run_context(body: dict[str, Any]) -> dict[str, Any]:
+    _messages, envelope, semantic_envelope, measurement = direct_envelope_with_metrics(body)
+    receiver = direct_envelope_receiver(body)
+    proxy_provider_config = {} if receiver in {"openai-responses", "openai-codex"} else provider_config_for_proxy_body(body)
+    provider_summary = {
+        key: value
+        for key, value in proxy_provider_config.items()
+        if key not in {"api_key", "apiKey"}
+    }
+    provider_summary["api_key_present"] = bool(proxy_provider_config.get("api_key") or proxy_provider_config.get("apiKey"))
+    run_body = {
+        "session_id": body.get("session_id") or "direct-envelope",
+        "turn_id": body.get("turn_id") or envelope.get("trace_id") or f"direct_{uuid.uuid4().hex}",
+        "message": envelope.get("objective") or "direct envelope",
+        "mode": "direct-head",
+        "target_node": "direct-head",
+        "envelope": body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope"),
+        "provider_config": provider_summary,
+        "receiver": receiver,
+    }
+    return {
+        "envelope": envelope,
+        "semantic_envelope": semantic_envelope,
+        "measurement": measurement,
+        "receiver": receiver,
+        "proxy_provider_config": proxy_provider_config,
+        "provider_summary": provider_summary,
+        "run_body": run_body,
+    }
+
+
+def provider_envelope_result_from_final(final: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    provider = final.get("provider") if isinstance(final.get("provider"), dict) else {}
+    result = dict(provider)
+    result["reply"] = str(final.get("reply") or provider.get("reply") or "")
+    result["hermes_dispatch"] = final.get("hermes_dispatch")
+    result["run"] = run
+    result["run_id"] = run.get("run_id") or final.get("run_id")
+    result["turn_id"] = run.get("turn_id") or final.get("turn_id")
+    result["context_measurement"] = result.get("context_measurement") or (final.get("diagnostics") or {}).get("context_measurement")
+    return result
+
+
+def direct_head_change_proof(
+    server: WasmAgentServer,
+    *,
+    user: dict[str, Any] | None,
+    before_tree: str,
+    after_tree: str,
+    target_node: str,
+    objective: str,
+    space_id: str,
+) -> dict[str, Any]:
+    files = changed_files_between_trees(server, before_tree, after_tree) if before_tree and after_tree else []
+    checkpoint_summary = run_checkpoint_summary(objective)
+    before_checkpoint = (
+        create_timeline_checkpoint(
+            server,
+            label=timeline_ref_name(f"before-direct-head-{target_node}-{checkpoint_summary}"),
+            message=f"wasm-agent before direct-head on {target_node}: {checkpoint_summary}",
+            automatic=True,
+            user=user,
+            space_id=space_id,
+            tree_sha=before_tree,
+            extra_metadata={
+                "phase": "before_run",
+                "after_tree": after_tree,
+                "changed_files": files,
+                "scope": timeline_scope_for_paths(server, [str(item.get("path") or "") for item in files], user),
+            },
+        )
+        if files and before_tree
+        else None
+    )
+    auto_checkpoint = (
+        timeline_auto_checkpoint(
+            server,
+            f"direct-head-{target_node}-{checkpoint_summary}",
+            message=f"wasm-agent direct-head on {target_node}: {checkpoint_summary}",
+            tree_sha=after_tree,
+            before_tree=before_tree,
+            before_ref=before_checkpoint.get("ref") if before_checkpoint else None,
+            changed_files=files,
+            user=user,
+            space_id=space_id,
+        )
+        if files
+        else None
+    )
+    return {
+        "changed_files": files,
+        "before_checkpoint": {
+            "ref": before_checkpoint.get("ref"),
+            "sha": str(before_checkpoint.get("sha") or "")[:7],
+            "label": before_checkpoint.get("label"),
+        } if before_checkpoint else None,
+        "auto_checkpoint": {
+            "ref": auto_checkpoint.get("ref"),
+            "sha": str(auto_checkpoint.get("sha") or "")[:7],
+            "label": auto_checkpoint.get("label"),
+            "before_ref": auto_checkpoint.get("before_ref"),
+        } if auto_checkpoint else None,
+    }
+
+
+def direct_head_change_actions(change_proof: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    changed = change_proof.get("changed_files") if isinstance(change_proof.get("changed_files"), list) else []
+    before_checkpoint = change_proof.get("before_checkpoint") if isinstance(change_proof.get("before_checkpoint"), dict) else None
+    auto_checkpoint = change_proof.get("auto_checkpoint") if isinstance(change_proof.get("auto_checkpoint"), dict) else None
+    if changed:
+        actions.append({
+            "id": "changed_files",
+            "kind": "timeline",
+            "label": "Capture changed files",
+            "status": "done",
+            "detail": f"{len(changed)} paths",
+            "preview": compact_json(changed[:12], 900),
+        })
+    if before_checkpoint:
+        actions.append({
+            "id": "timeline_before_checkpoint",
+            "kind": "timeline",
+            "label": "Timeline before-run point",
+            "status": "done",
+            "detail": clipped(str(before_checkpoint.get("label") or ""), 160),
+            "meta": str(before_checkpoint.get("sha") or "")[:7],
+            "preview": compact_json(before_checkpoint, 900),
+        })
+    if auto_checkpoint:
+        actions.append({
+            "id": "timeline_checkpoint",
+            "kind": "timeline",
+            "label": "Timeline checkpoint",
+            "status": "done",
+            "detail": clipped(str(auto_checkpoint.get("label") or ""), 160),
+            "meta": str(auto_checkpoint.get("sha") or "")[:7],
+            "preview": compact_json(auto_checkpoint, 900),
+        })
+    return actions
+
+
+def provider_envelope_run_execute(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+    run: dict[str, Any],
+    context: dict[str, Any],
+) -> dict[str, Any]:
+    envelope = context["envelope"]
+    semantic_envelope = str(context.get("semantic_envelope") or "")
+    measurement = context["measurement"]
+    receiver = str(context.get("receiver") or "provider")
+    proxy_provider_config = context.get("proxy_provider_config") if isinstance(context.get("proxy_provider_config"), dict) else {}
+    before_tree = safe_worktree_tree_sha(server)
+    objective = str(envelope.get("objective") or body.get("message") or "direct envelope")
+    space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
+    append_agent_run_event(
+        server,
+        str(run.get("run_id") or ""),
+        "envelope.created",
+        summary=clipped(str(envelope.get("objective") or "Direct envelope"), 180),
+        payload={
+            "envelope": {
+                "schema": "agent-envelope-v1",
+                "trace_id": envelope.get("trace_id", ""),
+                "objective": clipped(str(envelope.get("objective") or ""), 500),
+                "caps": direct_envelope_names(envelope.get("capabilities")),
+                "refs": direct_envelope_names(envelope.get("evidence_refs") or envelope.get("evidence"), key="ref"),
+                "actions": direct_envelope_names(envelope.get("allowed_actions")),
+                "stream": bool(envelope.get("stream")),
+                "receiver": receiver,
+            },
+            "context_measurement": measurement,
+        },
+    )
+    append_agent_run_event(
+        server,
+        str(run.get("run_id") or ""),
+        "head.started",
+        summary="Direct head request started",
+        payload={"context_measurement": measurement},
+    )
+    try:
+        if receiver in {"openai-responses", "openai-codex"}:
+            def emit_openai_event(progress: dict[str, Any]) -> None:
+                if progress.get("type") == "head.delta":
+                    append_agent_run_event(
+                        server,
+                        str(run.get("run_id") or ""),
+                        "head.delta",
+                        summary=clipped(str(progress.get("summary") or "OpenAI delta"), 180),
+                        payload=progress.get("payload") if isinstance(progress.get("payload"), dict) else {},
+                    )
+                    return
+                record_agent_run_action(server, str(run.get("run_id") or ""), progress)
+
+            result = openai_responses_completion(
+                server,
+                body,
+                envelope,
+                run_id=str(run.get("run_id") or ""),
+                user=user,
+                action_callback=emit_openai_event,
+            )
+            parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+            decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "OpenAI receiver replied"), 240)
+            append_agent_run_event(
+                server,
+                str(run.get("run_id") or ""),
+                "head.decision",
+                summary=decision,
+                payload={
+                    "receiver": receiver,
+                    "decision": clipped(str(parsed.get("decision") or "answer"), 120),
+                    "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
+                    "needs": parsed.get("needs") if isinstance(parsed.get("needs"), list) else [],
+                    "confidence": parsed.get("confidence"),
+                },
+            )
+            dispatch_action = direct_head_hermes_dispatch_action(parsed)
+            dispatch_result = (
+                execute_direct_head_hermes_dispatch(
+                    server,
+                    dispatch_action,
+                    envelope,
+                    user=user,
+                    run_id=str(run.get("run_id") or ""),
+                )
+                if dispatch_action
+                else None
+            )
+            final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else result.get("reply", "")
+            target_node = (dispatch_result or {}).get("target_node") or "direct-head"
+            change_proof = direct_head_change_proof(
+                server,
+                user=user,
+                before_tree=before_tree,
+                after_tree=safe_worktree_tree_sha(server),
+                target_node=target_node,
+                objective=objective,
+                space_id=space_id,
+            )
+            final = {
+                "schema": "hermes.wasm_agent.direct_head_run.final.v1",
+                "run_id": run.get("run_id"),
+                "turn_id": run.get("turn_id"),
+                "reply": final_reply,
+                "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
+                "hermes_dispatch": dispatch_result,
+                "diagnostics": {
+                    "source": f"{receiver.replace('-', '_')}_hermes_dispatch" if dispatch_result else f"{receiver.replace('-', '_')}_direct",
+                    "mode": "direct-head",
+                    "receiver": receiver,
+                    "target_node": target_node,
+                    "context_measurement": result.get("context_measurement") or measurement,
+                    "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
+                    "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
+                    "token_usage": result.get("usage"),
+                    "openai_response": result.get("openai_response"),
+                    "changed_files_complete": True,
+                    "before_checkpoint": change_proof.get("before_checkpoint"),
+                    "auto_checkpoint": change_proof.get("auto_checkpoint"),
+                },
+                "changed_files": change_proof.get("changed_files") or [],
+                "context_preview": [{"tool": f"{receiver.replace('-', '_')}_envelope", "preview": semantic_envelope[:1200]}],
+                "actions": [
+                    {
+                        "id": receiver.replace("-", "_"),
+                        "topic": "run-api",
+                        "kind": "api",
+                        "label": "OpenAI Codex OAuth" if receiver == "openai-codex" else "OpenAI Responses",
+                        "status": "done",
+                        "detail": decision,
+                        "meta": result.get("model") or "openai",
+                    }
+                ] + bridge_trace_action_events((dispatch_result or {}).get("bridge_trace")) + direct_head_change_actions(change_proof),
+                "proof": [
+                    "route-used:/agent/provider/envelope/stream",
+                    f"receiver:{receiver}",
+                    f"target-node:{target_node}",
+                ],
+            }
+            record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
+            finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
+            return {
+                **result,
+                "reply": final_reply,
+                "envelope_text": semantic_envelope,
+                "hermes_dispatch": dispatch_result,
+                "run": run,
+                "run_id": run.get("run_id"),
+                "turn_id": run.get("turn_id"),
+            }
+        if direct_head_server_provider_requested(body) and not (proxy_provider_config.get("api_key") or proxy_provider_config.get("apiKey")):
+            dispatch_action = direct_head_fallback_dispatch_action(envelope)
+            decision = "Server direct-head provider unavailable; dispatching Hermes directly."
+            append_agent_run_event(
+                server,
+                str(run.get("run_id") or ""),
+                "head.decision",
+                summary=decision,
+                payload={
+                    "decision": "dispatch.hermes",
+                    "actions": [direct_envelope_redact(dispatch_action)],
+                    "needs": [],
+                    "confidence": 1,
+                    "provider_head_unavailable": True,
+                    "fallback_reason": dispatch_action["fallback_reason"],
+                },
+            )
+            dispatch_result = execute_direct_head_hermes_dispatch(
+                server,
+                dispatch_action,
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+            )
+            final_reply = dispatch_result.get("reply", "")
+            target_node = dispatch_result.get("target_node") or "direct-head"
+            change_proof = direct_head_change_proof(
+                server,
+                user=user,
+                before_tree=before_tree,
+                after_tree=safe_worktree_tree_sha(server),
+                target_node=target_node,
+                objective=objective,
+                space_id=space_id,
+            )
+            parsed = {
+                "answer": final_reply,
+                "decision": "dispatch.hermes",
+                "actions": [direct_envelope_redact(dispatch_action)],
+                "state_delta": {},
+                "needs": [],
+                "confidence": 1,
+                "provider_head_unavailable": True,
+            }
+            result = {
+                "schema": DIRECT_ENVELOPE_RESULT_SCHEMA,
+                "transport_schema": dispatch_result.get("schema", ""),
+                "mode": "direct-envelope",
+                "category": "server-default-hermes-dispatch",
+                "content_type": "json",
+                "parsed": parsed,
+                "envelope": {
+                    "schema": envelope.get("schema", DIRECT_ENVELOPE_SCHEMA),
+                    "trace_id": envelope.get("trace_id", ""),
+                    "objective": envelope.get("objective", ""),
+                    "budget": envelope.get("budget", {}),
+                },
+                "envelope_text": semantic_envelope,
+                "context_measurement": measurement,
+                "reply": final_reply,
+                "usage": dispatch_result.get("usage"),
+                "provider": "hermes-runs",
+                "model": dispatch_result.get("source") or "bridge_runs",
+                "diagnostic": provider_diagnostic(
+                    "direct-envelope",
+                    "server-default-hermes-dispatch",
+                    "Server direct-head provider key is not configured; dispatched Hermes Runs API directly.",
+                    HTTPStatus.OK,
+                ),
+            }
+            final = {
+                "schema": "hermes.wasm_agent.direct_head_run.final.v1",
+                "run_id": run.get("run_id"),
+                "turn_id": run.get("turn_id"),
+                "reply": final_reply,
+                "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
+                "hermes_dispatch": dispatch_result,
+                "diagnostics": {
+                    "source": "direct_head_hermes_dispatch",
+                    "mode": "direct-head",
+                    "target_node": target_node,
+                    "context_measurement": measurement,
+                    "dispatch_context_measurement": dispatch_result.get("context_measurement"),
+                    "bridge_trace": dispatch_result.get("bridge_trace"),
+                    "token_usage": dispatch_result.get("usage"),
+                    "provider_head_unavailable": True,
+                    "fallback_reason": dispatch_action["fallback_reason"],
+                    "changed_files_complete": True,
+                    "before_checkpoint": change_proof.get("before_checkpoint"),
+                    "auto_checkpoint": change_proof.get("auto_checkpoint"),
+                },
+                "changed_files": change_proof.get("changed_files") or [],
+                "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
+                "actions": [
+                    {
+                        "id": "direct_envelope",
+                        "topic": "run-api",
+                        "kind": "api",
+                        "label": "Direct envelope",
+                        "status": "done",
+                        "detail": decision,
+                        "meta": "server default fallback",
+                    }
+                ] + bridge_trace_action_events(dispatch_result.get("bridge_trace")) + direct_head_change_actions(change_proof),
+                "proof": [
+                    "route-used:/agent/provider/envelope/stream",
+                    f"receiver:{receiver}",
+                    f"target-node:{target_node}",
+                ],
+            }
+            record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
+            finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
+            return {
+                **result,
+                "hermes_dispatch": dispatch_result,
+                "run": run,
+                "run_id": run.get("run_id"),
+                "turn_id": run.get("turn_id"),
+            }
+        def emit_provider_event(progress: dict[str, Any]) -> None:
+            if progress.get("type") == "head.delta":
+                append_agent_run_event(
+                    server,
+                    str(run.get("run_id") or ""),
+                    "head.delta",
+                    summary=clipped(str(progress.get("summary") or "Provider delta"), 180),
+                    payload=progress.get("payload") if isinstance(progress.get("payload"), dict) else {},
+                )
+                return
+            record_agent_run_action(server, str(run.get("run_id") or ""), progress)
+
+        result = provider_envelope_completion(server, body, user=user, action_callback=emit_provider_event)
+        parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+        decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "direct head replied"), 240)
+        append_agent_run_event(
+            server,
+            str(run.get("run_id") or ""),
+            "head.decision",
+            summary=decision,
+            payload={
+                "decision": clipped(str(parsed.get("decision") or ""), 120),
+                "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
+                "needs": parsed.get("needs") if isinstance(parsed.get("needs"), list) else [],
+                "confidence": parsed.get("confidence"),
+            },
+        )
+        dispatch_action = direct_head_hermes_dispatch_action(parsed)
+        dispatch_result = (
+            execute_direct_head_hermes_dispatch(
+                server,
+                dispatch_action,
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+            )
+            if dispatch_action
+            else None
+        )
+        final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else result.get("reply", "")
+        target_node = (dispatch_result or {}).get("target_node") or "direct-head"
+        change_proof = direct_head_change_proof(
+            server,
+            user=user,
+            before_tree=before_tree,
+            after_tree=safe_worktree_tree_sha(server),
+            target_node=target_node,
+            objective=objective,
+            space_id=space_id,
+        )
+        final = {
+            "schema": "hermes.wasm_agent.direct_head_run.final.v1",
+            "run_id": run.get("run_id"),
+            "turn_id": run.get("turn_id"),
+            "reply": final_reply,
+            "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
+            "hermes_dispatch": dispatch_result,
+            "diagnostics": {
+                "source": "direct_head_hermes_dispatch" if dispatch_result else "direct_envelope",
+                "mode": "direct-head",
+                "target_node": target_node,
+                "context_measurement": result.get("context_measurement") or measurement,
+                "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
+                "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
+                "token_usage": result.get("usage"),
+                "changed_files_complete": True,
+                "before_checkpoint": change_proof.get("before_checkpoint"),
+                "auto_checkpoint": change_proof.get("auto_checkpoint"),
+            },
+            "changed_files": change_proof.get("changed_files") or [],
+            "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
+            "actions": [
+                {
+                    "id": "direct_envelope",
+                    "topic": "run-api",
+                    "kind": "api",
+                    "label": "Direct envelope",
+                    "status": "done",
+                    "detail": decision,
+                    "meta": "admin direct-head",
+                }
+            ] + bridge_trace_action_events((dispatch_result or {}).get("bridge_trace")) + direct_head_change_actions(change_proof),
+            "proof": [
+                "route-used:/agent/provider/envelope/stream",
+                f"receiver:{receiver}",
+                f"target-node:{target_node}",
+            ],
+        }
+        record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
+        finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
+        return {
+            **result,
+            "reply": final_reply,
+            "hermes_dispatch": dispatch_result,
+            "run": run,
+            "run_id": run.get("run_id"),
+            "turn_id": run.get("turn_id"),
+        }
+    except ProviderProxyError as exc:
+        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
+        raise
+    except Exception as exc:
+        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": "direct_envelope_error", "message": str(exc)})
+        raise
+
+
+def provider_envelope_run_completion(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not user_is_admin(user):
+        return provider_envelope_completion(server, body, user=user)
+    context = provider_envelope_run_context(body)
+    run, created = begin_agent_run(server, dict(context["run_body"]), user=user, direct_head=True)
+    if not created:
+        status = str(run.get("status") or "")
+        if status == "completed":
+            final = run.get("final") if isinstance(run.get("final"), dict) else {}
+            return provider_envelope_result_from_final(final, run)
+        if status in AGENT_RUN_TERMINAL_STATUSES:
+            error = run.get("error") if isinstance(run.get("error"), dict) else {}
+            message = str(error.get("message") or "Direct-head run failed.")
+            diagnostic = provider_diagnostic("direct-envelope", str(error.get("code") or "run-failed"), message, HTTPStatus.BAD_GATEWAY)
+            raise ProviderProxyError(str(error.get("code") or "direct-head-run-failed"), message, diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+        final = wait_for_agent_run_terminal(user, str(run.get("run_id") or ""), timeout_sec=agent_bridge_timeout_sec() + 30)
+        return provider_envelope_result_from_final(final, run)
+    return provider_envelope_run_execute(server, body, user=user, run=run, context=context)
+
+
+def start_provider_envelope_run_worker(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run: dict[str, Any],
+    context: dict[str, Any],
+) -> bool:
+    run_id = str(run.get("run_id") or "")
+    status = str(run.get("status") or "")
+    if not run_id or status in AGENT_RUN_TERMINAL_STATUSES:
+        return False
+    workers, lock = agent_run_worker_maps(server)
+    with lock:
+        existing = workers.get(run_id)
+        if existing and existing.is_alive():
+            return False
+
+        def run_direct_head() -> None:
+            try:
+                provider_envelope_run_execute(server, dict(body), user=user, run=run, context=context)
+            except ProviderProxyError:
+                pass
+            except BrowserError as exc:
+                finish_agent_run(server, run_id, status="failed", error={"code": exc.code, "message": exc.message})
+            except Exception as exc:
+                finish_agent_run(server, run_id, status="failed", error={"code": "direct_envelope_error", "message": str(exc)})
+            finally:
+                workers_map, workers_lock = agent_run_worker_maps(server)
+                with workers_lock:
+                    current = workers_map.get(run_id)
+                    if current is threading.current_thread():
+                        workers_map.pop(run_id, None)
+
+        worker = threading.Thread(target=run_direct_head, name=f"wasm-agent-direct-head-{run_id[:18]}", daemon=True)
+        workers[run_id] = worker
+        worker.start()
+        return True
 
 
 def provider_proxy_completion(
@@ -2515,6 +3973,7 @@ def provider_proxy_completion(
     *,
     user: dict[str, Any] | None = None,
     probe: bool = False,
+    action_callback: Any | None = None,
 ) -> dict[str, Any]:
     if not user:
         diagnostic = provider_diagnostic("config-missing", "auth-required", "Account sign-in is required.", HTTPStatus.UNAUTHORIZED)
@@ -2525,7 +3984,7 @@ def provider_proxy_completion(
     model = config["model"]
     payload = {
         "model": model,
-        "stream": False,
+        "stream": bool(action_callback),
         "messages": messages,
     }
     payload.update(provider_proxy_payload_options(body))
@@ -2534,7 +3993,7 @@ def provider_proxy_completion(
         endpoint,
         data=data,
         headers={
-            "Accept": "application/json",
+            "Accept": "text/event-stream" if action_callback else "application/json",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {config['api_key']}",
             "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION} provider-proxy",
@@ -2542,6 +4001,73 @@ def provider_proxy_completion(
         method="POST",
     )
     started = time.monotonic()
+    if action_callback:
+        deltas: list[str] = []
+        completed_response: dict[str, Any] | None = None
+        try:
+            with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+                for event in iter_sse_json(response):
+                    event_type = str(event.get("type") or event.get("event") or "")
+                    delta = ""
+                    choices = event.get("choices") if isinstance(event.get("choices"), list) else []
+                    if choices and isinstance(choices[0], dict):
+                        delta_obj = choices[0].get("delta") if isinstance(choices[0].get("delta"), dict) else {}
+                        delta = str(delta_obj.get("content") or "")
+                    if delta:
+                        deltas.append(delta)
+                        action_callback({
+                            "type": "head.delta",
+                            "summary": clipped(delta, 180),
+                            "payload": {
+                                "receiver": config.get("provider") or "provider",
+                                "event_type": event_type,
+                                "delta": delta,
+                            },
+                        })
+                    if event_type in {"message_stop"} or (choices and choices[0].get("finish_reason")):
+                        completed_response = event
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:2000]
+            parsed_error: Any = {}
+            try:
+                parsed_error = json.loads(detail) if detail else {}
+            except json.JSONDecodeError:
+                parsed_error = {}
+            diagnostic = provider_http_diagnostic(
+                int(exc.code),
+                provider_error_message(parsed_error, detail[:600]),
+                endpoint=endpoint,
+                model=model,
+            )
+            raise ProviderProxyError(diagnostic["category"], diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+        except TimeoutError as exc:
+            diagnostic = provider_diagnostic("unreachable", "network-timeout", "Provider request timed out.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+            raise ProviderProxyError("network-timeout", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+        except URLError as exc:
+            reason = str(getattr(exc, "reason", exc))
+            category = "network-offline" if "Name or service not known" in reason or "Temporary failure" in reason else "network-failed"
+            diagnostic = provider_diagnostic("unreachable", category, reason or "Provider request failed.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+            raise ProviderProxyError(category, diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
+        reply = "".join(deltas).strip()
+        if not reply and completed_response:
+            reply = provider_reply_from_payload(completed_response)
+        if not reply:
+            diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider returned no message content.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
+            raise ProviderProxyError("provider-empty-response", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
+        duration_ms = round((time.monotonic() - started) * 1000)
+        return {
+            "schema": "hermes.wasm_agent.provider_proxy.v1",
+            "mode": "backend-proxy",
+            "category": "ready",
+            "base_url": config["base_url"],
+            "endpoint": endpoint,
+            "provider": config["provider"],
+            "model": model,
+            "reply": reply,
+            "usage": completed_response.get("usage") if isinstance(completed_response, dict) and isinstance(completed_response.get("usage"), dict) else None,
+            "duration_ms": duration_ms,
+            "diagnostic": provider_diagnostic("backend-proxy", "ready", "Backend proxy provider request succeeded.", HTTPStatus.OK, endpoint=endpoint, model=model),
+        }
     try:
         with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
             raw = response.read().decode("utf-8", "replace")
@@ -4889,6 +6415,49 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_run_tb (
+          run_id TEXT PRIMARY KEY,
+          turn_id TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          session_id TEXT NOT NULL DEFAULT '',
+          account_scope TEXT NOT NULL DEFAULT '',
+          mode TEXT NOT NULL DEFAULT '',
+          target_node TEXT NOT NULL DEFAULT '',
+          kind TEXT NOT NULL DEFAULT 'avatar-chat',
+          status TEXT NOT NULL,
+          direct_head INTEGER NOT NULL DEFAULT 0,
+          admin_trace INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          terminal_at INTEGER NOT NULL DEFAULT 0,
+          request_summary_json TEXT NOT NULL DEFAULT '{}',
+          final_json TEXT NOT NULL DEFAULT '{}',
+          error_json TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(user_id, session_id, turn_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_run_event_tb (
+          run_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          turn_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          account_scope TEXT NOT NULL DEFAULT '',
+          session_id TEXT NOT NULL DEFAULT '',
+          type TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          summary TEXT NOT NULL DEFAULT '',
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          redacted INTEGER NOT NULL DEFAULT 1,
+          PRIMARY KEY(run_id, seq)
+        )
+        """
+    )
     for statement in (
         "CREATE INDEX IF NOT EXISTS friendship_user_idx ON friendship_tb(requester_user_id, addressee_user_id, status)",
         "CREATE INDEX IF NOT EXISTS conversation_member_user_idx ON conversation_member_tb(user_id, conversation_id)",
@@ -4899,6 +6468,10 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         "CREATE UNIQUE INDEX IF NOT EXISTS flux_credit_idempotency_idx ON flux_credit_ledger_tb(kind, idempotency_key) WHERE idempotency_key != ''",
         "CREATE INDEX IF NOT EXISTS agent_harness_user_idx ON agent_harness_tb(user_id, lifecycle_state, created_at)",
         "CREATE INDEX IF NOT EXISTS agent_harness_node_idx ON agent_harness_tb(node_id)",
+        "CREATE INDEX IF NOT EXISTS agent_run_user_idx ON agent_run_tb(user_id, status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS agent_run_session_idx ON agent_run_tb(user_id, session_id, updated_at)",
+        "CREATE INDEX IF NOT EXISTS agent_run_event_user_idx ON agent_run_event_tb(user_id, run_id, seq)",
+        "CREATE INDEX IF NOT EXISTS agent_run_event_type_idx ON agent_run_event_tb(run_id, type, seq)",
     ):
         conn.execute(statement)
 
@@ -4950,6 +6523,947 @@ def public_user_label(user: dict[str, Any] | None) -> str:
     if not user:
         return "Guest"
     return clipped(str(user.get("email") or user.get("name") or user_id(user) or "User"), 120)
+
+
+AGENT_RUN_TERMINAL_STATUSES = {"completed", "failed", "interrupted", "cancelled"}
+AGENT_RUN_TERMINAL_EVENTS = {"run.final", "run.error", "run.cancelled"}
+AGENT_RUN_EVENT_TYPES = {
+    "run.started",
+    "bridge.dispatch",
+    "bridge.progress",
+    "envelope.created",
+    "head.started",
+    "head.delta",
+    "head.decision",
+    "lookup.requested",
+    "lookup.loaded",
+    "hermes.dispatch",
+    "hermes.progress",
+    "tool.started",
+    "tool.finished",
+    "files.touched",
+    "files.changed",
+    "tests.finished",
+    "proof.collected",
+    "envelope.parsed",
+    "run.final",
+    "run.error",
+    "run.cancelled",
+    "run.interrupted",
+}
+
+
+def agent_run_now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def safe_agent_run_key(raw: Any, fallback: str) -> str:
+    value = str(raw or "").strip()
+    value = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value)[:160].strip("-_.:")
+    return value or fallback
+
+
+def bounded_json_text(value: Any, max_chars: int) -> str:
+    text = json.dumps(value if value is not None else {}, ensure_ascii=True, separators=(",", ":"), default=str)
+    if len(text) <= max_chars:
+        return text
+    marker = {
+        "schema": "hermes.wasm_agent.truncated_json.v1",
+        "truncated": True,
+        "original_chars": len(text),
+        "preview": text[: max(0, max_chars - 220)],
+    }
+    return json.dumps(marker, ensure_ascii=True, separators=(",", ":"), default=str)[:max_chars]
+
+
+def json_dict(text: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(text or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def agent_run_hash_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return {"truncated": True, "type": type(value).__name__}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if value.startswith("data:") or len(value) > 512:
+            return {
+                "sha256": hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest(),
+                "chars": len(value),
+            }
+        return value
+    if isinstance(value, list):
+        return [agent_run_hash_value(item, depth=depth + 1) for item in value[:80]]
+    if isinstance(value, dict):
+        return {
+            str(key): agent_run_hash_value(item, depth=depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:160]
+            if str(key) not in {"observation"}
+        }
+    return str(value)
+
+
+def agent_run_request_hash(body: dict[str, Any]) -> str:
+    material = {
+        key: body.get(key)
+        for key in (
+            "session_id",
+            "turn_id",
+            "message",
+            "mode",
+            "target_node",
+            "node_id",
+            "model",
+            "model_provider",
+            "space_id",
+            "space_name",
+            "space_display_name",
+            "active_space",
+            "transcript",
+            "images",
+            "attachments",
+            "envelope",
+            "llm_envelope",
+            "instructions",
+            "provider_config",
+            "temperature",
+            "max_tokens",
+            "maxTokens",
+            "output_schema",
+            "receiver",
+            "envelope_receiver",
+            "openai_model",
+        )
+    }
+    encoded = json.dumps(agent_run_hash_value(material), ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def agent_run_request_summary(body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    message = str(body.get("message") or "")
+    transcript = body.get("transcript") if isinstance(body.get("transcript"), list) else []
+    images = body.get("images") if isinstance(body.get("images"), list) else []
+    attachments = body.get("attachments") if isinstance(body.get("attachments"), list) else []
+    active_space = body.get("active_space") if isinstance(body.get("active_space"), dict) else {}
+    return {
+        "schema": "hermes.wasm_agent.agent_run.request_summary.v1",
+        "kind": "avatar-chat",
+        "user_id": user_id(user),
+        "session_id": safe_agent_run_key(body.get("session_id"), "local"),
+        "turn_id": safe_agent_run_key(body.get("turn_id"), ""),
+        "message_chars": len(message),
+        "message_sha256": hashlib.sha256(message.encode("utf-8", errors="ignore")).hexdigest() if message else "",
+        "mode": clipped(str(body.get("mode") or "auto"), 40),
+        "target_node": clipped(str(body.get("target_node") or body.get("node_id") or ""), 120),
+        "model": clipped(str(body.get("model") or ""), 180),
+        "provider": clipped(str(body.get("model_provider") or ""), 120),
+        "space_id": clipped(str(body.get("space_id") or active_space.get("id") or ""), 120),
+        "space_name": clipped(str(body.get("space_name") or active_space.get("name") or ""), 160),
+        "transcript_turns": len(transcript),
+        "image_count": len(images),
+        "attachment_count": len(attachments),
+        "created_at": agent_run_now_ms(),
+    }
+
+
+def agent_run_from_row(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    return {key: row[key] for key in row.keys()}
+
+
+def public_agent_run(row: sqlite3.Row | dict[str, Any], *, include_payloads: bool = False) -> dict[str, Any]:
+    data = agent_run_from_row(row) or {}
+    payload = {
+        "schema": "hermes.wasm_agent.agent_run.v1",
+        "run_id": str(data.get("run_id") or ""),
+        "turn_id": str(data.get("turn_id") or ""),
+        "session_id": str(data.get("session_id") or ""),
+        "kind": str(data.get("kind") or "avatar-chat"),
+        "status": str(data.get("status") or ""),
+        "mode": str(data.get("mode") or ""),
+        "target_node": str(data.get("target_node") or ""),
+        "direct_head": bool(data.get("direct_head")),
+        "admin_trace": bool(data.get("admin_trace")),
+        "created_at": int(data.get("created_at") or 0),
+        "updated_at": int(data.get("updated_at") or 0),
+        "terminal_at": int(data.get("terminal_at") or 0),
+        "request_summary": json_dict(str(data.get("request_summary_json") or "{}")),
+    }
+    if include_payloads:
+        payload["final"] = json_dict(str(data.get("final_json") or "{}"))
+        payload["error"] = json_dict(str(data.get("error_json") or "{}"))
+    return payload
+
+
+def public_agent_run_event(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = agent_run_from_row(row) or {}
+    return {
+        "schema": "hermes.wasm_agent.agent_run_event.v1",
+        "run_id": str(data.get("run_id") or ""),
+        "seq": int(data.get("seq") or 0),
+        "turn_id": str(data.get("turn_id") or ""),
+        "session_id": str(data.get("session_id") or ""),
+        "type": str(data.get("type") or ""),
+        "created_at": int(data.get("created_at") or 0),
+        "summary": str(data.get("summary") or ""),
+        "payload": json_dict(str(data.get("payload_json") or "{}")),
+        "redacted": bool(data.get("redacted")),
+    }
+
+
+def agent_run_append_event_conn(
+    conn: sqlite3.Connection,
+    run: sqlite3.Row | dict[str, Any],
+    event_type: str,
+    *,
+    summary: str = "",
+    payload: dict[str, Any] | None = None,
+    created_at: int | None = None,
+) -> dict[str, Any]:
+    run_data = agent_run_from_row(run) or {}
+    event_type = event_type if event_type in AGENT_RUN_EVENT_TYPES else "bridge.progress"
+    if event_type in AGENT_RUN_TERMINAL_EVENTS:
+        existing = conn.execute(
+            "SELECT * FROM agent_run_event_tb WHERE run_id = ? AND type IN ('run.final', 'run.error', 'run.cancelled') ORDER BY seq LIMIT 1",
+            (str(run_data.get("run_id") or ""),),
+        ).fetchone()
+        if existing:
+            return public_agent_run_event(existing)
+    row = conn.execute(
+        "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM agent_run_event_tb WHERE run_id = ?",
+        (str(run_data.get("run_id") or ""),),
+    ).fetchone()
+    seq = int(row["next_seq"] if isinstance(row, sqlite3.Row) else row[0])
+    event_payload = payload if isinstance(payload, dict) else {}
+    now = int(created_at or agent_run_now_ms())
+    conn.execute(
+        """
+        INSERT INTO agent_run_event_tb (
+          run_id, seq, turn_id, user_id, account_scope, session_id,
+          type, created_at, summary, payload_json, redacted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """,
+        (
+            str(run_data.get("run_id") or ""),
+            seq,
+            str(run_data.get("turn_id") or ""),
+            str(run_data.get("user_id") or ""),
+            str(run_data.get("account_scope") or ""),
+            str(run_data.get("session_id") or ""),
+            event_type,
+            now,
+            clipped(str(summary or ""), 500),
+            bounded_json_text(event_payload, AGENT_RUN_EVENT_MAX_JSON_CHARS),
+        ),
+    )
+    return {
+        "schema": "hermes.wasm_agent.agent_run_event.v1",
+        "run_id": str(run_data.get("run_id") or ""),
+        "seq": seq,
+        "type": event_type,
+        "created_at": now,
+        "summary": clipped(str(summary or ""), 500),
+        "payload": event_payload,
+        "redacted": True,
+    }
+
+
+def get_agent_run_for_user(conn: sqlite3.Connection, run_id: str, user: dict[str, Any] | None) -> sqlite3.Row:
+    clean_run_id = safe_agent_run_key(run_id, "")
+    row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (clean_run_id,)).fetchone()
+    if not row or str(row["user_id"]) != user_id(user):
+        raise BrowserError("agent_run_not_found", "Agent run was not found.", status=HTTPStatus.NOT_FOUND)
+    if int(row["direct_head"] or 0) and not user_is_admin(user):
+        raise BrowserError("admin_required", "Direct-head run detail requires admin access.", status=HTTPStatus.FORBIDDEN)
+    return row
+
+
+def begin_agent_run(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    direct_head: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    turn_id = safe_agent_run_key(body.get("turn_id"), f"turn_{uuid.uuid4().hex}")
+    session_id = safe_agent_run_key(body.get("session_id"), "local")
+    body["turn_id"] = turn_id
+    body["session_id"] = session_id
+    uid = user_id(user)
+    now = agent_run_now_ms()
+    request_hash = agent_run_request_hash(body)
+    summary = agent_run_request_summary(body, user)
+    summary["turn_id"] = turn_id
+    summary["session_id"] = session_id
+    mode = clipped(str(body.get("mode") or "auto"), 40)
+    target_node = clipped(str(body.get("target_node") or body.get("node_id") or default_agent_target_node(user)), 120)
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = conn.execute(
+                """
+                SELECT * FROM agent_run_tb
+                 WHERE user_id = ? AND session_id = ? AND turn_id = ?
+                """,
+                (uid, session_id, turn_id),
+            ).fetchone()
+            if existing:
+                if str(existing["request_hash"]) != request_hash:
+                    raise BrowserError(
+                        "agent_turn_conflict",
+                        "That turn_id already belongs to a different agent request.",
+                        status=HTTPStatus.CONFLICT,
+                    )
+                conn.commit()
+                return public_agent_run(existing, include_payloads=True), False
+            run_id = f"wa_run_{uuid.uuid4().hex}"
+            conn.execute(
+                """
+                INSERT INTO agent_run_tb (
+                  run_id, turn_id, request_hash, user_id, session_id, account_scope,
+                  mode, target_node, kind, status, direct_head, admin_trace,
+                  created_at, updated_at, request_summary_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'avatar-chat', 'running', ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    turn_id,
+                    request_hash,
+                    uid,
+                    session_id,
+                    uid,
+                    mode,
+                    target_node,
+                    1 if direct_head else 0,
+                    1 if (direct_head and user_is_admin(user)) else 0,
+                    now,
+                    now,
+                    bounded_json_text(summary, AGENT_RUN_EVENT_MAX_JSON_CHARS),
+                ),
+            )
+            row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (run_id,)).fetchone()
+            assert row is not None
+            agent_run_append_event_conn(
+                conn,
+                row,
+                "run.started",
+                summary=f"{target_node} / {mode}",
+                payload={"run": public_agent_run(row), "request": summary},
+                created_at=now,
+            )
+            conn.commit()
+            return public_agent_run(row, include_payloads=True), True
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def append_agent_run_event(
+    server: WasmAgentServer,
+    run_id: str,
+    event_type: str,
+    *,
+    summary: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    clean_run_id = safe_agent_run_key(run_id, "")
+    if not clean_run_id:
+        return None
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (clean_run_id,)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            event = agent_run_append_event_conn(conn, row, event_type, summary=summary, payload=payload)
+            conn.execute("UPDATE agent_run_tb SET updated_at = ? WHERE run_id = ?", (agent_run_now_ms(), clean_run_id))
+            conn.commit()
+            return event
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def agent_run_action_event_type(action: dict[str, Any]) -> str:
+    status = str(action.get("status") or "").lower()
+    kind = str(action.get("kind") or "").lower()
+    topic = str(action.get("topic") or "").lower()
+    action_id = str(action.get("id") or "").lower()
+    label = str(action.get("label") or "").lower()
+    if kind == "tool":
+        return "tool.finished" if status in {"done", "error", "failed"} else "tool.started"
+    if "changed" in label or "checkpoint" in label or action_id in {"apply_source_mutation", "apply_wis_patch"}:
+        return "files.changed" if "changed" in label or "mutation" in kind or "mutation" in action_id else "proof.collected"
+    if topic == "run-hermes":
+        return "hermes.progress"
+    return "bridge.progress"
+
+
+def record_agent_run_action(server: WasmAgentServer, run_id: str, action: dict[str, Any]) -> None:
+    label = clipped(str(action.get("label") or action.get("id") or "Agent progress"), 160)
+    append_agent_run_event(server, run_id, agent_run_action_event_type(action), summary=label, payload={"action": action})
+
+
+def record_agent_run_final_proof_events(server: WasmAgentServer, run_id: str, result: dict[str, Any]) -> None:
+    touched: list[dict[str, Any]] = []
+    raw_touched = result.get("touched_files") if isinstance(result.get("touched_files"), list) else []
+    for item in raw_touched[:80]:
+        if isinstance(item, dict):
+            path = clipped(str(item.get("path") or item.get("file") or ""), 500)
+            if path:
+                touched.append({k: v for k, v in item.items() if k != "content"} | {"path": path})
+        else:
+            path = clipped(str(item or ""), 500)
+            if path:
+                touched.append({"path": path})
+    if not touched:
+        tools = result.get("tools") if isinstance(result.get("tools"), list) else []
+        seen_paths: set[str] = set()
+        for tool in tools[:120]:
+            if not isinstance(tool, dict):
+                continue
+            path = clipped(str(tool.get("path") or ""), 500)
+            if not path or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            touched.append({
+                "path": path,
+                "tool": clipped(str(tool.get("tool") or ""), 80),
+            })
+    if touched:
+        append_agent_run_event(server, run_id, "files.touched", summary=f"{len(touched)} touched files", payload={"touched_files": touched[:80], "count": len(touched)})
+    changed = result.get("changed_files") if isinstance(result.get("changed_files"), list) else []
+    if changed:
+        append_agent_run_event(server, run_id, "files.changed", summary=f"{len(changed)} changed files", payload={"changed_files": changed[:80], "count": len(changed)})
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    proof: dict[str, Any] = {}
+    for key in ("before_checkpoint", "auto_checkpoint"):
+        value = diagnostics.get(key)
+        if isinstance(value, dict) and value.get("ref"):
+            proof[key] = value
+    if proof:
+        append_agent_run_event(server, run_id, "proof.collected", summary="Timeline proof collected", payload=proof)
+    tests = diagnostics.get("tests") or diagnostics.get("test_results")
+    if tests:
+        append_agent_run_event(server, run_id, "tests.finished", summary="Test proof collected", payload={"tests": tests})
+
+
+def finish_agent_run(
+    server: WasmAgentServer,
+    run_id: str,
+    *,
+    status: str,
+    final: dict[str, Any] | None = None,
+    error: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    clean_run_id = safe_agent_run_key(run_id, "")
+    terminal_event = "run.final" if status == "completed" else "run.cancelled" if status == "cancelled" else "run.error"
+    now = agent_run_now_ms()
+    final_json = bounded_json_text(final or {}, AGENT_RUN_FINAL_MAX_JSON_CHARS)
+    error_json = bounded_json_text(error or {}, AGENT_RUN_EVENT_MAX_JSON_CHARS)
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (clean_run_id,)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            if str(row["status"]) in AGENT_RUN_TERMINAL_STATUSES:
+                conn.commit()
+                return public_agent_run(row, include_payloads=True)
+            conn.execute(
+                """
+                UPDATE agent_run_tb
+                   SET status = ?, updated_at = ?, terminal_at = ?,
+                       final_json = ?, error_json = ?
+                 WHERE run_id = ?
+                """,
+                (status, now, now, final_json, error_json, clean_run_id),
+            )
+            updated = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (clean_run_id,)).fetchone()
+            assert updated is not None
+            agent_run_append_event_conn(
+                conn,
+                updated,
+                terminal_event,
+                summary="Assistant turn completed" if terminal_event == "run.final" else str((error or {}).get("message") or "Assistant turn failed"),
+                payload={
+                    "status": status,
+                    "error": error or {},
+                    "reply_chars": len(str((final or {}).get("reply") or "")),
+                    "changed_file_count": len((final or {}).get("changed_files") or []) if isinstance(final, dict) else 0,
+                },
+                created_at=now,
+            )
+            conn.commit()
+            return public_agent_run(updated, include_payloads=True)
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def mark_interrupted_agent_runs(server: WasmAgentServer) -> None:
+    try:
+        with auth_connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT * FROM agent_run_tb WHERE status NOT IN ('completed', 'failed', 'interrupted', 'cancelled')"
+            ).fetchall()
+            now = agent_run_now_ms()
+            for row in rows:
+                error = {"code": "agent_run_interrupted", "message": "Agent run was interrupted by a server restart."}
+                conn.execute(
+                    """
+                    UPDATE agent_run_tb
+                       SET status = 'interrupted', updated_at = ?, terminal_at = ?, error_json = ?
+                     WHERE run_id = ?
+                    """,
+                    (now, now, bounded_json_text(error, AGENT_RUN_EVENT_MAX_JSON_CHARS), str(row["run_id"])),
+                )
+                updated = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (str(row["run_id"]),)).fetchone()
+                if updated:
+                    agent_run_append_event_conn(conn, updated, "run.error", summary=error["message"], payload={"error": error}, created_at=now)
+            conn.commit()
+    except Exception:
+        return
+
+
+def list_agent_runs(user: dict[str, Any] | None, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    query = query or {}
+    session_id = safe_agent_run_key((query.get("session_id") or query.get("session") or [""])[0], "")
+    status = clipped(str((query.get("status") or [""])[0] or ""), 40)
+    try:
+        limit = max(1, min(100, int((query.get("limit") or ["30"])[0] or 30)))
+    except (TypeError, ValueError):
+        limit = 30
+    clauses = ["user_id = ?"]
+    params: list[Any] = [user_id(user)]
+    if not user_is_admin(user):
+        clauses.append("direct_head = 0")
+    if session_id:
+        clauses.append("session_id = ?")
+        params.append(session_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    params.append(limit)
+    sql = f"""
+        SELECT * FROM agent_run_tb
+         WHERE {' AND '.join(clauses)}
+         ORDER BY updated_at DESC
+         LIMIT ?
+    """
+    with auth_connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {"ok": True, "schema": "hermes.wasm_agent.agent_run.list.v1", "runs": [public_agent_run(row) for row in rows]}
+
+
+def read_agent_run(user: dict[str, Any] | None, run_id: str) -> dict[str, Any]:
+    with auth_connect() as conn:
+        row = get_agent_run_for_user(conn, run_id, user)
+        latest = conn.execute(
+            "SELECT seq, type, created_at, summary FROM agent_run_event_tb WHERE run_id = ? ORDER BY seq DESC LIMIT 1",
+            (str(row["run_id"]),),
+        ).fetchone()
+    payload = public_agent_run(row, include_payloads=True)
+    if latest:
+        payload["latest_event"] = {
+            "seq": int(latest["seq"]),
+            "type": str(latest["type"]),
+            "created_at": int(latest["created_at"]),
+            "summary": str(latest["summary"] or ""),
+        }
+    return {"ok": True, "run": payload}
+
+
+def read_agent_run_events(user: dict[str, Any] | None, run_id: str, query: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    query = query or {}
+    try:
+        after_seq = max(0, int((query.get("after_seq") or query.get("after") or ["0"])[0] or 0))
+    except (TypeError, ValueError):
+        after_seq = 0
+    try:
+        limit = max(1, min(240, int((query.get("limit") or ["120"])[0] or 120)))
+    except (TypeError, ValueError):
+        limit = 120
+    with auth_connect() as conn:
+        run = get_agent_run_for_user(conn, run_id, user)
+        rows = conn.execute(
+            """
+            SELECT * FROM agent_run_event_tb
+             WHERE run_id = ? AND seq > ?
+             ORDER BY seq ASC
+             LIMIT ?
+            """,
+            (str(run["run_id"]), after_seq, limit),
+        ).fetchall()
+    events = [public_agent_run_event(row) for row in rows]
+    return {
+        "ok": True,
+        "schema": "hermes.wasm_agent.agent_run.events.v1",
+        "run": public_agent_run(run),
+        "after_seq": after_seq,
+        "next_after_seq": events[-1]["seq"] if events else after_seq,
+        "events": events,
+    }
+
+
+def agent_run_event_stream_payload(
+    server: WasmAgentServer,
+    event: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    event_type = str(event.get("type") or "")
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    if event_type == "run.final":
+        with auth_connect() as conn:
+            row = get_agent_run_for_user(conn, str(event.get("run_id") or ""), user)
+        final = json_dict(str(row["final_json"] or "{}"))
+        return {"type": "final", "agent": final, "run_id": str(event.get("run_id") or ""), "seq": int(event.get("seq") or 0)}
+    if event_type in {"run.error", "run.cancelled"}:
+        with auth_connect() as conn:
+            row = get_agent_run_for_user(conn, str(event.get("run_id") or ""), user)
+        error = json_dict(str(row["error_json"] or "{}")) or {"code": "agent_error", "message": str(event.get("summary") or "Agent run failed.")}
+        return {"type": "error", "error": error, "run_id": str(event.get("run_id") or ""), "seq": int(event.get("seq") or 0)}
+    action = payload.get("action") if isinstance(payload.get("action"), dict) else None
+    if action:
+        return {"type": "action", "action": action, "run_id": str(event.get("run_id") or ""), "seq": int(event.get("seq") or 0)}
+    if event_type == "run.started":
+        return {"type": "run", "run": payload.get("run") or {}, "run_id": str(event.get("run_id") or ""), "seq": int(event.get("seq") or 0)}
+    if event_type == "head.delta":
+        return {
+            "type": "delta",
+            "delta": str(payload.get("delta") or ""),
+            "run_id": str(event.get("run_id") or ""),
+            "seq": int(event.get("seq") or 0),
+            "source": str(payload.get("receiver") or "direct-head"),
+        }
+    if event_type in {
+        "envelope.created",
+        "head.started",
+        "head.decision",
+        "hermes.dispatch",
+        "files.touched",
+        "files.changed",
+        "tests.finished",
+        "proof.collected",
+    }:
+        seq = int(event.get("seq") or 0)
+        label = {
+            "envelope.created": "Envelope created",
+            "head.started": "Direct head started",
+            "head.decision": "Direct head decision",
+            "hermes.dispatch": "Hermes dispatch",
+            "files.touched": "Touched files",
+            "files.changed": "Changed files",
+            "tests.finished": "Tests finished",
+            "proof.collected": "Proof collected",
+        }.get(event_type, "Trace event")
+        return {
+            "type": "action",
+            "action": {
+                "id": f"trace_{event_type.replace('.', '_')}_{seq}",
+                "topic": "run-trace",
+                "kind": "trace",
+                "label": label,
+                "status": "done",
+                "detail": clipped(str(event.get("summary") or label), 180),
+                "meta": event_type,
+                "arguments": payload,
+            },
+            "run_id": str(event.get("run_id") or ""),
+            "seq": seq,
+        }
+    return None
+
+
+def agent_run_worker_maps(server: WasmAgentServer) -> tuple[dict[str, threading.Thread], threading.Lock]:
+    if not hasattr(server, "agent_run_workers"):
+        setattr(server, "agent_run_workers", {})
+    if not hasattr(server, "agent_run_workers_lock"):
+        setattr(server, "agent_run_workers_lock", threading.Lock())
+    return getattr(server, "agent_run_workers"), getattr(server, "agent_run_workers_lock")
+
+
+def cache_agent_turn_result(server: WasmAgentServer, user: dict[str, Any] | None, turn_id: str, payload: dict[str, Any]) -> None:
+    cache_key = f"{user_id(user)}:{turn_id}" if turn_id else ""
+    if not cache_key or not hasattr(server, "chat_turn_results_lock"):
+        return
+    with server.chat_turn_results_lock:
+        server.chat_turn_results[cache_key] = {
+            "result": payload.get("result"),
+            "error": payload.get("error"),
+            "expires_at": time.monotonic() + 120,
+        }
+
+
+def start_agent_run_worker(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run: dict[str, Any],
+) -> bool:
+    run_id = str(run.get("run_id") or "")
+    status = str(run.get("status") or "")
+    if not run_id or status in AGENT_RUN_TERMINAL_STATUSES:
+        return False
+    workers, lock = agent_run_worker_maps(server)
+    with lock:
+        existing = workers.get(run_id)
+        if existing and existing.is_alive():
+            return False
+
+        def run_turn() -> None:
+            try:
+                def emit_action(action: dict[str, Any]) -> None:
+                    record_agent_run_action(server, run_id, action)
+
+                result = embedded_agent_message(server, dict(body), user=user, action_callback=emit_action)
+                result = {
+                    **result,
+                    "run_id": run_id,
+                    "turn_id": str(run.get("turn_id") or body.get("turn_id") or ""),
+                    "run": {k: v for k, v in run.items() if k not in {"final", "error"}},
+                }
+                record_agent_run_final_proof_events(server, run_id, result)
+                finish_agent_run(server, run_id, status="completed", final=result)
+                cache_agent_turn_result(server, user, str(run.get("turn_id") or ""), {"result": result})
+            except BrowserError as exc:
+                error = {"code": exc.code, "message": exc.message}
+                finish_agent_run(server, run_id, status="failed", error=error)
+                cache_agent_turn_result(server, user, str(run.get("turn_id") or ""), {"error": error})
+            except Exception as exc:
+                error = {"code": "agent_error", "message": str(exc)}
+                finish_agent_run(server, run_id, status="failed", error=error)
+                cache_agent_turn_result(server, user, str(run.get("turn_id") or ""), {"error": error})
+            finally:
+                workers_map, workers_lock = agent_run_worker_maps(server)
+                with workers_lock:
+                    current = workers_map.get(run_id)
+                    if current is threading.current_thread():
+                        workers_map.pop(run_id, None)
+
+        worker = threading.Thread(target=run_turn, name=f"wasm-agent-run-{run_id[:18]}", daemon=True)
+        workers[run_id] = worker
+        worker.start()
+        return True
+
+
+def wait_for_agent_run_terminal(
+    user: dict[str, Any] | None,
+    run_id: str,
+    *,
+    timeout_sec: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(1.0, timeout_sec)
+    while time.monotonic() < deadline:
+        with auth_connect() as conn:
+            row = get_agent_run_for_user(conn, run_id, user)
+            status = str(row["status"] or "")
+            if status in AGENT_RUN_TERMINAL_STATUSES:
+                if status == "completed":
+                    final = json_dict(str(row["final_json"] or "{}"))
+                    if final:
+                        return final
+                    raise BrowserError("agent_empty_result", "Agent run completed without a final result.")
+                error = json_dict(str(row["error_json"] or "{}")) or {"code": "agent_error", "message": "Agent run failed."}
+                raise BrowserError(str(error.get("code") or "agent_error"), str(error.get("message") or "Agent run failed."))
+        time.sleep(AGENT_RUN_EVENT_POLL_SEC)
+    raise BrowserError("agent_turn_timeout", "The assistant turn is taking too long.", status=HTTPStatus.GATEWAY_TIMEOUT)
+
+
+def run_embedded_agent_message(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    run, _created = begin_agent_run(server, body, user=user)
+    start_agent_run_worker(server, body, user=user, run=run)
+    return wait_for_agent_run_terminal(user, str(run.get("run_id") or ""), timeout_sec=agent_bridge_timeout_sec() + 30)
+
+
+def stream_agent_run_ndjson(
+    handler: WasmAgentHandler,
+    run_id: str,
+    *,
+    user: dict[str, Any] | None,
+    after_seq: int = 0,
+) -> None:
+    heartbeat_started = time.monotonic()
+    last_seq = max(0, int(after_seq or 0))
+    last_action_label = "Receive chat turn"
+    while True:
+        with auth_connect() as conn:
+            run = get_agent_run_for_user(conn, run_id, user)
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_run_event_tb
+                 WHERE run_id = ? AND seq > ?
+                 ORDER BY seq ASC
+                 LIMIT 80
+                """,
+                (str(run["run_id"]), last_seq),
+            ).fetchall()
+        if rows:
+            for row in rows:
+                event = public_agent_run_event(row)
+                last_seq = max(last_seq, int(event.get("seq") or 0))
+                payload = agent_run_event_stream_payload(handler.server, event, user=user)
+                if not payload:
+                    continue
+                action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+                if action.get("label"):
+                    last_action_label = clipped(str(action.get("label") or ""), 80)
+                try:
+                    write_ndjson(handler, payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+                if payload.get("type") in {"final", "error"}:
+                    return
+        elif str(run["status"] or "") in AGENT_RUN_TERMINAL_STATUSES:
+            return
+        elapsed = time.monotonic() - heartbeat_started
+        if elapsed >= AGENT_RUN_STREAM_HEARTBEAT_SEC:
+            elapsed_ms = int(elapsed * 1000)
+            try:
+                write_ndjson(handler, {
+                    "type": "heartbeat",
+                    "phase": "Hermes bridge active",
+                    "message": f"Hermes is still working after {elapsed_ms // 1000}s. Latest step: {last_action_label}.",
+                    "elapsed_ms": elapsed_ms,
+                    "run_id": run_id,
+                    "after_seq": last_seq,
+                    "action": {
+                        "id": "node_reply",
+                        "topic": "run-hermes",
+                        "kind": "model",
+                        "label": "Hermes bridge active",
+                        "status": "running",
+                        "detail": f"{elapsed_ms // 1000}s elapsed / latest: {last_action_label}",
+                        "meta": "bridge active",
+                    },
+                })
+                heartbeat_started = time.monotonic()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+        time.sleep(AGENT_RUN_EVENT_POLL_SEC)
+
+
+def stream_agent_run_text_ndjson(
+    handler: WasmAgentHandler,
+    run_id: str,
+    *,
+    user: dict[str, Any] | None,
+    after_seq: int = 0,
+) -> None:
+    heartbeat_started = time.monotonic()
+    last_seq = max(0, int(after_seq or 0))
+    last_action_label = "Receive chat turn"
+    while True:
+        with auth_connect() as conn:
+            run = get_agent_run_for_user(conn, run_id, user)
+            rows = conn.execute(
+                """
+                SELECT * FROM agent_run_event_tb
+                 WHERE run_id = ? AND seq > ?
+                 ORDER BY seq ASC
+                 LIMIT 80
+                """,
+                (str(run["run_id"]), last_seq),
+            ).fetchall()
+        if rows:
+            delta_buffer: list[str] = []
+            for row in rows:
+                event = public_agent_run_event(row)
+                last_seq = max(last_seq, int(event.get("seq") or 0))
+                event_type = str(event.get("type") or "")
+                payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                if event_type == "head.delta":
+                    delta = str(payload.get("delta") or "")
+                    if delta:
+                        delta_buffer.append(delta)
+                    continue
+                # Flush any buffered deltas before handling a non-delta event
+                if delta_buffer:
+                    try:
+                        handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
+                        handler.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    delta_buffer = []
+                if event_type == "run.final":
+                    with auth_connect() as conn:
+                        row = get_agent_run_for_user(conn, str(event.get("run_id") or ""), user)
+                    final = json_dict(str(row["final_json"] or "{}"))
+                    try:
+                        write_ndjson(handler, {
+                            "type": "final",
+                            "agent": final,
+                            "run_id": str(event.get("run_id") or ""),
+                            "seq": int(event.get("seq") or 0),
+                        })
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
+                if event_type in {"run.error", "run.cancelled"}:
+                    with auth_connect() as conn:
+                        row = get_agent_run_for_user(conn, str(event.get("run_id") or ""), user)
+                    error = json_dict(str(row["error_json"] or "{}")) or {"code": "agent_error", "message": str(event.get("summary") or "Agent run failed.")}
+                    try:
+                        write_ndjson(handler, {
+                            "type": "error",
+                            "error": error,
+                            "run_id": str(event.get("run_id") or ""),
+                            "seq": int(event.get("seq") or 0),
+                        })
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    return
+                action = payload.get("action") if isinstance(payload.get("action"), dict) else None
+                if action and action.get("label"):
+                    last_action_label = clipped(str(action.get("label") or ""), 80)
+            # Flush any remaining buffered deltas after processing all rows
+            if delta_buffer:
+                try:
+                    handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
+                    handler.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+        elif str(run["status"] or "") in AGENT_RUN_TERMINAL_STATUSES:
+            return
+        elapsed = time.monotonic() - heartbeat_started
+        if elapsed >= AGENT_RUN_STREAM_HEARTBEAT_SEC:
+            try:
+                handler.wfile.flush()
+                heartbeat_started = time.monotonic()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+        time.sleep(AGENT_RUN_EVENT_POLL_SEC)
+
+
+def serve_agent_run_stream(
+    handler: WasmAgentHandler,
+    run_id: str,
+    *,
+    user: dict[str, Any] | None,
+    after_seq: int = 0,
+) -> None:
+    with auth_connect() as conn:
+        get_agent_run_for_user(conn, run_id, user)
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    stream_agent_run_ndjson(handler, run_id, user=user, after_seq=after_seq)
 
 
 def public_social_user(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
@@ -12183,21 +14697,6 @@ def validate_provision_main_body(user: dict[str, Any] | None, body: dict[str, An
         raise BrowserError("provision_agent_type_denied", "Only Hermes service agents are available right now.", status=HTTPStatus.FORBIDDEN)
 
 
-def provider_api_key_env_name(provider: str) -> str:
-    clean = str(provider or "").strip().lower()
-    if clean == "openrouter":
-        return "OPENROUTER_API_KEY"
-    if clean == "opencode-go":
-        return "OPENCODE_GO_API_KEY"
-    if clean == "opencode-zen":
-        return "OPENCODE_ZEN_API_KEY"
-    if clean == "nvidia":
-        return "NVIDIA_API_KEY"
-    if clean in {"minimax", "minimax-cn"}:
-        return "MINIMAX_API_KEY"
-    return "OPENAI_API_KEY"
-
-
 def provision_main_bridge_payload(
     node_id: str,
     body: dict[str, Any] | None = None,
@@ -19075,78 +21574,31 @@ def stream_embedded_agent_message(
     *,
     user: dict[str, Any] | None = None,
 ) -> None:
+    run, _created = begin_agent_run(handler.server, body, user=user)
+    start_agent_run_worker(handler.server, body, user=user, run=run)
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
+    stream_agent_run_ndjson(handler, str(run.get("run_id") or ""), user=user)
 
-    events: "queue.Queue[dict[str, Any]]" = queue.Queue()
-    started = time.monotonic()
-    last_action_label = "Receive chat turn"
 
-    def emit_action(action: dict[str, Any]) -> None:
-        events.put({"type": "action", "action": action})
-
-    def run_turn() -> None:
-        try:
-            result = embedded_agent_message(handler.server, body, user=user, action_callback=emit_action)
-            events.put({"type": "final", "agent": result})
-        except BrowserError as exc:
-            events.put({"type": "error", "error": {"code": exc.code, "message": exc.message}})
-        except Exception as exc:
-            events.put({"type": "error", "error": {"code": "agent_error", "message": str(exc)}})
-
-    worker = threading.Thread(target=run_turn, name="wasm-agent-chat-turn", daemon=True)
-    worker.start()
-
-    turn_id = str(body.get("turn_id") or "").strip()
-    cache_key = f"{user_id(user)}:{turn_id}" if turn_id else ""
-    if cache_key:
-        with handler.server.chat_turn_results_lock:
-            handler.server.chat_turn_results[cache_key] = {"inflight": True, "expires_at": time.monotonic() + 600}
-    client_connected = True
-    while True:
-        try:
-            payload = events.get(timeout=15)
-        except queue.Empty:
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            payload = {
-                "type": "heartbeat",
-                "phase": "Hermes bridge active",
-                "message": f"Hermes is still working after {elapsed_ms // 1000}s. Latest step: {last_action_label}.",
-                "elapsed_ms": elapsed_ms,
-                "action": {
-                    "id": "node_reply",
-                    "topic": "run-hermes",
-                    "kind": "model",
-                    "label": "Hermes bridge active",
-                    "status": "running",
-                    "detail": f"{elapsed_ms // 1000}s elapsed / latest: {last_action_label}",
-                    "meta": "bridge active",
-                },
-            }
-        else:
-            action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
-            if action.get("label"):
-                last_action_label = clipped(str(action.get("label") or ""), 80)
-        if client_connected:
-            try:
-                write_ndjson(handler, payload)
-            except (BrokenPipeError, ConnectionResetError):
-                client_connected = False
-        if payload.get("type") in {"final", "error"}:
-            if cache_key:
-                with handler.server.chat_turn_results_lock:
-                    handler.server.chat_turn_results[cache_key] = {
-                        "result": payload.get("agent") if payload.get("type") == "final" else None,
-                        "error": payload.get("error") if payload.get("type") == "error" else None,
-                        "expires_at": time.monotonic() + 120,
-                    }
-                    now = time.monotonic()
-                    for key in list(handler.server.chat_turn_results.keys()):
-                        if handler.server.chat_turn_results[key].get("expires_at", 0) < now:
-                            del handler.server.chat_turn_results[key]
-            return
+def stream_provider_envelope_message(
+    handler: WasmAgentHandler,
+    body: dict[str, Any],
+    *,
+    user: dict[str, Any] | None = None,
+) -> None:
+    if not user_is_admin(user):
+        raise BrowserError("admin_required", "Direct-head envelope streams require admin access.", status=HTTPStatus.FORBIDDEN)
+    context = provider_envelope_run_context(body)
+    run, _created = begin_agent_run(handler.server, dict(context["run_body"]), user=user, direct_head=True)
+    start_provider_envelope_run_worker(handler.server, body, user=user, run=run, context=context)
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    stream_agent_run_text_ndjson(handler, str(run.get("run_id") or ""), user=user)
 
 
 def dev_hmr_files(server: WasmAgentServer) -> list[Path]:

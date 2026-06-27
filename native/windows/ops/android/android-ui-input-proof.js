@@ -1,5 +1,7 @@
 "use strict";
 
+const { execFileSync } = require("node:child_process");
+
 function numberInRange(min, max, value, fallback) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -326,6 +328,59 @@ async function run(context) {
       devices: device,
       screenReady,
       failureClassification: ok ? "pass" : "adb_force_stop_failed",
+      lastPhase: context.progress?.lastPhase || "",
+      phaseHistory: context.progress?.phases || [],
+    };
+  }
+  if (action === "adb_reverse") {
+    const local = String(args.local || args.localPort || args.local_port || "tcp:8878").trim();
+    const remote = String(args.remote || args.remotePort || args.remote_port || local).trim();
+    const remove = args.remove === true || args.remove === "true";
+    if (!/^tcp:\d{2,5}$/.test(local) || !/^tcp:\d{2,5}$/.test(remote)) {
+      return {
+        ok: false,
+        stable: false,
+        operation: "run_android_ui_input_proof",
+        action,
+        local,
+        remote,
+        devices: device,
+        screenReady,
+        failureClassification: "adb_reverse_invalid_port",
+        lastPhase: context.progress?.lastPhase || "",
+        phaseHistory: context.progress?.phases || [],
+      };
+    }
+    let stdout = "";
+    let stderr = "";
+    let ok = false;
+    try {
+      const argsList = ["-s", serial, "reverse", remove ? "--remove" : local, ...(remove ? [] : [remote])];
+      stdout = execFileSync(device.adbPath || "adb", argsList, {
+        encoding: "utf8",
+        timeout: numberInRange(1000, 30000, args.timeoutMs ?? args.timeout_ms, 10000),
+        maxBuffer: numberInRange(64 * 1024, 1024 * 1024, args.maxBuffer ?? args.max_buffer, 256 * 1024),
+      });
+      ok = true;
+    } catch (error) {
+      stdout = String(error?.stdout || "");
+      stderr = String(error?.stderr || error?.message || "");
+    }
+    return {
+      ok,
+      stable: ok,
+      operation: "run_android_ui_input_proof",
+      action,
+      local,
+      remote,
+      remove,
+      reverse: {
+        stdout: stdout.slice(0, 4000),
+        stderr: stderr.slice(0, 4000),
+      },
+      devices: device,
+      screenReady,
+      failureClassification: ok ? "pass" : "adb_reverse_failed",
       lastPhase: context.progress?.lastPhase || "",
       phaseHistory: context.progress?.phases || [],
     };

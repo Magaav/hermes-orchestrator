@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "wasm-agent-whisper-tiny-en-xenova-fp16",
+  "source": "Xenova/whisper-tiny.en",
+  "revision": "main",
+  "version": "2026.06.26-english-v1-xenova-fp16",
+  "languageTags": [
+    "en",
+    "en-US"
+  ],
+  "engine": "transformers.js",
+  "task": "automatic-speech-recognition",
+  "dtype": "fp16",
+  "sizeBytes": 80359506,
+  "sha256": "7e6a467d817c34954750b82f2dacda57b6ce41ea990129baf515ce455657dfd9",
+  "files": [
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "normalizer.json",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "onnx/encoder_model_fp16.onnx",
+    "onnx/decoder_model_merged_fp16.onnx"
+  ]
+}

@@ -29,6 +29,10 @@ GOOGLE_LOGIN_CLIENT_ID=<google-web-client-id>
 ADMIN_EMAIL=admin@example.com
 USER_EMAILS=user1@example.com,user2@example.com
 HERMES_WASM_AGENT_PUBLIC_ORIGIN=https://wa.colmeio.com
+WASM_AGENT_MASTER_FRONTIER_RECEIVER=openai-responses
+WASM_AGENT_OPENAI_MODEL=gpt-5.5
+WASM_AGENT_OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=<openai-api-key>
 ```
 
 The app creates and uses:

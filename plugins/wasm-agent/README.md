@@ -87,6 +87,8 @@ Production-grade proof for this direction must show the old and new baseline
 context bytes/tokens, preserve answer/action quality on representative
 avatar-chat turns, keep context preview inspectable, and keep connection-drop
 resume behavior intact.
+Avatar-chat also exposes a compact `agentNodeSelect` diagnostic snapshot so
+native/PWA selector parity can be proven without scraping the dropdown.
 
 ## Native Release Feed
 

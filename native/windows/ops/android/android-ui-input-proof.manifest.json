@@ -1,7 +1,7 @@
 {
   "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
   "name": "run_android_ui_input_proof",
-  "version": "20260622T1958",
+  "version": "20260626T2217",
   "entry": "android-ui-input-proof.js",
   "operationId": "run_android_ui_input_proof",
   "requiredNativeCapabilities": [
@@ -18,64 +18,201 @@
   "inputsSchema": {
     "type": "object",
     "properties": {
-      "action": { "type": "string", "enum": ["tap", "swipe", "launch", "install_apk", "keyevent", "adb_shell", "adb_write_url", "delete_wake_snapshot", "voice_wake_service", "ui_dump", "gfxinfo", "gfx_reset", "status", "voice_wake_status", "voice_wake_logcat_summary", "force_stop", "task_trace", "foreground_summary", "web_log", "screenshot"] },
-      "x": { "type": "number" },
-      "y": { "type": "number" },
-      "x1": { "type": "number" },
-      "y1": { "type": "number" },
-      "x2": { "type": "number" },
-      "y2": { "type": "number" },
-      "durationMs": { "type": "number" },
-      "key": { "type": "string" },
-      "keyCode": { "type": "string" },
-      "key_code": { "type": "string" },
-      "componentName": { "type": "string" },
-      "component_name": { "type": "string" },
-      "dataUri": { "type": "string" },
-      "data_uri": { "type": "string" },
-      "url": { "type": "string" },
-      "intentAction": { "type": "string" },
-      "intent_action": { "type": "string" },
-      "voiceWakeCommand": { "type": "string" },
-      "voice_wake_command": { "type": "string" },
-      "command": { "type": "string" },
+      "action": {
+        "type": "string",
+        "enum": [
+          "tap",
+          "swipe",
+          "launch",
+          "install_apk",
+          "keyevent",
+          "adb_shell",
+          "adb_reverse",
+          "adb_write_url",
+          "delete_wake_snapshot",
+          "voice_wake_service",
+          "ui_dump",
+          "gfxinfo",
+          "gfx_reset",
+          "status",
+          "voice_wake_status",
+          "voice_wake_logcat_summary",
+          "force_stop",
+          "task_trace",
+          "foreground_summary",
+          "web_log",
+          "screenshot"
+        ]
+      },
+      "x": {
+        "type": "number"
+      },
+      "y": {
+        "type": "number"
+      },
+      "x1": {
+        "type": "number"
+      },
+      "y1": {
+        "type": "number"
+      },
+      "x2": {
+        "type": "number"
+      },
+      "y2": {
+        "type": "number"
+      },
+      "durationMs": {
+        "type": "number"
+      },
+      "key": {
+        "type": "string"
+      },
+      "keyCode": {
+        "type": "string"
+      },
+      "key_code": {
+        "type": "string"
+      },
+      "componentName": {
+        "type": "string"
+      },
+      "component_name": {
+        "type": "string"
+      },
+      "dataUri": {
+        "type": "string"
+      },
+      "data_uri": {
+        "type": "string"
+      },
+      "url": {
+        "type": "string"
+      },
+      "intentAction": {
+        "type": "string"
+      },
+      "intent_action": {
+        "type": "string"
+      },
+      "voiceWakeCommand": {
+        "type": "string"
+      },
+      "voice_wake_command": {
+        "type": "string"
+      },
+      "command": {
+        "type": "string"
+      },
       "commandArgs": {
         "type": "array",
-        "items": { "type": "string" }
+        "items": {
+          "type": "string"
+        }
       },
-      "timeoutMs": { "type": "number" },
-      "maxBuffer": { "type": "number" },
-      "origin": { "type": "string" },
-      "wakeThreshold": { "type": "number" },
-      "wake_threshold": { "type": "number" },
-      "wakePhrase": { "type": "string" },
-      "wake_phrase": { "type": "string" },
-      "wakeConfirmationFrames": { "type": "number" },
-      "wake_confirmation_frames": { "type": "number" },
-      "wakeVerificationFrames": { "type": "number" },
-      "wakeConfirmationWindowMs": { "type": "number" },
-      "wake_confirmation_window_ms": { "type": "number" },
-      "wakeVerificationWindowMs": { "type": "number" },
-      "wakeCooldownMs": { "type": "number" },
-      "wake_cooldown_ms": { "type": "number" },
-      "vadRmsThreshold": { "type": "number" },
-      "vad_rms_threshold": { "type": "number" },
-      "vadPeakThreshold": { "type": "number" },
-      "vad_peak_threshold": { "type": "number" },
-      "tuningSessionId": { "type": "string" },
-      "tuning_session_id": { "type": "string" },
-      "since": { "type": "string" },
-      "sinceTime": { "type": "string" },
-      "since_time": { "type": "string" },
+      "timeoutMs": {
+        "type": "number"
+      },
+      "maxBuffer": {
+        "type": "number"
+      },
+      "origin": {
+        "type": "string"
+      },
+      "wakeThreshold": {
+        "type": "number"
+      },
+      "wake_threshold": {
+        "type": "number"
+      },
+      "wakePhrase": {
+        "type": "string"
+      },
+      "wake_phrase": {
+        "type": "string"
+      },
+      "wakeConfirmationFrames": {
+        "type": "number"
+      },
+      "wake_confirmation_frames": {
+        "type": "number"
+      },
+      "wakeVerificationFrames": {
+        "type": "number"
+      },
+      "wakeConfirmationWindowMs": {
+        "type": "number"
+      },
+      "wake_confirmation_window_ms": {
+        "type": "number"
+      },
+      "wakeVerificationWindowMs": {
+        "type": "number"
+      },
+      "wakeCooldownMs": {
+        "type": "number"
+      },
+      "wake_cooldown_ms": {
+        "type": "number"
+      },
+      "vadRmsThreshold": {
+        "type": "number"
+      },
+      "vad_rms_threshold": {
+        "type": "number"
+      },
+      "vadPeakThreshold": {
+        "type": "number"
+      },
+      "vad_peak_threshold": {
+        "type": "number"
+      },
+      "tuningSessionId": {
+        "type": "string"
+      },
+      "tuning_session_id": {
+        "type": "string"
+      },
+      "since": {
+        "type": "string"
+      },
+      "sinceTime": {
+        "type": "string"
+      },
+      "since_time": {
+        "type": "string"
+      },
       "categories": {
         "type": "array",
-        "items": { "type": "string" }
+        "items": {
+          "type": "string"
+        }
+      },
+      "local": {
+        "type": "string"
+      },
+      "remote": {
+        "type": "string"
+      },
+      "localPort": {
+        "type": "string"
+      },
+      "remotePort": {
+        "type": "string"
+      },
+      "remove": {
+        "type": "boolean"
       }
     }
   },
   "outputsSchema": {
     "type": "object",
-    "required": ["ok", "stable", "operation", "failureClassification"]
+    "required": [
+      "ok",
+      "stable",
+      "operation",
+      "failureClassification"
+    ]
   },
   "safetyLimits": {
     "network": false,

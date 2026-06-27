@@ -16,6 +16,7 @@
 // from "./image-card-core/module.js"
 // from "./barcode-reader/module.js"
 // from "./ocr/module.js"
+// from "./speech-transcription/module.js"
 // from "./cv-shapes/module.js"
 // from "./semantic-vision/module.js"
 const moduleDefinition = (definition) => Object.freeze(definition);
@@ -262,6 +263,25 @@ export const MODULE_DEFINITIONS = Object.freeze([
       native_api: "TextDetector",
       fallback_library: "tesseract.js",
       default_runtime_url: "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js",
+    },
+  }),
+  moduleDefinition({
+    id: "speech-transcription",
+    title: "Speech Transcription",
+    status: "lazy local ASR",
+    detail: "Adds on-demand embedded-chat microphone transcription through a worker-owned local Transformers.js/WebGPU/WASM pipeline.",
+    defaultEnabled: true,
+    firmware: "/modules/speech-transcription/speech-transcription.js",
+    worker: "/modules/speech-transcription/speech-transcription-worker.js",
+    metadata: "/modules/speech-transcription/models/english-v1/metadata.json",
+    analyzer: {
+      kind: "audio",
+      mode: "lazy-worker",
+      cache: "immutable versioned SHA assets",
+      evidence: "transcript",
+      default_engine: "transformers.js",
+      acceleration: ["webgpu", "wasm"],
+      browser_speech_recognition: "disabled",
     },
   }),
   moduleDefinition({

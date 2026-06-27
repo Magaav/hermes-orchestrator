@@ -702,6 +702,17 @@ const AGENT_EDIT_CONFIG_TARGET_ID = "__target:edit__";
 const AGENT_OWNED_AGENT_TARGET_ID = "__agent:owned__";
 const AGENT_MODEL_TARGET_PREFIX = "__target:model:";
 const AGENT_FRONTIER_NODE_ID = "frontier";
+const AGENT_MASTER_FRONTIER_TARGET_ID = "__target:master_frontier__";
+const AGENT_MASTER_FRONTIER_LABEL = "Master:frontier";
+const AGENT_MASTER_FRONTIER_CAPS = Object.freeze([
+  "repo.read",
+  "repo.edit",
+  "test.run",
+  "command.run",
+  "runtime.inspect",
+  "docs.update",
+  "proof.report",
+]);
 const VOICE_CHAT_TRANSCRIPT_BREAK_MS = 2400;
 const VOICE_CHAT_DEDUPE_MS = 8000;
 const VOICE_CHAT_DRAFT_STALE_MS = 20000;
@@ -1711,6 +1722,7 @@ const els = {
   agentModelCancelButton: document.querySelector("#agentModelCancelButton"),
   agentInput: document.querySelector("#agentInput"),
   agentTokenUsage: document.querySelector("#agentTokenUsage"),
+  agentMicButton: document.querySelector("#agentMicButton"),
   agentSendButton: document.querySelector("#agentSendButton"),
   agentDirectTools: document.querySelector("#agentDirectTools"),
   agentEmojiButton: document.querySelector("#agentEmojiButton"),
@@ -2159,6 +2171,10 @@ const state = {
   },
   configAreaDragActive: false,
   agentComposer: null,
+  agentSpeechTranscriber: null,
+  agentSpeechTranscriberLoadPromise: null,
+  agentSpeechState: "idle",
+  agentSpeechToggleInFlight: false,
   clientFirstStore: createClientFirstStore(),
   localStorageEstimate: null,
   spaceWidgetLayouts: INITIAL_SPACE_WIDGET_LAYOUTS,
@@ -3233,6 +3249,9 @@ function buildObservationSnapshot() {
         uptime: state.resources.uptime?.display,
       } : null,
       last_error: state.lastError,
+    },
+    avatar_chat: {
+      target_selector: agentNodeSelectDiagnostic(),
     },
     tasks: {
       active_task_id: state.taskId,
@@ -13214,15 +13233,20 @@ function normalizeStoredMessage(message) {
       : undefined,
   };
   if (normalized.pending) {
-    normalized.pending = false;
-    normalized.phase = "Reloaded";
-    normalized.content = normalized.content || "This assistant turn was interrupted by a page reload.";
-    normalized.duration_ms = Number.isFinite(normalized.duration_ms)
-      ? normalized.duration_ms
-      : Date.now() - Number(normalized.turn_started_at || Date.now());
-    normalized.actions = (Array.isArray(normalized.actions) ? normalized.actions : []).map((action) => (
-      action.status === "running" ? { ...action, status: "error", detail: "Interrupted by reload" } : action
-    ));
+    if (normalized.run_id || normalized.turn_id) {
+      normalized.phase = "Reconnecting...";
+      normalized.content = normalized.content || "Reconnecting to the assistant turn...";
+    } else {
+      normalized.pending = false;
+      normalized.phase = "Reloaded";
+      normalized.content = normalized.content || "This assistant turn was interrupted by a page reload.";
+      normalized.duration_ms = Number.isFinite(normalized.duration_ms)
+        ? normalized.duration_ms
+        : Date.now() - Number(normalized.turn_started_at || Date.now());
+      normalized.actions = (Array.isArray(normalized.actions) ? normalized.actions : []).map((action) => (
+        action.status === "running" ? { ...action, status: "error", detail: "Interrupted by reload" } : action
+      ));
+    }
   }
   if (!normalized.images?.length) delete normalized.images;
   if (!normalized.attachments?.length) delete normalized.attachments;
@@ -14665,6 +14689,10 @@ function agentTargetIsDirectProvider(value = state.agentTargetNode) {
     && directProviderVerified(config);
 }
 
+function agentTargetIsMasterFrontier(value = state.agentTargetNode) {
+  return cleanText(value, "") === AGENT_MASTER_FRONTIER_TARGET_ID && isAdminUser();
+}
+
 function agentTargetIsOwnedAgent(value = state.agentTargetNode) {
   return cleanText(value, "") === AGENT_OWNED_AGENT_TARGET_ID && ownedAgentConfigured();
 }
@@ -14825,6 +14853,7 @@ function userFleetAgentNodes() {
 
 function agentNodeDisplayLabel(nodeId) {
   const id = cleanText(nodeId, "");
+  if (id === AGENT_MASTER_FRONTIER_TARGET_ID) return AGENT_MASTER_FRONTIER_LABEL;
   if (id === AGENT_FRONTIER_NODE_ID) return "frontier";
   if (id === AGENT_SANDBOX_NODE_ID) return "My agent";
   return id;
@@ -15789,6 +15818,7 @@ function defaultAgentTargetNode() {
 function agentTargetNode() {
   const fallback = defaultAgentTargetNode();
   const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
+  if (agentTargetIsMasterFrontier(target)) return AGENT_FRONTIER_NODE_ID;
   if (
     target === AGENT_PROVIDER_TARGET_ID
     || target.startsWith(AGENT_PROVIDER_TARGET_PREFIX)
@@ -15798,6 +15828,7 @@ function agentTargetNode() {
     || target === AGENT_NEW_CONFIG_TARGET_ID
     || target === AGENT_EDIT_CONFIG_TARGET_ID
     || target === AGENT_OWNED_AGENT_TARGET_ID
+    || target === AGENT_MASTER_FRONTIER_TARGET_ID
     || agentTargetIsAgentModel(target)
   ) return fallback;
   return !isAdminUser() && isGlobalAgentNodeId(target) ? AGENT_SANDBOX_NODE_ID : target;
@@ -15858,6 +15889,21 @@ function configuredAgentTargetOptions() {
       model,
     });
   };
+  if (isAdminUser()) {
+    const providerConfig = activeAgentDirectProviderConfig() || {};
+    pushOption({
+      value: AGENT_MASTER_FRONTIER_TARGET_ID,
+      kind: "master-frontier",
+      label: AGENT_MASTER_FRONTIER_LABEL,
+      detail: "direct-head",
+      nodeId: AGENT_FRONTIER_NODE_ID,
+      model: normalizeAgentModelEntry({
+        id: providerConfig?.model || "",
+        provider: providerConfig?.provider || "",
+        label: providerConfig?.model ? `${providerConfig?.provider || "provider"}:${providerConfig.model}` : "direct-head",
+      }),
+    });
+  }
   readyHarnesses.forEach(pushHarnessOption);
   userFleetAgentNodes().forEach((node) => {
     const nodeId = userFleetNodeId(node);
@@ -15965,6 +16011,44 @@ function agentNodeSelectOptions() {
   return options;
 }
 
+function agentNodeSelectDiagnostic() {
+  const configured = configuredAgentTargetOptions();
+  const options = agentNodeSelectOptions();
+  const selectedValue = cleanText(els.agentNodeSelect?.value || state.agentTargetNode, "");
+  const kindCounts = options.reduce((counts, option) => {
+    const kind = cleanText(option.kind || "agent", "agent");
+    counts[kind] = (counts[kind] || 0) + 1;
+    return counts;
+  }, {});
+  return {
+    schema: "hermes.wasm_agent.agent_node_select.diagnostic.v1",
+    platform: isWindowsNativeShellHost() ? "windows-native" : isAndroidNativeShell() ? "android-native" : "web",
+    native: {
+      windows: isWindowsNativeShellHost(),
+      android: isAndroidNativeShell(),
+    },
+    authenticated: Boolean(state.authUser),
+    role: cleanText(state.authUser?.role || "", ""),
+    is_admin: isAdminUser(),
+    selected_value: selectedValue,
+    resolved_target_node: agentTargetNode(),
+    configured_count: configured.length,
+    option_count: options.length,
+    option_kinds: kindCounts,
+    direct_provider_count: Array.isArray(state.agentDirectProviders) ? state.agentDirectProviders.length : 0,
+    verified_direct_provider_count: verifiedAgentProviderConfigs().length,
+    provider_storage_scope: "browser-local",
+    master_frontier_present: options.some((option) => option.value === AGENT_MASTER_FRONTIER_TARGET_ID),
+    master_frontier_selected: selectedValue === AGENT_MASTER_FRONTIER_TARGET_ID,
+    options: options.slice(0, 40).map((option) => ({
+      value: cleanText(option.value, ""),
+      kind: cleanText(option.kind || "agent", "agent"),
+      label: cleanText(option.label || option.value, ""),
+      detail: cleanText(option.detail || option.nodeId || "", ""),
+    })),
+  };
+}
+
 function preferredAgentNodeSelectValue(options = agentNodeSelectOptions()) {
   const values = new Set(options.map((option) => option.value));
   const raw = cleanText(state.agentTargetNode, "");
@@ -16063,6 +16147,23 @@ function setAgentTargetNode(nodeId) {
     openNodeForm("new");
     renderAgentNodeSelect();
     renderNodesPanel();
+    return;
+  }
+  if (requested === AGENT_MASTER_FRONTIER_TARGET_ID && isAdminUser()) {
+    const previous = state.agentTargetNode;
+    state.agentTargetNode = AGENT_MASTER_FRONTIER_TARGET_ID;
+    closeNodeForm();
+    closeAgentModelSetup();
+    renderAgentNodeSelect();
+    renderAgentModelSelect();
+    renderAgentReadinessStatus();
+    if (previous !== AGENT_MASTER_FRONTIER_TARGET_ID) {
+      recordUserEvent("agent.target_node_selected", {
+        target: "master-frontier",
+        summary: `Chat target changed to ${AGENT_MASTER_FRONTIER_LABEL}`,
+        data: { node_id: AGENT_MASTER_FRONTIER_TARGET_ID, target_node: AGENT_FRONTIER_NODE_ID, previous_node_id: previous || "" },
+      });
+    }
     return;
   }
   const requestedProvider = activeAgentDirectProviderConfig(requested);
@@ -20634,6 +20735,7 @@ function exposeFrontierRendererState() {
       authRedirectMessage: cleanText(state.authRedirectMessage, ""),
       lastError: cleanText(state.lastError, ""),
       lastFatalError: frontierRuntimeState.lastFatalError,
+      agentNodeSelect: agentNodeSelectDiagnostic(),
     });
   } catch {
     // Frontier state must never affect the app path.
@@ -22641,7 +22743,21 @@ async function postAgentMessage(body, pendingMessage, options = {}) {
       body,
     });
   }
-  return streamAgentMessage(body, pendingMessage, options);
+  try {
+    return await streamAgentMessage(body, pendingMessage, options);
+  } catch (error) {
+    if (error.name !== "AbortError" && body.turn_id) {
+      updateAgentPendingMessage(pendingMessage, { phase: "Reconnecting..." });
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      return fetchJson("/agent/session/message", {
+        ...options,
+        timeoutMs: options.timeoutMs || options.idleTimeoutMs,
+        method: "POST",
+        body,
+      });
+    }
+    throw error;
+  }
 }
 
 async function streamAgentMessage(body, pendingMessage, options = {}) {
@@ -22708,11 +22824,34 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
 function handleAgentStreamLine(line, pendingMessage) {
   const text = String(line || "").trim();
   if (!text) return null;
-  let payload = {};
+  let payload = null;
   try {
     payload = JSON.parse(text);
   } catch {
-    return null;
+    // Not valid JSON — will be treated as raw text delta below
+  }
+  if (!payload || typeof payload === "string") {
+    const delta = typeof payload === "string" ? payload : text;
+    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
+    pendingMessage.agent_delta_started = true;
+    updateAgentPendingMessage(pendingMessage, {
+      phase: pendingMessage.phase || "Streaming",
+      content: `${currentContent}${delta}`,
+    });
+    return { type: "delta", delta };
+  }
+  if (payload.run_id) pendingMessage.run_id = cleanText(payload.run_id, "");
+  if (Number.isFinite(payload.seq)) pendingMessage.agent_run_seq = Math.max(Number(pendingMessage.agent_run_seq || 0), payload.seq);
+  if (payload.type === "run" && payload.run) {
+    pendingMessage.run_id = cleanText(payload.run.run_id || payload.run_id, pendingMessage.run_id || "");
+    pendingMessage.turn_id = cleanText(payload.run.turn_id, pendingMessage.turn_id || "");
+    pendingMessage.agent_run_status = cleanText(payload.run.status, pendingMessage.agent_run_status || "");
+    updateAgentPendingMessage(pendingMessage, {
+      run_id: pendingMessage.run_id,
+      turn_id: pendingMessage.turn_id,
+      agent_run_seq: pendingMessage.agent_run_seq || payload.seq || 0,
+      agent_run_status: pendingMessage.agent_run_status,
+    });
   }
   if (payload.type === "action" && payload.action) {
     mergeAgentAction(pendingMessage, payload.action);
@@ -22724,10 +22863,145 @@ function handleAgentStreamLine(line, pendingMessage) {
       content: payload.message || pendingMessage.content,
     });
   }
+  if (payload.type === "delta" && payload.delta) {
+    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
+    pendingMessage.agent_delta_started = true;
+    updateAgentPendingMessage(pendingMessage, {
+      phase: pendingMessage.phase || "Streaming",
+      content: `${currentContent}${payload.delta}`,
+    });
+  }
   if (payload.type === "error") {
     throw new Error(payload.error?.message || "Embedded chat stream failed.");
   }
   return payload;
+}
+
+async function fetchAgentRunForPendingMessage(session, message) {
+  if (message.run_id) return cleanText(message.run_id, "");
+  if (!message.turn_id || !session?.id) return "";
+  const payload = await fetchJson(`/agent/runs?session_id=${encodeURIComponent(session.id)}&limit=20`, {
+    timeoutMs: 8000,
+  });
+  const runs = Array.isArray(payload.runs) ? payload.runs : [];
+  const match = runs.find((run) => cleanText(run.turn_id, "") === cleanText(message.turn_id, ""));
+  return cleanText(match?.run_id, "");
+}
+
+async function streamExistingAgentRun(runId, pendingMessage, options = {}) {
+  const afterSeq = Math.max(0, Number(pendingMessage.agent_run_seq || 0));
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort();
+  if (options.signal) options.signal.addEventListener("abort", abortFromCaller, { once: true });
+  try {
+    const response = await fetch(`/agent/runs/${encodeURIComponent(runId)}/stream?after_seq=${afterSeq}`, {
+      headers: { "X-Wasm-Agent-Device-Id": clientDeviceId() },
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalPayload = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const payload = handleAgentStreamLine(line, pendingMessage);
+        if (payload?.type === "final") finalPayload = { ok: true, agent: payload.agent };
+      }
+    }
+    if (buffer.trim()) {
+      const payload = handleAgentStreamLine(buffer, pendingMessage);
+      if (payload?.type === "final") finalPayload = { ok: true, agent: payload.agent };
+    }
+    if (finalPayload) return finalPayload;
+    const run = await fetchJson(`/agent/runs/${encodeURIComponent(runId)}`, { timeoutMs: 8000 });
+    if (run.run?.status === "completed" && run.run.final) return { ok: true, agent: run.run.final };
+    if (run.run?.error?.message) throw new Error(run.run.error.message);
+    throw new Error("The agent run stream ended without a final response.");
+  } finally {
+    if (options.signal) options.signal.removeEventListener("abort", abortFromCaller);
+  }
+}
+
+async function finishAgentBackendPayload(pendingMessage, payload, startedAt) {
+  const rawReply = payload.agent?.reply || "I did not receive a response from the embedded agent adapter.";
+  const clientWis = await applyClientWisPatchesFromReply(rawReply);
+  const clientOps = applyAgentClientOpsFromReply(clientWis.reply);
+  const diagnostics = { ...(payload.agent?.diagnostics || {}) };
+  if (clientWis.result) diagnostics.client_wis_patch_result = clientWis.result;
+  if (clientOps.result) diagnostics.client_ops = clientOps.result;
+  if (diagnostics.wis_patch_result?.applied) await refreshWisArtifactsAfterPatch(diagnostics.wis_patch_result, "agent-wis-patch");
+  const session = activeAgentSession();
+  pendingMessage.content = clientOps.reply;
+  pendingMessage.pending = false;
+  pendingMessage.phase = "";
+  pendingMessage.duration_ms = payload.agent?.duration_ms || Date.now() - Number(startedAt || pendingMessage.turn_started_at || Date.now());
+  pendingMessage.changed_files = payload.agent?.changed_files || [];
+  pendingMessage.diagnostics = diagnostics;
+  pendingMessage.run_id = cleanText(payload.agent?.run_id, pendingMessage.run_id || "");
+  pendingMessage.turn_id = cleanText(payload.agent?.turn_id, pendingMessage.turn_id || "");
+  pendingMessage.agent_run_status = "completed";
+  pendingMessage.actions = agentActionRowsFromPayload(payload.agent, pendingMessage.actions || []);
+  if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
+  session.diagnostics = diagnostics;
+  session.changed_files = pendingMessage.changed_files;
+  session.context_preview = payload.agent?.context_preview || [];
+  updateAgentTokenUsage(diagnostics.token_usage || null);
+  saveAgentSessions();
+  renderAgentDiagnostics(diagnostics);
+  renderAgentContextPreview(payload.agent?.context_preview || []);
+  renderAgentMessages();
+}
+
+async function resumePendingAgentRun(origin = "bootstrap") {
+  if (!state.authUser || state.agentBusy) return;
+  const session = activeAgentSession();
+  if (!session || socialChatSession(session)) return;
+  const pendingMessage = [...(session.messages || [])].reverse().find((message) => message.pending && (message.run_id || message.turn_id));
+  if (!pendingMessage) return;
+  let runId = "";
+  try {
+    runId = await fetchAgentRunForPendingMessage(session, pendingMessage);
+    if (!runId) return;
+    pendingMessage.run_id = runId;
+    state.agentBusy = true;
+    state.agentStopRequested = false;
+    state.agentAbortController = new AbortController();
+    updateAgentSendButton();
+    startAgentTurnTimer(pendingMessage);
+    updateAgentPendingMessage(pendingMessage, { phase: "Reconnecting...", content: pendingMessage.content || "Reconnecting to the assistant turn..." });
+    const payload = await streamExistingAgentRun(runId, pendingMessage, { signal: state.agentAbortController.signal });
+    await finishAgentBackendPayload(pendingMessage, payload, pendingMessage.turn_started_at);
+    recordUserEvent("agent.message_resumed", {
+      target: "agent-overlay",
+      summary: "Resumed embedded assistant run",
+      data: { origin, run_id: runId },
+      redacted: true,
+    });
+  } catch (error) {
+    pendingMessage.content = `I could not resume the embedded assistant run: ${error.message}`;
+    pendingMessage.pending = false;
+    pendingMessage.phase = "Resume error";
+    pendingMessage.duration_ms = Date.now() - Number(pendingMessage.turn_started_at || Date.now());
+    pendingMessage.actions = (pendingMessage.actions || []).map((action) => (
+      action.status === "running" ? { ...action, status: "error", detail: error.message } : action
+    ));
+    saveAgentSessions();
+    renderAgentMessages();
+  } finally {
+    if (state.agentAbortController) state.agentAbortController = null;
+    state.agentBusy = false;
+    state.agentStopRequested = false;
+    stopAgentTurnTimer();
+    updateAgentSendButton();
+    renderAgentReadinessStatus();
+    flushDeferredHmrReload();
+  }
 }
 
 function setAgentOpen(open, options = {}) {
@@ -23209,6 +23483,92 @@ function initializeAgentComposer() {
       void sendAgentMessage(raw);
       return false;
     },
+  });
+}
+
+function recordAgentSpeechDiagnostic(detail = {}) {
+  const type = cleanText(detail.type === "diagnostic" ? detail.event : detail.type || detail.event || "", "");
+  if (!type || (type !== "error" && type !== "ready" && !type.endsWith("_failed"))) return;
+  recordUserEvent("agent.speech_transcription_diagnostic", {
+    target: "agent-form",
+    summary: type,
+    data: {
+      type,
+      state: state.agentSpeechState,
+      engine: cleanText(detail.engine, ""),
+      error: cleanText(detail.error, ""),
+      device: cleanText(detail.device, ""),
+      runtime: detail.runtime && typeof detail.runtime === "object" ? detail.runtime : null,
+    },
+    redacted: true,
+  });
+}
+
+function handleAgentSpeechStateChange(detail = {}) {
+  state.agentSpeechState = cleanText(detail.state, "idle");
+}
+
+function handleAgentSpeechError(detail = {}) {
+  recordUserEvent("agent.speech_transcription_error", {
+    target: "agent-form",
+    summary: cleanText(detail.error, "Voice input error"),
+    data: {
+      context: cleanText(detail.context, ""),
+      state: state.agentSpeechState,
+    },
+    redacted: true,
+  });
+}
+
+async function ensureAgentSpeechTranscriber() {
+  if (state.agentSpeechTranscriber) return state.agentSpeechTranscriber;
+  if (state.agentSpeechTranscriberLoadPromise) return state.agentSpeechTranscriberLoadPromise;
+  state.agentSpeechTranscriberLoadPromise = import("./modules/speech-transcription/speech-transcription.js")
+    .then(({ createSpeechTranscriber }) => {
+      state.agentSpeechTranscriber = createSpeechTranscriber({
+        textarea: els.agentInput,
+        composer: state.agentComposer,
+        button: els.agentMicButton,
+        language: "en",
+        autoBindButton: false,
+        onStateChange: handleAgentSpeechStateChange,
+        onError: handleAgentSpeechError,
+        onDiagnostic: recordAgentSpeechDiagnostic,
+      });
+      return state.agentSpeechTranscriber;
+    })
+    .catch((error) => {
+      state.agentSpeechTranscriberLoadPromise = null;
+      handleAgentSpeechError({ error: errorMessage(error), context: "module_import" });
+      throw error;
+    });
+  return state.agentSpeechTranscriberLoadPromise;
+}
+
+async function toggleAgentSpeechTranscription(preAcquiredStream) {
+  let stream = preAcquiredStream || null;
+  try {
+    const transcriber = await ensureAgentSpeechTranscriber();
+    const activeStates = new Set(["requesting-permission", "loading-model", "listening", "quiet", "transcribing"]);
+    if (activeStates.has(transcriber.state)) {
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      await transcriber.stop();
+      return;
+    }
+    await transcriber.start({ mediaStream: stream });
+  } catch (error) {
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+    handleAgentSpeechError({ error: errorMessage(error), context: "toggle" });
+  }
+}
+
+function stopAgentSpeechTranscription(reason = "send") {
+  const transcriber = state.agentSpeechTranscriber;
+  if (!transcriber) return;
+  void transcriber.stop({ flush: false, reason }).catch((error) => {
+    handleAgentSpeechError({ error: errorMessage(error), context: "stop" });
   });
 }
 
@@ -24433,6 +24793,187 @@ async function callDirectAgentProvider(message, transcript = [], imageEntries = 
     error.diagnostic = diagnostic;
     throw error;
   }
+}
+
+function masterFrontierEnvelope(message, transcript = [], observation = {}, options = {}) {
+  const activeSpace = options.activeSpace || activeSpaceContext();
+  const imageCards = Array.isArray(options.imageCards) ? options.imageCards : [];
+  const nodeRunConfig = options.nodeRunConfig || {};
+  const recentTranscript = (Array.isArray(transcript) ? transcript : []).slice(-6).map((turn) => ({
+    role: cleanText(turn.role || "", "user"),
+    content: truncateText(cleanText(turn.content || "", ""), 320),
+  }));
+  const attachments = imageCards.slice(0, 8).map((card) => ({
+    name: cleanText(card.name || card.label || "", ""),
+    type: cleanText(card.type || card.media_kind || "", ""),
+    dimensions: cleanText(card.dimensions || "", ""),
+    reason: cleanText(card.reason || "", ""),
+  }));
+  return {
+    schema: "hermes.wasm_agent.master_frontier.envelope.v1",
+    trace_id: cleanText(options.turnId || "", ""),
+    objective: message,
+    state_summary: [
+      `surface:avatar-chat`,
+      `target:${AGENT_MASTER_FRONTIER_LABEL}`,
+      `node:${AGENT_FRONTIER_NODE_ID}`,
+      `space:${cleanText(activeSpace?.display_name || activeSpace?.name || "", "home")}`,
+      `panel:${cleanText(observation.workspace?.active_panel || state.activePanel, "")}`,
+      `transcript_turns:${recentTranscript.length}`,
+      `attachments:${attachments.length}`,
+    ].join(" "),
+    compact_state: {
+      target: AGENT_MASTER_FRONTIER_LABEL,
+      target_node: AGENT_FRONTIER_NODE_ID,
+      endpoint: "/agent/provider/envelope/stream",
+      receiver: "server-configured",
+      mode: "direct-head",
+      node_config: {
+        node_id: AGENT_FRONTIER_NODE_ID,
+        name: nodeRunConfig.name || "frontier",
+        type: nodeRunConfig.type || "hermes",
+        provider: nodeRunConfig.provider || "",
+        model: nodeRunConfig.model || "",
+      },
+      workspace: {
+        active_panel: observation.workspace?.active_panel || state.activePanel,
+        active_space: {
+          id: activeSpaceStorageId(),
+          name: activeSpace?.name || "",
+          display_name: activeSpace?.display_name || "",
+        },
+      },
+      fleet: {
+        bridge_ready: Boolean(observation.fleet?.bridge_ready),
+        selected_node: observation.fleet?.selected_node || "",
+        chat_target_node: AGENT_FRONTIER_NODE_ID,
+      },
+      transcript: recentTranscript,
+      attachments,
+      recent_events: Array.isArray(observation.recent_events) ? observation.recent_events.slice(0, 6) : [],
+      requested_click_context: observation.requested_click_context || null,
+    },
+    capabilities: AGENT_MASTER_FRONTIER_CAPS,
+    evidence_refs: [
+      { ref: "ctx://avatar-chat/current-turn", kind: "chat", summary: "Current message and compact transcript are inline." },
+      { ref: "ctx://workspace/compact-state", kind: "state", summary: "Compact workspace, fleet, and recent event state are inline." },
+      { ref: "ctx://direct-head/receiver", kind: "receiver", summary: "Envelope is sent to the server-configured direct-head receiver." },
+    ],
+    allowed_actions: [
+      { id: "answer", type: "direct", description: "Answer directly from the envelope when no tool work is required." },
+      { id: "dispatch.hermes", type: "bridge", caps: AGENT_MASTER_FRONTIER_CAPS, description: "Dispatch bounded tool/proof work through the wasm-agent Hermes bridge." },
+    ],
+    constraints: [
+      "Do not assume hidden state beyond this envelope.",
+      "Answer directly when possible; use dispatch.hermes only when tool, file, runtime, or proof work is required.",
+      "Keep the answer compact and include proof handles when work is dispatched.",
+    ],
+    proof_requests: [
+      "route-used:/agent/provider/envelope/stream",
+      "receiver:server-configured",
+      "target-label:Master:frontier",
+      "target-node:frontier",
+    ],
+    budget: {
+      max_output_tokens: 900,
+      max_dispatch_caps: AGENT_MASTER_FRONTIER_CAPS.length,
+    },
+    stream: true,
+    output_schema: {
+      type: "object",
+      required: ["answer", "decision", "actions", "state_delta", "needs", "confidence"],
+      properties: {
+        answer: { type: "string" },
+        decision: { type: "string" },
+        actions: { type: "array", items: { type: "object" } },
+        state_delta: { type: "object" },
+        needs: { type: "array", items: { type: "string" } },
+        proof_requests: { type: "array", items: { type: "string" } },
+        confidence: { type: "number" },
+      },
+      additionalProperties: true,
+    },
+  };
+}
+
+async function callMasterFrontierDirectHead(message, transcript = [], observation = {}, options = {}) {
+  const envelope = masterFrontierEnvelope(message, transcript, observation, options);
+  const body = {
+    session_id: activeAgentSession().id,
+    turn_id: cleanText(options.turnId || "", ""),
+    space_id: activeSpaceStorageId(),
+    envelope,
+    instructions: [
+      `You are the ${AGENT_MASTER_FRONTIER_LABEL} direct head for avatar-chat.`,
+      "Receive this wasm-agent envelope through the server-configured direct-head receiver.",
+      "Answer from the envelope protocol; return dispatch.hermes only when the envelope requires bounded bridge tool/proof work.",
+    ].join(" "),
+    max_output_tokens: 900,
+    text_verbosity: "low",
+  };
+  let response = null;
+  if ("ReadableStream" in window && "TextDecoder" in window && options.pendingMessage) {
+    const fetchResponse = await fetch("/agent/provider/envelope/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Wasm-Agent-Device-Id": clientDeviceId(),
+      },
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+    if (!fetchResponse.ok || !fetchResponse.body) throw new Error(`HTTP ${fetchResponse.status}`);
+    const reader = fetchResponse.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalAgent = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const payload = handleAgentStreamLine(line, options.pendingMessage);
+        if (payload?.type === "final") finalAgent = payload.agent;
+      }
+    }
+    if (buffer.trim()) {
+      const payload = handleAgentStreamLine(buffer, options.pendingMessage);
+      if (payload?.type === "final") finalAgent = payload.agent;
+    }
+    if (!finalAgent) throw new Error("The direct-head stream ended without a final response.");
+    response = { ok: true, provider: finalAgent.provider || {}, ...finalAgent };
+  } else {
+    response = await fetchJson("/agent/provider/envelope", {
+      method: "POST",
+      body,
+      timeoutMs: state.agentTurnTimeoutMs + 5000,
+      signal: options.signal,
+    });
+  }
+  const providerPayload = response?.provider && typeof response.provider === "object" ? response.provider : {};
+  return {
+    ...providerPayload,
+    ...response,
+    provider_result: providerPayload,
+    provider: providerPayload.provider || (typeof response?.provider === "string" ? response.provider : ""),
+    base_url: providerPayload.base_url || response?.base_url || "",
+    model: response?.model || providerPayload.model || "",
+    usage: response?.usage || providerPayload.usage || null,
+    run_id: response?.run_id || providerPayload.run_id || "",
+    turn_id: response?.turn_id || providerPayload.turn_id || "",
+    hermes_dispatch: response?.hermes_dispatch || providerPayload.hermes_dispatch || null,
+    context_measurement: response?.context_measurement || providerPayload.context_measurement || null,
+  };
+}
+
+function masterFrontierReplyFromPayload(payload = {}) {
+  const parsed = payload?.parsed && typeof payload.parsed === "object" ? payload.parsed : {};
+  const dispatchReply = payload?.hermes_dispatch && typeof payload.hermes_dispatch === "object"
+    ? payload.hermes_dispatch.reply
+    : "";
+  return cleanText(dispatchReply || parsed.answer || parsed.decision || payload?.reply || "", "");
 }
 
 function ownedAgentPrompt(message, transcript = [], observation = {}) {
@@ -28217,14 +28758,22 @@ function renderAgentDiagnostics(diagnostics = {}) {
   if (!els.agentDiagnostics) return;
   updateAgentTokenUsage(diagnostics.token_usage || null);
   const usage = normalizeAgentTokenUsage(diagnostics.token_usage || state.agentTokenUsage);
-  const tokenText = usage
-    ? `input ${usage.prompt_tokens || 0} output ${usage.completion_tokens || 0} total ${usage.total_tokens || 0}`
-    : "-";
+  const sessionSummary = agentSessionTokenSummary();
+  const measurements = diagnosticsContextMeasurement(diagnostics);
+  const directHead = diagnostics.direct_head && typeof diagnostics.direct_head === "object" ? diagnostics.direct_head : {};
+  const providerBits = [
+    directHead.provider || diagnostics.receiver || diagnostics.source || "",
+    directHead.model || diagnostics.model || "",
+  ].filter(Boolean);
   const contextText = state.agentContextString
     || (diagnostics.tools?.length ? diagnostics.tools.join(" ") : "")
     || (diagnostics.context_estimated_tokens ? `~${diagnostics.context_estimated_tokens} tokens` : "-");
   const rows = [
-    ["Tokens", tokenText],
+    ["Last Turn", formatTokenUsageParts(usage)],
+    ["Session", sessionSummary.usage ? `${formatTokenUsageParts(sessionSummary.usage)} · ${sessionSummary.turns} turns` : "-"],
+    ["Envelope", measurements.direct ? `~${compactCount(measurements.direct.estimated_tokens || 0)} est · ${compactCount(measurements.direct.utf8_bytes || 0)} bytes` : "-"],
+    ["Dispatch", measurements.dispatch ? `~${compactCount(measurements.dispatch.estimated_tokens || 0)} est` : "-"],
+    ["Model", providerBits.length ? providerBits.join(" · ") : "-"],
     ["Turns", Number.isFinite(diagnostics.transcript_turns) ? String(diagnostics.transcript_turns) : "-"],
     ["Context", contextText],
   ];
@@ -28275,6 +28824,12 @@ function normalizeAgentTokenUsage(usage) {
   const prompt = firstTokenNumber(usage, ["prompt_tokens", "input_tokens", "input_token_count", "inputTokenCount", "tokens_in", "prompt"]);
   const completion = firstTokenNumber(usage, ["completion_tokens", "output_tokens", "output_token_count", "outputTokenCount", "candidatesTokenCount", "tokens_out", "completion"]);
   let total = firstTokenNumber(usage, ["total_tokens", "total_token_count", "totalTokenCount", "tokens", "total"]);
+  const cacheRead = firstTokenNumber(usage, ["cache_read_tokens", "cached_tokens", "cachedTokens"]);
+  const reasoning = firstTokenNumber(usage, ["reasoning_tokens", "reasoningTokens"]);
+  const inputDetails = usage.input_tokens_details && typeof usage.input_tokens_details === "object" ? usage.input_tokens_details : {};
+  const outputDetails = usage.output_tokens_details && typeof usage.output_tokens_details === "object" ? usage.output_tokens_details : {};
+  const nestedCacheRead = firstTokenNumber(inputDetails, ["cached_tokens", "cache_read_tokens", "cachedTokens"]);
+  const nestedReasoning = firstTokenNumber(outputDetails, ["reasoning_tokens", "reasoningTokens"]);
   let input = prompt;
   let output = completion;
   if (total === null && (input !== null || output !== null)) total = (input || 0) + (output || 0);
@@ -28288,17 +28843,72 @@ function normalizeAgentTokenUsage(usage) {
     input_tokens: input || 0,
     output_tokens: output || 0,
     total_tokens: total || 0,
+    cache_read_tokens: cacheRead ?? nestedCacheRead ?? 0,
+    reasoning_tokens: reasoning ?? nestedReasoning ?? 0,
   };
+}
+
+function addTokenUsage(a, b) {
+  const left = normalizeAgentTokenUsage(a) || {};
+  const right = normalizeAgentTokenUsage(b) || {};
+  return normalizeAgentTokenUsage({
+    input_tokens: Number(left.input_tokens || 0) + Number(right.input_tokens || 0),
+    output_tokens: Number(left.output_tokens || 0) + Number(right.output_tokens || 0),
+    total_tokens: Number(left.total_tokens || 0) + Number(right.total_tokens || 0),
+    cache_read_tokens: Number(left.cache_read_tokens || 0) + Number(right.cache_read_tokens || 0),
+    reasoning_tokens: Number(left.reasoning_tokens || 0) + Number(right.reasoning_tokens || 0),
+  });
+}
+
+function agentSessionTokenSummary(session = activeAgentSession()) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  let total = null;
+  let turns = 0;
+  for (const message of messages) {
+    const usage = normalizeAgentTokenUsage(message?.diagnostics?.token_usage);
+    if (!usage) continue;
+    turns += 1;
+    total = addTokenUsage(total, usage);
+  }
+  return {
+    turns,
+    usage: total,
+  };
+}
+
+function formatTokenUsageParts(usage) {
+  const normalized = normalizeAgentTokenUsage(usage);
+  if (!normalized) return "-";
+  const parts = [
+    `in ${compactCount(normalized.input_tokens || 0)}`,
+    `out ${compactCount(normalized.output_tokens || 0)}`,
+    `total ${compactCount(normalized.total_tokens || 0)}`,
+  ];
+  if (normalized.reasoning_tokens) parts.push(`reason ${compactCount(normalized.reasoning_tokens)}`);
+  if (normalized.cache_read_tokens) parts.push(`cached ${compactCount(normalized.cache_read_tokens)}`);
+  return parts.join(" ");
+}
+
+function diagnosticsContextMeasurement(diagnostics = {}) {
+  const direct = diagnostics.context_measurement && typeof diagnostics.context_measurement === "object"
+    ? diagnostics.context_measurement
+    : null;
+  const dispatch = diagnostics.dispatch_context_measurement && typeof diagnostics.dispatch_context_measurement === "object"
+    ? diagnostics.dispatch_context_measurement
+    : null;
+  return { direct, dispatch };
 }
 
 function updateAgentTokenUsage(usage = state.agentTokenUsage) {
   const normalized = normalizeAgentTokenUsage(usage);
   state.agentTokenUsage = normalized || null;
   if (!els.agentTokenUsage) return;
+  const sessionSummary = agentSessionTokenSummary();
   const total = normalized ? normalized.total_tokens : null;
-  els.agentTokenUsage.textContent = fmtCompactToken(total);
+  const sessionTotal = sessionSummary.usage?.total_tokens || 0;
+  els.agentTokenUsage.textContent = sessionTotal ? `${fmtCompactToken(total)} / ${compactCount(sessionTotal)}` : fmtCompactToken(total);
   els.agentTokenUsage.title = normalized
-    ? `Exact model tokens: input ${normalized.prompt_tokens || 0}, output ${normalized.completion_tokens || 0}, total ${total || 0}`
+    ? `Last turn exact tokens: ${formatTokenUsageParts(normalized)}. Session exact tokens: ${formatTokenUsageParts(sessionSummary.usage)} across ${sessionSummary.turns} turns.`
     : "Exact model token usage for the last turn";
 }
 
@@ -30586,7 +31196,17 @@ function updateAgentPendingMessage(message, updates = {}) {
   if (!message) return;
   Object.assign(message, updates);
   saveAgentSessions();
-  renderAgentMessages();
+  scheduleRenderAgentMessages();
+}
+
+let agentMessagesRafId = 0;
+function scheduleRenderAgentMessages() {
+  if (!agentMessagesRafId) {
+    agentMessagesRafId = requestAnimationFrame(() => {
+      agentMessagesRafId = 0;
+      renderAgentMessages();
+    });
+  }
 }
 
 function stopAgentMessage() {
@@ -31277,6 +31897,7 @@ async function handleAgentSlashCommand(content = "") {
 }
 
 async function sendAgentMessage(text) {
+  stopAgentSpeechTranscription("send");
   if (state.agentBusy) {
     stopAgentMessage();
     return;
@@ -31310,9 +31931,14 @@ async function sendAgentMessage(text) {
   const runHintId = `chat_${turnStartedAt}_${Math.random().toString(36).slice(2, 7)}`;
   const mode = els.agentModeSelect.value;
   const useDirectApi = shouldUseDirectAgentProvider(activeSession);
-  const directProviderConfig = useDirectApi ? activeAgentDirectProviderConfig(state.agentTargetNode) : null;
+  const useMasterFrontier = agentTargetIsMasterFrontier(state.agentTargetNode);
+  const directHeadLike = useDirectApi || useMasterFrontier;
+  const directProviderConfig = directHeadLike ? activeAgentDirectProviderConfig(state.agentTargetNode) : null;
   const useOwnedBridge = shouldUseOwnedAgentBridge(activeSession);
-  const runHintTarget = useDirectApi || useOwnedBridge ? "" : targetNode;
+  const backendTurnId = useDirectApi || useOwnedBridge
+    ? ""
+    : window.crypto?.randomUUID?.() || `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const runHintTarget = useDirectApi || useOwnedBridge || useMasterFrontier ? "" : targetNode;
   if (runHintTarget) {
     setNodeRunHint(runHintTarget, {
       id: runHintId,
@@ -31372,9 +31998,10 @@ async function sendAgentMessage(text) {
   });
   clearAgentInput();
   recordUserEvent("agent.message_submitted", {
-    target: useDirectApi ? "provider-api" : useOwnedBridge ? "owned-agent" : `node:${targetNode}`,
+    target: useMasterFrontier ? "master-frontier" : useDirectApi ? "provider-api" : useOwnedBridge ? "owned-agent" : `node:${targetNode}`,
     summary: useDirectApi
       ? "Submitted embedded assistant message to provider"
+      : useMasterFrontier ? `Submitted embedded assistant message to ${AGENT_MASTER_FRONTIER_LABEL}`
       : useOwnedBridge ? "Submitted embedded assistant message to owned agent" : `Submitted embedded assistant message to ${targetNode}`,
     data: {
       message_length: userMessageContent.length,
@@ -31386,6 +32013,7 @@ async function sendAgentMessage(text) {
       space_name: activeSpaceContext().name,
       target_node: targetNode,
       direct_api: useDirectApi,
+      direct_head: useMasterFrontier,
       owned_bridge: useOwnedBridge,
     },
     redacted: true,
@@ -31463,15 +32091,15 @@ async function sendAgentMessage(text) {
     ];
     if (attachmentCount) {
       initialActions.push(
-        agentAction("Prepare attachments", useDirectApi ? "done" : "running", useDirectApi ? `${attachmentCount} ready for provider` : `${attachmentCount} queued`, {
+        agentAction("Prepare attachments", directHeadLike ? "done" : "running", directHeadLike ? `${attachmentCount} ready for direct head` : `${attachmentCount} queued`, {
         id: "client_store_image_assets",
         topic: "run-wasm",
         kind: "media",
-        meta: useDirectApi ? "provider metadata" : "local store",
-        arguments: useDirectApi
-          ? { count: attachmentCount, storage: "skipped-direct-provider" }
+        meta: directHeadLike ? "provider metadata" : "local store",
+        arguments: directHeadLike
+          ? { count: attachmentCount, storage: "skipped-direct-head" }
           : { endpoint: "/agent/attachments", count: attachmentCount },
-        preview: useDirectApi ? agentImageCardPreview(userImages, userAttachments) : undefined,
+        preview: directHeadLike ? agentImageCardPreview(userImages, userAttachments) : undefined,
       }),
         agentAction("Decode pixels", "done", `${imageCards.filter((card) => card.dimensions).length}/${attachmentCount} decoded`, {
         id: "client_decode_pixels",
@@ -31502,7 +32130,7 @@ async function sendAgentMessage(text) {
       );
     }
     const providerProbeActionId = "client_probe_provider";
-    const askActionId = useDirectApi ? "client_call_provider" : useOwnedBridge ? "client_call_owned_agent" : "client_ask_orchestrator";
+    const askActionId = useMasterFrontier ? "client_call_master_frontier" : useDirectApi ? "client_call_provider" : useOwnedBridge ? "client_call_owned_agent" : "client_ask_orchestrator";
     if (useDirectApi) {
       initialActions.push(
         agentAction("Probe provider", "running", directProviderChatUrl(directProviderConfig), {
@@ -31520,30 +32148,35 @@ async function sendAgentMessage(text) {
     }
     initialActions.push(
       agentAction(
-        useDirectApi ? "Call provider" : useOwnedBridge ? `Call ${state.agentOwnedAgent?.name || "owned agent"}` : `Ask ${targetNode}`,
+        useMasterFrontier ? `Call ${AGENT_MASTER_FRONTIER_LABEL}` : useDirectApi ? "Call provider" : useOwnedBridge ? `Call ${state.agentOwnedAgent?.name || "owned agent"}` : `Ask ${targetNode}`,
         "running",
-        useDirectApi ? directProviderChatUrl(directProviderConfig) : useOwnedBridge ? ownedAgentBridgeUrl() : "POST /agent/session/message",
+        useMasterFrontier ? "POST /agent/provider/envelope/stream" : useDirectApi ? directProviderChatUrl(directProviderConfig) : useOwnedBridge ? ownedAgentBridgeUrl() : "POST /agent/session/message",
         {
         id: askActionId,
-        topic: useDirectApi || useOwnedBridge ? "run-api" : "run-hermes",
-        kind: useDirectApi || useOwnedBridge ? "api" : "model",
-        meta: useDirectApi
+        topic: useDirectApi || useOwnedBridge || useMasterFrontier ? "run-api" : "run-hermes",
+        kind: useDirectApi || useOwnedBridge || useMasterFrontier ? "api" : "model",
+        meta: useMasterFrontier
+          ? AGENT_MASTER_FRONTIER_LABEL
+          : useDirectApi
           ? directProviderConfig?.model || "provider"
           : useOwnedBridge
             ? state.agentOwnedAgent?.type || "hermes"
           : chatModel?.label ? `${mode} / ${chatModel.label}` : mode,
-        arguments: useDirectApi
+        arguments: useMasterFrontier
+          ? { endpoint: "/agent/provider/envelope/stream", target_node: AGENT_FRONTIER_NODE_ID, provider: directProviderConfig?.provider || "", model: directProviderConfig?.model || "" }
+          : useDirectApi
           ? { endpoint: directProviderChatUrl(directProviderConfig), model: directProviderConfig?.model || "", provider: directProviderConfig?.provider || "" }
           : useOwnedBridge
             ? { endpoint: ownedAgentBridgeUrl(), type: state.agentOwnedAgent?.type || "hermes", name: state.agentOwnedAgent?.name || "" }
           : { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
       })
     );
-    const pendingMessage = appendAgentMessage("assistant", useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
+    const pendingMessage = appendAgentMessage("assistant", useMasterFrontier ? `Calling ${AGENT_MASTER_FRONTIER_LABEL}...` : useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
       pending: true,
-      phase: useDirectApi ? "Provider" : useOwnedBridge ? "Owned agent" : "Inspecting context",
+      phase: useMasterFrontier ? "Direct head" : useDirectApi ? "Provider" : useOwnedBridge ? "Owned agent" : "Inspecting context",
       target_node: targetNode,
-      mode: useDirectApi ? "direct_api" : useOwnedBridge ? "owned_bridge" : mode,
+      mode: useMasterFrontier ? "direct_head" : useDirectApi ? "direct_api" : useOwnedBridge ? "owned_bridge" : mode,
+      turn_id: backendTurnId || undefined,
       turn_started_at: turnStartedAt,
       space_id: activeSpaceStorageId(),
       space_name: activeSpace.name,
@@ -31551,6 +32184,131 @@ async function sendAgentMessage(text) {
       actions: initialActions,
     });
     startAgentTurnTimer(pendingMessage);
+    if (useMasterFrontier) {
+      els.agentStatus.textContent = "Calling direct head";
+      updateAgentPendingMessage(pendingMessage, {
+        phase: "Direct head",
+        content: `Calling ${AGENT_MASTER_FRONTIER_LABEL}...`,
+      });
+      try {
+        const directHead = await callMasterFrontierDirectHead(userMessageContent, transcript, compactObservation, {
+          activeSpace,
+          imageCards,
+          nodeRunConfig,
+          turnId: backendTurnId,
+          pendingMessage,
+          signal: state.agentAbortController.signal,
+        });
+        const rawReply = masterFrontierReplyFromPayload(directHead) || "The direct head returned an empty response.";
+        const clientWis = await applyClientWisPatchesFromReply(rawReply);
+        const clientOps = applyAgentClientOpsFromReply(clientWis.reply);
+        const directHeadUsage = directHead.usage && typeof directHead.usage === "object" ? directHead.usage : {};
+        const dispatch = directHead.hermes_dispatch && typeof directHead.hermes_dispatch === "object" ? directHead.hermes_dispatch : null;
+        const changedFiles = Array.isArray(directHead.changed_files) ? directHead.changed_files : [];
+        pendingMessage.content = clientOps.reply;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.changed_files = changedFiles;
+        pendingMessage.run_id = cleanText(directHead.run_id, pendingMessage.run_id || "");
+        pendingMessage.turn_id = cleanText(directHead.turn_id, pendingMessage.turn_id || backendTurnId || "");
+        pendingMessage.agent_run_status = "completed";
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId
+            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "done", detail: dispatch ? "Hermes dispatch" : "direct decision", meta: "direct-head" }
+            : action
+        ));
+        if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
+        if (directHead.context_measurement) {
+          pendingMessage.actions.push(agentAction("Envelope estimate", "done", `~${directHead.context_measurement.estimated_tokens || 0} tokens`, {
+            id: "client_master_frontier_context_measurement",
+            topic: "run-api",
+            kind: "context",
+            meta: "direct-head",
+            arguments: directHead.context_measurement,
+          }));
+        }
+        pendingMessage.diagnostics = {
+          source: dispatch ? "master_frontier_hermes_dispatch" : "master_frontier_direct_head",
+          mode: "direct_head",
+          target_node: AGENT_FRONTIER_NODE_ID,
+          duration_ms: pendingMessage.duration_ms,
+          tool_count: 0,
+          tools: [],
+          transcript_turns: transcript.length,
+          token_usage: directHeadUsage,
+          run_id: pendingMessage.run_id,
+          turn_id: pendingMessage.turn_id,
+          context_measurement: directHead.context_measurement || null,
+          dispatch_context_measurement: dispatch?.context_measurement || null,
+          changed_files_complete: directHead.diagnostics?.changed_files_complete || changedFiles.length > 0,
+          before_checkpoint: directHead.diagnostics?.before_checkpoint || null,
+          auto_checkpoint: directHead.diagnostics?.auto_checkpoint || null,
+          direct_head: {
+            label: AGENT_MASTER_FRONTIER_LABEL,
+            endpoint: "/agent/provider/envelope/stream",
+            provider: directProviderConfig?.provider || directHead.provider || "",
+            model: directProviderConfig?.model || directHead.model || "",
+            base_url: directProviderConfig?.baseUrl || directHead.base_url || "",
+            provider_config_source: directProviderConfig ? "browser-local" : "server-default",
+            parsed: directHead.parsed || null,
+          },
+          hermes_dispatch: dispatch,
+          backend_tools_enabled: true,
+          source_mutations_enabled: Boolean(dispatch),
+          wis_patch_result: clientWis.result,
+          client_ops: clientOps.result,
+        };
+        const session = activeAgentSession();
+        session.diagnostics = pendingMessage.diagnostics;
+        updateAgentTokenUsage(directHeadUsage);
+        session.changed_files = changedFiles;
+        session.context_preview = Array.isArray(directHead.context_preview) && directHead.context_preview.length
+          ? directHead.context_preview
+          : directHead.envelope_text ? [{ tool: "direct_envelope", preview: truncateText(directHead.envelope_text, 1200) }] : [];
+        saveAgentSessions();
+        renderAgentDiagnostics(pendingMessage.diagnostics);
+        renderAgentContextPreview(session.context_preview);
+        renderAgentMessages();
+        recordUserEvent("agent.master_frontier_finished", {
+          target: "master-frontier",
+          summary: `${AGENT_MASTER_FRONTIER_LABEL} replied`,
+          data: { run_id: pendingMessage.run_id, dispatched: Boolean(dispatch), usage: directHeadUsage },
+        });
+        void publishClientSnapshot("agent-master-frontier-finished", { silent: true });
+        return;
+      } catch (directHeadError) {
+        const diagnostic = providerDiagnosticFromError(directHeadError) || directHeadError.diagnostic || {};
+        const reason = diagnostic.message || directHeadError.message;
+        pendingMessage.content = `The ${AGENT_MASTER_FRONTIER_LABEL} direct head could not answer: ${reason}`;
+        pendingMessage.pending = false;
+        pendingMessage.phase = "Direct head error";
+        pendingMessage.duration_ms = Date.now() - turnStartedAt;
+        pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
+          action.id === askActionId
+            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "error", detail: reason, meta: diagnostic.category || diagnostic.mode || "error" }
+            : action
+        ));
+        pendingMessage.diagnostics = {
+          source: "master_frontier_direct_head_error",
+          mode: "direct_head",
+          target_node: AGENT_FRONTIER_NODE_ID,
+          provider_error: diagnostic,
+          direct_head: {
+            label: AGENT_MASTER_FRONTIER_LABEL,
+            endpoint: "/agent/provider/envelope/stream",
+            provider: directProviderConfig?.provider || "",
+            model: directProviderConfig?.model || "",
+            provider_config_source: directProviderConfig ? "browser-local" : "server-default",
+          },
+        };
+        saveAgentSessions();
+        renderAgentMessages();
+        renderNodesPanel();
+        void publishClientSnapshot("agent-master-frontier-error", { silent: true });
+        return;
+      }
+    }
     if (useDirectApi) {
       els.agentStatus.textContent = "Calling API";
       updateAgentPendingMessage(pendingMessage, {
@@ -31773,6 +32531,7 @@ async function sendAgentMessage(text) {
     }));
     const payload = await postAgentMessage({
       session_id: activeAgentSession().id,
+      turn_id: backendTurnId,
       message: userMessageContent,
       images: userImages.length ? userImages : undefined,
       attachments: payloadAttachments.length ? payloadAttachments : undefined,
@@ -31807,6 +32566,9 @@ async function sendAgentMessage(text) {
     pendingMessage.duration_ms = payload.agent?.duration_ms || Date.now() - turnStartedAt;
     pendingMessage.changed_files = changedFiles;
     pendingMessage.diagnostics = diagnostics;
+    pendingMessage.run_id = cleanText(payload.agent?.run_id, pendingMessage.run_id || "");
+    pendingMessage.turn_id = cleanText(payload.agent?.turn_id, pendingMessage.turn_id || backendTurnId || "");
+    pendingMessage.agent_run_status = "completed";
     pendingMessage.space_id = activeSpaceStorageId();
     pendingMessage.actions = agentActionRowsFromPayload(payload.agent, initialActions);
     if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
@@ -41505,6 +42267,33 @@ function wireEvents() {
   els.agentModelCancelButton?.addEventListener("click", closeAgentModelSetup);
   initializeAgentComposer();
   renderAgentImageProcessingToggle();
+  els.agentMicButton?.addEventListener("click", (event) => {
+    event.preventDefault();
+    if (state.agentSpeechToggleInFlight) return;
+    const activeStates = new Set(["requesting-permission", "loading-model", "listening", "quiet", "transcribing"]);
+    if (activeStates.has(state.agentSpeechState)) {
+      void toggleAgentSpeechTranscription();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      handleAgentSpeechError({ error: "Microphone not supported", context: "unsupported" });
+      return;
+    }
+    state.agentSpeechToggleInFlight = true;
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => toggleAgentSpeechTranscription(stream))
+      .catch((error) => {
+        if (error?.name === "NotAllowedError" || error?.name === "PermissionDeniedError") {
+          window.alert("Microphone access is blocked. Please allow it in your browser/site settings (on Android Chrome: tap the lock icon in the address bar → Site settings → Microphone → Allow), then try again.");
+        } else if (typeof window !== "undefined" && window.isSecureContext === false) {
+          window.alert("Microphone access requires a secure HTTPS connection. Please access this page via HTTPS.");
+        }
+        handleAgentSpeechError({ error: errorMessage(error), context: "microphone_permission" });
+      })
+      .finally(() => {
+        state.agentSpeechToggleInFlight = false;
+      });
+  });
   els.agentAttachButton?.addEventListener("click", () => els.agentImageInput?.click());
   els.agentImageScanInfoButton?.addEventListener("click", (event) => {
     event.preventDefault();
@@ -41641,6 +42430,7 @@ async function bootstrapAuthenticatedApp() {
   renderAgentSessions();
   if (leanHomeBootstrap) clientBootMark("authenticated_agent_messages_deferred");
   else renderAgentMessages({ forceBottom: true });
+  void resumePendingAgentRun("bootstrap");
   if (!leanHomeBootstrap || state.agentOpen) applyAgentLayout();
   setPanel(panelFromPath(), { updateUrl: false });
   initializeUiNavigationFromUrl();

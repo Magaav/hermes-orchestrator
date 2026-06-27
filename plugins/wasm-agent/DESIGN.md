@@ -413,8 +413,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Local development HMR must reload the client automatically for JavaScript,
   module descriptor, HTML, manifest, and server-source changes, with reloads
   deferred only while an assistant turn is actively running.
-- The composer is bottom anchored: attachment, model selector, token usage, and
-  send controls live in the row below the text area. The model selector is the
+- The composer is bottom anchored: attachment, model selector, token usage,
+  local microphone transcription, and send controls live in the row below the
+  text area. The mic control is a 34px icon-only PWA/runtime control
+  immediately left of Send; it starts local worker-owned ASR only after click
+  and must not depend on native dictation bridges. The model selector is the
   one-place control for choosing default/current, selecting a saved model,
   adding a model id, or removing the active saved model from the chat list.
   It should render compactly at about half of its track width. Chat model state

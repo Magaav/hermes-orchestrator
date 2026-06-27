@@ -1,0 +1,204 @@
+{
+  "schemaVersion": 1,
+  "id": "wasm-agent-speech-transcription-english-v1",
+  "version": "2026.06.26-english-v1-xenova-fp16",
+  "languageTags": [
+    "en",
+    "en-US"
+  ],
+  "engine": {
+    "name": "transformers.js",
+    "version": "4.2.0",
+    "task": "automatic-speech-recognition",
+    "runtimeUrl": "/modules/speech-transcription/runtime/transformers/4.2.0/transformers.min.js",
+    "acceleration": [
+      "webgpu"
+    ],
+    "fallbacks": [
+      "wasm"
+    ],
+    "dtype": "fp16",
+    "graphOptimizationLevel": "disabled",
+    "chunkLengthSec": 30,
+    "strideLengthSec": 5,
+    "browserSpeechRecognition": false,
+    "multilingual": false,
+    "onnxRuntime": {
+      "version": "1.26.0-dev.20260416-b7804b056c",
+      "wasmPaths": {
+        "mjs": "/modules/speech-transcription/runtime/onnxruntime-web/1.26.0-dev.20260416-b7804b056c/ort-wasm-simd-threaded.asyncify.mjs",
+        "wasm": "/modules/speech-transcription/runtime/onnxruntime-web/1.26.0-dev.20260416-b7804b056c/ort-wasm-simd-threaded.asyncify.wasm"
+      }
+    }
+  },
+  "model": {
+    "id": "wasm-agent-whisper-tiny-en-xenova-fp16",
+    "source": "Xenova/whisper-tiny.en",
+    "revision": "main",
+    "family": "whisper",
+    "basePath": "/modules/speech-transcription/models/english-v1/",
+    "sizeBytes": 80359506,
+    "sha256": "7e6a467d817c34954750b82f2dacda57b6ce41ea990129baf515ce455657dfd9"
+  },
+  "audio": {
+    "sampleRate": 16000,
+    "channels": 1,
+    "vadRmsThreshold": 0.015,
+    "minSegmentMs": 900,
+    "partialEveryMs": 3500,
+    "quietAfterMs": 700,
+    "maxSegmentMs": 28000
+  },
+  "cachePolicy": {
+    "kind": "immutable-versioned-sha",
+    "cacheName": "wasm-agent-speech-transcription-2026.06.26-english-v1-xenova-fp16",
+    "metadataInvalidates": [
+      "version",
+      "assets[].sha256",
+      "assets[].url"
+    ],
+    "load": "on-mic-click"
+  },
+  "assets": [
+    {
+      "kind": "runtime",
+      "engine": "transformers.js",
+      "url": "/modules/speech-transcription/runtime/transformers/4.2.0/transformers.min.js",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 558373,
+      "sha256": "e74bd32ed4453369ebb0edcaa27f6bc6204004a949a0233cdb87b62dda8d6978",
+      "required": true
+    },
+    {
+      "kind": "runtime",
+      "engine": "onnxruntime-web",
+      "url": "/modules/speech-transcription/runtime/onnxruntime-web/1.26.0-dev.20260416-b7804b056c/ort-wasm-simd-threaded.asyncify.mjs",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 47389,
+      "sha256": "5959c6733039619c9af710d8e1bae8d6e84402787990637be987c2b1bd6c5fa9",
+      "required": true
+    },
+    {
+      "kind": "runtime",
+      "engine": "onnxruntime-web",
+      "url": "/modules/speech-transcription/runtime/onnxruntime-web/1.26.0-dev.20260416-b7804b056c/ort-wasm-simd-threaded.asyncify.wasm",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 23567050,
+      "sha256": "e0c0c6d3e73d43b8a249972f8358f845b08cc16fec3c80efafdf8bed40366786",
+      "required": true
+    },
+    {
+      "kind": "model-config",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/config.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 2197,
+      "sha256": "251ea843b5901a99efa58c0b99b8052c6019aa3e7d2baf46693a1128ff606233",
+      "required": true
+    },
+    {
+      "kind": "model-config",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/generation_config.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 1646,
+      "sha256": "7b2e8451ed5f118e75fdd991409d72119d21d2fef1eba9723f68fb9c57fe5dc9",
+      "required": true
+    },
+    {
+      "kind": "model-config",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/preprocessor_config.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 339,
+      "sha256": "a6a76d28c93edb273669eb9e0b0636a2bddbb1272c3261e47b7ca6dfdbac1b8d",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/tokenizer.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 2405679,
+      "sha256": "5eb60cec1e77aeeb6869a2bb5a8e01a84c3fe5d072d75369343021fe6f5310d0",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/tokenizer_config.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 282662,
+      "sha256": "93879c3dccdd4b976f709acd85b44778873f30c275e67026f30ca1e4c975230c",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/vocab.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 999186,
+      "sha256": "f6bd25a65e4e63ca31360e9fb11c7e4f9a391a78385d640acd814092dd6eee4f",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/merges.txt",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 456318,
+      "sha256": "1ce1664773c50f3e0cc8842619a93edc4624525b728b188a9e0be33b7726adc5",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/normalizer.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 52666,
+      "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/added_tokens.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 34604,
+      "sha256": "560be47bea388757f8d4cc185c5d82067426cbb6361e38016dd90ddc01ab203a",
+      "required": true
+    },
+    {
+      "kind": "tokenizer",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/special_tokens_map.json",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 2173,
+      "sha256": "98bdf3ec5b32e31575b02f64b0a32bde7c0449075d34484a7df9bdd3cdeb9fb9",
+      "required": true
+    },
+    {
+      "kind": "model-weights",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/onnx/encoder_model_fp16.onnx",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 16519776,
+      "sha256": "9642671531f37f756defd070993a815f94dd9c6a716a799b01fee61d73d3f506",
+      "required": true
+    },
+    {
+      "kind": "model-weights",
+      "engine": "whisper",
+      "url": "/modules/speech-transcription/models/english-v1/wasm-agent-whisper-tiny-en-xenova-fp16/onnx/decoder_model_merged_fp16.onnx",
+      "version": "2026.06.26-english-v1-xenova-fp16",
+      "sizeBytes": 59602260,
+      "sha256": "2186c6567a2a10ea74f425a369cad5e598c17953d731aa05d23e5fff16afa61f",
+      "required": true
+    }
+  ],
+  "networkPolicy": {
+    "remoteStt": false,
+    "remoteModelFetch": false,
+    "browserSpeechRecognitionDefault": false
+  }
+}

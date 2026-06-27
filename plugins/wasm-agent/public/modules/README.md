@@ -71,6 +71,13 @@ tree and workflow.
 - `ocr/`: lazy OCR evidence contract; it tries native `TextDetector` first,
   then lazy-loads and caches a Tesseract.js runtime when needed. The default
   runtime URL is configurable through `window.__WASM_AGENT_TESSERACT_URL__`.
+- `speech-transcription/`: lazy embedded-chat microphone transcription
+  contract. It starts only from the mic button, uses `getUserMedia` plus Web
+  Audio for local capture/VAD glow, and hands audio to a worker-owned local ASR
+  pipeline. English v1 metadata lives under static module paths with immutable
+  version/SHA cache policy and pins Transformers.js, ONNX Runtime WASM, and
+  Whisper tiny English fp16 assets; replacing runtime/model artifacts is a
+  metadata update, not a native rebuild.
 - `cv-shapes/`: lazy planned contour/layout evidence contract; disabled by
   default until a CV runtime is bundled.
 - `semantic-vision/`: lazy planned semantic label/embedding contract; disabled

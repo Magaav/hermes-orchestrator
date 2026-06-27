@@ -7968,26 +7968,26 @@ details.agent-action-row .agent-action-row-summary {
 .agent-form-row {
   position: relative;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  grid-template-columns: 34px minmax(0, 1fr) 34px 34px;
   align-items: center;
   gap: 6px;
   min-width: 0;
 }
 
 .agent-form[data-chat-kind="direct"] .agent-form-row {
-  grid-template-columns: 34px auto minmax(0, 1fr) 34px;
+  grid-template-columns: 34px auto minmax(0, 1fr) 34px 34px;
 }
 
 .agent-form[data-chat-kind="shared-space"] .agent-form-row {
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  grid-template-columns: 34px minmax(0, 1fr) 34px 34px;
 }
 
 .agent-form[data-chat-kind="direct"] .agent-send-button {
-  grid-column: 4;
+  grid-column: 5;
 }
 
 .agent-form[data-chat-kind="shared-space"] .agent-send-button {
-  grid-column: 3;
+  grid-column: 4;
 }
 
 .agent-direct-tools {
@@ -8289,7 +8289,8 @@ details.agent-action-row .agent-action-row-summary {
   vertical-align: middle;
 }
 
-.agent-attach-button {
+.agent-attach-button,
+.agent-mic-button {
   flex-shrink: 0;
   width: 34px;
   min-width: 34px;
@@ -8307,12 +8308,14 @@ details.agent-action-row .agent-action-row-summary {
   transition: color 0.15s, border-color 0.15s;
 }
 
-.agent-attach-button:hover {
+.agent-attach-button:hover,
+.agent-mic-button:hover {
   color: var(--text);
   border-color: rgba(147, 170, 203, 0.34);
 }
 
-.agent-attach-button svg {
+.agent-attach-button svg,
+.agent-mic-button svg {
   width: 16px;
   height: 16px;
   fill: none;
@@ -8320,6 +8323,50 @@ details.agent-action-row .agent-action-row-summary {
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.agent-mic-button {
+  --agent-speech-level: 0;
+  --agent-speech-opacity: 0.18;
+  --agent-speech-scale: 0.82;
+  position: relative;
+}
+
+.agent-mic-button::after {
+  content: "";
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  border: 1px solid rgba(125, 220, 255, var(--agent-speech-opacity));
+  opacity: 0;
+  transform: scale(var(--agent-speech-scale));
+  transition: opacity 0.12s, transform 0.12s, border-color 0.12s;
+  pointer-events: none;
+}
+
+.agent-mic-button.is-active {
+  color: #e8f8ff;
+  border-color: rgba(125, 220, 255, 0.34);
+  background: rgba(18, 52, 69, 0.86);
+}
+
+.agent-mic-button.is-listening::after,
+.agent-mic-button.is-quiet::after,
+.agent-mic-button.is-transcribing::after {
+  opacity: 1;
+}
+
+.agent-mic-button.is-loading svg {
+  animation: agent-provider-spin 0.9s linear infinite;
+}
+
+.agent-mic-button.is-transcribing {
+  color: var(--accent);
+}
+
+.agent-mic-button.is-error {
+  color: var(--danger);
+  border-color: rgba(248, 113, 113, 0.48);
 }
 
 .agent-image-preview {
