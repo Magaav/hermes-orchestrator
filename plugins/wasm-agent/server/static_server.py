@@ -3251,7 +3251,7 @@ def provider_envelope_completion(
 
 
 def direct_head_action_name(action: dict[str, Any]) -> str:
-    return clipped(str(action.get("act") or action.get("action") or action.get("type") or action.get("id") or ""), 120).lower()
+    return clipped(str(action.get("act") or action.get("action") or action.get("id") or action.get("type") or ""), 120).lower()
 
 
 def direct_head_hermes_dispatch_action(parsed: Any) -> dict[str, Any] | None:
@@ -3296,18 +3296,26 @@ def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[st
     objective = clipped(str(action.get("obj") or action.get("objective") or action.get("OBJ") or envelope.get("objective") or ""), 2000)
     refs = action.get("refs") or action.get("REFS") or envelope.get("evidence_refs") or []
     proof = action.get("proof") or action.get("PROOF") or action.get("proof_requests") or []
-    payload = {
-        "schema": "hermes.wasm_agent.direct_head_dispatch.v1",
-        "objective": objective,
-        "caps": validate_direct_head_hermes_caps(action),
-        "refs": direct_envelope_redact(refs),
-        "proof": direct_envelope_redact(proof),
-        "stream": bool(action.get("stream") or action.get("STREAM")),
-    }
+    caps = validate_direct_head_hermes_caps(action)
+    refs_text = direct_envelope_json(direct_envelope_redact(refs), limit=1800)
+    proof_text = direct_envelope_json(direct_envelope_redact(proof), limit=1200)
+    caps_text = ", ".join(caps) if caps else "proof.report"
+    stream_text = "yes" if bool(action.get("stream") or action.get("STREAM")) else "no"
     return (
-        "Direct-head requested Hermes capability dispatch. Act only within the listed CAPS, "
-        "use REFS as handles rather than hidden context, and return compact answer/proof summary.\n"
-        f"{direct_envelope_json(payload, limit=6000)}"
+        "This is an executable wasm-agent bridge handoff, not role-play and not a user-facing "
+        "question. Continue the authorized work now in the `/local` repository workspace.\n\n"
+        "Do not refuse because you lack a wasm-agent bridge, direct-head receiver, workspace, "
+        "or separate instruction source. This message is the bridge handoff and the instruction "
+        "source. Do not ask the user to restate the task.\n\n"
+        f"Task:\n{objective or 'Answer the avatar-chat turn.'}\n\n"
+        f"Allowed capabilities:\n{caps_text}\n\n"
+        f"Evidence refs, if useful:\n{refs_text}\n\n"
+        f"Required proof:\n{proof_text}\n\n"
+        f"Stream requested: {stream_text}\n\n"
+        "Inspect the relevant files, use available tools, make only changes allowed by the listed "
+        "capabilities, run the requested verification, and return compact files/tests/runtime proof. "
+        "If a required primitive is truly unavailable, report the exact missing command or tool and "
+        "the specific proof you could not produce."
     )
 
 
@@ -3345,6 +3353,7 @@ def execute_direct_head_hermes_dispatch(
     target_node = resolve_frontier_agent_node(user, target_node)
     prompt = direct_head_hermes_dispatch_prompt(action, envelope)
     measurement = compact_context_measurement("hermes-dispatch-envelope", prompt)
+    obligation = create_direct_head_bridge_obligation(server, run_id, action, envelope)
     append_agent_run_event(
         server,
         run_id,
@@ -3354,22 +3363,47 @@ def execute_direct_head_hermes_dispatch(
             "target_node": target_node,
             "caps": caps,
             "context_measurement": measurement,
+            "bridge_obligation": {"summary": bridge_obligation_summary(obligation), **obligation} if obligation else {},
         },
     )
 
     def emit_action(progress: dict[str, Any]) -> None:
         record_agent_run_action(server, run_id, progress)
 
-    reply, source, usage, bridge_trace = call_agent_bridge_runs(
-        server,
-        system_content="You are Hermes acting through wasm-agent's plugin-safe bridge/Runs API surface.",
-        text_content=prompt,
-        target_node=target_node,
-        model_id=clipped(str(action.get("model") or "embedded-hermes"), 160),
-        selected_model=None,
-        timeout_sec=agent_bridge_timeout_sec(),
-        action_callback=emit_action,
-    )
+    try:
+        reply, source, usage, bridge_trace = call_agent_bridge_runs(
+            server,
+            system_content="You are Hermes acting through wasm-agent's plugin-safe bridge/Runs API surface.",
+            text_content=prompt,
+            target_node=target_node,
+            model_id=clipped(str(action.get("model") or "embedded-hermes"), 160),
+            selected_model=None,
+            timeout_sec=agent_bridge_timeout_sec(),
+            action_callback=emit_action,
+        )
+    except BrowserError as exc:
+        if exc.code == "agent_run_interrupted":
+            mark_bridge_obligation_interrupted(server, run_id, exc.code)
+        raise
+    bridge_run_id = str((bridge_trace or {}).get("id") or "")
+    if obligation and bridge_run_id:
+        with auth_connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (safe_agent_run_key(run_id, ""),)).fetchone()
+                if row:
+                    obligation = upsert_bridge_obligation(
+                        conn,
+                        row,
+                        kind=str(obligation.get("kind") or "impl"),
+                        state="running",
+                        proof_min=[str(item) for item in obligation.get("proof_min") or []],
+                        bridge_run_id=bridge_run_id,
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
     return {
         "schema": "hermes.wasm_agent.direct_head_dispatch_result.v1",
         "reply": reply,
@@ -3378,6 +3412,8 @@ def execute_direct_head_hermes_dispatch(
         "caps": caps,
         "usage": usage,
         "bridge_trace": bridge_trace,
+        "bridge_run_id": bridge_run_id,
+        "bridge_obligation": {"summary": bridge_obligation_summary(obligation), **obligation} if obligation else None,
         "context_measurement": measurement,
     }
 
@@ -3648,7 +3684,11 @@ def provider_envelope_run_execute(
                     "auto_checkpoint": change_proof.get("auto_checkpoint"),
                 },
                 "changed_files": change_proof.get("changed_files") or [],
-                "context_preview": [{"tool": f"{receiver.replace('-', '_')}_envelope", "preview": semantic_envelope[:1200]}],
+                "context_preview": (
+                    ([{"tool": "bridge_obligation", "preview": str((dispatch_result or {}).get("bridge_obligation", {}).get("summary") or "")}]
+                     if isinstance((dispatch_result or {}).get("bridge_obligation"), dict) else [])
+                    + [{"tool": f"{receiver.replace('-', '_')}_envelope", "preview": semantic_envelope[:1200]}]
+                ),
                 "actions": [
                     {
                         "id": receiver.replace("-", "_"),
@@ -3769,7 +3809,11 @@ def provider_envelope_run_execute(
                     "auto_checkpoint": change_proof.get("auto_checkpoint"),
                 },
                 "changed_files": change_proof.get("changed_files") or [],
-                "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
+                "context_preview": (
+                    ([{"tool": "bridge_obligation", "preview": str(dispatch_result.get("bridge_obligation", {}).get("summary") or "")}]
+                     if isinstance(dispatch_result.get("bridge_obligation"), dict) else [])
+                    + [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}]
+                ),
                 "actions": [
                     {
                         "id": "direct_envelope",
@@ -3866,7 +3910,11 @@ def provider_envelope_run_execute(
                 "auto_checkpoint": change_proof.get("auto_checkpoint"),
             },
             "changed_files": change_proof.get("changed_files") or [],
-            "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
+            "context_preview": (
+                ([{"tool": "bridge_obligation", "preview": str((dispatch_result or {}).get("bridge_obligation", {}).get("summary") or "")}]
+                 if isinstance((dispatch_result or {}).get("bridge_obligation"), dict) else [])
+                + [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}]
+            ),
             "actions": [
                 {
                     "id": "direct_envelope",
@@ -3895,6 +3943,9 @@ def provider_envelope_run_execute(
             "turn_id": run.get("turn_id"),
         }
     except ProviderProxyError as exc:
+        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
+        raise
+    except BrowserError as exc:
         finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
         raise
     except Exception as exc:
@@ -6458,6 +6509,22 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_bridge_obligation_tb (
+          obligation_id TEXT PRIMARY KEY,
+          turn_id TEXT NOT NULL,
+          agent_run_id TEXT NOT NULL,
+          bridge_run_id TEXT NOT NULL DEFAULT '',
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL,
+          proof_min_json TEXT NOT NULL DEFAULT '[]',
+          updated_at INTEGER NOT NULL,
+          err_code TEXT NOT NULL DEFAULT '',
+          UNIQUE(agent_run_id, kind)
+        )
+        """
+    )
     for statement in (
         "CREATE INDEX IF NOT EXISTS friendship_user_idx ON friendship_tb(requester_user_id, addressee_user_id, status)",
         "CREATE INDEX IF NOT EXISTS conversation_member_user_idx ON conversation_member_tb(user_id, conversation_id)",
@@ -6472,6 +6539,8 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS agent_run_session_idx ON agent_run_tb(user_id, session_id, updated_at)",
         "CREATE INDEX IF NOT EXISTS agent_run_event_user_idx ON agent_run_event_tb(user_id, run_id, seq)",
         "CREATE INDEX IF NOT EXISTS agent_run_event_type_idx ON agent_run_event_tb(run_id, type, seq)",
+        "CREATE INDEX IF NOT EXISTS agent_bridge_obligation_run_idx ON agent_bridge_obligation_tb(agent_run_id, state, updated_at)",
+        "CREATE INDEX IF NOT EXISTS agent_bridge_obligation_turn_idx ON agent_bridge_obligation_tb(turn_id, state, updated_at)",
     ):
         conn.execute(statement)
 
@@ -6700,6 +6769,291 @@ def public_agent_run(row: sqlite3.Row | dict[str, Any], *, include_payloads: boo
     return payload
 
 
+def bridge_obligation_from_row(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    data = agent_run_from_row(row) or {}
+    try:
+        proof_min_raw = json.loads(str(data.get("proof_min_json") or "[]"))
+    except Exception:
+        proof_min_raw = []
+    proof_min = proof_min_raw if isinstance(proof_min_raw, list) else []
+    return {
+        "obligation_id": str(data.get("obligation_id") or ""),
+        "turn_id": str(data.get("turn_id") or ""),
+        "agent_run_id": str(data.get("agent_run_id") or ""),
+        "bridge_run_id": str(data.get("bridge_run_id") or ""),
+        "kind": str(data.get("kind") or ""),
+        "state": str(data.get("state") or ""),
+        "proof_min": [clipped(str(item or ""), 40) for item in proof_min[:12] if str(item or "")],
+        "updated_at": int(data.get("updated_at") or 0),
+        "err_code": str(data.get("err_code") or ""),
+    }
+
+
+def bridge_obligation_summary(obligation: dict[str, Any] | None) -> str:
+    if not obligation:
+        return ""
+    proof = ",".join(str(item) for item in (obligation.get("proof_min") or []) if item) or "none"
+    run = str(obligation.get("bridge_run_id") or obligation.get("agent_run_id") or "")
+    state = str(obligation.get("state") or "")
+    err = str(obligation.get("err_code") or "")
+    summary = f"OBL run={run} s={state} proof={proof}"
+    if err:
+        summary += f" err={err}"
+    return clipped(summary, 240)
+
+
+def read_agent_bridge_obligation(conn: sqlite3.Connection, run_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM agent_bridge_obligation_tb WHERE agent_run_id = ? ORDER BY updated_at DESC LIMIT 1",
+        (safe_agent_run_key(run_id, ""),),
+    ).fetchone()
+    return bridge_obligation_from_row(row)
+
+
+def public_agent_run_with_obligation(conn: sqlite3.Connection, row: sqlite3.Row | dict[str, Any], *, include_payloads: bool = False) -> dict[str, Any]:
+    payload = public_agent_run(row, include_payloads=include_payloads)
+    obligation = read_agent_bridge_obligation(conn, str(payload.get("run_id") or ""))
+    if obligation:
+        payload["bridge_obligation"] = {
+            "summary": bridge_obligation_summary(obligation),
+            **obligation,
+        }
+    return payload
+
+
+def normalize_obligation_proof_codes(values: Any, *, kind: str = "") -> list[str]:
+    raw = values
+    if isinstance(raw, str):
+        raw = [item.strip() for item in re.split(r"[,|\s]+", raw) if item.strip()]
+    if not isinstance(raw, list):
+        raw = []
+    codes: list[str] = []
+    for item in raw[:16]:
+        text = str(item or "").lower()
+        if text in {"files", "file", "changed_files", "diff", "patch"}:
+            code = "files"
+        elif text in {"tests", "test", "test_results"}:
+            code = "tests"
+        elif text in {"runtime", "run", "bridge", "summary", "answer"}:
+            code = "runtime"
+        elif text in {"timeline", "checkpoint", "proof"}:
+            code = "timeline"
+        else:
+            continue
+        if code not in codes:
+            codes.append(code)
+    if not codes:
+        if kind == "test":
+            codes = ["tests"]
+        elif kind == "runtime":
+            codes = ["runtime"]
+        else:
+            codes = ["files", "timeline"] if kind == "impl" else ["runtime"]
+    return codes[:6]
+
+
+def direct_head_obligation_kind(action: dict[str, Any], envelope: dict[str, Any]) -> str:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            action.get("kind"),
+            action.get("objective"),
+            action.get("obj"),
+            action.get("proof"),
+            action.get("caps"),
+            envelope.get("objective"),
+        )
+    ).lower()
+    if re.search(r"\b(test|verify|regression)\b", text):
+        return "test"
+    if re.search(r"\b(runtime|run|bridge|native|hot-op|hot op)\b", text):
+        return "runtime"
+    if re.search(r"\b(proof|prove|evidence)\b", text):
+        return "proof"
+    if re.search(r"\b(apply|fix|implement|patch|edit|change|source|write)\b", text):
+        return "impl"
+    return ""
+
+
+def upsert_bridge_obligation(
+    conn: sqlite3.Connection,
+    run: sqlite3.Row | dict[str, Any],
+    *,
+    kind: str,
+    state: str,
+    proof_min: list[str],
+    bridge_run_id: str = "",
+    err_code: str = "",
+) -> dict[str, Any]:
+    run_data = agent_run_from_row(run) or {}
+    run_id = safe_agent_run_key(run_data.get("run_id"), "")
+    obligation_id = f"obl_{hashlib.sha256(f'{run_id}:{kind}'.encode('utf-8')).hexdigest()[:24]}"
+    now = agent_run_now_ms()
+    conn.execute(
+        """
+        INSERT INTO agent_bridge_obligation_tb (
+          obligation_id, turn_id, agent_run_id, bridge_run_id, kind, state,
+          proof_min_json, updated_at, err_code
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(agent_run_id, kind) DO UPDATE SET
+          bridge_run_id = COALESCE(NULLIF(excluded.bridge_run_id, ''), agent_bridge_obligation_tb.bridge_run_id),
+          state = excluded.state,
+          proof_min_json = excluded.proof_min_json,
+          updated_at = excluded.updated_at,
+          err_code = excluded.err_code
+        """,
+        (
+            obligation_id,
+            str(run_data.get("turn_id") or ""),
+            run_id,
+            clipped(str(bridge_run_id or ""), 160),
+            kind,
+            state,
+            bounded_json_text(proof_min, 800),
+            now,
+            clipped(str(err_code or ""), 120),
+        ),
+    )
+    return read_agent_bridge_obligation(conn, run_id) or {}
+
+
+def create_direct_head_bridge_obligation(
+    server: WasmAgentServer,
+    run_id: str,
+    action: dict[str, Any],
+    envelope: dict[str, Any],
+) -> dict[str, Any] | None:
+    kind = direct_head_obligation_kind(action, envelope)
+    if not kind:
+        return None
+    proof_min = normalize_obligation_proof_codes(action.get("proof") or action.get("proof_min") or action.get("proof_requests") or [], kind=kind)
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (safe_agent_run_key(run_id, ""),)).fetchone()
+            if not row:
+                conn.rollback()
+                return None
+            obligation = upsert_bridge_obligation(conn, row, kind=kind, state="running", proof_min=proof_min)
+            agent_run_append_event_conn(
+                conn,
+                row,
+                "hermes.dispatch",
+                summary=bridge_obligation_summary(obligation),
+                payload={"bridge_obligation": {"summary": bridge_obligation_summary(obligation), **obligation}},
+            )
+            conn.commit()
+            return obligation
+        except Exception:
+            conn.rollback()
+            raise
+
+
+def final_proof_codes(final: dict[str, Any]) -> set[str]:
+    codes: set[str] = set()
+    if final.get("changed_files"):
+        codes.add("files")
+    diagnostics = final.get("diagnostics") if isinstance(final.get("diagnostics"), dict) else {}
+    if diagnostics.get("before_checkpoint") or diagnostics.get("auto_checkpoint"):
+        codes.add("timeline")
+    if diagnostics.get("tests") or diagnostics.get("test_results"):
+        codes.add("tests")
+    dispatch = final.get("hermes_dispatch") if isinstance(final.get("hermes_dispatch"), dict) else {}
+    trace = dispatch.get("bridge_trace") or diagnostics.get("bridge_trace")
+    if isinstance(trace, dict) and (trace.get("id") or trace.get("steps") or trace.get("tool_calls")):
+        codes.add("runtime")
+    if final.get("reply") and dispatch:
+        codes.add("runtime")
+    reply_text = str(final.get("reply") or "")
+    if reply_text and bridge_reply_mentions_passing_tests(reply_text):
+        codes.add("tests")
+    return codes
+
+
+def bridge_reply_mentions_passing_tests(reply: str) -> bool:
+    text = clipped(str(reply or ""), 12000)
+    if not text:
+        return False
+    lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        if re.search(r"\b(test results|tests?|verification|syntax checks?)\b", line):
+            window = " ".join(lines[index : index + 8])
+            if re.search(r"\b(pass(?:ed|es)?|ok|green|succeeded|success(?:ful)?)\b", window):
+                return True
+            if re.search(r"\b\d+\s*/\s*\d+\s+pass(?:ed|es)?\b", window):
+                return True
+    compact = " ".join(lines)
+    return bool(
+        re.search(r"\b(test results|tests?|verification|syntax checks?)\b.{0,220}\b(pass(?:ed|es)?|ok|green|succeeded|success(?:ful)?)\b", compact)
+        or re.search(r"\b\d+\s*/\s*\d+\s+pass(?:ed|es)?\b", compact)
+    )
+
+
+def reconcile_bridge_obligation_for_completion(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    final: dict[str, Any],
+) -> tuple[bool, dict[str, Any] | None, str]:
+    obligation = read_agent_bridge_obligation(conn, str(row["run_id"]))
+    if not obligation:
+        return True, None, ""
+    state = str(obligation.get("state") or "")
+    required = [str(item) for item in (obligation.get("proof_min") or []) if item]
+    present = final_proof_codes(final)
+    missing = [code for code in required if code not in present]
+    bridge_run_id = str(obligation.get("bridge_run_id") or "")
+    dispatch = final.get("hermes_dispatch") if isinstance(final.get("hermes_dispatch"), dict) else {}
+    trace = dispatch.get("bridge_trace") if isinstance(dispatch.get("bridge_trace"), dict) else {}
+    if not bridge_run_id:
+        bridge_run_id = str(trace.get("id") or dispatch.get("bridge_run_id") or dispatch.get("run_id") or "")
+    if state == "interrupted":
+        return False, obligation, "interrupted"
+    if missing:
+        updated = upsert_bridge_obligation(
+            conn,
+            row,
+            kind=str(obligation.get("kind") or "impl"),
+            state="blocked",
+            proof_min=required,
+            bridge_run_id=bridge_run_id,
+            err_code=f"missing_proof:{','.join(missing)}",
+        )
+        return False, updated, f"missing proof: {', '.join(missing)}"
+    updated = upsert_bridge_obligation(
+        conn,
+        row,
+        kind=str(obligation.get("kind") or "impl"),
+        state="satisfied",
+        proof_min=required,
+        bridge_run_id=bridge_run_id,
+    )
+    return True, updated, ""
+
+
+def mark_bridge_obligation_interrupted(server: WasmAgentServer, run_id: str, err_code: str = "agent_run_interrupted") -> None:
+    with auth_connect() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (safe_agent_run_key(run_id, ""),)).fetchone()
+            obligation = read_agent_bridge_obligation(conn, safe_agent_run_key(run_id, ""))
+            if row and obligation:
+                upsert_bridge_obligation(
+                    conn,
+                    row,
+                    kind=str(obligation.get("kind") or "impl"),
+                    state="interrupted",
+                    proof_min=[str(item) for item in obligation.get("proof_min") or []],
+                    bridge_run_id=str(obligation.get("bridge_run_id") or ""),
+                    err_code=err_code,
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+
 def public_agent_run_event(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = agent_run_from_row(row) or {}
     return {
@@ -6819,8 +7173,9 @@ def begin_agent_run(
                         "That turn_id already belongs to a different agent request.",
                         status=HTTPStatus.CONFLICT,
                     )
+                result = public_agent_run_with_obligation(conn, existing, include_payloads=True)
                 conn.commit()
-                return public_agent_run(existing, include_payloads=True), False
+                return result, False
             run_id = f"wa_run_{uuid.uuid4().hex}"
             conn.execute(
                 """
@@ -6856,8 +7211,9 @@ def begin_agent_run(
                 payload={"run": public_agent_run(row), "request": summary},
                 created_at=now,
             )
+            result = public_agent_run_with_obligation(conn, row, include_payloads=True)
             conn.commit()
-            return public_agent_run(row, include_payloads=True), True
+            return result, True
         except Exception:
             conn.rollback()
             raise
@@ -6965,8 +7321,8 @@ def finish_agent_run(
     clean_run_id = safe_agent_run_key(run_id, "")
     terminal_event = "run.final" if status == "completed" else "run.cancelled" if status == "cancelled" else "run.error"
     now = agent_run_now_ms()
-    final_json = bounded_json_text(final or {}, AGENT_RUN_FINAL_MAX_JSON_CHARS)
-    error_json = bounded_json_text(error or {}, AGENT_RUN_EVENT_MAX_JSON_CHARS)
+    final_payload = final or {}
+    error_payload = error or {}
     with auth_connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -6975,8 +7331,24 @@ def finish_agent_run(
                 conn.rollback()
                 return None
             if str(row["status"]) in AGENT_RUN_TERMINAL_STATUSES:
+                result = public_agent_run_with_obligation(conn, row, include_payloads=True)
                 conn.commit()
-                return public_agent_run(row, include_payloads=True)
+                return result
+            if status == "completed":
+                ok, obligation, reason = reconcile_bridge_obligation_for_completion(conn, row, final_payload)
+                if obligation:
+                    obligation_payload = {"summary": bridge_obligation_summary(obligation), **obligation}
+                    final_payload = {**final_payload, "bridge_obligation": obligation_payload}
+                if not ok:
+                    status = "failed"
+                    terminal_event = "run.error"
+                    error_payload = {
+                        "code": str((obligation or {}).get("err_code") or "bridge_obligation_unsatisfied"),
+                        "message": f"Bridge obligation is not satisfied; assistant turn cannot complete successfully ({reason}).",
+                        "bridge_obligation": {"summary": bridge_obligation_summary(obligation), **(obligation or {})},
+                    }
+            final_json = bounded_json_text(final_payload, AGENT_RUN_FINAL_MAX_JSON_CHARS)
+            error_json = bounded_json_text(error_payload, AGENT_RUN_EVENT_MAX_JSON_CHARS)
             conn.execute(
                 """
                 UPDATE agent_run_tb
@@ -6992,17 +7364,19 @@ def finish_agent_run(
                 conn,
                 updated,
                 terminal_event,
-                summary="Assistant turn completed" if terminal_event == "run.final" else str((error or {}).get("message") or "Assistant turn failed"),
+                summary="Assistant turn completed" if terminal_event == "run.final" else str(error_payload.get("message") or "Assistant turn failed"),
                 payload={
                     "status": status,
-                    "error": error or {},
-                    "reply_chars": len(str((final or {}).get("reply") or "")),
-                    "changed_file_count": len((final or {}).get("changed_files") or []) if isinstance(final, dict) else 0,
+                    "error": error_payload,
+                    "bridge_obligation": final_payload.get("bridge_obligation") or error_payload.get("bridge_obligation") or {},
+                    "reply_chars": len(str(final_payload.get("reply") or "")),
+                    "changed_file_count": len(final_payload.get("changed_files") or []) if isinstance(final_payload, dict) else 0,
                 },
                 created_at=now,
             )
+            result = public_agent_run_with_obligation(conn, updated, include_payloads=True)
             conn.commit()
-            return public_agent_run(updated, include_payloads=True)
+            return result
         except Exception:
             conn.rollback()
             raise
@@ -7028,6 +7402,17 @@ def mark_interrupted_agent_runs(server: WasmAgentServer) -> None:
                 )
                 updated = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (str(row["run_id"]),)).fetchone()
                 if updated:
+                    obligation = read_agent_bridge_obligation(conn, str(row["run_id"]))
+                    if obligation:
+                        upsert_bridge_obligation(
+                            conn,
+                            updated,
+                            kind=str(obligation.get("kind") or "impl"),
+                            state="interrupted",
+                            proof_min=[str(item) for item in obligation.get("proof_min") or []],
+                            bridge_run_id=str(obligation.get("bridge_run_id") or ""),
+                            err_code="agent_run_interrupted",
+                        )
                     agent_run_append_event_conn(conn, updated, "run.error", summary=error["message"], payload={"error": error}, created_at=now)
             conn.commit()
     except Exception:
@@ -7061,7 +7446,8 @@ def list_agent_runs(user: dict[str, Any] | None, query: dict[str, list[str]] | N
     """
     with auth_connect() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return {"ok": True, "schema": "hermes.wasm_agent.agent_run.list.v1", "runs": [public_agent_run(row) for row in rows]}
+        runs = [public_agent_run_with_obligation(conn, row) for row in rows]
+    return {"ok": True, "schema": "hermes.wasm_agent.agent_run.list.v1", "runs": runs}
 
 
 def read_agent_run(user: dict[str, Any] | None, run_id: str) -> dict[str, Any]:
@@ -7071,7 +7457,7 @@ def read_agent_run(user: dict[str, Any] | None, run_id: str) -> dict[str, Any]:
             "SELECT seq, type, created_at, summary FROM agent_run_event_tb WHERE run_id = ? ORDER BY seq DESC LIMIT 1",
             (str(row["run_id"]),),
         ).fetchone()
-    payload = public_agent_run(row, include_payloads=True)
+        payload = public_agent_run_with_obligation(conn, row, include_payloads=True)
     if latest:
         payload["latest_event"] = {
             "seq": int(latest["seq"]),
@@ -7103,11 +7489,12 @@ def read_agent_run_events(user: dict[str, Any] | None, run_id: str, query: dict[
             """,
             (str(run["run_id"]), after_seq, limit),
         ).fetchall()
+        run_payload = public_agent_run_with_obligation(conn, run)
     events = [public_agent_run_event(row) for row in rows]
     return {
         "ok": True,
         "schema": "hermes.wasm_agent.agent_run.events.v1",
-        "run": public_agent_run(run),
+        "run": run_payload,
         "after_seq": after_seq,
         "next_after_seq": events[-1]["seq"] if events else after_seq,
         "events": events,
@@ -7368,6 +7755,39 @@ def stream_agent_run_text_ndjson(
     heartbeat_started = time.monotonic()
     last_seq = max(0, int(after_seq or 0))
     last_action_label = "Receive chat turn"
+    stream_start = time.monotonic()
+    first_flush_time: float | None = None
+    last_flush_time: float | None = None
+    flush_count = 0
+    total_delta_bytes = 0
+    total_deltas = 0
+
+    def _record_flush(data_bytes: int) -> None:
+        nonlocal first_flush_time, last_flush_time, flush_count, total_delta_bytes
+        now = time.monotonic()
+        if first_flush_time is None:
+            first_flush_time = now
+        last_flush_time = now
+        flush_count += 1
+        total_delta_bytes += data_bytes
+
+    def _log_metrics(reason: str) -> None:
+        elapsed = time.monotonic() - stream_start
+        ftl = (first_flush_time - stream_start) if first_flush_time else None
+        itg = (last_flush_time - first_flush_time) if last_flush_time and first_flush_time and flush_count > 1 else None
+        print(json.dumps({
+            "event": "stream.metrics",
+            "run_id": run_id,
+            "reason": reason,
+            "elapsed_ms": round(elapsed * 1000, 2),
+            "first_token_latency_ms": round(ftl * 1000, 2) if ftl else None,
+            "inter_token_gap_ms": round((itg / (flush_count - 1)) * 1000, 2) if itg else None,
+            "flush_count": flush_count,
+            "total_deltas": total_deltas,
+            "total_delta_bytes": total_delta_bytes,
+            "avg_chunk_bytes": round(total_delta_bytes / flush_count, 2) if flush_count else None,
+        }))
+
     while True:
         with auth_connect() as conn:
             run = get_agent_run_for_user(conn, run_id, user)
@@ -7391,13 +7811,17 @@ def stream_agent_run_text_ndjson(
                     delta = str(payload.get("delta") or "")
                     if delta:
                         delta_buffer.append(delta)
+                        total_deltas += 1
                     continue
                 # Flush any buffered deltas before handling a non-delta event
                 if delta_buffer:
+                    data = json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n"
                     try:
-                        handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
+                        handler.wfile.write(data)
                         handler.wfile.flush()
+                        _record_flush(len(data))
                     except (BrokenPipeError, ConnectionResetError):
+                        _log_metrics("broken_pipe")
                         return
                     delta_buffer = []
                 if event_type == "run.final":
@@ -7413,6 +7837,7 @@ def stream_agent_run_text_ndjson(
                         })
                     except (BrokenPipeError, ConnectionResetError):
                         pass
+                    _log_metrics("final")
                     return
                 if event_type in {"run.error", "run.cancelled"}:
                     with auth_connect() as conn:
@@ -7427,18 +7852,23 @@ def stream_agent_run_text_ndjson(
                         })
                     except (BrokenPipeError, ConnectionResetError):
                         pass
+                    _log_metrics("error")
                     return
                 action = payload.get("action") if isinstance(payload.get("action"), dict) else None
                 if action and action.get("label"):
                     last_action_label = clipped(str(action.get("label") or ""), 80)
             # Flush any remaining buffered deltas after processing all rows
             if delta_buffer:
+                data = json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n"
                 try:
-                    handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
+                    handler.wfile.write(data)
                     handler.wfile.flush()
+                    _record_flush(len(data))
                 except (BrokenPipeError, ConnectionResetError):
+                    _log_metrics("broken_pipe")
                     return
         elif str(run["status"] or "") in AGENT_RUN_TERMINAL_STATUSES:
+            _log_metrics("terminal")
             return
         elapsed = time.monotonic() - heartbeat_started
         if elapsed >= AGENT_RUN_STREAM_HEARTBEAT_SEC:
@@ -7446,9 +7876,10 @@ def stream_agent_run_text_ndjson(
                 handler.wfile.flush()
                 heartbeat_started = time.monotonic()
             except (BrokenPipeError, ConnectionResetError):
+                _log_metrics("broken_pipe")
                 return
-        time.sleep(AGENT_RUN_EVENT_POLL_SEC)
-
+        if not rows:
+            time.sleep(AGENT_RUN_EVENT_POLL_SEC)
 
 def serve_agent_run_stream(
     handler: WasmAgentHandler,

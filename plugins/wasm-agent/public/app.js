@@ -16052,6 +16052,9 @@ function agentNodeSelectDiagnostic() {
 function preferredAgentNodeSelectValue(options = agentNodeSelectOptions()) {
   const values = new Set(options.map((option) => option.value));
   const raw = cleanText(state.agentTargetNode, "");
+  const rawIsMasterFrontier = raw === AGENT_MASTER_FRONTIER_TARGET_ID;
+  if (rawIsMasterFrontier && (values.has(raw) || !state.authChecked || isAdminUser())) return raw;
+  if (raw === AGENT_FRONTIER_NODE_ID && isAdminUser() && values.has(AGENT_MASTER_FRONTIER_TARGET_ID)) return AGENT_MASTER_FRONTIER_TARGET_ID;
   const readyHarness = options.find((option) => option.kind === "harness" && option.lifecycle === "ready" && option.nodeId && option.value === option.nodeId);
   const rawIsDirectProvider = raw === AGENT_PROVIDER_TARGET_ID || raw.startsWith(AGENT_PROVIDER_TARGET_PREFIX);
   const rawIsDefaultSandbox = raw === defaultAgentTargetNode();
@@ -16102,6 +16105,10 @@ function renderAgentNodeSelect() {
 
 function setAgentTargetNode(nodeId) {
   const requested = cleanText(nodeId, defaultAgentTargetNode());
+  if (requested === AGENT_FRONTIER_NODE_ID && isAdminUser()) {
+    setAgentTargetNode(AGENT_MASTER_FRONTIER_TARGET_ID);
+    return;
+  }
   if (requested === AGENT_NONE_TARGET_ID) {
     const previous = state.agentTargetNode;
     state.agentTargetNode = AGENT_NONE_TARGET_ID;
@@ -22797,6 +22804,13 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
     const decoder = new TextDecoder();
     let buffer = "";
     let finalPayload = null;
+    const streamMetrics = {
+      fetchStart: performance.now(),
+      firstLineTime: null,
+      lastLineTime: null,
+      lineCount: 0,
+      totalBytes: 0,
+    };
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -22805,15 +22819,36 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
+        streamMetrics.lineCount += 1;
+        streamMetrics.totalBytes += line.length;
+        if (streamMetrics.firstLineTime === null) {
+          streamMetrics.firstLineTime = performance.now();
+        }
+        streamMetrics.lastLineTime = performance.now();
         const payload = handleAgentStreamLine(line, pendingMessage);
         if (payload?.type === "final") finalPayload = { ok: true, agent: payload.agent };
       }
     }
     if (buffer.trim()) {
+      streamMetrics.lineCount += 1;
+      streamMetrics.totalBytes += buffer.trim().length;
+      if (streamMetrics.firstLineTime === null) {
+        streamMetrics.firstLineTime = performance.now();
+      }
+      streamMetrics.lastLineTime = performance.now();
       const payload = handleAgentStreamLine(buffer, pendingMessage);
       if (payload?.type === "final") finalPayload = { ok: true, agent: payload.agent };
     }
     if (!finalPayload) throw new Error("The embedded chat stream ended without a final response.");
+    const elapsed = performance.now() - streamMetrics.fetchStart;
+    console.log(JSON.stringify({
+      event: "client.stream.metrics",
+      elapsedMs: Math.round(elapsed * 100) / 100,
+      firstTokenLatencyMs: streamMetrics.firstLineTime ? Math.round((streamMetrics.firstLineTime - streamMetrics.fetchStart) * 100) / 100 : null,
+      interLineGapMs: streamMetrics.lineCount > 1 ? Math.round(((streamMetrics.lastLineTime - streamMetrics.firstLineTime) / (streamMetrics.lineCount - 1)) * 100) / 100 : null,
+      lineCount: streamMetrics.lineCount,
+      totalBytes: streamMetrics.totalBytes,
+    }));
     return finalPayload;
   } finally {
     window.clearTimeout(idleTimeout);
@@ -22821,7 +22856,7 @@ async function streamAgentMessage(body, pendingMessage, options = {}) {
   }
 }
 
-function handleAgentStreamLine(line, pendingMessage) {
+function handleAgentStreamLine(line, pendingMessage, options = {}) {
   const text = String(line || "").trim();
   if (!text) return null;
   let payload = null;
@@ -22832,12 +22867,14 @@ function handleAgentStreamLine(line, pendingMessage) {
   }
   if (!payload || typeof payload === "string") {
     const delta = typeof payload === "string" ? payload : text;
-    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
-    pendingMessage.agent_delta_started = true;
-    updateAgentPendingMessage(pendingMessage, {
-      phase: pendingMessage.phase || "Streaming",
-      content: `${currentContent}${delta}`,
-    });
+    if (!options.envelopeMode) {
+      const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
+      pendingMessage.agent_delta_started = true;
+      updateAgentPendingMessage(pendingMessage, {
+        phase: pendingMessage.phase || "Streaming",
+        content: `${currentContent}${delta}`,
+      });
+    }
     return { type: "delta", delta };
   }
   if (payload.run_id) pendingMessage.run_id = cleanText(payload.run_id, "");
@@ -22864,12 +22901,14 @@ function handleAgentStreamLine(line, pendingMessage) {
     });
   }
   if (payload.type === "delta" && payload.delta) {
-    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
-    pendingMessage.agent_delta_started = true;
-    updateAgentPendingMessage(pendingMessage, {
-      phase: pendingMessage.phase || "Streaming",
-      content: `${currentContent}${payload.delta}`,
-    });
+    if (!options.envelopeMode) {
+      const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
+      pendingMessage.agent_delta_started = true;
+      updateAgentPendingMessage(pendingMessage, {
+        phase: pendingMessage.phase || "Streaming",
+        content: `${currentContent}${payload.delta}`,
+      });
+    }
   }
   if (payload.type === "error") {
     throw new Error(payload.error?.message || "Embedded chat stream failed.");
@@ -23798,6 +23837,7 @@ function bindAgentDetailsOpenState(details, key, defaultOpen = false, options = 
 }
 
 function renderAgentMessages(options = {}) {
+  const renderStart = performance.now();
   const session = activeAgentSession();
   const scrollSnapshot = agentChatScrollSnapshot();
   renderAgentChrome();
@@ -23816,6 +23856,12 @@ function renderAgentMessages(options = {}) {
   renderAgentDiagnostics(session.diagnostics || {});
   renderAgentContextPreview(session.context_preview || []);
   restoreAgentChatScroll(scrollSnapshot, { forceBottom: Boolean(options.forceBottom) });
+  const renderElapsed = performance.now() - renderStart;
+  console.log(JSON.stringify({
+    event: "client.render.metrics",
+    elapsedMs: Math.round(renderElapsed * 100) / 100,
+    messageCount: session.messages.length,
+  }));
 }
 
 function socialUserId(user) {
@@ -24934,12 +24980,12 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
-        const payload = handleAgentStreamLine(line, options.pendingMessage);
+        const payload = handleAgentStreamLine(line, options.pendingMessage, { envelopeMode: true });
         if (payload?.type === "final") finalAgent = payload.agent;
       }
     }
     if (buffer.trim()) {
-      const payload = handleAgentStreamLine(buffer, options.pendingMessage);
+      const payload = handleAgentStreamLine(buffer, options.pendingMessage, { envelopeMode: true });
       if (payload?.type === "final") finalAgent = payload.agent;
     }
     if (!finalAgent) throw new Error("The direct-head stream ended without a final response.");

@@ -1049,6 +1049,291 @@ class ProviderProxyTests(unittest.TestCase):
                 self.assertIn("hermes.progress", event_types)
                 self.assertEqual(event_types[-1], "run.final")
 
+    def test_direct_head_dispatch_uses_id_before_generic_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Dispatch via id.",
+                            "decision": "dispatch.hermes",
+                            "actions": [{
+                                "id": "dispatch.hermes",
+                                "type": "bridge",
+                                "objective": "Apply a bounded implementation lane.",
+                                "caps": ["repo.read", "proof.report"],
+                                "proof_requests": ["runtime"],
+                            }],
+                            "confidence": 0.86,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-dispatch-id-before-type",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-dispatch-id-before-type",
+                    "objective": "Decide whether Hermes should act.",
+                    "capabilities": ["repo.read", "proof.report"],
+                    "allowed_actions": [{"id": "dispatch.hermes"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            def fake_bridge_runs(*_args, **kwargs):
+                action_callback = kwargs.get("action_callback")
+                if action_callback:
+                    action_callback({
+                        "id": "bridge_run",
+                        "topic": "run-hermes",
+                        "kind": "model",
+                        "label": "bridge.run.completed",
+                        "status": "done",
+                        "detail": "completed",
+                    })
+                return "Hermes handled id-first dispatch.", "bridge_runs", {"total_tokens": 9}, {"id": "run_id_first", "steps": [{"status": "completed"}], "tool_calls": []}
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs", side_effect=fake_bridge_runs):
+                result = server_mod.provider_envelope_run_completion(server, body, user=self.admin())
+                run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"])["events"]
+
+            self.assertEqual(result["reply"], "Hermes handled id-first dispatch.")
+            self.assertEqual(result["hermes_dispatch"]["source"], "bridge_runs")
+            self.assertEqual(run["status"], "completed")
+            self.assertIn("hermes.dispatch", [event["type"] for event in events])
+            self.assertEqual(run["bridge_obligation"]["state"], "satisfied")
+
+    def test_direct_head_dispatch_prompt_binds_local_workspace_and_proof(self) -> None:
+        action = {
+            "id": "dispatch.hermes",
+            "type": "bridge",
+            "objective": "Run bounded streaming-performance improvement lane for avatar-chat.",
+            "caps": ["repo.read", "repo.edit", "test.run", "proof.report"],
+            "proof_requests": ["tests", "runtime"],
+        }
+        envelope = {
+            "objective": "go ahead and do that",
+            "evidence_refs": ["ctx://avatar-chat/current-turn"],
+        }
+
+        prompt = server_mod.direct_head_hermes_dispatch_prompt(action, envelope)
+
+        self.assertIn("/local", prompt)
+        self.assertIn("executable wasm-agent bridge handoff", prompt)
+        self.assertIn("not role-play", prompt)
+        self.assertIn("Do not refuse because you lack a wasm-agent bridge", prompt)
+        self.assertIn("Do not ask the user to restate the task", prompt)
+        self.assertIn("files/tests/runtime proof", prompt)
+        self.assertIn("Run bounded streaming-performance improvement lane", prompt)
+
+    def test_bridge_reply_test_report_satisfies_test_proof_code(self) -> None:
+        final = {
+            "reply": (
+                "Bounded avatar-chat streaming-performance pass complete.\n\n"
+                "Test results\n"
+                "- agent_run_store.test.py      5/5 passed\n"
+                "- bridge_routes.test.py        7/7 passed\n"
+                "- streaming_performance.test.py 2/2 passed\n\n"
+                "Syntax checks\n"
+                "- static_server.py: py_compile OK\n"
+            ),
+            "hermes_dispatch": {
+                "bridge_trace": {
+                    "id": "run_tests",
+                    "tool_calls": [{"name": "execute_code"}],
+                },
+            },
+        }
+
+        self.assertIn("tests", server_mod.final_proof_codes(final))
+
+    def test_bridge_reply_without_passing_test_evidence_does_not_satisfy_tests(self) -> None:
+        final = {
+            "reply": "I inspected the tests and can run them if you want.",
+            "hermes_dispatch": {
+                "bridge_trace": {
+                    "id": "run_no_tests",
+                    "tool_calls": [{"name": "read_file"}],
+                },
+            },
+        }
+
+        self.assertNotIn("tests", server_mod.final_proof_codes(final))
+
+    def test_direct_head_implementation_dispatch_creates_and_satisfies_bridge_obligation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Dispatch implementation.",
+                            "decision": "dispatch",
+                            "actions": [{
+                                "action": "dispatch.hermes",
+                                "objective": "Implement the compact bridge lifecycle guard.",
+                                "caps": ["repo.read", "repo.edit", "proof.report"],
+                                "proof": ["files", "timeline"],
+                            }],
+                            "confidence": 0.9,
+                        })
+                    }
+                }],
+                "usage": {"total_tokens": 5},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-impl-obligation",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-impl-obligation",
+                    "objective": "Implement lifecycle guard.",
+                    "capabilities": ["repo.read", "repo.edit", "proof.report"],
+                    "allowed_actions": [{"id": "dispatch.hermes"}],
+                },
+            }
+
+            def fake_bridge_runs(*_args, **kwargs):
+                return "Implemented with proof.", "bridge_runs", {"total_tokens": 9}, {"id": "run_impl", "steps": [{"status": "completed"}], "tool_calls": []}
+
+            change_proof = {
+                "changed_files": [{"path": "plugins/wasm-agent/server/static_server.py", "status": "modified"}],
+                "before_checkpoint": {"ref": "timeline://before", "label": "before"},
+                "auto_checkpoint": {"ref": "timeline://after", "label": "after"},
+            }
+
+            with patch.dict(os.environ, env, clear=True), \
+                patch.object(server_mod, "call_agent_bridge_runs", side_effect=fake_bridge_runs), \
+                patch.object(server_mod, "direct_head_change_proof", return_value=change_proof):
+                result = server_mod.provider_envelope_run_completion(server, body, user=self.admin())
+                run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"])["events"]
+
+            self.assertEqual(run["status"], "completed")
+            self.assertEqual(run["bridge_obligation"]["state"], "satisfied")
+            self.assertEqual(run["bridge_obligation"]["bridge_run_id"], "run_impl")
+            self.assertIn("OBL run=run_impl s=satisfied proof=files,timeline", run["bridge_obligation"]["summary"])
+            self.assertTrue(any(event["payload"].get("bridge_obligation") for event in events))
+            preview = json.dumps(run["final"].get("context_preview", []))
+            self.assertIn("OBL run=run_impl", preview)
+            self.assertNotIn("final_json", preview)
+            self.assertNotIn("bridge_trace", preview)
+            self.assertNotIn("diff", preview)
+            self.assertNotIn("logs", preview)
+
+    def test_direct_head_interrupted_bridge_obligation_cannot_complete_successfully(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "decision": "dispatch",
+                            "actions": [{
+                                "action": "dispatch.hermes",
+                                "objective": "Fix the avatar-chat bridge lifecycle bug.",
+                                "caps": ["repo.read", "repo.edit", "proof.report"],
+                                "proof": ["files", "timeline"],
+                            }],
+                        })
+                    }
+                }],
+                "usage": {"total_tokens": 5},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-impl-interrupted",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-impl-interrupted",
+                    "objective": "Fix lifecycle guard.",
+                    "allowed_actions": [{"id": "dispatch.hermes"}],
+                },
+            }
+
+            def interrupted_bridge(*_args, **_kwargs):
+                raise server_mod.BrowserError("agent_run_interrupted", "Agent run was interrupted by a server restart.")
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs", side_effect=interrupted_bridge):
+                with self.assertRaises(server_mod.BrowserError):
+                    server_mod.provider_envelope_run_completion(server, body, user=self.admin())
+                runs = server_mod.list_agent_runs(self.admin(), {"session_id": ["direct-session"]})["runs"]
+                run = next(item for item in runs if item["turn_id"] == "direct-impl-interrupted")
+                loaded = server_mod.read_agent_run(self.admin(), run["run_id"])["run"]
+
+            self.assertEqual(loaded["status"], "failed")
+            self.assertEqual(loaded["error"]["code"], "agent_run_interrupted")
+            self.assertEqual(loaded["bridge_obligation"]["state"], "interrupted")
+            self.assertEqual(loaded["bridge_obligation"]["err_code"], "agent_run_interrupted")
+
+    def test_direct_head_missing_proof_blocks_successful_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "decision": "dispatch",
+                            "actions": [{
+                                "action": "dispatch.hermes",
+                                "objective": "Implement a source change.",
+                                "caps": ["repo.read", "repo.edit", "proof.report"],
+                                "proof": ["files", "timeline"],
+                            }],
+                        })
+                    }
+                }],
+                "usage": {"total_tokens": 5},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-impl-missing-proof",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-impl-missing-proof",
+                    "objective": "Implement source change.",
+                    "allowed_actions": [{"id": "dispatch.hermes"}],
+                },
+            }
+
+            def fake_bridge_runs(*_args, **_kwargs):
+                return "Text without proof.", "bridge_runs", {"total_tokens": 9}, {"id": "run_missing", "steps": [{"status": "completed"}]}
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs", side_effect=fake_bridge_runs):
+                result = server_mod.provider_envelope_run_completion(server, body, user=self.admin())
+                run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+
+            self.assertEqual(run["status"], "failed")
+            self.assertEqual(run["error"]["code"], "missing_proof:files,timeline")
+            self.assertEqual(run["bridge_obligation"]["state"], "blocked")
+            self.assertIn("OBL run=run_missing s=blocked proof=files,timeline", run["bridge_obligation"]["summary"])
+
     def test_direct_head_without_server_provider_key_dispatches_hermes_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / "wa.env"
