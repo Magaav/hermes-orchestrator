@@ -106,6 +106,24 @@ answer/action quality. New features that increase model context must justify
 the added tokens with correctness, safety, or observability that cannot be
 achieved through a cheaper query path.
 
+## Route Contract Law
+
+Routing must be declarative, owned, and testable. Do not fix a missed route by
+adding product-specific strings, CSS selectors, DOM classes, filenames, or
+feature labels to backend/runtime code. That creates a hidden map that models
+cannot inspect, tests cannot govern, and future agents will keep extending.
+
+The correct artifact is a route contract in the context map, owning docs, or a
+machine-readable registry. It must name surface, owner, workspace root, allowed
+roots, capabilities, proof requirements, and token/API-call budgets. Runtime
+code may load and enforce the route contract. It must not become the route
+contract.
+
+If route resolution lacks `route_id`, `workspace_root`, or allowed roots, the
+agent must return `route_contract_missing` or add the missing contract before
+dispatch. Do not use Hermes or any model to broad-search arbitrary roots as a
+replacement for route ownership.
+
 ## Harness Factory Reflection
 
 After intent/context routing and before slow investigation, rebuilds, runtime

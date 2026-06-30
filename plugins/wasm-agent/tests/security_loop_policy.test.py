@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,8 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertTrue(server_mod.requires_admin_request("GET", "/security-loop/status"))
         self.assertTrue(server_mod.requires_admin_request("POST", "/security-loop/findings"))
         self.assertTrue(server_mod.requires_admin_request("POST", "/agent/provider/envelope"))
+        self.assertTrue(server_mod.requires_admin_request("POST", "/agent/provider/envelope/stream"))
+        self.assertTrue(server_mod.requires_admin_request("POST", "/agent/tools/route.resolve"))
         self.assertFalse(server_mod.requires_admin_request("POST", "/agent/provider/chat"))
         self.assertFalse(server_mod.requires_admin_request("GET", "/spaces"))
         self.assertFalse(server_mod.requires_admin_request("POST", "/spaces"))
@@ -62,8 +65,10 @@ class SecurityLoopPolicyTest(unittest.TestCase):
             self.assertTrue(global_policy["can_modify_core_firmware"])
             self.assertEqual(sandbox_policy["scope"], "user-sandbox")
             self.assertFalse(sandbox_policy["can_modify_core_firmware"])
-            self.assertEqual(server_mod.default_agent_target_node(admin), "orchestrator")
-            self.assertEqual(server_mod.default_agent_target_node(user), "account-sandbox")
+            self.assertEqual(server_mod.default_agent_target_node(admin), "frontier")
+            self.assertEqual(server_mod.default_agent_target_node(user), "frontier")
+            self.assertEqual(server_mod.resolve_frontier_agent_node(admin, "frontier"), "orchestrator")
+            self.assertEqual(server_mod.resolve_frontier_agent_node(user, "frontier"), "account-sandbox")
             server_mod.ensure_agent_target_allowed(admin, "orchestrator")
             with self.assertRaises(server_mod.BrowserError):
                 server_mod.ensure_agent_target_allowed(user, "orchestrator")
@@ -143,17 +148,195 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertEqual(usage["completion_tokens"], 34)
         self.assertEqual(usage["total_tokens"], 1234)
         self.assertEqual(usage["source"], "bridge_runs")
+        hermes_usage = server_mod.normalize_token_usage({
+            "inputTokens": "42",
+            "outputTokens": 8,
+            "totalTokens": 50,
+            "cachedInputTokens": 12,
+            "reasoningOutputTokens": 3,
+        }, source="bridge_runs")
+        self.assertEqual(hermes_usage["prompt_tokens"], 42)
+        self.assertEqual(hermes_usage["completion_tokens"], 8)
+        self.assertEqual(hermes_usage["total_tokens"], 50)
+        self.assertEqual(hermes_usage["cached_input_tokens"], 12)
+        self.assertEqual(hermes_usage["reasoning_output_tokens"], 3)
+        exact_usage = server_mod.exact_llm_token_usage({
+            "input_tokens": "12",
+            "output_tokens": "3",
+        }, source="provider_proxy", model="model-a")
+        self.assertEqual(exact_usage["usage_scope"], "llm_api_call")
+        self.assertEqual(exact_usage["usage_accuracy"], "provider_exact")
+        self.assertTrue(exact_usage["billable"])
+        self.assertEqual(exact_usage["model"], "model-a")
         task_usage = server_mod.bridge_task_usage({
             "result": {
                 "usage": {
                     "totals": {
                         "input_tokens": "50",
                         "output_tokens": "7",
+                        "api_calls": 1,
                     }
                 }
             }
         })
         self.assertEqual(task_usage["total_tokens"], 57)
+        self.assertEqual(task_usage["usage_scope"], "llm_api_call")
+        self.assertEqual(task_usage["usage_accuracy"], "provider_exact")
+        event_usage = server_mod.bridge_task_usage({
+            "result": {
+                "events": [
+                    {"event": "run.started"},
+                    {
+                        "event": "run.completed",
+                        "usage": {
+                            "input_tokens": 20,
+                            "output_tokens": 5,
+                            "api_calls": 1,
+                        },
+                    },
+                ]
+            }
+        })
+        self.assertEqual(event_usage["total_tokens"], 25)
+        self.assertEqual(event_usage["usage_scope"], "llm_api_call")
+        self.assertEqual(event_usage["usage_accuracy"], "provider_exact")
+        payload = server_mod.agent_run_token_usage_payload({
+            "diagnostics": {
+                "token_usage_head": {
+                    "input_tokens": 10,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                    "api_calls": 1,
+                    "usage_scope": "llm_api_call",
+                    "usage_accuracy": "provider_exact",
+                    "billable": True,
+                },
+                "token_usage_bridge": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_tokens": 300,
+                    "total_tokens": 420,
+                    "api_calls": 3,
+                    "usage_scope": "llm_api_call",
+                    "usage_accuracy": "provider_exact",
+                    "billable": True,
+                },
+            }
+        })
+        self.assertEqual(payload["primary"], "total")
+        self.assertEqual(payload["usage"]["total_tokens"], 432)
+        self.assertEqual(payload["usage"]["prompt_tokens"], 110)
+        self.assertEqual(payload["usage"]["completion_tokens"], 22)
+        self.assertEqual(payload["usage"]["cached_input_tokens"], 300)
+        self.assertEqual(payload["components"]["bridge"]["total_tokens"], 420)
+        zero_call_usage = server_mod.bridge_task_usage({
+            "result": {
+                "usage": {
+                    "input_tokens": "1658690",
+                    "output_tokens": "11132",
+                    "api_calls": 0,
+                }
+            }
+        })
+        self.assertIsNotNone(zero_call_usage)
+        assert zero_call_usage is not None
+        self.assertEqual(zero_call_usage["total_tokens"], 1669822)
+        self.assertEqual(zero_call_usage["api_calls"], 0)
+        dispatch = server_mod.direct_head_hermes_dispatch_action({
+            "decision": "dispatch.hermes",
+            "actions": [{
+                "id": "dispatch.hermes",
+                "type": "bridge",
+                "objective": "Apply a tiny edit.",
+            }],
+        })
+        self.assertIsNotNone(dispatch)
+        self.assertEqual(dispatch["objective"], "Apply a tiny edit.")
+
+    def test_avatar_chat_dispatch_is_scoped_to_wasm_agent_workspace(self) -> None:
+        action = {
+            "id": "dispatch.hermes",
+            "objective": "Set .agent-timeline gap and .agent-timeline-rows padding.",
+            "caps": ["repo.read", "repo.edit", "proof.report"],
+        }
+        envelope = {"objective": "CSS fix", "surface": "avatar-chat"}
+
+        workspace = server_mod.direct_head_dispatch_workspace_contract(action, envelope)
+        prompt = server_mod.direct_head_hermes_dispatch_prompt(action, envelope)
+
+        self.assertIsNotNone(workspace)
+        assert workspace is not None
+        self.assertEqual(workspace["route_id"], "wasm-agent.avatar-chat.ui")
+        self.assertEqual(workspace["workspace_root"], str(PLUGIN_ROOT.resolve()))
+        self.assertIn('"route_contract":', prompt)
+        self.assertIn(str(PLUGIN_ROOT.resolve()), prompt)
+        self.assertIn("stay inside allowed roots", prompt)
+
+    def test_route_tools_are_registry_scoped_and_receipted(self) -> None:
+        resolved = server_mod.route_resolve_tool({
+            "objective": "Fix agent timeline overflow",
+            "surface_hint": "agent timeline",
+        })
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(resolved["route_contract"]["route_id"], "wasm-agent.agent-run.timeline")
+
+        summary = server_mod.route_map_summary_tool({"route_id": "wasm-agent.agent-run.timeline"})
+        self.assertEqual(summary["summary"]["route_id"], "wasm-agent.agent-run.timeline")
+        self.assertGreater(summary["summary"]["likely_file_count"], 1)
+
+        files = server_mod.route_lookup_files_tool({"route_id": "wasm-agent.frontier.provider"})
+        static_receipt = next(item for item in files["files"] if item["path"] == "server/README.md")
+        self.assertTrue(static_receipt["exists"])
+        self.assertGreater(static_receipt["bytes"], 1000)
+        self.assertRegex(static_receipt["sha256"], r"^[a-f0-9]{64}$")
+
+        symbols = server_mod.route_lookup_symbol_tool({
+            "route_id": "wasm-agent.frontier.provider",
+            "query": "provider_envelope_run_execute",
+        })
+        self.assertTrue(symbols["ok"])
+        self.assertGreaterEqual(symbols["count"], 1)
+        self.assertTrue(any(match["path"] == "server/static_server.py" for match in symbols["matches"]))
+
+    def test_route_resolve_missing_does_not_scan_source(self) -> None:
+        with patch.object(server_mod.subprocess, "run") as run_mock:
+            resolved = server_mod.route_resolve_tool({"objective": "Unknown surface should not search."})
+        self.assertFalse(resolved["ok"])
+        self.assertEqual(resolved["error"]["code"], "route_contract_missing")
+        run_mock.assert_not_called()
+
+    def test_explicit_workspace_root_is_not_a_route_contract(self) -> None:
+        action = {
+            "id": "dispatch.hermes",
+            "objective": "Search wherever needed.",
+            "workspace_root": str(PLUGIN_ROOT),
+        }
+        envelope = {"objective": "No registered route."}
+
+        self.assertIsNone(server_mod.direct_head_dispatch_workspace_contract(action, envelope))
+        with self.assertRaises(server_mod.ProviderProxyError) as raised:
+            server_mod.direct_head_hermes_dispatch_prompt(action, envelope)
+        self.assertEqual(raised.exception.diagnostic["category"], "route_contract_missing")
+
+    def test_hermes_dispatch_fails_closed_without_route_contract(self) -> None:
+        action = {
+            "id": "dispatch.hermes",
+            "objective": "Set .agent-timeline gap.",
+            "caps": ["repo.read", "repo.edit", "proof.report"],
+        }
+        envelope = {"objective": "CSS fix"}
+
+        self.assertIsNone(server_mod.direct_head_dispatch_workspace_contract(action, envelope))
+        with self.assertRaises(server_mod.ProviderProxyError) as raised:
+            server_mod.direct_head_hermes_dispatch_prompt(action, envelope)
+
+        self.assertEqual(raised.exception.diagnostic["category"], "route_contract_missing")
+
+    def test_static_server_has_no_product_selector_route_heuristic(self) -> None:
+        source = SERVER_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("WASM_AGENT_UI_ROUTE_TERMS", source)
+        self.assertNotIn("WASM_AGENT_UI_SELECTOR_RE", source)
+        self.assertIn("agent_route_contracts.json", source)
 
     def test_browser_stream_requires_same_origin_websocket(self) -> None:
         same_origin = self.fake_handler({

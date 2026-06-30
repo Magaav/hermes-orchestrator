@@ -31,6 +31,17 @@ state, and product UI surfaces.
   then expose bounded lookup tools for detail. Do not make verbose JSON
   snapshots, raw logs, screenshots, protobuf/base64 blobs, or human-debug views
   the default prompt contract.
+- Do not encode wasm-agent routing by adding CSS selectors, DOM class names,
+  UI labels, filenames, or other product strings to `server/static_server.py`
+  or similar runtime code. Route ownership belongs in the context route map,
+  this contract, or a dedicated machine-readable route registry with tests.
+  Runtime code may enforce a resolved route contract; it must not become a pile
+  of reactive routing heuristics.
+- The embedded agent must be cheap, strong, and autonomous by protocol:
+  wasm-agent resolves surface/owner/workspace/capabilities/proof/budget first,
+  then calls Hermes or another provider only as a bounded skill/bridge executor.
+  Hermes must not be asked to infer the product map, broad-search unknown roots,
+  or do work that deterministic wasm-agent routing/lookup can do locally.
 - Use native shells only for non-negotiable OS/browser constraints: background
   wake-word listeners, OS services, native permissions, package/signing
   behavior, accessibility/media projection, foreground services, or hardware/OS
@@ -59,6 +70,10 @@ state, and product UI surfaces.
 - For server/API work, also read `server/README.md`.
 - For config defaults, also read `conf/README.md`.
 - For generated/local state handling, also read `state/README.md`.
+- For embedded-agent, avatar-chat routing, context/token economics, run
+  timelines, or Hermes dispatch work, read `LLM_NATIVE_AGENT_ARCHITECTURE.md`
+  `LLM_NATIVE_AGENT_MANIFEST_PLAN.md`, and
+  `LLM_NATIVE_AGENT_SOURCE_HARVEST.md` before source edits.
 - Before rebuild-heavy or runtime-control work, prefer live introspection,
   HMR, hot-op, runtime config, downloaded runtime/model metadata, or a small
   diagnostic probe when that safely shortens the loop.

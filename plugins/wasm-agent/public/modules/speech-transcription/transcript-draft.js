@@ -1,4 +1,4 @@
-export const DEFAULT_TRANSCRIPT_DEBOUNCE_MS = 90;
+export const DEFAULT_TRANSCRIPT_DEBOUNCE_MS = 50;
 
 function toRawText(value = "") {
   return String(value ?? "").replace(/\r\n?/g, "\n");
@@ -8,6 +8,74 @@ export function normalizeTranscriptText(value = "") {
   return toRawText(value)
     .replace(/[ \t\n]+/g, " ")
     .trim();
+}
+
+const OR_HOMOPHONE_LEFT_TERMS = [
+  "improvements?",
+  "regressions?",
+  "degradations?",
+  "gains?",
+  "loss(?:es)?",
+  "changes?",
+  "progress",
+  "quality",
+  "accuracy",
+  "performance",
+  "latency",
+  "speed",
+].join("|");
+const OR_HOMOPHONE_RIGHT_TERMS = [
+  "degradations?",
+  "regressions?",
+  "loss(?:es)?",
+  "failures?",
+  "errors?",
+  "worse",
+].join("|");
+const OR_HOMOPHONE_PATTERN = new RegExp(
+  `\\b(${OR_HOMOPHONE_LEFT_TERMS}),?\\s+our\\s+(${OR_HOMOPHONE_RIGHT_TERMS})(?=\\b)`,
+  "gi",
+);
+const HEAR_YOU_ARE_ME_PATTERN = /\b(hear(?:ing|s|d)?)\s+(?:you['’]?re|you\s+are|your)\s+me\b/gi;
+const QUESTION_OR_YOU_ARE_NOT_PATTERN = new RegExp(
+  "\\b(can\\s+you\\s+(?:hear|see|read|understand|get)\\b[^.!?]{0,96}?),?\\s+or\\s+(?:you['’]?re|you\\s+are)\\s+not\\b",
+  "gi",
+);
+
+export function repairTranscriptText(value = "") {
+  return normalizeTranscriptText(value)
+    .replace(OR_HOMOPHONE_PATTERN, (_match, left, right) => `${left} or ${right}`)
+    .replace(HEAR_YOU_ARE_ME_PATTERN, (_match, verb) => `${verb} me`)
+    .replace(QUESTION_OR_YOU_ARE_NOT_PATTERN, (_match, question) => `${question} or not`);
+}
+
+export function mergeOverlappingTranscriptText(previous = "", nextText = "", maxOverlapWords = 8) {
+  const left = normalizeTranscriptText(previous);
+  const right = normalizeTranscriptText(nextText);
+  if (!left) return right;
+  if (!right) return left;
+  const leftLower = left.toLowerCase();
+  const rightLower = right.toLowerCase();
+  if (leftLower === rightLower || leftLower.endsWith(rightLower)) return left;
+  if (rightLower.startsWith(leftLower)) return right;
+  const leftWords = left.split(/\s+/);
+  const rightWords = right.split(/\s+/);
+  const leftLowerWords = leftWords.map((word) => word.toLowerCase());
+  const rightLowerWords = rightWords.map((word) => word.toLowerCase());
+  const maxOverlap = Math.min(
+    Math.max(0, Math.floor(Number(maxOverlapWords) || 0)),
+    leftWords.length,
+    rightWords.length,
+  );
+  for (let size = maxOverlap; size > 0; size -= 1) {
+    const leftTail = leftLowerWords.slice(leftLowerWords.length - size).join(" ");
+    const rightHead = rightLowerWords.slice(0, size).join(" ");
+    if (leftTail === rightHead) {
+      const suffix = rightWords.slice(size).join(" ");
+      return suffix ? `${left} ${suffix}` : left;
+    }
+  }
+  return `${left} ${right}`;
 }
 
 export function appendTranscriptSegment(segments = [], text = "") {
@@ -164,7 +232,7 @@ export function createTranscriptDraftController(options = {}) {
   }
 
   function applyTranscript(entry = {}) {
-    const text = normalizeTranscriptText(entry.text ?? entry.transcript ?? "");
+    const text = repairTranscriptText(entry.text ?? entry.transcript ?? "");
     if (entry.final || entry.isFinal) {
       finalSegments = appendTranscriptSegment(finalSegments, text);
       partialText = "";

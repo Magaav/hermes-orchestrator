@@ -14,6 +14,7 @@ download/update, and bridge work.
 | Client-first workspace state | implemented-unverified | focused tests under `tests/` | Server is for auth, presence/relay, sync, backup, provisioning, diagnostics, release metadata. |
 | Omni-device feature default | verified | Root/context/agent docs | Ship shared PWA/runtime behavior first. Prefer browser APIs, WASM, WebGPU/WebNN, downloaded model/runtime artifacts, version/SHA metadata, browser cache, and IndexedDB before native shell code. |
 | LLM-native context default | proposal | docs only | Embedded-agent/model-facing context should become a tiny text envelope plus on-demand lookup tools, with expanded human diagnostics kept separate from prompt input. |
+| Cheap autonomous agent architecture | proposal | `LLM_NATIVE_AGENT_ARCHITECTURE.md` | wasm-agent must route by declarative surface/workspace contracts before model dispatch. Hermes is a bounded skill/bridge executor, not the owner of product routing or broad workspace search. |
 | Account auth allowlist | implemented-unverified | auth tests; `conf/README.md` | `ADMIN_EMAIL` and optional `USER_EMAILS`; empty allowlists reject all Google accounts. |
 | Native release feed | implemented-unverified | `plugins/wasm-agent/public/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json` | Current local Windows feed guard fails without `native/windows/release/VERIFY.json`; feed publication is not installed runtime proof. |
 | Downloaded native runtime feed | implemented-unverified | `artifacts.runtime.launcher` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js` | Requires installed native shells with downloaded-runtime sync before runtime IDs/SHAs are installed evidence. |
@@ -22,7 +23,7 @@ download/update, and bridge work.
 | Dev HMR | implemented-unverified | `horc simulate web`; JS smoke tests | Local developer convenience, not production sync contract. |
 | Hermes Wake data/model loop | implemented-unverified | Android bridge/model tests and device proof | Prefer dataset/model iteration over APK rebuilds. |
 | Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWordState()`; `apply_wake_word_policy`; `GET /native/android/wake-word-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside and avatar wake feedback from live state. |
-| Embedded-chat speech transcription | implemented-unverified | `node --experimental-vm-modules tests/speech_transcription_module.test.mjs`; `node tests/wasm_agent_smoke.test.js`; browser/device proof still required | Shared PWA/runtime mic button and worker-owned local ASR boundary with versioned Transformers.js 4.2.0, ONNX Runtime WASM, and Whisper tiny English fp16 assets. No native dictation bridge and no remote STT; production runtime proof still requires browser/device mic validation. |
+| Embedded-chat speech transcription | implemented-unverified | `node --experimental-vm-modules tests/speech_transcription_module.test.mjs`; `node tests/wasm_agent_smoke.test.js`; browser/device proof still required | Shared PWA/runtime mic button and worker-owned local ASR boundary with versioned Transformers.js 4.2.0, ONNX Runtime WASM, Whisper tiny English fp16 assets, frame-batched AudioWorklet capture with ScriptProcessor fallback, click-time worker/model warmup, same-SHA cache reuse with SHA cache markers, speech-gated pre-roll buffering, noise-adaptive VAD threshold diagnostics, enforced adaptive rolling partials, partial token streaming, duration-capped decode, ONNX graph optimization, and deterministic beam final decode. No native dictation bridge and no remote STT; production runtime proof still requires browser/device mic validation. |
 | Host Browser/CDP | implemented-unverified | security-loop/browser tests | Disabled by default on public HTTPS unless explicitly reviewed. |
 | Windows installed-app behavior | implemented-unverified | Windows verifier in `native/windows` | Do not claim fixed from PWA/source tests. |
 | Android runtime behavior | implemented-unverified | `horc simulate android` | Report must name the behavior proven. |
@@ -44,6 +45,9 @@ download/update, and bridge work.
 | Path | Owns | Read / verify |
 | --- | --- | --- |
 | `AGENTS.md` | Local binding contract | Read before any plugin edit. |
+| `LLM_NATIVE_AGENT_ARCHITECTURE.md` | Cheap autonomous embedded-agent architecture | Read before embedded-agent, avatar-chat routing, Hermes dispatch, context budget, or token accounting work. |
+| `LLM_NATIVE_AGENT_MANIFEST_PLAN.md` | Implementation plan, critique loop, acceptance gates, and frontier prompt for the cheap autonomous agent | Read before implementing route contracts, provider adapters, token ledgers, or run timelines. |
+| `LLM_NATIVE_AGENT_SOURCE_HARVEST.md` | Source-harvested acceptance gates for map, recall, receipts, and token economics | Read before changing the wasm-agent kernel path or adding new route/proof/token contracts. |
 | `DESIGN.md` | Frontend shell and visual regression contract | Read before UI/CSS/HTML work. |
 | `conf/README.md` | Configuration defaults and private env handling | Read before auth/env/deployment changes. |
 | `server/README.md` | Python backend ownership and runtime notes | Read before server/API/auth/Frontier edits. |
@@ -68,6 +72,16 @@ download/update, and bridge work.
 | Hermes Wake proof | `python3 tools/voice/run-hermes-wake-proof.py --dry-run`; `python3 tools/voice/run-hermes-wake-proof.py --debug` |
 
 ## LLM-Native Embedded Assistant Direction
+
+The durable architecture is specified in
+`LLM_NATIVE_AGENT_ARCHITECTURE.md`. It replaces reactive routing by code
+heuristic with declarative route contracts: surface, owner, workspace root,
+allowed roots, capabilities, proof, and token budget must be resolved before
+Hermes or any other provider is invoked.
+
+Do not add product strings, CSS selectors, DOM classes, filenames, or feature
+labels to `server/static_server.py` to fix routing. That is a regression. Add
+or fix the route contract, then make runtime code load/enforce it.
 
 The embedded assistant should evolve toward an LLM-native context ABI. The
 production target is not "more JSON in the prompt"; it is a tiny baseline

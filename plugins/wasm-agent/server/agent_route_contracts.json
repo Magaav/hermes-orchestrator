@@ -1,0 +1,258 @@
+{
+  "schema": "hermes.wasm_agent.route_contracts.v1",
+  "routes": [
+    {
+      "route_id": "wasm-agent.avatar-chat.ui",
+      "surface": "avatar-chat",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "likely_paths": [
+        "public/styles.css",
+        "public/app.js",
+        "public/index.html"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "route.symbols",
+        "route.tests",
+        "run.timeline"
+      ],
+      "caps": [
+        "repo.read",
+        "repo.edit",
+        "test.run",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "aliases": [
+        "avatar-chat"
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 8000,
+        "api_calls_max": 6,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "changed_files",
+        "checks",
+        "token_ledger"
+      ]
+    },
+    {
+      "route_id": "wasm-agent.agent-run.timeline",
+      "surface": "agent-run-timeline",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "likely_paths": [
+        "public/styles.css",
+        "public/app.js",
+        "server/static_server.py",
+        "tests/agent_run_store.test.py",
+        "tests/provider_proxy.test.py"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "route.symbols",
+        "route.tests",
+        "run.timeline",
+        "cost.status"
+      ],
+      "caps": [
+        "repo.read",
+        "repo.edit",
+        "test.run",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "aliases": [
+        "agent timeline",
+        "agent-run timeline",
+        "run timeline",
+        "timeline projection"
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 8000,
+        "api_calls_max": 6,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "changed_files",
+        "checks",
+        "token_ledger",
+        "timeline_events"
+      ]
+    },
+    {
+      "route_id": "wasm-agent.speech-transcription.module",
+      "surface": "speech-transcription",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "likely_paths": [
+        "public/modules/speech-transcription/speech-transcription.js",
+        "public/modules/speech-transcription/speech-transcription-worker.js",
+        "public/modules/speech-transcription/transcript-draft.js",
+        "public/modules/speech-transcription/speech-capture-worklet.js",
+        "tests/speech_transcription_module.test.mjs"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "route.symbols",
+        "route.tests",
+        "cost.status"
+      ],
+      "caps": [
+        "repo.read",
+        "repo.edit",
+        "test.run",
+        "proof.report"
+      ],
+      "aliases": [
+        "speech transcription",
+        "asr",
+        "mic transcription"
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 10000,
+        "api_calls_max": 6,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "changed_files",
+        "checks",
+        "token_ledger"
+      ]
+    },
+    {
+      "route_id": "wasm-agent.frontier.provider",
+      "surface": "frontier-provider",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "likely_paths": [
+        "server/static_server.py",
+        "server/README.md",
+        "tests/provider_proxy.test.py",
+        "tests/security_loop_policy.test.py"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "route.symbols",
+        "route.tests",
+        "cost.status"
+      ],
+      "caps": [
+        "repo.read",
+        "repo.edit",
+        "test.run",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "aliases": [
+        "frontier",
+        "direct head",
+        "provider envelope",
+        "hermes dispatch"
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 8000,
+        "api_calls_max": 6,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "changed_files",
+        "checks",
+        "token_ledger"
+      ]
+    },
+    {
+      "route_id": "wasm-agent.native-control",
+      "surface": "native-control",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "likely_paths": [
+        "server/static_server.py",
+        "server/README.md",
+        "public/android-app.js",
+        "tests/bridge_routes.test.py"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "route.symbols",
+        "route.tests",
+        "cost.status"
+      ],
+      "caps": [
+        "repo.read",
+        "repo.edit",
+        "test.run",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "aliases": [
+        "native control",
+        "native bridge",
+        "android bridge",
+        "frontier native"
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 10000,
+        "api_calls_max": 6,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "changed_files",
+        "checks",
+        "token_ledger"
+      ]
+    }
+  ]
+}

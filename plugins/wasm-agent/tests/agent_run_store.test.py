@@ -152,6 +152,20 @@ class AgentRunStoreTest(unittest.TestCase):
             self.assertEqual(touched_event["payload"]["touched_files"][0]["path"], "plugins/wasm-agent/server/README.md")
             self.assertNotIn("do-not-store", static_server.json.dumps(touched_event["payload"]))
 
+            # Compact timeline contract: no topic/kind/arguments, presence of event_type/meta/label
+            for event in events:
+                if event["type"] in {"hermes.progress", "files.touched", "files.changed", "proof.collected", "tests.finished", "run.started"}:
+                    action = event["payload"].get("action") if isinstance(event["payload"], dict) else None
+                    if isinstance(action, dict):
+                        self.assertNotIn("topic", action)
+                        self.assertNotIn("kind", action)
+                        self.assertNotIn("arguments", action)
+                        self.assertIn("event_type", action)
+                        self.assertIn("meta", action)
+                        self.assertIn("label", action)
+                        self.assertEqual(action["label"], event["type"])
+                        self.assertEqual(action["meta"], event["type"])
+
             run = static_server.read_agent_run(self.user, result["run_id"])["run"]
             self.assertEqual(run["status"], "completed")
             self.assertEqual(run["final"]["reply"], "Done")
@@ -299,6 +313,55 @@ class AgentRunStoreTest(unittest.TestCase):
 
             events = static_server.read_agent_run_events(self.user, run["run_id"])["events"]
             self.assertEqual(events[-1]["type"], "run.error")
+
+    def test_auxiliary_server_startup_does_not_mark_running_run_interrupted(self) -> None:
+        primary = SimpleNamespace(server_port=8877)
+        auxiliary = SimpleNamespace(server_port=40287)
+        with patch.dict(os.environ, self.env, clear=True):
+            self.assertTrue(static_server.should_mark_interrupted_agent_runs_on_startup(primary))
+            self.assertFalse(static_server.should_mark_interrupted_agent_runs_on_startup(auxiliary))
+
+        with patch.dict(os.environ, {**self.env, "HERMES_WASM_AGENT_MARK_INTERRUPTED_ON_STARTUP": "1"}, clear=True):
+            self.assertTrue(static_server.should_mark_interrupted_agent_runs_on_startup(auxiliary))
+
+    def test_direct_head_timeline_events_are_compact_and_replayable(self) -> None:
+        admin_user = {"id": "101", "role": "admin", "email": "admin@example.test"}
+        body = {
+            "session_id": "agent_session",
+            "turn_id": "turn-direct-head-timeline",
+            "message": "Direct head timeline test",
+            "mode": "direct-head",
+            "target_node": "direct-head",
+        }
+        with patch.dict(os.environ, self.env, clear=True):
+            run, _created = static_server.begin_agent_run(self.server, dict(body), user=admin_user, direct_head=True)
+            # Simulate key timeline events via the production path
+            static_server.record_agent_run_action(self.server, run["run_id"], {"id": "patch", "topic": "run-hermes", "kind": "tool", "label": "patch", "status": "running", "detail": "editing"})
+            static_server.record_agent_run_action(self.server, run["run_id"], {"id": "patch", "topic": "run-hermes", "kind": "tool", "label": "patch", "status": "done", "detail": "done"})
+            static_server.record_agent_run_action(self.server, run["run_id"], {"id": "pytest", "topic": "test", "kind": "test", "label": "pytest", "status": "running", "detail": "starting"})
+            static_server.record_agent_run_action(self.server, run["run_id"], {"id": "pytest", "topic": "test", "kind": "test", "label": "pytest", "status": "done", "detail": "5 passed"})
+            static_server.finish_agent_run(self.server, run["run_id"], status="completed", final={"reply": "Done", "changed_files": []})
+
+            events = static_server.read_agent_run_events(admin_user, run["run_id"])["events"]
+            event_types = [event["type"] for event in events]
+            self.assertEqual(event_types[0], "run.started")
+            self.assertIn("tool.started", event_types)
+            self.assertIn("tool.finished", event_types)
+            self.assertIn("tests.started", event_types)
+            self.assertIn("tests.finished", event_types)
+            self.assertEqual(event_types[-1], "run.final")
+
+            # Verify stream payload compactness for replay (tool/test events pass through generic action branch)
+            replay_payloads = [static_server.agent_run_event_stream_payload(self.server, event, user=admin_user) for event in events]
+            for payload in replay_payloads:
+                if payload and payload.get("type") == "action" and payload.get("action"):
+                    action = payload["action"]
+                    self.assertNotIn("topic", action)
+                    self.assertNotIn("kind", action)
+                    self.assertNotIn("arguments", action)
+                    self.assertIn("event_type", action)
+                    self.assertIn("meta", action)
+                    self.assertEqual(action["label"], action["event_type"])
 
     def test_non_admin_cannot_list_or_read_direct_head_runs(self) -> None:
         admin_user = {"id": "303", "role": "admin", "email": "admin@example.test"}

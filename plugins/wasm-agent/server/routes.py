@@ -715,6 +715,13 @@ class OrchestratorClient:
         if current.get("status") == "cancelled":
             return current
         current_result = current.get("result") if isinstance(current.get("result"), dict) else {}
+        session_id = str(current_result.get("session_id") or "").strip()
+        final_usage = read_node_session_token_usage(self.settings, node, session_id)
+        if usage_has_signal(final_usage):
+            current_result = {
+                **current_result,
+                "token_usage": normalize_token_usage(final_usage),
+            }
         result: dict[str, Any] = {**current_result, "response": response, "node_id": node}
         if run_options:
             result["run_options"] = run_options
@@ -1183,6 +1190,8 @@ class OrchestratorClient:
                 "model_request": run_payload.get("model"),
                 "run_status": "running",
             }
+            if run_options:
+                initial_result["run_options"] = run_options
             if usage_has_signal(created_usage):
                 initial_result["token_usage"] = created_usage
             self.task_store.update_running(
@@ -1209,6 +1218,8 @@ class OrchestratorClient:
                     "run_status": state or "running",
                     "last_event": status.get("last_event"),
                 }
+                if run_options:
+                    running_result["run_options"] = run_options
                 if usage_has_signal(status_usage):
                     running_result["token_usage"] = status_usage
                 self.task_store.update_running(
@@ -1217,6 +1228,22 @@ class OrchestratorClient:
                 )
                 self.task_store.record_status_event(task_id, status)
             if state == "completed":
+                if task_id:
+                    final_usage = read_node_session_token_usage(self.settings, node, session_id)
+                    if usage_has_signal(final_usage):
+                        self.task_store.update_running(
+                            task_id,
+                            result={
+                                "node_id": node,
+                                "run_id": run_id,
+                                "session_id": session_id,
+                                "model_request": run_payload.get("model"),
+                                "run_status": state,
+                                "last_event": status.get("last_event"),
+                                "token_usage": final_usage,
+                                "run_options": run_options,
+                            },
+                        )
                 output = status.get("output") or status.get("result") or status.get("final_response")
                 if isinstance(output, dict):
                     output = output.get("text") or output.get("content") or json.dumps(output)
@@ -1245,6 +1272,8 @@ class OrchestratorClient:
                 "run_status": "timeout",
                 "last_event": last_status.get("last_event"),
             }
+            if run_options:
+                timeout_result["run_options"] = run_options
             if usage_has_signal(last_usage):
                 timeout_result["token_usage"] = last_usage
             self.task_store.update_running(
@@ -1500,11 +1529,15 @@ class TaskStore:
             incoming_usage = None
             if isinstance(result, dict):
                 incoming_usage = result.get("token_usage") or result.get("usage")
-            if usage_has_signal(token_usage_from_payload(incoming_usage)):
-                merged_result["token_usage"] = merge_token_usage(
-                    token_usage_from_payload(existing_result.get("token_usage")),
-                    token_usage_from_payload(incoming_usage),
-                )
+            normalized_incoming_usage = token_usage_from_payload(incoming_usage)
+            if usage_has_signal(normalized_incoming_usage):
+                if str(normalized_incoming_usage.get("source") or "") == "hermes_state_db":
+                    merged_result["token_usage"] = normalized_incoming_usage
+                else:
+                    merged_result["token_usage"] = merge_token_usage(
+                        token_usage_from_payload(existing_result.get("token_usage")),
+                        normalized_incoming_usage,
+                    )
             task = {
                 **existing,
                 "updated_at": utc_now(),
@@ -2816,17 +2849,25 @@ def token_usage_from_payload(payload: Any) -> dict[str, Any]:
         return {}
     usage_keys = {
         "total_tokens",
+        "totalTokens",
         "input_tokens",
+        "inputTokens",
         "output_tokens",
+        "outputTokens",
         "prompt_tokens",
+        "promptTokens",
         "completion_tokens",
+        "completionTokens",
         "cache_read_tokens",
+        "cachedInputTokens",
         "cache_write_tokens",
+        "cacheCreationInputTokens",
         "reasoning_tokens",
+        "reasoningOutputTokens",
         "api_calls",
         "api_call_count",
     }
-    nested_keys = ("usage", "token_usage", "tokenUsage", "metrics", "resource_usage")
+    nested_keys = ("usage", "token_usage", "tokenUsage", "usage_metadata", "usageMetadata", "metrics", "resource_usage")
     candidates: list[dict[str, Any]] = []
 
     def visit(value: Any, depth: int = 0) -> None:
@@ -2847,13 +2888,14 @@ def token_usage_from_payload(payload: Any) -> dict[str, Any]:
 
 
 def normalize_token_usage(usage: dict[str, Any]) -> dict[str, Any]:
-    input_tokens = integer(usage.get("input_tokens") or usage.get("prompt_tokens"))
-    output_tokens = integer(usage.get("output_tokens") or usage.get("completion_tokens"))
-    cache_read_tokens = integer(usage.get("cache_read_tokens"))
-    cache_write_tokens = integer(usage.get("cache_write_tokens"))
-    reasoning_tokens = integer(usage.get("reasoning_tokens"))
+    input_tokens = integer(usage.get("input_tokens") or usage.get("inputTokens") or usage.get("prompt_tokens") or usage.get("promptTokens"))
+    output_tokens = integer(usage.get("output_tokens") or usage.get("outputTokens") or usage.get("completion_tokens") or usage.get("completionTokens"))
+    cache_read_tokens = integer(usage.get("cache_read_tokens") or usage.get("cachedInputTokens") or usage.get("cacheReadInputTokens"))
+    cache_write_tokens = integer(usage.get("cache_write_tokens") or usage.get("cacheCreationInputTokens"))
+    reasoning_tokens = integer(usage.get("reasoning_tokens") or usage.get("reasoningOutputTokens"))
     total_tokens = integer(
         usage.get("total_tokens")
+        or usage.get("totalTokens")
         or usage.get("total")
         or usage.get("tokens")
     )
@@ -2927,6 +2969,59 @@ def task_token_usage(task: dict[str, Any]) -> dict[str, Any]:
     for event in events:
         usage = merge_token_usage(usage, token_usage_from_payload(event))
     return usage
+
+
+def read_node_session_token_usage(settings: BridgeSettings, node_id: str, session_id: str) -> dict[str, Any]:
+    node = validate_node_id(node_id)
+    clean_session_id = str(session_id or "").strip()
+    if not clean_session_id:
+        return {}
+    db_path = settings.agents_root / "nodes" / node / ".hermes" / "state.db"
+    if not db_path.exists():
+        return {}
+    try:
+        uri = f"file:{db_path}?mode=ro"
+        con = sqlite3.connect(uri, uri=True, timeout=2)
+        con.row_factory = sqlite3.Row
+        row = con.execute(
+            """
+            SELECT id, source, model, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                   api_call_count
+              FROM sessions
+             WHERE id = ?
+             LIMIT 1
+            """,
+            (clean_session_id,),
+        ).fetchone()
+        con.close()
+    except Exception:
+        return {}
+    if row is None:
+        return {}
+    input_tokens = integer(row["input_tokens"])
+    output_tokens = integer(row["output_tokens"])
+    cache_read_tokens = integer(row["cache_read_tokens"])
+    cache_write_tokens = integer(row["cache_write_tokens"])
+    reasoning_tokens = integer(row["reasoning_tokens"])
+    usage = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "prompt_tokens": input_tokens,
+        "completion_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": input_tokens + output_tokens + cache_read_tokens + cache_write_tokens + reasoning_tokens,
+        "api_calls": integer(row["api_call_count"]),
+        "source": "hermes_state_db",
+        "model": str(row["model"] or ""),
+        "session_id": clean_session_id,
+        "usage_scope": "llm_api_call",
+        "usage_accuracy": "provider_exact",
+        "billable": True,
+    }
+    return usage if usage_has_signal(usage) else {}
 
 
 def node_hermes_runtime_snapshot(settings: BridgeSettings, node_id: str) -> dict[str, Any]:
@@ -3624,6 +3719,10 @@ def run_options_from_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
             options["timeout_sec"] = max(1.0, float(timeout_raw))
         except (TypeError, ValueError):
             pass
+    for key in ("cwd", "workspace_root"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            options[key] = value
     return options or None
 
 

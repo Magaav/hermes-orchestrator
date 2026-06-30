@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v169-android-responsive35";
+const CACHE_NAME = "wasm-agent-v171-route-contracts";
 const ASSETS = [
   "/android-app.js",
   "/app-loader.js",
@@ -22,6 +22,7 @@ const ASSETS = [
   "/modules/speech-transcription/speech-transcription.js",
   "/modules/speech-transcription/transcript-draft.js",
   "/modules/speech-transcription/speech-transcription-worker.js",
+  "/modules/speech-transcription/speech-capture-worklet.js",
   "/modules/index.js",
   "/modules/hmr/dev-hmr.js",
   "/modules/hmr/module.js",

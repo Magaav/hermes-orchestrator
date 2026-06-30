@@ -72,6 +72,28 @@ human-only debug text, broad polling, and hidden state that requires manual
 inference. Extra context is allowed only when it pays for correctness, safety,
 or observability that cannot be achieved through a cheaper lookup path.
 
+## No Reactive Routing Monkey-Patches
+
+Never repair model-routing failures by adding product-specific strings,
+CSS selectors, DOM class names, filenames, or one-off lexical heuristics inside
+server/runtime code such as `static_server.py`. That is reactive
+monkey-patching: it hides missing architecture, increases token spend, and
+guarantees future misses.
+
+Routing knowledge must live in an owned contract: `docs/context/MAP.md`, the
+nearest owning `AGENTS.md`/`README.md`, or a dedicated machine-readable route
+registry with tests. Runtime code may load and enforce that contract, but must
+not become the contract. If a request cannot be routed from declared surface,
+owner, workspace root, capabilities, and proof policy, stop with
+`route_contract_missing` or add the missing contract first. Do not dispatch
+Hermes or any model to broad-search arbitrary roots as a substitute for route
+ownership.
+
+Hermes is a capability/tool provider, not the architecture owner. wasm-agent
+must route, scope, budget, and verify work before invoking Hermes. Hermes must
+receive a bounded task contract and should never be asked to infer the product
+map from raw user text.
+
 ## Self-Improving Harness Loop
 
 After intent/context routing and before slow investigation, rebuilds, runtime

@@ -16,9 +16,12 @@ export const SPEECH_TRANSCRIPTION_STATES = Object.freeze([
 
 const ACTIVE_STATES = new Set(["requesting-permission", "loading-model", "listening", "quiet", "transcribing"]);
 const DEFAULT_METADATA_URL = "/modules/speech-transcription/models/english-v1/metadata.json";
+const DEFAULT_CAPTURE_WORKLET_PATH = "./speech-capture-worklet.js";
+const DEFAULT_TARGET_SAMPLE_RATE = 16000;
 const DEFAULT_IDLE_TIMEOUT_MS = 15000;
 const DEFAULT_VAD_RMS_THRESHOLD = 0.015;
 const DEFAULT_SCRIPT_PROCESSOR_SIZE = 4096;
+const DEFAULT_WORKLET_FRAME_MS = 32;
 
 function clamp(value, min, max) {
   const number = Number(value);
@@ -75,11 +78,128 @@ export function validateSpeechModelMetadata(metadata = {}) {
   if (metadata.engine?.name !== "transformers.js") errors.push("engine.name must be transformers.js for english-v1");
   if (!metadata.engine?.acceleration?.includes("webgpu")) errors.push("engine.acceleration must include webgpu");
   if (!metadata.engine?.fallbacks?.includes("wasm")) errors.push("engine.fallbacks must include wasm");
+  const decode = metadata.engine?.decode;
+  if (!decode || typeof decode !== "object" || Array.isArray(decode)) {
+    errors.push("engine.decode must declare speech transcription decode knobs");
+  } else {
+    if (!Number.isFinite(Number(decode.finalNumBeams)) || Number(decode.finalNumBeams) < 1) {
+      errors.push("engine.decode.finalNumBeams must be a positive number");
+    }
+    if (!Number.isFinite(Number(decode.partialNumBeams)) || Number(decode.partialNumBeams) < 1) {
+      errors.push("engine.decode.partialNumBeams must be a positive number");
+    }
+    if (!Number.isFinite(Number(decode.temperature)) || Number(decode.temperature) < 0) {
+      errors.push("engine.decode.temperature must be a non-negative number");
+    }
+    if (typeof decode.doSample !== "boolean") errors.push("engine.decode.doSample must be boolean");
+    if (!Number.isFinite(Number(decode.maxTokensPerSecond)) || Number(decode.maxTokensPerSecond) <= 0) {
+      errors.push("engine.decode.maxTokensPerSecond must be a positive number");
+    }
+    if (!Number.isFinite(Number(decode.maxNewTokensBase)) || Number(decode.maxNewTokensBase) < 0) {
+      errors.push("engine.decode.maxNewTokensBase must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(decode.partialMaxNewTokens)) || Number(decode.partialMaxNewTokens) <= 0) {
+      errors.push("engine.decode.partialMaxNewTokens must be a positive number");
+    }
+    if (!Number.isFinite(Number(decode.finalMaxNewTokens)) || Number(decode.finalMaxNewTokens) <= 0) {
+      errors.push("engine.decode.finalMaxNewTokens must be a positive number");
+    }
+    if (typeof decode.streamPartialText !== "boolean") errors.push("engine.decode.streamPartialText must be boolean");
+    if (!Number.isFinite(Number(decode.streamEmitEveryMs)) || Number(decode.streamEmitEveryMs) <= 0) {
+      errors.push("engine.decode.streamEmitEveryMs must be a positive number");
+    }
+    if (typeof decode.warmupOnLoad !== "boolean") errors.push("engine.decode.warmupOnLoad must be boolean");
+    if (!Number.isFinite(Number(decode.warmupAudioMs)) || Number(decode.warmupAudioMs) <= 0) {
+      errors.push("engine.decode.warmupAudioMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(decode.warmupMaxNewTokens)) || Number(decode.warmupMaxNewTokens) <= 0) {
+      errors.push("engine.decode.warmupMaxNewTokens must be a positive number");
+    }
+  }
   if (!metadata.engine?.onnxRuntime?.wasmPaths?.mjs || !metadata.engine?.onnxRuntime?.wasmPaths?.wasm) {
     errors.push("engine.onnxRuntime.wasmPaths must include local mjs and wasm paths");
   }
   if (metadata.engine?.browserSpeechRecognition === true) {
     errors.push("browser SpeechRecognition is not a production ASR engine");
+  }
+  const audio = metadata.audio;
+  if (!audio || typeof audio !== "object" || Array.isArray(audio)) {
+    errors.push("audio must declare speech capture/VAD policy");
+  } else {
+    if (!Number.isFinite(Number(audio.sampleRate)) || Number(audio.sampleRate) <= 0) {
+      errors.push("audio.sampleRate must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.vadRmsThreshold)) || Number(audio.vadRmsThreshold) <= 0) {
+      errors.push("audio.vadRmsThreshold must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.workletFrameMs)) || Number(audio.workletFrameMs) <= 0) {
+      errors.push("audio.workletFrameMs must be a positive number");
+    }
+    if (typeof audio.vadAdaptiveNoise !== "boolean") errors.push("audio.vadAdaptiveNoise must be boolean");
+    if (!Number.isFinite(Number(audio.vadNoiseFloorRms)) || Number(audio.vadNoiseFloorRms) < 0) {
+      errors.push("audio.vadNoiseFloorRms must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.vadNoiseFloorAlpha)) || Number(audio.vadNoiseFloorAlpha) <= 0 || Number(audio.vadNoiseFloorAlpha) > 1) {
+      errors.push("audio.vadNoiseFloorAlpha must be in (0, 1]");
+    }
+    if (!Number.isFinite(Number(audio.vadStartRatio)) || Number(audio.vadStartRatio) < 1) {
+      errors.push("audio.vadStartRatio must be >= 1");
+    }
+    if (!Number.isFinite(Number(audio.vadHoldRatio)) || Number(audio.vadHoldRatio) < 1) {
+      errors.push("audio.vadHoldRatio must be >= 1");
+    }
+    if (!Number.isFinite(Number(audio.vadMinStartRms)) || Number(audio.vadMinStartRms) < 0) {
+      errors.push("audio.vadMinStartRms must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.vadMinHoldRms)) || Number(audio.vadMinHoldRms) < 0) {
+      errors.push("audio.vadMinHoldRms must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.vadHangoverMs)) || Number(audio.vadHangoverMs) < 0) {
+      errors.push("audio.vadHangoverMs must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.minSegmentMs)) || Number(audio.minSegmentMs) <= 0) {
+      errors.push("audio.minSegmentMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.quietAfterMs)) || Number(audio.quietAfterMs) <= 0) {
+      errors.push("audio.quietAfterMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.partialEveryMs)) || Number(audio.partialEveryMs) <= 0) {
+      errors.push("audio.partialEveryMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.preRollMs)) || Number(audio.preRollMs) < 0) {
+      errors.push("audio.preRollMs must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.partialWindowMs)) || Number(audio.partialWindowMs) <= 0) {
+      errors.push("audio.partialWindowMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.partialOverlapMs)) || Number(audio.partialOverlapMs) < 0) {
+      errors.push("audio.partialOverlapMs must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.partialCooldownMs)) || Number(audio.partialCooldownMs) < 0) {
+      errors.push("audio.partialCooldownMs must be a non-negative number");
+    }
+    if (!Number.isFinite(Number(audio.minPartialWindowMs)) || Number(audio.minPartialWindowMs) <= 0) {
+      errors.push("audio.minPartialWindowMs must be a positive number");
+    }
+    if (
+      Number.isFinite(Number(audio.minPartialWindowMs))
+      && Number.isFinite(Number(audio.partialWindowMs))
+      && Number(audio.minPartialWindowMs) > Number(audio.partialWindowMs)
+    ) {
+      errors.push("audio.minPartialWindowMs must be <= audio.partialWindowMs");
+    }
+    if (!Number.isFinite(Number(audio.partialWindowStepMs)) || Number(audio.partialWindowStepMs) <= 0) {
+      errors.push("audio.partialWindowStepMs must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.partialBackpressureRtf)) || Number(audio.partialBackpressureRtf) <= 0) {
+      errors.push("audio.partialBackpressureRtf must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.partialRecoveryRtf)) || Number(audio.partialRecoveryRtf) <= 0) {
+      errors.push("audio.partialRecoveryRtf must be a positive number");
+    }
+    if (!Number.isFinite(Number(audio.partialCooldownMaxMs)) || Number(audio.partialCooldownMaxMs) < Number(audio.partialCooldownMs || 0)) {
+      errors.push("audio.partialCooldownMaxMs must be >= audio.partialCooldownMs");
+    }
   }
   return { ok: errors.length === 0, errors };
 }
@@ -127,6 +247,12 @@ function resolveAudioContextClass(options = {}) {
     || null;
 }
 
+function resolveAudioWorkletNodeClass(options = {}) {
+  return options.AudioWorkletNodeClass
+    || globalThis.AudioWorkletNode
+    || null;
+}
+
 function createDefaultWorker() {
   return new Worker(new URL("./speech-transcription-worker.js", import.meta.url), {
     type: "module",
@@ -163,9 +289,15 @@ export function createSpeechTranscriber(options = {}) {
   const vadRmsThreshold = Number.isFinite(options.vadRmsThreshold)
     ? Math.max(0, options.vadRmsThreshold)
     : DEFAULT_VAD_RMS_THRESHOLD;
+  const targetSampleRate = Number.isFinite(options.targetSampleRate)
+    ? clamp(options.targetSampleRate, 8000, 48000)
+    : DEFAULT_TARGET_SAMPLE_RATE;
   const audioBufferSize = Number.isFinite(options.audioBufferSize)
     ? Math.max(256, options.audioBufferSize)
     : DEFAULT_SCRIPT_PROCESSOR_SIZE;
+  const workletFrameMs = Number.isFinite(options.workletFrameMs)
+    ? clamp(options.workletFrameMs, 10, 96)
+    : DEFAULT_WORKLET_FRAME_MS;
 
   let state = "idle";
   let destroyed = false;
@@ -173,6 +305,7 @@ export function createSpeechTranscriber(options = {}) {
   let stream = null;
   let audioContext = null;
   let sourceNode = null;
+  let workletNode = null;
   let processorNode = null;
   let silenceGain = null;
   let worker = null;
@@ -232,7 +365,11 @@ export function createSpeechTranscriber(options = {}) {
     if (data.type === "state") {
       if (data.state === "ready") {
         workerReady = true;
-        emitState("quiet", { engine: data.engine || "" });
+        if (stream || state === "loading-model") {
+          emitState("quiet", { engine: data.engine || "" });
+        } else {
+          applyButtonState(button, state, latestLevel);
+        }
         dispatchDiagnostic(options.onDiagnostic, { type: "ready", engine: data.engine || "", metadata: data.metadata || null });
         return;
       }
@@ -281,10 +418,22 @@ export function createSpeechTranscriber(options = {}) {
       language,
       vad: {
         rmsThreshold: vadRmsThreshold,
+        vadAdaptiveNoise: options.vadAdaptiveNoise,
+        vadNoiseFloorRms: options.vadNoiseFloorRms,
+        vadNoiseFloorAlpha: options.vadNoiseFloorAlpha,
+        vadStartRatio: options.vadStartRatio,
+        vadHoldRatio: options.vadHoldRatio,
+        vadMinStartRms: options.vadMinStartRms,
+        vadMinHoldRms: options.vadMinHoldRms,
+        vadHangoverMs: options.vadHangoverMs,
         quietAfterMs: options.quietAfterMs,
         minSegmentMs: options.minSegmentMs,
         partialEveryMs: options.partialEveryMs,
         maxSegmentMs: options.maxSegmentMs,
+        preRollMs: options.preRollMs,
+        partialWindowMs: options.partialWindowMs,
+        partialOverlapMs: options.partialOverlapMs,
+        partialCooldownMs: options.partialCooldownMs,
       },
     });
     return worker;
@@ -305,6 +454,11 @@ export function createSpeechTranscriber(options = {}) {
 
   function disconnectAudio() {
     try {
+      if (workletNode?.port) {
+        workletNode.port.onmessage = null;
+        workletNode.port.close?.();
+      }
+      workletNode?.disconnect?.();
       processorNode && (processorNode.onaudioprocess = null);
       processorNode?.disconnect?.();
       sourceNode?.disconnect?.();
@@ -312,6 +466,7 @@ export function createSpeechTranscriber(options = {}) {
     } catch {
       // Audio node cleanup is best effort across browser engines.
     }
+    workletNode = null;
     processorNode = null;
     sourceNode = null;
     silenceGain = null;
@@ -345,34 +500,110 @@ export function createSpeechTranscriber(options = {}) {
     terminateWorker();
   }
 
-  function setupAudioPipeline(mediaStream) {
-    const AudioContextClass = resolveAudioContextClass(options);
-    if (!AudioContextClass) throw new Error("audio_context_unavailable");
-    audioContext = new AudioContextClass({ latencyHint: "interactive" });
-    sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  function handleCapturedAudio(audio, rms, captureEngine = "script-processor") {
+    updateAudioLevel(rms);
+    if (workerReady && (state === "quiet" || state === "listening")) {
+      emitState(rms >= vadRmsThreshold ? "listening" : "quiet", { rms });
+    }
+    postWorker({
+      type: "audio",
+      sampleRate: audioContext?.sampleRate || 48000,
+      rms,
+      captureEngine,
+      audio,
+    }, [audio.buffer]);
+  }
+
+  async function setupAudioWorkletCapture() {
+    if (options.disableAudioWorklet) return false;
+    const AudioWorkletNodeClass = resolveAudioWorkletNodeClass(options);
+    if (!audioContext?.audioWorklet?.addModule || !AudioWorkletNodeClass) return false;
+    try {
+      const workletUrl = options.audioWorkletUrl || new URL(DEFAULT_CAPTURE_WORKLET_PATH, import.meta.url);
+      await audioContext.audioWorklet.addModule(String(workletUrl));
+      const targetFrameCount = Math.max(128, Math.round(((audioContext.sampleRate || targetSampleRate) * workletFrameMs) / 1000));
+      workletNode = new AudioWorkletNodeClass(audioContext, "wasm-agent-speech-capture", {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        processorOptions: { targetFrameCount },
+      });
+      workletNode.port.onmessage = (event) => {
+        if (destroyed || !stream) return;
+        const data = event?.data || {};
+        const audio = data.audio instanceof Float32Array ? data.audio : new Float32Array(data.audio || []);
+        if (!audio.length) return;
+        handleCapturedAudio(audio, Number(data.rms || 0), "audio-worklet");
+      };
+      sourceNode.connect(workletNode);
+      workletNode.connect(silenceGain);
+      silenceGain.connect(audioContext.destination);
+      dispatchDiagnostic(options.onDiagnostic, {
+        type: "diagnostic",
+        event: "audio_capture_engine",
+        engine: "audio-worklet",
+        sampleRate: audioContext.sampleRate || 0,
+        frameMs: workletFrameMs,
+        targetFrameCount,
+      });
+      return true;
+    } catch (error) {
+      try {
+        workletNode?.disconnect?.();
+        workletNode?.port?.close?.();
+      } catch {
+        // Worklet fallback cleanup is best effort.
+      }
+      workletNode = null;
+      dispatchDiagnostic(options.onDiagnostic, {
+        type: "diagnostic",
+        event: "audio_worklet_capture_fallback",
+        error: errorMessage(error),
+      });
+      return false;
+    }
+  }
+
+  function setupScriptProcessorCapture() {
     processorNode = audioContext.createScriptProcessor(audioBufferSize, 1, 1);
-    silenceGain = audioContext.createGain();
-    silenceGain.gain.value = 0;
     processorNode.onaudioprocess = (event) => {
       if (destroyed || !stream) return;
       const source = event.inputBuffer?.getChannelData?.(0);
       if (!source) return;
       const audio = new Float32Array(source);
-      const rms = rmsForBuffer(audio);
-      updateAudioLevel(rms);
-      if (workerReady && (state === "quiet" || state === "listening")) {
-        emitState(rms >= vadRmsThreshold ? "listening" : "quiet", { rms });
-      }
-      postWorker({
-        type: "audio",
-        sampleRate: audioContext.sampleRate || 48000,
-        rms,
-        audio,
-      }, [audio.buffer]);
+      handleCapturedAudio(audio, rmsForBuffer(audio), "script-processor");
     };
     sourceNode.connect(processorNode);
     processorNode.connect(silenceGain);
     silenceGain.connect(audioContext.destination);
+    dispatchDiagnostic(options.onDiagnostic, {
+      type: "diagnostic",
+      event: "audio_capture_engine",
+      engine: "script-processor",
+      sampleRate: audioContext.sampleRate || 0,
+      bufferSize: audioBufferSize,
+    });
+  }
+
+  async function setupAudioPipeline(mediaStream) {
+    const AudioContextClass = resolveAudioContextClass(options);
+    if (!AudioContextClass) throw new Error("audio_context_unavailable");
+    try {
+      audioContext = new AudioContextClass({ latencyHint: "interactive", sampleRate: targetSampleRate });
+    } catch (error) {
+      dispatchDiagnostic(options.onDiagnostic, {
+        type: "diagnostic",
+        event: "audio_context_sample_rate_fallback",
+        targetSampleRate,
+        error: errorMessage(error),
+      });
+      audioContext = new AudioContextClass({ latencyHint: "interactive" });
+    }
+    sourceNode = audioContext.createMediaStreamSource(mediaStream);
+    silenceGain = audioContext.createGain();
+    silenceGain.gain.value = 0;
+    if (await setupAudioWorkletCapture()) return;
+    setupScriptProcessorCapture();
   }
 
   function supported() {
@@ -409,7 +640,7 @@ export function createSpeechTranscriber(options = {}) {
             video: false,
           });
         }
-        setupAudioPipeline(stream);
+        await setupAudioPipeline(stream);
         emitState("loading-model");
         ensureWorker();
         postWorker({ type: "start", language });
@@ -431,6 +662,13 @@ export function createSpeechTranscriber(options = {}) {
       }
     })();
     return starting;
+  }
+
+  function preload() {
+    if (destroyed) return false;
+    if (!(options.workerFactory || globalThis.Worker)) return false;
+    ensureWorker();
+    return true;
   }
 
   async function stop(optionsForStop = {}) {
@@ -479,6 +717,7 @@ export function createSpeechTranscriber(options = {}) {
   applyButtonState(button, state, latestLevel);
 
   return {
+    preload,
     start,
     stop,
     toggle,

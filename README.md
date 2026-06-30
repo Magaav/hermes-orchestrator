@@ -169,6 +169,13 @@ whether detail can be fetched only when needed. Production-grade observability
 is LLM-first: compact, redacted, provider-aware, replayable, and precise enough
 to let the model decide which bounded tool or proof to call next.
 
+Route ownership is part of the LLM-native contract. Do not repair routing
+failures by adding product strings, CSS selectors, DOM classes, filenames, or
+feature labels to server/runtime code. Runtime code may enforce a resolved
+route contract, but routing knowledge must live in the context map, owning
+docs, or a machine-readable route registry. Missing route fields should produce
+`route_contract_missing`, not a broad Hermes/model search over arbitrary roots.
+
 ## Self-Improving Harness
 
 Use `docs/context/HARNESS.md` after intent/context routing and before slow

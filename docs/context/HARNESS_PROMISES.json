@@ -495,6 +495,159 @@
         "If wake state build id is stale, install android-universal-20260622T193436Z or newer through the Windows bridge.",
         "If speech produces no timeline evidence, tune live wake policy/model without rebuilding unless a missing native primitive is proven."
       ]
+    },
+    {
+      "id": "wasm-agent-route-contract-tools",
+      "owner": "plugins/wasm-agent",
+      "claim": "wasm-agent route resolution and map/lookup tools are registry-backed, bounded by route contracts, and do not scan source during route.resolve.",
+      "whenToUse": "After changing wasm-agent route contracts, direct-head route resolution, route/map/lookup tools, or provider dispatch scoping.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/security_loop_policy.test.py"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "route.resolve returns a declared route contract for known wasm-agent surfaces",
+        "route.resolve missing-route behavior returns route_contract_missing without invoking source search",
+        "map.summary returns a tiny route summary",
+        "lookup.files returns bounded file receipts with path, bytes, and sha256 where available",
+        "lookup.symbol searches only the resolved route contract scope",
+        "explicit workspace_root does not bypass route contract resolution"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/security_loop_policy.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "If this fails, fix the route registry or resolver before allowing provider/Hermes dispatch.",
+        "Do not add route ownership strings to static_server.py; add or repair a route contract."
+      ]
+    },
+    {
+      "id": "wasm-agent-no-selector-routing-heuristics",
+      "owner": "plugins/wasm-agent",
+      "claim": "static_server.py does not route wasm-agent product ownership through CSS selectors, DOM classes, product labels, or ad hoc route regex lists.",
+      "whenToUse": "After editing wasm-agent provider dispatch, route contracts, UI-symbol helpers, or static_server.py routing logic.",
+      "command": [
+        "node",
+        "plugins/wasm-agent/tests/wasm_agent_smoke.test.js"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "static_server.py does not contain WASM_AGENT_UI_ROUTE_TERMS",
+        "static_server.py does not contain WASM_AGENT_UI_SELECTOR_RE",
+        "route ownership is represented by agent_route_contracts.json or context docs, not runtime selector branches"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/wasm_agent_smoke.test.js"
+      ],
+      "nextSuggestedSteps": [
+        "If selector routing returns, remove it and add a route contract plus resolver test instead."
+      ]
+    },
+    {
+      "id": "wasm-agent-token-ledger-exact",
+      "owner": "plugins/wasm-agent",
+      "claim": "wasm-agent persists exact provider token usage by quest, turn, and provider call, with raw usage stored separately from normalized exact fields.",
+      "whenToUse": "After changing direct-head provider adapters, Hermes dispatch, agent run storage, token aggregation, or timeline token events.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "direct-head provider runs require a route contract before provider/Hermes dispatch",
+        "token ledger rows are persisted per provider call",
+        "quest/run total equals the sum of exact provider-call totals",
+        "raw provider usage remains available separately from normalized exact fields",
+        "cost.status exposes compact ledger totals"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "If exact and estimated usage are mixed, split the fields before exposing totals.",
+        "If a provider omits usage, store estimated values only under estimated fields and mark exact false."
+      ]
+    },
+    {
+      "id": "wasm-agent-timeline-token-ledger-layout",
+      "owner": "plugins/wasm-agent",
+      "claim": "avatar-chat timeline and token-ledger UI remain width-contained with long route ids, token call ids, and event details.",
+      "whenToUse": "After changing avatar-chat timeline rendering, token ledger rendering, agent message CSS, or compact run proof UI.",
+      "command": [
+        "node",
+        "plugins/wasm-agent/tests/agent_timeline_layout.test.js"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "behavioral"
+      ],
+      "passRequires": [
+        "Chromium renders synthetic long timeline rows without document horizontal overflow",
+        "agent-timeline boxes stay inside the agent message bounds",
+        "agent-token-ledger boxes stay inside the agent message bounds",
+        "long provider call ids and route ids are clipped or wrapped inside bounded grid columns"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/styles.css",
+        "plugins/wasm-agent/tests/agent_timeline_layout.test.js"
+      ],
+      "nextSuggestedSteps": [
+        "If this fails, fix the layout constraints before adding more timeline or ledger fields.",
+        "Do not hide overflow by removing route, token, or proof fields from the UI."
+      ]
     }
   ]
 }

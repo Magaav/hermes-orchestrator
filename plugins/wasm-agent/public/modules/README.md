@@ -76,8 +76,16 @@ tree and workflow.
   Audio for local capture/VAD glow, and hands audio to a worker-owned local ASR
   pipeline. English v1 metadata lives under static module paths with immutable
   version/SHA cache policy and pins Transformers.js, ONNX Runtime WASM, and
-  Whisper tiny English fp16 assets; replacing runtime/model artifacts is a
-  metadata update, not a native rebuild.
+  Whisper tiny English fp16 assets. Mic click warms the local ASR worker while
+  permission is pending, and the worker reuses same-SHA assets across speech
+  cache versions plus stores tiny SHA cache markers so immutable
+  runtime/model assets are not rehashed on every load. Capture prefers
+  frame-batched AudioWorklet with ScriptProcessor fallback, then speech-gates
+  with a short pre-roll, noise-adaptive VAD thresholds, enforced adaptive
+  rolling partials, partial token streaming, duration-capped decode, ONNX graph
+  optimization, and deterministic beam final decode; replacing runtime/model
+  artifacts or tuning decode/VAD metadata is a shared web update, not a native
+  rebuild.
 - `cv-shapes/`: lazy planned contour/layout evidence contract; disabled by
   default until a CV runtime is bundled.
 - `semantic-vision/`: lazy planned semantic label/embedding contract; disabled

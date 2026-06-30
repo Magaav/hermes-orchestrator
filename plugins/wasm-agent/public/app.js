@@ -534,6 +534,7 @@ const CLIENT_SNAPSHOT_SCHEMA = "hermes.wasm_agent.client_snapshot.v1";
 const CLIENT_SNAPSHOT_REQUEST_SCHEMA = "hermes.wasm_agent.client_snapshot.request.v1";
 const CLIENT_SNAPSHOT_RESPONSE_SCHEMA = "hermes.wasm_agent.client_snapshot.response.v1";
 const AGENT_ACTIVE_SESSION_STORAGE_KEY = "wasmAgent.activeSession.v1";
+const AGENT_TARGET_NODE_SESSION_STORAGE_KEY = "wasmAgent.agentTargetNode.session.v1";
 const AGENT_LAYOUT_STORAGE_KEY = "wasmAgent.agentLayout.v1";
 const AGENT_MODELS_STORAGE_KEY = "wasmAgent.agentModels.v1";
 const AGENT_IMAGE_PROCESSING_STORAGE_KEY = "wasmAgent.imageProcessing.v1";
@@ -704,6 +705,8 @@ const AGENT_MODEL_TARGET_PREFIX = "__target:model:";
 const AGENT_FRONTIER_NODE_ID = "frontier";
 const AGENT_MASTER_FRONTIER_TARGET_ID = "__target:master_frontier__";
 const AGENT_MASTER_FRONTIER_LABEL = "Master:frontier";
+const AGENT_MISSING_TARGET_PREFIX = "__target:missing:";
+const AGENT_MISSING_TARGET_LABEL = "NODE IS MISSING";
 const AGENT_MASTER_FRONTIER_CAPS = Object.freeze([
   "repo.read",
   "repo.edit",
@@ -2324,7 +2327,7 @@ const state = {
   clientSnapshotRequestBusy: false,
   clientSnapshotRequestInterval: 0,
   clientSnapshotHandledRequests: new Set(),
-  agentTargetNode: "frontier",
+  agentTargetNode: readAgentTargetNodeSessionPreference() || "frontier",
   nativeVoiceChatLastTranscript: "",
   nativeVoiceChatLastTranscriptAt: 0,
   nativeVoiceChatLastSessionId: "",
@@ -13852,6 +13855,78 @@ function agentTranscriptForRequest() {
     }));
 }
 
+function isAgentContinuationRequest(text = "") {
+  const normalized = cleanText(text, "").toLowerCase().replace(/[.!?]+$/g, "").trim();
+  return [
+    "continue",
+    "go on",
+    "keep going",
+    "resume",
+    "continue please",
+    "please continue",
+    "carry on",
+  ].includes(normalized);
+}
+
+function compactAgentTimelineRows(message = {}, limit = 10) {
+  const timeline = Array.isArray(message.timeline) ? message.timeline : [];
+  const actions = Array.isArray(message.actions) ? message.actions : [];
+  return [...timeline, ...actions]
+    .map((item) => ({
+      label: cleanText(item.label || item.event_type || item.id || "", ""),
+      status: cleanText(item.status || "", ""),
+      detail: truncateText(cleanText(item.detail || item.summary || item.meta || "", ""), 140),
+    }))
+    .filter((item) => item.label || item.detail)
+    .slice(-limit);
+}
+
+function latestAgentContinuationContext(session = activeAgentSession()) {
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  const candidates = messages
+    .map((message, index) => ({ message, index }))
+    .filter(({ message }) => message && message.role === "assistant" && message.content !== AGENT_DEFAULT_MESSAGE_CONTENT)
+    .map(({ message, index }) => {
+      const content = cleanText(message.content || "", "");
+      const status = cleanText(message.agent_run_status || "", "").toLowerCase();
+      const phase = cleanText(message.phase || "", "").toLowerCase();
+      const timelineCount = compactAgentTimelineRows(message, 20).length;
+      const changedCount = Array.isArray(message.changed_files) ? message.changed_files.length : 0;
+      const hollow = /no active task context|provide objective/i.test(content);
+      const score = (
+        (message.pending ? 60 : 0)
+        + (status === "interrupted" ? 50 : 0)
+        + (phase.includes("error") ? 35 : 0)
+        + (/not finished|interrupted|could not answer|needs attention/i.test(content) ? 25 : 0)
+        + Math.min(20, timelineCount)
+        + Math.min(20, changedCount * 4)
+        + (message.run_id ? 5 : 0)
+        - (hollow ? 35 : 0)
+        + Math.min(10, index / Math.max(1, messages.length))
+      );
+      return { message, score };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score);
+  const candidate = candidates[0]?.message || null;
+  if (!candidate) return null;
+  return {
+    schema: "hermes.wasm_agent.avatar_chat.continuation_context.v1",
+    source: "avatar-chat-session",
+    previous_run_id: cleanText(candidate.run_id || "", ""),
+    previous_turn_id: cleanText(candidate.turn_id || "", ""),
+    previous_status: cleanText(candidate.agent_run_status || (candidate.pending ? "running" : ""), ""),
+    previous_phase: cleanText(candidate.phase || "", ""),
+    previous_answer: truncateText(cleanText(candidate.content || "", ""), 900),
+    changed_files: (Array.isArray(candidate.changed_files) ? candidate.changed_files : [])
+      .map((file) => cleanText(file.path || file.file || file, ""))
+      .filter(Boolean)
+      .slice(0, 12),
+    timeline: compactAgentTimelineRows(candidate, 12),
+    instruction: "Continue the previous avatar-chat objective from this compact context; do not ask the user to restate the objective unless the context is empty or contradictory.",
+  };
+}
+
 function readAgentLayout() {
   try {
     const raw = JSON.parse(localStorage.getItem(AGENT_LAYOUT_STORAGE_KEY) || "{}");
@@ -15815,9 +15890,52 @@ function defaultAgentTargetNode() {
   return AGENT_FRONTIER_NODE_ID;
 }
 
+function readAgentTargetNodeSessionPreference() {
+  try {
+    return cleanText(window.sessionStorage?.getItem(AGENT_TARGET_NODE_SESSION_STORAGE_KEY) || "", "");
+  } catch {
+    return "";
+  }
+}
+
+function saveAgentTargetNodeSessionPreference(nodeId = state.agentTargetNode) {
+  try {
+    const value = cleanText(nodeId, "");
+    if (value) window.sessionStorage?.setItem(AGENT_TARGET_NODE_SESSION_STORAGE_KEY, value);
+    else window.sessionStorage?.removeItem(AGENT_TARGET_NODE_SESSION_STORAGE_KEY);
+  } catch {
+    // Session node preference is UI convenience state; default routing still works.
+  }
+}
+
+function commitAgentTargetNode(nodeId) {
+  state.agentTargetNode = cleanText(nodeId, defaultAgentTargetNode());
+  saveAgentTargetNodeSessionPreference(state.agentTargetNode);
+  return state.agentTargetNode;
+}
+
+function agentMissingTargetValue(nodeId) {
+  return `${AGENT_MISSING_TARGET_PREFIX}${encodeURIComponent(cleanText(nodeId, ""))}`;
+}
+
+function agentMissingTargetNodeId(value) {
+  const raw = cleanText(value, "");
+  if (!raw.startsWith(AGENT_MISSING_TARGET_PREFIX)) return "";
+  try {
+    return cleanText(decodeURIComponent(raw.slice(AGENT_MISSING_TARGET_PREFIX.length)), "");
+  } catch {
+    return "";
+  }
+}
+
+function agentTargetIsMissing(value = state.agentTargetNode) {
+  return cleanText(value, "").startsWith(AGENT_MISSING_TARGET_PREFIX);
+}
+
 function agentTargetNode() {
   const fallback = defaultAgentTargetNode();
   const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
+  if (agentTargetIsMissing(target)) return agentMissingTargetNodeId(target) || fallback;
   if (agentTargetIsMasterFrontier(target)) return AGENT_FRONTIER_NODE_ID;
   if (
     target === AGENT_PROVIDER_TARGET_ID
@@ -16002,6 +16120,16 @@ function configuredAgentTargetOptions() {
 function agentNodeSelectOptions() {
   const configured = configuredAgentTargetOptions();
   const options = [...configured];
+  const savedTarget = readAgentTargetNodeSessionPreference();
+  if (savedTarget && !options.some((option) => option.value === savedTarget)) {
+    options.unshift({
+      value: agentMissingTargetValue(savedTarget),
+      label: AGENT_MISSING_TARGET_LABEL,
+      detail: cleanDisplayNodeId(savedTarget),
+      kind: "missing",
+      nodeId: savedTarget,
+    });
+  }
   if (!configured.length && !isAdminUser()) options.push({ value: AGENT_NONE_TARGET_ID, label: "None", kind: "empty" });
   options.push({
     value: configured.length ? AGENT_EDIT_CONFIG_TARGET_ID : AGENT_NEW_CONFIG_TARGET_ID,
@@ -16051,6 +16179,10 @@ function agentNodeSelectDiagnostic() {
 
 function preferredAgentNodeSelectValue(options = agentNodeSelectOptions()) {
   const values = new Set(options.map((option) => option.value));
+  const savedTarget = readAgentTargetNodeSessionPreference();
+  if (savedTarget && values.has(savedTarget)) return savedTarget;
+  const missingSavedTarget = savedTarget ? agentMissingTargetValue(savedTarget) : "";
+  if (missingSavedTarget && values.has(missingSavedTarget)) return missingSavedTarget;
   const raw = cleanText(state.agentTargetNode, "");
   const readyHarness = options.find((option) => option.kind === "harness" && option.lifecycle === "ready" && option.nodeId && option.value === option.nodeId);
   const rawIsDirectProvider = raw === AGENT_PROVIDER_TARGET_ID || raw.startsWith(AGENT_PROVIDER_TARGET_PREFIX);
@@ -16102,9 +16234,13 @@ function renderAgentNodeSelect() {
 
 function setAgentTargetNode(nodeId) {
   const requested = cleanText(nodeId, defaultAgentTargetNode());
+  if (agentTargetIsMissing(requested)) {
+    renderAgentNodeSelect();
+    return;
+  }
   if (requested === AGENT_NONE_TARGET_ID) {
     const previous = state.agentTargetNode;
-    state.agentTargetNode = AGENT_NONE_TARGET_ID;
+    commitAgentTargetNode(AGENT_NONE_TARGET_ID);
     closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
@@ -16151,7 +16287,7 @@ function setAgentTargetNode(nodeId) {
   }
   if (requested === AGENT_MASTER_FRONTIER_TARGET_ID && isAdminUser()) {
     const previous = state.agentTargetNode;
-    state.agentTargetNode = AGENT_MASTER_FRONTIER_TARGET_ID;
+    commitAgentTargetNode(AGENT_MASTER_FRONTIER_TARGET_ID);
     closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
@@ -16170,7 +16306,7 @@ function setAgentTargetNode(nodeId) {
   if ((requested === AGENT_PROVIDER_TARGET_ID || requested.startsWith(AGENT_PROVIDER_TARGET_PREFIX)) && directProviderConfigured(requestedProvider)) {
     const previous = state.agentTargetNode;
     state.agentDirectProvider = requestedProvider;
-    state.agentTargetNode = directProviderTargetValue(requestedProvider);
+    commitAgentTargetNode(directProviderTargetValue(requestedProvider));
     closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
@@ -16187,7 +16323,7 @@ function setAgentTargetNode(nodeId) {
   }
   if (requested === AGENT_OWNED_AGENT_TARGET_ID && ownedAgentConfigured()) {
     const previous = state.agentTargetNode;
-    state.agentTargetNode = AGENT_OWNED_AGENT_TARGET_ID;
+    commitAgentTargetNode(AGENT_OWNED_AGENT_TARGET_ID);
     closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
@@ -16213,7 +16349,7 @@ function setAgentTargetNode(nodeId) {
     state.agentTargetNode = targetNode;
     applyAgentModelToTarget(model);
     persistAgentModelSelection();
-    state.agentTargetNode = agentModelTargetValue(model) || targetNode;
+    commitAgentTargetNode(agentModelTargetValue(model) || targetNode);
     closeNodeForm();
     closeAgentModelSetup();
     renderAgentNodeSelect();
@@ -16241,7 +16377,7 @@ function setAgentTargetNode(nodeId) {
     return;
   }
   if (requested === AGENT_SET_HERMES_TARGET_ID) {
-    state.agentTargetNode = defaultAgentTargetNode();
+    commitAgentTargetNode(defaultAgentTargetNode());
     openAgentSetupBalloon({
       mode: "agent",
       message: "Set or pick a node before sending chat messages.",
@@ -16255,7 +16391,7 @@ function setAgentTargetNode(nodeId) {
     ? directProviderTargetValue(activeAgentDirectProviderConfig())
     : !isAdminUser() && isGlobalAgentNodeId(requested) ? AGENT_SANDBOX_NODE_ID : requested;
   const previous = state.agentTargetNode;
-  state.agentTargetNode = next;
+  commitAgentTargetNode(next);
   renderAgentNodeSelect();
   renderAgentModelSelect();
   renderAgentReadinessStatus();
@@ -22536,6 +22672,72 @@ async function fetchJson(path, options = {}) {
   }
 }
 
+async function fetchAgentKernelTool(path, body = {}, options = {}) {
+  if (!isAdminUser()) throw new Error("Agent kernel tools require admin access.");
+  return fetchJson(path, {
+    method: "POST",
+    timeoutMs: options.timeoutMs || 10000,
+    body,
+    signal: options.signal,
+  });
+}
+
+function agentKernelRouteSummary(proof = {}) {
+  const summary = proof.summary || proof.map_summary || {};
+  const routeId = cleanText(summary.route_id || proof.route_id || proof.route_contract?.route_id || "", "");
+  const fileCount = Number(proof.file_count ?? proof.files?.count ?? 0);
+  return [routeId, fileCount ? `${fileCount} file receipts` : ""].filter(Boolean).join(" / ");
+}
+
+async function proveAgentKernelRouteTools(objective, pendingMessage, options = {}) {
+  const resolvePayload = await fetchAgentKernelTool("/agent/tools/route.resolve", {
+    route_id: "wasm-agent.avatar-chat.ui",
+    surface_hint: "avatar-chat",
+    objective,
+  }, { signal: options.signal, timeoutMs: 8000 });
+  const routeContract = resolvePayload.route_contract || {};
+  const routeId = cleanText(routeContract.route_id || resolvePayload.summary?.route_id || "", "");
+  if (!routeId) throw new Error(resolvePayload.error?.message || "route_contract_missing");
+  const [mapPayload, filesPayload] = await Promise.all([
+    fetchAgentKernelTool("/agent/tools/map.summary", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
+    fetchAgentKernelTool("/agent/tools/lookup.files", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
+  ]);
+  const proof = {
+    schema: "hermes.wasm_agent.client_kernel_route_proof.v1",
+    route_id: routeId,
+    route_contract: routeContract,
+    summary: resolvePayload.summary || mapPayload.summary || {},
+    map_summary: mapPayload.summary || {},
+    files: {
+      count: Number(filesPayload.count || 0),
+      receipts: Array.isArray(filesPayload.files) ? filesPayload.files.slice(0, 12) : [],
+    },
+    tools: ["route.resolve", "map.summary", "lookup.files"],
+  };
+  if (pendingMessage) {
+    pendingMessage.kernel_route_proof = proof;
+    pendingMessage.route_contract = routeContract;
+    mergeAgentAction(pendingMessage, agentAction("Kernel route proof", "done", agentKernelRouteSummary(proof), {
+      id: "client_kernel_route_preflight",
+      topic: "run-wasm",
+      kind: "context",
+      meta: "route.resolve/map.summary/lookup.files",
+      arguments: proof,
+      preview: JSON.stringify({
+        route_id: proof.route_id,
+        owner: proof.summary.owner,
+        workspace_root: proof.summary.workspace_root,
+        files: proof.files.receipts.map((item) => ({
+          path: item.path,
+          bytes: item.bytes,
+          sha256: item.sha256 ? item.sha256.slice(0, 12) : "",
+        })),
+      }, null, 2),
+    }));
+  }
+  return proof;
+}
+
 async function fetchExternalJson(url, options = {}) {
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort();
@@ -22832,12 +23034,7 @@ function handleAgentStreamLine(line, pendingMessage) {
   }
   if (!payload || typeof payload === "string") {
     const delta = typeof payload === "string" ? payload : text;
-    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
-    pendingMessage.agent_delta_started = true;
-    updateAgentPendingMessage(pendingMessage, {
-      phase: pendingMessage.phase || "Streaming",
-      content: `${currentContent}${delta}`,
-    });
+    appendAgentVisibleDelta(pendingMessage, delta);
     return { type: "delta", delta };
   }
   if (payload.run_id) pendingMessage.run_id = cleanText(payload.run_id, "");
@@ -22846,35 +23043,249 @@ function handleAgentStreamLine(line, pendingMessage) {
     pendingMessage.run_id = cleanText(payload.run.run_id || payload.run_id, pendingMessage.run_id || "");
     pendingMessage.turn_id = cleanText(payload.run.turn_id, pendingMessage.turn_id || "");
     pendingMessage.agent_run_status = cleanText(payload.run.status, pendingMessage.agent_run_status || "");
+    const timeline = Array.isArray(pendingMessage.timeline) ? [...pendingMessage.timeline] : [];
+    const runEvent = {
+      id: `tl_run_started_${payload.seq || 0}`,
+      label: "run.started",
+      status: "done",
+      detail: `${pendingMessage.run_id || ""} / ${pendingMessage.agent_run_status || ""}`.trim(),
+      kind: "timeline",
+      event_type: "run.started",
+    };
+    const existing = timeline.findIndex((item) => item.id === runEvent.id);
+    if (existing >= 0) {
+      timeline[existing] = { ...timeline[existing], ...runEvent };
+    } else {
+      timeline.push(runEvent);
+    }
     updateAgentPendingMessage(pendingMessage, {
       run_id: pendingMessage.run_id,
       turn_id: pendingMessage.turn_id,
       agent_run_seq: pendingMessage.agent_run_seq || payload.seq || 0,
       agent_run_status: pendingMessage.agent_run_status,
+      timeline,
     });
   }
   if (payload.type === "action" && payload.action) {
     mergeAgentAction(pendingMessage, payload.action);
+    const actionUsage = agentTokenUsageFromAction(payload.action);
+    const actionLedger = agentTokenLedgerFromAction(payload.action);
+    if (actionUsage) {
+      pendingMessage.diagnostics = {
+        ...(pendingMessage.diagnostics || {}),
+        token_usage: actionUsage,
+        token_usage_total: actionUsage,
+      };
+      updateAgentTokenUsage(actionUsage);
+    }
+    if (actionLedger) applyAgentTokenLedger(pendingMessage, actionLedger);
   }
   if (payload.type === "heartbeat") {
     if (payload.action) mergeAgentAction(pendingMessage, payload.action);
     updateAgentPendingMessage(pendingMessage, {
-      phase: payload.phase || "Waiting for Hermes",
+      phase: agentLiveStepFromPayload(payload) || pendingMessage.phase || "Waiting for agent",
       content: payload.message || pendingMessage.content,
     });
   }
   if (payload.type === "delta" && payload.delta) {
-    const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
-    pendingMessage.agent_delta_started = true;
-    updateAgentPendingMessage(pendingMessage, {
-      phase: pendingMessage.phase || "Streaming",
-      content: `${currentContent}${payload.delta}`,
-    });
+    appendAgentVisibleDelta(pendingMessage, payload.delta);
   }
   if (payload.type === "error") {
-    throw new Error(payload.error?.message || "Embedded chat stream failed.");
+    const streamError = new Error(payload.error?.message || "Embedded chat stream failed.");
+    streamError.diagnostic = payload.error || {};
+    throw streamError;
   }
   return payload;
+}
+
+function appendAgentVisibleDelta(pendingMessage, delta) {
+  const visibleDelta = agentHumanVisibleDelta(pendingMessage, String(delta || ""));
+  if (!visibleDelta) {
+    if (!pendingMessage.agent_delta_started) {
+      updateAgentPendingMessage(pendingMessage, { phase: pendingMessage.phase || "Understanding request" });
+    }
+    return;
+  }
+  const currentContent = pendingMessage.agent_delta_started ? pendingMessage.content || "" : "";
+  pendingMessage.agent_delta_started = true;
+  updateAgentPendingMessage(pendingMessage, {
+    phase: pendingMessage.phase || "Streaming answer",
+    content: `${currentContent}${visibleDelta}`,
+  });
+}
+
+function agentHumanVisibleDelta(message, delta) {
+  if (!message || !delta) return delta || "";
+  let state = message.agent_answer_json_stream;
+  if (!state) {
+    const first = delta.trimStart()[0] || "";
+    if (first !== "{") return delta;
+    state = { buffer: "", answerLength: 0, jsonMode: true, complete: false };
+    message.agent_answer_json_stream = state;
+  }
+  if (!state.jsonMode || state.complete) return state.jsonMode ? "" : delta;
+  state.buffer += delta;
+  const extracted = extractJsonStringValue(state.buffer, "answer");
+  if (!extracted.started && state.buffer.trimStart()[0] !== "{") {
+    state.jsonMode = false;
+    const buffered = state.buffer;
+    state.buffer = "";
+    return buffered;
+  }
+  if (!extracted.started) return "";
+  const next = extracted.value.slice(state.answerLength);
+  state.answerLength = extracted.value.length;
+  state.complete = extracted.complete;
+  return next;
+}
+
+function extractJsonStringValue(text, key) {
+  const source = String(text || "");
+  const marker = `"${key}"`;
+  const keyIndex = source.indexOf(marker);
+  if (keyIndex < 0) return { started: false, value: "", complete: false };
+  let index = keyIndex + marker.length;
+  while (/\s/.test(source[index] || "")) index += 1;
+  if (source[index] !== ":") return { started: false, value: "", complete: false };
+  index += 1;
+  while (/\s/.test(source[index] || "")) index += 1;
+  if (source[index] !== "\"") return { started: false, value: "", complete: false };
+  index += 1;
+  let value = "";
+  let escaped = false;
+  for (; index < source.length; index += 1) {
+    const ch = source[index];
+    if (escaped) {
+      if (ch === "n") value += "\n";
+      else if (ch === "r") value += "\r";
+      else if (ch === "t") value += "\t";
+      else value += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === "\"") return { started: true, value, complete: true };
+    value += ch;
+  }
+  return { started: true, value, complete: false };
+}
+
+function agentLiveStepFromPayload(payload = {}) {
+  if (!payload || typeof payload !== "object") return "";
+  if (payload.action && typeof payload.action === "object") return agentLiveStepFromAction(payload.action);
+  const phase = cleanText(payload.phase || "", "");
+  if (!phase || phase === "Hermes bridge active") return "";
+  return phase;
+}
+
+function agentLiveStepFromAction(action = {}) {
+  if (!action || typeof action !== "object") return "";
+  const label = cleanText(action.label || "", "");
+  const status = cleanText(action.status || "", "").toLowerCase();
+  const meta = cleanText(action.meta || "", "");
+  const detail = cleanText(action.detail || "", "");
+  if (!label) return "";
+  if (label === "tokens.used") return "";
+  if (label === "bridge.run.poll") return "";
+  if (label === "patch" || label === "repo.edit" || label === "apply_patch") return "Hermes: editing files";
+  if (label === "test.run" || label === "run_tests") return "Hermes: running tests";
+  if (label === "bridge.run.started") return "Dispatching Hermes";
+  if (label === "bridge.run.completed") return "Hermes: preparing final";
+  if (label === "backend.run.completed") return "Hermes: preparing final";
+  if (label === "backend.tool.started") return "Starting tool";
+  if (label === "backend.tool.completed") return "Reviewing tool result";
+  if (meta.startsWith("tool.started") || status === "running") {
+    if (label === "execute_code") {
+      const match = detail.match(/['"]([^'"]+\.(?:test|spec)\.[A-Za-z0-9]+|[^'"]+\.test\.[A-Za-z0-9]+)['"]/);
+      return match ? "Hermes: running tests" : "Running code";
+    }
+    if (label === "patch") return "Hermes: editing files";
+    if (label === "read_file") return "Reading file";
+    return `Running ${label}`;
+  }
+  if ((meta.startsWith("tool.completed") || meta.startsWith("tool.finished")) && status === "done") return `Finished ${label}`;
+  if (status === "error") return `${label} needs attention`;
+  return "";
+}
+
+function agentTokenUsageFromAction(action = {}) {
+  if (!action || typeof action !== "object") return null;
+  const label = cleanText(action.label || "", "");
+  const kind = cleanText(action.kind || "", "");
+  if (label !== "tokens.used" && kind !== "tokens") return null;
+  const args = action.arguments && typeof action.arguments === "object" ? action.arguments : {};
+  return normalizeAgentTokenUsage(args.usage || action.usage || action.token_usage || null);
+}
+
+function agentTokenLedgerFromAction(action = {}) {
+  if (!action || typeof action !== "object") return null;
+  const label = cleanText(action.label || "", "");
+  const kind = cleanText(action.kind || "", "");
+  if (label !== "tokens.used" && kind !== "tokens") return null;
+  const args = action.arguments && typeof action.arguments === "object" ? action.arguments : {};
+  const ledger = args.ledger || action.ledger || action.token_ledger || null;
+  return ledger && typeof ledger === "object" ? ledger : null;
+}
+
+function agentTokenLedgerUsage(ledger = {}) {
+  if (!ledger || typeof ledger !== "object") return null;
+  const calls = Array.isArray(ledger.calls) ? ledger.calls : [];
+  const exactCalls = calls.filter((call) => call && typeof call === "object" && call.exact);
+  const exact = ledger.exact !== false;
+  const sourceCalls = exact ? exactCalls : calls;
+  const ledgerTotal = exact ? tokenNumber(ledger.total_tokens) : tokenNumber(ledger.estimated_total_tokens);
+  if (!sourceCalls.length && ledgerTotal === null) return null;
+  const sum = (items, key) => items.reduce((total, item) => total + Number(tokenNumber(item?.[key]) || 0), 0);
+  const input = sum(sourceCalls, exact ? "input_tokens" : "estimated_input_tokens");
+  const output = sum(sourceCalls, exact ? "output_tokens" : "estimated_output_tokens");
+  const cached = exact ? sum(sourceCalls, "cached_input_tokens") : 0;
+  const reasoning = exact ? sum(sourceCalls, "reasoning_tokens") : 0;
+  const total = ledgerTotal ?? sum(sourceCalls, exact ? "total_tokens" : "estimated_total_tokens");
+  return normalizeAgentTokenUsage({
+    input_tokens: input,
+    output_tokens: output,
+    total_tokens: total,
+    cached_input_tokens: cached,
+    reasoning_tokens: reasoning,
+    usage_accuracy: exact ? "provider_exact" : "estimated",
+    usage_scope: "llm_api_call",
+    billable: exact,
+  });
+}
+
+function applyAgentTokenLedger(message, ledger, extra = {}) {
+  if (!message || !ledger || typeof ledger !== "object") return null;
+  const normalizedLedger = {
+    ...ledger,
+    source: extra.source || ledger.source || "tokens.used",
+  };
+  message.token_ledger = normalizedLedger;
+  message.diagnostics = {
+    ...(message.diagnostics || {}),
+    token_ledger: normalizedLedger,
+  };
+  const usage = agentTokenLedgerUsage(normalizedLedger);
+  if (usage) {
+    message.diagnostics.token_usage = message.diagnostics.token_usage || usage;
+    message.diagnostics.token_usage_total = usage;
+    updateAgentTokenUsage(usage);
+  }
+  return normalizedLedger;
+}
+
+async function refreshAgentRunTokenLedger(message, options = {}) {
+  const runId = cleanText(message?.run_id || "", "");
+  if (!runId || !isAdminUser()) return null;
+  const payload = await fetchAgentKernelTool("/agent/tools/cost.status", {
+    run_id: runId,
+    quest_id: cleanText(options.questId || activeAgentSession()?.id || "", ""),
+  }, { signal: options.signal, timeoutMs: options.timeoutMs || 8000 });
+  const ledger = payload.ledger && typeof payload.ledger === "object" ? payload.ledger : null;
+  if (!ledger) return null;
+  return applyAgentTokenLedger(message, ledger, { source: "cost.status" });
 }
 
 async function fetchAgentRunForPendingMessage(session, message) {
@@ -22946,14 +23357,55 @@ async function finishAgentBackendPayload(pendingMessage, payload, startedAt) {
   pendingMessage.run_id = cleanText(payload.agent?.run_id, pendingMessage.run_id || "");
   pendingMessage.turn_id = cleanText(payload.agent?.turn_id, pendingMessage.turn_id || "");
   pendingMessage.agent_run_status = "completed";
+  if (payload.agent?.route_contract) pendingMessage.route_contract = payload.agent.route_contract;
+  if (payload.agent?.token_ledger || pendingMessage.token_ledger) {
+    applyAgentTokenLedger(pendingMessage, payload.agent?.token_ledger || pendingMessage.token_ledger);
+  }
+  await refreshAgentRunTokenLedger(pendingMessage, {
+    questId: session?.id || "",
+    signal: state.agentAbortController?.signal,
+  }).catch(() => null);
+  const timeline = Array.isArray(pendingMessage.timeline) ? [...pendingMessage.timeline] : [];
+  const finalEvent = {
+    id: `tl_run_final`,
+    label: "run.final",
+    status: "done",
+    detail: `${pendingMessage.duration_ms || 0} ms`,
+    kind: "timeline",
+    event_type: "run.final",
+  };
+  const existingFinal = timeline.findIndex((item) => item.id === finalEvent.id);
+  if (existingFinal >= 0) {
+    timeline[existingFinal] = { ...timeline[existingFinal], ...finalEvent };
+  } else {
+    timeline.push(finalEvent);
+  }
+  const changed = Array.isArray(payload.agent?.changed_files) ? payload.agent.changed_files.length : 0;
+  if (changed) {
+    const filesEvent = {
+      id: "tl_files_changed",
+      label: "files.changed",
+      status: "done",
+      detail: `${changed} paths`,
+      kind: "timeline",
+      event_type: "files.changed",
+    };
+    const existingFiles = timeline.findIndex((item) => item.id === filesEvent.id);
+    if (existingFiles >= 0) {
+      timeline[existingFiles] = { ...timeline[existingFiles], ...filesEvent };
+    } else {
+      timeline.push(filesEvent);
+    }
+  }
+  pendingMessage.timeline = timeline;
   pendingMessage.actions = agentActionRowsFromPayload(payload.agent, pendingMessage.actions || []);
   if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
-  session.diagnostics = diagnostics;
+  session.diagnostics = pendingMessage.diagnostics;
   session.changed_files = pendingMessage.changed_files;
   session.context_preview = payload.agent?.context_preview || [];
-  updateAgentTokenUsage(diagnostics.token_usage || null);
+  updateAgentTokenUsage(agentTokenLedgerUsage(pendingMessage.token_ledger) || agentDiagnosticsTokenUsageBreakdown(pendingMessage.diagnostics).total);
   saveAgentSessions();
-  renderAgentDiagnostics(diagnostics);
+  renderAgentDiagnostics(pendingMessage.diagnostics);
   renderAgentContextPreview(payload.agent?.context_preview || []);
   renderAgentMessages();
 }
@@ -23366,6 +23818,10 @@ function renderAgentMessage(message) {
   const fileAttachments = renderAgentFileAttachments(message);
   if (fileAttachments) wrap.append(fileAttachments);
   if (header) wrap.append(header);
+  const timeline = !socialChat && message.role === "assistant" ? renderAgentTimeline(message) : null;
+  if (timeline) wrap.append(timeline);
+  const tokenLedger = !socialChat && message.role === "assistant" ? renderAgentTokenLedger(message) : null;
+  if (tokenLedger) wrap.append(tokenLedger);
   const actions = !socialChat && message.role === "assistant" ? agentActionsChain(message) : null;
   if (actions) wrap.append(actions);
   wrap.append(body);
@@ -24799,6 +25255,10 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
   const activeSpace = options.activeSpace || activeSpaceContext();
   const imageCards = Array.isArray(options.imageCards) ? options.imageCards : [];
   const nodeRunConfig = options.nodeRunConfig || {};
+  const continuationContext = options.continuationContext && typeof options.continuationContext === "object"
+    ? options.continuationContext
+    : null;
+  const routeContract = options.routeContract && typeof options.routeContract === "object" ? options.routeContract : null;
   const recentTranscript = (Array.isArray(transcript) ? transcript : []).slice(-6).map((turn) => ({
     role: cleanText(turn.role || "", "user"),
     content: truncateText(cleanText(turn.content || "", ""), 320),
@@ -24813,8 +25273,12 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     schema: "hermes.wasm_agent.master_frontier.envelope.v1",
     trace_id: cleanText(options.turnId || "", ""),
     objective: message,
+    surface: "avatar-chat",
+    route_id: "wasm-agent.avatar-chat.ui",
+    route_contract: routeContract || undefined,
     state_summary: [
       `surface:avatar-chat`,
+      `route:wasm-agent.avatar-chat.ui`,
       `target:${AGENT_MASTER_FRONTIER_LABEL}`,
       `node:${AGENT_FRONTIER_NODE_ID}`,
       `space:${cleanText(activeSpace?.display_name || activeSpace?.name || "", "home")}`,
@@ -24823,6 +25287,8 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
       `attachments:${attachments.length}`,
     ].join(" "),
     compact_state: {
+      surface: "avatar-chat",
+      route_id: "wasm-agent.avatar-chat.ui",
       target: AGENT_MASTER_FRONTIER_LABEL,
       target_node: AGENT_FRONTIER_NODE_ID,
       endpoint: "/agent/provider/envelope/stream",
@@ -24849,6 +25315,7 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
         chat_target_node: AGENT_FRONTIER_NODE_ID,
       },
       transcript: recentTranscript,
+      continuation_context: continuationContext,
       attachments,
       recent_events: Array.isArray(observation.recent_events) ? observation.recent_events.slice(0, 6) : [],
       requested_click_context: observation.requested_click_context || null,
@@ -24858,6 +25325,7 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
       { ref: "ctx://avatar-chat/current-turn", kind: "chat", summary: "Current message and compact transcript are inline." },
       { ref: "ctx://workspace/compact-state", kind: "state", summary: "Compact workspace, fleet, and recent event state are inline." },
       { ref: "ctx://direct-head/receiver", kind: "receiver", summary: "Envelope is sent to the server-configured direct-head receiver." },
+      ...(continuationContext ? [{ ref: "ctx://avatar-chat/continuation", kind: "resume", summary: "Compact previous-run continuation context is inline." }] : []),
     ],
     allowed_actions: [
       { id: "answer", type: "direct", description: "Answer directly from the envelope when no tool work is required." },
@@ -24865,8 +25333,11 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     ],
     constraints: [
       "Do not assume hidden state beyond this envelope.",
+      "When continuation_context is present and the user asks to continue or resume, continue that objective instead of asking the user to restate it.",
       "Answer directly when possible; use dispatch.hermes only when tool, file, runtime, or proof work is required.",
       "Keep the answer compact and include proof handles when work is dispatched.",
+      "Do not report token usage in the answer text; the UI renders exact provider token usage from diagnostics.",
+      "Do not claim inspected, confirmed, verified, or viable unless the claim is supported by envelope evidence or dispatched proof; otherwise say not inspected yet.",
     ],
     proof_requests: [
       "route-used:/agent/provider/envelope/stream",
@@ -24907,6 +25378,8 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
       `You are the ${AGENT_MASTER_FRONTIER_LABEL} direct head for avatar-chat.`,
       "Receive this wasm-agent envelope through the server-configured direct-head receiver.",
       "Answer from the envelope protocol; return dispatch.hermes only when the envelope requires bounded bridge tool/proof work.",
+      "Do not narrate token usage; runtime diagnostics render exact provider-reported LLM usage outside the answer.",
+      "Be proof-honest: distinguish conceptual possibility from inspected or verified runtime proof.",
     ].join(" "),
     max_output_tokens: 900,
     text_verbosity: "low",
@@ -24961,10 +25434,14 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
     base_url: providerPayload.base_url || response?.base_url || "",
     model: response?.model || providerPayload.model || "",
     usage: response?.usage || providerPayload.usage || null,
+    token_ledger: response?.token_ledger || providerPayload.token_ledger || response?.ledger || null,
+    route_id: response?.route_id || providerPayload.route_id || "",
+    route_contract: response?.route_contract || providerPayload.route_contract || null,
     run_id: response?.run_id || providerPayload.run_id || "",
     turn_id: response?.turn_id || providerPayload.turn_id || "",
     hermes_dispatch: response?.hermes_dispatch || providerPayload.hermes_dispatch || null,
     context_measurement: response?.context_measurement || providerPayload.context_measurement || null,
+    actions: Array.isArray(response?.actions) ? response.actions : Array.isArray(providerPayload.actions) ? providerPayload.actions : [],
   };
 }
 
@@ -24973,7 +25450,40 @@ function masterFrontierReplyFromPayload(payload = {}) {
   const dispatchReply = payload?.hermes_dispatch && typeof payload.hermes_dispatch === "object"
     ? payload.hermes_dispatch.reply
     : "";
-  return cleanText(dispatchReply || parsed.answer || parsed.decision || payload?.reply || "", "");
+  return cleanText(
+    humanAgentReplyFromStructuredJson(dispatchReply)
+      || dispatchReply
+      || parsed.answer
+      || parsed.decision
+      || payload?.reply
+      || "",
+    ""
+  );
+}
+
+function humanAgentReplyFromStructuredJson(reply = "") {
+  const text = cleanText(reply, "");
+  if (!text || text[0] !== "{") return "";
+  let parsed = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return "";
+  }
+  if (!parsed || typeof parsed !== "object") return "";
+  const answer = cleanText(parsed.answer || parsed.message || parsed.summary || "", "");
+  if (answer) return answer;
+  const status = cleanText(parsed.status || "", "");
+  const objective = cleanText(parsed.objective || parsed.title || "", "");
+  const changedFiles = Array.isArray(parsed.changed_files) ? parsed.changed_files.map((item) => cleanText(item, "")).filter(Boolean) : [];
+  const edits = Array.isArray(parsed.edits) ? parsed.edits : [];
+  if (!objective && !changedFiles.length && !edits.length) return "";
+  const parts = [];
+  parts.push(status === "done" ? "Done." : status ? `${status}.` : "Hermes finished.");
+  if (objective) parts.push(objective.endsWith(".") ? objective : `${objective}.`);
+  if (changedFiles.length) parts.push(`Changed ${changedFiles.map((path) => path.split("/").pop() || path).join(", ")}.`);
+  if (edits.length) parts.push(`${edits.length} edit${edits.length === 1 ? "" : "s"} recorded.`);
+  return parts.join(" ");
 }
 
 function ownedAgentPrompt(message, transcript = [], observation = {}) {
@@ -28756,8 +29266,8 @@ function newAgentSession() {
 
 function renderAgentDiagnostics(diagnostics = {}) {
   if (!els.agentDiagnostics) return;
-  updateAgentTokenUsage(diagnostics.token_usage || null);
-  const usage = normalizeAgentTokenUsage(diagnostics.token_usage || state.agentTokenUsage);
+  const usageBreakdown = agentDiagnosticsTokenUsageBreakdown(diagnostics);
+  updateAgentTokenUsage(usageBreakdown.total || null);
   const sessionSummary = agentSessionTokenSummary();
   const measurements = diagnosticsContextMeasurement(diagnostics);
   const directHead = diagnostics.direct_head && typeof diagnostics.direct_head === "object" ? diagnostics.direct_head : {};
@@ -28765,11 +29275,15 @@ function renderAgentDiagnostics(diagnostics = {}) {
     directHead.provider || diagnostics.receiver || diagnostics.source || "",
     directHead.model || diagnostics.model || "",
   ].filter(Boolean);
+  const estimatedContextText = formatAgentContextMeasurementSummary(measurements);
   const contextText = state.agentContextString
     || (diagnostics.tools?.length ? diagnostics.tools.join(" ") : "")
+    || estimatedContextText
     || (diagnostics.context_estimated_tokens ? `~${diagnostics.context_estimated_tokens} tokens` : "-");
   const rows = [
-    ["Last Turn", formatTokenUsageParts(usage)],
+    ["Last Turn", formatTokenUsageParts(usageBreakdown.total)],
+    ["Head", usageBreakdown.head ? formatTokenUsageParts(usageBreakdown.head) : "-"],
+    ["Bridge", usageBreakdown.bridge ? formatTokenUsageParts(usageBreakdown.bridge) : "-"],
     ["Session", sessionSummary.usage ? `${formatTokenUsageParts(sessionSummary.usage)} · ${sessionSummary.turns} turns` : "-"],
     ["Envelope", measurements.direct ? `~${compactCount(measurements.direct.estimated_tokens || 0)} est · ${compactCount(measurements.direct.utf8_bytes || 0)} bytes` : "-"],
     ["Dispatch", measurements.dispatch ? `~${compactCount(measurements.dispatch.estimated_tokens || 0)} est` : "-"],
@@ -28821,11 +29335,11 @@ function firstTokenNumber(usage, keys) {
 
 function normalizeAgentTokenUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
-  const prompt = firstTokenNumber(usage, ["prompt_tokens", "input_tokens", "input_token_count", "inputTokenCount", "tokens_in", "prompt"]);
-  const completion = firstTokenNumber(usage, ["completion_tokens", "output_tokens", "output_token_count", "outputTokenCount", "candidatesTokenCount", "tokens_out", "completion"]);
-  let total = firstTokenNumber(usage, ["total_tokens", "total_token_count", "totalTokenCount", "tokens", "total"]);
-  const cacheRead = firstTokenNumber(usage, ["cache_read_tokens", "cached_tokens", "cachedTokens"]);
-  const reasoning = firstTokenNumber(usage, ["reasoning_tokens", "reasoningTokens"]);
+  const prompt = firstTokenNumber(usage, ["prompt_tokens", "input_tokens", "inputTokens", "input_token_count", "inputTokenCount", "promptTokens", "tokens_in", "prompt"]);
+  const completion = firstTokenNumber(usage, ["completion_tokens", "output_tokens", "outputTokens", "output_token_count", "outputTokenCount", "completionTokens", "candidatesTokenCount", "tokens_out", "completion"]);
+  let total = firstTokenNumber(usage, ["total_tokens", "totalTokens", "total_token_count", "totalTokenCount", "tokens", "total"]);
+  const cacheRead = firstTokenNumber(usage, ["cache_read_tokens", "cached_tokens", "cachedTokens", "cached_input_tokens", "cachedInputTokens", "cacheReadInputTokens"]);
+  const reasoning = firstTokenNumber(usage, ["reasoning_tokens", "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens"]);
   const inputDetails = usage.input_tokens_details && typeof usage.input_tokens_details === "object" ? usage.input_tokens_details : {};
   const outputDetails = usage.output_tokens_details && typeof usage.output_tokens_details === "object" ? usage.output_tokens_details : {};
   const nestedCacheRead = firstTokenNumber(inputDetails, ["cached_tokens", "cache_read_tokens", "cachedTokens"]);
@@ -28865,7 +29379,7 @@ function agentSessionTokenSummary(session = activeAgentSession()) {
   let total = null;
   let turns = 0;
   for (const message of messages) {
-    const usage = normalizeAgentTokenUsage(message?.diagnostics?.token_usage);
+    const usage = agentDiagnosticsTokenUsageBreakdown(message?.diagnostics || {}).total;
     if (!usage) continue;
     turns += 1;
     total = addTokenUsage(total, usage);
@@ -28873,6 +29387,35 @@ function agentSessionTokenSummary(session = activeAgentSession()) {
   return {
     turns,
     usage: total,
+  };
+}
+
+function agentDiagnosticsTokenUsageBreakdown(diagnostics = {}) {
+  const raw = diagnostics && typeof diagnostics === "object" ? diagnostics : {};
+  const explicitTotal = normalizeAgentTokenUsage(raw.token_usage_total || raw.total_token_usage);
+  const head = normalizeAgentTokenUsage(raw.token_usage_head || raw.head_token_usage);
+  const bridge = normalizeAgentTokenUsage(
+    raw.token_usage_bridge
+      || raw.bridge_token_usage
+      || (raw.hermes_dispatch && typeof raw.hermes_dispatch === "object" ? raw.hermes_dispatch.usage : null)
+  );
+  const exact = normalizeAgentTokenUsage(raw.token_usage);
+  const bridgeApiCalls = tokenNumber(bridge?.api_calls);
+  const bridgeTrusted = Boolean(
+    bridge
+      && bridge.usage_scope === "llm_api_call"
+      && bridge.usage_accuracy === "provider_exact"
+      && bridge.billable !== false
+      && (bridgeApiCalls === null || bridgeApiCalls > 0 || bridge.cost_usd || bridge.billable === true)
+  );
+  const inferredHead = head || (bridge && exact && exact.total_tokens !== bridge.total_tokens ? exact : null);
+  const trustedBridge = bridgeTrusted ? bridge : null;
+  const total = explicitTotal || (trustedBridge ? addTokenUsage(inferredHead, trustedBridge) : (inferredHead || exact));
+  return {
+    total: total || null,
+    head: inferredHead || (!bridge ? exact : null),
+    bridge: trustedBridge,
+    bridge_trusted: bridgeTrusted,
   };
 }
 
@@ -28899,6 +29442,17 @@ function diagnosticsContextMeasurement(diagnostics = {}) {
   return { direct, dispatch };
 }
 
+function formatAgentContextMeasurementSummary(measurements = {}) {
+  const directTokens = tokenNumber(measurements.direct?.estimated_tokens);
+  const dispatchTokens = tokenNumber(measurements.dispatch?.estimated_tokens);
+  if (directTokens === null && dispatchTokens === null) return "";
+  const parts = [];
+  if (directTokens !== null) parts.push(`head ~${compactCount(directTokens)} est`);
+  if (dispatchTokens !== null) parts.push(`Hermes ~${compactCount(dispatchTokens)} est`);
+  const total = Number(directTokens || 0) + Number(dispatchTokens || 0);
+  return parts.length > 1 ? `${parts.join(" + ")} = ~${compactCount(total)} est` : parts[0];
+}
+
 function updateAgentTokenUsage(usage = state.agentTokenUsage) {
   const normalized = normalizeAgentTokenUsage(usage);
   state.agentTokenUsage = normalized || null;
@@ -28907,9 +29461,10 @@ function updateAgentTokenUsage(usage = state.agentTokenUsage) {
   const total = normalized ? normalized.total_tokens : null;
   const sessionTotal = sessionSummary.usage?.total_tokens || 0;
   els.agentTokenUsage.textContent = sessionTotal ? `${fmtCompactToken(total)} / ${compactCount(sessionTotal)}` : fmtCompactToken(total);
+  const accuracy = normalized?.usage_accuracy === "estimated" ? "Estimated" : "Exact";
   els.agentTokenUsage.title = normalized
-    ? `Last turn exact tokens: ${formatTokenUsageParts(normalized)}. Session exact tokens: ${formatTokenUsageParts(sessionSummary.usage)} across ${sessionSummary.turns} turns.`
-    : "Exact model token usage for the last turn";
+    ? `${accuracy} model token usage for the last turn: ${formatTokenUsageParts(normalized)}. Session exact tokens: ${formatTokenUsageParts(sessionSummary.usage)} across ${sessionSummary.turns} turns.`
+    : "Model token usage for the last turn";
 }
 
 function agentFileDiffText(file = {}) {
@@ -29064,8 +29619,183 @@ async function stepbackTimeline(ref, spaceId = activeSpaceStorageId()) {
   }
 }
 
+function agentTimelineIcon(item = {}) {
+  const label = cleanText(item.label, "").toLowerCase();
+  const eventType = cleanText(item.event_type, "").toLowerCase();
+  const status = cleanText(item.status, "").toLowerCase();
+  if (status === "error") return "⚠️";
+  if (status === "running") return "⏳";
+  if (label === "run.started" || eventType === "run.started") return "▶️";
+  if (label === "run.final" || eventType === "run.final") return "🏁";
+  if (label === "hermes.dispatch" || eventType === "hermes.dispatch") return "🪽";
+  if (label === "tool.started" || eventType === "tool.started") return "🔧";
+  if (label === "tool.finished" || eventType === "tool.finished") return "✓";
+  if (label.includes("file") || eventType.startsWith("files.")) return "📄";
+  if (label.includes("test") || eventType.startsWith("tests.")) return "🧪";
+  if (label.includes("proof") || eventType.startsWith("proof.")) return "📋";
+  if (label === "tokens.used" || eventType === "tokens.used") return "🔶";
+  return "•";
+}
+
+function agentMessageRouteSummary(message = {}) {
+  const timeline = Array.isArray(message.timeline) ? message.timeline : [];
+  const routeEvent = [...timeline].reverse().find((item) => (
+    cleanText(item.event_type || item.label, "").toLowerCase() === "route.resolved"
+  ));
+  const args = routeEvent?.arguments && typeof routeEvent.arguments === "object" ? routeEvent.arguments : {};
+  const contract = message.route_contract || args.route_contract || message.kernel_route_proof?.route_contract || {};
+  const summary = args.map_summary || message.kernel_route_proof?.summary || {};
+  const routeId = cleanText(contract.route_id || summary.route_id || message.diagnostics?.route_id || "", "");
+  const owner = cleanText(contract.owner || summary.owner || "", "");
+  return {
+    route_id: routeId,
+    owner,
+    label: [routeId, owner].filter(Boolean).join(" / "),
+  };
+}
+
+function renderAgentTimelineSummary(message) {
+  const wrap = document.createElement("div");
+  wrap.className = "agent-timeline-summary";
+  const objective = document.createElement("span");
+  objective.className = "agent-timeline-pill objective";
+  objective.textContent = "Objective";
+  const route = agentMessageRouteSummary(message);
+  const routePill = document.createElement("span");
+  routePill.className = "agent-timeline-pill route";
+  routePill.textContent = route.route_id ? `Route ${route.route_id}` : "Route pending";
+  if (route.label) routePill.title = route.label;
+  const current = document.createElement("span");
+  current.className = "agent-timeline-pill current";
+  current.textContent = message.pending ? (message.phase || "Running") : "Done";
+  const evidence = document.createElement("span");
+  evidence.className = "agent-timeline-pill evidence";
+  const filesCount = Array.isArray(message.changed_files) ? message.changed_files.length : 0;
+  evidence.textContent = filesCount ? `${filesCount} files` : "No files";
+  const finalStatus = document.createElement("span");
+  finalStatus.className = "agent-timeline-pill final";
+  finalStatus.textContent = message.agent_run_status === "completed" ? "Final ✓" : "Pending";
+  wrap.append(objective, routePill, current, evidence, finalStatus);
+  return wrap;
+}
+
+function renderAgentTimeline(message) {
+  const timeline = Array.isArray(message.timeline) ? message.timeline : [];
+  if (!timeline.length) return null;
+  const wrap = document.createElement("div");
+  wrap.className = "agent-timeline";
+  const summary = renderAgentTimelineSummary(message);
+  if (summary) wrap.append(summary);
+  const rows = document.createElement("div");
+  rows.className = "agent-timeline-rows";
+  for (const item of timeline) {
+    const row = document.createElement("div");
+    row.className = `agent-timeline-row ${cleanText(item.status, "done")}`;
+    const icon = document.createElement("span");
+    icon.className = "agent-timeline-icon";
+    icon.textContent = agentTimelineIcon(item);
+    const label = document.createElement("span");
+    label.className = "agent-timeline-label";
+    label.textContent = cleanAgentActionLabel(item, agentActionInnerKind(item));
+    const detail = document.createElement("span");
+    detail.className = "agent-timeline-detail";
+    detail.textContent = cleanText(item.detail, "");
+    row.append(icon, label);
+    if (detail.textContent) row.append(detail);
+    rows.append(row);
+  }
+  wrap.append(rows);
+  return wrap;
+}
+
+function agentMessageTokenLedger(message = {}) {
+  const ledger = message.token_ledger || message.diagnostics?.token_ledger || null;
+  return ledger && typeof ledger === "object" ? ledger : null;
+}
+
+function shortLedgerId(value) {
+  const text = cleanText(value, "");
+  if (!text) return "-";
+  if (text.length <= 18) return text;
+  return `${text.slice(0, 8)}...${text.slice(-6)}`;
+}
+
+function renderAgentTokenLedger(message = {}) {
+  const ledger = agentMessageTokenLedger(message);
+  if (!ledger) return null;
+  const calls = Array.isArray(ledger.calls) ? ledger.calls : [];
+  const usage = agentTokenLedgerUsage(ledger);
+  if (!calls.length && !usage) return null;
+  const details = document.createElement("details");
+  details.className = "agent-token-ledger";
+  bindAgentDetailsOpenState(details, message?.id ? `token-ledger:${message.id}` : "", Boolean(message.pending), {
+    status: message.pending ? "running" : "done",
+    autoCloseOnDone: true,
+  });
+  const summary = document.createElement("summary");
+  summary.className = "agent-token-ledger-summary";
+  const title = document.createElement("strong");
+  title.textContent = "Token ledger";
+  const badge = document.createElement("span");
+  badge.className = `agent-token-ledger-badge ${ledger.exact === false ? "estimated" : "exact"}`;
+  badge.textContent = ledger.exact === false ? "estimated" : "exact";
+  const total = document.createElement("span");
+  total.className = "agent-token-ledger-total";
+  total.textContent = usage ? formatTokenUsageParts(usage) : "-";
+  const scope = document.createElement("span");
+  scope.className = "agent-token-ledger-scope";
+  scope.textContent = [
+    `quest ${shortLedgerId(ledger.quest_id || activeAgentSession()?.id || "")}`,
+    `turn ${shortLedgerId(calls[0]?.turn_id || message.turn_id || "")}`,
+    `${calls.length || Number(ledger.provider_call_count || 0)} calls`,
+  ].filter(Boolean).join(" / ");
+  summary.append(title, badge, total, scope);
+  const list = document.createElement("div");
+  list.className = "agent-token-ledger-calls";
+  list.replaceChildren(...calls.map((call) => {
+    const row = document.createElement("div");
+    row.className = `agent-token-ledger-call ${call.exact ? "exact" : "estimated"}`;
+    const head = document.createElement("div");
+    head.className = "agent-token-ledger-call-head";
+    const provider = document.createElement("strong");
+    provider.textContent = [call.provider, call.model].map((item) => cleanText(item, "")).filter(Boolean).join(" / ") || "provider call";
+    const route = document.createElement("span");
+    route.textContent = cleanText(call.route_id, "");
+    const callId = document.createElement("code");
+    callId.textContent = shortLedgerId(call.provider_call_id);
+    head.append(provider, route, callId);
+    const metrics = document.createElement("div");
+    metrics.className = "agent-token-ledger-metrics";
+    const metricRows = call.exact
+      ? [
+          ["in", call.input_tokens],
+          ["out", call.output_tokens],
+          ["cached", call.cached_input_tokens],
+          ["reason", call.reasoning_tokens],
+          ["total", call.total_tokens],
+        ]
+      : [
+          ["est in", call.estimated_input_tokens],
+          ["est out", call.estimated_output_tokens],
+          ["est total", call.estimated_total_tokens],
+        ];
+    metricRows
+      .filter(([, value]) => tokenNumber(value) !== null)
+      .forEach(([label, value]) => {
+        const chip = document.createElement("span");
+        chip.textContent = `${label} ${compactCount(tokenNumber(value) || 0)}`;
+        metrics.append(chip);
+      });
+    row.append(head, metrics);
+    return row;
+  }));
+  details.append(summary, list);
+  return details;
+}
+
 function agentActionsChain(message) {
-  const actions = Array.isArray(message.actions) ? message.actions : [];
+  const rawActions = Array.isArray(message.actions) ? message.actions : [];
+  const actions = compactAgentActionRows(message.pending ? rawActions : rawActions.map(finalizeAgentActionRow));
   if (!actions.length) return null;
   const topics = groupAgentActions(actions);
   const details = document.createElement("details");
@@ -29079,7 +29809,7 @@ function agentActionsChain(message) {
   const running = actions.find((action) => action.status === "running");
   const failed = actions.find((action) => action.status === "error");
   const label = message.pending
-    ? running?.label || message.phase || "Working"
+    ? message.phase || agentLiveStepFromAction(running) || running?.label || "Working"
     : failed
       ? "Actions need attention"
       : `${actions.length} actions completed`;
@@ -29102,6 +29832,73 @@ function groupAgentActions(actions) {
     groups.get(topic).actions.push(action);
   }
   return [...groups.values()].filter((group) => group.actions.length);
+}
+
+function isAgentPollAction(action = {}) {
+  return cleanText(action.label, "") === "bridge.run.poll" || cleanText(action.id, "") === "bridge_run_poll";
+}
+
+function isAgentTimelineAction(action = {}) {
+  const label = cleanText(action.label, "").toLowerCase();
+  const meta = cleanText(action.meta, "").toLowerCase();
+  const id = cleanText(action.id, "").toLowerCase();
+  const eventType = cleanText(action.event_type, "").toLowerCase();
+  if (label === "bridge.run.poll" || id === "bridge_run_poll") return false;
+  if (label === "tokens.used" || id === "tokens_used" || id === "bridge_token_usage") return true;
+  if (label === "route.resolved" || eventType === "route.resolved") return true;
+  if (label === "route_contract_missing" || eventType === "route_contract_missing") return true;
+  if (label === "run.started" || eventType === "run.started") return true;
+  if (label === "hermes.dispatch" || eventType === "hermes.dispatch") return true;
+  if (label === "tool.started" || meta.startsWith("tool.started")) return true;
+  if (label === "tool.finished" || meta.startsWith("tool.completed") || meta.startsWith("tool.finished")) return true;
+  if (label.includes("files") || label.includes("file") || eventType.startsWith("files.")) return true;
+  if (label.includes("test") || eventType.startsWith("tests.")) return true;
+  if (label.includes("proof") || eventType.startsWith("proof.")) return true;
+  if (label === "run.final" || eventType === "run.final") return true;
+  if (label === "bridge.run.started" || label === "bridge.run.completed") return true;
+  if (label === "backend.run.started" || label === "backend.run.completed") return true;
+  if (label === "head.started" || label === "head.decision") return true;
+  if (label === "envelope.created") return true;
+  return false;
+}
+
+function compactAgentActionRows(actions = []) {
+  const rows = [];
+  for (const action of actions) {
+    if (isAgentPollAction(action)) continue;
+    if (isAgentTimelineAction(action)) continue;
+    rows.push(action);
+  }
+  return rows;
+}
+
+function masterFrontierHermesActions(directHead = {}) {
+  const actions = Array.isArray(directHead.actions) ? directHead.actions : [];
+  const hermesActions = actions.filter((action) => agentActionTopic(action) === "run-hermes");
+  if (hermesActions.length) return hermesActions;
+  const dispatch = directHead.hermes_dispatch && typeof directHead.hermes_dispatch === "object" ? directHead.hermes_dispatch : null;
+  if (!dispatch) return [];
+  const target = cleanText(dispatch.target_node || "Hermes", "Hermes");
+  const trace = dispatch.bridge_trace && typeof dispatch.bridge_trace === "object" ? dispatch.bridge_trace : {};
+  const toolCalls = Array.isArray(trace.tool_calls) ? trace.tool_calls.length : 0;
+  const steps = Array.isArray(trace.steps) ? trace.steps.length : 0;
+  const detail = [
+    target,
+    toolCalls ? `${toolCalls} tools` : "",
+    steps ? `${steps} events` : "",
+  ].filter(Boolean).join(" · ");
+  return [agentAction("Hermes dispatch", "done", detail || target, {
+    id: "client_master_frontier_hermes_dispatch",
+    topic: "run-hermes",
+    kind: "model",
+    meta: cleanText(trace.model || dispatch.source || "embedded-hermes", "embedded-hermes"),
+    arguments: {
+      target_node: target,
+      run_id: cleanText(trace.id || "", ""),
+      context_measurement: dispatch.context_measurement || null,
+      exact_token_usage: dispatch.usage || null,
+    },
+  })];
 }
 
 function agentActionTopic(action) {
@@ -29131,6 +29928,7 @@ function agentActionInnerKind(action) {
   if (id === "turn_intake") return "turn";
   if (id === "mutation_policy") return "policy";
   if (id === "client_call_api" || id === "client_call_provider" || id === "client_probe_provider") return "api";
+  if (id === "bridge_token_usage" || label === "tokens.used") return "tokens";
   if (id === "node_reply" || id.startsWith("client_ask_")) return "model";
   if (id === "bridge_steps" || id === "bridge_reasoning_summary") return "trace";
   if (id.startsWith("bridge_tool_") || id.startsWith("tool_")) return "tool";
@@ -29173,6 +29971,9 @@ function agentTopicIconText(topic, status = "") {
 
 function cleanAgentActionLabel(action, kind = "") {
   const raw = cleanText(action?.label, "Action");
+  if (raw === "tokens.used" || kind === "tokens") return "Token usage";
+  if (raw === "route.resolved") return "Route resolved";
+  if (raw === "route_contract_missing") return "Route contract missing";
   if (kind === "tool") return raw.replace(/^tool:\s*/i, "") || "tool";
   return raw;
 }
@@ -29280,6 +30081,33 @@ function agentAction(label, status = "done", detail = "", extra = {}) {
 
 function mergeAgentAction(message, nextAction) {
   if (!message || !nextAction) return;
+  if (isAgentPollAction(nextAction)) {
+    const phase = message.pending ? agentLiveStepFromAction(nextAction) : "";
+    if (phase) updateAgentPendingMessage(message, { phase });
+    return;
+  }
+  if (isAgentTimelineAction(nextAction)) {
+    const timeline = Array.isArray(message.timeline) ? [...message.timeline] : [];
+    const eventId = nextAction.id || `tl_${timeline.length + 1}`;
+    const normalized = { ...nextAction, id: eventId };
+    let index = timeline.findIndex((item) => item.id === eventId);
+    if (index < 0 && ["done", "error"].includes(cleanText(normalized.status, "").toLowerCase())) {
+      index = timeline.findIndex((item) => (
+        cleanText(item.status, "").toLowerCase() === "running"
+        && cleanText(item.label, "") === cleanText(normalized.label, "")
+        && cleanText(item.meta, "").startsWith("tool.started")
+        && (cleanText(normalized.meta, "").startsWith("tool.completed") || cleanText(normalized.meta, "").startsWith("tool.finished"))
+      ));
+    }
+    if (index >= 0) {
+      timeline[index] = { ...timeline[index], ...normalized };
+    } else {
+      timeline.push(normalized);
+    }
+    const phase = message.pending ? agentLiveStepFromAction(normalized) : "";
+    updateAgentPendingMessage(message, phase ? { timeline, phase } : { timeline });
+    return;
+  }
   const actions = Array.isArray(message.actions) ? [...message.actions] : [];
   const actionId = nextAction.id || `act_${actions.length + 1}`;
   const normalized = { ...nextAction, id: actionId };
@@ -29291,7 +30119,7 @@ function mergeAgentAction(message, nextAction) {
       && cleanText(action.kind, "") === cleanText(normalized.kind, "")
       && cleanText(action.label, "") === cleanText(normalized.label, "")
       && cleanText(action.meta, "").startsWith("tool.started")
-      && cleanText(normalized.meta, "").startsWith("tool.completed")
+      && (cleanText(normalized.meta, "").startsWith("tool.completed") || cleanText(normalized.meta, "").startsWith("tool.finished"))
     ));
   }
   if (index >= 0) {
@@ -29299,7 +30127,8 @@ function mergeAgentAction(message, nextAction) {
   } else {
     actions.push(normalized);
   }
-  updateAgentPendingMessage(message, { actions });
+  const phase = message.pending ? agentLiveStepFromAction(normalized) : "";
+  updateAgentPendingMessage(message, phase ? { actions, phase } : { actions });
 }
 
 function finalAgentActionStatus(status) {
@@ -29315,8 +30144,8 @@ function finalizeAgentActionRow(action = {}) {
 
 function agentActionRowsFromPayload(agent, fallbackActions = []) {
   const actions = Array.isArray(agent?.actions) ? agent.actions : [];
-  if (actions.length) return actions.map(finalizeAgentActionRow);
-  const rows = fallbackActions.map(finalizeAgentActionRow);
+  if (actions.length) return compactAgentActionRows(actions.map(finalizeAgentActionRow));
+  const rows = compactAgentActionRows(fallbackActions.map(finalizeAgentActionRow));
   const previews = Array.isArray(agent?.context_preview) ? agent.context_preview : [];
   previews.forEach((item) => {
     rows.push(agentAction(`Tool: ${cleanText(item.tool, "context")}`, "done", cleanText(item.path || item.query || item.preview, "")));
@@ -29326,8 +30155,6 @@ function agentActionRowsFromPayload(agent, fallbackActions = []) {
   if (diagnostics.auto_checkpoint?.ref) {
     rows.push(agentAction("Timeline checkpoint", "done", `${diagnostics.auto_checkpoint.label || "auto"} ${diagnostics.auto_checkpoint.sha || ""}`.trim()));
   }
-  const changed = Array.isArray(agent?.changed_files) ? agent.changed_files.length : 0;
-  if (changed) rows.push(agentAction("Changed files", "done", `${changed} paths`));
   return rows;
 }
 
@@ -31977,6 +32804,9 @@ async function sendAgentMessage(text) {
     video_card: attachment.video_card,
   }));
   const requestTranscript = agentTranscriptForRequest();
+  const continuationContext = isAgentContinuationRequest(userMessageContent)
+    ? latestAgentContinuationContext(activeSession)
+    : null;
   clearAgentPendingImages();
   appendAgentMessage("user", userMessageContent, {
     images: userImages,
@@ -32089,6 +32919,15 @@ async function sendAgentMessage(text) {
         }, null, 2),
       }),
     ];
+    if (continuationContext) {
+      initialActions.push(agentAction("Resume context", "done", continuationContext.previous_run_id || continuationContext.previous_phase || "previous turn", {
+        id: "client_resume_context",
+        topic: "run-wasm",
+        kind: "context",
+        meta: continuationContext.previous_status || "continuation",
+        arguments: continuationContext,
+      }));
+    }
     if (attachmentCount) {
       initialActions.push(
         agentAction("Prepare attachments", directHeadLike ? "done" : "running", directHeadLike ? `${attachmentCount} ready for direct head` : `${attachmentCount} queued`, {
@@ -32187,15 +33026,24 @@ async function sendAgentMessage(text) {
     if (useMasterFrontier) {
       els.agentStatus.textContent = "Calling direct head";
       updateAgentPendingMessage(pendingMessage, {
-        phase: "Direct head",
-        content: `Calling ${AGENT_MASTER_FRONTIER_LABEL}...`,
+        phase: "Resolving route",
+        content: `Preparing ${AGENT_MASTER_FRONTIER_LABEL} route...`,
       });
       try {
+        const kernelRouteProof = await proveAgentKernelRouteTools(userMessageContent, pendingMessage, {
+          signal: state.agentAbortController.signal,
+        });
+        updateAgentPendingMessage(pendingMessage, {
+          phase: "Direct head",
+          content: `Calling ${AGENT_MASTER_FRONTIER_LABEL}...`,
+        });
         const directHead = await callMasterFrontierDirectHead(userMessageContent, transcript, compactObservation, {
           activeSpace,
           imageCards,
           nodeRunConfig,
+          continuationContext,
           turnId: backendTurnId,
+          routeContract: kernelRouteProof?.route_contract,
           pendingMessage,
           signal: state.agentAbortController.signal,
         });
@@ -32213,11 +33061,13 @@ async function sendAgentMessage(text) {
         pendingMessage.run_id = cleanText(directHead.run_id, pendingMessage.run_id || "");
         pendingMessage.turn_id = cleanText(directHead.turn_id, pendingMessage.turn_id || backendTurnId || "");
         pendingMessage.agent_run_status = "completed";
+        pendingMessage.route_contract = directHead.route_contract || pendingMessage.route_contract || kernelRouteProof?.route_contract || null;
         pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
           action.id === askActionId
             ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "done", detail: dispatch ? "Hermes dispatch" : "direct decision", meta: "direct-head" }
             : action
         ));
+        pendingMessage.actions.push(...masterFrontierHermesActions(directHead));
         if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
         if (directHead.context_measurement) {
           pendingMessage.actions.push(agentAction("Envelope estimate", "done", `~${directHead.context_measurement.estimated_tokens || 0} tokens`, {
@@ -32237,6 +33087,12 @@ async function sendAgentMessage(text) {
           tools: [],
           transcript_turns: transcript.length,
           token_usage: directHeadUsage,
+          token_usage_head: directHeadUsage,
+          token_usage_bridge: dispatch?.usage || null,
+          token_ledger: directHead.token_ledger || pendingMessage.token_ledger || pendingMessage.diagnostics?.token_ledger || null,
+          route_id: directHead.route_id || pendingMessage.route_contract?.route_id || "wasm-agent.avatar-chat.ui",
+          route_contract: pendingMessage.route_contract,
+          kernel_route_proof: pendingMessage.kernel_route_proof || kernelRouteProof || null,
           run_id: pendingMessage.run_id,
           turn_id: pendingMessage.turn_id,
           context_measurement: directHead.context_measurement || null,
@@ -32259,9 +33115,13 @@ async function sendAgentMessage(text) {
           wis_patch_result: clientWis.result,
           client_ops: clientOps.result,
         };
+        await refreshAgentRunTokenLedger(pendingMessage, {
+          questId: activeAgentSession()?.id || "",
+          signal: state.agentAbortController.signal,
+        }).catch(() => null);
         const session = activeAgentSession();
         session.diagnostics = pendingMessage.diagnostics;
-        updateAgentTokenUsage(directHeadUsage);
+        updateAgentTokenUsage(agentTokenLedgerUsage(pendingMessage.token_ledger) || agentDiagnosticsTokenUsageBreakdown(pendingMessage.diagnostics).total);
         session.changed_files = changedFiles;
         session.context_preview = Array.isArray(directHead.context_preview) && directHead.context_preview.length
           ? directHead.context_preview
@@ -32278,15 +33138,25 @@ async function sendAgentMessage(text) {
         void publishClientSnapshot("agent-master-frontier-finished", { silent: true });
         return;
       } catch (directHeadError) {
-        const diagnostic = providerDiagnosticFromError(directHeadError) || directHeadError.diagnostic || {};
+        const diagnostic = directHeadError.diagnostic || directHeadError.payload?.error || providerDiagnosticFromError(directHeadError) || {};
         const reason = diagnostic.message || directHeadError.message;
+        const category = cleanText(diagnostic.code || diagnostic.category || diagnostic.mode || "", "error");
+        mergeAgentAction(pendingMessage, {
+          id: category === "route_contract_missing" ? "tl_route_contract_missing" : "tl_direct_head_error",
+          label: category === "route_contract_missing" ? "route_contract_missing" : "direct_head.error",
+          status: "error",
+          detail: reason,
+          kind: "timeline",
+          event_type: category === "route_contract_missing" ? "route_contract_missing" : "direct_head.error",
+          arguments: { error: diagnostic },
+        });
         pendingMessage.content = `The ${AGENT_MASTER_FRONTIER_LABEL} direct head could not answer: ${reason}`;
         pendingMessage.pending = false;
         pendingMessage.phase = "Direct head error";
         pendingMessage.duration_ms = Date.now() - turnStartedAt;
         pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
           action.id === askActionId
-            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "error", detail: reason, meta: diagnostic.category || diagnostic.mode || "error" }
+            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "error", detail: reason, meta: category }
             : action
         ));
         pendingMessage.diagnostics = {
@@ -32569,15 +33439,23 @@ async function sendAgentMessage(text) {
     pendingMessage.run_id = cleanText(payload.agent?.run_id, pendingMessage.run_id || "");
     pendingMessage.turn_id = cleanText(payload.agent?.turn_id, pendingMessage.turn_id || backendTurnId || "");
     pendingMessage.agent_run_status = "completed";
+    if (payload.agent?.route_contract) pendingMessage.route_contract = payload.agent.route_contract;
+    if (payload.agent?.token_ledger || pendingMessage.token_ledger) {
+      applyAgentTokenLedger(pendingMessage, payload.agent?.token_ledger || pendingMessage.token_ledger);
+    }
+    await refreshAgentRunTokenLedger(pendingMessage, {
+      questId: session?.id || "",
+      signal: state.agentAbortController?.signal,
+    }).catch(() => null);
     pendingMessage.space_id = activeSpaceStorageId();
     pendingMessage.actions = agentActionRowsFromPayload(payload.agent, initialActions);
     if (clientWis.result) pendingMessage.actions.push(wisPatchActionFromResult(clientWis.result));
-    session.diagnostics = diagnostics;
-    updateAgentTokenUsage(diagnostics.token_usage || null);
+    session.diagnostics = pendingMessage.diagnostics;
+    updateAgentTokenUsage(agentTokenLedgerUsage(pendingMessage.token_ledger) || agentDiagnosticsTokenUsageBreakdown(pendingMessage.diagnostics).total);
     session.changed_files = changedFiles;
     session.context_preview = payload.agent?.context_preview || [];
     saveAgentSessions();
-    renderAgentDiagnostics(diagnostics);
+    renderAgentDiagnostics(pendingMessage.diagnostics);
     renderAgentContextPreview(payload.agent?.context_preview || []);
     renderAgentMessages();
     recordUserEvent("agent.message_finished", {
@@ -39788,14 +40666,20 @@ function bindAndroidNativeFastTap(element, action, options = {}) {
   }
 }
 
+function promptForNewSpaceTitle() {
+  const title = cleanText(window.prompt("Name this space before creating it.", ""), "").slice(0, 80);
+  return title || "";
+}
+
 function createUserSpace() {
   if (!ensureMainDeviceForEvolution("create space")) return;
+  const title = promptForNewSpaceTitle();
+  if (!title) return;
   const createdAt = new Date().toISOString();
-  const nextNumber = state.userSpaces.length + 1;
   const area = initialCanvasAreaSize();
   const space = {
     id: `space_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    title: `Space ${nextNumber}`,
+    title,
     created_at: createdAt,
     space_area: serializableSpaceArea(area),
   };
@@ -42280,6 +43164,9 @@ function wireEvents() {
       return;
     }
     state.agentSpeechToggleInFlight = true;
+    void ensureAgentSpeechTranscriber()
+      .then((transcriber) => transcriber.preload?.())
+      .catch((error) => handleAgentSpeechError({ error: errorMessage(error), context: "preload" }));
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => toggleAgentSpeechTranscription(stream))
       .catch((error) => {

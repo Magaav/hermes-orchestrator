@@ -18,8 +18,10 @@ from routes import (
     TaskStore,
     activity_from_running_task,
     compact_run_event,
+    read_node_session_token_usage,
     render_node_env,
     rewrite_exhaust_slash_prompt,
+    run_options_from_payload,
 )
 
 
@@ -118,6 +120,158 @@ class RoutesTest(unittest.TestCase):
             self.assertEqual(activity["input_tokens"], 12)
             self.assertEqual(activity["output_tokens"], 5)
             self.assertEqual(activity["api_calls"], 1)
+
+    def test_task_store_records_hermes_camelcase_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = TaskStore(tmp_path)
+            task = store.create_running("prompt", "orchestrator")
+            store.update_running(task["task_id"], result={"run_id": "run_123"})
+
+            store.record_event(
+                task["task_id"],
+                {
+                    "event": "run.completed",
+                    "tokenUsage": {
+                        "inputTokens": 42,
+                        "outputTokens": 8,
+                        "totalTokens": 50,
+                        "cachedInputTokens": 12,
+                        "reasoningOutputTokens": 3,
+                    },
+                },
+            )
+
+            updated = store.get(task["task_id"])
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            usage = updated["result"]["token_usage"]
+            self.assertEqual(usage["total_tokens"], 50)
+            self.assertEqual(usage["input_tokens"], 42)
+            self.assertEqual(usage["output_tokens"], 8)
+            self.assertEqual(usage["cache_read_tokens"], 12)
+            self.assertEqual(usage["reasoning_tokens"], 3)
+
+    def test_reads_exact_node_session_usage_from_state_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db_dir = tmp_path / "nodes" / "orchestrator" / ".hermes"
+            db_dir.mkdir(parents=True)
+            import sqlite3
+
+            conn = sqlite3.connect(db_dir / "state.db")
+            conn.execute(
+                """
+                CREATE TABLE sessions (
+                  id TEXT PRIMARY KEY,
+                  source TEXT,
+                  model TEXT,
+                  input_tokens INTEGER,
+                  output_tokens INTEGER,
+                  cache_read_tokens INTEGER,
+                  cache_write_tokens INTEGER,
+                  reasoning_tokens INTEGER,
+                  api_call_count INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ("space-ui-orchestrator-test", "api_server", "kimi-k2.6", 100, 20, 300, 4, 6, 3),
+            )
+            conn.commit()
+            conn.close()
+
+            usage = read_node_session_token_usage(_settings(tmp_path), "orchestrator", "space-ui-orchestrator-test")
+
+            self.assertEqual(usage["input_tokens"], 100)
+            self.assertEqual(usage["output_tokens"], 20)
+            self.assertEqual(usage["cache_read_tokens"], 300)
+            self.assertEqual(usage["cache_write_tokens"], 4)
+            self.assertEqual(usage["reasoning_tokens"], 6)
+            self.assertEqual(usage["total_tokens"], 430)
+            self.assertEqual(usage["api_calls"], 3)
+            self.assertEqual(usage["usage_accuracy"], "provider_exact")
+
+    def test_exact_session_usage_replaces_provisional_folded_cache_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = TaskStore(tmp_path)
+            task = store.create_running("prompt", "orchestrator")
+
+            store.update_running(
+                task["task_id"],
+                result={
+                    "token_usage": {
+                        "input_tokens": 3610808,
+                        "output_tokens": 24124,
+                        "total_tokens": 3634932,
+                        "api_calls": 0,
+                    }
+                },
+            )
+            store.update_running(
+                task["task_id"],
+                result={
+                    "token_usage": {
+                        "input_tokens": 108407,
+                        "output_tokens": 24124,
+                        "cache_read_tokens": 3502401,
+                        "total_tokens": 3634932,
+                        "api_calls": 46,
+                        "source": "hermes_state_db",
+                        "model": "kimi-k2.6",
+                    }
+                },
+            )
+
+            updated = store.get(task["task_id"])
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            usage = updated["result"]["token_usage"]
+            self.assertEqual(usage["input_tokens"], 108407)
+            self.assertEqual(usage["output_tokens"], 24124)
+            self.assertEqual(usage["cache_read_tokens"], 3502401)
+            self.assertEqual(usage["total_tokens"], 3634932)
+            self.assertEqual(usage["api_calls"], 46)
+            self.assertEqual(usage["source"], "hermes_state_db")
+
+    def test_run_options_keep_dispatch_workspace_root(self) -> None:
+        options = run_options_from_payload({
+            "model": "embedded-hermes",
+            "cwd": "/local/plugins/wasm-agent",
+            "workspace_root": "/local/plugins/wasm-agent",
+            "timeout_sec": 12,
+        })
+
+        self.assertIsNotNone(options)
+        assert options is not None
+        self.assertEqual(options["cwd"], "/local/plugins/wasm-agent")
+        self.assertEqual(options["workspace_root"], "/local/plugins/wasm-agent")
+        self.assertEqual(options["model"], "embedded-hermes")
+
+    def test_running_task_preserves_dispatch_workspace_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            store = TaskStore(tmp_path)
+            task = store.create_running("prompt", "orchestrator")
+
+            updated = store.update_running(
+                task["task_id"],
+                result={
+                    "run_id": "run_123",
+                    "run_options": {
+                        "model": "embedded-hermes",
+                        "cwd": "/local/plugins/wasm-agent",
+                        "workspace_root": "/local/plugins/wasm-agent",
+                    },
+                },
+            )
+
+            self.assertIsNotNone(updated)
+            assert updated is not None
+            self.assertEqual(updated["result"]["run_options"]["cwd"], "/local/plugins/wasm-agent")
+            self.assertEqual(updated["result"]["run_options"]["workspace_root"], "/local/plugins/wasm-agent")
 
     def test_stop_task_calls_node_run_stop_and_marks_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

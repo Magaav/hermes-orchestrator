@@ -336,6 +336,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-server-provider",
                     "objective": "Use the server-owned direct head provider.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                 },
@@ -433,6 +434,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-codex",
                     "objective": "Answer through ChatGPT subscription auth.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
@@ -479,6 +481,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-codex-missing",
                     "objective": "Require Codex OAuth.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                 },
             }
@@ -504,6 +507,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-openai-worker",
                     "objective": "Answer directly from a worker.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
@@ -575,6 +579,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-openai-dispatch",
                     "objective": "Decide and dispatch only if proof work is needed.",
+                    "surface": "avatar-chat",
                     "capabilities": ["repo.read", "proof.report"],
                     "allowed_actions": [{"id": "answer"}, {"id": "dispatch.hermes"}],
                     "budget": {"max_output_tokens": 128},
@@ -599,7 +604,8 @@ class ProviderProxyTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs", side_effect=fake_bridge_runs):
                 result = server_mod.provider_envelope_run_completion(server, body, user=self.admin())
                 events = server_mod.read_agent_run_events(self.admin(), result["run_id"])["events"]
-                stored = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]["final"]
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+                stored = stored_run["final"]
 
             self.assertEqual(result["reply"], "Hermes handled the OpenAI request.")
             self.assertEqual(result["hermes_dispatch"]["source"], "bridge_runs")
@@ -610,10 +616,23 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertIn("RAW true", request["payload"]["input"][1]["content"])
             event_types = [event["type"] for event in events]
             self.assertIn("head.delta", event_types)
+            self.assertIn("route.resolved", event_types)
             self.assertIn("head.decision", event_types)
             self.assertIn("hermes.dispatch", event_types)
             self.assertIn("hermes.progress", event_types)
+            self.assertIn("tokens.used", event_types)
             self.assertEqual(event_types[-1], "run.final")
+            token_event = next(event for event in events if event["type"] == "tokens.used")
+            self.assertEqual(token_event["payload"]["usage"]["total_tokens"], 31)
+            self.assertEqual(token_event["payload"]["primary"], "total")
+            self.assertEqual(token_event["payload"]["components"]["head"]["total_tokens"], 20)
+            self.assertEqual(token_event["payload"]["components"]["bridge"]["total_tokens"], 11)
+            ledger = stored_run["token_ledger"]
+            self.assertEqual(ledger["provider_call_count"], 2)
+            self.assertTrue(ledger["exact"])
+            self.assertEqual(ledger["total_tokens"], 31)
+            self.assertEqual({call["route_id"] for call in ledger["calls"]}, {"wasm-agent.avatar-chat.ui"})
+            self.assertTrue(any(call["raw_usage"].get("input_tokens") == 14 for call in ledger["calls"]))
             self.assertEqual(stored["reply"], "Hermes handled the OpenAI request.")
             self.assertEqual(stored["diagnostics"]["source"], "openai_responses_hermes_dispatch")
 
@@ -634,6 +653,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-openai-http",
                     "objective": "Answer directly through the stream route.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
@@ -653,6 +673,32 @@ class ProviderProxyTests(unittest.TestCase):
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
+                    def post_agent_tool(path: str, payload: dict[str, Any]) -> dict[str, Any]:
+                        tool_request = Request(
+                            f"http://127.0.0.1:{server.server_address[1]}{path}",
+                            data=json.dumps(payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json"},
+                            method="POST",
+                        )
+                        with urlopen(tool_request, timeout=5) as response:
+                            return json.loads(response.read().decode("utf-8"))
+
+                    route_resolve = post_agent_tool(
+                        "/agent/tools/route.resolve",
+                        {
+                            "route_id": "wasm-agent.avatar-chat.ui",
+                            "surface_hint": "avatar-chat",
+                            "objective": "Runtime route proof from avatar-chat.",
+                        },
+                    )
+                    map_summary = post_agent_tool(
+                        "/agent/tools/map.summary",
+                        {"route_id": "wasm-agent.avatar-chat.ui"},
+                    )
+                    lookup_files = post_agent_tool(
+                        "/agent/tools/lookup.files",
+                        {"route_id": "wasm-agent.avatar-chat.ui", "paths": ["public/index.html"]},
+                    )
                     request = Request(
                         f"http://127.0.0.1:{server.server_address[1]}/agent/provider/envelope/stream",
                         data=json.dumps(body).encode("utf-8"),
@@ -680,6 +726,10 @@ class ProviderProxyTests(unittest.TestCase):
                         for run in listed["runs"]
                         if run["turn_id"] == "openai-http-turn"
                     )
+                    cost_status = post_agent_tool(
+                        "/agent/tools/cost.status",
+                        {"run_id": discovered_run["run_id"]},
+                    )
                     replay_request = Request(
                         f"http://127.0.0.1:{server.server_address[1]}/agent/runs/{discovered_run['run_id']}/stream?after_seq=1",
                         method="GET",
@@ -706,6 +756,13 @@ class ProviderProxyTests(unittest.TestCase):
                 self.assertEqual(discovered_run["session_id"], "direct-session")
                 self.assertEqual(discovered_run["status"], "completed")
                 self.assertTrue(discovered_run["direct_head"])
+                self.assertEqual(route_resolve["summary"]["route_id"], "wasm-agent.avatar-chat.ui")
+                self.assertEqual(map_summary["summary"]["route_id"], "wasm-agent.avatar-chat.ui")
+                self.assertEqual(lookup_files["files"][0]["path"], "public/index.html")
+                self.assertTrue(lookup_files["files"][0]["sha256"])
+                self.assertEqual(cost_status["ledger"]["provider_call_count"], 1)
+                self.assertTrue(cost_status["ledger"]["exact"])
+                self.assertEqual(cost_status["ledger"]["total_tokens"], 14)
                 self.assertIn("delta", [line["type"] for line in replay_lines])
                 self.assertEqual(replay_lines[-1]["type"], "final")
                 self.assertEqual(replay_lines[-1]["agent"]["reply"], "Hello from OpenAI")
@@ -730,6 +787,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-openai-disconnect",
                     "objective": "Keep running after the stream subscriber disconnects.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
@@ -769,7 +827,8 @@ class ProviderProxyTests(unittest.TestCase):
                     server.server_close()
                     thread.join(timeout=5)
 
-            self.assertIsInstance(first_line, str)
+            self.assertIsInstance(first_line, dict)
+            self.assertIn(first_line.get("type"), {"action", "run", "delta"})
             self.assertEqual(final["reply"], "Hello from OpenAI")
             self.assertEqual(len(OpenAIResponsesStubHandler.requests), 1)
             event_types = [event["type"] for event in events]
@@ -895,6 +954,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-openai-env",
                     "objective": "Answer through the wa.env receiver.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
@@ -960,6 +1020,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-direct-run",
                     "objective": "Answer directly.",
+                    "surface": "avatar-chat",
                     "capabilities": ["answer"],
                     "allowed_actions": [{"id": "answer"}],
                     "budget": {"max_output_tokens": 128},
@@ -975,9 +1036,13 @@ class ProviderProxyTests(unittest.TestCase):
                 event_types = [event["type"] for event in events]
                 self.assertEqual(event_types[0], "run.started")
                 self.assertIn("envelope.created", event_types)
+                self.assertIn("route.resolved", event_types)
                 self.assertIn("head.started", event_types)
                 self.assertIn("head.decision", event_types)
                 self.assertEqual(event_types[-1], "run.final")
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+                self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 1)
+                self.assertEqual(stored_run["token_ledger"]["total_tokens"], 5)
                 self.assertTrue(all(event["redacted"] for event in events))
 
     def test_direct_head_dispatches_hermes_through_bridge_surface(self) -> None:
@@ -1017,6 +1082,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-dispatch",
                     "objective": "Decide whether Hermes should act.",
+                    "surface": "avatar-chat",
                     "capabilities": ["repo.read", "proof.report"],
                     "allowed_actions": [{"id": "dispatch.hermes"}],
                     "budget": {"max_output_tokens": 128},
@@ -1047,7 +1113,23 @@ class ProviderProxyTests(unittest.TestCase):
                 event_types = [event["type"] for event in events]
                 self.assertIn("hermes.dispatch", event_types)
                 self.assertIn("hermes.progress", event_types)
+                self.assertIn("tokens.used", event_types)
                 self.assertEqual(event_types[-1], "run.final")
+                token_event = next(event for event in events if event["type"] == "tokens.used")
+                self.assertEqual(token_event["payload"]["usage"]["total_tokens"], 14)
+                self.assertEqual(token_event["payload"]["primary"], "total")
+                self.assertEqual(token_event["payload"]["components"]["head"]["total_tokens"], 5)
+                self.assertEqual(token_event["payload"]["components"]["bridge"]["total_tokens"], 9)
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+                self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 2)
+                self.assertEqual(stored_run["token_ledger"]["total_tokens"], 14)
+                cost = server_mod.agent_kernel_tool(
+                    server,
+                    "/agent/tools/cost.status",
+                    {"run_id": result["run_id"]},
+                    user=self.admin(),
+                )
+                self.assertEqual(cost["ledger"]["total_tokens"], 14)
 
     def test_direct_head_without_server_provider_key_dispatches_hermes_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1067,6 +1149,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-no-provider-key",
                     "objective": "Answer through the master frontier lane.",
+                    "surface": "avatar-chat",
                     "capabilities": ["repo.read", "proof.report"],
                     "allowed_actions": [{"id": "dispatch.hermes"}],
                     "budget": {"max_output_tokens": 128},
@@ -1099,7 +1182,58 @@ class ProviderProxyTests(unittest.TestCase):
                 self.assertIn("head.decision", event_types)
                 self.assertIn("hermes.dispatch", event_types)
                 self.assertIn("hermes.progress", event_types)
+                self.assertIn("tokens.used", event_types)
                 self.assertEqual(event_types[-1], "run.final")
+                token_event = next(event for event in events if event["type"] == "tokens.used")
+                self.assertEqual(token_event["payload"]["usage"]["total_tokens"], 7)
+                self.assertEqual(token_event["payload"]["primary"], "bridge")
+
+    def test_direct_head_dispatch_requires_resolved_route_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Dispatch Hermes.",
+                            "decision": "dispatch",
+                            "actions": [{
+                                "action": "dispatch.hermes",
+                                "objective": "Search wherever needed.",
+                                "caps": ["repo.read", "proof.report"],
+                            }],
+                            "state_delta": {},
+                            "needs": [],
+                            "confidence": 0.7,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-missing-route",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-missing-route",
+                    "objective": "Decide whether Hermes should act.",
+                    "capabilities": ["repo.read", "proof.report"],
+                    "allowed_actions": [{"id": "dispatch.hermes"}],
+                    "budget": {"max_output_tokens": 128},
+                },
+            }
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs") as bridge:
+                with self.assertRaises(server_mod.ProviderProxyError) as raised:
+                    server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+
+                self.assertEqual(raised.exception.diagnostic["category"], "route_contract_missing")
+                bridge.assert_not_called()
+                runs = server_mod.list_agent_runs(self.admin(), {"session_id": ["direct-session"]})["runs"]
+                self.assertEqual(runs[0]["status"], "failed")
 
     def test_direct_head_rejects_unknown_hermes_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
@@ -1133,6 +1267,7 @@ class ProviderProxyTests(unittest.TestCase):
                 "envelope": {
                     "trace_id": "trace-bad-cap",
                     "objective": "Decide whether Hermes should act.",
+                    "surface": "avatar-chat",
                     "allowed_actions": [{"id": "dispatch.hermes"}],
                 },
             }

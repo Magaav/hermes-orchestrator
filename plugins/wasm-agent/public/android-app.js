@@ -1050,12 +1050,19 @@ function selectLiteSpace(spaceId) {
   mark("android_lite_space_selected", { space_id: space.id });
 }
 
+function promptForNewLiteSpaceTitle() {
+  const title = cleanText(window.prompt("Name this space before creating it.", ""), "").slice(0, 80);
+  return title || "";
+}
+
 function createLiteSpace() {
   const spaces = allLiteSpaces();
+  const title = promptForNewLiteSpaceTitle();
+  if (!title) return;
   const createdAt = new Date().toISOString();
   const space = {
     id: `space_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
-    title: `Space ${spaces.length + 1}`,
+    title,
     created_at: createdAt,
     updated_at: createdAt,
     space_area: { width_px: 1000, height_px: 760, distance: 1 },
