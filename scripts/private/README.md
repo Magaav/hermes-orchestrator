@@ -9,6 +9,7 @@ This tree is intentionally separated from public framework code so deployment-sp
 ## Current Structure
 
 - `backup/`: local backup/restore entrypoints used by compatibility wrappers and operational runbooks.
+- `github-credentials.md`: ignored local runbook for repo-specific GitHub credential paths and push notes. Keep token values out of this tracked README.
 
 ## Hermes-Orchestrator Integration
 
