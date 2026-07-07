@@ -124,6 +124,20 @@ agent must return `route_contract_missing` or add the missing contract before
 dispatch. Do not use Hermes or any model to broad-search arbitrary roots as a
 replacement for route ownership.
 
+## Root-Cause Gate
+
+Observation is not authorization to patch the observed edge. When a watch,
+simulator, test, or runtime trace shows a miss, first classify the miss as one
+owned contract gap: route, capability manifest, generic inspect/action/proof
+primitive, runtime evidence, harness promise, or implementation bug.
+
+Next actions must target that contract layer. Product names, node names,
+filenames, selectors, prompts, and single examples may appear only as fixtures
+or proof cases after the generic contract has been named. If a proposed next
+step only helps the case just observed, demote it to reactive programming and
+replace it with the smallest reusable contract or proof surface that would
+answer the whole class of misses.
+
 ## Harness Factory Reflection
 
 After intent/context routing and before slow investigation, rebuilds, runtime
@@ -185,14 +199,15 @@ user interaction.
 
 ## Reply Next-Step Phase
 
-Every substantive agent reply should end with a short next-step phase. Keep it
-concrete and loop-shortening:
+Every substantive final agent reply must end with a short `**Next Step:**`
+phase. Keep it concrete, first-grade, and loop-shortening:
 
 1. Name the immediate next action or command.
 2. Say whether it uses live introspection/control, local static checks, or a rebuild/runtime proof.
 3. If blocked, name the missing access or proof instead of giving a broad menu.
 4. If suggesting rebuild/reinstall/package work, state the missing primitive or proof that makes it necessary.
 5. Never claim runtime success from source/static/build checks.
+6. Do not end with vague "let me know" language when a precise next proof step exists.
 
 ## Conflict Law
 

@@ -5,7 +5,7 @@ function usage() {
   console.log(`horc app simulator
 
 Usage:
-  node tools/app-simulator/simulate.js web
+  node tools/app-simulator/simulate.js web [--avatar-quest]
   node tools/app-simulator/simulate.js android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
   node tools/app-simulator/simulate.js windows
   node tools/app-simulator/simulate.js all
@@ -65,6 +65,20 @@ function parseAndroidArgs(args) {
   return options;
 }
 
+function parseWebArgs(args) {
+  const options = {
+    avatarQuest: false,
+  };
+  for (const arg of args) {
+    if (arg === "--avatar-quest") {
+      options.avatarQuest = true;
+    } else {
+      throw new Error(`unknown web simulator option: ${arg}`);
+    }
+  }
+  return options;
+}
+
 function commandLabel(target, args) {
   return `horc simulate ${target}${args.length ? ` ${args.join(" ")}` : ""}`;
 }
@@ -78,8 +92,11 @@ async function main() {
   }
 
   if (target === "web") {
-    const { runWebSimulation } = require("./web");
-    const result = await runWebSimulation({ command: commandLabel("web", args) });
+    const options = parseWebArgs(args);
+    const { runAvatarQuestSimulation, runWebSimulation } = require("./web");
+    const result = options.avatarQuest
+      ? await runAvatarQuestSimulation({ command: commandLabel("web", args) })
+      : await runWebSimulation({ command: commandLabel("web", args) });
     process.exitCode = result.status === "passed" ? 0 : 1;
     return;
   }

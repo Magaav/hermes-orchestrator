@@ -688,6 +688,28 @@
               </div>
               <div class="widget-resize-handle" data-widget-resize="security-loop" title="Resize Security Loop" aria-hidden="true"></div>
             </article>
+
+            <article class="widget meta-analysis-widget" data-widget-id="meta-analysis">
+              <header class="widget-head" title="Drag to move. Double-click to reset.">
+                <span>Meta-Analysis</span>
+                <span class="widget-head-actions">
+                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Meta-Analysis"></button>
+                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Meta-Analysis"></button>
+                  <span class="widget-chip">paracelsus</span>
+                </span>
+              </header>
+              <div class="meta-analysis-body">
+                <div class="meta-analysis-search">
+                  <input id="metaAnalysisInput" type="text" placeholder="Subject (e.g., GLP-1 agonists)" autocomplete="off" spellcheck="false">
+                  <button id="metaAnalysisRankButton" type="button">Rank Papers</button>
+                  <button id="metaAnalysisExportButton" type="button">Export</button>
+                </div>
+                <div id="metaAnalysisStatus" class="meta-analysis-status" role="status" aria-live="polite"></div>
+                <div id="metaAnalysisQueue" class="meta-analysis-queue"></div>
+                <div id="metaAnalysisResults" class="meta-analysis-results"></div>
+              </div>
+              <div class="widget-resize-handle" data-widget-resize="meta-analysis" title="Resize Meta-Analysis" aria-hidden="true"></div>
+            </article>
             </div>
           </section>
           <button id="spaceConfigButton" class="space-config-button icon-button" type="button" title="Space config" aria-label="Space config"></button>
@@ -1077,5 +1099,6 @@
     </section>
     <script src="/auth-redirect.js?v=20260621-android-bootstrap19"></script>
     <script src="/app-loader.js?v=20260630-route-contracts"></script>
+    <script type="module" src="/modules/meta-analysis/meta-analysis-widget.js?v=1"></script>
   </body>
 </html>

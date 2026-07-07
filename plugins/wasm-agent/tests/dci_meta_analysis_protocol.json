@@ -1,0 +1,115 @@
+{
+  "schema": "hermes.wasm_agent.direct_head_dispatch.v1",
+  "route_id": "wasm-agent.avatar-chat.ui",
+  "objective": "Test input for scientific-paper-meta-analysis skill, derived from DCI (Dr. Frederico Chaves / Identidade Metabolica) app domain.",
+  "domain": "metabolic-health",
+  "app_reference": "/local/projects/paracelsus/apps/dci",
+  "app_owner": "Dr. Frederico Chaves",
+  "app_public_host": "fredericochaves.com",
+  "protocol_version": "2026-07-04",
+  "test_batches": [
+    {
+      "batch_id": "dci-core-metabolic",
+      "description": "Core metabolic identity topics aligned with DCI patient accompaniment model.",
+      "topics": [
+        {
+          "query": "GLP-1 receptor agonists cardiovascular outcomes type 2 diabetes",
+          "source_preference": "all",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 20},
+          "expected_clinical_flags": ["RCT", "systematic-review", "drug-interaction"],
+          "relevance_to_dci": "Primary pharmacotherapy for metabolic patients under DCI accompaniment."
+        },
+        {
+          "query": "obesity pharmacotherapy long-term weight maintenance behavioral accompaniment",
+          "source_preference": "all",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 20},
+          "expected_clinical_flags": ["RCT", "systematic-review"],
+          "relevance_to_dci": "Behavioral + pharmacological models matching DCI's non-automated, doctor-led approach."
+        },
+        {
+          "query": "ketogenic diet metabolic syndrome insulin resistance clinical trial",
+          "source_preference": "all",
+          "filters": {"year_from": 2019, "year_to": 2026, "max_results": 20},
+          "expected_clinical_flags": ["RCT", "clinical-trial-registration"],
+          "relevance_to_dci": "Dietary intervention research for metabolic identity profiling."
+        },
+        {
+          "query": "digital health remote patient monitoring obesity weight management",
+          "source_preference": "all",
+          "filters": {"year_from": 2021, "year_to": 2026, "max_results": 20},
+          "expected_clinical_flags": ["systematic-review"],
+          "relevance_to_dci": "Evidence base for DCI's digital portal and check-in/dose-log features."
+        },
+        {
+          "query": "patient-reported outcomes hunger satiety energy quality of life obesity treatment",
+          "source_preference": "pubmed",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 20},
+          "expected_clinical_flags": ["RCT"],
+          "relevance_to_dci": "Validates DCI check-in fields: hunger, nausea, energy, weight, notes."
+        }
+      ]
+    },
+    {
+      "batch_id": "dci-adjacent-lifestyle",
+      "description": "Adjacent lifestyle and metabolic research for protocol expansion.",
+      "topics": [
+        {
+          "query": "time-restricted eating circadian rhythm metabolic health randomized controlled trial",
+          "source_preference": "all",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 15},
+          "expected_clinical_flags": ["RCT"],
+          "relevance_to_dci": "Lifestyle timing interventions for metabolic identity."
+        },
+        {
+          "query": "gut microbiome obesity metabolic endotoxemia intervention",
+          "source_preference": "all",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 15},
+          "expected_clinical_flags": ["RCT", "systematic-review"],
+          "relevance_to_dci": "Emerging metabolic factor for patient education content library."
+        },
+        {
+          "query": "exercise prescription obesity resistance training aerobic combined metabolic outcomes",
+          "source_preference": "pubmed",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 15},
+          "expected_clinical_flags": ["RCT", "clinical-trial-registration"],
+          "relevance_to_dci": "Physical activity protocols for patient accompaniment."
+        }
+      ]
+    },
+    {
+      "batch_id": "dci-safety-ethics",
+      "description": "Safety, ethics, and regulatory topics for DCI content and terms.",
+      "topics": [
+        {
+          "query": "informed consent telemedicine digital health brazil portuguese language",
+          "source_preference": "pubmed",
+          "filters": {"year_from": 2019, "year_to": 2026, "max_results": 10},
+          "expected_clinical_flags": [],
+          "relevance_to_dci": "Legal/ethical foundation for DCI privacy/terms pages and evaluation request flow."
+        },
+        {
+          "query": "medication adherence GLP-1 semaglutide liraglutide dropout predictors",
+          "source_preference": "all",
+          "filters": {"year_from": 2020, "year_to": 2026, "max_results": 15},
+          "expected_clinical_flags": ["RCT", "systematic-review"],
+          "relevance_to_dci": "Understanding patient dropout and adherence for DCI pending/active status design."
+        }
+      ]
+    }
+  ],
+  "execution_notes": {
+    "rate_limit_discipline": "PubMed 3 req/s (0.34s sleep), arXiv 3s between pages, CrossRef/OpenAlex 5 workers with mailto=.",
+    "deduplication_priority": "DOI > PMID > ArXiv ID > title similarity. Prefer CrossRef for citations/ORCID, PubMed for MeSH, OpenAlex for OA URLs.",
+    "ranking_formula": "Doctor Relevance Score = log1p(citations)*0.4 + recency*0.3 + source_bonus*0.2 + open_access*0.1",
+    "pitfall_checks": [
+      "Verify GLP-1 papers are human clinical trials, not rodent studies.",
+      "Filter out papers with 'carnivore diet' ambiguity (returns wild animal diet literature).",
+      "Ensure Portuguese-language informed consent papers are not excluded by English-only filters.",
+      "Validate that 'dose informada' vs 'dose recomendada' terminology aligns with DCI safety copy."
+    ]
+  },
+  "expected_outputs": {
+    "per_topic": ["search-results.json", "deduplicated.json", "enriched.json", "ranked.json", "report.md", "export.bib"],
+    "aggregate": "cross-batch synthesis identifying highest-evidence interventions for DCI protocol v1"
+  }
+}

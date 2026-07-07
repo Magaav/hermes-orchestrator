@@ -648,6 +648,308 @@
         "If this fails, fix the layout constraints before adding more timeline or ledger fields.",
         "Do not hide overflow by removing route, token, or proof fields from the UI."
       ]
+    },
+    {
+      "id": "wasm-agent-avatar-chat-quest-simulator",
+      "owner": "plugins/wasm-agent",
+      "claim": "A simulator user can submit a two-turn avatar-chat UI quest and receive direct-head responses with route-before-provider proof, exact quest/turn/provider-call token ledger rows, no broad Hermes fallback, and contained run timeline UI.",
+      "whenToUse": "After changing avatar-chat submission, direct-head route preflight, provider dispatch, token ledger persistence, or compact run timeline UI.",
+      "command": [
+        "node",
+        "tools/app-simulator/simulate.js",
+        "web",
+        "--avatar-quest"
+      ],
+      "timeoutSec": 90,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "simulator admin user reaches the authenticated avatar-chat UI",
+        "the UI submits exactly two provider calls to the local Responses stub",
+        "route.resolved is recorded before head.started or provider dispatch evidence for every turn",
+        "route_contract_missing is returned for objective-only routing",
+        "the exact quest ledger input, output, and total token counts equal the sum of provider stub usage across turns",
+        "each turn ledger includes exact input, output, total, quest_id, turn_id, route_id, and provider_call_id",
+        "Hermes broad fallback is absent",
+        "timeline and token-ledger UI boxes are width-contained"
+      ],
+      "outputArtifacts": [
+        "reports/sim/avatar-quest/latest/result.json",
+        "reports/sim/avatar-quest/latest/summary.md",
+        "reports/sim/avatar-quest/latest/screenshots/final.png"
+      ],
+      "invalidatedBy": [
+        "tools/app-simulator/web.js",
+        "tools/app-simulator/simulate.js",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/styles.css",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/tests/security_loop_policy.test.py",
+        "plugins/wasm-agent/tests/agent_timeline_layout.test.js"
+      ],
+      "nextSuggestedSteps": [
+        "If route proof fails, fix the declarative route contract or preflight before provider dispatch.",
+        "If token totals fail, fix exact provider usage normalization and ledger persistence before exposing UI totals.",
+        "If containment fails, fix the timeline/token-ledger layout instead of hiding proof fields.",
+        "If the simulator cannot submit deterministically, stop with the missing UI primitive instead of dispatching Hermes broadly."
+      ]
+    },
+    {
+      "id": "master-frontier-production-gates",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier route-first, tool-first, budgeted, bounded-harness production gates pass without provider or rebuild work.",
+      "whenToUse": "After changing Master:frontier planner, envelope, dispatch, protocol, code-memory, route contracts, provider proxy, local kernel tools, or before claiming the direct-head harness is production-ready at the static/behavioral contract layer.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-production.py"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "harness registry validation passes",
+        "Master:frontier planner, dispatch, protocol, envelope, prompt-audit, route-contract, intent, and code-memory tests pass",
+        "code-memory helper returns route-scoped compact results",
+        "provider proxy direct-head, local-tool, Hermes-gating, node-tool, changed-file, token-ledger, and proof tests pass",
+        "avatar-chat records stale Master:frontier reliability manifests as degraded evidence instead of blocking direct-head dispatch",
+        "wasm-agent smoke test passes",
+        "report JSON has ok true"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-production-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/master_frontier_*.test.py",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/tests/wasm_agent_smoke.test.js",
+        "plugins/wasm-agent/tests/code_memory_agent_contract.test.py",
+        "tools/context/prove-master-frontier-production.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If a Master:frontier unit gate fails, fix the owning module under server/master_frontier instead of adding policy to static_server.py.",
+        "If provider-proxy fails, inspect the failing test name and repair the contract layer it names before touching provider fallback behavior.",
+        "Run with --include-runtime before claiming live node-brain availability."
+      ]
+    },
+    {
+      "id": "wasm-agent-node-bridge-proof",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier can prove a named Hermes node is inspectable and answerable through wasm-agent node.capabilities and node.chat before claiming node-brain availability.",
+      "whenToUse": "After changing Master:frontier allowed actions, node bridge primitives, Hermes node API_SERVER_* env contracts, route contracts for Hermes nodes, or before diagnosing whether a node such as Paracelsus can answer through its own brain.",
+      "command": [
+        "python3",
+        "tools/context/prove-wasm-agent-node-bridge.py"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "wasm-agent bridge is reachable",
+        "target Hermes node is running",
+        "node.capabilities returns ok true for the target node",
+        "node.capabilities exposes inspect_node and run_prompt actions",
+        "node.chat returns ok true through bridge_runs",
+        "node.chat canary reply exactly matches the harness prompt",
+        "node.chat provider usage reports the expected model deepseek-v4-flash"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/wasm-agent-node-bridge-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/server/routes.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "agents/envs/paracelsus.env",
+        "agents/nodes/paracelsus/.hermes/.env",
+        "agents/nodes/paracelsus/.hermes/config.yaml",
+        "tools/context/prove-wasm-agent-node-bridge.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If node.capabilities fails, fix the declarative route/node bridge contract before asking the LLM to infer node state.",
+        "If node.chat fails with api_server_url_not_configured, add or repair the node API_SERVER_* env contract instead of patching Hermes core.",
+        "If the model mismatches, fix the node model/env bootstrap before claiming Paracelsus is using OpenCode Go deepseek-v4-flash."
+      ]
+    },
+    {
+      "id": "wasm-agent-runtime-entity-history-local-proof",
+      "owner": "plugins/wasm-agent",
+      "claim": "avatar-chat runtime-entity history questions are resolved through declared route contracts and local kernel.inspect proof, then composed by the direct-head LLM without Hermes dispatch.",
+      "whenToUse": "After changing direct-head envelope routing, runtime entity route contracts, kernel.inspect, provider fallback handling, Hermes dispatch gating, or avatar-chat submission for entity/history questions.",
+      "command": [
+        "node",
+        "tools/app-simulator/avatar-paracelsus-live.js"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "simulator admin user reaches the authenticated avatar-chat UI",
+        "the first submitted prompt is exactly `what is paracelsus in this code base and what has it done overtime`",
+        "the final submitted follow-up prompt is exactly `tell me more about this paracelsus meta-analsys and what it were doing`",
+        "the run completes without HTTP 502 or direct-head provider failure",
+        "Hermes dispatch is absent",
+        "the resolved runtime entity route is `hermes-node.paracelsus.runtime`",
+        "kernel.inspect runs before the direct-head LLM final answer",
+        "the final answer has exact nonzero direct-head provider token usage when the provider is available",
+        "the answer includes bounded route proof for `/local/agents/nodes/paracelsus` and `/local/datas/paracelsus`",
+        "the answer includes conversation/runtime evidence such as sessions or messages",
+        "the answer includes data investigation evidence such as summary_md_count or raw_paper_json_count",
+        "the answer does not say Paracelsus was not inspected or that runtime inspection is still needed"
+      ],
+      "outputArtifacts": [
+        "reports/sim/avatar-paracelsus-live/latest/result.json",
+        "reports/sim/avatar-paracelsus-live/latest/summary.md",
+        "reports/sim/avatar-paracelsus-live/latest/final.png"
+      ],
+      "invalidatedBy": [
+        "tools/app-simulator/avatar-paracelsus-live.js",
+        "tools/app-simulator/web.js",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/styles.css",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If HTTP 502 appears, verify the running server contains the local runtime-route proof-first branch before blaming provider transport.",
+        "If Hermes dispatch appears, restore local-first runtime-entity inspection before provider or bridge work.",
+        "If route proof is missing, fix the declarative route contract or runtime entity resolver instead of adding product-specific runtime strings.",
+        "If the answer lacks conversation or data evidence, fix kernel.inspect bounded investigation before changing prompt wording."
+      ]
+    },
+    {
+      "id": "wasm-agent-implementation-intent-priority",
+      "owner": "plugins/wasm-agent",
+      "claim": "avatar-chat implementation objectives that mention runtime entities route to the owned repo edit/proof lane first; runtime/entity inspection is only supporting evidence and must not preflight as the primary task.",
+      "whenToUse": "After changing direct-head envelope routing, runtime entity preflight, dispatch.hermes parsing, kernel projection, or implementation/action routing for avatar-chat.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "an implementation objective containing a runtime entity name resolves the owning UI route",
+        "direct-head does not emit local_runtime_route_inspection before the provider for implementation intent",
+        "kernel.inspect is not run as objective preflight for the implementation request",
+        "the provider envelope advertises implementation_uses_owned_repo_action_lane_before_entity_inspection",
+        "the direct-head final remains on the owned workspace route",
+        "dispatch targets the owned workspace route with repo.edit/test/proof capabilities",
+        "the runtime entity mention is available as supporting route evidence without becoming the primary preflight"
+      ],
+      "outputArtifacts": [
+        "provider_proxy.test.py unittest output"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If runtime preflight appears, fix generic intent priority before adding product-specific prompt text.",
+        "If a later implementation run loses changed_files, fix scoped bridge proof collection before claiming implementation shipped.",
+        "If the provider lacks the intent-priority hint, fix the direct-head kernel projection/prompt contract."
+      ]
+    },
+    {
+      "id": "wasm-agent-agent-kernel-contract",
+      "owner": "plugins/wasm-agent",
+      "claim": "The wasm-agent Agent Kernel exposes generic local-first capabilities, resolve, inspect, act, and prove primitives; direct-head can use kernel.inspect for unknown runtime/entity state without Hermes fallback.",
+      "whenToUse": "After changing /agent/tools kernel or route tools, direct-head local tool action handling, Hermes dispatch gating, token/proof ledgers, or the compact direct-head envelope projection.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "kernel.capabilities reports local-first primitives and bounded Hermes requirements",
+        "kernel.resolve returns a registered route contract without broad search",
+        "kernel.inspect returns bounded route-scoped observations for runtime/entity inspection, including declared capability status, run evidence, explicit unknowns, and no self-confirming model-text entity proof",
+        "kernel.act executes declared local tools and rejects external-provider dispatch",
+        "kernel.prove returns route, timeline, token-ledger, and check proof projections",
+        "direct-head local tool action handling can execute kernel.inspect before final answer",
+        "direct-head fails closed when it declares missing state/proof needs without a kernel or bounded dispatch action",
+        "Hermes is not called for locally inspectable kernel work",
+        "Hermes dispatch still requires route, capability need, budget, proof, and escalation reason"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/server/README.md",
+        "plugins/wasm-agent/README.md"
+      ],
+      "nextSuggestedSteps": [
+        "If kernel primitives fail, fix the generic kernel contract before adding product-specific prompt affordances.",
+        "If unknown runtime/entity state is answered without kernel inspection, tighten the compact kernel projection or direct-head action handling.",
+        "If Hermes is called for local work, restore local-first capability gating before provider dispatch."
+      ]
     }
   ]
 }

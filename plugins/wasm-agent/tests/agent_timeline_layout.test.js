@@ -66,16 +66,27 @@ function chromiumExecutablePath() {
                   <span class="agent-token-ledger-total">in 1856 out 367 total 2223 reason 19 cached 42</span>
                   <span class="agent-token-ledger-scope">quest ${long} / turn ${long} / 2 calls</span>
                 </summary>
-                <div class="agent-token-ledger-calls">
-                  ${Array.from({ length: 3 }, (_, index) => `
-                    <div class="agent-token-ledger-call exact">
-                      <div class="agent-token-ledger-call-head">
-                        <strong>openai-responses / gpt-5.5-${long}</strong>
-                        <span>wasm-agent.avatar-chat.ui/${long}</span>
-                        <code>pc_${long}_${index}</code>
+                <div class="agent-token-ledger-turns">
+                  ${Array.from({ length: 2 }, (_, turnIndex) => `
+                    <div class="agent-token-ledger-turn exact">
+                      <div class="agent-token-ledger-turn-head">
+                        <strong>turn ${long}_${turnIndex}</strong>
+                        <span>in 1856 out 367 total 2223 reason 19 cached 42</span>
+                        <span>2 calls</span>
                       </div>
-                      <div class="agent-token-ledger-metrics">
-                        <span>in 1856</span><span>out 367</span><span>cached 42</span><span>reason 19</span><span>total 2223</span>
+                      <div class="agent-token-ledger-calls">
+                        ${Array.from({ length: 2 }, (_, index) => `
+                          <div class="agent-token-ledger-call exact">
+                            <div class="agent-token-ledger-call-head">
+                              <strong>openai-responses / gpt-5.5-${long}</strong>
+                              <span>wasm-agent.avatar-chat.ui/${long}</span>
+                              <code>pc_${long}_${turnIndex}_${index}</code>
+                            </div>
+                            <div class="agent-token-ledger-metrics">
+                              <span>in 1856</span><span>out 367</span><span>cached 42</span><span>reason 19</span><span>total 2223</span>
+                            </div>
+                          </div>
+                        `).join("")}
                       </div>
                     </div>
                   `).join("")}
@@ -96,6 +107,9 @@ function chromiumExecutablePath() {
         ".agent-timeline-row",
         ".agent-token-ledger",
         ".agent-token-ledger-summary",
+        ".agent-token-ledger-turns",
+        ".agent-token-ledger-turn",
+        ".agent-token-ledger-turn-head",
         ".agent-token-ledger-calls",
         ".agent-token-ledger-call",
         ".agent-token-ledger-call-head",

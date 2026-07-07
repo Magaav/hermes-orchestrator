@@ -37,11 +37,41 @@ state, and product UI surfaces.
   this contract, or a dedicated machine-readable route registry with tests.
   Runtime code may enforce a resolved route contract; it must not become a pile
   of reactive routing heuristics.
+- The MCP/tool contract layer belongs under `server/master_frontier/`, not in
+  the `server/static_server.py` monolith. New tool vocabularies, model-facing
+  action schemas, repair policies, prompt projections, code-memory query
+  policy, and token-saving lookup contracts must be added to Master:frontier
+  modules with focused tests. `static_server.py` may provide auth, HTTP
+  routing, route-contract loading, run-event recording, and side-effect
+  execution only; it must delegate MCP policy to the owning module.
+- For codebase understanding, ownership lookup, symbol search, caller/callee
+  tracing, and change blast-radius work, use the Master:frontier code-memory
+  lane before broad `rg` or multi-file reads. From the terminal, prefer
+  `python3 tools/context/code-memory-query.py --route-id <route> "<query>"`
+  for the first pass. Use `rg` after code-memory when the graph is missing,
+  stale, unavailable, or when exact raw-text matching is explicitly needed.
+- Master:frontier must emit a compact `task_contract` before provider or
+  harness selection. The contract owns intent, route, workspace, capabilities,
+  `tools_first`, executor choice, proof requirements, and block codes.
+  Capability inquiries must prefer code-memory and kernel inspection before
+  model/harness dispatch; implementation requests must require route-scoped
+  action plus changed-file proof.
 - The embedded agent must be cheap, strong, and autonomous by protocol:
   wasm-agent resolves surface/owner/workspace/capabilities/proof/budget first,
   then calls Hermes or another provider only as a bounded skill/bridge executor.
   Hermes must not be asked to infer the product map, broad-search unknown roots,
   or do work that deterministic wasm-agent routing/lookup can do locally.
+  Hermes is a subagent/harness, not the Master:frontier brain: direct-head
+  provider unavailability, malformed model output, and missing changed-file
+  proof must fail with typed contract errors unless an action explicitly
+  declares `role=subagent_harness` or `harness=true` with a resolved route,
+  allowed capabilities, proof request, and escalation reason.
+- When avatar-chat, direct-head, or run-api observation exposes a weak answer,
+  do not add a node name, product string, selector, filename, or one-off prompt
+  affordance to fix that observed miss. First name the missing generic kernel
+  contract: capability discovery, objective/entity resolution, bounded runtime
+  inspection, scoped action, proof collection, or harness promise. The observed
+  case may then become a fixture proving the generic contract.
 - Use native shells only for non-negotiable OS/browser constraints: background
   wake-word listeners, OS services, native permissions, package/signing
   behavior, accessibility/media projection, foreground services, or hardware/OS

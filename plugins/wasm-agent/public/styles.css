@@ -7389,7 +7389,11 @@ details.agent-file-row .agent-file-path {
 
 .agent-message-body {
   white-space: pre-wrap;
-  padding: 5px 5px 0 5px;
+  padding: 0 5px 0 5px;
+}
+
+.agent-message-body.agent-markdown.chat-rendered-markdown {
+  padding: 0 5px 0 5px;
 }
 
 .agent-command-choices {
@@ -7589,6 +7593,7 @@ details.agent-file-row .agent-file-path {
 
 .agent-actions-chain {
   margin: 0;
+  margin-bottom: 5px;
   border: 1px solid rgba(147, 170, 203, 0.12);
   border-radius: 6px;
   background: rgba(3, 8, 15, 0.28);
@@ -7866,7 +7871,7 @@ details.agent-action-row .agent-action-row-summary {
 .agent-message.user {
   justify-self: end;
   max-width: calc(100% - 24px);
-  padding: 0 5px 5px 5px;
+  padding: 5px;
   background: rgba(125, 220, 255, 0.11);
   border-color: rgba(125, 220, 255, 0.22);
 }
@@ -9373,6 +9378,45 @@ details.agent-action-row .agent-action-row-summary {
   overflow: hidden;
 }
 
+.agent-token-ledger-turns {
+  display: grid;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.agent-token-ledger-turn {
+  display: grid;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 5px;
+  border: 1px solid rgba(124, 228, 176, 0.12);
+  border-radius: 6px;
+  background: rgba(124, 228, 176, 0.04);
+}
+
+.agent-token-ledger-turn-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) max-content;
+  gap: 6px;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  font-size: 10px;
+  color: rgba(220, 238, 255, 0.82);
+}
+
+.agent-token-ledger-turn-head strong,
+.agent-token-ledger-turn-head span {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-token-ledger-call {
   display: grid;
   gap: 4px;
@@ -9425,4 +9469,149 @@ details.agent-action-row .agent-action-row-summary {
   color: rgba(147, 170, 203, 0.78);
   font-size: 10px;
   line-height: 1.15;
+}
+
+.meta-analysis-widget {
+  min-width: 260px;
+  min-height: 180px;
+}
+
+.meta-analysis-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.meta-analysis-search {
+  display: flex;
+  gap: 6px;
+}
+
+.meta-analysis-search input {
+  flex: 1;
+  min-height: 28px;
+  background: rgba(29, 45, 67, 0.92);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+}
+
+.meta-analysis-search button {
+  white-space: nowrap;
+}
+
+.meta-analysis-search button:last-child {
+  min-width: 56px;
+}
+
+.meta-analysis-status {
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.meta-analysis-status[data-mode="busy"] {
+  color: rgba(125, 220, 255, 0.92);
+}
+
+.meta-analysis-status[data-mode="ok"] {
+  color: rgba(124, 228, 176, 0.92);
+}
+
+.meta-analysis-status[data-mode="warn"],
+.meta-analysis-status[data-mode="error"] {
+  color: rgba(255, 196, 112, 0.95);
+}
+
+.meta-analysis-queue {
+  font-size: 12px;
+  color: var(--muted);
+  max-height: 80px;
+  overflow: auto;
+}
+
+.ma-queue-item {
+  display: block;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.ma-queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.ma-queue-item button {
+  min-height: 18px;
+  padding: 0 5px;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+
+.ma-collapse-button {
+  width: 22px;
+  flex: 0 0 22px;
+}
+
+.ma-subject-button {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ma-integrity-badge {
+  flex: 0 0 auto;
+  max-width: 96px;
+  overflow: hidden;
+  border: 1px solid rgba(124, 228, 176, 0.28);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: rgba(124, 228, 176, 0.95);
+  font-size: 10px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ma-integrity-badge[data-level="review"] {
+  border-color: rgba(245, 198, 106, 0.42);
+  color: rgba(245, 198, 106, 0.96);
+}
+
+.ma-integrity-badge[data-level="high"] {
+  border-color: rgba(248, 113, 113, 0.48);
+  color: rgba(248, 113, 113, 0.96);
+}
+
+.ma-subject-result {
+  margin: 5px 0 2px 28px;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.meta-analysis-results {
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
+  background: rgba(13, 23, 38, 0.60);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 6px 8px;
 }

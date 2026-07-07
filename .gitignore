@@ -68,6 +68,7 @@ plugins/wasm-agent/conf/wa.env
 **/.ruff_cache/
 **/.cache/
 **/node_modules/
+tools/vendor/
 
 # Native build/release outputs
 /build/

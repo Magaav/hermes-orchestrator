@@ -65,16 +65,22 @@ the loop.
 
 ```bash
 python3 tools/context/check-harness-promises.py
+python3 tools/context/prove-master-frontier-production.py
 ```
 
 Expected report:
 
 ```text
 reports/context/latest/harness-promises-result.json
+reports/context/latest/master-frontier-production-proof.json
 ```
 
-The validator proves only registry structure. Each listed promise still proves
-only the claim and evidence classes declared by that promise.
+The registry validator proves only registry structure. The Master:frontier
+production gate composes the focused planner, envelope, dispatch, protocol,
+route-contract, code-memory, provider-proxy, and smoke checks; it proves the
+static/behavioral contract layer only. Run
+`python3 tools/context/prove-master-frontier-production.py --include-runtime`
+before claiming live node-brain availability.
 
 ## Loop-Aware Evidence
 
@@ -109,11 +115,17 @@ only; it is not runtime proof.
 ```bash
 node plugins/wasm-agent/tests/android_lite_performance_budget.test.js
 horc simulate web
+horc simulate web --avatar-quest
 /local/plugins/wasm-agent/scripts/doctor.sh
 ```
 
 Use focused tests under `plugins/wasm-agent/tests` when touching one behavior.
 `horc simulate web` proves browser/PWA behavior only.
+`horc simulate web --avatar-quest` proves a two-turn avatar-chat UI quest
+against an isolated local backend and provider stub: route-before-provider on
+each turn, objective-only `route_contract_missing`, exact token ledger rows by
+quest/turn/provider call, quest totals equal summed turn totals, no broad
+Hermes fallback, and contained timeline/token-ledger UI.
 
 Native evolution source/feed contract:
 

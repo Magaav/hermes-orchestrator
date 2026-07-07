@@ -73,7 +73,7 @@ Usage:
   horc build android
   horc build android-fast
   horc build all
-  horc simulate web
+  horc simulate web [--avatar-quest]
   horc simulate android [--device|--emulator|--local-report PATH|--voice-wake FIXTURE]
   horc simulate windows
   horc simulate all
@@ -104,6 +104,7 @@ Examples:
   horc build win
   horc build win-fast
   horc simulate web
+  horc simulate web --avatar-quest
   horc simulate all
   horc space start
   horc space stop
@@ -123,6 +124,7 @@ Notes:
     creating a trusted installer or release feed.
   - `horc build android` creates Android APK artifacts for Go Native.
   - `horc simulate web` runs Playwright browser/PWA runtime evidence and writes reports/sim/web/latest/.
+  - `horc simulate web --avatar-quest` submits a real avatar-chat quest through the UI and writes reports/sim/avatar-quest/latest/.
   - `horc simulate android --device` installs and drives the real APK on a connected USB/ADB device.
   - `horc simulate android --emulator` attempts cloud host/Docker emulator setup and reports exact blockers.
   - `horc simulate android --local-report PATH` validates a copied real-device report from another machine.

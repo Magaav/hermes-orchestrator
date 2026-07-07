@@ -275,10 +275,16 @@ class SecurityLoopPolicyTest(unittest.TestCase):
     def test_route_tools_are_registry_scoped_and_receipted(self) -> None:
         resolved = server_mod.route_resolve_tool({
             "objective": "Fix agent timeline overflow",
-            "surface_hint": "agent timeline",
+            "surface_hint": "agent-run-timeline",
         })
         self.assertTrue(resolved["ok"])
         self.assertEqual(resolved["route_contract"]["route_id"], "wasm-agent.agent-run.timeline")
+        missing = server_mod.route_resolve_tool({
+            "objective": "Fix agent timeline overflow",
+            "surface_hint": "agent timeline",
+        })
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["error"]["code"], "route_contract_missing")
 
         summary = server_mod.route_map_summary_tool({"route_id": "wasm-agent.agent-run.timeline"})
         self.assertEqual(summary["summary"]["route_id"], "wasm-agent.agent-run.timeline")

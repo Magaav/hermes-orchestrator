@@ -4,8 +4,9 @@ from __future__ import annotations
 import argparse
 import base64
 import calendar
+import difflib
 from datetime import datetime, timezone
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 import hashlib
 import hmac
 import io
@@ -22,6 +23,7 @@ import socket
 import sqlite3
 import subprocess
 import struct
+import sys
 import threading
 import time
 import uuid
@@ -34,6 +36,17 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPBasicAuthHandler, HTTPDigestAuthHandler, HTTPPasswordMgrWithDefaultRealm, Request, build_opener, urlopen
+
+SERVER_DIR = Path(__file__).resolve().parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+from master_frontier import intent as master_frontier_intent
+from master_frontier import route_contracts as master_frontier_routes
+from master_frontier import dispatch as master_frontier_dispatch
+from master_frontier import protocol as master_frontier_protocol
+from master_frontier import envelope as master_frontier_envelope
+from master_frontier import code_memory as master_frontier_code_memory
+from master_frontier import planner as master_frontier_planner
 
 try:
     from PIL import Image
@@ -1696,11 +1709,24 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 body = self._read_json(max_bytes=512 * 1024)
                 self._json(HTTPStatus.OK, agent_kernel_tool(self.server, path, body, user=user))
             except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
+                self._json(
+                    exc.status,
+                    {
+                        "ok": False,
+                        "code": exc.code,
+                        "schema": "hermes.wasm_agent.tool_error.v1",
+                        "error": {"code": exc.code, "message": exc.message},
+                    },
+                )
             except Exception as exc:
                 self._json(
                     HTTPStatus.BAD_GATEWAY,
-                    {"ok": False, "error": {"code": "agent_tool_error", "message": str(exc)}},
+                    {
+                        "ok": False,
+                        "code": "agent_tool_error",
+                        "schema": "hermes.wasm_agent.tool_error.v1",
+                        "error": {"code": "agent_tool_error", "message": str(exc)},
+                    },
                 )
             return
         if path in {"/agent/provider/probe", "/agent/provider/chat", "/agent/provider/envelope"}:
@@ -2659,18 +2685,40 @@ def provider_proxy_messages(body: dict[str, Any], *, probe: bool = False) -> lis
     return messages
 
 
+def plain_http_error_text(value: Any, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        return clipped(str(fallback or ""), 600)
+    if re.search(r"<(?:!doctype|html|head|body|title|h1|p)\b", text, flags=re.IGNORECASE):
+        message_match = re.search(r"<p[^>]*>\s*Message:\s*(.*?)</p>", text, flags=re.IGNORECASE | re.DOTALL)
+        candidates: list[str] = [message_match.group(1)] if message_match else []
+        for pattern in (r"<h1[^>]*>(.*?)</h1>", r"<title[^>]*>(.*?)</title>"):
+            if candidates:
+                break
+            match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                candidates.append(match.group(1))
+        source = " ".join(candidates) if candidates else text
+        source = re.sub(r"<script\b.*?</script>", " ", source, flags=re.IGNORECASE | re.DOTALL)
+        source = re.sub(r"<style\b.*?</style>", " ", source, flags=re.IGNORECASE | re.DOTALL)
+        source = re.sub(r"<[^>]+>", " ", source)
+        source = html_unescape(re.sub(r"\s+", " ", source).strip())
+        return clipped(source or str(fallback or "Provider returned an HTML error page."), 600)
+    return clipped(re.sub(r"\s+", " ", text), 600)
+
+
 def provider_error_message(payload: Any, fallback: str = "") -> str:
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, str):
             return clipped(error, 600)
         if isinstance(error, dict):
-            return clipped(str(error.get("message") or error.get("code") or fallback), 600)
+            return plain_http_error_text(error.get("message") or error.get("code") or fallback)
         if payload.get("detail") or payload.get("title"):
-            return clipped(str(payload.get("detail") or payload.get("title")), 600)
+            return plain_http_error_text(payload.get("detail") or payload.get("title"))
         if payload.get("message"):
-            return clipped(str(payload.get("message")), 600)
-    return clipped(fallback, 600)
+            return plain_http_error_text(payload.get("message"))
+    return plain_http_error_text(fallback)
 
 
 def provider_payload_text(value: Any) -> str:
@@ -2699,64 +2747,15 @@ def provider_reply_from_payload(payload: dict[str, Any]) -> str:
     return clipped(content.strip(), 120000)
 
 
-DIRECT_ENVELOPE_SCHEMA = "hermes.wasm_agent.direct_envelope.v1"
-DIRECT_ENVELOPE_RESULT_SCHEMA = "hermes.wasm_agent.direct_envelope_result.v1"
-DIRECT_ENVELOPE_MAX_JSON_CHARS = 24_000
-DIRECT_ENVELOPE_ALLOWED_KEYS = (
-    "schema",
-    "version",
-    "trace_id",
-    "objective",
-    "intent",
-    "route",
-    "route_id",
-    "surface",
-    "route_contract",
-    "state_summary",
-    "compact_state",
-    "capabilities",
-    "constraints",
-    "evidence",
-    "evidence_refs",
-    "allowed_actions",
-    "action_schemas",
-    "budget",
-    "stream",
-    "output_schema",
-)
-DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "required": ["answer", "decision", "actions", "state_delta", "needs", "confidence"],
-    "properties": {
-        "answer": {"type": "string"},
-        "decision": {"type": "string"},
-        "actions": {"type": "array", "items": {"type": "object"}},
-        "state_delta": {"type": "object"},
-        "needs": {"type": "array", "items": {"type": "string"}},
-        "proof_requests": {"type": "array", "items": {"type": "string"}},
-        "confidence": {"type": "number"},
-    },
-    "additionalProperties": True,
-}
-DIRECT_HEAD_HERMES_ALLOWED_CAPS = {
-    "repo.read",
-    "repo.edit",
-    "test.run",
-    "command.run",
-    "runtime.inspect",
-    "docs.update",
-    "proof.report",
-}
-DIRECT_ENVELOPE_SYSTEM_PROMPT = (
-    "You are wasm-agent's direct LLM-native head. Use only the provided compact "
-    "envelope; do not assume hidden Hermes conversation, memory, tool, or session "
-    "context exists. Prefer the shortest correct decision, request proof when "
-    "blocked, and keep normal answers as plain text for humans."
-)
-SENSITIVE_ENVELOPE_KEY_RE = re.compile(
-    r"(api[_-]?key|authorization|bearer|cookie|password|secret|(^|[_-])(access|auth|id|refresh|session)?[_-]?token($|[_-]))",
-    re.IGNORECASE,
-)
+DIRECT_ENVELOPE_SCHEMA = master_frontier_envelope.SCHEMA
+DIRECT_ENVELOPE_RESULT_SCHEMA = master_frontier_envelope.RESULT_SCHEMA
+DIRECT_ENVELOPE_MAX_JSON_CHARS = master_frontier_envelope.MAX_JSON_CHARS
+DIRECT_ENVELOPE_ALLOWED_KEYS = master_frontier_envelope.ALLOWED_KEYS
+DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = master_frontier_envelope.DEFAULT_OUTPUT_SCHEMA
+DIRECT_HEAD_HERMES_ALLOWED_CAPS = master_frontier_dispatch.ALLOWED_CAPS
+DIRECT_HEAD_LOCAL_TOOL_PATHS = master_frontier_envelope.LOCAL_TOOL_PATHS
+DIRECT_ENVELOPE_SYSTEM_PROMPT = master_frontier_envelope.SYSTEM_PROMPT
+SENSITIVE_ENVELOPE_KEY_RE = master_frontier_envelope.SENSITIVE_KEY_RE
 
 
 def provider_proxy_payload_options(body: dict[str, Any]) -> dict[str, Any]:
@@ -2778,35 +2777,11 @@ def provider_proxy_payload_options(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def direct_envelope_redact(value: Any, *, depth: int = 0) -> Any:
-    if depth > 5:
-        return "[depth-clipped]"
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= 80:
-                result["__clipped_keys__"] = len(value) - index
-                break
-            clean_key = clipped(str(key), 120)
-            result[clean_key] = (
-                "[redacted]"
-                if SENSITIVE_ENVELOPE_KEY_RE.search(clean_key)
-                else direct_envelope_redact(item, depth=depth + 1)
-            )
-        return result
-    if isinstance(value, list):
-        result = [direct_envelope_redact(item, depth=depth + 1) for item in value[:80]]
-        if len(value) > 80:
-            result.append({"__clipped_items__": len(value) - 80})
-        return result
-    if isinstance(value, str):
-        return clipped(value, 6000)
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return clipped(str(value), 1000)
+    return master_frontier_envelope.redact(value, depth=depth)
 
 
 def direct_envelope_json(value: Any, *, limit: int = DIRECT_ENVELOPE_MAX_JSON_CHARS) -> str:
-    return clipped(json.dumps(value, ensure_ascii=True, separators=(",", ":")), limit)
+    return master_frontier_envelope.json_text(value, limit=limit)
 
 
 def compact_context_measurement(label: str, text: str, *, baseline_text: str = "") -> dict[str, Any]:
@@ -2825,50 +2800,88 @@ def compact_context_measurement(label: str, text: str, *, baseline_text: str = "
 
 
 def direct_envelope_inline(value: Any, limit: int = 1200) -> str:
-    if value in (None, "", [], {}):
-        return ""
-    if isinstance(value, str):
-        return clipped(value, limit)
-    return direct_envelope_json(value, limit=limit)
+    return master_frontier_envelope.inline(value, limit=limit)
 
 
 def direct_envelope_names(value: Any, key: str = "id") -> str:
-    if isinstance(value, str):
-        return clipped(value, 1000)
-    if isinstance(value, list):
-        names = []
-        for item in value[:24]:
-            if isinstance(item, str):
-                names.append(item)
-            elif isinstance(item, dict):
-                names.append(str(item.get(key) or item.get("name") or item.get("type") or item.get("action") or "item"))
-        return ", ".join(clipped(str(item), 80) for item in names if str(item).strip())
-    if isinstance(value, dict):
-        return ", ".join(clipped(str(key), 80) for key in list(value.keys())[:24])
-    return clipped(str(value), 1000)
+    return master_frontier_envelope.names(value, key=key)
+
+
+def direct_envelope_kernel_projection(envelope: dict[str, Any]) -> dict[str, Any]:
+    return master_frontier_envelope.kernel_projection(envelope)
 
 
 def direct_envelope_semantic_text(envelope: dict[str, Any]) -> str:
-    refs = envelope.get("evidence_refs")
-    if not refs:
-        refs = envelope.get("evidence")
-    route_contract = envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else {}
-    lines = [
-        "ENV agent-envelope-v1",
-        f"OBJ {direct_envelope_inline(envelope.get('objective'), 1600)}",
-        f"ROUTE {direct_envelope_inline(envelope.get('route_id') or envelope.get('route'), 300)}",
-        f"SURFACE {direct_envelope_inline(envelope.get('surface'), 160)}",
-        f"ROOT {direct_envelope_inline(route_contract.get('workspace_root'), 500)}",
-        f"STATE {direct_envelope_inline(envelope.get('state_summary') or envelope.get('compact_state'), 1600)}",
-        f"CAPS {direct_envelope_names(envelope.get('capabilities'))}",
-        f"REFS {direct_envelope_names(refs, key='ref')}",
-        f"ACT {direct_envelope_names(envelope.get('allowed_actions'))}",
-        f"PROOF {direct_envelope_inline(envelope.get('constraints') or envelope.get('proof_requests'), 900)}",
-        f"BUDGET {direct_envelope_inline(envelope.get('budget'), 500)}",
-        "STREAM true" if envelope.get("stream") is True else "STREAM false",
-        f"OUT {direct_envelope_inline(envelope.get('output_schema'), 1200)}",
-    ]
-    return "\n".join(line for line in lines if line.split(" ", 1)[-1].strip())
+    return master_frontier_envelope.semantic_text(envelope)
+
+
+def direct_head_identity_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    receiver = direct_envelope_receiver(body)
+    identity: dict[str, Any] = {
+        "schema": "hermes.wasm_agent.direct_head_identity.v1",
+        "receiver": receiver,
+    }
+    if receiver == "provider":
+        config = provider_config_for_proxy_body(body)
+        identity.update({
+            "provider": clipped(str(config.get("provider") or ""), 80),
+            "model": clipped(str(config.get("model") or ""), 180),
+            "base_url": clipped(str(config.get("base_url") or config.get("baseUrl") or ""), 260),
+            "source": clipped(str(config.get("source") or body.get("provider_config_source") or ""), 120),
+            "api_key_present": bool(config.get("api_key") or config.get("apiKey")),
+        })
+        return identity
+    if receiver == "openai-codex":
+        identity.update({
+            "provider": "openai-codex",
+            "model": clipped(str(
+                body.get("codex_model")
+                or body.get("openai_codex_model")
+                or body.get("model")
+                or configured_env_value("WASM_AGENT_CODEX_MODEL")
+                or configured_env_value("HERMES_WASM_AGENT_CODEX_MODEL")
+                or configured_env_value("OPENAI_CODEX_MODEL")
+                or OPENAI_CODEX_DEFAULT_MODEL
+            ), 180),
+            "base_url": clipped(str(
+                body.get("codex_base_url")
+                or body.get("openai_codex_base_url")
+                or body.get("base_url")
+                or configured_env_value("WASM_AGENT_CODEX_BASE_URL")
+                or configured_env_value("HERMES_WASM_AGENT_CODEX_BASE_URL")
+                or configured_env_value("OPENAI_CODEX_BASE_URL")
+                or OPENAI_CODEX_DEFAULT_BASE_URL
+            ), 260),
+            "api_key_present": bool(codex_oauth_access_token()[0]),
+        })
+        return identity
+    if receiver == "openai-responses":
+        identity.update({
+            "provider": "openai-responses",
+            "model": clipped(str(
+                body.get("openai_model")
+                or body.get("model")
+                or configured_env_value("WASM_AGENT_OPENAI_MODEL")
+                or configured_env_value("HERMES_WASM_AGENT_OPENAI_MODEL")
+                or configured_env_value("OPENAI_MODEL")
+                or OPENAI_RESPONSES_DEFAULT_MODEL
+            ), 180),
+            "base_url": clipped(str(
+                body.get("openai_base_url")
+                or body.get("openaiBaseUrl")
+                or configured_env_value("WASM_AGENT_OPENAI_BASE_URL")
+                or configured_env_value("HERMES_WASM_AGENT_OPENAI_BASE_URL")
+                or configured_env_value("OPENAI_BASE_URL")
+                or OPENAI_RESPONSES_DEFAULT_BASE_URL
+            ), 260),
+            "api_key_present": bool(
+                body.get("openai_api_key")
+                or body.get("api_key")
+                or configured_env_value("WASM_AGENT_OPENAI_API_KEY")
+                or configured_env_value("OPENAI_API_KEY")
+            ),
+        })
+    return identity
 
 
 def direct_envelope_error(category: str, message: str, status: HTTPStatus = HTTPStatus.BAD_REQUEST) -> None:
@@ -2888,157 +2901,73 @@ def direct_head_route_registry_path() -> Path:
 
 
 def route_contract_path(plugin_root: Path, value: Any) -> str:
-    raw = str(value or ".").strip() or "."
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        path = plugin_root / path
-    return str(path.resolve())
+    return master_frontier_routes.contract_path(plugin_root, value)
 
 
 def route_contract_rel_path(value: Any) -> str:
-    raw = str(value or "").strip().replace("\\", "/")
-    raw = raw.lstrip("/")
-    parts = [part for part in raw.split("/") if part not in {"", "."}]
-    if any(part == ".." for part in parts):
-        return ""
-    return "/".join(parts)
+    return master_frontier_routes.rel_path(value)
 
 
 def normalize_route_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]:
-    route_id = clipped(str(raw.get("route_id") or raw.get("id") or "").strip(), 160)
-    surface = clipped(str(raw.get("surface") or "").strip(), 120)
-    workspace_root = route_contract_path(plugin_root, raw.get("workspace_root") or ".")
-    def paths(key: str, fallback: list[str]) -> list[str]:
-        values = raw.get(key)
-        if not isinstance(values, list):
-            values = fallback
-        return [route_contract_path(plugin_root, item) for item in values[:24]]
-    aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
-    return {
-        "kind": "route-contract",
-        "route_id": route_id,
-        "surface": surface,
-        "owner": clipped(str(raw.get("owner") or "").strip(), 160),
-        "workspace_root": workspace_root,
-        "cwd": workspace_root,
-        "allowed_read_roots": paths("allowed_read_roots", [raw.get("workspace_root") or "."]),
-        "allowed_write_roots": paths("allowed_write_roots", [raw.get("workspace_root") or "."]),
-        "likely_paths": [
-            clipped(route_contract_rel_path(item), 240)
-            for item in (raw.get("likely_paths") if isinstance(raw.get("likely_paths"), list) else [])[:80]
-            if route_contract_rel_path(item)
-        ],
-        "lookup_handles": [clipped(str(item or ""), 80) for item in (raw.get("lookup_handles") if isinstance(raw.get("lookup_handles"), list) else [])[:24]],
-        "caps": [clipped(str(item or ""), 80) for item in (raw.get("caps") if isinstance(raw.get("caps"), list) else [])[:24]],
-        "aliases": [clipped(str(item or ""), 120) for item in aliases[:24]],
-        "provider_policy": raw.get("provider_policy") if isinstance(raw.get("provider_policy"), dict) else {},
-        "budget": raw.get("budget") if isinstance(raw.get("budget"), dict) else {},
-        "proof": [clipped(str(item or ""), 80) for item in (raw.get("proof") if isinstance(raw.get("proof"), list) else [])[:24]],
-        "reason": "resolved declarative wasm-agent route contract",
-    }
+    return master_frontier_routes.normalize_contract(raw, plugin_root)
 
 
 def load_direct_head_route_contracts() -> list[dict[str, Any]]:
-    path = direct_head_route_registry_path()
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    routes = payload.get("routes") if isinstance(payload, dict) else []
-    if not isinstance(routes, list):
-        return []
-    plugin_root = wasm_agent_plugin_root().resolve()
-    contracts: list[dict[str, Any]] = []
-    for item in routes[:80]:
-        if not isinstance(item, dict):
-            continue
-        contract = normalize_route_contract(item, plugin_root)
-        if contract.get("route_id") and contract.get("workspace_root"):
-            contracts.append(contract)
-    return contracts
+    return master_frontier_routes.load_contracts(direct_head_route_registry_path(), wasm_agent_plugin_root().resolve())
 
 
 def route_tokens_from_structured_value(value: Any) -> list[str]:
-    tokens: list[str] = []
-    if isinstance(value, dict):
-        for key in ("route_id", "route", "surface", "surface_hint", "screen"):
-            raw = str(value.get(key) or "").strip()
-            if raw:
-                tokens.append(raw)
-        route_contract = value.get("route_contract")
-        if isinstance(route_contract, dict):
-            tokens.extend(route_tokens_from_structured_value(route_contract))
-        for key in ("compact_state", "workspace", "active_space"):
-            child = value.get(key)
-            if isinstance(child, dict):
-                tokens.extend(route_tokens_from_structured_value(child))
-        return tokens
-    if isinstance(value, str):
-        for part in re.split(r"[\s,;]+", value):
-            if ":" not in part:
-                continue
-            key, raw = part.split(":", 1)
-            if key.strip().lower() in {"route", "route_id", "surface"} and raw.strip():
-                tokens.append(raw.strip())
-    return tokens
+    return master_frontier_routes.tokens_from_structured_value(value)
 
 
 def direct_head_route_tokens(action: dict[str, Any], envelope: dict[str, Any]) -> list[str]:
-    tokens: list[str] = []
-    for source in (action, envelope):
-        if isinstance(source, dict):
-            tokens.extend(route_tokens_from_structured_value(source))
-            tokens.extend(route_tokens_from_structured_value(source.get("state_summary")))
-    seen: set[str] = set()
-    result: list[str] = []
-    for token in tokens:
-        normalized = clipped(str(token or "").strip().lower(), 160)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            result.append(normalized)
-    return result
+    return master_frontier_routes.route_tokens(action, envelope)
+
+
+def direct_head_dispatch_explicit_route_ids(action: dict[str, Any]) -> list[str]:
+    return master_frontier_routes.explicit_route_ids(action, load_direct_head_route_contracts())
 
 
 def route_contract_match_tokens(contract: dict[str, Any]) -> set[str]:
-    values = {
-        str(contract.get("route_id") or "").strip().lower(),
-        str(contract.get("surface") or "").strip().lower(),
-    }
-    for alias in contract.get("aliases") if isinstance(contract.get("aliases"), list) else []:
-        values.add(str(alias or "").strip().lower())
-    return {value for value in values if value}
+    return master_frontier_routes.match_tokens(contract)
 
 
-def route_contract_text_match(contract: dict[str, Any], text: str) -> bool:
-    haystack = f" {re.sub(r'[^a-z0-9_.:-]+', ' ', text.lower())} "
-    for token in route_contract_match_tokens(contract):
-        if not token:
-            continue
-        needle = f" {re.sub(r'[^a-z0-9_.:-]+', ' ', token.lower()).strip()} "
-        if needle.strip() and needle in haystack:
-            return True
-    return False
+def route_contract_entity_match_tokens(contract: dict[str, Any]) -> set[str]:
+    return master_frontier_routes.entity_match_tokens(contract)
+
+
+def resolve_runtime_entity_route_contract(text: str) -> dict[str, Any] | None:
+    return master_frontier_routes.resolve_runtime_entity_contract(text, load_direct_head_route_contracts())
+
+
+def direct_envelope_runtime_entity_hints(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    text = " ".join(
+        str(value or "")
+        for value in (
+            envelope.get("objective"),
+            envelope.get("intent"),
+            envelope.get("state_summary"),
+            envelope.get("compact_state"),
+        )
+    )
+    contract = resolve_runtime_entity_route_contract(text)
+    if not contract:
+        return []
+    return [{
+        "route_id": contract.get("route_id"),
+        "surface": contract.get("surface"),
+        "owner": contract.get("owner"),
+        "workspace_root": contract.get("workspace_root"),
+        "allowed_read_roots": contract.get("allowed_read_roots"),
+        "caps": contract.get("caps"),
+        "entities": contract.get("entities"),
+        "lookup_handles": contract.get("lookup_handles"),
+        "proof": contract.get("proof"),
+    }]
 
 
 def direct_head_public_route_contract(contract: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "kind",
-        "route_id",
-        "surface",
-        "owner",
-        "workspace_root",
-        "cwd",
-        "allowed_read_roots",
-        "allowed_write_roots",
-        "likely_paths",
-        "lookup_handles",
-        "caps",
-        "provider_policy",
-        "budget",
-        "proof",
-        "reason",
-    )
-    return {key: contract[key] for key in keys if key in contract}
+    return master_frontier_routes.public_contract(contract)
 
 
 def resolve_route_contract(
@@ -3049,37 +2978,17 @@ def resolve_route_contract(
     surface_hint: Any = "",
     contract_hint: Any = None,
 ) -> dict[str, Any] | None:
-    tokens: set[str] = set()
-    for source in (
-        {"route_id": route_id, "surface": surface},
-        {"surface": surface_hint},
-        contract_hint if isinstance(contract_hint, dict) else {},
-    ):
-        tokens.update(direct_head_route_tokens({}, source))
-    contracts = load_direct_head_route_contracts()
-    for contract in contracts:
-        if tokens & route_contract_match_tokens(contract):
-            return direct_head_public_route_contract(contract)
-    text = " ".join(str(item or "") for item in (surface_hint, surface, objective)).strip()
-    if text:
-        for contract in contracts:
-            if route_contract_text_match(contract, text):
-                return direct_head_public_route_contract(contract)
-    return None
+    return master_frontier_routes.resolve_contract(
+        load_direct_head_route_contracts(),
+        route_id=route_id,
+        surface=surface,
+        surface_hint=surface_hint,
+        contract_hint=contract_hint,
+    )
 
 
 def direct_head_dispatch_workspace_contract(action: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any] | None:
-    tokens = set(direct_head_route_tokens(action, envelope))
-    if tokens:
-        for contract in load_direct_head_route_contracts():
-            if tokens & route_contract_match_tokens(contract):
-                return direct_head_public_route_contract(contract)
-    return resolve_route_contract(
-        route_id=action.get("route_id") or envelope.get("route_id") or envelope.get("route"),
-        surface=action.get("surface") or envelope.get("surface"),
-        objective=action.get("objective") or action.get("obj") or envelope.get("objective"),
-        contract_hint=envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else None,
-    )
+    return master_frontier_routes.dispatch_workspace_contract(action, envelope, load_direct_head_route_contracts())
 
 
 def require_direct_head_dispatch_workspace_contract(action: dict[str, Any], envelope: dict[str, Any]) -> dict[str, Any]:
@@ -3116,6 +3025,7 @@ def require_direct_envelope_route_contract(envelope: dict[str, Any]) -> dict[str
 def route_contract_missing_result(missing: str, *, objective: str = "", surface_hint: str = "") -> dict[str, Any]:
     return {
         "ok": False,
+        "code": "route_contract_missing",
         "schema": "hermes.wasm_agent.route.resolve_result.v1",
         "error": {
             "code": "route_contract_missing",
@@ -3129,6 +3039,7 @@ def route_contract_missing_result(missing: str, *, objective: str = "", surface_
 
 def route_contract_summary(contract: dict[str, Any]) -> dict[str, Any]:
     likely_paths = contract.get("likely_paths") if isinstance(contract.get("likely_paths"), list) else []
+    checks = contract.get("checks") if isinstance(contract.get("checks"), list) else []
     return {
         "schema": "hermes.wasm_agent.route.map_summary.v1",
         "route_id": str(contract.get("route_id") or ""),
@@ -3141,7 +3052,18 @@ def route_contract_summary(contract: dict[str, Any]) -> dict[str, Any]:
         "caps": contract.get("caps") if isinstance(contract.get("caps"), list) else [],
         "budget": contract.get("budget") if isinstance(contract.get("budget"), dict) else {},
         "proof": contract.get("proof") if isinstance(contract.get("proof"), list) else [],
+        "checks": [
+            {
+                "id": clipped(str(item.get("id") or ""), 120),
+                "description": clipped(str(item.get("description") or ""), 240),
+                "timeout_sec": int(item.get("timeout_sec") or 0),
+            }
+            for item in checks[:24]
+            if isinstance(item, dict)
+        ],
+        "entities": contract.get("entities") if isinstance(contract.get("entities"), list) else [],
         "likely_file_count": len(likely_paths),
+        "check_count": len(checks),
         "registry_digest": hashlib.sha256(
             json.dumps(
                 {
@@ -3174,14 +3096,7 @@ def route_contract_for_tool(body: dict[str, Any]) -> dict[str, Any]:
 
 
 def route_path_inside(path: Path, roots: list[str]) -> bool:
-    resolved = path.resolve()
-    for root in roots:
-        try:
-            resolved.relative_to(Path(root).resolve())
-            return True
-        except ValueError:
-            continue
-    return False
+    return master_frontier_routes.path_inside(path, roots)
 
 
 def route_contract_file_path(contract: dict[str, Any], rel_path: str) -> Path:
@@ -3194,6 +3109,30 @@ def route_contract_file_path(contract: dict[str, Any], rel_path: str) -> Path:
     if not route_path_inside(path, [str(item) for item in roots]):
         raise BrowserError("route_path_denied", "Route lookup path is outside allowed read roots.", status=HTTPStatus.FORBIDDEN)
     return path
+
+
+def route_contract_write_file_path(contract: dict[str, Any], rel_path: str) -> Path:
+    clean = route_contract_rel_path(rel_path)
+    if not clean:
+        raise BrowserError("route_path_invalid", "Route write path must be relative to the route root.")
+    root = Path(str(contract.get("workspace_root") or "")).resolve()
+    path = (root / clean).resolve()
+    if ".git" in path.parts:
+        raise BrowserError("route_path_denied", "Route writes may not target .git.", status=HTTPStatus.FORBIDDEN)
+    roots = contract.get("allowed_write_roots") if isinstance(contract.get("allowed_write_roots"), list) else [str(root)]
+    if not route_path_inside(path, [str(item) for item in roots]):
+        raise BrowserError("route_path_denied", "Route write path is outside allowed write roots.", status=HTTPStatus.FORBIDDEN)
+    if path.suffix.lower() not in AGENT_MUTATION_ALLOWED_EXTENSIONS:
+        raise BrowserError("route_path_denied", "Route write path must be a recognized text source file.", status=HTTPStatus.FORBIDDEN)
+    return path
+
+
+def route_rel_to_root(contract: dict[str, Any], path: Path) -> str:
+    root = Path(str(contract.get("workspace_root") or "")).resolve()
+    try:
+        return str(path.resolve().relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return clipped(str(path), 240)
 
 
 def route_file_receipt(contract: dict[str, Any], rel_path: str) -> dict[str, Any]:
@@ -3218,6 +3157,128 @@ def route_file_receipt(contract: dict[str, Any], rel_path: str) -> dict[str, Any
     return receipt
 
 
+def route_tool_ok(schema: str, *, route_id: str = "", **items: Any) -> dict[str, Any]:
+    result = {"ok": True, "code": "ok", "schema": schema}
+    if route_id:
+        result["route_id"] = route_id
+    result.update(items)
+    return result
+
+
+def transcript_cache_from_body(body: dict[str, Any]) -> dict[str, Any]:
+    cache = body.get("transcript_cache") or body.get("transcriptCache") or body.get("transcript")
+    if isinstance(cache, dict):
+        return cache
+    if isinstance(cache, list):
+        return {"schema": "hermes.wasm_agent.transcript_cache.v1", "turns": cache}
+    return {}
+
+
+def transcript_turn_public(turn: Any) -> dict[str, Any] | None:
+    if not isinstance(turn, dict):
+        return None
+    content = route_text_redact(clipped_verbatim(str(turn.get("content") or ""), 2000))
+    role = str(turn.get("role") or turn.get("r") or "").strip().lower()
+    if role in {"u", "user"}:
+        role = "user"
+    elif role in {"a", "assistant"}:
+        role = "assistant"
+    else:
+        role = clipped(role or "unknown", 40)
+    index = turn.get("i") if isinstance(turn.get("i"), int) else turn.get("index")
+    try:
+        turn_index = int(index)
+    except Exception:
+        turn_index = 0
+    digest = str(turn.get("sha16") or turn.get("digest") or "")
+    if not digest:
+        digest = hashlib.sha256(f"{role}\n{content}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return {
+        "i": turn_index,
+        "id": clipped(str(turn.get("id") or ""), 120),
+        "role": role,
+        "kind": clipped(str(turn.get("kind") or ""), 80),
+        "anchor": clipped(str(turn.get("anchor") or ""), 160),
+        "sha16": clipped(digest, 32),
+        "content": content,
+        "timestamp": clipped(str(turn.get("timestamp") or ""), 80),
+    }
+
+
+def transcript_read_tool(body: dict[str, Any]) -> dict[str, Any]:
+    cache = transcript_cache_from_body(body)
+    turns = [item for item in (transcript_turn_public(turn) for turn in (cache.get("turns") if isinstance(cache.get("turns"), list) else [])) if item]
+    if not turns:
+        return route_tool_ok(
+            "hermes.wasm_agent.transcript.read_result.v1",
+            ok=False,
+            code="transcript_cache_missing",
+            handle=clipped(str(body.get("handle") or cache.get("handle") or ""), 240),
+            turns=[],
+            turn_count=0,
+            proof={"cache_present": False},
+        )
+    raw_limit = body.get("limit") or body.get("max_turns") or body.get("maxTurns") or 6
+    try:
+        limit = max(1, min(12, int(raw_limit)))
+    except Exception:
+        limit = 6
+    start = body.get("start") or body.get("from") or body.get("from_turn")
+    end = body.get("end") or body.get("to") or body.get("to_turn")
+    try:
+        start_i = int(start) if start not in (None, "") else None
+    except Exception:
+        start_i = None
+    try:
+        end_i = int(end) if end not in (None, "") else None
+    except Exception:
+        end_i = None
+    selected = turns
+    if start_i is not None:
+        selected = [turn for turn in selected if int(turn.get("i") or 0) >= start_i]
+    if end_i is not None:
+        selected = [turn for turn in selected if int(turn.get("i") or 0) <= end_i]
+    if start_i is None and end_i is None:
+        selected = selected[-limit:]
+    else:
+        selected = selected[:limit]
+    compact = str(body.get("format") or body.get("projection") or "compact").strip().lower()
+    if compact in {"trc", "receipt", "receipts", "summary"}:
+        selected = [
+            {key: turn.get(key) for key in ("i", "role", "kind", "anchor", "sha16") if turn.get(key) not in (None, "")}
+            for turn in selected
+        ]
+    digest = str(cache.get("digest") or "")
+    if not digest:
+        digest = hashlib.sha256("|".join(str(turn.get("sha16") or "") for turn in turns).encode("utf-8")).hexdigest()[:16]
+    return route_tool_ok(
+        "hermes.wasm_agent.transcript.read_result.v1",
+        handle=clipped(str(body.get("handle") or cache.get("handle") or ""), 240),
+        covers=clipped(str(cache.get("covers") or ""), 80),
+        digest=clipped(digest, 80),
+        turns=selected,
+        turn_count=len(selected),
+        available_turn_count=len(turns),
+        projection=compact or "compact",
+        proof={
+            "cache_present": True,
+            "digest": clipped(digest, 80),
+            "source": "request.transcript_cache",
+            "bounded": True,
+        },
+    )
+
+
+def route_text_redact(text: str) -> str:
+    lines: list[str] = []
+    for line in str(text or "").splitlines():
+        if SENSITIVE_ENVELOPE_KEY_RE.search(line):
+            lines.append("[redacted]")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def route_resolve_tool(body: dict[str, Any]) -> dict[str, Any]:
     objective = str(body.get("objective") or body.get("query") or "")
     surface_hint = str(body.get("surface_hint") or body.get("surfaceHint") or body.get("surface") or "")
@@ -3233,7 +3294,9 @@ def route_resolve_tool(body: dict[str, Any]) -> dict[str, Any]:
         return route_contract_missing_result(missing, objective=objective, surface_hint=surface_hint)
     return {
         "ok": True,
+        "code": "ok",
         "schema": "hermes.wasm_agent.route.resolve_result.v1",
+        "route_id": str(contract.get("route_id") or ""),
         "route_contract": contract,
         "summary": route_contract_summary(contract),
     }
@@ -3241,7 +3304,17 @@ def route_resolve_tool(body: dict[str, Any]) -> dict[str, Any]:
 
 def route_map_summary_tool(body: dict[str, Any]) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
-    return {"ok": True, "summary": route_contract_summary(contract)}
+    route_id = str(contract.get("route_id") or "")
+    return route_tool_ok(
+        "hermes.wasm_agent.route.map_summary_result.v1",
+        route_id=route_id,
+        summary=route_contract_summary(contract),
+    )
+
+
+def code_memory_tool(tool_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    return master_frontier_code_memory.execute(tool_id, contract, body)
 
 
 def route_lookup_files_tool(body: dict[str, Any]) -> dict[str, Any]:
@@ -3250,14 +3323,13 @@ def route_lookup_files_tool(body: dict[str, Any]) -> dict[str, Any]:
     likely_paths = contract.get("likely_paths") if isinstance(contract.get("likely_paths"), list) else []
     paths = [route_contract_rel_path(item) for item in (requested or likely_paths)[:ROUTE_LOOKUP_MAX_RESULTS]]
     receipts = [route_file_receipt(contract, item) for item in paths if item]
-    return {
-        "ok": True,
-        "schema": "hermes.wasm_agent.route.lookup_files.v1",
-        "route_id": str(contract.get("route_id") or ""),
-        "workspace_root": str(contract.get("workspace_root") or ""),
-        "files": receipts,
-        "count": len(receipts),
-    }
+    return route_tool_ok(
+        "hermes.wasm_agent.route.lookup_files.v1",
+        route_id=str(contract.get("route_id") or ""),
+        workspace_root=str(contract.get("workspace_root") or ""),
+        files=receipts,
+        count=len(receipts),
+    )
 
 
 def route_lookup_symbol_tool(body: dict[str, Any]) -> dict[str, Any]:
@@ -3277,50 +3349,1331 @@ def route_lookup_symbol_tool(body: dict[str, Any]) -> dict[str, Any]:
             search_paths.append(str(path))
     if not search_paths:
         search_paths = [str(root)]
+    matches: list[dict[str, Any]] = []
+    returncode = 0
+    engine = "rg"
+    try:
+        proc = subprocess.run(
+            [
+                "rg",
+                "--fixed-strings",
+                "--line-number",
+                "--no-heading",
+                "--color=never",
+                "--glob",
+                "!state/**",
+                "--glob",
+                "!reports/**",
+                query,
+                *search_paths,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=8,
+            check=False,
+        )
+        returncode = int(proc.returncode)
+        for line in (proc.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
+            path_text, line_no, text = (line.split(":", 2) + ["", ""])[:3]
+            try:
+                rel = str(Path(path_text).resolve().relative_to(root))
+            except ValueError:
+                rel = clipped(path_text, 240)
+            matches.append({
+                "path": rel,
+                "line": int(line_no) if str(line_no).isdigit() else 0,
+                "text": clipped(text.strip(), 300),
+            })
+    except FileNotFoundError:
+        engine = "python"
+        candidate_files: list[Path] = []
+        for item in search_paths:
+            path = Path(item)
+            if path.is_file():
+                candidate_files.append(path)
+            elif path.is_dir():
+                for child in path.rglob("*"):
+                    if len(candidate_files) >= ROUTE_LOOKUP_MAX_RESULTS:
+                        break
+                    if child.is_file() and child.suffix.lower() in AGENT_MUTATION_ALLOWED_EXTENSIONS and "state" not in child.parts and "reports" not in child.parts:
+                        candidate_files.append(child)
+        for path in candidate_files:
+            if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
+                break
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for index, line in enumerate(text.splitlines(), start=1):
+                if query in line:
+                    matches.append({
+                        "path": route_rel_to_root(contract, path),
+                        "line": index,
+                        "text": clipped(line.strip(), 300),
+                    })
+                    if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
+                        break
+    return route_tool_ok(
+        "hermes.wasm_agent.route.lookup_symbol.v1",
+        route_id=str(contract.get("route_id") or ""),
+        query=query,
+        returncode=returncode,
+        engine=engine,
+        matches=matches,
+        count=len(matches),
+        bounded=True,
+    )
+
+
+def route_file_read_bounded_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    raw_path = str(body.get("path") or body.get("file") or "").strip()
+    if not raw_path:
+        raise BrowserError("file_read_missing_path", "file.read_bounded requires path.")
+    path = route_contract_file_path(contract, raw_path)
+    if not path.is_file():
+        raise BrowserError("file_read_missing", "Requested route file does not exist.", status=HTTPStatus.NOT_FOUND)
+    stat = path.stat()
+    max_bytes_raw = body.get("max_bytes", body.get("maxBytes", ROUTE_LOOKUP_MAX_BYTES))
+    try:
+        max_bytes = max(1, min(ROUTE_LOOKUP_MAX_BYTES, int(max_bytes_raw)))
+    except (TypeError, ValueError):
+        max_bytes = ROUTE_LOOKUP_MAX_BYTES
+    range_spec = body.get("range") if isinstance(body.get("range"), dict) else {}
+    try:
+        offset = max(0, int(range_spec.get("offset", range_spec.get("start", body.get("offset", 0))) or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        requested_len = int(range_spec.get("length", range_spec.get("limit", body.get("length", max_bytes))) or max_bytes)
+    except (TypeError, ValueError):
+        requested_len = max_bytes
+    read_len = max(1, min(max_bytes, requested_len))
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read(read_len)
+    text = data.decode("utf-8", "replace")
+    redacted = route_text_redact(text)
+    end_offset = offset + len(data)
+    return route_tool_ok(
+        "hermes.wasm_agent.route.file_read_bounded.v1",
+        route_id=str(contract.get("route_id") or ""),
+        path=route_rel_to_root(contract, path),
+        bytes=len(data),
+        file_bytes=int(stat.st_size),
+        sha256=hashlib.sha256(path.read_bytes()).hexdigest() if stat.st_size <= ROUTE_LOOKUP_MAX_BYTES else "",
+        range={"offset": offset, "end": end_offset, "max_bytes": max_bytes},
+        truncated=end_offset < stat.st_size,
+        redacted=redacted != text,
+        text=clipped(redacted, max_bytes),
+    )
+
+
+def route_patch_operations_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
+    patch = body.get("patch") if isinstance(body.get("patch"), dict) else body
+    operations = patch.get("operations") if isinstance(patch.get("operations"), list) else []
+    return [item for item in operations if isinstance(item, dict)]
+
+
+def route_patch_apply_scoped_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    operations = route_patch_operations_from_body(body)
+    if not operations:
+        raise BrowserError("patch_missing_operations", "patch.apply_scoped requires operations.")
+    if len(operations) > AGENT_MUTATION_MAX_OPS:
+        raise BrowserError("patch_too_many_operations", f"Too many operations: {len(operations)} > {AGENT_MUTATION_MAX_OPS}.")
+    dry_run = request_bool(body.get("dry_run") if "dry_run" in body else body.get("dryRun"))
+    pending: dict[Path, str] = {}
+    originals: dict[Path, str] = {}
+    changed: set[str] = set()
+    total_replace_bytes = 0
+    for operation in operations:
+        op = str(operation.get("op") or operation.get("operation") or "replace").strip().lower()
+        path = route_contract_write_file_path(contract, str(operation.get("path") or ""))
+        if path.exists() and path.stat().st_size > AGENT_MUTATION_MAX_FILE_BYTES:
+            raise BrowserError("patch_file_too_large", "Patch target file is too large.")
+        if not path.exists() and op != "append":
+            raise BrowserError("patch_file_missing", "Patch target file does not exist.")
+        current = pending.get(path)
+        if current is None:
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            originals[path] = current
+        if op == "replace":
+            find = str(operation.get("find") or "")
+            replace = str(operation.get("replace") or "")
+            if not find:
+                raise BrowserError("patch_invalid_replace", "Replace operations require a non-empty find string.")
+            count = current.count(find)
+            if count != 1:
+                raise BrowserError("patch_non_unique_match", f"Replace match count for {route_rel_to_root(contract, path)} was {count}, expected 1.")
+            total_replace_bytes += len(find.encode("utf-8")) + len(replace.encode("utf-8"))
+            if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
+                raise BrowserError("patch_payload_too_large", "Patch replacement payload is too large.")
+            pending[path] = current.replace(find, replace, 1)
+        elif op == "append":
+            insert = str(operation.get("insert") or operation.get("text") or operation.get("content") or "")
+            after = str(operation.get("after") or "")
+            if not insert:
+                raise BrowserError("patch_invalid_append", "Append operations require a non-empty insert field.")
+            total_replace_bytes += len(insert.encode("utf-8"))
+            if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
+                raise BrowserError("patch_payload_too_large", "Patch append payload is too large.")
+            if after:
+                count = current.count(after)
+                if count != 1:
+                    raise BrowserError("patch_non_unique_match", f"Append anchor count for {route_rel_to_root(contract, path)} was {count}, expected 1.")
+                pending[path] = current.replace(after, after + insert, 1)
+            else:
+                pending[path] = current + insert
+        else:
+            raise BrowserError("patch_invalid_op", f"Unsupported patch op: {op}.")
+        changed.add(route_rel_to_root(contract, path))
+    diff_chunks: list[str] = []
+    for path, updated in pending.items():
+        original = originals.get(path, "")
+        rel = route_rel_to_root(contract, path)
+        diff_chunks.extend(difflib.unified_diff(
+            original.splitlines(),
+            updated.splitlines(),
+            fromfile=f"a/{rel}",
+            tofile=f"b/{rel}",
+            lineterm="",
+            n=3,
+        ))
+        if not dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(updated, encoding="utf-8")
+    return route_tool_ok(
+        "hermes.wasm_agent.route.patch_apply_scoped.v1",
+        route_id=str(contract.get("route_id") or ""),
+        applied=not dry_run,
+        dry_run=dry_run,
+        changed_files=sorted(changed),
+        operations=len(operations),
+        diff=clipped("\n".join(diff_chunks), 12000),
+    )
+
+
+def route_registered_check(contract: dict[str, Any], check_id: str) -> dict[str, Any]:
+    checks = contract.get("checks") if isinstance(contract.get("checks"), list) else []
+    for check in checks:
+        if isinstance(check, dict) and str(check.get("id") or "") == check_id:
+            command = check.get("command") if isinstance(check.get("command"), list) else []
+            if not command:
+                break
+            return check
+    raise BrowserError("test_check_not_registered", "Focused tests must be registered on the route contract.", status=HTTPStatus.FORBIDDEN)
+
+
+def route_test_run_focused_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    check_id = clipped(str(body.get("check_id") or body.get("checkId") or ""), 120)
+    if not check_id:
+        raise BrowserError("test_check_missing", "test.run_focused requires check_id.")
+    check = route_registered_check(contract, check_id)
+    command = [str(part) for part in check.get("command", [])]
+    timeout_sec = int(check.get("timeout_sec") or 30)
+    started = time.monotonic()
     proc = subprocess.run(
-        [
-            "rg",
-            "--fixed-strings",
-            "--line-number",
-            "--no-heading",
-            "--color=never",
-            "--glob",
-            "!state/**",
-            "--glob",
-            "!reports/**",
-            query,
-            *search_paths,
-        ],
+        command,
+        cwd=str(contract.get("workspace_root") or wasm_agent_plugin_root()),
         text=True,
         capture_output=True,
-        timeout=8,
+        timeout=timeout_sec,
         check=False,
     )
-    matches: list[dict[str, Any]] = []
-    for line in (proc.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
-        path_text, line_no, text = (line.split(":", 2) + ["", ""])[:3]
-        try:
-            rel = str(Path(path_text).resolve().relative_to(root))
-        except ValueError:
-            rel = clipped(path_text, 240)
-        matches.append({
-            "path": rel,
-            "line": int(line_no) if str(line_no).isdigit() else 0,
-            "text": clipped(text.strip(), 300),
-        })
+    duration_ms = round((time.monotonic() - started) * 1000)
     return {
-        "ok": True,
-        "schema": "hermes.wasm_agent.route.lookup_symbol.v1",
+        "ok": proc.returncode == 0,
+        "code": "ok" if proc.returncode == 0 else "test_failed",
+        "schema": "hermes.wasm_agent.route.test_run_focused.v1",
         "route_id": str(contract.get("route_id") or ""),
-        "query": query,
+        "check_id": check_id,
+        "command": command,
         "returncode": int(proc.returncode),
-        "matches": matches,
-        "count": len(matches),
-        "bounded": True,
+        "duration_ms": duration_ms,
+        "stdout": clipped(proc.stdout or "", 12000),
+        "stderr": clipped(proc.stderr or "", 12000),
     }
 
 
-def agent_kernel_tool(server: WasmAgentServer, path: str, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
+def route_git_diff_summary_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    root = Path(str(contract.get("workspace_root") or "")).resolve()
+    stat = subprocess.run(["git", "-C", str(root), "diff", "--stat", "--", "."], text=True, capture_output=True, timeout=10, check=False)
+    names = subprocess.run(["git", "-C", str(root), "diff", "--name-status", "--", "."], text=True, capture_output=True, timeout=10, check=False)
+    files: list[dict[str, str]] = []
+    for line in (names.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
+        parts = line.split("\t", 1)
+        if len(parts) == 2:
+            files.append({"status": clipped(parts[0], 20), "path": clipped(parts[1], 240)})
+    return route_tool_ok(
+        "hermes.wasm_agent.route.git_diff_summary.v1",
+        route_id=str(contract.get("route_id") or ""),
+        workspace_root=str(root),
+        returncode=int(stat.returncode or names.returncode),
+        changed_files=files,
+        count=len(files),
+        stat=clipped(stat.stdout or stat.stderr or "", 12000),
+    )
+
+
+def route_proof_collect_tool(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
+    run_id = safe_agent_run_key(body.get("run_id"), "")
+    quest_id = safe_agent_run_key(body.get("quest_id") or body.get("session_id"), "")
+    turn_id = safe_agent_run_key(body.get("turn_id") or body.get("turnId"), "")
+    if not run_id and not quest_id and not turn_id:
+        raise BrowserError("proof_collect_missing_scope", "proof.collect requires run_id, quest_id, or turn_id.")
+    with auth_connect() as conn:
+        clauses = ["user_id = ?"]
+        params: list[Any] = [user_id(user)]
+        if run_id:
+            get_agent_run_for_user(conn, run_id, user)
+            clauses.append("run_id = ?")
+            params.append(run_id)
+        if quest_id:
+            clauses.append("session_id = ?")
+            params.append(quest_id)
+        if turn_id:
+            clauses.append("turn_id = ?")
+            params.append(turn_id)
+        run_rows = conn.execute(
+            f"SELECT * FROM agent_run_tb WHERE {' AND '.join(clauses)} ORDER BY created_at ASC LIMIT 24",
+            params,
+        ).fetchall()
+        run_ids = [str(row["run_id"]) for row in run_rows]
+        events: list[dict[str, Any]] = []
+        if run_ids:
+            placeholders = ",".join("?" for _ in run_ids)
+            event_rows = conn.execute(
+                f"""
+                SELECT * FROM agent_run_event_tb
+                 WHERE user_id = ? AND run_id IN ({placeholders})
+                 ORDER BY created_at ASC, seq ASC
+                 LIMIT 120
+                """,
+                [user_id(user), *run_ids],
+            ).fetchall()
+            events = [
+                {
+                    "run_id": str(row["run_id"]),
+                    "seq": int(row["seq"]),
+                    "type": str(row["type"]),
+                    "summary": clipped(str(row["summary"] or ""), 240),
+                    "created_at": int(row["created_at"] or 0),
+                }
+                for row in event_rows
+            ]
+        ledger = agent_token_ledger_summary_conn(conn, user_id(user), run_id=run_id, quest_id=quest_id, turn_id=turn_id)
+    statuses = {str(row["status"]) for row in run_rows}
+    return route_tool_ok(
+        "hermes.wasm_agent.proof.collect_result.v1",
+        run_id=run_id,
+        quest_id=quest_id,
+        turn_id=turn_id,
+        runs=[public_agent_run(row) for row in run_rows],
+        events=events,
+        event_count=len(events),
+        terminal=bool(statuses and statuses <= AGENT_RUN_TERMINAL_STATUSES),
+        token_ledger=ledger,
+    )
+
+
+def hermes_capabilities_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract = None
+    if body.get("route_id") or body.get("route") or body.get("surface") or body.get("surface_hint") or body.get("route_contract"):
+        contract = route_contract_for_tool(body)
+    raw_need = body.get("capability_need") or body.get("capabilityNeed") or body.get("need") or []
+    needs = [raw_need] if isinstance(raw_need, str) else raw_need if isinstance(raw_need, list) else []
+    needs = [clipped(str(item or "").strip(), 80) for item in needs[:24] if str(item or "").strip()]
+    missing = [need for need in needs if need not in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
+    route_caps = contract.get("caps") if isinstance(contract, dict) and isinstance(contract.get("caps"), list) else []
+    route_id = str(contract.get("route_id") or "") if isinstance(contract, dict) else ""
+    return {
+        "ok": not missing,
+        "code": "ok" if not missing else "capability_missing",
+        "schema": "hermes.wasm_agent.hermes.capabilities.v1",
+        "route_id": route_id,
+        "capability_need": needs,
+        "missing": missing,
+        "available_caps": sorted(DIRECT_HEAD_HERMES_ALLOWED_CAPS),
+        "route_caps": route_caps,
+        "dispatch_policy": "bounded-last-resort",
+        "non_mutating": True,
+    }
+
+
+def node_id_from_body(body: dict[str, Any], contract: dict[str, Any] | None = None) -> str:
+    raw = body.get("node_id") or body.get("nodeId") or body.get("node") or body.get("target_node") or body.get("target")
+    node_id = _safe_agent_node_id(raw)
+    if node_id:
+        return node_id
+    entities = contract.get("entities") if isinstance(contract, dict) and isinstance(contract.get("entities"), list) else []
+    for entity in entities:
+        if not isinstance(entity, dict):
+            continue
+        candidate = _safe_agent_node_id(entity.get("id") or entity.get("node_id") or entity.get("name"))
+        if candidate:
+            return candidate
+    return ""
+
+
+def node_capabilities_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = None
+    if body.get("route_id") or body.get("route") or body.get("surface") or body.get("surface_hint") or body.get("route_contract"):
+        contract = route_contract_for_tool(body)
+    node_id = node_id_from_body(body, contract)
+    if not node_id:
+        raise BrowserError("node_id_missing", "node.capabilities requires node_id or a route contract with an entity id.", status=HTTPStatus.BAD_REQUEST)
+    payload = bridge_proxy(server, "GET", f"/nodes/{quote(node_id, safe='')}", None, timeout=8)
+    node = payload.get("node") if isinstance(payload.get("node"), dict) else payload
+    actions = node.get("actions") if isinstance(node.get("actions"), list) else []
+    action_ids = [
+        clipped(str(action.get("action") or action.get("id") or ""), 120)
+        for action in actions[:40]
+        if isinstance(action, dict) and str(action.get("action") or action.get("id") or "").strip()
+    ]
+    activity = node.get("activity") if isinstance(node.get("activity"), dict) else {}
+    hermes = node.get("hermes") if isinstance(node.get("hermes"), dict) else {}
+    raw = node.get("raw") if isinstance(node.get("raw"), dict) else {}
+    model_provider = clipped(str(
+        node.get("provider")
+        or node.get("model_provider")
+        or hermes.get("inference_provider")
+        or raw.get("default_model_provider_env")
+        or ""
+    ), 120)
+    model_id = clipped(str(
+        node.get("model")
+        or node.get("default_model")
+        or activity.get("model")
+        or hermes.get("api_model")
+        or raw.get("default_model_env")
+        or ""
+    ), 180)
+    return route_tool_ok(
+        "hermes.wasm_agent.node.capabilities_result.v1",
+        route_id=str(contract.get("route_id") or "") if isinstance(contract, dict) else "",
+        node_id=node_id,
+        can_answer=True,
+        chat_tool="node.chat",
+        bridge_endpoint=f"/nodes/{node_id}/prompt",
+        actions=action_ids,
+        model={
+            "provider": model_provider,
+            "model": model_id,
+        },
+        node=direct_envelope_redact(node),
+        proof={
+            "source": "bridge:/nodes/{id}",
+            "bridge_url_configured": bool(getattr(server, "bridge_url", "")),
+        },
+    )
+
+
+def node_chat_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = None
+    if body.get("route_id") or body.get("route") or body.get("surface") or body.get("surface_hint") or body.get("route_contract"):
+        contract = route_contract_for_tool(body)
+    node_id = node_id_from_body(body, contract)
+    if not node_id:
+        raise BrowserError("node_id_missing", "node.chat requires node_id or a route contract with an entity id.", status=HTTPStatus.BAD_REQUEST)
+    objective = clipped(str(body.get("objective") or body.get("message") or body.get("prompt") or body.get("task") or "").strip(), 4000)
+    if not objective:
+        raise BrowserError("node_objective_missing", "node.chat requires objective/message.", status=HTTPStatus.BAD_REQUEST)
+    timeout_sec = max(5.0, min(float(body.get("timeout_sec") or body.get("timeoutSec") or 90), 600.0))
+    model_id = clipped(str(body.get("model") or body.get("model_id") or body.get("modelId") or "").strip(), 180)
+    system_content = clipped(str(body.get("system") or body.get("system_content") or "").strip(), 4000)
+    if not system_content:
+        system_content = (
+            "You are answering as the target Hermes node through wasm-agent node.chat. "
+            "Use the node's own runtime context and configured model. Return a concise answer with proof handles when available."
+        )
+    reply, source, usage, bridge_trace = call_agent_bridge_runs(
+        server,
+        system_content=system_content,
+        text_content=objective,
+        target_node=node_id,
+        model_id=model_id,
+        selected_model=None,
+        timeout_sec=timeout_sec,
+        run_options={"route_id": str(contract.get("route_id") or "")} if isinstance(contract, dict) else None,
+    )
+    return route_tool_ok(
+        "hermes.wasm_agent.node.chat_result.v1",
+        route_id=str(contract.get("route_id") or "") if isinstance(contract, dict) else "",
+        node_id=node_id,
+        reply=reply,
+        source=source,
+        usage=usage,
+        bridge_trace=bridge_trace,
+        proof={
+            "source": "bridge:/nodes/{id}/prompt",
+            "model_source": "node-runtime-default" if not model_id else "request",
+        },
+    )
+
+
+KERNEL_ACTION_TOOL_PATHS = master_frontier_protocol.KERNEL_ACTION_TOOL_PATHS
+MASTER_FRONTIER_RELIABILITY_BUILD = "mf-reliability-20260704-empty-repair-local-proof-v1"
+MASTER_FRONTIER_RELIABILITY_FEATURES = {
+    "empty_provider_repair": True,
+    "structured_action_repair": True,
+    "local_evidence_continuation": True,
+    "local_patch_stops_extra_provider_call": True,
+    "typed_repair_events": True,
+    "hermes_default_fallback_disabled": True,
+}
+
+
+def kernel_capability_manifest(contract: dict[str, Any] | None = None) -> dict[str, Any]:
+    route_caps = contract.get("caps") if isinstance(contract, dict) and isinstance(contract.get("caps"), list) else []
+    budget = contract.get("budget") if isinstance(contract, dict) and isinstance(contract.get("budget"), dict) else {}
+    proof = contract.get("proof") if isinstance(contract, dict) and isinstance(contract.get("proof"), list) else []
+    checks = contract.get("checks") if isinstance(contract, dict) and isinstance(contract.get("checks"), list) else []
+    route_id = str(contract.get("route_id") or "") if isinstance(contract, dict) else ""
+    return {
+        "schema": "hermes.wasm_agent.kernel.capability_manifest.v1",
+        "route_id": route_id,
+        "local_first": True,
+        "external_provider_policy": "capability-gap-only",
+        "primitives": [
+            {
+                "id": "kernel.capabilities",
+                "cost": "tiny",
+                "mutates": False,
+                "proof": ["capability_manifest"],
+                "description": "Report local inspect/action/proof abilities and budgets.",
+            },
+            {
+                "id": "kernel.resolve",
+                "cost": "tiny",
+                "mutates": False,
+                "proof": ["route_contract"],
+                "description": "Resolve objective/surface to an owned route contract.",
+            },
+            {
+                "id": "kernel.inspect",
+                "cost": "bounded",
+                "mutates": False,
+                "proof": ["receipts", "explicit_unknowns"],
+                "description": "Inspect route-scoped files, symbols, maps, transcript, run proof, and cost.",
+            },
+            {
+                "id": "kernel.act",
+                "cost": "bounded",
+                "mutates": True,
+                "proof": ["scoped_action_result"],
+                "description": "Execute declared local actions under the resolved route contract.",
+            },
+            {
+                "id": "kernel.prove",
+                "cost": "bounded",
+                "mutates": False,
+                "proof": ["timeline", "token_ledger", "checks"],
+                "description": "Collect replayable run, token, file, and test proof.",
+            },
+            {
+                "id": "node.capabilities",
+                "cost": "tiny",
+                "mutates": False,
+                "proof": ["bridge_node_manifest"],
+                "description": "Inspect whether a Hermes node is alive and answerable through the bridge.",
+            },
+            {
+                "id": "node.chat",
+                "cost": "bounded",
+                "mutates": False,
+                "proof": ["bridge_task", "node_reply"],
+                "description": "Ask an answerable Hermes node through the existing bridge prompt/task API.",
+            },
+        ],
+        "local_tools": sorted(KERNEL_ACTION_TOOL_PATHS),
+        "master_frontier": {
+            "build": MASTER_FRONTIER_RELIABILITY_BUILD,
+            "features": dict(MASTER_FRONTIER_RELIABILITY_FEATURES),
+            "required_event_types": ["head.repair", "head.continued", "kernel.evidence_ready", "tool.finished", "files.changed"],
+            "policy": "route-first local-proof repair-loop",
+        },
+        "continuity": {
+            "protocol": "CSC/1+TRC/1",
+            "exact_read_tool": "transcript.read",
+            "policy": "summary-first exact-read-on-demand",
+        },
+        "route_caps": route_caps,
+        "budget": budget,
+        "proof": proof,
+        "checks": [
+            {
+                "id": clipped(str(item.get("id") or ""), 120),
+                "timeout_sec": int(item.get("timeout_sec") or 0),
+            }
+            for item in checks[:24]
+            if isinstance(item, dict)
+        ],
+        "hermes": {
+            "role": "bounded-capability-node",
+            "required": ["route_contract", "capability_need", "budget", "proof", "escalation_reason"],
+            "default": "reject-unless-local-gap",
+        },
+    }
+
+
+def kernel_capabilities_tool(body: dict[str, Any]) -> dict[str, Any]:
+    contract: dict[str, Any] | None = None
+    if body.get("route_id") or body.get("route") or body.get("surface") or body.get("surface_hint") or body.get("route_contract"):
+        contract = route_contract_for_tool(body)
+    return route_tool_ok(
+        "hermes.wasm_agent.kernel.capabilities_result.v1",
+        route_id=str(contract.get("route_id") or "") if isinstance(contract, dict) else "",
+        manifest=kernel_capability_manifest(contract),
+    )
+
+
+def kernel_resolve_tool(body: dict[str, Any]) -> dict[str, Any]:
+    resolved = route_resolve_tool(body)
+    result = {
+        **resolved,
+        "schema": "hermes.wasm_agent.kernel.resolve_result.v1",
+        "primitive": "kernel.resolve",
+        "root_cause_class": "route" if resolved.get("ok") else "missing_route_contract",
+        "next_local_primitives": ["kernel.inspect", "kernel.prove"] if resolved.get("ok") else [],
+    }
+    if resolved.get("ok") and isinstance(resolved.get("route_contract"), dict):
+        result["capabilities"] = kernel_capability_manifest(resolved["route_contract"])
+    return result
+
+
+def kernel_inspect_kind_items(body: dict[str, Any]) -> list[str]:
+    raw = body.get("inspect") or body.get("kinds") or body.get("kind") or body.get("need") or []
+    if isinstance(raw, str):
+        raw = [item.strip() for item in re.split(r"[, ]+", raw) if item.strip()]
+    if not isinstance(raw, list):
+        raw = []
+    items = [clipped(str(item or "").strip().lower(), 80) for item in raw[:12] if str(item or "").strip()]
+    return items or ["route"]
+
+
+def kernel_entity_file_kind(path: Path) -> str:
+    suffix = path.suffix.lower()
+    name = path.name.lower()
+    if name in {"readme.md", "agents.md", "node_runtime_contract.md", "soul.md", "memory.md"}:
+        return "contract_doc"
+    if suffix in {".db", ".sqlite", ".sqlite3"}:
+        return "sqlite"
+    if suffix in {".jsonl"}:
+        return "jsonl"
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".mod", ".sum"}:
+        return "config_or_manifest"
+    if suffix in {".go", ".py", ".js", ".ts", ".tsx", ".jsx", ".rs", ".java", ".kt", ".sh"}:
+        return "source"
+    if suffix in {".md", ".txt"}:
+        return "document"
+    if suffix in {".pdf"}:
+        return "asset"
+    return suffix.lstrip(".") or "file"
+
+
+def kernel_entity_text_excerpt(path: Path, *, max_chars: int = 900) -> str:
+    try:
+        if path.stat().st_size > 80_000:
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = route_text_redact(text)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return clipped("\n".join(lines[:18]), max_chars)
+
+
+def kernel_entity_sqlite_summary(path: Path) -> dict[str, Any]:
+    summary: dict[str, Any] = {"path": str(path), "tables": {}, "semantic_tables": []}
+    try:
+        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        db.row_factory = sqlite3.Row
+        tables = [
+            str(row[0])
+            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 40").fetchall()
+        ]
+        table_counts: dict[str, int] = {}
+        semantic_tables: list[dict[str, Any]] = []
+        for table in tables:
+            if table.endswith(("_fts", "_fts_data", "_fts_idx", "_fts_docsize", "_fts_config", "_fts_content")):
+                continue
+            try:
+                count = int(db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+            except sqlite3.Error:
+                continue
+            table_counts[table] = count
+            columns = [str(row["name"]) for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()]
+            table_lc = table.lower()
+            if table_lc in {"messages", "sessions", "content_items", "plans", "evaluation_requests"} or "paper" in table_lc or "analysis" in table_lc:
+                entry: dict[str, Any] = {"table": table, "count": count, "columns": columns[:12]}
+                sample_columns = [col for col in columns if col.lower() in {
+                    "id", "session_id", "role", "content", "title", "name", "paper_title", "http_link",
+                    "query", "status", "created_at", "updated_at", "started_at", "timestamp", "model", "source",
+                }][:6]
+                if sample_columns and count:
+                    try:
+                        select_cols = ", ".join(f'"{col}"' for col in sample_columns)
+                        rows = db.execute(f'SELECT {select_cols} FROM "{table}" LIMIT 5').fetchall()
+                        entry["samples"] = [
+                            {
+                                key: clipped(str(row[key] or ""), 220)
+                                for key in sample_columns
+                                if row[key] not in (None, "")
+                            }
+                            for row in rows
+                        ]
+                    except sqlite3.Error:
+                        pass
+                semantic_tables.append(entry)
+        db.close()
+        summary["tables"] = table_counts
+        summary["semantic_tables"] = semantic_tables[:12]
+    except sqlite3.Error:
+        summary["error"] = "open_failed"
+    return summary
+
+
+def kernel_entity_investigation_summary(contract: dict[str, Any], entity: str) -> dict[str, Any]:
+    workspace_root = Path(str(contract.get("workspace_root") or "")).resolve()
+    allowed_roots = [
+        Path(str(item)).resolve()
+        for item in (contract.get("allowed_read_roots") if isinstance(contract.get("allowed_read_roots"), list) else [])
+        if str(item or "").strip()
+    ]
+    if workspace_root and workspace_root not in allowed_roots:
+        allowed_roots.insert(0, workspace_root)
+    result: dict[str, Any] = {
+        "entity": entity,
+        "roots": [],
+        "codebase": {},
+        "documents": [],
+        "databases": [],
+        "conversations": {},
+        "data_assets": {},
+        "inferred_identity": [],
+    }
+    all_files: list[Path] = []
+    for root in allowed_roots[:8]:
+        if not root.exists() or not root.is_dir():
+            continue
+        files: list[Path] = []
+        try:
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                rel = str(path.relative_to(root)).replace("\\", "/")
+                if any(part in {".git", "node_modules", "__pycache__"} for part in rel.split("/")):
+                    continue
+                files.append(path)
+        except OSError:
+            continue
+        files = sorted(files, key=lambda item: str(item))[:900]
+        all_files.extend(files)
+        kind_counts: dict[str, int] = {}
+        top_dirs: dict[str, int] = {}
+        for path in files:
+            rel = str(path.relative_to(root)).replace("\\", "/")
+            kind_counts[kernel_entity_file_kind(path)] = kind_counts.get(kernel_entity_file_kind(path), 0) + 1
+            top = rel.split("/", 1)[0] if "/" in rel else "."
+            top_dirs[top] = top_dirs.get(top, 0) + 1
+        result["roots"].append({
+            "root": str(root),
+            "file_count": len(files),
+            "kind_counts": dict(sorted(kind_counts.items(), key=lambda item: (-item[1], item[0]))[:16]),
+            "top_dirs": dict(sorted(top_dirs.items(), key=lambda item: (-item[1], item[0]))[:16]),
+        })
+
+    important_names = {"README.md", "AGENTS.md", "NODE_RUNTIME_CONTRACT.md", "SOUL.md", "MEMORY.md", "go.mod", "package.json", "config.yaml"}
+    documents: list[dict[str, Any]] = []
+    db_paths: list[Path] = []
+    session_files: list[Path] = []
+    summary_md_count = 0
+    raw_paper_count = 0
+    pdf_count = 0
+    for path in all_files:
+        name = path.name
+        rel_root = next((root for root in allowed_roots if str(path).startswith(str(root))), None)
+        rel = str(path.relative_to(rel_root)).replace("\\", "/") if rel_root else str(path)
+        if name in important_names or rel.endswith("DESIGN_PLAN.md"):
+            excerpt = kernel_entity_text_excerpt(path)
+            documents.append({"path": rel, "bytes": int(path.stat().st_size), "excerpt": excerpt})
+        if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+            db_paths.append(path)
+        if "/.hermes/sessions/" in str(path) and path.suffix.lower() in {".json", ".jsonl"}:
+            session_files.append(path)
+        if name == "summary.md":
+            summary_md_count += 1
+        if name == "raw-paper.json":
+            raw_paper_count += 1
+        if path.suffix.lower() == ".pdf":
+            pdf_count += 1
+    result["documents"] = documents[:12]
+    result["data_assets"] = {
+        "summary_md_count": summary_md_count,
+        "raw_paper_json_count": raw_paper_count,
+        "pdf_count": pdf_count,
+        "session_file_count": len(session_files),
+    }
+    result["databases"] = [kernel_entity_sqlite_summary(path) for path in sorted(set(db_paths), key=lambda item: str(item))[:8]]
+
+    state_dbs = [item for item in result["databases"] if str(item.get("path") or "").endswith("/.hermes/state.db")]
+    if state_dbs:
+        tables = state_dbs[0].get("tables") if isinstance(state_dbs[0].get("tables"), dict) else {}
+        result["conversations"] = {
+            "source": ".hermes/state.db",
+            "sessions": tables.get("sessions", 0),
+            "messages": tables.get("messages", 0),
+            "session_files": len(session_files),
+        }
+    elif session_files:
+        result["conversations"] = {"source": ".hermes/sessions", "session_files": len(session_files)}
+
+    identity_terms: list[str] = []
+    joined_docs = "\n".join(str(doc.get("excerpt") or "") for doc in documents[:8]).lower()
+    if "hermes" in joined_docs or any("/.hermes/" in str(path) for path in all_files[:300]):
+        identity_terms.append("Hermes agent/runtime node")
+    if "discord" in joined_docs or any("/discord" in str(path).lower() for path in all_files[:300]):
+        identity_terms.append("Discord-connected assistant/runtime")
+    if "scientific-paper-meta-analysis" in joined_docs or raw_paper_count or "paper" in json.dumps(result["databases"]).lower():
+        identity_terms.append("scientific paper/meta-analysis workspace")
+    if "dci" in joined_docs or any("/dci/" in str(path).lower() for path in all_files[:300]):
+        identity_terms.append("DCI application/data workspace")
+    result["inferred_identity"] = list(dict.fromkeys(identity_terms))[:8]
+    return direct_envelope_redact(result)
+
+
+def kernel_runtime_entity_inspect_tool(
+    user: dict[str, Any] | None,
+    contract: dict[str, Any],
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    route_id = str(contract.get("route_id") or "")
+    entity = clipped(str(body.get("entity") or body.get("node") or body.get("target") or body.get("query") or "").strip(), 160)
+    if not entity:
+        entities = contract.get("entities") if isinstance(contract.get("entities"), list) else []
+        if entities and isinstance(entities[0], dict):
+            entity = clipped(str(entities[0].get("id") or entities[0].get("name") or "").strip(), 160)
+    scope = {
+        "run_id": safe_agent_run_key(body.get("run_id"), ""),
+        "quest_id": safe_agent_run_key(body.get("quest_id") or body.get("session_id"), ""),
+        "turn_id": safe_agent_run_key(body.get("turn_id") or body.get("turnId"), ""),
+    }
+    caps = contract.get("caps") if isinstance(contract.get("caps"), list) else []
+    lookup_handles = contract.get("lookup_handles") if isinstance(contract.get("lookup_handles"), list) else []
+    proof = contract.get("proof") if isinstance(contract.get("proof"), list) else []
+    checks = contract.get("checks") if isinstance(contract.get("checks"), list) else []
+    route_entities = [
+        clipped(str(item or ""), 160)
+        for item in (
+            contract.get("route_id"),
+            contract.get("surface"),
+            contract.get("owner"),
+            *(contract.get("aliases") if isinstance(contract.get("aliases"), list) else []),
+            *[
+                value
+                for entity_item in (contract.get("entities") if isinstance(contract.get("entities"), list) else [])
+                if isinstance(entity_item, dict)
+                for value in (entity_item.get("id"), entity_item.get("name"))
+            ],
+        )
+        if str(item or "").strip()
+    ]
+    entity_matches: list[dict[str, Any]] = []
+    entity_mentions: list[dict[str, Any]] = []
+    entity_lc = entity.lower()
+    for value in route_entities:
+        if entity_lc and entity_lc in value.lower():
+            entity_matches.append({"kind": "route_identity", "value": value})
+    run_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    if any(scope.values()) or entity:
+        with auth_connect() as conn:
+            clauses = ["user_id = ?"]
+            params: list[Any] = [user_id(user)]
+            if scope["run_id"]:
+                get_agent_run_for_user(conn, scope["run_id"], user)
+                clauses.append("run_id = ?")
+                params.append(scope["run_id"])
+            if scope["quest_id"]:
+                clauses.append("session_id = ?")
+                params.append(scope["quest_id"])
+            if scope["turn_id"]:
+                clauses.append("turn_id = ?")
+                params.append(scope["turn_id"])
+            if not any(scope.values()):
+                clauses.append("direct_head = 1")
+            rows = conn.execute(
+                f"""
+                SELECT run_id, session_id, turn_id, status, mode, target_node, created_at,
+                       terminal_at, request_summary_json
+                  FROM agent_run_tb
+                 WHERE {' AND '.join(clauses)}
+                 ORDER BY updated_at DESC
+                 LIMIT 12
+                """,
+                params,
+            ).fetchall()
+            run_ids = [str(row["run_id"]) for row in rows]
+            for row in rows:
+                summary = json_dict(str(row["request_summary_json"] or "{}"))
+                run_rows.append({
+                    "run_id": str(row["run_id"]),
+                    "session_id": str(row["session_id"]),
+                    "turn_id": str(row["turn_id"]),
+                    "status": str(row["status"]),
+                    "mode": str(row["mode"]),
+                    "target_node": str(row["target_node"]),
+                    "created_at": int(row["created_at"] or 0),
+                    "terminal_at": int(row["terminal_at"] or 0),
+                    "request": direct_envelope_redact(summary),
+                })
+                haystack = json.dumps(summary, ensure_ascii=True, sort_keys=True)
+                if entity_lc and entity_lc in haystack.lower():
+                    entity_mentions.append({"kind": "run_request", "run_id": str(row["run_id"]), "field": "request_summary"})
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                events = conn.execute(
+                    f"""
+                    SELECT run_id, seq, type, summary, payload_json, created_at
+                      FROM agent_run_event_tb
+                     WHERE user_id = ? AND run_id IN ({placeholders})
+                     ORDER BY created_at DESC, seq DESC
+                     LIMIT 80
+                    """,
+                    [user_id(user), *run_ids],
+                ).fetchall()
+                for row in events:
+                    item = {
+                        "run_id": str(row["run_id"]),
+                        "seq": int(row["seq"]),
+                        "type": str(row["type"]),
+                        "summary": clipped(str(row["summary"] or ""), 240),
+                        "created_at": int(row["created_at"] or 0),
+                    }
+                    event_rows.append(item)
+                    haystack = f"{row['summary'] or ''}\n{row['payload_json'] or ''}"
+                    if entity_lc and entity_lc in haystack.lower():
+                        entity_mentions.append({"kind": "run_event", "run_id": str(row["run_id"]), "seq": int(row["seq"]), "type": str(row["type"])})
+    metadata_files: list[dict[str, Any]] = []
+    likely_paths = contract.get("likely_paths") if isinstance(contract.get("likely_paths"), list) else []
+    for rel_path in likely_paths[:12]:
+        clean = route_contract_rel_path(rel_path)
+        if not clean or clean.endswith("/"):
+            continue
+        try:
+            path = route_contract_file_path(contract, clean)
+        except BrowserError:
+            continue
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+            if stat.st_size > 32_000:
+                continue
+            text = route_text_redact(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        item: dict[str, Any] = {
+            "path": clean,
+            "bytes": int(stat.st_size),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "preview": clipped(text, 3000),
+        }
+        if path.suffix.lower() == ".json":
+            parsed = json_dict(text)
+            if parsed:
+                item["json"] = direct_envelope_redact(parsed)
+        metadata_files.append(item)
+    data_roots: list[dict[str, Any]] = []
+    allowed_roots = contract.get("allowed_read_roots") if isinstance(contract.get("allowed_read_roots"), list) else []
+    workspace_root = str(contract.get("workspace_root") or "")
+    for root_value in allowed_roots[:6]:
+        root = Path(str(root_value)).resolve()
+        if str(root) == str(Path(workspace_root).resolve()):
+            continue
+        if not root.exists() or not root.is_dir():
+            continue
+        files: list[dict[str, Any]] = []
+        try:
+            for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: str(item))[:24]:
+                rel = str(path.relative_to(root)).replace("\\", "/")
+                entry: dict[str, Any] = {"path": rel, "bytes": int(path.stat().st_size)}
+                if path.suffix.lower() in {".db", ".sqlite", ".sqlite3"}:
+                    try:
+                        db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+                        tables = [
+                            str(row[0])
+                            for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 12").fetchall()
+                        ]
+                        counts: dict[str, int] = {}
+                        for table in tables[:8]:
+                            try:
+                                counts[table] = int(db.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+                            except sqlite3.Error:
+                                continue
+                        db.close()
+                        entry["sqlite_tables"] = counts
+                    except sqlite3.Error:
+                        entry["sqlite_error"] = "open_failed"
+                files.append(entry)
+        except OSError:
+            continue
+        data_roots.append({"root": str(root), "files": files, "file_count": len(files)})
+    investigation = kernel_entity_investigation_summary(contract, entity)
+    result = route_tool_ok(
+        "hermes.wasm_agent.kernel.runtime_entity_inspect_result.v1",
+        route_id=route_id,
+        entity=entity,
+        scope={key: value for key, value in scope.items() if value},
+        route_identity={
+            "surface": str(contract.get("surface") or ""),
+            "owner": str(contract.get("owner") or ""),
+            "workspace_root": str(contract.get("workspace_root") or ""),
+        },
+        capabilities={
+            "runtime_inspect": "runtime.inspect" in caps,
+            "lookup_handles": lookup_handles[:12],
+            "proof": proof[:12],
+            "check_ids": [clipped(str(item.get("id") or ""), 120) for item in checks[:12] if isinstance(item, dict)],
+        },
+        runs=run_rows[:12],
+        run_count=len(run_rows),
+        events=event_rows[:24],
+        event_count=len(event_rows),
+        entity_matches=entity_matches[:24],
+        entity_match_count=len(entity_matches),
+        entity_mentions=entity_mentions[:24],
+        entity_mention_count=len(entity_mentions),
+        metadata_files=metadata_files,
+        metadata_file_count=len(metadata_files),
+        data_roots=data_roots,
+        data_root_count=len(data_roots),
+        investigation=investigation,
+    )
+    unknowns: list[dict[str, Any]] = []
+    if "runtime.inspect" not in caps:
+        unknowns.append({"kind": "runtime", "code": "capability_not_declared", "message": "The resolved route contract does not declare runtime.inspect."})
+    if entity and not entity_matches:
+        unknowns.append({"kind": "entity", "code": "entity_not_observed", "message": "The requested entity was not found in bounded route identity or run evidence."})
+    if not any(scope.values()) and not run_rows:
+        unknowns.append({"kind": "run", "code": "scope_or_recent_run_missing", "message": "No run scope or recent direct-head run evidence was available for bounded runtime inspection."})
+    result["unknowns"] = unknowns
+    result["unknown_count"] = len(unknowns)
+    return result
+
+
+def kernel_runtime_entity_compact_summary(result: dict[str, Any]) -> dict[str, Any]:
+    metadata_files = result.get("metadata_files") if isinstance(result.get("metadata_files"), list) else []
+    data_roots = result.get("data_roots") if isinstance(result.get("data_roots"), list) else []
+    investigation = result.get("investigation") if isinstance(result.get("investigation"), dict) else {}
+    return {
+        "route_id": result.get("route_id"),
+        "entity": result.get("entity"),
+        "route_identity": result.get("route_identity") if isinstance(result.get("route_identity"), dict) else {},
+        "entity_match_count": result.get("entity_match_count"),
+        "investigation": {
+            "inferred_identity": investigation.get("inferred_identity") if isinstance(investigation.get("inferred_identity"), list) else [],
+            "roots": [
+                {
+                    "root": root.get("root"),
+                    "file_count": root.get("file_count"),
+                    "kind_counts": root.get("kind_counts") if isinstance(root.get("kind_counts"), dict) else {},
+                    "top_dirs": root.get("top_dirs") if isinstance(root.get("top_dirs"), dict) else {},
+                }
+                for root in (investigation.get("roots") if isinstance(investigation.get("roots"), list) else [])[:4]
+                if isinstance(root, dict)
+            ],
+            "conversations": investigation.get("conversations") if isinstance(investigation.get("conversations"), dict) else {},
+            "data_assets": investigation.get("data_assets") if isinstance(investigation.get("data_assets"), dict) else {},
+            "documents": [
+                {"path": doc.get("path"), "excerpt": clipped(str(doc.get("excerpt") or ""), 220)}
+                for doc in (investigation.get("documents") if isinstance(investigation.get("documents"), list) else [])[:6]
+                if isinstance(doc, dict)
+            ],
+            "databases": [
+                {
+                    "path": db.get("path"),
+                    "tables": db.get("tables") if isinstance(db.get("tables"), dict) else {},
+                    "semantic_tables": [
+                        {
+                            "table": table.get("table"),
+                            "count": table.get("count"),
+                            "samples": table.get("samples") if isinstance(table.get("samples"), list) else [],
+                        }
+                        for table in (db.get("semantic_tables") if isinstance(db.get("semantic_tables"), list) else [])[:4]
+                        if isinstance(table, dict)
+                    ],
+                }
+                for db in (investigation.get("databases") if isinstance(investigation.get("databases"), list) else [])[:5]
+                if isinstance(db, dict)
+            ],
+        },
+        "metadata_files": [
+            {
+                "path": meta.get("path"),
+                "bytes": meta.get("bytes"),
+                "json": {
+                    key: meta.get("json", {}).get(key)
+                    for key in ("bootstrapped_at", "reseeded_at", "state_code", "node_role", "timezone")
+                    if isinstance(meta.get("json"), dict) and meta.get("json", {}).get(key) not in (None, "")
+                },
+            }
+            for meta in metadata_files[:6]
+            if isinstance(meta, dict)
+        ],
+        "data_roots": [
+            {
+                "root": root.get("root"),
+                "file_count": root.get("file_count"),
+                "files": [
+                    {
+                        "path": file_item.get("path"),
+                        "bytes": file_item.get("bytes"),
+                        "sqlite_tables": file_item.get("sqlite_tables") if isinstance(file_item.get("sqlite_tables"), dict) else {},
+                    }
+                    for file_item in (root.get("files") if isinstance(root.get("files"), list) else [])[:8]
+                    if isinstance(file_item, dict)
+                ],
+            }
+            for root in data_roots[:4]
+            if isinstance(root, dict)
+        ],
+    }
+
+
+def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    kinds = kernel_inspect_kind_items(body)
+    observations: list[dict[str, Any]] = []
+    unknowns: list[dict[str, Any]] = []
+    runtime_entity_summaries: list[dict[str, Any]] = []
+
+    def add_observation(kind: str, result: dict[str, Any]) -> None:
+        observations.append({
+            "kind": kind,
+            "ok": bool(result.get("ok")),
+            "code": str(result.get("code") or ""),
+            "result": direct_envelope_redact(result),
+        })
+
+    for kind in kinds:
+        if kind in {"route", "contract", "map"}:
+            add_observation("map", route_map_summary_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
+        elif kind in {"files", "file", "receipts"}:
+            tool_body = {"route_id": contract.get("route_id"), "route_contract": contract}
+            if isinstance(body.get("paths"), list):
+                tool_body["paths"] = body["paths"]
+            add_observation("files", route_lookup_files_tool(tool_body))
+        elif kind in {"symbol", "symbols", "code"}:
+            query = clipped(str(body.get("query") or body.get("symbol") or body.get("entity") or "").strip(), 240)
+            if query:
+                add_observation("symbols", route_lookup_symbol_tool({"route_id": contract.get("route_id"), "route_contract": contract, "query": query}))
+            else:
+                unknowns.append({"kind": "symbols", "code": "query_missing", "message": "kernel.inspect symbols requires query/entity."})
+        elif kind in {"proof", "timeline", "run"}:
+            scope = {
+                "run_id": body.get("run_id"),
+                "quest_id": body.get("quest_id") or body.get("session_id"),
+                "turn_id": body.get("turn_id") or body.get("turnId"),
+            }
+            if any(scope.values()):
+                add_observation("proof", route_proof_collect_tool(user, scope))
+            else:
+                unknowns.append({"kind": "proof", "code": "scope_missing", "message": "kernel.inspect proof requires run_id, quest_id, or turn_id."})
+        elif kind in {"cost", "tokens", "ledger"}:
+            scope = {
+                "run_id": body.get("run_id"),
+                "quest_id": body.get("quest_id") or body.get("session_id"),
+                "turn_id": body.get("turn_id") or body.get("turnId"),
+            }
+            if any(scope.values()):
+                add_observation("cost", agent_token_ledger_status(user, scope))
+            else:
+                unknowns.append({"kind": "cost", "code": "scope_missing", "message": "kernel.inspect cost requires run_id, quest_id, or turn_id."})
+        elif kind in {"transcript", "messages", "history", "continuity"}:
+            transcript_result = transcript_read_tool(body)
+            add_observation("transcript", transcript_result)
+            if not transcript_result.get("ok"):
+                unknowns.append({"kind": "transcript", "code": transcript_result.get("code") or "transcript_unavailable", "message": "No bounded transcript cache was available for transcript.read."})
+        elif kind in {"diff", "changes"}:
+            add_observation("diff", route_git_diff_summary_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
+        elif kind in {"capabilities", "capability"}:
+            add_observation("capabilities", kernel_capabilities_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
+        elif kind in {"runtime", "entity", "entities", "workspace"}:
+            runtime_result = kernel_runtime_entity_inspect_tool(user, contract, body)
+            runtime_entity_summaries.append(kernel_runtime_entity_compact_summary(runtime_result))
+            add_observation("runtime_entity", runtime_result)
+            unknowns.extend(runtime_result.get("unknowns") if isinstance(runtime_result.get("unknowns"), list) else [])
+        else:
+            unknowns.append({"kind": kind, "code": "inspect_kind_unsupported", "message": "Unsupported kernel.inspect kind."})
+    return route_tool_ok(
+        "hermes.wasm_agent.kernel.inspect_result.v1",
+        route_id=str(contract.get("route_id") or ""),
+        primitive="kernel.inspect",
+        inspected=kinds,
+        observations=observations,
+        observation_count=len(observations),
+        runtime_entity_summaries=runtime_entity_summaries,
+        unknowns=unknowns,
+        unknown_count=len(unknowns),
+        root_cause_class="inspected_with_unknowns" if unknowns else "inspected",
+    )
+
+
+def kernel_act_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    action = clipped(str(body.get("local_action") or body.get("action") or body.get("tool") or "").strip().lower(), 120)
+    if not action:
+        raise BrowserError("kernel_action_missing", "kernel.act requires local_action.")
+    if action in {"hermes.dispatch_bounded", "dispatch.hermes", "hermes"}:
+        raise BrowserError("kernel_external_provider_denied", "kernel.act is local-only; use hermes.dispatch_bounded with explicit capability gap.", status=HTTPStatus.BAD_REQUEST)
+    path = KERNEL_ACTION_TOOL_PATHS.get(action)
+    if not path:
+        raise BrowserError("kernel_action_unsupported", f"Unsupported kernel local action: {action}.", status=HTTPStatus.BAD_REQUEST)
+    raw_args = body.get("args") or body.get("arguments") or body.get("input") or {}
+    args = json_clone(raw_args) if isinstance(raw_args, dict) else {}
+    args.setdefault("route_id", contract.get("route_id"))
+    args.setdefault("route_contract", contract)
+    if body.get("run_id") and "run_id" not in args:
+        args["run_id"] = body.get("run_id")
+    result = agent_kernel_tool(server, path, args, user=user)
+    return route_tool_ok(
+        "hermes.wasm_agent.kernel.act_result.v1",
+        route_id=str(contract.get("route_id") or ""),
+        primitive="kernel.act",
+        local_action=action,
+        result=direct_envelope_redact(result),
+    )
+
+
+def kernel_prove_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    scope = {
+        "run_id": body.get("run_id"),
+        "quest_id": body.get("quest_id") or body.get("session_id"),
+        "turn_id": body.get("turn_id") or body.get("turnId"),
+    }
+    proofs: list[dict[str, Any]] = []
+    unknowns: list[dict[str, Any]] = []
+    proofs.append({"kind": "route", "result": route_contract_summary(contract)})
+    if any(scope.values()):
+        proofs.append({"kind": "timeline", "result": direct_envelope_redact(route_proof_collect_tool(user, scope))})
+        proofs.append({"kind": "cost", "result": direct_envelope_redact(agent_token_ledger_status(user, scope))})
+    else:
+        unknowns.append({"kind": "timeline", "code": "scope_missing", "message": "kernel.prove run/timeline proof requires run_id, quest_id, or turn_id."})
+    checks = contract.get("checks") if isinstance(contract.get("checks"), list) else []
+    proofs.append({
+        "kind": "checks",
+        "result": [
+            {
+                "id": clipped(str(item.get("id") or ""), 120),
+                "description": clipped(str(item.get("description") or ""), 240),
+                "timeout_sec": int(item.get("timeout_sec") or 0),
+            }
+            for item in checks[:24]
+            if isinstance(item, dict)
+        ],
+    })
+    return route_tool_ok(
+        "hermes.wasm_agent.kernel.prove_result.v1",
+        route_id=str(contract.get("route_id") or ""),
+        primitive="kernel.prove",
+        proofs=proofs,
+        proof_count=len(proofs),
+        unknowns=unknowns,
+        unknown_count=len(unknowns),
+    )
+
+
+def hermes_dispatch_bounded_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
+    contract = route_contract_for_tool(body)
+    task_contract = body.get("task_contract") if isinstance(body.get("task_contract"), dict) else body
+    reason = clipped(str(task_contract.get("escalation_reason") or task_contract.get("escalationReason") or ""), 500)
+    raw_need = task_contract.get("capability_need") or task_contract.get("capabilityNeed") or task_contract.get("caps") or task_contract.get("capabilities") or []
+    needs = [raw_need] if isinstance(raw_need, str) else raw_need if isinstance(raw_need, list) else []
+    caps = [clipped(str(item or "").strip(), 80) for item in needs[:24] if str(item or "").strip()]
+    if not reason:
+        raise BrowserError("hermes_escalation_missing", "Hermes dispatch requires escalation_reason.", status=HTTPStatus.BAD_REQUEST)
+    if not caps:
+        raise BrowserError("capability_missing", "Hermes dispatch requires capability_need.", status=HTTPStatus.BAD_REQUEST)
+    missing = [cap for cap in caps if cap not in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
+    if missing:
+        raise BrowserError("capability_missing", f"Hermes dispatch capability missing: {', '.join(missing[:8])}.", status=HTTPStatus.BAD_REQUEST)
+    provider_policy = contract.get("provider_policy") if isinstance(contract.get("provider_policy"), dict) else {}
+    if str(provider_policy.get("hermes") or "") != "bounded-skill-only":
+        raise BrowserError("hermes_policy_missing", "Hermes dispatch requires provider_policy.hermes=bounded-skill-only.", status=HTTPStatus.BAD_REQUEST)
+    budget = task_contract.get("budget") if isinstance(task_contract.get("budget"), dict) else contract.get("budget") if isinstance(contract.get("budget"), dict) else {}
+    if not budget:
+        raise BrowserError("budget_missing", "Hermes dispatch requires a task or route budget.", status=HTTPStatus.BAD_REQUEST)
+    proof = task_contract.get("proof") or task_contract.get("proof_requirements") or contract.get("proof") or []
+    if not proof:
+        raise BrowserError("proof_contract_missing", "Hermes dispatch requires proof requirements.", status=HTTPStatus.BAD_REQUEST)
+    run_id = safe_agent_run_key(body.get("run_id"), "")
+    created_run = False
+    if not run_id:
+        run, _created = begin_agent_run(
+            server,
+            {
+                "session_id": body.get("quest_id") or body.get("session_id") or "agent-tools",
+                "turn_id": body.get("turn_id") or f"hermes_{uuid.uuid4().hex[:12]}",
+                "message": task_contract.get("objective") or task_contract.get("task") or "bounded Hermes dispatch",
+                "mode": "direct-head",
+                "target_node": "direct-head",
+            },
+            user=user,
+            direct_head=True,
+        )
+        run_id = str(run.get("run_id") or "")
+        created_run = True
+    action = {
+        "action": "dispatch.hermes",
+        "role": "subagent_harness",
+        "objective": task_contract.get("objective") or task_contract.get("task") or body.get("objective") or "",
+        "caps": caps,
+        "refs": task_contract.get("evidence_refs") or task_contract.get("refs") or [],
+        "proof": proof,
+        "target_node": task_contract.get("target_node") or body.get("target_node") or AGENT_FRONTIER_NODE_ID,
+        "stream": bool(task_contract.get("stream")),
+        "escalation_reason": reason,
+    }
+    envelope = {
+        "objective": action["objective"],
+        "route_id": contract.get("route_id"),
+        "surface": contract.get("surface"),
+        "route_contract": contract,
+        "budget": budget,
+        "allow_hermes": True,
+        "constraints": {
+            "escalation_reason": reason,
+            "last_resort": True,
+        },
+    }
+    result = execute_direct_head_hermes_dispatch(server, action, envelope, user=user, run_id=run_id)
+    result["ok"] = True
+    result["code"] = "ok"
+    result["run_id"] = run_id
+    result["route_id"] = str(contract.get("route_id") or "")
+    result["last_resort"] = True
+    record_agent_run_token_usage_event(server, run_id, {"route_id": result["route_id"], "usage": result.get("usage")})
+    if created_run:
+        finish_agent_run(server, run_id, status="completed", final=result)
+    return result
+
+
+def agent_kernel_tool_execute(server: WasmAgentServer, path: str, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
+    if path == "/agent/tools/kernel.capabilities":
+        return kernel_capabilities_tool(body)
+    if path == "/agent/tools/kernel.resolve":
+        return kernel_resolve_tool(body)
+    if path == "/agent/tools/kernel.inspect":
+        return kernel_inspect_tool(server, body, user)
+    if path == "/agent/tools/kernel.act":
+        return kernel_act_tool(server, body, user)
+    if path == "/agent/tools/kernel.prove":
+        return kernel_prove_tool(server, body, user)
     if path == "/agent/tools/route.resolve":
         return route_resolve_tool(body)
     if path == "/agent/tools/map.summary":
@@ -3329,9 +4682,98 @@ def agent_kernel_tool(server: WasmAgentServer, path: str, body: dict[str, Any], 
         return route_lookup_files_tool(body)
     if path == "/agent/tools/lookup.symbol":
         return route_lookup_symbol_tool(body)
+    if path == "/agent/tools/file.read_bounded":
+        return route_file_read_bounded_tool(body)
+    if path == "/agent/tools/patch.apply_scoped":
+        return route_patch_apply_scoped_tool(body)
+    if path == "/agent/tools/test.run_focused":
+        return route_test_run_focused_tool(body)
+    if path == "/agent/tools/git.diff_summary":
+        return route_git_diff_summary_tool(body)
+    if path == "/agent/tools/proof.collect":
+        return route_proof_collect_tool(user, body)
     if path == "/agent/tools/cost.status":
         return agent_token_ledger_status(user, body)
+    if path == "/agent/tools/code.memory.index":
+        return code_memory_tool("code.memory.index", body)
+    if path == "/agent/tools/code.memory.status":
+        return code_memory_tool("code.memory.status", body)
+    if path == "/agent/tools/code.memory.search":
+        return code_memory_tool("code.memory.search", body)
+    if path == "/agent/tools/code.memory.impact":
+        return code_memory_tool("code.memory.impact", body)
+    if path == "/agent/tools/transcript.read":
+        return transcript_read_tool(body)
+    if path == "/agent/tools/node.capabilities":
+        return node_capabilities_tool(server, body, user)
+    if path == "/agent/tools/node.chat":
+        return node_chat_tool(server, body, user)
+    if path == "/agent/tools/hermes.capabilities":
+        return hermes_capabilities_tool(body)
+    if path == "/agent/tools/hermes.dispatch_bounded":
+        return hermes_dispatch_bounded_tool(server, body, user)
     raise BrowserError("agent_tool_not_found", "Unknown wasm-agent tool.", status=HTTPStatus.NOT_FOUND)
+
+
+def agent_run_accepts_tool_events(run_id: str, user: dict[str, Any] | None) -> bool:
+    clean_run_id = safe_agent_run_key(run_id, "")
+    if not clean_run_id:
+        return False
+    try:
+        with auth_connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM agent_run_tb WHERE run_id = ? AND user_id = ?",
+                (clean_run_id, user_id(user)),
+            ).fetchone()
+    except Exception:
+        return False
+    return bool(row and str(row["status"]) not in AGENT_RUN_TERMINAL_STATUSES)
+
+
+def agent_kernel_tool(server: WasmAgentServer, path: str, body: dict[str, Any], user: dict[str, Any] | None = None) -> dict[str, Any]:
+    tool_name = clipped(path.removeprefix("/agent/tools/"), 120)
+    run_id = safe_agent_run_key(body.get("run_id"), "")
+    record_tool_event = agent_run_accepts_tool_events(run_id, user)
+    if record_tool_event:
+        append_agent_run_event(
+            server,
+            run_id,
+            "tool.started",
+            summary=tool_name,
+            payload={"tool": tool_name, "schema": "hermes.wasm_agent.tool_event.v1"},
+        )
+    try:
+        result = agent_kernel_tool_execute(server, path, body, user=user)
+    except BrowserError as exc:
+        if record_tool_event:
+            append_agent_run_event(
+                server,
+                run_id,
+                "tool.finished",
+                summary=f"{tool_name}: {exc.code}",
+                payload={
+                    "tool": tool_name,
+                    "schema": "hermes.wasm_agent.tool_event.v1",
+                    "ok": False,
+                    "error": {"code": exc.code, "message": exc.message},
+                },
+        )
+        raise
+    if record_tool_event:
+        append_agent_run_event(
+            server,
+            run_id,
+            "tool.finished",
+            summary=f"{tool_name}: {result.get('code') or 'ok'}",
+            payload={
+                "tool": tool_name,
+                "schema": "hermes.wasm_agent.tool_event.v1",
+                "ok": bool(result.get("ok")),
+                "code": result.get("code") or "ok",
+                "route_id": result.get("route_id") or "",
+            },
+        )
+    return result
 
 
 def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -3352,6 +4794,23 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
         envelope.setdefault("route_id", route_contract.get("route_id"))
         envelope.setdefault("surface", route_contract.get("surface"))
         envelope["route_contract"] = route_contract
+    runtime_routes = direct_envelope_runtime_entity_hints(envelope)
+    if runtime_routes:
+        envelope["runtime_entity_routes"] = runtime_routes
+    existing_actions = envelope.get("allowed_actions") if isinstance(envelope.get("allowed_actions"), list) else []
+    existing_action_ids = {
+        direct_head_action_name(item)
+        for item in existing_actions
+        if isinstance(item, dict)
+    }
+    kernel_actions = list(master_frontier_protocol.KERNEL_ACTIONS)
+    if route_contract:
+        envelope["kernel"] = direct_envelope_kernel_projection(envelope)
+        envelope["task_contract"] = master_frontier_planner.task_contract(envelope)
+        envelope["allowed_actions"] = [
+            *existing_actions,
+            *[item for item in kernel_actions if item["id"] not in existing_action_ids],
+        ][:16]
     if not isinstance(envelope.get("output_schema"), dict):
         output_schema = body.get("output_schema") if isinstance(body.get("output_schema"), dict) else None
         envelope["output_schema"] = direct_envelope_redact(output_schema or DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA)
@@ -3360,14 +4819,25 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
 
 def direct_envelope_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     envelope = direct_envelope_from_body(body)
+    envelope["head_identity"] = direct_head_identity_from_body(body)
+    transcript_cache = transcript_cache_from_body(body)
+    if transcript_cache:
+        envelope["transcript_cache"] = direct_envelope_redact(transcript_cache)
     instructions = clipped(str(body.get("instructions") or "").strip(), 4000)
     semantic = direct_envelope_semantic_text(envelope)
     content = [
         "Treat this compact semantic envelope as the complete context for this decision.",
         (
             "For a direct answer, return plain human-readable text only. "
-            "Do not wrap normal answers in JSON. Return compact JSON only when choosing "
-            "dispatch.hermes, with actions containing the dispatch.hermes action."
+            "Do not wrap normal answers in JSON. If any tool, file, runtime, transcript, "
+            "kernel, or Hermes work is required, return only minified JSON as the first byte "
+            "of the response: no prose, no markdown fence, no explanation before or after. "
+            "Action JSON must contain answer, decision, actions, state_delta, needs, and "
+            "confidence. Use actions like {\"action\":\"kernel.inspect\",\"args\":{...}} "
+            "or {\"action\":\"dispatch.hermes\",\"objective\":\"...\",\"caps\":[...],"
+            "\"escalation_reason\":\"...\",\"refs\":[...],\"proof\":[...]}. "
+            "Never say you are dispatching, inspecting, reading, running, or executing unless "
+            "the same JSON contains that executable action."
         ),
         semantic,
     ]
@@ -3391,14 +4861,22 @@ def direct_envelope_with_metrics(body: dict[str, Any]) -> tuple[list[dict[str, A
 
 
 def openai_direct_envelope_text(body: dict[str, Any], envelope: dict[str, Any]) -> str:
-    raw = body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope")
-    payload = raw if isinstance(raw, dict) else envelope
     receiver = direct_envelope_receiver(body)
+    provider_envelope = dict(envelope)
+    if isinstance(provider_envelope.get("task_contract"), dict):
+        task_contract = master_frontier_envelope.task_contract_projection(provider_envelope)
+        task_contract.pop("p", None)
+        task_contract.pop("h", None)
+        provider_envelope.pop("task_contract", None)
+        provider_envelope["p"] = (
+            f"{task_contract.get('i')}>{task_contract.get('x')}:"
+            f"{','.join(str(item) for item in task_contract.get('t', [])[:5])}"
+        )
     return (
         "ENV agent-envelope-v1\n"
         f"RECEIVER {receiver}\n"
         "RAW true\n"
-        f"{direct_envelope_json(payload, limit=DIRECT_ENVELOPE_MAX_JSON_CHARS)}"
+        f"{direct_envelope_json(provider_envelope, limit=DIRECT_ENVELOPE_MAX_JSON_CHARS)}"
     )
 
 
@@ -3742,38 +5220,829 @@ def provider_envelope_completion(
 
 
 def direct_head_action_name(action: dict[str, Any]) -> str:
-    return clipped(str(action.get("act") or action.get("action") or action.get("id") or action.get("type") or ""), 120).lower()
+    return master_frontier_envelope.action_name(action)
+
+
+def direct_head_action_args(action: dict[str, Any]) -> dict[str, Any]:
+    return master_frontier_envelope.action_args(action)
+
+
+def direct_head_canonical_action_name(action: dict[str, Any]) -> str:
+    return master_frontier_envelope.canonical_action_name(action)
 
 
 def direct_head_hermes_dispatch_action(parsed: Any) -> dict[str, Any] | None:
-    if not isinstance(parsed, dict):
-        return None
-    actions = parsed.get("actions") if isinstance(parsed.get("actions"), list) else []
-    for action in actions:
-        if not isinstance(action, dict):
+    return master_frontier_envelope.hermes_dispatch_action(parsed)
+
+
+def direct_head_local_tool_actions(parsed: Any) -> list[dict[str, Any]]:
+    return master_frontier_envelope.local_tool_actions(parsed)
+
+
+def direct_head_declared_needs(parsed: Any) -> list[str]:
+    return master_frontier_envelope.declared_needs(parsed)
+
+
+def direct_head_has_executable_action(parsed: Any) -> bool:
+    return master_frontier_envelope.has_executable_action(parsed)
+
+
+def direct_head_tool_intent_text(parsed: Any, reply: str) -> str:
+    return master_frontier_envelope.tool_intent_text(parsed, reply)
+
+
+def direct_head_reply_looks_like_action_json(reply: str) -> bool:
+    return master_frontier_envelope.reply_looks_like_action_json(reply)
+
+
+def direct_head_requires_structured_action(parsed: Any, reply: str) -> bool:
+    return master_frontier_envelope.requires_structured_action(parsed, reply)
+
+
+def enforce_direct_head_structured_action(parsed: Any, reply: str) -> None:
+    if not direct_head_requires_structured_action(parsed, reply):
+        return
+    direct_envelope_error(
+        "structured_action_required",
+        "Direct-head output claimed tool/dispatch work but did not provide a valid executable action. Return a structured kernel/transcript action or dispatch.hermes action, or answer without claiming execution.",
+        HTTPStatus.BAD_REQUEST,
+    )
+
+
+def direct_head_action_repair_body(body: dict[str, Any], bad_reply: str) -> dict[str, Any]:
+    return master_frontier_envelope.action_repair_body(body, bad_reply)
+
+
+def direct_head_empty_response_repair_body(body: dict[str, Any]) -> dict[str, Any]:
+    repaired = direct_head_action_repair_body(body, "")
+    instructions = clipped(str(repaired.get("instructions") or "").strip(), 5000)
+    empty_repair = (
+        "EMPTY RESPONSE REPAIR: the previous provider call returned no message content. "
+        "Return a non-empty response now. If the objective needs work, the first character "
+        "must be `{` and the JSON must contain an executable local action. If no action is "
+        "needed, answer directly from the envelope."
+    )
+    repaired["instructions"] = "\n\n".join(part for part in (instructions, empty_repair) if part)
+    repaired["max_output_tokens"] = max(int(repaired.get("max_output_tokens") or 0), 1200)
+    return repaired
+
+
+def direct_head_provider_error_is_repairable_empty(error: ProviderProxyError) -> bool:
+    return str(getattr(error, "code", "") or "") in {"provider-empty-response", "provider-no-content"}
+
+
+def enforce_kernel_before_unknown_answer(parsed: Any) -> None:
+    needs = direct_head_declared_needs(parsed)
+    if not needs:
+        return
+    if direct_head_has_executable_action(parsed):
+        return
+    direct_envelope_error(
+        "kernel_inspection_required",
+        "Direct-head declared missing state/proof needs without a kernel local action. Unknown state must use kernel.resolve, kernel.inspect, or kernel.prove before answering.",
+        HTTPStatus.BAD_REQUEST,
+    )
+
+
+def direct_head_answer_text(parsed: Any, fallback: str) -> str:
+    if isinstance(parsed, dict):
+        answer = str(parsed.get("answer") or "").strip()
+        if answer:
+            return answer
+    return str(fallback or "")
+
+
+def direct_head_local_tool_body(action: dict[str, Any], envelope: dict[str, Any], run_id: str) -> dict[str, Any]:
+    raw = direct_head_action_args(action)
+    body = json_clone(raw)
+    for source_key, target_key in (("node", "node_id"), ("target_node", "node_id")):
+        if body.get(source_key) and not body.get(target_key):
+            body[target_key] = body.get(source_key)
+    target_value = str(action.get("target") or "").strip()
+    target_route_id = clipped(str(
+        action.get("target_route_id")
+        or action.get("targetRouteId")
+        or action.get("route_id")
+        or action.get("route")
+        or (target_value if resolve_route_contract(route_id=target_value) else "")
+        or ""
+    ).strip(), 160)
+    if target_route_id and "route_id" not in body and "route" not in body:
+        body["route_id"] = target_route_id
+    if action.get("entity") and "entity" not in body:
+        body["entity"] = action.get("entity")
+    if action.get("handles") and "inspect" not in body:
+        handles = action.get("handles") if isinstance(action.get("handles"), list) else []
+        inspect: list[str] = []
+        for handle in handles[:12]:
+            value = str(handle or "").lower()
+            if "runtime" in value:
+                inspect.extend(["runtime", "entity"])
+            elif "timeline" in value or "proof" in value:
+                inspect.append("proof")
+            elif "file" in value:
+                inspect.append("files")
+            elif "symbol" in value:
+                inspect.append("symbols")
+        if inspect:
+            body["inspect"] = list(dict.fromkeys(inspect))
+    explicit_route = str(body.get("route_id") or body.get("route") or "").strip()
+    envelope_route = str(envelope.get("route_id") or envelope.get("route") or "").strip()
+    use_envelope_route_fields = not explicit_route or explicit_route == envelope_route
+    for key, fallback in (
+        ("route_id", envelope.get("route_id") or envelope.get("route")),
+        ("surface", envelope.get("surface") if use_envelope_route_fields else None),
+        (
+            "route_contract",
+            envelope.get("route_contract")
+            if isinstance(envelope.get("route_contract"), dict) and use_envelope_route_fields
+            else None,
+        ),
+        ("run_id", run_id),
+        ("transcript_cache", envelope.get("transcript_cache") if isinstance(envelope.get("transcript_cache"), dict) else None),
+    ):
+        if fallback is not None and key not in body:
+            body[key] = fallback
+    return body
+
+
+def execute_direct_head_local_tool_actions(
+    server: WasmAgentServer,
+    actions: list[dict[str, Any]],
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for action in actions[:6]:
+        name = direct_head_canonical_action_name(action)
+        path = DIRECT_HEAD_LOCAL_TOOL_PATHS.get(name)
+        if not path:
             continue
-        if direct_head_action_name(action) == "dispatch.hermes":
-            return action
-    return None
+        body = direct_head_local_tool_body(action, envelope, run_id)
+        try:
+            result = agent_kernel_tool(server, path, body, user=user)
+        except BrowserError as exc:
+            direct_envelope_error(
+                exc.code,
+                f"Local tool {name} failed: {exc.message}",
+                exc.status,
+            )
+        results.append({
+            "tool": name,
+            "ok": bool(result.get("ok")),
+            "code": str(result.get("code") or ""),
+            "schema": str(result.get("schema") or ""),
+            "route_id": str(result.get("route_id") or body.get("route_id") or ""),
+            "summary": direct_head_kernel_result_summary(result),
+            "result": direct_envelope_redact(result),
+        })
+    return results
+
+
+def direct_head_kernel_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "route_id": str(result.get("route_id") or ""),
+        "schema": str(result.get("schema") or ""),
+    }
+    observations = result.get("observations") if isinstance(result.get("observations"), list) else []
+    compact_observations: list[dict[str, Any]] = []
+    runtime_summaries = result.get("runtime_entity_summaries") if isinstance(result.get("runtime_entity_summaries"), list) else []
+    for runtime_summary in runtime_summaries[:6]:
+        if isinstance(runtime_summary, dict):
+            compact_observations.append({"kind": "runtime_entity", "ok": True, **runtime_summary})
+    for obs in observations[:12]:
+        if not isinstance(obs, dict):
+            continue
+        if obs.get("kind") == "runtime_entity" and runtime_summaries:
+            continue
+        obs_result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
+        compact: dict[str, Any] = {"kind": str(obs.get("kind") or ""), "ok": bool(obs.get("ok"))}
+        if obs.get("kind") == "runtime_entity":
+            compact["route_identity"] = obs_result.get("route_identity") if isinstance(obs_result.get("route_identity"), dict) else {}
+            compact["entity"] = obs_result.get("entity")
+            compact["entity_match_count"] = obs_result.get("entity_match_count")
+            compact["investigation"] = obs_result.get("investigation") if isinstance(obs_result.get("investigation"), dict) else {}
+            metadata_files = obs_result.get("metadata_files") if isinstance(obs_result.get("metadata_files"), list) else []
+            compact["metadata_files"] = [
+                {
+                    "path": meta.get("path"),
+                    "bytes": meta.get("bytes"),
+                    "json": {
+                        key: meta.get("json", {}).get(key)
+                        for key in ("bootstrapped_at", "reseeded_at", "state_code", "node_role", "timezone")
+                        if isinstance(meta.get("json"), dict) and meta.get("json", {}).get(key) not in (None, "")
+                    },
+                }
+                for meta in metadata_files[:6]
+                if isinstance(meta, dict)
+            ]
+            data_roots = obs_result.get("data_roots") if isinstance(obs_result.get("data_roots"), list) else []
+            compact["data_roots"] = [
+                {
+                    "root": root.get("root"),
+                    "file_count": root.get("file_count"),
+                    "files": [
+                        {
+                            "path": file_item.get("path"),
+                            "bytes": file_item.get("bytes"),
+                            "sqlite_tables": file_item.get("sqlite_tables") if isinstance(file_item.get("sqlite_tables"), dict) else {},
+                        }
+                        for file_item in (root.get("files") if isinstance(root.get("files"), list) else [])[:8]
+                        if isinstance(file_item, dict)
+                    ],
+                }
+                for root in data_roots[:4]
+                if isinstance(root, dict)
+            ]
+        elif obs.get("kind") == "files":
+            compact["count"] = obs_result.get("count")
+        compact_observations.append(compact)
+    if compact_observations:
+        summary["observations"] = compact_observations
+    return summary
+
+
+def record_direct_head_local_tool_events(server: WasmAgentServer, run_id: str, results: list[dict[str, Any]]) -> None:
+    for item in results:
+        tool = clipped(str(item.get("tool") or "local-tool"), 120)
+        append_agent_run_event(server, run_id, "tool.started", summary=tool, payload={"tool": tool})
+        append_agent_run_event(
+            server,
+            run_id,
+            "tool.finished",
+            summary=f"{tool}: {item.get('code') or 'ok'}",
+            payload={"tool": item},
+        )
+
+
+def direct_head_runtime_entity_preflight_actions(action: dict[str, Any], envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    text = direct_head_action_text(action, envelope)
+    entity_route = resolve_runtime_entity_route_contract(text)
+    route_id = (entity_route or envelope.get("route_contract") or {}).get("route_id") if isinstance((entity_route or envelope.get("route_contract") or {}), dict) else ""
+    entity = ""
+    entities = entity_route.get("entities") if isinstance(entity_route, dict) and isinstance(entity_route.get("entities"), list) else []
+    if entities and isinstance(entities[0], dict):
+        entity = str(entities[0].get("id") or entities[0].get("name") or "")
+    if not entity:
+        entity = clipped(str(action.get("entity") or action.get("node") or action.get("target") or "").strip(), 160)
+    if not entity:
+        match = re.search(r"\b([A-Za-z][A-Za-z0-9_-]{2,})\s+node\b", text, flags=re.IGNORECASE)
+        if match:
+            entity = clipped(match.group(1), 160)
+    actions: list[dict[str, Any]] = []
+    if entity_route:
+        actions.append({
+            "action": "kernel.resolve",
+            "args": {"route_id": entity_route.get("route_id")},
+        })
+    actions.append({
+        "action": "kernel.inspect",
+        "args": {
+            "route_id": route_id or envelope.get("route_id") or envelope.get("route"),
+            "route_contract": entity_route if entity_route else envelope.get("route_contract"),
+            "inspect": ["runtime", "entity", "route"],
+            "entity": entity,
+        },
+    })
+    return actions
+
+
+def ensure_direct_head_runtime_entity_preflight(
+    server: WasmAgentServer,
+    action: dict[str, Any] | None,
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+    local_tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not action or not direct_head_dispatch_is_runtime_entity(action, envelope):
+        return local_tool_results
+    if direct_head_local_inspect_results(local_tool_results):
+        return local_tool_results
+    preflight = execute_direct_head_local_tool_actions(
+        server,
+        direct_head_runtime_entity_preflight_actions(action, envelope),
+        envelope,
+        user=user,
+        run_id=run_id,
+    )
+    record_direct_head_local_tool_events(server, run_id, preflight)
+    return [*local_tool_results, *preflight]
+
+
+def direct_head_objective_runtime_entity_preflight_actions(envelope: dict[str, Any]) -> list[dict[str, Any]]:
+    routes = envelope.get("runtime_entity_routes") if isinstance(envelope.get("runtime_entity_routes"), list) else []
+    actions: list[dict[str, Any]] = []
+    for route in routes[:3]:
+        if not isinstance(route, dict):
+            continue
+        route_id = str(route.get("route_id") or "").strip()
+        if not route_id:
+            continue
+        entities = route.get("entities") if isinstance(route.get("entities"), list) else []
+        entity = ""
+        if entities and isinstance(entities[0], dict):
+            entity = str(entities[0].get("id") or entities[0].get("name") or "").strip()
+        actions.append({
+            "action": "kernel.resolve",
+            "args": {"route_id": route_id},
+        })
+        actions.append({
+            "action": "kernel.inspect",
+            "args": {
+                "route_id": route_id,
+                "route_contract": route,
+                "inspect": ["files", "runtime", "entity", "proof"],
+                "entity": entity,
+            },
+        })
+    return actions
+
+
+def ensure_direct_head_objective_runtime_entity_preflight(
+    server: WasmAgentServer,
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+    local_tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    routes = envelope.get("runtime_entity_routes") if isinstance(envelope.get("runtime_entity_routes"), list) else []
+    if not routes:
+        return local_tool_results
+    inspected_routes = {
+        str(item.get("route_id") or "")
+        for item in direct_head_local_inspect_results(local_tool_results)
+        if isinstance(item, dict)
+    }
+    missing_routes = [
+        route for route in routes[:3]
+        if isinstance(route, dict) and str(route.get("route_id") or "").strip() not in inspected_routes
+    ]
+    if not missing_routes:
+        return local_tool_results
+    scoped_envelope = {**envelope, "runtime_entity_routes": missing_routes}
+    preflight = execute_direct_head_local_tool_actions(
+        server,
+        direct_head_objective_runtime_entity_preflight_actions(scoped_envelope),
+        envelope,
+        user=user,
+        run_id=run_id,
+    )
+    record_direct_head_local_tool_events(server, run_id, preflight)
+    return [*local_tool_results, *preflight]
+
+
+def direct_head_dispatch_has_escalation_reason(action: dict[str, Any] | None) -> bool:
+    if not action:
+        return False
+    return bool(str(
+        action.get("escalation_reason")
+        or action.get("escalationReason")
+        or action.get("fallback_reason")
+        or action.get("reason")
+        or ""
+    ).strip())
+
+
+def direct_head_has_runtime_entity_routes(envelope: dict[str, Any]) -> bool:
+    routes = envelope.get("runtime_entity_routes") if isinstance(envelope.get("runtime_entity_routes"), list) else []
+    return any(isinstance(route, dict) and str(route.get("route_id") or "").strip() for route in routes)
+
+
+def direct_head_objective_is_implementation_intent(envelope: dict[str, Any]) -> bool:
+    return master_frontier_intent.objective_is_implementation_intent(envelope)
+
+
+def direct_head_text_is_capability_inquiry(text: str) -> bool:
+    return master_frontier_intent.text_is_capability_inquiry(text)
+
+
+def direct_head_goal_completion_text(envelope: dict[str, Any]) -> str:
+    return master_frontier_intent.goal_completion_text(envelope)
+
+
+def direct_head_goal_requires_change_artifact(envelope: dict[str, Any]) -> bool:
+    return master_frontier_intent.goal_requires_change_artifact(envelope)
+
+
+def direct_head_changed_file_artifacts(change_proof: dict[str, Any], dispatch_result: dict[str, Any] | None) -> list[Any]:
+    return master_frontier_intent.changed_file_artifacts(change_proof, dispatch_result)
+
+
+def direct_head_local_tool_changed_files(local_tool_results: list[dict[str, Any]]) -> list[str]:
+    changed: list[str] = []
+    for item in local_tool_results:
+        if not isinstance(item, dict):
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        for source in (result.get("changed_files"), result.get("changed")):
+            if not isinstance(source, list):
+                continue
+            for path in source[:40]:
+                clean = clipped(str(path or "").strip(), 500)
+                if clean and clean not in changed:
+                    changed.append(clean)
+    return changed
+
+
+def direct_head_merge_local_change_proof(change_proof: dict[str, Any], local_tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    local_changed = direct_head_local_tool_changed_files(local_tool_results)
+    if not local_changed:
+        return change_proof
+    merged = dict(change_proof)
+    existing = merged.get("changed_files") if isinstance(merged.get("changed_files"), list) else []
+    merged["changed_files"] = list(dict.fromkeys([*existing, *local_changed]))
+    return merged
+
+
+def enforce_direct_head_goal_completion(
+    server: WasmAgentServer,
+    run_id: str,
+    envelope: dict[str, Any],
+    change_proof: dict[str, Any],
+    dispatch_result: dict[str, Any] | None,
+) -> None:
+    if not direct_head_goal_requires_change_artifact(envelope):
+        return
+    artifacts = direct_head_changed_file_artifacts(change_proof, dispatch_result)
+    if artifacts:
+        return
+    append_agent_run_event(
+        server,
+        run_id,
+        "goal.incomplete",
+        summary="Implementation objective completed without changed-file proof",
+        payload={
+            "code": "implementation_goal_incomplete",
+            "objective": clipped(str(envelope.get("objective") or ""), 240),
+            "target_node": (dispatch_result or {}).get("target_node") if isinstance(dispatch_result, dict) else "",
+            "dispatch_workspace": (dispatch_result or {}).get("workspace") if isinstance(dispatch_result, dict) else None,
+        },
+    )
+    direct_envelope_error(
+        "implementation_goal_incomplete",
+        "Implementation or continuation objective completed without changed-file proof. Dispatch a scoped repo-edit task, produce change proof, or report a typed block instead of a completed answer.",
+        HTTPStatus.CONFLICT,
+    )
+
+
+def direct_head_runtime_entity_objective_needs_local_inspection(envelope: dict[str, Any]) -> bool:
+    if not direct_head_has_runtime_entity_routes(envelope):
+        return False
+    if direct_head_objective_is_implementation_intent(envelope):
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            envelope.get("objective"),
+            envelope.get("intent"),
+            envelope.get("state_summary"),
+        )
+    ).lower()
+    if not text:
+        return False
+    history_terms = (
+        "tell me",
+        "more about",
+        "what is",
+        "what are",
+        "what have",
+        "what has",
+        "what did",
+        "what was",
+        "what were",
+        "done over time",
+        "over time",
+        "since creation",
+        "since its creation",
+        "history",
+        "timeline",
+        "understand it",
+        "activity",
+        "doing",
+        "analyzing",
+        "analysis",
+        "research",
+        "paper",
+        "data",
+        "summary",
+    )
+    inspect_terms = ("navigate", "inspect", "understand", "done", "history", "timeline", "creation")
+    return any(term in text for term in history_terms) or any(term in text for term in inspect_terms)
+
+
+def direct_head_local_runtime_proof_satisfies_dispatch(
+    action: dict[str, Any] | None,
+    envelope: dict[str, Any],
+    local_tool_results: list[dict[str, Any]],
+) -> bool:
+    if not action or direct_head_dispatch_has_escalation_reason(action):
+        return False
+    routes = envelope.get("runtime_entity_routes") if isinstance(envelope.get("runtime_entity_routes"), list) else []
+    route_ids = {
+        str(route.get("route_id") or "").strip()
+        for route in routes
+        if isinstance(route, dict) and str(route.get("route_id") or "").strip()
+    }
+    if not route_ids:
+        return False
+    for item in direct_head_local_inspect_results(local_tool_results):
+        if str(item.get("route_id") or "") in route_ids and item.get("ok"):
+            return True
+    return False
+
+
+def direct_head_local_tool_summary_reply(reply: str, local_tool_results: list[dict[str, Any]]) -> str:
+    summaries: list[str] = []
+    synthesized_intro = ""
+    synthesized_history = ""
+    for item in local_tool_results[:8]:
+        if not isinstance(item, dict):
+            continue
+        route_id = str(item.get("route_id") or "")
+        if not route_id:
+            continue
+        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
+        observations = summary.get("observations") if isinstance(summary.get("observations"), list) else []
+        if not observations:
+            continue
+        route_entity = route_id.split(".")[1] if route_id.startswith("hermes-node.") and len(route_id.split(".")) >= 3 else route_id
+        entity_label = route_entity.replace("-", " ").replace("_", " ").strip().title() or "The runtime entity"
+        route_line = f"Kernel inspection resolved `{route_id}` for entity `{route_entity}`."
+        details: list[str] = [route_line]
+        for obs in observations:
+            if not isinstance(obs, dict):
+                continue
+            if obs.get("kind") == "runtime_entity":
+                identity = obs.get("route_identity") if isinstance(obs.get("route_identity"), dict) else {}
+                workspace_root = str(identity.get("workspace_root") or "").strip()
+                data_roots = obs.get("data_roots") if isinstance(obs.get("data_roots"), list) else []
+                data_root = ""
+                for root in data_roots:
+                    if isinstance(root, dict) and str(root.get("root") or "").strip():
+                        data_root = str(root.get("root") or "").strip()
+                        break
+                details.append(
+                    "Runtime route: "
+                    f"surface `{identity.get('surface')}`, owner `{identity.get('owner')}`, root `{identity.get('workspace_root')}`."
+                )
+                investigation = obs.get("investigation") if isinstance(obs.get("investigation"), dict) else {}
+                inferred = investigation.get("inferred_identity") if isinstance(investigation.get("inferred_identity"), list) else []
+                if inferred:
+                    details.append("Entity investigation inferred: " + ", ".join(f"`{item}`" for item in inferred[:5]) + ".")
+                conversations = investigation.get("conversations") if isinstance(investigation.get("conversations"), dict) else {}
+                conv_bits = []
+                if conversations:
+                    for key in ("sessions", "messages", "session_files"):
+                        if conversations.get(key) not in (None, "", 0):
+                            conv_bits.append(f"{key}={conversations.get(key)}")
+                    if conv_bits:
+                        details.append(f"Conversation/runtime memory evidence from `{conversations.get('source') or 'runtime store'}`: " + ", ".join(conv_bits) + ".")
+                assets = investigation.get("data_assets") if isinstance(investigation.get("data_assets"), dict) else {}
+                asset_bits = []
+                for key in ("summary_md_count", "raw_paper_json_count", "pdf_count"):
+                    if assets.get(key):
+                        asset_bits.append(f"{key}={assets.get(key)}")
+                if asset_bits:
+                    details.append("Data asset evidence: " + ", ".join(asset_bits) + ".")
+                documents = investigation.get("documents") if isinstance(investigation.get("documents"), list) else []
+                for doc in documents[:3]:
+                    if isinstance(doc, dict) and doc.get("path"):
+                        details.append(f"`{doc.get('path')}` says: {clipped(str(doc.get('excerpt') or ''), 180)}")
+                databases = investigation.get("databases") if isinstance(investigation.get("databases"), list) else []
+                for db in databases[:3]:
+                    if not isinstance(db, dict):
+                        continue
+                    tables = db.get("tables") if isinstance(db.get("tables"), dict) else {}
+                    semantic = db.get("semantic_tables") if isinstance(db.get("semantic_tables"), list) else []
+                    if tables:
+                        table_text = ", ".join(f"{key}={value}" for key, value in list(tables.items())[:6])
+                        details.append(f"`{db.get('path')}` table evidence: {table_text}.")
+                    for table in semantic[:2]:
+                        if isinstance(table, dict) and table.get("table"):
+                            details.append(f"`{table.get('table')}` semantic evidence count={table.get('count')}.")
+                metadata_files = obs.get("metadata_files") if isinstance(obs.get("metadata_files"), list) else []
+                bootstrap_facts: list[str] = []
+                for meta in metadata_files[:3]:
+                    if not isinstance(meta, dict):
+                        continue
+                    parsed = meta.get("json") if isinstance(meta.get("json"), dict) else {}
+                    if parsed:
+                        facts = []
+                        for key in ("bootstrapped_at", "reseeded_at", "state_code", "node_role", "timezone"):
+                            if parsed.get(key) not in (None, ""):
+                                facts.append(f"{key}={parsed.get(key)}")
+                                if key in {"bootstrapped_at", "reseeded_at", "state_code"}:
+                                    bootstrap_facts.append(f"{key}={parsed.get(key)}")
+                        if facts:
+                            details.append(f"`{meta.get('path')}`: " + ", ".join(facts) + ".")
+                    elif meta.get("preview"):
+                        details.append(f"`{meta.get('path')}` is readable ({meta.get('bytes')} bytes).")
+                data_roots = obs.get("data_roots") if isinstance(obs.get("data_roots"), list) else []
+                for root in data_roots[:2]:
+                    if not isinstance(root, dict):
+                        continue
+                    details.append(f"Data root `{root.get('root')}` exposed {root.get('file_count')} bounded file receipts.")
+                    for file_item in (root.get("files") if isinstance(root.get("files"), list) else [])[:4]:
+                        if not isinstance(file_item, dict):
+                            continue
+                        tables = file_item.get("sqlite_tables") if isinstance(file_item.get("sqlite_tables"), dict) else {}
+                        if tables:
+                            table_text = ", ".join(f"{key}={value}" for key, value in list(tables.items())[:6])
+                            details.append(f"`{file_item.get('path')}` tables: {table_text}.")
+                        else:
+                            details.append(f"`{file_item.get('path')}` is present ({file_item.get('bytes')} bytes).")
+                if conversations or asset_bits or bootstrap_facts:
+                    timeline_bits = []
+                    if bootstrap_facts:
+                        timeline_bits.append(", ".join(dict.fromkeys(bootstrap_facts)))
+                    if conversations:
+                        timeline_bits.append(
+                            "runtime conversations "
+                            + ", ".join(
+                                f"{key}={conversations.get(key)}"
+                                for key in ("sessions", "messages", "session_files")
+                                if conversations.get(key)
+                            )
+                        )
+                    if asset_bits:
+                        timeline_bits.append("data corpus " + ", ".join(asset_bits))
+                    details.append("What it has done over time, from bounded evidence: " + "; ".join(timeline_bits) + ".")
+                    identity_phrase = ", ".join(f"`{value}`" for value in inferred[:3]) if inferred else "`runtime entity`"
+                    root_phrase = f" and rooted at `{workspace_root}`" if workspace_root else ""
+                    data_phrase = f", with related data under `{data_root}`" if data_root else ""
+                    synthesized_intro = (
+                        f"{entity_label} is represented in bounded workspace evidence as {identity_phrase}, "
+                        f"exposed through `{route_id}`{root_phrase}{data_phrase}."
+                    )
+                    synthesized_history = (
+                        "Over time, the bounded evidence shows "
+                        f"{route_entity} has accumulated " + ", ".join([*conv_bits, *asset_bits, *dict.fromkeys(bootstrap_facts)]) + "."
+                    )
+            elif obs.get("kind") == "files":
+                count = obs.get("count")
+                if count is not None:
+                    details.append(f"Route file lookup returned {count} declared path receipts.")
+        if details:
+            summaries.append("\n".join(dict.fromkeys(details)))
+    if not summaries:
+        return reply
+    proof_lines = list(dict.fromkeys(line for summary in summaries for line in summary.splitlines() if line.strip()))
+    suffix = "\n\nKernel inspection proof:\n" + "\n".join(f"- {line}" for line in proof_lines)
+    if "Kernel inspection proof:" in reply:
+        return reply
+    clean_reply = "\n\n".join(part for part in (synthesized_intro, synthesized_history) if part).strip()
+    if not clean_reply:
+        clean_reply = str(reply or "").strip() or "The declared runtime entity was inspected locally."
+    return clipped(clean_reply.rstrip() + suffix, 120000)
+
+
+def direct_head_answer_still_requests_local_tools(reply: str, local_tool_results: list[dict[str, Any]]) -> bool:
+    if not local_tool_results:
+        return False
+    text = str(reply or "").strip().lower()
+    if not text:
+        return True
+    stale_patterns = (
+        r"\bi\s+need\s+to\s+(?:inspect|read|recover|locate|check)\b",
+        r"\bbefore\s+i\s+can\s+(?:answer|give|provide|instruct)\b",
+        r"\bneed\s+to\s+(?:inspect|read|recover|locate|check)\b",
+        r"\bdispatching\s+(?:inspection|inspect|local|kernel|tool|read|search)\s+actions?\s+now\b",
+        r"\bdispatching\s+.*\b(?:inspect|inspection|kernel|tool|read|search).*\bnow\b",
+        r"\broute_to_kernel_inspect\b",
+        r"\bpending\s*[:=]\s*[a-z0-9_-]+",
+    )
+    return any(re.search(pattern, text) for pattern in stale_patterns)
+
+
+def direct_head_local_evidence_projection(local_tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "tool": item.get("tool"),
+            "ok": item.get("ok"),
+            "code": item.get("code"),
+            "route_id": item.get("route_id"),
+            "summary": item.get("summary"),
+        }
+        for item in local_tool_results[:10]
+        if isinstance(item, dict)
+    ]
+
+
+def direct_head_local_continuation_body(body: dict[str, Any], envelope: dict[str, Any], local_tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    continued = dict(body)
+    continued_envelope = dict(envelope)
+    continued_envelope["local_kernel_evidence"] = direct_head_local_evidence_projection(local_tool_results)
+    continued_envelope["state_summary"] = clipped(
+        "Local kernel/tool evidence is now available. Continue cheaply from these receipts. "
+        "For implementation, return patch.apply_scoped/test.run_focused/proof actions if edits are required; "
+        "otherwise answer from evidence without saying you still need to inspect.",
+        700,
+    )
+    continued["envelope"] = continued_envelope
+    instructions = clipped(str(continued.get("instructions") or "").strip(), 3000)
+    continuation = (
+        "LOCAL CONTINUATION: use LOCAL_KERNEL_EVIDENCE as completed tool proof. "
+        "Do not repeat inspection requests already satisfied. If the objective requires code changes, "
+        "return only executable local action JSON such as patch.apply_scoped, test.run_focused, or proof.collect. "
+        "If no edit is required, answer directly with the inspected evidence."
+    )
+    continued["instructions"] = "\n\n".join(part for part in (instructions, continuation) if part)
+    return continued
+
+
+def direct_head_should_continue_after_local_tools(
+    envelope: dict[str, Any],
+    parsed: Any,
+    reply: str,
+    local_tool_results: list[dict[str, Any]],
+    dispatch_result: dict[str, Any] | None,
+) -> bool:
+    if dispatch_result or not local_tool_results:
+        return False
+    if direct_head_goal_requires_change_artifact(envelope):
+        return not direct_head_local_tool_changed_files(local_tool_results)
+    if direct_head_answer_still_requests_local_tools(direct_head_answer_text(parsed, reply), local_tool_results):
+        return True
+    needs = direct_head_declared_needs(parsed)
+    return bool(needs and not direct_head_local_tool_actions(parsed))
+
+
+def direct_head_continue_after_local_tools(
+    server: WasmAgentServer,
+    body: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    receiver: str,
+    user: dict[str, Any] | None,
+    run_id: str,
+    parsed: Any,
+    result: dict[str, Any],
+    local_tool_results: list[dict[str, Any]],
+    action_callback: Any | None = None,
+) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    if not direct_head_should_continue_after_local_tools(envelope, parsed, result.get("reply", ""), local_tool_results, None):
+        return parsed, result, local_tool_results
+    append_agent_run_event(
+        server,
+        run_id,
+        "head.continued",
+        summary="Continuing direct head with local tool evidence",
+        payload={
+            "reason": "local_tool_evidence_available",
+            "local_tool_count": len(local_tool_results),
+            "receiver": receiver,
+        },
+    )
+    continued_body = direct_head_local_continuation_body(body, envelope, local_tool_results)
+    if receiver in {"openai-responses", "openai-codex"}:
+        continued_result = openai_responses_completion(
+            server,
+            continued_body,
+            continued_body["envelope"],
+            run_id=run_id,
+            user=user,
+            action_callback=action_callback,
+        )
+    else:
+        continued_result = provider_envelope_completion(server, continued_body, user=user, action_callback=action_callback)
+    continued_parsed = continued_result.get("parsed") if isinstance(continued_result.get("parsed"), dict) else {}
+    enforce_direct_head_structured_action(continued_parsed, continued_result.get("reply", ""))
+    decision = clipped(str(continued_parsed.get("decision") or continued_parsed.get("answer") or continued_result.get("reply") or "continued direct head replied"), 240)
+    append_agent_run_event(
+        server,
+        run_id,
+        "head.decision",
+        summary=decision,
+        payload={
+            "decision": clipped(str(continued_parsed.get("decision") or ""), 120),
+            "actions": continued_parsed.get("actions") if isinstance(continued_parsed.get("actions"), list) else [],
+            "needs": continued_parsed.get("needs") if isinstance(continued_parsed.get("needs"), list) else [],
+            "confidence": continued_parsed.get("confidence"),
+            "continued": True,
+        },
+    )
+    more_results = execute_direct_head_local_tool_actions(
+        server,
+        direct_head_local_tool_actions(continued_parsed),
+        envelope,
+        user=user,
+        run_id=run_id,
+    )
+    return continued_parsed, continued_result, [*local_tool_results, *more_results]
 
 
 def direct_head_dispatch_caps(action: dict[str, Any]) -> list[str]:
-    raw = action.get("caps") or action.get("capabilities") or action.get("CAPS") or []
-    if isinstance(raw, str):
-        raw = [item.strip() for item in raw.split(",")]
-    if not isinstance(raw, list):
-        return []
-    caps: list[str] = []
-    for item in raw[:24]:
-        cap = clipped(str(item or "").strip(), 80)
-        if cap:
-            caps.append(cap)
-    return caps
+    return master_frontier_dispatch.dispatch_caps(action)
 
 
 def validate_direct_head_hermes_caps(action: dict[str, Any]) -> list[str]:
     caps = direct_head_dispatch_caps(action)
-    unknown = [cap for cap in caps if cap not in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
+    unknown = master_frontier_dispatch.unknown_caps(action, DIRECT_HEAD_HERMES_ALLOWED_CAPS)
     if unknown:
         direct_envelope_error(
             "unknown-hermes-capability",
@@ -3783,15 +6052,121 @@ def validate_direct_head_hermes_caps(action: dict[str, Any]) -> list[str]:
     return caps
 
 
+def direct_head_hermes_escalation_reason(action: dict[str, Any]) -> str:
+    reason = master_frontier_dispatch.escalation_reason(action)
+    if not reason:
+        direct_envelope_error(
+            "hermes-escalation-missing",
+            "Direct-head Hermes dispatch requires an explicit escalation reason.",
+            HTTPStatus.BAD_REQUEST,
+        )
+    return reason
+
+
+def direct_head_hermes_requires_subagent_harness(action: dict[str, Any]) -> None:
+    if master_frontier_dispatch.is_harness_subagent_dispatch(action):
+        return
+    direct_envelope_error(
+        "hermes_subagent_contract_required",
+        "Hermes is a bounded harness/subagent, not the Master:frontier default brain. Dispatch requires role=subagent_harness or harness=true plus route, caps, proof, and escalation reason.",
+        HTTPStatus.BAD_REQUEST,
+    )
+
+
+def direct_head_hermes_requires_explicit_request(envelope: dict[str, Any]) -> None:
+    if master_frontier_dispatch.explicit_hermes_requested(envelope):
+        return
+    direct_envelope_error(
+        "hermes_explicit_request_required",
+        "Hermes dispatch is disabled unless the user/envelope explicitly asks to use Hermes. Use local kernel/provider capabilities by default.",
+        HTTPStatus.BAD_REQUEST,
+    )
+
+
+def direct_head_action_text(action: dict[str, Any], envelope: dict[str, Any]) -> str:
+    return master_frontier_dispatch.action_text(direct_envelope_redact(action), direct_envelope_redact(envelope))
+
+
+def direct_head_dispatch_is_runtime_entity(action: dict[str, Any], envelope: dict[str, Any]) -> bool:
+    return master_frontier_dispatch.is_runtime_entity_dispatch(action, envelope)
+
+
+def direct_head_local_inspect_results(local_tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        item
+        for item in local_tool_results[:12]
+        if isinstance(item, dict) and str(item.get("tool") or "") == "kernel.inspect" and bool(item.get("ok"))
+    ]
+
+
+def direct_head_runtime_inspect_has_entity_unknown(local_tool_results: list[dict[str, Any]]) -> bool:
+    for item in direct_head_local_inspect_results(local_tool_results):
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        unknowns = result.get("unknowns") if isinstance(result.get("unknowns"), list) else []
+        for unknown in unknowns:
+            if isinstance(unknown, dict) and str(unknown.get("code") or "") in {"entity_not_observed", "scope_or_recent_run_missing", "capability_not_declared"}:
+                return True
+    return False
+
+
+def direct_head_requested_paths(action: dict[str, Any], envelope: dict[str, Any]) -> list[str]:
+    return master_frontier_routes.requested_paths(action, envelope)
+
+
+def enforce_direct_head_hermes_dispatch_gate(
+    action: dict[str, Any],
+    envelope: dict[str, Any],
+    *,
+    local_tool_results: list[dict[str, Any]],
+) -> None:
+    direct_head_hermes_requires_explicit_request(envelope)
+    validate_direct_head_hermes_caps(action)
+    direct_head_hermes_escalation_reason(action)
+    workspace = require_direct_head_dispatch_workspace_contract(action, envelope)
+    direct_head_hermes_requires_subagent_harness(action)
+    requested_paths = direct_head_requested_paths(action, envelope)
+    allowed_roots = workspace.get("allowed_read_roots") if isinstance(workspace.get("allowed_read_roots"), list) else []
+    denied: list[str] = []
+    for raw_path in requested_paths:
+        try:
+            path = Path(raw_path).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not route_path_inside(path, [str(root) for root in allowed_roots]):
+            denied.append(str(path))
+    if denied:
+        direct_envelope_error(
+            "hermes-route-scope-denied",
+            f"Hermes dispatch requested paths outside the resolved route contract: {', '.join(denied[:4])}. Add or select an owning route contract first.",
+            HTTPStatus.BAD_REQUEST,
+        )
+    if not direct_head_dispatch_is_runtime_entity(action, envelope):
+        return
+    if not direct_head_local_inspect_results(local_tool_results):
+        direct_envelope_error(
+            "kernel_inspection_required",
+            "Runtime/entity Hermes dispatch requires local kernel.inspect evidence first.",
+            HTTPStatus.BAD_REQUEST,
+        )
+    if direct_head_runtime_inspect_has_entity_unknown(local_tool_results):
+        direct_envelope_error(
+            "runtime_entity_route_required",
+            "Local kernel.inspect did not resolve the requested runtime entity. Add or select an owning runtime-entity route before Hermes dispatch.",
+            HTTPStatus.BAD_REQUEST,
+        )
+
+
 def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[str, Any]) -> str:
     objective = clipped(str(action.get("obj") or action.get("objective") or action.get("OBJ") or envelope.get("objective") or ""), 2000)
     refs = action.get("refs") or action.get("REFS") or envelope.get("evidence_refs") or []
     proof = action.get("proof") or action.get("PROOF") or action.get("proof_requests") or []
     workspace = require_direct_head_dispatch_workspace_contract(action, envelope)
+    escalation_reason = direct_head_hermes_escalation_reason(action)
     payload = {
         "schema": "hermes.wasm_agent.direct_head_dispatch.v1",
         "objective": objective,
         "caps": validate_direct_head_hermes_caps(action),
+        "escalation_reason": escalation_reason,
         "refs": direct_envelope_redact(refs),
         "proof": direct_envelope_redact(proof),
         "stream": bool(action.get("stream") or action.get("STREAM")),
@@ -3807,24 +6182,30 @@ def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[st
     )
 
 
-def direct_head_fallback_dispatch_action(envelope: dict[str, Any]) -> dict[str, Any]:
-    raw_caps = envelope.get("capabilities")
-    caps = direct_head_dispatch_caps({"caps": raw_caps})
-    if not caps:
-        caps = ["repo.read", "runtime.inspect", "proof.report"]
-    caps = [cap for cap in caps if cap in DIRECT_HEAD_HERMES_ALLOWED_CAPS]
-    if not caps:
-        caps = ["repo.read", "proof.report"]
-    return {
-        "action": "dispatch.hermes",
-        "objective": envelope.get("objective") or "Answer the avatar-chat turn.",
-        "caps": caps,
-        "refs": envelope.get("evidence_refs") or envelope.get("evidence") or [],
-        "proof": envelope.get("proof_requests") or envelope.get("constraints") or ["answer"],
-        "stream": bool(envelope.get("stream")),
-        "target_node": AGENT_FRONTIER_NODE_ID,
-        "fallback_reason": "server direct-head provider API key is not configured",
-    }
+def maybe_repair_direct_head_completion_dispatch(
+    server: WasmAgentServer,
+    *,
+    envelope: dict[str, Any],
+    user: dict[str, Any] | None,
+    run_id: str,
+    dispatch_result: dict[str, Any] | None,
+    local_tool_results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if dispatch_result is not None:
+        return dispatch_result
+    if not direct_head_goal_requires_change_artifact(envelope):
+        return None
+    append_agent_run_event(
+        server,
+        run_id,
+        "head.repair",
+        summary="Implementation result needs local change proof; Hermes auto-repair is disabled",
+        payload={
+            "reason": "implementation_completion_requires_change_proof",
+            "blocked_dispatch": "hermes_auto_repair_disabled",
+        },
+    )
+    return None
 
 
 def execute_direct_head_hermes_dispatch(
@@ -3834,7 +6215,9 @@ def execute_direct_head_hermes_dispatch(
     *,
     user: dict[str, Any] | None,
     run_id: str,
+    local_tool_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    enforce_direct_head_hermes_dispatch_gate(action, envelope, local_tool_results=local_tool_results or [])
     caps = validate_direct_head_hermes_caps(action)
     target_node = _safe_agent_node_id(action.get("target_node") or action.get("node_id") or default_agent_target_node(user))
     ensure_agent_target_allowed(user, target_node)
@@ -4024,6 +6407,157 @@ def direct_head_change_actions(change_proof: dict[str, Any]) -> list[dict[str, A
     return actions
 
 
+def direct_head_runtime_entity_transport_fallback(
+    server: WasmAgentServer,
+    *,
+    body: dict[str, Any],
+    user: dict[str, Any] | None,
+    run: dict[str, Any],
+    envelope: dict[str, Any],
+    route_contract: dict[str, Any],
+    semantic_envelope: str,
+    measurement: dict[str, Any],
+    receiver: str,
+    before_tree: str,
+    objective: str,
+    space_id: str,
+    error: ProviderProxyError,
+) -> dict[str, Any] | None:
+    if not direct_head_has_runtime_entity_routes(envelope):
+        return None
+    if int(getattr(error, "status", HTTPStatus.BAD_GATEWAY)) < 500:
+        return None
+    run_id = str(run.get("run_id") or "")
+    append_agent_run_event(
+        server,
+        run_id,
+        "head.decision",
+        summary="Provider transport failed; using local runtime route proof",
+        payload={
+            "decision": "local_runtime_route_fallback",
+            "receiver": receiver,
+            "provider_error": {
+                "code": error.code,
+                "message": clipped(error.message, 500),
+                "status": int(getattr(error, "status", HTTPStatus.BAD_GATEWAY)),
+            },
+        },
+    )
+    local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
+        server,
+        envelope,
+        user=user,
+        run_id=run_id,
+        local_tool_results=[],
+    )
+    append_agent_run_event(
+        server,
+        run_id,
+        "hermes.skipped",
+        summary="Local runtime route proof satisfied provider transport fallback",
+        payload={"reason": "provider_fallback_local_runtime_route_proof"},
+    )
+    base_reply = (
+        f"I am in the `{envelope.get('surface') or route_contract.get('surface')}` surface, "
+        f"route `{route_contract.get('route_id')}`, acting through the direct-head run-api. "
+        "The direct-head provider transport failed, so I used the declared local runtime route contract instead."
+    )
+    final_reply = direct_head_local_tool_summary_reply(base_reply, local_tool_results)
+    target_node = "direct-head"
+    change_proof = direct_head_change_proof(
+        server,
+        user=user,
+        before_tree=before_tree,
+        after_tree=safe_worktree_tree_sha(server) if before_tree else "",
+        target_node=target_node,
+        objective=objective,
+        space_id=space_id,
+    )
+    result = {
+        "schema": DIRECT_ENVELOPE_RESULT_SCHEMA,
+        "mode": "direct-envelope",
+        "category": "provider-transport-fallback",
+        "receiver": receiver,
+        "content_type": "text",
+        "parsed": {
+            "answer": final_reply,
+            "decision": "local_runtime_route_fallback",
+            "actions": [{"action": "kernel.inspect", "reason": "provider_transport_fallback"}],
+            "state_delta": {},
+            "needs": [],
+            "confidence": 1,
+        },
+        "reply": final_reply,
+        "usage": {"total_tokens": 0, "source": "local_runtime_route_fallback", "billable": False},
+        "provider": receiver,
+        "model": "local-runtime-route-fallback",
+        "diagnostic": error.diagnostic,
+        "context_measurement": measurement,
+    }
+    final = {
+        "schema": "hermes.wasm_agent.direct_head_run.final.v1",
+        "run_id": run.get("run_id"),
+        "turn_id": run.get("turn_id"),
+        "route_id": route_contract.get("route_id"),
+        "route_contract": route_contract,
+        "reply": final_reply,
+        "provider": result,
+        "local_tools": local_tool_results,
+        "hermes_dispatch": None,
+        "diagnostics": {
+            "source": "provider_transport_fallback",
+            "mode": "direct-head",
+            "receiver": receiver,
+            "target_node": target_node,
+            "route_id": route_contract.get("route_id"),
+            "route_contract": route_contract,
+            "context_measurement": measurement,
+            "local_tool_results": local_tool_results,
+            "token_usage": result["usage"],
+            "token_usage_head": result["usage"],
+            "token_usage_bridge": None,
+            "provider_error": {
+                "code": error.code,
+                "message": clipped(error.message, 500),
+                "status": int(getattr(error, "status", HTTPStatus.BAD_GATEWAY)),
+            },
+            "changed_files_complete": True,
+            "before_checkpoint": change_proof.get("before_checkpoint"),
+            "auto_checkpoint": change_proof.get("auto_checkpoint"),
+        },
+        "changed_files": change_proof.get("changed_files") or [],
+        "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
+        "actions": [
+            {
+                "id": "provider_transport_fallback",
+                "topic": "run-api",
+                "kind": "api",
+                "label": "Provider transport fallback",
+                "status": "done",
+                "detail": error.code,
+                "meta": receiver,
+            }
+        ] + direct_head_change_actions(change_proof),
+        "proof": [
+            "route-used:/agent/provider/envelope/stream",
+            f"receiver:{receiver}",
+            "target-node:direct-head",
+            f"local-tools:{len(local_tool_results)}",
+            "provider-transport-fallback:true",
+        ],
+    }
+    record_agent_run_final_proof_events(server, run_id, final)
+    finish_agent_run(server, run_id, status="completed", final=final)
+    return {
+        **result,
+        "reply": final_reply,
+        "hermes_dispatch": None,
+        "run": run,
+        "run_id": run.get("run_id"),
+        "turn_id": run.get("turn_id"),
+    }
+
+
 def provider_envelope_run_execute(
     server: WasmAgentServer,
     body: dict[str, Any],
@@ -4042,7 +6576,8 @@ def provider_envelope_run_execute(
     measurement = context["measurement"]
     receiver = str(context.get("receiver") or "provider")
     proxy_provider_config = context.get("proxy_provider_config") if isinstance(context.get("proxy_provider_config"), dict) else {}
-    before_tree = safe_worktree_tree_sha(server)
+    task_contract = envelope.get("task_contract") if isinstance(envelope.get("task_contract"), dict) else {}
+    before_tree = safe_worktree_tree_sha(server) if str(task_contract.get("intent") or "") == "implementation" else ""
     objective = str(envelope.get("objective") or body.get("message") or "direct envelope")
     space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
     append_agent_run_event(
@@ -4081,6 +6616,63 @@ def provider_envelope_run_execute(
         summary="Direct head request started",
         payload={"context_measurement": measurement},
     )
+    preflight_local_tool_results: list[dict[str, Any]] = []
+    if direct_head_runtime_entity_objective_needs_local_inspection(envelope):
+        run_id = str(run.get("run_id") or "")
+        append_agent_run_event(
+            server,
+            run_id,
+            "head.decision",
+            summary="local_runtime_route_inspection",
+            payload={
+                "decision": "local_runtime_route_inspection",
+                "reason": "declared runtime entity objective requires bounded local inspection before provider answer",
+            },
+        )
+        preflight_local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
+            server,
+            envelope,
+            user=user,
+            run_id=run_id,
+            local_tool_results=[],
+        )
+        append_agent_run_event(
+            server,
+            run_id,
+            "kernel.evidence_ready",
+            summary="Local runtime route proof attached for LLM composition",
+            payload={
+                "reason": "local_runtime_route_proof_for_llm",
+                "local_tools": [
+                    {
+                        "tool": item.get("tool"),
+                        "ok": item.get("ok"),
+                        "code": item.get("code"),
+                        "route_id": item.get("route_id"),
+                        "summary": item.get("summary"),
+                    }
+                    for item in preflight_local_tool_results[:8]
+                    if isinstance(item, dict)
+                ],
+            },
+        )
+        envelope["local_kernel_evidence"] = [
+            {
+                "tool": item.get("tool"),
+                "ok": item.get("ok"),
+                "code": item.get("code"),
+                "route_id": item.get("route_id"),
+                "summary": item.get("summary"),
+            }
+            for item in preflight_local_tool_results[:8]
+            if isinstance(item, dict)
+        ]
+        semantic_envelope = direct_envelope_semantic_text(envelope)
+        measurement = compact_context_measurement(
+            "direct-head-envelope",
+            semantic_envelope,
+            baseline_text=direct_envelope_json(envelope),
+        )
     try:
         if receiver in {"openai-responses", "openai-codex"}:
             def emit_openai_event(progress: dict[str, Any]) -> None:
@@ -4095,15 +6687,54 @@ def provider_envelope_run_execute(
                     return
                 record_agent_run_action(server, str(run.get("run_id") or ""), progress)
 
-            result = openai_responses_completion(
-                server,
-                body,
-                envelope,
-                run_id=str(run.get("run_id") or ""),
-                user=user,
-                action_callback=emit_openai_event,
-            )
+            try:
+                result = openai_responses_completion(
+                    server,
+                    body,
+                    envelope,
+                    run_id=str(run.get("run_id") or ""),
+                    user=user,
+                    action_callback=emit_openai_event,
+                )
+            except ProviderProxyError as exc:
+                if not direct_head_provider_error_is_repairable_empty(exc):
+                    raise
+                append_agent_run_event(
+                    server,
+                    str(run.get("run_id") or ""),
+                    "head.repair",
+                    summary="Retrying direct head after empty provider content",
+                    payload={"reason": "provider_empty_response", "receiver": receiver},
+                )
+                result = openai_responses_completion(
+                    server,
+                    direct_head_empty_response_repair_body(body),
+                    envelope,
+                    run_id=str(run.get("run_id") or ""),
+                    user=user,
+                    action_callback=emit_openai_event,
+                )
             parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+            if direct_head_requires_structured_action(parsed, result.get("reply", "")):
+                append_agent_run_event(
+                    server,
+                    str(run.get("run_id") or ""),
+                    "head.repair",
+                    summary="Retrying direct head with strict action-only output contract",
+                    payload={"reason": "structured_action_required", "receiver": receiver},
+                )
+                result = openai_responses_completion(
+                    server,
+                    direct_head_action_repair_body(body, result.get("reply", "")),
+                    envelope,
+                    run_id=str(run.get("run_id") or ""),
+                    user=user,
+                    action_callback=emit_openai_event,
+                )
+                parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+            enforce_direct_head_structured_action(parsed, result.get("reply", ""))
+            if not direct_head_has_runtime_entity_routes(envelope):
+                enforce_kernel_before_unknown_answer(parsed)
             decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "OpenAI receiver replied"), 240)
             append_agent_run_event(
                 server,
@@ -4118,7 +6749,53 @@ def provider_envelope_run_execute(
                     "confidence": parsed.get("confidence"),
                 },
             )
+            local_tool_results = [
+                *preflight_local_tool_results,
+                *execute_direct_head_local_tool_actions(
+                server,
+                direct_head_local_tool_actions(parsed),
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                ),
+            ]
+            local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
+                server,
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                local_tool_results=local_tool_results,
+            )
+            parsed, result, local_tool_results = direct_head_continue_after_local_tools(
+                server,
+                body,
+                envelope,
+                receiver=receiver,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                parsed=parsed,
+                result=result,
+                local_tool_results=local_tool_results,
+                action_callback=emit_openai_event,
+            )
             dispatch_action = direct_head_hermes_dispatch_action(parsed)
+            local_tool_results = ensure_direct_head_runtime_entity_preflight(
+                server,
+                dispatch_action,
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                local_tool_results=local_tool_results,
+            )
+            if direct_head_local_runtime_proof_satisfies_dispatch(dispatch_action, envelope, local_tool_results):
+                append_agent_run_event(
+                    server,
+                    str(run.get("run_id") or ""),
+                    "hermes.skipped",
+                    summary="Local runtime route proof satisfied dispatch request",
+                    payload={"reason": "local_runtime_proof_satisfied"},
+                )
+                dispatch_action = None
             dispatch_result = (
                 execute_direct_head_hermes_dispatch(
                     server,
@@ -4126,11 +6803,27 @@ def provider_envelope_run_execute(
                     envelope,
                     user=user,
                     run_id=str(run.get("run_id") or ""),
+                    local_tool_results=local_tool_results,
                 )
                 if dispatch_action
                 else None
             )
-            final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else result.get("reply", "")
+            dispatch_result = maybe_repair_direct_head_completion_dispatch(
+                server,
+                envelope=envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                dispatch_result=dispatch_result if isinstance(dispatch_result, dict) else None,
+                local_tool_results=local_tool_results,
+            )
+            final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else direct_head_answer_text(parsed, result.get("reply", ""))
+            stale_local_tool_answer = direct_head_answer_still_requests_local_tools(final_reply, local_tool_results)
+            if not dispatch_result and (
+                not final_reply.strip()
+                or re.fullmatch(r"\s*dispatch(?:\.|\s+)hermes\.?\s*", final_reply, flags=re.IGNORECASE)
+                or stale_local_tool_answer
+            ):
+                final_reply = direct_head_local_tool_summary_reply("" if stale_local_tool_answer else final_reply, local_tool_results)
             target_node = (dispatch_result or {}).get("target_node") or "direct-head"
             head_token_usage = token_usage_with_raw_usage(
                 exact_llm_token_usage(
@@ -4145,11 +6838,12 @@ def provider_envelope_run_execute(
                 server,
                 user=user,
                 before_tree=before_tree,
-                after_tree=safe_worktree_tree_sha(server),
+                after_tree=safe_worktree_tree_sha(server) if before_tree else "",
                 target_node=target_node,
                 objective=objective,
                 space_id=space_id,
             )
+            change_proof = direct_head_merge_local_change_proof(change_proof, local_tool_results)
             final = {
                 "schema": "hermes.wasm_agent.direct_head_run.final.v1",
                 "run_id": run.get("run_id"),
@@ -4158,6 +6852,7 @@ def provider_envelope_run_execute(
                 "route_contract": route_contract,
                 "reply": final_reply,
                 "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
+                "local_tools": local_tool_results,
                 "hermes_dispatch": dispatch_result,
                 "diagnostics": {
                     "source": f"{receiver.replace('-', '_')}_hermes_dispatch" if dispatch_result else f"{receiver.replace('-', '_')}_direct",
@@ -4168,6 +6863,7 @@ def provider_envelope_run_execute(
                     "route_contract": route_contract,
                     "context_measurement": result.get("context_measurement") or measurement,
                     "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
+                    "local_tool_results": local_tool_results,
                     "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
                     "token_usage": head_token_usage,
                     "token_usage_head": head_token_usage,
@@ -4194,8 +6890,16 @@ def provider_envelope_run_execute(
                     "route-used:/agent/provider/envelope/stream",
                     f"receiver:{receiver}",
                     f"target-node:{target_node}",
+                    f"local-tools:{len(local_tool_results)}",
                 ],
             }
+            enforce_direct_head_goal_completion(
+                server,
+                str(run.get("run_id") or ""),
+                envelope,
+                change_proof,
+                dispatch_result if isinstance(dispatch_result, dict) else None,
+            )
             record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
             finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
             return {
@@ -4208,128 +6912,27 @@ def provider_envelope_run_execute(
                 "turn_id": run.get("turn_id"),
             }
         if direct_head_server_provider_requested(body) and not (proxy_provider_config.get("api_key") or proxy_provider_config.get("apiKey")):
-            dispatch_action = direct_head_fallback_dispatch_action(envelope)
-            decision = "Server direct-head provider unavailable; dispatching Hermes directly."
+            decision = "Server direct-head provider unavailable; Hermes default fallback is disabled."
             append_agent_run_event(
                 server,
                 str(run.get("run_id") or ""),
                 "head.decision",
                 summary=decision,
                 payload={
-                    "decision": "dispatch.hermes",
-                    "actions": [direct_envelope_redact(dispatch_action)],
+                    "decision": "provider_unavailable",
+                    "actions": [],
                     "needs": [],
                     "confidence": 1,
                     "provider_head_unavailable": True,
-                    "fallback_reason": dispatch_action["fallback_reason"],
+                    "fallback_reason": "server direct-head provider API key is not configured",
+                    "blocked_dispatch": "hermes_default_fallback_disabled",
                 },
             )
-            dispatch_result = execute_direct_head_hermes_dispatch(
-                server,
-                dispatch_action,
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
+            direct_envelope_error(
+                "provider_head_unavailable",
+                "Server direct-head provider key is not configured. Configure the direct-head provider or request an explicit bounded Hermes subagent dispatch; Hermes is not a default fallback.",
+                HTTPStatus.BAD_GATEWAY,
             )
-            final_reply = dispatch_result.get("reply", "")
-            target_node = dispatch_result.get("target_node") or "direct-head"
-            change_proof = direct_head_change_proof(
-                server,
-                user=user,
-                before_tree=before_tree,
-                after_tree=safe_worktree_tree_sha(server),
-                target_node=target_node,
-                objective=objective,
-                space_id=space_id,
-            )
-            parsed = {
-                "answer": final_reply,
-                "decision": "dispatch.hermes",
-                "actions": [direct_envelope_redact(dispatch_action)],
-                "state_delta": {},
-                "needs": [],
-                "confidence": 1,
-                "provider_head_unavailable": True,
-            }
-            result = {
-                "schema": DIRECT_ENVELOPE_RESULT_SCHEMA,
-                "transport_schema": dispatch_result.get("schema", ""),
-                "mode": "direct-envelope",
-                "category": "server-default-hermes-dispatch",
-                "content_type": "json",
-                "parsed": parsed,
-                "envelope": {
-                    "schema": envelope.get("schema", DIRECT_ENVELOPE_SCHEMA),
-                    "trace_id": envelope.get("trace_id", ""),
-                    "objective": envelope.get("objective", ""),
-                    "budget": envelope.get("budget", {}),
-                },
-                "envelope_text": semantic_envelope,
-                "context_measurement": measurement,
-                "reply": final_reply,
-                "usage": dispatch_result.get("usage"),
-                "provider": "hermes-runs",
-                "model": dispatch_result.get("source") or "bridge_runs",
-                "diagnostic": provider_diagnostic(
-                    "direct-envelope",
-                    "server-default-hermes-dispatch",
-                    "Server direct-head provider key is not configured; dispatched Hermes Runs API directly.",
-                    HTTPStatus.OK,
-                ),
-            }
-            final = {
-                "schema": "hermes.wasm_agent.direct_head_run.final.v1",
-                "run_id": run.get("run_id"),
-                "turn_id": run.get("turn_id"),
-                "route_id": route_contract.get("route_id"),
-                "route_contract": route_contract,
-                "reply": final_reply,
-                "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
-                "hermes_dispatch": dispatch_result,
-                "diagnostics": {
-                    "source": "direct_head_hermes_dispatch",
-                    "mode": "direct-head",
-                    "target_node": target_node,
-                    "route_id": route_contract.get("route_id"),
-                    "route_contract": route_contract,
-                    "context_measurement": measurement,
-                    "dispatch_context_measurement": dispatch_result.get("context_measurement"),
-                    "bridge_trace": dispatch_result.get("bridge_trace"),
-                    "token_usage": dispatch_result.get("usage"),
-                    "provider_head_unavailable": True,
-                    "fallback_reason": dispatch_action["fallback_reason"],
-                    "changed_files_complete": True,
-                    "before_checkpoint": change_proof.get("before_checkpoint"),
-                    "auto_checkpoint": change_proof.get("auto_checkpoint"),
-                },
-                "changed_files": change_proof.get("changed_files") or [],
-                "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
-                "actions": [
-                    {
-                        "id": "direct_envelope",
-                        "topic": "run-api",
-                        "kind": "api",
-                        "label": "Direct envelope",
-                        "status": "done",
-                        "detail": decision,
-                        "meta": "server default fallback",
-                    }
-                ] + bridge_trace_action_events(dispatch_result.get("bridge_trace")) + direct_head_change_actions(change_proof),
-                "proof": [
-                    "route-used:/agent/provider/envelope/stream",
-                    f"receiver:{receiver}",
-                    f"target-node:{target_node}",
-                ],
-            }
-            record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
-            finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
-            return {
-                **result,
-                "hermes_dispatch": dispatch_result,
-                "run": run,
-                "run_id": run.get("run_id"),
-                "turn_id": run.get("turn_id"),
-            }
         def emit_provider_event(progress: dict[str, Any]) -> None:
             if progress.get("type") == "head.delta":
                 append_agent_run_event(
@@ -4342,8 +6945,43 @@ def provider_envelope_run_execute(
                 return
             record_agent_run_action(server, str(run.get("run_id") or ""), progress)
 
-        result = provider_envelope_completion(server, body, user=user, action_callback=emit_provider_event)
+        try:
+            result = provider_envelope_completion(server, body, user=user, action_callback=emit_provider_event)
+        except ProviderProxyError as exc:
+            if not direct_head_provider_error_is_repairable_empty(exc):
+                raise
+            append_agent_run_event(
+                server,
+                str(run.get("run_id") or ""),
+                "head.repair",
+                summary="Retrying direct head after empty provider content",
+                payload={"reason": "provider_empty_response", "receiver": receiver},
+            )
+            result = provider_envelope_completion(
+                server,
+                direct_head_empty_response_repair_body(body),
+                user=user,
+                action_callback=emit_provider_event,
+            )
         parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+        if direct_head_requires_structured_action(parsed, result.get("reply", "")):
+            append_agent_run_event(
+                server,
+                str(run.get("run_id") or ""),
+                "head.repair",
+                summary="Retrying direct head with strict action-only output contract",
+                payload={"reason": "structured_action_required", "receiver": receiver},
+            )
+            result = provider_envelope_completion(
+                server,
+                direct_head_action_repair_body(body, result.get("reply", "")),
+                user=user,
+                action_callback=emit_provider_event,
+            )
+            parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
+        enforce_direct_head_structured_action(parsed, result.get("reply", ""))
+        if not direct_head_has_runtime_entity_routes(envelope):
+            enforce_kernel_before_unknown_answer(parsed)
         decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "direct head replied"), 240)
         append_agent_run_event(
             server,
@@ -4357,7 +6995,54 @@ def provider_envelope_run_execute(
                 "confidence": parsed.get("confidence"),
             },
         )
+        local_tool_results = [
+            *preflight_local_tool_results,
+            *execute_direct_head_local_tool_actions(
+            server,
+            direct_head_local_tool_actions(parsed),
+            envelope,
+            user=user,
+            run_id=str(run.get("run_id") or ""),
+            ),
+        ]
+        if not direct_head_objective_is_implementation_intent(envelope):
+            local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
+                server,
+                envelope,
+                user=user,
+                run_id=str(run.get("run_id") or ""),
+                local_tool_results=local_tool_results,
+            )
+        parsed, result, local_tool_results = direct_head_continue_after_local_tools(
+            server,
+            body,
+            envelope,
+            receiver=receiver,
+            user=user,
+            run_id=str(run.get("run_id") or ""),
+            parsed=parsed,
+            result=result,
+            local_tool_results=local_tool_results,
+            action_callback=emit_provider_event,
+        )
         dispatch_action = direct_head_hermes_dispatch_action(parsed)
+        local_tool_results = ensure_direct_head_runtime_entity_preflight(
+            server,
+            dispatch_action,
+            envelope,
+            user=user,
+            run_id=str(run.get("run_id") or ""),
+            local_tool_results=local_tool_results,
+        )
+        if direct_head_local_runtime_proof_satisfies_dispatch(dispatch_action, envelope, local_tool_results):
+            append_agent_run_event(
+                server,
+                str(run.get("run_id") or ""),
+                "hermes.skipped",
+                summary="Local runtime route proof satisfied dispatch request",
+                payload={"reason": "local_runtime_proof_satisfied"},
+            )
+            dispatch_action = None
         dispatch_result = (
             execute_direct_head_hermes_dispatch(
                 server,
@@ -4365,11 +7050,27 @@ def provider_envelope_run_execute(
                 envelope,
                 user=user,
                 run_id=str(run.get("run_id") or ""),
+                local_tool_results=local_tool_results,
             )
             if dispatch_action
             else None
         )
-        final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else result.get("reply", "")
+        dispatch_result = maybe_repair_direct_head_completion_dispatch(
+            server,
+            envelope=envelope,
+            user=user,
+            run_id=str(run.get("run_id") or ""),
+            dispatch_result=dispatch_result if isinstance(dispatch_result, dict) else None,
+            local_tool_results=local_tool_results,
+        )
+        final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else direct_head_answer_text(parsed, result.get("reply", ""))
+        stale_local_tool_answer = direct_head_answer_still_requests_local_tools(final_reply, local_tool_results)
+        if not dispatch_result and (
+            not final_reply.strip()
+            or re.fullmatch(r"\s*dispatch(?:\.|\s+)hermes\.?\s*", final_reply, flags=re.IGNORECASE)
+            or stale_local_tool_answer
+        ):
+            final_reply = direct_head_local_tool_summary_reply("" if stale_local_tool_answer else final_reply, local_tool_results)
         target_node = (dispatch_result or {}).get("target_node") or "direct-head"
         head_token_usage = token_usage_with_raw_usage(
             exact_llm_token_usage(
@@ -4384,11 +7085,12 @@ def provider_envelope_run_execute(
             server,
             user=user,
             before_tree=before_tree,
-            after_tree=safe_worktree_tree_sha(server),
+            after_tree=safe_worktree_tree_sha(server) if before_tree else "",
             target_node=target_node,
             objective=objective,
             space_id=space_id,
         )
+        change_proof = direct_head_merge_local_change_proof(change_proof, local_tool_results)
         final = {
             "schema": "hermes.wasm_agent.direct_head_run.final.v1",
             "run_id": run.get("run_id"),
@@ -4397,6 +7099,7 @@ def provider_envelope_run_execute(
             "route_contract": route_contract,
             "reply": final_reply,
             "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
+            "local_tools": local_tool_results,
             "hermes_dispatch": dispatch_result,
             "diagnostics": {
                 "source": "direct_head_hermes_dispatch" if dispatch_result else "direct_envelope",
@@ -4406,6 +7109,7 @@ def provider_envelope_run_execute(
                 "route_contract": route_contract,
                 "context_measurement": result.get("context_measurement") or measurement,
                 "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
+                "local_tool_results": local_tool_results,
                 "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
                 "token_usage": head_token_usage,
                 "token_usage_head": head_token_usage,
@@ -4431,8 +7135,16 @@ def provider_envelope_run_execute(
                 "route-used:/agent/provider/envelope/stream",
                 f"receiver:{receiver}",
                 f"target-node:{target_node}",
+                f"local-tools:{len(local_tool_results)}",
             ],
         }
+        enforce_direct_head_goal_completion(
+            server,
+            str(run.get("run_id") or ""),
+            envelope,
+            change_proof,
+            dispatch_result if isinstance(dispatch_result, dict) else None,
+        )
         record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
         finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
         return {
@@ -4444,6 +7156,23 @@ def provider_envelope_run_execute(
             "turn_id": run.get("turn_id"),
         }
     except ProviderProxyError as exc:
+        fallback = direct_head_runtime_entity_transport_fallback(
+            server,
+            body=body,
+            user=user,
+            run=run,
+            envelope=envelope,
+            route_contract=route_contract,
+            semantic_envelope=semantic_envelope,
+            measurement=measurement,
+            receiver=receiver,
+            before_tree=before_tree,
+            objective=objective,
+            space_id=space_id,
+            error=exc,
+        )
+        if fallback is not None:
+            return fallback
         finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
         raise
     except Exception as exc:
@@ -4497,8 +7226,8 @@ def start_provider_envelope_run_worker(
         def run_direct_head() -> None:
             try:
                 provider_envelope_run_execute(server, dict(body), user=user, run=run, context=context)
-            except ProviderProxyError:
-                pass
+            except ProviderProxyError as exc:
+                finish_agent_run(server, run_id, status="failed", error={"code": exc.code, "message": exc.message})
             except BrowserError as exc:
                 finish_agent_run(server, run_id, status="failed", error={"code": exc.code, "message": exc.message})
             except Exception as exc:
@@ -4512,8 +7241,8 @@ def start_provider_envelope_run_worker(
 
         worker = threading.Thread(target=run_direct_head, name=f"wasm-agent-direct-head-{run_id[:18]}", daemon=True)
         workers[run_id] = worker
-        worker.start()
-        return True
+    worker.start()
+    return True
 
 
 def provider_proxy_completion(
@@ -7123,10 +9852,14 @@ AGENT_RUN_EVENT_TYPES = {
     "head.started",
     "head.delta",
     "head.decision",
+    "head.continued",
+    "head.repair",
+    "kernel.evidence_ready",
     "lookup.requested",
     "lookup.loaded",
     "hermes.dispatch",
     "hermes.progress",
+    "hermes.skipped",
     "tokens.used",
     "tool.started",
     "tool.finished",
@@ -7745,12 +10478,91 @@ def public_agent_token_ledger_row(row: sqlite3.Row | dict[str, Any]) -> dict[str
     }
 
 
+def request_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def agent_token_ledger_summary_from_calls(
+    calls: list[dict[str, Any]],
+    *,
+    run_id: str = "",
+    quest_id: str = "",
+    turn_id: str = "",
+    include_turns: bool = True,
+) -> dict[str, Any]:
+    exact_calls = [call for call in calls if call.get("exact")]
+    estimated_calls = [call for call in calls if not call.get("exact")]
+    exact_total = sum(int(call.get("total_tokens") or 0) for call in exact_calls)
+    exact_input = sum(int(call.get("input_tokens") or 0) for call in exact_calls)
+    exact_output = sum(int(call.get("output_tokens") or 0) for call in exact_calls)
+    exact_cached = sum(int(call.get("cached_input_tokens") or 0) for call in exact_calls)
+    exact_reasoning = sum(int(call.get("reasoning_tokens") or 0) for call in exact_calls)
+    estimated_input = sum(int(call.get("estimated_input_tokens") or 0) for call in estimated_calls)
+    estimated_output = sum(int(call.get("estimated_output_tokens") or 0) for call in estimated_calls)
+    estimated_total = sum(int(call.get("estimated_total_tokens") or 0) for call in estimated_calls)
+    summary = {
+        "schema": "hermes.wasm_agent.token_ledger.summary.v1",
+        "run_id": safe_agent_run_key(run_id, ""),
+        "quest_id": safe_agent_run_key(quest_id, ""),
+        "turn_id": safe_agent_run_key(turn_id, ""),
+        "exact": len(exact_calls) == len(calls),
+        "provider_call_count": len(calls),
+        "exact_provider_call_count": len(exact_calls),
+        "input_tokens": exact_input,
+        "output_tokens": exact_output,
+        "cached_input_tokens": exact_cached,
+        "reasoning_tokens": exact_reasoning,
+        "total_tokens": exact_total,
+        "estimated_input_tokens": estimated_input if estimated_input else None,
+        "estimated_output_tokens": estimated_output if estimated_output else None,
+        "estimated_total_tokens": estimated_total if estimated_total else None,
+        "calls": calls,
+    }
+    if include_turns:
+        turn_groups: dict[str, list[dict[str, Any]]] = {}
+        turn_order: list[str] = []
+        for call in calls:
+            key = str(call.get("turn_id") or "")
+            if key not in turn_groups:
+                turn_groups[key] = []
+                turn_order.append(key)
+            turn_groups[key].append(call)
+        turns: list[dict[str, Any]] = []
+        for key in turn_order:
+            provider_calls = turn_groups[key]
+            run_ids = sorted({str(call.get("run_id") or "") for call in provider_calls if call.get("run_id")})
+            turn_quest_id = quest_id
+            if not turn_quest_id and provider_calls:
+                turn_quest_id = str(provider_calls[0].get("quest_id") or "")
+            turn_summary = agent_token_ledger_summary_from_calls(
+                provider_calls,
+                run_id=run_ids[0] if len(run_ids) == 1 else "",
+                quest_id=turn_quest_id,
+                turn_id=key,
+                include_turns=False,
+            )
+            turn_summary["schema"] = "hermes.wasm_agent.token_ledger.turn.v1"
+            turn_summary["run_ids"] = run_ids
+            turn_summary["provider_calls"] = provider_calls
+            turn_summary.pop("calls", None)
+            turns.append(turn_summary)
+        summary["turn_count"] = len(turns)
+        summary["turns"] = turns
+    return summary
+
+
 def agent_token_ledger_summary_conn(
     conn: sqlite3.Connection,
     uid: str,
     *,
     run_id: str = "",
     quest_id: str = "",
+    turn_id: str = "",
+    exact_only: bool = False,
 ) -> dict[str, Any]:
     clauses = ["user_id = ?"]
     params: list[Any] = [str(uid)]
@@ -7760,6 +10572,11 @@ def agent_token_ledger_summary_conn(
     if quest_id:
         clauses.append("quest_id = ?")
         params.append(safe_agent_run_key(quest_id, ""))
+    if turn_id:
+        clauses.append("turn_id = ?")
+        params.append(safe_agent_run_key(turn_id, ""))
+    if exact_only:
+        clauses.append("exact = 1")
     rows = conn.execute(
         f"""
         SELECT * FROM agent_token_ledger_tb
@@ -7769,32 +10586,33 @@ def agent_token_ledger_summary_conn(
         params,
     ).fetchall()
     calls = [public_agent_token_ledger_row(row) for row in rows]
-    exact_calls = [call for call in calls if call.get("exact")]
-    exact_total = sum(int(call.get("total_tokens") or 0) for call in exact_calls)
-    estimated_total = sum(int(call.get("estimated_total_tokens") or 0) for call in calls if not call.get("exact"))
-    return {
-        "schema": "hermes.wasm_agent.token_ledger.summary.v1",
-        "run_id": safe_agent_run_key(run_id, ""),
-        "quest_id": safe_agent_run_key(quest_id, ""),
-        "exact": len(exact_calls) == len(calls),
-        "provider_call_count": len(calls),
-        "exact_provider_call_count": len(exact_calls),
-        "total_tokens": exact_total,
-        "estimated_total_tokens": estimated_total if estimated_total else None,
-        "calls": calls,
-    }
+    return agent_token_ledger_summary_from_calls(calls, run_id=run_id, quest_id=quest_id, turn_id=turn_id)
 
 
 def agent_token_ledger_status(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
     run_id = safe_agent_run_key(body.get("run_id"), "")
     quest_id = safe_agent_run_key(body.get("quest_id") or body.get("session_id"), "")
-    if not run_id and not quest_id:
-        raise BrowserError("cost_status_missing_scope", "cost.status requires run_id or quest_id.")
+    turn_id = safe_agent_run_key(body.get("turn_id") or body.get("turnId"), "")
+    exact_only = request_bool(body.get("exact_only") if "exact_only" in body else body.get("exactOnly"))
+    if not run_id and not quest_id and not turn_id:
+        raise BrowserError("cost_status_missing_scope", "cost.status requires run_id, quest_id, or turn_id.")
     with auth_connect() as conn:
         if run_id:
             get_agent_run_for_user(conn, run_id, user)
-        summary = agent_token_ledger_summary_conn(conn, user_id(user), run_id=run_id, quest_id=quest_id)
-    return {"ok": True, "ledger": summary}
+        summary = agent_token_ledger_summary_conn(
+            conn,
+            user_id(user),
+            run_id=run_id,
+            quest_id=quest_id,
+            turn_id=turn_id,
+            exact_only=exact_only,
+        )
+    return {
+        "ok": True,
+        "code": "ok",
+        "schema": "hermes.wasm_agent.cost.status_result.v1",
+        "ledger": summary,
+    }
 
 
 def record_agent_run_token_usage_event(server: WasmAgentServer, run_id: str, result: dict[str, Any]) -> None:
@@ -8338,6 +11156,18 @@ def stream_agent_run_text_ndjson(
                     delta = str(payload.get("delta") or "")
                     if delta:
                         delta_buffer.append(delta)
+                    continue
+                if event_type == "run.started":
+                    try:
+                        write_ndjson(handler, {
+                            "type": "run",
+                            "run_id": str(event.get("run_id") or ""),
+                            "seq": int(event.get("seq") or 0),
+                            "status": "running",
+                            "summary": str(event.get("summary") or ""),
+                        })
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
                     continue
                 # Flush any buffered deltas before handling a non-delta event
                 if delta_buffer:

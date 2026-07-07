@@ -1476,6 +1476,10 @@ export const PROVIDER_MODEL_SNAPSHOT = Object.freeze({
       "label": "kimi-k2.5"
     },
     {
+      "id": "glm-5.2",
+      "label": "glm-5.2"
+    },
+    {
       "id": "glm-5.1",
       "label": "glm-5.1"
     },

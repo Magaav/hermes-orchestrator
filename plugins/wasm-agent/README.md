@@ -14,7 +14,7 @@ download/update, and bridge work.
 | Client-first workspace state | implemented-unverified | focused tests under `tests/` | Server is for auth, presence/relay, sync, backup, provisioning, diagnostics, release metadata. |
 | Omni-device feature default | verified | Root/context/agent docs | Ship shared PWA/runtime behavior first. Prefer browser APIs, WASM, WebGPU/WebNN, downloaded model/runtime artifacts, version/SHA metadata, browser cache, and IndexedDB before native shell code. |
 | LLM-native context default | proposal | docs only | Embedded-agent/model-facing context should become a tiny text envelope plus on-demand lookup tools, with expanded human diagnostics kept separate from prompt input. |
-| Cheap autonomous agent architecture | proposal | `LLM_NATIVE_AGENT_ARCHITECTURE.md` | wasm-agent must route by declarative surface/workspace contracts before model dispatch. Hermes is a bounded skill/bridge executor, not the owner of product routing or broad workspace search. |
+| Cheap autonomous agent architecture | implemented-unverified first slice | `LLM_NATIVE_AGENT_ARCHITECTURE.md`; focused server tests | wasm-agent resolves declarative route contracts before direct-head/provider work. The Agent Kernel layer exposes generic `kernel.capabilities`, `kernel.resolve`, `kernel.inspect`, `kernel.act`, and `kernel.prove` primitives over route, map, lookup, bounded read, scoped patch, focused test, diff, proof, cost, and bounded Hermes capability/dispatch tools. Hermes remains a bounded skill/bridge executor, not the owner of product routing or broad workspace search. |
 | Account auth allowlist | implemented-unverified | auth tests; `conf/README.md` | `ADMIN_EMAIL` and optional `USER_EMAILS`; empty allowlists reject all Google accounts. |
 | Native release feed | implemented-unverified | `plugins/wasm-agent/public/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json` | Current local Windows feed guard fails without `native/windows/release/VERIFY.json`; feed publication is not installed runtime proof. |
 | Downloaded native runtime feed | implemented-unverified | `artifacts.runtime.launcher` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js` | Requires installed native shells with downloaded-runtime sync before runtime IDs/SHAs are installed evidence. |
@@ -66,6 +66,7 @@ download/update, and bridge work.
 | Doctor | `/local/plugins/wasm-agent/scripts/doctor.sh` |
 | Android lite performance budget | `node plugins/wasm-agent/tests/android_lite_performance_budget.test.js` |
 | Web simulation | `horc simulate web` |
+| Avatar-chat route/token quest simulation | `horc simulate web --avatar-quest` |
 | Android simulation | `horc simulate android` |
 | Native feed build | `horc build all` |
 | Windows feed guard | `python3 tools/windows/check-windows-release-feed.py` |
@@ -103,6 +104,49 @@ avatar-chat turns, keep context preview inspectable, and keep connection-drop
 resume behavior intact.
 Avatar-chat also exposes a compact `agentNodeSelect` diagnostic snapshot so
 native/PWA selector parity can be proven without scraping the dropdown.
+Use `horc simulate web --avatar-quest` as the local behavioral gate for a
+two-turn avatar-chat UI quest: it verifies route contract resolution before
+provider dispatch on each turn, exact token ledger persistence by
+quest/turn/provider call, summed quest totals, no broad Hermes fallback, and
+contained timeline/token-ledger UI.
+
+The first Agent Kernel slice is exposed under `POST /agent/tools/*` and is
+MCP-compatible by shape rather than a separate MCP server. The LLM-facing
+kernel primitives are `kernel.capabilities`, `kernel.resolve`,
+`kernel.inspect`, `kernel.act`, and `kernel.prove`. They sit above the route
+tools: `route.resolve`, `map.summary`, `lookup.files`, `lookup.symbol`,
+`file.read_bounded`, `patch.apply_scoped`, `test.run_focused`,
+`git.diff_summary`, `proof.collect`, `cost.status`, `hermes.capabilities`, and
+`hermes.dispatch_bounded`.
+
+MCP/tool policy belongs in `server/master_frontier/`, not in the
+`server/static_server.py` monolith. `static_server.py` may authenticate,
+resolve route contracts, record run events, and execute side effects, but new
+tool vocabularies, action schemas, repair prompts, code-memory query policy,
+and token-budget behavior must be implemented as Master:frontier modules with
+focused tests.
+
+The code-memory slice exposes route-scoped `code.memory.index`,
+`code.memory.status`, `code.memory.search`, and `code.memory.impact` wrappers
+around `codebase-memory-mcp`. Use these before broad file reads or Hermes
+dispatch when a task needs repository structure, symbol lookup, or change blast
+radius. Results must stay compact by default: symbol/file/risk summaries first,
+bounded source reads only after the graph narrows the target.
+
+The direct-head envelope exposes a compact generic kernel projection instead
+of a growing product map. If an answer depends on unknown runtime, entity,
+workspace, file, timeline, cost, or proof state, the head should call
+`kernel.resolve`, `kernel.inspect`, or `kernel.prove` before answering.
+Runtime/entity inspection is a bounded route-contract primitive: it reports
+declared route identity, `runtime.inspect` capability status, lookup/proof
+handles, scoped or recent run evidence, and separates entity text mentions from
+actual entity matches. A node or product name appearing in a model decision is
+not proof that the runtime entity was resolved.
+Route-bound tools enforce the resolved contract's read/write roots; focused
+tests must be declared in `server/agent_route_contracts.json`; Hermes dispatch
+requires an explicit last-resort escalation reason plus capability need before
+using the bridge. Observed node/product/entity misses are fixtures for the
+generic contract, not prompt-affordance design inputs.
 
 ## Native Release Feed
 

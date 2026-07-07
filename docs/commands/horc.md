@@ -272,6 +272,7 @@ docker run --rm --platform linux/amd64 alpine:3.20 uname -m
 
 ```bash
 horc simulate web
+horc simulate web --avatar-quest
 horc simulate android --emulator
 horc simulate android --device
 horc simulate android --local-report reports/sim/android/latest/result.json
@@ -294,6 +295,14 @@ detected, Go Native/native-desktop install prompts are hidden, visible UI does
 not leak browser/native-install placeholder text, and renderer diagnostics
 confirm the shell mode. It captures screenshots, redacted console logs, redacted
 network failures, and failure-only Playwright trace/video artifacts.
+
+`horc simulate web --avatar-quest` starts an isolated local wasm-agent backend
+and local OpenAI Responses stub, authenticates a simulator admin user, submits
+two real avatar-chat prompts through the UI, and verifies that `route.resolved`
+precedes provider dispatch on each turn, no broad Hermes fallback occurred,
+exact token ledger rows exist by quest/turn/provider call, quest totals equal
+the sum of turn totals, and timeline/token-ledger UI boxes stay
+width-contained. It writes `reports/sim/avatar-quest/latest/`.
 
 Every simulator run writes:
 
@@ -502,6 +511,8 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
   `horc simulate web`; otherwise the simulator searches common local browser
   commands.
 - `WASM_AGENT_SIM_HEADED=1`: run the Playwright web simulator headed.
+- `WASM_AGENT_SIM_AVATAR_QUEST_PROMPT`: optional prompt for
+  `horc simulate web --avatar-quest`.
 - `WASM_AGENT_SIM_ADB`: optional `adb` executable path for
   `horc simulate android`.
 - `WASM_AGENT_ANDROID_APK` / `WASM_AGENT_SIM_ANDROID_APK`: optional Android APK

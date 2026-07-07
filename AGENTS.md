@@ -94,6 +94,24 @@ must route, scope, budget, and verify work before invoking Hermes. Hermes must
 receive a bounded task contract and should never be asked to infer the product
 map from raw user text.
 
+## Root-Cause Before Edge-Fix Law
+
+After watching a failure, miss, or weak answer, do not propose a
+product-specific, entity-specific, selector-specific, prompt-specific, or
+file-specific fix as the next step until the architectural gap is named.
+
+First classify the miss in owned-contract terms: missing route contract,
+missing capability manifest, missing generic inspect/action/proof primitive,
+missing runtime evidence, missing harness promise, or implementation bug in an
+existing contract. The next step must repair or verify that contract layer.
+Use the observed product/entity as a test fixture only after the generic
+contract is named.
+
+If the suggested fix would only help the exact observed case, it is reactive
+programming even when no source code has been edited yet. Stop and restate the
+generic capability or proof surface that would make future similar cases cheap,
+bounded, and inspectable.
+
 ## Self-Improving Harness Loop
 
 After intent/context routing and before slow investigation, rebuilds, runtime
@@ -129,6 +147,23 @@ Prime Checkpoints.
 - Record rebuild command, target, duration or approximate duration, validation
   command, proof inspected, and the next loop-shortening opportunity whenever a
   rebuild-heavy operation is performed.
+
+## Final Response Next-Step Law
+
+Every substantive final response must end with a first-grade `**Next Step:**`
+line. This is an evolution control, not a courtesy footer.
+
+The next step must name the single highest-leverage action that should happen
+after the current answer. Prefer actions that shorten proof loops: a live
+introspection/control command, a local deterministic check, a focused runtime
+proof, or a harness promise promotion. If work is blocked, name the exact
+missing access, primitive, or proof. Do not end with broad menus, vague
+"let me know" language, or a rebuild/reinstall suggestion unless the missing
+runtime proof or platform primitive makes that step necessary.
+
+Never let a final answer imply completion just because code was written,
+tests passed, or a build succeeded. State the verified level plainly, then
+close with the next concrete evolution step.
 
 ## Context Routing
 

@@ -26,9 +26,6 @@
         "runtime.inspect",
         "proof.report"
       ],
-      "aliases": [
-        "avatar-chat"
-      ],
       "provider_policy": {
         "default": "local-first",
         "hermes": "bounded-skill-only",
@@ -46,6 +43,14 @@
         "changed_files",
         "checks",
         "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "provider-proxy",
+          "command": ["python3", "tests/provider_proxy.test.py"],
+          "timeout_sec": 90,
+          "description": "Focused direct-head, route-contract, local-tool, Hermes-gating, and token-ledger server tests"
+        }
       ]
     },
     {
@@ -76,12 +81,6 @@
         "runtime.inspect",
         "proof.report"
       ],
-      "aliases": [
-        "agent timeline",
-        "agent-run timeline",
-        "run timeline",
-        "timeline projection"
-      ],
       "provider_policy": {
         "default": "local-first",
         "hermes": "bounded-skill-only",
@@ -100,6 +99,14 @@
         "checks",
         "token_ledger",
         "timeline_events"
+      ],
+      "checks": [
+        {
+          "id": "provider-proxy",
+          "command": ["python3", "tests/provider_proxy.test.py"],
+          "timeout_sec": 90,
+          "description": "Focused direct-head, route-contract, local-tool, Hermes-gating, and token-ledger server tests"
+        }
       ]
     },
     {
@@ -128,11 +135,6 @@
         "test.run",
         "proof.report"
       ],
-      "aliases": [
-        "speech transcription",
-        "asr",
-        "mic transcription"
-      ],
       "provider_policy": {
         "default": "local-first",
         "hermes": "bounded-skill-only",
@@ -150,6 +152,14 @@
         "changed_files",
         "checks",
         "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "speech-transcription-module",
+          "command": ["node", "--experimental-vm-modules", "tests/speech_transcription_module.test.mjs"],
+          "timeout_sec": 90,
+          "description": "Focused shared speech transcription module test"
+        }
       ]
     },
     {
@@ -178,12 +188,6 @@
         "runtime.inspect",
         "proof.report"
       ],
-      "aliases": [
-        "frontier",
-        "direct head",
-        "provider envelope",
-        "hermes dispatch"
-      ],
       "provider_policy": {
         "default": "local-first",
         "hermes": "bounded-skill-only",
@@ -201,6 +205,14 @@
         "changed_files",
         "checks",
         "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "provider-proxy",
+          "command": ["python3", "tests/provider_proxy.test.py"],
+          "timeout_sec": 90,
+          "description": "Focused direct-head, route-contract, local-tool, Hermes-gating, and token-ledger server tests"
+        }
       ]
     },
     {
@@ -229,12 +241,6 @@
         "runtime.inspect",
         "proof.report"
       ],
-      "aliases": [
-        "native control",
-        "native bridge",
-        "android bridge",
-        "frontier native"
-      ],
       "provider_policy": {
         "default": "local-first",
         "hermes": "bounded-skill-only",
@@ -252,6 +258,74 @@
         "changed_files",
         "checks",
         "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "bridge-routes",
+          "command": ["python3", "tests/bridge_routes.test.py"],
+          "timeout_sec": 90,
+          "description": "Focused native-control and bridge route tests"
+        }
+      ]
+    },
+    {
+      "route_id": "hermes-node.paracelsus.runtime",
+      "surface": "paracelsus-node",
+      "owner": "hermes-runtime/paracelsus",
+      "workspace_root": "/local/agents/nodes/paracelsus",
+      "allowed_read_roots": [
+        "/local/agents/nodes/paracelsus",
+        "/local/datas/paracelsus"
+      ],
+      "allowed_write_roots": [],
+      "likely_paths": [
+        ".clone-meta/bootstrap.json",
+        "NODE_RUNTIME_CONTRACT.md",
+        "workspace",
+        "/local/datas/paracelsus"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "runtime.entity",
+        "run.timeline",
+        "proof.collect"
+      ],
+      "caps": [
+        "repo.read",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "entities": [
+        {
+          "id": "paracelsus",
+          "name": "Paracelsus",
+          "kind": "hermes-node"
+        }
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 8000,
+        "api_calls_max": 4,
+        "wall_ms_max": 60000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "runtime_entity",
+        "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "paracelsus-runtime-contract",
+          "command": ["python3", "-c", "from pathlib import Path; assert Path('/local/agents/nodes/paracelsus').exists(); assert Path('/local/datas/paracelsus').exists()"],
+          "timeout_sec": 10,
+          "description": "Paracelsus runtime route roots exist"
+        }
       ]
     }
   ]

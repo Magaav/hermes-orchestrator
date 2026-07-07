@@ -1,6 +1,8 @@
 import { MODULE_DEFINITIONS } from "./modules/index.js?v=20260622-android-responsive35";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
+import { isMasterFrontierTarget, masterFrontierNodeId, masterFrontierSelectionTarget } from "./modules/master-frontier/target.js";
+import { MASTER_FRONTIER_CAPS, MASTER_FRONTIER_OUTPUT_SCHEMA, masterFrontierAllowedActions } from "./modules/master-frontier/protocol.js";
 
 const RESOURCE_PROFILE_MAX_ENTRIES = 320;
 const RESOURCE_PROFILE_SLOW_MS = 24;
@@ -707,15 +709,7 @@ const AGENT_MASTER_FRONTIER_TARGET_ID = "__target:master_frontier__";
 const AGENT_MASTER_FRONTIER_LABEL = "Master:frontier";
 const AGENT_MISSING_TARGET_PREFIX = "__target:missing:";
 const AGENT_MISSING_TARGET_LABEL = "NODE IS MISSING";
-const AGENT_MASTER_FRONTIER_CAPS = Object.freeze([
-  "repo.read",
-  "repo.edit",
-  "test.run",
-  "command.run",
-  "runtime.inspect",
-  "docs.update",
-  "proof.report",
-]);
+const AGENT_MASTER_FRONTIER_CAPS = MASTER_FRONTIER_CAPS;
 const VOICE_CHAT_TRANSCRIPT_BREAK_MS = 2400;
 const VOICE_CHAT_DEDUPE_MS = 8000;
 const VOICE_CHAT_DRAFT_STALE_MS = 20000;
@@ -768,6 +762,10 @@ const AGENT_DIRECT_PROVIDER_DEFINITIONS = Object.freeze({
 const AGENT_DIRECT_PROVIDER_MODEL_SNAPSHOT_PATH = "./provider-model-catalog.js";
 const AGENT_DIRECT_PROVIDER_MODEL_REQUESTS = new Map();
 let agentDirectProviderModelSnapshotPromise = null;
+const AGENT_CONTINUITY_PROTOCOL_VERSION = "continuity_protocol.v1";
+const AGENT_CONTINUITY_SUMMARY_TURN_LIMIT = 12;
+const AGENT_CONTINUITY_CACHE_TURN_LIMIT = 24;
+const AGENT_CONTINUITY_TURN_CONTENT_MAX = 1200;
 const AGENT_MESSAGE_LONG_PRESS_MS = 520;
 const AGENT_MAX_IMAGES = 8;
 const AGENT_AVATAR_VIEWPORT_GAP_PX = 14;
@@ -805,11 +803,12 @@ const SPACE_APP_DEFINITIONS = [
   { id: "wis", label: "Artifacts", short: "Apps", module: "wis" },
   { id: "drop-to-copy", label: "Drop", short: "Drop" },
   { id: "security-loop", label: "Security", short: "Sec", desktopOnly: true },
+  { id: "meta-analysis", label: "Meta-Analysis", short: "Meta" },
 ];
 const SPACE_APP_MAPPINGS = {
   home: [],
-  admin: ["resources", "topology", "studio", "browser-proof", "wis", "drop-to-copy", "security-loop"],
-  user: [],
+  admin: ["resources", "topology", "studio", "browser-proof", "wis", "drop-to-copy", "security-loop", "meta-analysis"],
+  user: ["browser-proof", "wis", "drop-to-copy", "meta-analysis"],
 };
 const FIXED_WIDGET_LAYOUT = {
   timeline: { minimized: true },
@@ -13855,6 +13854,94 @@ function agentTranscriptForRequest() {
     }));
 }
 
+function continuityHash(value = "") {
+  let hash = 2166136261;
+  const text = String(value || "");
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function continuityAnchor(text = "") {
+  const words = cleanText(text, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9._:-]+/g, " ")
+    .trim()
+    .split(/\s+/)
+    .filter((word) => word && !["the", "and", "that", "this", "with", "from", "about", "what", "were", "you"].includes(word))
+    .slice(0, 5);
+  return words.join("_") || "turn";
+}
+
+function continuityKind(role = "", text = "") {
+  const normalized = cleanText(text, "").toLowerCase();
+  if (role === "user" && /\?|what|how|why|should|can\b/.test(normalized)) return "question";
+  if (/verified|proof|passed|confirmed|done/.test(normalized)) return "proof";
+  if (/decid|direction|recommend|best|use\\b/.test(normalized)) return "decision";
+  if (/implement|apply|fix|add/.test(normalized)) return "action";
+  return role === "user" ? "intent" : "answer";
+}
+
+function agentContinuityMessages(session = activeAgentSession()) {
+  return (Array.isArray(session?.messages) ? session.messages : [])
+    .filter((message) => message && !message.pending && message.content !== AGENT_DEFAULT_MESSAGE_CONTENT)
+    .map((message, index) => {
+      const content = cleanText(message.content || "", "");
+      return {
+        i: index + 1,
+        id: cleanText(message.id, `turn_${index + 1}`),
+        role: message.role === "user" ? "u" : "a",
+        kind: continuityKind(message.role, content),
+        anchor: continuityAnchor(content),
+        sha16: continuityHash(`${message.role}\\n${content}`).slice(0, 16),
+        content: truncateText(content, AGENT_CONTINUITY_TURN_CONTENT_MAX),
+        timestamp: cleanText(message.timestamp, ""),
+      };
+    });
+}
+
+function buildAgentContinuityState(session = activeAgentSession(), options = {}) {
+  const turns = agentContinuityMessages(session);
+  const digest = continuityHash(turns.map((turn) => `${turn.i}:${turn.role}:${turn.sha16}`).join("|"));
+  const start = turns.length ? Math.max(1, turns[0].i) : 0;
+  const end = turns.length ? turns[turns.length - 1].i : 0;
+  const recent = turns.slice(-AGENT_CONTINUITY_SUMMARY_TURN_LIMIT);
+  const handle = `ctx://avatar-chat/session/${cleanText(session?.id, "unknown")}`;
+  const lines = [
+    "CSC/1 legend: G=goal D=fact P=decision Q=open R=recall",
+    `sid=${cleanText(session?.id, "unknown")} turn=${end} covers=${start}..${end} d=${digest}`,
+    "G maintain cheap LLM-native avatar-chat continuity",
+    "D default=tiny_state_code+exact_recall_handles no_full_history_each_turn",
+    "D protocol=CSC/1+TRC/1+transcript.read",
+    "P read_exact_history_with=transcript.read when summary is ambiguous",
+    "Q preserve quality_per_token across mixed model families",
+    `R ${handle} turns=${start}..${end} d=${digest}`,
+    "TRC/1 cols=i,role,kind,anchor,sha16",
+    ...recent.map((turn) => `${turn.i},${turn.role},${turn.kind},${turn.anchor},${turn.sha16}`),
+  ];
+  return {
+    schema: AGENT_CONTINUITY_PROTOCOL_VERSION,
+    handle,
+    digest,
+    covers: `${start}..${end}`,
+    turn_count: turns.length,
+    csc: lines.join("\\n"),
+    trc: recent.map(({ i, role, kind, anchor, sha16 }) => ({ i, role, kind, anchor, sha16 })),
+    cache: {
+      schema: "hermes.wasm_agent.transcript_cache.v1",
+      handle,
+      digest,
+      covers: `${start}..${end}`,
+      turns: turns.slice(-AGENT_CONTINUITY_CACHE_TURN_LIMIT),
+      max_turns: AGENT_CONTINUITY_CACHE_TURN_LIMIT,
+      content_max_chars: AGENT_CONTINUITY_TURN_CONTENT_MAX,
+    },
+    include_recent_transcript: options.includeRecentTranscript !== false,
+  };
+}
+
 function isAgentContinuationRequest(text = "") {
   const normalized = cleanText(text, "").toLowerCase().replace(/[.!?]+$/g, "").trim();
   return [
@@ -14765,7 +14852,11 @@ function agentTargetIsDirectProvider(value = state.agentTargetNode) {
 }
 
 function agentTargetIsMasterFrontier(value = state.agentTargetNode) {
-  return cleanText(value, "") === AGENT_MASTER_FRONTIER_TARGET_ID && isAdminUser();
+  return isMasterFrontierTarget(value, {
+    masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID,
+    frontierNodeId: AGENT_FRONTIER_NODE_ID,
+    isAdmin: isAdminUser(),
+  });
 }
 
 function agentTargetIsOwnedAgent(value = state.agentTargetNode) {
@@ -15619,11 +15710,34 @@ function providerDiagnosticFromHttp(status, message = "") {
   return { mode: "unreachable", category: "http-error", message: message || `Provider returned HTTP ${status}.` };
 }
 
+function plainHttpErrorText(value, fallback = "") {
+  const text = cleanText(value, "");
+  if (!text) return cleanText(fallback, "");
+  if (/<(?:!doctype|html|head|body|title|h1|p)\b/i.test(text)) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(text, "text/html");
+    const messageParagraph = Array.from(doc.querySelectorAll("p"))
+      .map((item) => cleanText(item.textContent, ""))
+      .find((item) => /^Message:/i.test(item));
+    const extracted = cleanText(
+      messageParagraph?.replace(/^Message:\s*/i, "")
+        || doc.querySelector("h1")?.textContent
+        || doc.querySelector("title")?.textContent
+        || doc.body?.textContent
+        || "",
+      ""
+    );
+    return truncateText(extracted || fallback || "Provider returned an HTML error page.", 600);
+  }
+  return truncateText(text, 600);
+}
+
 function providerErrorMessage(payload, fallback = "") {
   const error = payload?.error;
-  if (typeof error === "string") return error;
-  if (error && typeof error === "object") return cleanText(error.message || error.code || fallback, fallback);
-  return fallback;
+  if (typeof error === "string") return plainHttpErrorText(error, fallback);
+  if (error && typeof error === "object") return plainHttpErrorText(error.message || error.code || fallback, fallback);
+  if (payload?.detail || payload?.title || payload?.message) return plainHttpErrorText(payload.detail || payload.title || payload.message, fallback);
+  return plainHttpErrorText(fallback);
 }
 
 function classifyBrowserProviderError(error) {
@@ -15936,7 +16050,14 @@ function agentTargetNode() {
   const fallback = defaultAgentTargetNode();
   const target = cleanText(state.agentTargetNode || state.selectedNode || fallback, fallback);
   if (agentTargetIsMissing(target)) return agentMissingTargetNodeId(target) || fallback;
-  if (agentTargetIsMasterFrontier(target)) return AGENT_FRONTIER_NODE_ID;
+  if (agentTargetIsMasterFrontier(target)) {
+    return masterFrontierNodeId(target, {
+      masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID,
+      frontierNodeId: AGENT_FRONTIER_NODE_ID,
+      fallback,
+      isAdmin: isAdminUser(),
+    });
+  }
   if (
     target === AGENT_PROVIDER_TARGET_ID
     || target.startsWith(AGENT_PROVIDER_TARGET_PREFIX)
@@ -18136,7 +18257,6 @@ function mappedAppIdsForPanel(panel = state.activePanel) {
 function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
   if (widgetId === "wis" && wisArtifactAvailableInPanel(panel)) return true;
   if (!isAdminUser() && isAdminPanel(panel)) return false;
-  if (!isAdminUser() && isUserSpacePanel(panel)) return false;
   if (Object.prototype.hasOwnProperty.call(FIXED_WIDGET_LAYOUT, widgetId)) return true;
   const app = appDefinitionById(widgetId);
   if (app?.desktopOnly && isCompactViewport()) return false;
@@ -18318,7 +18438,6 @@ function applyWidgetState(widget) {
 
 function spaceApps(panel = state.activePanel) {
   if (!isAdminUser() && isAdminPanel(panel)) return [];
-  if (!isAdminUser() && isUserSpacePanel(panel) && !wisArtifactAvailableInPanel(panel)) return [];
   const mappedIds = mappedAppIdsForPanel(panel);
   if (wisArtifactAvailableInPanel(panel)) mappedIds.add("wis");
   const spaceId = activeSpaceStorageId(panel);
@@ -22651,7 +22770,7 @@ async function fetchJson(path, options = {}) {
     try {
       payload = text ? JSON.parse(text) : {};
     } catch {
-      payload = { ok: false, error: { message: text.slice(0, 600) } };
+      payload = { ok: false, error: { message: plainHttpErrorText(text, `HTTP ${response.status}`) } };
     }
     if (!response.ok || payload.ok === false) {
       const error = new Error(payload?.error?.message || `HTTP ${response.status}`);
@@ -22689,6 +22808,14 @@ function agentKernelRouteSummary(proof = {}) {
   return [routeId, fileCount ? `${fileCount} file receipts` : ""].filter(Boolean).join(" / ");
 }
 
+function agentKernelCapabilityManifest(payload = {}) {
+  if (payload.manifest && typeof payload.manifest === "object") return payload.manifest;
+  if (payload.capabilities && typeof payload.capabilities === "object") return payload.capabilities;
+  if (payload.result?.manifest && typeof payload.result.manifest === "object") return payload.result.manifest;
+  if (payload.result?.capabilities && typeof payload.result.capabilities === "object") return payload.result.capabilities;
+  return {};
+}
+
 async function proveAgentKernelRouteTools(objective, pendingMessage, options = {}) {
   const resolvePayload = await fetchAgentKernelTool("/agent/tools/route.resolve", {
     route_id: "wasm-agent.avatar-chat.ui",
@@ -22698,21 +22825,36 @@ async function proveAgentKernelRouteTools(objective, pendingMessage, options = {
   const routeContract = resolvePayload.route_contract || {};
   const routeId = cleanText(routeContract.route_id || resolvePayload.summary?.route_id || "", "");
   if (!routeId) throw new Error(resolvePayload.error?.message || "route_contract_missing");
-  const [mapPayload, filesPayload] = await Promise.all([
+  const [mapPayload, filesPayload, capabilitiesPayload] = await Promise.all([
     fetchAgentKernelTool("/agent/tools/map.summary", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
     fetchAgentKernelTool("/agent/tools/lookup.files", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
+    fetchAgentKernelTool("/agent/tools/kernel.capabilities", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
   ]);
+  const capabilityManifest = agentKernelCapabilityManifest(capabilitiesPayload);
+  const masterFrontierManifest = capabilityManifest.master_frontier && typeof capabilityManifest.master_frontier === "object" ? capabilityManifest.master_frontier : {};
+  const reliabilityFeatures = masterFrontierManifest.features && typeof masterFrontierManifest.features === "object" ? masterFrontierManifest.features : {};
+  const reliabilityMissing = [];
+  if (!reliabilityFeatures.empty_provider_repair) reliabilityMissing.push("empty_provider_repair");
+  if (!reliabilityFeatures.local_evidence_continuation) reliabilityMissing.push("local_evidence_continuation");
   const proof = {
     schema: "hermes.wasm_agent.client_kernel_route_proof.v1",
     route_id: routeId,
     route_contract: routeContract,
     summary: resolvePayload.summary || mapPayload.summary || {},
     map_summary: mapPayload.summary || {},
+    capabilities: capabilityManifest,
+    master_frontier: masterFrontierManifest,
     files: {
       count: Number(filesPayload.count || 0),
       receipts: Array.isArray(filesPayload.files) ? filesPayload.files.slice(0, 12) : [],
     },
-    tools: ["route.resolve", "map.summary", "lookup.files"],
+    reliability: {
+      ok: reliabilityMissing.length === 0,
+      missing: reliabilityMissing,
+      build: cleanText(masterFrontierManifest.build || "", ""),
+      code: reliabilityMissing.length ? "master_frontier_reliability_build_missing" : "ok",
+    },
+    tools: ["route.resolve", "map.summary", "lookup.files", "kernel.capabilities"],
   };
   if (pendingMessage) {
     pendingMessage.kernel_route_proof = proof;
@@ -22727,6 +22869,8 @@ async function proveAgentKernelRouteTools(objective, pendingMessage, options = {
         route_id: proof.route_id,
         owner: proof.summary.owner,
         workspace_root: proof.summary.workspace_root,
+        master_frontier_build: proof.master_frontier.build || "",
+        reliability: proof.reliability,
         files: proof.files.receipts.map((item) => ({
           path: item.path,
           bytes: item.bytes,
@@ -22734,6 +22878,16 @@ async function proveAgentKernelRouteTools(objective, pendingMessage, options = {
         })),
       }, null, 2),
     }));
+    if (reliabilityMissing.length) {
+      mergeAgentAction(pendingMessage, agentAction("Master:frontier reliability", "error", reliabilityMissing.join(", "), {
+        id: "client_master_frontier_reliability_degraded",
+        topic: "run-wasm",
+        kind: "context",
+        meta: proof.reliability.code,
+        arguments: proof.reliability,
+        preview: JSON.stringify(proof.reliability, null, 2),
+      }));
+    }
   }
   return proof;
 }
@@ -23279,9 +23433,14 @@ function applyAgentTokenLedger(message, ledger, extra = {}) {
 async function refreshAgentRunTokenLedger(message, options = {}) {
   const runId = cleanText(message?.run_id || "", "");
   if (!runId || !isAdminUser()) return null;
+  const questId = cleanText(options.questId || activeAgentSession()?.id || "", "");
+  const body = questId
+    ? { quest_id: questId }
+    : { run_id: runId };
+  if (options.turnId) body.turn_id = cleanText(options.turnId, "");
+  if (options.exactOnly !== undefined) body.exact_only = Boolean(options.exactOnly);
   const payload = await fetchAgentKernelTool("/agent/tools/cost.status", {
-    run_id: runId,
-    quest_id: cleanText(options.questId || activeAgentSession()?.id || "", ""),
+    ...body,
   }, { signal: options.signal, timeoutMs: options.timeoutMs || 8000 });
   const ledger = payload.ledger && typeof payload.ledger === "object" ? payload.ledger : null;
   if (!ledger) return null;
@@ -25255,6 +25414,9 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
   const activeSpace = options.activeSpace || activeSpaceContext();
   const imageCards = Array.isArray(options.imageCards) ? options.imageCards : [];
   const nodeRunConfig = options.nodeRunConfig || {};
+  const continuity = options.continuity && typeof options.continuity === "object"
+    ? options.continuity
+    : buildAgentContinuityState(activeAgentSession());
   const continuationContext = options.continuationContext && typeof options.continuationContext === "object"
     ? options.continuationContext
     : null;
@@ -25284,6 +25446,7 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
       `space:${cleanText(activeSpace?.display_name || activeSpace?.name || "", "home")}`,
       `panel:${cleanText(observation.workspace?.active_panel || state.activePanel, "")}`,
       `transcript_turns:${recentTranscript.length}`,
+      `continuity:${continuity.covers || "0..0"}`,
       `attachments:${attachments.length}`,
     ].join(" "),
     compact_state: {
@@ -25315,6 +25478,15 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
         chat_target_node: AGENT_FRONTIER_NODE_ID,
       },
       transcript: recentTranscript,
+      continuity: {
+        schema: continuity.schema,
+        handle: continuity.handle,
+        covers: continuity.covers,
+        digest: continuity.digest,
+        turn_count: continuity.turn_count,
+        csc: continuity.csc,
+        trc: continuity.trc,
+      },
       continuation_context: continuationContext,
       attachments,
       recent_events: Array.isArray(observation.recent_events) ? observation.recent_events.slice(0, 6) : [],
@@ -25323,18 +25495,19 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     capabilities: AGENT_MASTER_FRONTIER_CAPS,
     evidence_refs: [
       { ref: "ctx://avatar-chat/current-turn", kind: "chat", summary: "Current message and compact transcript are inline." },
+      { ref: continuity.handle, kind: "transcript", summary: `CSC/1 continuity covers ${continuity.covers}; use transcript.read for exact turns.` },
       { ref: "ctx://workspace/compact-state", kind: "state", summary: "Compact workspace, fleet, and recent event state are inline." },
       { ref: "ctx://direct-head/receiver", kind: "receiver", summary: "Envelope is sent to the server-configured direct-head receiver." },
       ...(continuationContext ? [{ ref: "ctx://avatar-chat/continuation", kind: "resume", summary: "Compact previous-run continuation context is inline." }] : []),
     ],
-    allowed_actions: [
-      { id: "answer", type: "direct", description: "Answer directly from the envelope when no tool work is required." },
-      { id: "dispatch.hermes", type: "bridge", caps: AGENT_MASTER_FRONTIER_CAPS, description: "Dispatch bounded tool/proof work through the wasm-agent Hermes bridge." },
-    ],
+    allowed_actions: masterFrontierAllowedActions(AGENT_MASTER_FRONTIER_CAPS),
     constraints: [
       "Do not assume hidden state beyond this envelope.",
       "When continuation_context is present and the user asks to continue or resume, continue that objective instead of asking the user to restate it.",
       "Answer directly when possible; use dispatch.hermes only when tool, file, runtime, or proof work is required.",
+      "Use node.capabilities before assuming a named Hermes node can or cannot answer; use node.chat for bounded node-brain delegation when available.",
+      "When tool work is required, output only compact JSON with executable actions as the first response bytes; no prose or markdown before action JSON.",
+      "Use CSC/1 continuity first; request transcript.read only when exact previous-message content changes the answer.",
       "Keep the answer compact and include proof handles when work is dispatched.",
       "Do not report token usage in the answer text; the UI renders exact provider token usage from diagnostics.",
       "Do not claim inspected, confirmed, verified, or viable unless the claim is supported by envelope evidence or dispatched proof; otherwise say not inspected yet.",
@@ -25350,34 +25523,27 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
       max_dispatch_caps: AGENT_MASTER_FRONTIER_CAPS.length,
     },
     stream: true,
-    output_schema: {
-      type: "object",
-      required: ["answer", "decision", "actions", "state_delta", "needs", "confidence"],
-      properties: {
-        answer: { type: "string" },
-        decision: { type: "string" },
-        actions: { type: "array", items: { type: "object" } },
-        state_delta: { type: "object" },
-        needs: { type: "array", items: { type: "string" } },
-        proof_requests: { type: "array", items: { type: "string" } },
-        confidence: { type: "number" },
-      },
-      additionalProperties: true,
-    },
+    output_schema: MASTER_FRONTIER_OUTPUT_SCHEMA,
   };
 }
 
 async function callMasterFrontierDirectHead(message, transcript = [], observation = {}, options = {}) {
-  const envelope = masterFrontierEnvelope(message, transcript, observation, options);
+  const continuity = options.continuity && typeof options.continuity === "object"
+    ? options.continuity
+    : buildAgentContinuityState(activeAgentSession());
+  const envelope = masterFrontierEnvelope(message, transcript, observation, { ...options, continuity });
   const body = {
     session_id: activeAgentSession().id,
     turn_id: cleanText(options.turnId || "", ""),
     space_id: activeSpaceStorageId(),
     envelope,
+    transcript_cache: continuity.cache,
     instructions: [
       `You are the ${AGENT_MASTER_FRONTIER_LABEL} direct head for avatar-chat.`,
       "Receive this wasm-agent envelope through the server-configured direct-head receiver.",
+      "Continuity is CSC/1 plus TRC/1; exact prior turns are available only through bounded transcript.read.",
       "Answer from the envelope protocol; return dispatch.hermes only when the envelope requires bounded bridge tool/proof work.",
+      "If choosing any tool or dispatch action, return only minified JSON with a complete actions array; no prose, no markdown fences, no recap before JSON.",
       "Do not narrate token usage; runtime diagnostics render exact provider-reported LLM usage outside the answer.",
       "Be proof-honest: distinguish conceptual possibility from inspected or verified runtime proof.",
     ].join(" "),
@@ -25395,7 +25561,21 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
       body: JSON.stringify(body),
       signal: options.signal,
     });
-    if (!fetchResponse.ok || !fetchResponse.body) throw new Error(`HTTP ${fetchResponse.status}`);
+    if (!fetchResponse.ok || !fetchResponse.body) {
+      const text = await fetchResponse.text().catch(() => "");
+      let payload = {};
+      try {
+        payload = text ? JSON.parse(text) : {};
+      } catch {
+        payload = { ok: false, error: { message: plainHttpErrorText(text, `HTTP ${fetchResponse.status}`) } };
+      }
+      const message = providerErrorMessage(payload, `HTTP ${fetchResponse.status}`);
+      const error = new Error(message || `HTTP ${fetchResponse.status}`);
+      error.status = fetchResponse.status;
+      error.payload = payload;
+      error.diagnostic = payload?.provider?.diagnostic || payload?.error || providerDiagnosticFromHttp(fetchResponse.status, message);
+      throw error;
+    }
     const reader = fetchResponse.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -29720,10 +29900,109 @@ function shortLedgerId(value) {
   return `${text.slice(0, 8)}...${text.slice(-6)}`;
 }
 
+function appendAgentTokenMetricChips(container, rows = []) {
+  rows
+    .filter(([, value]) => tokenNumber(value) !== null)
+    .forEach(([label, value]) => {
+      const chip = document.createElement("span");
+      chip.textContent = `${label} ${compactCount(tokenNumber(value) || 0)}`;
+      container.append(chip);
+    });
+}
+
+function agentLedgerProviderCalls(ledger = {}) {
+  if (Array.isArray(ledger.provider_calls)) return ledger.provider_calls;
+  if (Array.isArray(ledger.calls)) return ledger.calls;
+  return [];
+}
+
+function renderAgentTokenLedgerCall(call = {}) {
+  const row = document.createElement("div");
+  row.className = `agent-token-ledger-call ${call.exact ? "exact" : "estimated"}`;
+  const head = document.createElement("div");
+  head.className = "agent-token-ledger-call-head";
+  const provider = document.createElement("strong");
+  provider.textContent = [call.provider, call.model].map((item) => cleanText(item, "")).filter(Boolean).join(" / ") || "provider call";
+  const route = document.createElement("span");
+  route.textContent = cleanText(call.route_id, "");
+  const callId = document.createElement("code");
+  callId.textContent = shortLedgerId(call.provider_call_id);
+  head.append(provider, route, callId);
+  const metrics = document.createElement("div");
+  metrics.className = "agent-token-ledger-metrics";
+  appendAgentTokenMetricChips(metrics, call.exact
+    ? [
+        ["in", call.input_tokens],
+        ["out", call.output_tokens],
+        ["cached", call.cached_input_tokens],
+        ["reason", call.reasoning_tokens],
+        ["total", call.total_tokens],
+      ]
+    : [
+        ["est in", call.estimated_input_tokens],
+        ["est out", call.estimated_output_tokens],
+        ["est total", call.estimated_total_tokens],
+      ]);
+  row.append(head, metrics);
+  return row;
+}
+
+function renderAgentTokenLedgerTurn(turn = {}) {
+  const wrap = document.createElement("div");
+  wrap.className = `agent-token-ledger-turn ${turn.exact === false ? "estimated" : "exact"}`;
+  const head = document.createElement("div");
+  head.className = "agent-token-ledger-turn-head";
+  const turnId = document.createElement("strong");
+  turnId.textContent = `turn ${shortLedgerId(turn.turn_id)}`;
+  const totals = document.createElement("span");
+  const usage = agentTokenLedgerUsage({
+    exact: turn.exact,
+    total_tokens: turn.total_tokens,
+    input_tokens: turn.input_tokens,
+    output_tokens: turn.output_tokens,
+    estimated_total_tokens: turn.estimated_total_tokens,
+    estimated_input_tokens: turn.estimated_input_tokens,
+    estimated_output_tokens: turn.estimated_output_tokens,
+    calls: agentLedgerProviderCalls(turn),
+  });
+  totals.textContent = usage ? formatTokenUsageParts(usage) : "-";
+  const count = document.createElement("span");
+  count.textContent = `${Number(turn.provider_call_count || agentLedgerProviderCalls(turn).length || 0)} calls`;
+  head.append(turnId, totals, count);
+  const calls = document.createElement("div");
+  calls.className = "agent-token-ledger-calls";
+  calls.replaceChildren(...agentLedgerProviderCalls(turn).map(renderAgentTokenLedgerCall));
+  wrap.append(head, calls);
+  return wrap;
+}
+
+function agentTokenLedgerSummaryText(ledger = {}, usage = null) {
+  if (ledger.exact !== false) return usage ? formatTokenUsageParts(usage) : "-";
+  const exactUsage = normalizeAgentTokenUsage({
+    input_tokens: tokenNumber(ledger.input_tokens) || 0,
+    output_tokens: tokenNumber(ledger.output_tokens) || 0,
+    total_tokens: tokenNumber(ledger.total_tokens) || 0,
+    cached_input_tokens: tokenNumber(ledger.cached_input_tokens) || 0,
+    reasoning_tokens: tokenNumber(ledger.reasoning_tokens) || 0,
+    usage_accuracy: "provider_exact",
+  });
+  const estimatedUsage = normalizeAgentTokenUsage({
+    input_tokens: tokenNumber(ledger.estimated_input_tokens) || 0,
+    output_tokens: tokenNumber(ledger.estimated_output_tokens) || 0,
+    total_tokens: tokenNumber(ledger.estimated_total_tokens) || 0,
+    usage_accuracy: "estimated",
+  });
+  const parts = [];
+  if (exactUsage && tokenNumber(exactUsage.total_tokens)) parts.push(`exact ${formatTokenUsageParts(exactUsage)}`);
+  if (estimatedUsage && tokenNumber(estimatedUsage.total_tokens)) parts.push(`est ${formatTokenUsageParts(estimatedUsage)}`);
+  return parts.join(" / ") || (usage ? formatTokenUsageParts(usage) : "-");
+}
+
 function renderAgentTokenLedger(message = {}) {
   const ledger = agentMessageTokenLedger(message);
   if (!ledger) return null;
   const calls = Array.isArray(ledger.calls) ? ledger.calls : [];
+  const turns = Array.isArray(ledger.turns) ? ledger.turns : [];
   const usage = agentTokenLedgerUsage(ledger);
   if (!calls.length && !usage) return null;
   const details = document.createElement("details");
@@ -29741,54 +30020,21 @@ function renderAgentTokenLedger(message = {}) {
   badge.textContent = ledger.exact === false ? "estimated" : "exact";
   const total = document.createElement("span");
   total.className = "agent-token-ledger-total";
-  total.textContent = usage ? formatTokenUsageParts(usage) : "-";
+  total.textContent = agentTokenLedgerSummaryText(ledger, usage);
   const scope = document.createElement("span");
   scope.className = "agent-token-ledger-scope";
+  const providerCallCount = Number(ledger.provider_call_count || calls.length || turns.reduce((totalCount, turn) => (
+    totalCount + Number(turn?.provider_call_count || agentLedgerProviderCalls(turn).length || 0)
+  ), 0));
   scope.textContent = [
     `quest ${shortLedgerId(ledger.quest_id || activeAgentSession()?.id || "")}`,
-    `turn ${shortLedgerId(calls[0]?.turn_id || message.turn_id || "")}`,
-    `${calls.length || Number(ledger.provider_call_count || 0)} calls`,
+    turns.length ? `${turns.length} turns` : `turn ${shortLedgerId(calls[0]?.turn_id || message.turn_id || "")}`,
+    `${providerCallCount} calls`,
   ].filter(Boolean).join(" / ");
   summary.append(title, badge, total, scope);
   const list = document.createElement("div");
-  list.className = "agent-token-ledger-calls";
-  list.replaceChildren(...calls.map((call) => {
-    const row = document.createElement("div");
-    row.className = `agent-token-ledger-call ${call.exact ? "exact" : "estimated"}`;
-    const head = document.createElement("div");
-    head.className = "agent-token-ledger-call-head";
-    const provider = document.createElement("strong");
-    provider.textContent = [call.provider, call.model].map((item) => cleanText(item, "")).filter(Boolean).join(" / ") || "provider call";
-    const route = document.createElement("span");
-    route.textContent = cleanText(call.route_id, "");
-    const callId = document.createElement("code");
-    callId.textContent = shortLedgerId(call.provider_call_id);
-    head.append(provider, route, callId);
-    const metrics = document.createElement("div");
-    metrics.className = "agent-token-ledger-metrics";
-    const metricRows = call.exact
-      ? [
-          ["in", call.input_tokens],
-          ["out", call.output_tokens],
-          ["cached", call.cached_input_tokens],
-          ["reason", call.reasoning_tokens],
-          ["total", call.total_tokens],
-        ]
-      : [
-          ["est in", call.estimated_input_tokens],
-          ["est out", call.estimated_output_tokens],
-          ["est total", call.estimated_total_tokens],
-        ];
-    metricRows
-      .filter(([, value]) => tokenNumber(value) !== null)
-      .forEach(([label, value]) => {
-        const chip = document.createElement("span");
-        chip.textContent = `${label} ${compactCount(tokenNumber(value) || 0)}`;
-        metrics.append(chip);
-      });
-    row.append(head, metrics);
-    return row;
-  }));
+  list.className = turns.length ? "agent-token-ledger-turns" : "agent-token-ledger-calls";
+  list.replaceChildren(...(turns.length ? turns.map(renderAgentTokenLedgerTurn) : calls.map(renderAgentTokenLedgerCall)));
   details.append(summary, list);
   return details;
 }
@@ -36894,7 +37140,7 @@ function showNativeVoiceChatDraft(event = {}, options = {}) {
   const now = Date.now();
   const stale = now - Number(state.nativeVoiceChatDraftUpdatedAt || 0) > VOICE_CHAT_DRAFT_STALE_MS;
   const content = transcript || (options.status === "rejected" ? "I heard the wake word, but the transcript was not usable." : "Listening...");
-  if (state.agentTargetNode !== AGENT_FRONTIER_NODE_ID) setAgentTargetNode(AGENT_FRONTIER_NODE_ID);
+  if (!agentTargetIsMasterFrontier(state.agentTargetNode)) setAgentTargetNode(masterFrontierSelectionTarget({ masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID }));
   openAgentChat();
   const existing = activeAgentMessageById(state.nativeVoiceChatDraftMessageId);
   if (existing && !stale && (!sessionId || sessionId === state.nativeVoiceChatDraftSessionId)) {
@@ -36969,8 +37215,8 @@ async function routeNativeVoiceCommandToFrontierChat(event = {}, options = {}) {
   state.nativeVoiceChatLastTranscriptAt = now;
   state.nativeVoiceChatLastSessionId = sessionId;
   const previousTarget = state.agentTargetNode;
-  if (state.agentTargetNode !== AGENT_FRONTIER_NODE_ID) {
-    setAgentTargetNode(AGENT_FRONTIER_NODE_ID);
+  if (!agentTargetIsMasterFrontier(state.agentTargetNode)) {
+    setAgentTargetNode(masterFrontierSelectionTarget({ masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID }));
   }
   openAgentChat();
   updateNativeVoiceChatDraft(transcript, {
