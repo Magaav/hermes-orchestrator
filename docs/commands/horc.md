@@ -27,6 +27,31 @@ cron, and logs are preserved; use `horc purge-node <name>` for full cleanup.
 `horc purge-node <name>` is a destructive two-step cleanup. The first command
 creates a purge request; the second confirms it with the request id and token.
 
+## App Containers
+
+```bash
+horc app zaiaecainelli start
+horc app zaiaecanelli restart
+horc app fredericochaves status
+horc app fredericochaves logs --lines 120
+horc app <zaiaecainelli|fredericochaves> <start|stop|restart|status|logs>
+```
+
+`horc app` manages local private app runtimes in bounded Docker containers. It
+does not replace node lifecycle commands. The current app containers are:
+
+- `zaiaecainelli` / typo alias `zaiaecanelli`: local app path
+  `/local/projects/zaiaecainelli`, host URL `http://127.0.0.1:18081`.
+- `fredericochaves`: local app path
+  `/local/projects/paracelsus/apps/dci`, host URL `http://127.0.0.1:18082`.
+
+The app lane uses `debian:bookworm-slim` by default, host-built Go binaries,
+read-only source/static mounts, writable data mounts, bridge networking, and
+resource caps. If a Go binary is missing or older than its source/templates,
+`horc app start` rebuilds it once on the host before creating the container.
+Override runtime limits with `HORC_APP_IMAGE`, `HORC_APP_MEMORY`,
+`HORC_APP_CPUS`, or `HORC_APP_PIDS_LIMIT`.
+
 ## Logs Commands
 
 ```bash

@@ -44,6 +44,8 @@ horc restore /local/backups/<archive>.tar.gz
 horc update help
 horc update all
 horc update node colmeio
+horc app zaiaecainelli start
+horc app fredericochaves status
 ```
 
 See more: [`../../docs/commands/horc.md`](../../docs/commands/horc.md)

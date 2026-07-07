@@ -5,7 +5,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_MANAGER="${SCRIPT_DIR}/clone_manager.py"
+DEFAULT_APP_MANAGER="${SCRIPT_DIR}/app_manager.py"
 HERMES_CLONE_MANAGER_SCRIPT="${HERMES_CLONE_MANAGER_SCRIPT:-${DEFAULT_MANAGER}}"
+HERMES_APP_MANAGER_SCRIPT="${HERMES_APP_MANAGER_SCRIPT:-${DEFAULT_APP_MANAGER}}"
 DEFAULT_NODE="${HERMES_DEFAULT_NODE:-orchestrator}"
 
 if [[ ! -f "${HERMES_CLONE_MANAGER_SCRIPT}" ]]; then
@@ -43,6 +45,10 @@ manager() {
   "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "$@"
 }
 
+app_manager() {
+  "${PYTHON_BIN}" "${HERMES_APP_MANAGER_SCRIPT}" "$@"
+}
+
 exec_manager() {
   exec "${PYTHON_BIN}" "${HERMES_CLONE_MANAGER_SCRIPT}" "$@"
 }
@@ -68,6 +74,7 @@ Usage:
   horc update [help]
   horc update all [--force]
   horc update node <name> [--force]
+  horc app <zaiaecainelli|fredericochaves> <start|stop|restart|status|logs>
   horc build win
   horc build win-fast
   horc build android
@@ -101,6 +108,9 @@ Examples:
   horc update all --force
   horc update node orchestrator
   horc update node colmeio --force
+  horc app zaiaecainelli start
+  horc app zaiaecanelli restart
+  horc app fredericochaves status
   horc build win
   horc build win-fast
   horc simulate web
@@ -118,6 +128,7 @@ Notes:
   - For restart, omitted name means "restart all nodes".
   - `horc update all` refreshes /local/hermes-agent and reseeds every node.
   - `horc update node <name>` refreshes /local/hermes-agent and reseeds only that node.
+  - `horc app <name> <action>` manages bounded Docker containers for local private apps.
   - Add `--force` to discard local `/local/hermes-agent` checkout changes during the refresh.
   - `horc build win` creates the Windows wasm-agent native installer and writes a trust manifest.
   - `horc build win-fast` runs Windows native source/package checks without
@@ -2492,6 +2503,14 @@ if [[ $# -gt 0 ]]; then
 fi
 
 case "${ACTION}" in
+  app)
+    if [[ ! -f "${HERMES_APP_MANAGER_SCRIPT}" ]]; then
+      echo "horc: app_manager.py not found" >&2
+      echo "set HERMES_APP_MANAGER_SCRIPT to override" >&2
+      exit 1
+    fi
+    app_manager "$@"
+    ;;
   build)
     SUBACTION="${1:-win-x64-prod}"
     if [[ $# -gt 0 ]]; then
