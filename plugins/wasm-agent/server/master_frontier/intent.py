@@ -6,6 +6,18 @@ from typing import Any
 
 
 IMPLEMENTATION_CAPS = {"repo.edit", "kernel.act", "test.run", "docs.update", "proof.report"}
+DIAGNOSIS_RE = re.compile(
+    r"\b(?:why|fail(?:ed|ure|ing)?|error|bug|diagnos\w*|inspect\w*|investigat\w*|audit\w*|review\w*|crit\w*|root[- ]cause)\b",
+    re.IGNORECASE,
+)
+SOURCE_OBJECT_RE = re.compile(
+    r"\b(?:code|codebase|component|file|function|implementation|module|repo(?:sitory)?|route|source|ui|widget)\b",
+    re.IGNORECASE,
+)
+SOURCE_QUESTION_RE = re.compile(
+    r"\b(?:check|describe|explain|find|how|identify|inspect|locate|show|what|where|which|why)\b",
+    re.IGNORECASE,
+)
 
 
 def _compact_json(value: Any, *, limit: int = 3000) -> str:
@@ -44,6 +56,14 @@ def text_is_capability_inquiry(text: str) -> bool:
     )
     if any(re.search(pattern, clean) for pattern in hard_commit_patterns):
         return False
+    self_capability_patterns = (
+        r"\bwhat\s+(?:you|we|it|the system)\s+can\s+do\b",
+        r"\bwhat\s+can\s+(?:you|we|it|the system)\s+do\b",
+        r"\bwhere\s+are\s+you\b",
+        r"\btest\s+(?:your|the system'?s?)\s+(?:power|capabilit(?:y|ies))\b",
+    )
+    if any(re.search(pattern, clean) for pattern in self_capability_patterns):
+        return True
     inquiry_patterns = (
         r"\bavailability\b",
         r"\bavailable\b",
@@ -97,7 +117,6 @@ def objective_is_implementation_intent(envelope: dict[str, Any]) -> bool:
         "apply",
         "build",
         "change",
-        "code",
         "create",
         "edit",
         "fix",
@@ -117,6 +136,20 @@ def objective_is_implementation_intent(envelope: dict[str, Any]) -> bool:
         if isinstance(source, list):
             caps.extend(str(item or "") for item in source)
     return any(cap in IMPLEMENTATION_CAPS for cap in caps)
+
+
+def objective_is_diagnosis_intent(envelope: dict[str, Any]) -> bool:
+    objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
+    if objective_kind == "diagnosis":
+        return True
+    if objective_kind in {"conversation", "implementation"}:
+        return False
+    return bool(DIAGNOSIS_RE.search(str(envelope.get("objective") or "")))
+
+
+def objective_requires_source_evidence(envelope: dict[str, Any]) -> bool:
+    objective = str(envelope.get("objective") or "")
+    return bool(SOURCE_OBJECT_RE.search(objective) and SOURCE_QUESTION_RE.search(objective))
 
 
 def goal_requires_change_artifact(envelope: dict[str, Any]) -> bool:

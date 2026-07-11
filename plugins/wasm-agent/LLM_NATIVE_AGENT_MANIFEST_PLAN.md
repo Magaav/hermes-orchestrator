@@ -1,5 +1,11 @@
 # LLM-Native wasm-agent Manifest Plan
 
+> Historical V1/V2 plan. It is not the current execution contract. Master:frontier
+> V3 is model-led Codex-style execution using canonical C3 cyphers and
+> load-on-demand tools; see `MASTER_FRONTIER_V3.md`. Autonomous planner,
+> `tools_first`, and executor-selection language below must not be reintroduced
+> into the V3 hot path.
+
 This plan turns the wasm-agent direction into an implementation track. It is
 written to prevent the exact failure mode where an agent misses the product map,
 delegates broad reasoning to Hermes, burns tokens in the wrong roots, and then
@@ -7,14 +13,18 @@ patches `static_server.py` with another product string.
 
 ## What We Are Trying To Build
 
-We are trying to build a cheap, strong, autonomous wasm-agent that is superior
+We are trying to build a high-quality, strong, autonomous wasm-agent that is superior
 inside this product domain because it does not act like a generic chat model
 with filesystem access.
 
-Cheap means known structure is never rediscovered by a large model. Routing,
+Quality comes first. Token savings are valid only when they preserve or improve
+answer quality, proof, and convergence. A cheap weak answer is false economy
+because the next corrective turn spends the "saved" tokens anyway. Cheap means
+known structure is never rediscovered by a large model. Routing,
 workspace ownership, likely files, local symbols, allowed capabilities, stop
 rules, and proof requirements are deterministic first. Model calls are reserved
-for ambiguity, planning, synthesis, and judgment.
+for ambiguity, planning, synthesis, and judgment, and the model must be allowed
+to reason fully when the objective needs it.
 
 Strong means the agent has explicit product contracts. It knows which surface is
 being discussed, where source lives, which roots are writable, which tools are
@@ -33,9 +43,10 @@ remains readable, but model input is not a screenshot, raw log dump, or verbose
 debug JSON blob.
 
 The target is not "Hermes but cheaper." The target is a wasm-agent kernel with
-its own route map, protocol, tool server, proof ledger, and skill adapters.
-Hermes can supply skills and bridge execution under contract. It must not own
-product routing, architecture decisions, or broad workspace discovery.
+its own route map, protocol, tool server, proof ledger, and action adapters.
+Hermes is forbidden for the current direct-head baseline and must not be a
+fallback, product router, architecture owner, or required capability. It can be
+revisited later only as an explicitly bounded optional adapter.
 
 ## Failure Being Corrected
 
@@ -203,6 +214,19 @@ R wasm-agent.avatar-chat.ui
 ROOT /local/plugins/wasm-agent
 CAP read,edit,test,proof
 BUD h=3000 p=8000 calls=6 wall=90s
+DEPTH normal|deep|free
+FLOOR conceptual|route|proof|runtime
+ROUTE_INTENT conceptual|informational|implementation|runtime_support
+A focused|playful|urgent|debugging|reflective
+STATE_MODE blocked_on_proof|exploring|converging|debugging|reflective
+CAPS_VERIFIED repo.read,proof.report
+COVERAGE rich|thin|ambiguous|stale
+ANCHORS turn3:decision:auth-proof turn7:preference:brevity
+RECALL_BUDGET reflective:transcript_turns=10
+RECENT session_local_clipped_turns
+REFLECT model_reflection=self_model_not_proof
+EVID route,receipts,recall_handles
+STATE_WRITEBACK delta,feedback,last_action,last_feedback,next
 LOOK files,symbols,tests,diff
 PROOF route,files,checks,tokens
 STOP no_progress=2 missing_route=fail
@@ -219,6 +243,40 @@ lookup(run.timeline, q_8fc2)
 
 The envelope is intentionally not a full UI dump. It gives the model enough
 structure to ask for the next cheapest fact.
+
+`DEPTH free` is reserved for explicit architectural critique or high-trust
+reflection turns. It does not disable proof discipline; it tells the provider
+to reason fully while the kernel keeps repeated uncertainty cheap through
+harness promises and evidence receipts. The protocol remains model-agnostic and
+does not branch on model capability metadata.
+
+`FLOOR` is the objective's evidence floor. It keeps conceptual critique from
+over-dispatching, while implementation and runtime/entity questions still
+require proof or runtime evidence before current-state claims.
+
+`COVERAGE` and `ANCHORS` let the head reason about compression quality without
+fetching full history. Provider output may include `state_feedback` so the
+state writer can repair thin or ambiguous envelopes on the next turn.
+`RECALL_BUDGET` is a bounded session-local transcript allowance for reflective
+turns only; it is not RAG and not broad persistent memory.
+If a bounded transcript cache is already present, `RECENT` may project a tiny
+clipped excerpt for reflective turns. It is session-local and non-persistent.
+
+`ROUTE_INTENT` separates route provenance from route-relevant reasoning. `A` is
+a bounded affect shorthand, not a personality blob. `SELF_CHECK` is emitted as
+deterministic run diagnostics, not a second model pass.
+`REFLECT` may permit `model_reflection` as labeled self-model/metaphor for
+reflective prompts. It never counts as inspected proof.
+
+`STATE_MODE` is the problem phase and stays separate from affect. `CAPS_VERIFIED`
+lists only capabilities proven or bound for this route/session. Do not include
+token-cost pressure fields in the head envelope; exact ledgers remain
+observability for humans and harness analysis, while the model prioritizes
+quality and proof.
+
+`STATE_WRITEBACK` is emitted after finalization as a compact run-ledger receipt
+from `state_delta` and `state_feedback`. It gives the next CSC/STATE writer a
+bounded target without creating broad hidden memory.
 
 ### 4. wa-tool-server
 

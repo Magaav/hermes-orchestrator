@@ -1,0 +1,148 @@
+{
+  "schema": "hermes.wasm_agent.cyphers.v3",
+  "id": "c3",
+  "protocols": {
+    "e": "envelope",
+    "c": "continuity",
+    "g": "registry_digest"
+  },
+  "routes": {
+    "a": "wasm-agent.avatar-chat.ui"
+  },
+  "surfaces": {
+    "a": "avatar-chat"
+  },
+  "capabilities": {
+    "r": "repo.read",
+    "w": "repo.edit",
+    "t": "test.run",
+    "x": "runtime.inspect",
+    "p": "proof.report"
+  },
+  "tools": {
+    "q": "code.memory.search",
+    "i": "code.memory.impact",
+    "r": "file.read_bounded",
+    "f": "lookup.files",
+    "s": "lookup.symbol",
+    "k": "kernel.inspect",
+    "w": "patch.apply_scoped",
+    "t": "test.run_focused",
+    "d": "git.diff_summary",
+    "p": "proof.collect",
+    "x": "transcript.read",
+    "c": "node.capabilities",
+    "n": "node.chat",
+    "u": "cost.status",
+    "v": "checkpoint.resume",
+    "l": "skill.select",
+    "a": "route.resolve"
+  },
+  "arguments": {
+    "q": "query",
+    "p": "path",
+    "b": "max_bytes",
+    "l": "limit",
+    "k": "kind",
+    "n": "node_id",
+    "o": "objective",
+    "c": "command",
+    "t": "timeout_sec",
+    "i": "inspect",
+    "r": "run_id",
+    "s": "skill_id",
+    "u": "turn_id",
+    "f": "surface"
+  },
+  "operations": {
+    "route": {
+      "tool": "route.resolve",
+      "args": {"objective": "objective", "surface": "surface"}
+    },
+    "search": {
+      "tool": "code.memory.search",
+      "args": {"query": "query", "limit": "limit"}
+    },
+    "read": {
+      "tool": "file.read_bounded",
+      "args": {"path": "path", "bytes": "max_bytes", "offset": "offset", "length": "length"}
+    },
+    "symbol": {
+      "tool": "lookup.symbol",
+      "args": {"query": "query"}
+    },
+    "files": {
+      "tool": "lookup.files",
+      "args": {}
+    },
+    "inspect": {
+      "tool": "kernel.inspect",
+      "args": {"kind": "kind", "inspect": "inspect"}
+    },
+    "edit": {
+      "tool": "patch.apply_scoped",
+      "args": {"operations": "operations", "dry_run": "dry_run"}
+    },
+    "test": {
+      "tool": "test.run_focused",
+      "args": {"check_id": "check_id"}
+    },
+    "diff": {
+      "tool": "git.diff_summary",
+      "args": {}
+    },
+    "prove": {
+      "tool": "proof.collect",
+      "args": {"run_id": "run_id", "quest_id": "quest_id", "turn_id": "turn_id"}
+    },
+    "transcript": {
+      "tool": "transcript.read",
+      "args": {"limit": "limit", "start": "start", "end": "end", "format": "format"}
+    },
+    "node_caps": {
+      "tool": "node.capabilities",
+      "args": {"node_id": "node_id", "skill_id": "skill_id"}
+    },
+    "node_chat": {
+      "tool": "node.chat",
+      "args": {"node_id": "node_id", "objective": "objective", "skill_id": "skill_id"}
+    },
+    "cost": {
+      "tool": "cost.status",
+      "args": {}
+    },
+    "impact": {
+      "tool": "code.memory.impact",
+      "args": {"limit": "limit"}
+    },
+    "resume": {
+      "tool": "checkpoint.resume",
+      "args": {"run_id": "run_id", "turn_id": "turn_id"}
+    },
+    "skill": {
+      "tool": "skill.select",
+      "args": {"node_id": "node_id", "skill_id": "skill_id"}
+    }
+  },
+  "statuses": {
+    "o": "satisfying",
+    "e": "empty",
+    "m": "missing_or_unsupported",
+    "x": "error"
+  },
+  "proof": {
+    "r": "route",
+    "e": "evidence",
+    "f": "changed_files",
+    "t": "checks",
+    "u": "token_usage"
+  },
+  "limits": {
+    "history_steps": 8,
+    "observation_chars": 18000,
+    "evidence_context_chars": 20000,
+    "file_observation_chars": 12000,
+    "summary_chars": 1200,
+    "minimum_output_reserve": 600
+  }
+}

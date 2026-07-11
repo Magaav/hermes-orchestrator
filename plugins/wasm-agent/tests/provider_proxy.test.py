@@ -179,6 +179,25 @@ class ProviderProxyTests(unittest.TestCase):
     def admin(self) -> dict[str, Any]:
         return {"id": 1, "role": "admin", "email": "admin@example.test"}
 
+    def test_direct_envelope_preserves_declared_conversation_objective_kind(self) -> None:
+        envelope = server_mod.direct_envelope_from_body({
+            "envelope": {
+                "trace_id": "trace-answer-direct-proof",
+                "objective": "avatar-chat quest proof turn one: answer directly with route and token proof only.",
+                "objective_kind": "conversation",
+                "surface": "avatar-chat",
+                "route_id": "wasm-agent.avatar-chat.ui",
+                "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                "allowed_actions": [{"id": "answer"}],
+                "stream": True,
+            }
+        })
+
+        self.assertEqual(envelope["objective_kind"], "conversation")
+        self.assertEqual(envelope["task_contract"]["intent"], "answer")
+        self.assertEqual(envelope["task_contract"]["evidence_floor"], "conceptual")
+        self.assertEqual(envelope["task_contract"]["tools_first"], ["kernel.resolve"])
+
     def body(self, base_url: str) -> dict[str, Any]:
         return {
             "provider_config": {
@@ -282,6 +301,31 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertEqual(request["authorization"], "Bearer test-key")
             self.assertEqual(request["payload"]["model"], "stub-model")
             self.assertFalse(request["payload"]["stream"])
+
+    def test_backend_proxy_stream_suppresses_stale_inspection_delta(self) -> None:
+        with ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": "Not inspected yet - I need to search the wasm-agent repo before I can describe space widgets."
+                    }
+                }],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+            }
+            emitted: list[dict[str, Any]] = []
+
+            result = server_mod.provider_proxy_completion(
+                None,
+                self.body(stub.base_url),
+                user=self.admin(),
+                action_callback=emitted.append,
+            )
+
+            self.assertIn("Not inspected yet", result["reply"])
+            self.assertEqual(emitted, [])
+            request = ProviderStubHandler.requests[-1]
+            self.assertTrue(request["payload"]["stream"])
 
     def test_direct_envelope_dispatches_compact_context(self) -> None:
         with ProviderStub() as stub:
@@ -450,7 +494,53 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertTrue(read["ok"])
             self.assertEqual(read["turn_count"], 2)
             self.assertEqual(read["turns"][0]["content"], "First goal")
+            self.assertEqual(len(read["cover_digest"]), 64)
+            self.assertEqual(read["proof"]["cover_digest"], read["cover_digest"])
             self.assertEqual(read["proof"]["source"], "request.transcript_cache")
+
+    def test_reflective_envelope_projects_session_local_recent_turns(self) -> None:
+        with ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Reflective continuity readable.",
+                            "decision": "answer",
+                            "actions": [],
+                            "state_delta": {},
+                            "needs": [],
+                            "confidence": 0.9,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            }
+            body = {
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "transcript_cache": {
+                    "handle": "ctx://avatar-chat/session/agent_reflect",
+                    "turns": [
+                        {"i": 1, "role": "user", "content": "We decided quality beats token saving."},
+                        {"i": 2, "role": "assistant", "content": "I will keep reflective answers rich."},
+                    ],
+                },
+                "envelope": {
+                    "trace_id": "trace-reflective-recent",
+                    "objective": "critique your own envelope from within",
+                    "surface": "avatar-chat",
+                    "allowed_actions": [{"id": "answer"}, {"id": "transcript.read"}],
+                    "budget": {"max_output_tokens": 128},
+                },
+            }
+
+            server_mod.provider_envelope_completion(None, body, user=self.admin())
+
+            sent_context = ProviderStubHandler.requests[-1]["payload"]["messages"][1]["content"]
+            self.assertIn("RECENT", sent_context)
+            self.assertIn("session_local_reflective", sent_context)
+            self.assertIn("quality beats token saving", sent_context)
+            self.assertIn('"persistent":false', sent_context)
 
     def test_node_bridge_tools_expose_capabilities_and_chat(self) -> None:
         fake_server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
@@ -500,6 +590,52 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertEqual(caps["chat_tool"], "node.chat")
         self.assertEqual(chat["reply"], "Paracelsus answered.")
         self.assertEqual(chat["proof"]["model_source"], "node-runtime-default")
+
+    def test_node_chat_selects_and_proves_requested_skill(self) -> None:
+        fake_server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
+
+        def fake_bridge_proxy(*_args, **_kwargs):
+            return {"node": {"id": "paracelsus", "status": "ok", "actions": []}}
+
+        def fake_bridge_runs(*_args, **kwargs):
+            self.assertIn("Required skill contract: `scientific-paper-meta-analysis`", kwargs["text_content"])
+            return (
+                "Ranked findings.",
+                "bridge_runs",
+                {"total_tokens": 11},
+                {
+                    "id": "task_skill_chat",
+                    "finish_reason": "completed",
+                    "tool_calls": [
+                        {
+                            "name": "skill_view",
+                            "arguments": '{"name":"scientific-paper-meta-analysis"}',
+                            "status": "done",
+                        }
+                    ],
+                    "steps": [],
+                },
+            )
+
+        body = {"node_id": "paracelsus", "skill_id": "scientific-paper-meta-analysis"}
+        with patch.object(server_mod, "bridge_proxy", side_effect=fake_bridge_proxy), patch.object(server_mod, "call_agent_bridge_runs", side_effect=fake_bridge_runs):
+            caps = server_mod.agent_kernel_tool(
+                fake_server,
+                "/agent/tools/node.capabilities",
+                body,
+                user=self.admin(),
+            )
+            chat = server_mod.agent_kernel_tool(
+                fake_server,
+                "/agent/tools/node.chat",
+                {**body, "objective": "Rank GPL-1 and dopamine papers."},
+                user=self.admin(),
+            )
+
+        self.assertTrue(caps["skill"]["available"])
+        self.assertEqual(caps["skill"]["version"], "1.1.0")
+        self.assertTrue(chat["skill"]["used"])
+        self.assertTrue(chat["skill"]["argument_matched"])
 
     def test_node_scoped_kernel_capabilities_action_routes_to_node_capabilities(self) -> None:
         fake_server = type("FakeServer", (), {"bridge_url": "http://bridge.example"})()
@@ -974,6 +1110,49 @@ class ProviderProxyTests(unittest.TestCase):
                 events = server_mod.read_agent_run_events(self.admin(), final["run_id"])["events"]
                 self.assertIn("head.delta", [event["type"] for event in events])
 
+    def test_openai_responses_top_level_stream_usage_is_persisted_to_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, OpenAIResponsesStub() as stub:
+            OpenAIResponsesStubHandler.events = [
+                {"type": "response.output_text.delta", "delta": "Top level usage"},
+                {
+                    "type": "response.done",
+                    "id": "resp_top_level_usage",
+                    "status": "completed",
+                    "usage": {"input_tokens": 12, "output_tokens": 5, "total_tokens": 17},
+                },
+            ]
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+                "WASM_AGENT_OPENAI_BASE_URL": stub.base_url,
+                "WASM_AGENT_OPENAI_MODEL": "gpt-top-level-usage",
+                "OPENAI_API_KEY": "openai-test-key",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "top-level-usage-turn",
+                "receiver": "openai-responses",
+                "envelope": {
+                    "trace_id": "trace-top-level-usage",
+                    "objective": "Answer directly.",
+                    "surface": "avatar-chat",
+                    "capabilities": ["answer"],
+                    "allowed_actions": [{"id": "answer"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+            with patch.dict(os.environ, env, clear=True):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+
+            self.assertEqual(result["reply"], "Top level usage")
+            self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 1)
+            self.assertTrue(stored_run["token_ledger"]["exact"])
+            self.assertEqual(stored_run["token_ledger"]["input_tokens"], 12)
+            self.assertEqual(stored_run["token_ledger"]["output_tokens"], 5)
+            self.assertEqual(stored_run["token_ledger"]["total_tokens"], 17)
+
     def test_cost_status_groups_quest_turn_history_and_filters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -1109,6 +1288,13 @@ class ProviderProxyTests(unittest.TestCase):
                     "lookup_handles": ["route.files", "route.symbols", "route.tests"],
                     "caps": ["repo.read", "repo.edit", "test.run", "proof.report"],
                     "provider_policy": {"default": "local-first", "hermes": "bounded-skill-only"},
+                    "source_index": {
+                        "include_roots": ["."],
+                        "exclude_globs": ["**/node_modules/**", "**/__pycache__/**"],
+                        "max_file_bytes": 32768,
+                        "max_total_bytes": 131072,
+                        "max_results": 4,
+                    },
                     "budget": {"head_tokens_max": 100, "provider_tokens_max": 200, "api_calls_max": 2},
                     "proof": ["route_id", "changed_files", "checks", "token_ledger"],
                     "checks": [{
@@ -1534,6 +1720,15 @@ class ProviderProxyTests(unittest.TestCase):
                             "decision": "answer",
                             "actions": [],
                             "state_delta": {},
+                            "state_feedback": {
+                                "coverage": "thin",
+                                "ambiguity": ["prior_decision"],
+                                "suggested_anchor": "turn3:decision:auth-proof",
+                            },
+                            "model_reflection": {
+                                "kind": "self_model",
+                                "claim_status": "metaphor_not_proof",
+                            },
                             "needs": [],
                             "confidence": 0.8,
                         })
@@ -1575,7 +1770,175 @@ class ProviderProxyTests(unittest.TestCase):
                 stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
                 self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 1)
                 self.assertEqual(stored_run["token_ledger"]["total_tokens"], 5)
+                self.assertEqual(
+                    stored_run["final"]["diagnostics"]["state_feedback"]["suggested_anchor"],
+                    "turn3:decision:auth-proof",
+                )
+                self.assertEqual(
+                    stored_run["final"]["diagnostics"]["state_writeback"]["next"]["suggested_anchor"],
+                    "turn3:decision:auth-proof",
+                )
+                self.assertEqual(
+                    stored_run["final"]["diagnostics"]["model_reflection"]["claim_status"],
+                    "metaphor_not_proof",
+                )
+                self.assertIn("state.writeback", event_types)
+                self.assertFalse(stored_run["final"]["diagnostics"]["self_check"]["proof_overclaim"])
                 self.assertTrue(all(event["redacted"] for event in events))
+
+    def test_state_writeback_suggested_anchor_feeds_next_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.response_bodies = [
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "First answer.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {"decision": "use anchor next"},
+                                "state_feedback": {
+                                    "coverage": "thin",
+                                    "state_mode": "converging",
+                                    "suggested_anchor": "turn1:decision:use-anchor-next",
+                                },
+                                "needs": [],
+                                "confidence": 0.8,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Second answer.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.8,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6},
+                },
+            ]
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            base_envelope = {
+                "surface": "avatar-chat",
+                "capabilities": ["answer"],
+                "allowed_actions": [{"id": "answer"}],
+                "budget": {"max_output_tokens": 128},
+                "stream": True,
+            }
+            with patch.dict(os.environ, env, clear=True):
+                first = server_mod.provider_envelope_run_completion(object(), {
+                    "session_id": "writeback-session",
+                    "turn_id": "writeback-turn-1",
+                    "provider_config": self.body(stub.base_url)["provider_config"],
+                    "envelope": {
+                        **base_envelope,
+                        "trace_id": "trace-writeback-1",
+                        "objective": "Answer first.",
+                    },
+                }, user=self.admin())
+                second = server_mod.provider_envelope_run_completion(object(), {
+                    "session_id": "writeback-session",
+                    "turn_id": "writeback-turn-2",
+                    "provider_config": self.body(stub.base_url)["provider_config"],
+                    "envelope": {
+                        **base_envelope,
+                        "trace_id": "trace-writeback-2",
+                        "objective": "Answer second.",
+                    },
+                }, user=self.admin())
+
+            self.assertEqual(first["reply"], "First answer.")
+            self.assertEqual(second["reply"], "Second answer.")
+            second_context = ProviderStubHandler.requests[-1]["payload"]["messages"][1]["content"]
+            self.assertIn("ANCHORS", second_context)
+            self.assertIn("turn1:decision:use-anchor-next", second_context)
+            self.assertIn("STATE_MODE converging", second_context)
+            self.assertIn("LAST_FEEDBACK", second_context)
+            self.assertIn('"status":"accepted"', second_context)
+            self.assertIn('"coverage":"thin"', second_context)
+
+    def test_repo_object_receipts_feed_next_envelope_context(self) -> None:
+        local_tool_results = [{
+            "tool": "code.memory.search",
+            "ok": True,
+            "code": "ok",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "result": {
+                "query": "meta-analysis",
+                "items": [{
+                    "name": "meta-analysis-widget.js",
+                    "qualified_name": "workspace.public.modules.meta-analysis.meta-analysis-widget.__file__",
+                    "file_path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                }],
+            },
+        }]
+        writeback = server_mod.master_frontier_envelope.state_writeback_projection(
+            {
+                "route_id": "wasm-agent.avatar-chat.ui",
+                "objective": "what does the meta-analysis widget from realure space does?",
+            },
+            {"answer": "Found widget.", "decision": "answer", "actions": []},
+            "Found widget.",
+            local_tool_results=local_tool_results,
+        )
+        envelope = {
+            "compact_state": {},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            with patch.dict(os.environ, env, clear=True):
+                now_ms = server_mod.agent_run_now_ms()
+                with server_mod.auth_connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO agent_run_tb
+                            (run_id, session_id, turn_id, request_hash, user_id, target_node, status, request_summary_json, final_json, created_at, updated_at, terminal_at)
+                        VALUES
+                            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            "wa_run_repo_context",
+                            "repo-context-session",
+                            "repo-context-turn-1",
+                            "repo-context-hash",
+                            str(self.admin()["id"]),
+                            "direct-head",
+                            "completed",
+                            json.dumps({"objective": "check meta-analysis widget"}),
+                            json.dumps({"diagnostics": {"state_writeback": writeback}}),
+                            now_ms,
+                            now_ms,
+                            now_ms,
+                        ),
+                    )
+                    conn.commit()
+                server_mod.apply_previous_state_writeback_to_envelope(
+                    {"session_id": "repo-context-session", "turn_id": "repo-context-turn-2"},
+                    envelope,
+                )
+
+        context = envelope["compact_state"]["repo_object_context"]
+        self.assertEqual(context["query"], "meta-analysis")
+        self.assertIn("public/modules/meta-analysis/meta-analysis-widget.js", context["paths"])
+        quest_state = envelope["compact_state"]["quest_state"]
+        self.assertEqual(quest_state["missing"], ["rt:realure"])
+        self.assertIn("QS/1 G:realure-meta-analysis-widget", server_mod.direct_envelope_semantic_text(envelope))
 
     def test_direct_head_can_execute_local_tool_action_without_hermes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
@@ -1631,6 +1994,8 @@ class ProviderProxyTests(unittest.TestCase):
             event_types = [event["type"] for event in events]
             self.assertIn("tool.started", event_types)
             self.assertIn("tool.finished", event_types)
+            self.assertIn("loop.finished", event_types)
+            self.assertLess(event_types.index("loop.finished"), event_types.index("run.final"))
             self.assertLess(event_types.index("tool.finished"), event_types.index("run.final"))
 
     def test_agent_kernel_primitives_are_generic_local_first_contract(self) -> None:
@@ -2064,6 +2429,23 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertEqual(envelope["runtime_entity_routes"][0]["route_id"], "hermes-node.paracelsus.runtime")
         self.assertIn("RUNTIME_ROUTES", semantic)
 
+    def test_master_frontier_entity_resolves_before_code_memory_search(self) -> None:
+        resolved = server_mod.agent_kernel_tool(
+            object(),
+            "/agent/tools/kernel.resolve",
+            {"objective": "look up our Master:frontier node"},
+            user=self.admin(),
+        )
+
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(resolved["route_id"], "wasm-agent.frontier.provider")
+        self.assertEqual(resolved["root_cause_class"], "entity_route")
+        self.assertEqual(resolved["entity"]["name"], "Master:frontier")
+        self.assertEqual(resolved["entity"]["node_id"], "frontier")
+        self.assertEqual(resolved["entity"]["selector"], "__target:master_frontier__")
+        self.assertIn("AGENT_MASTER_FRONTIER_TARGET_ID", resolved["entity"]["symbols"])
+        self.assertIn("code.memory.search", resolved["next_local_primitives"])
+
     def test_direct_head_runtime_entity_objective_attaches_local_kernel_before_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env = {
@@ -2273,6 +2655,22 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertFalse(server_mod.direct_head_objective_is_implementation_intent(envelope))
         self.assertFalse(server_mod.direct_head_goal_requires_change_artifact(envelope))
 
+    def test_direct_head_self_capability_location_probe_does_not_require_changed_files(self) -> None:
+        envelope = {
+            "objective": (
+                "hello i am going to test your power\n"
+                "check what you can do for us and your conecientness build up\n"
+                "so, where are you?"
+            ),
+            "surface": "avatar-chat",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "capabilities": ["repo.read", "repo.edit", "test.run", "runtime.inspect", "proof.report"],
+        }
+
+        self.assertTrue(server_mod.direct_head_text_is_capability_inquiry(envelope["objective"]))
+        self.assertFalse(server_mod.direct_head_objective_is_implementation_intent(envelope))
+        self.assertFalse(server_mod.direct_head_goal_requires_change_artifact(envelope))
+
     def test_direct_head_widget_build_request_still_requires_changed_files(self) -> None:
         envelope = {
             "objective": "Go ahead and build the widget in the Realure space",
@@ -2370,7 +2768,7 @@ class ProviderProxyTests(unittest.TestCase):
                     "surface": "avatar-chat",
                     "route_id": "wasm-agent.avatar-chat.ui",
                     "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
-                    "allowed_actions": [{"id": "answer"}, {"id": "kernel.inspect"}],
+                    "allowed_actions": [{"id": "answer"}, {"id": "kernel.inspect"}, {"id": "code.memory.search"}, {"id": "lookup.symbol"}],
                     "budget": {"max_output_tokens": 128},
                     "stream": True,
                 },
@@ -2386,6 +2784,87 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertNotIn("I need to inspect", result["reply"])
             self.assertIn("Kernel inspection proof", result["reply"])
             self.assertTrue(any(event["type"] == "tool.finished" and event["summary"].startswith("kernel.inspect") for event in events))
+
+    def test_direct_head_synthesizes_repo_object_lookup_when_repair_repeats_missing_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            missing = {
+                "model": "stub-model",
+                "choices": [{"message": {"content": "I don't have the meta-analysis widget. Could you paste the widget code?"}}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+            }
+            ProviderStubHandler.response_bodies = [
+                missing,
+                missing,
+                {
+                    "model": "stub-model",
+                    "choices": [{"message": {"content": json.dumps({
+                        "answer": "The bounded lookup found the meta-analysis widget; critique can proceed from that evidence.",
+                        "decision": "answer_from_lookup",
+                        "actions": [],
+                        "state_delta": {},
+                        "needs": [],
+                        "confidence": 0.8,
+                    })}}],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 3, "total_tokens": 9},
+                },
+            ]
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-repo-object-lookup-fallback",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-repo-object-lookup-fallback",
+                    "objective": "Check out this meta-analysis widget and criticize it.",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}, {"id": "code.memory.search"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            original_kernel_tool = server_mod.agent_kernel_tool
+
+            def fake_kernel_tool(_server, path, tool_body: dict[str, Any], *, user=None) -> dict[str, Any]:
+                if path.endswith("/code.memory.search"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "primitive": "code.memory.search",
+                        "route_id": tool_body.get("route_id"),
+                        "query": "meta-analysis",
+                        "engine": "fixture",
+                        "items": [{
+                            "name": "MetaAnalysisWidget",
+                            "path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                        }],
+                    }
+                if path.endswith("/file.read_bounded"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.route.file_read_bounded.v1",
+                        "route_id": tool_body.get("route_id"),
+                        "path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                        "text": "rankSubject node.chat paracelsus scientific-paper-meta-analysis assessIntegrity exportFindings persist localStorage",
+                    }
+                return original_kernel_tool(_server, path, tool_body, user=user)
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "agent_kernel_tool", side_effect=fake_kernel_tool):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"])["events"]
+
+            self.assertIn("The meta-analysis widget is a browser-side research workflow panel", result["reply"])
+            self.assertIn("sends the subject to the `paracelsus` research node's `scientific-paper-meta-analysis` workflow", result["reply"])
+            self.assertNotIn("Code memory proof", result["reply"])
+            self.assertTrue(any(event["type"] == "head.repair" and event["payload"].get("reason") == "repo_object_missing_context_lookup" for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and event["summary"].startswith("code.memory.search") for event in events))
+            self.assertFalse(any(event["type"] == "head.continued" for event in events))
 
     def test_direct_head_replaces_dispatching_inspection_now_after_local_tools_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
@@ -2507,6 +2986,54 @@ class ProviderProxyTests(unittest.TestCase):
                     }],
                     "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
                 },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "I don't have inspected evidence yet on what space widgets are in this UI — checking the owned repo codebase now.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.4,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Not inspected yet - I need to search the wasm-agent repo before I can describe space widgets.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.4,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Not inspected yet - I need to search the wasm-agent repo before I can describe space widgets.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.4,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
             ]
             env = {
                 "WASM_AGENT_ROUTE_CONTRACTS_PATH": str(registry),
@@ -2540,6 +3067,25 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertIn("app.py", run["final"]["changed_files"])
             self.assertTrue(any(event["type"] == "head.continued" for event in events))
             self.assertTrue(any(event["type"] == "tool.finished" and "patch.apply_scoped" in event["summary"] for event in events))
+            event_types = [event["type"] for event in events]
+            for required in (
+                "llm.inference.started",
+                "llm.reason.summary",
+                "semantic.decision",
+                "command.proposed",
+                "command.accepted",
+                "command.dispatched",
+                "command.started",
+                "evidence.received",
+                "llm.inference.completed",
+                "turn.usage.updated",
+                "gate.started",
+                "gate.decision",
+                "answer.started",
+                "answer.final",
+            ):
+                self.assertIn(required, event_types)
+            self.assertLess(event_types.index("evidence.received"), event_types.index("head.continued"))
 
     def test_direct_head_repairs_empty_provider_content_into_local_patch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
@@ -2721,6 +3267,662 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertEqual(events[-1]["type"], "run.error")
             self.assertFalse(any(event["type"] == "run.final" for event in events))
 
+    def test_master_frontier_loop_rejects_receipt_only_repo_diagnosis_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "Objective. Route resolved. kernel.inspect / 3 file receipts. Final ✓",
+                            "decision": "kernel.inspect",
+                            "actions": [{
+                                "action": "kernel.inspect",
+                                "args": {
+                                    "route_id": "wasm-agent.avatar-chat.ui",
+                                    "inspect": ["files"],
+                                    "query": "architecture",
+                                },
+                            }],
+                            "state_delta": {},
+                            "needs": [],
+                            "confidence": 0.5,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-receipt-only-diagnosis",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-receipt-only-diagnosis",
+                    "objective": "inspect the repo and diagnose why Master:frontier architecture is failing",
+                    "objective_kind": "diagnosis",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}, {"id": "kernel.inspect"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs") as bridge:
+                with self.assertRaises(server_mod.ProviderProxyError) as raised:
+                    server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                runs = server_mod.list_agent_runs(self.admin(), {"session_id": ["direct-session"]})["runs"]
+                events = server_mod.read_agent_run_events(self.admin(), runs[0]["run_id"], {"limit": ["500"]})["events"]
+
+            bridge.assert_not_called()
+            self.assertEqual(raised.exception.diagnostic["category"], "master_frontier_loop_incomplete")
+            self.assertEqual(runs[0]["status"], "failed")
+            self.assertTrue(any(event["type"] == "loop.critique" for event in events))
+            self.assertTrue(any(event["type"] == "loop.incomplete" for event in events))
+            self.assertFalse(any(event["type"] == "run.final" for event in events))
+
+    def test_direct_head_bounded_continuation_summarizes_repeated_local_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.response_bodies = [
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Looking into what space widgets are in this avatar-chat UI - need to inspect the repo for that.",
+                                "decision": "dispatch kernel.search to find space-widget related code",
+                                "actions": [{
+                                    "action": "code.memory.search",
+                                    "args": {
+                                        "route_id": "wasm-agent.avatar-chat.ui",
+                                        "query": "space widgets",
+                                        "limit": 4,
+                                    },
+                                }],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.5,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "dispatch kernel.inspect to find space-widget related code",
+                                "decision": "route_to_kernel_inspect",
+                                "actions": [{
+                                    "action": "kernel.inspect",
+                                    "args": {
+                                        "route_id": "wasm-agent.avatar-chat.ui",
+                                        "inspect": ["files"],
+                                        "query": "space widgets",
+                                    },
+                                }],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.5,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "route_to_kernel_inspect",
+                                "decision": "route_to_kernel_inspect",
+                                "actions": [{
+                                    "action": "kernel.inspect",
+                                    "args": {
+                                        "route_id": "wasm-agent.avatar-chat.ui",
+                                        "inspect": ["files"],
+                                        "query": "space widgets",
+                                    },
+                                }],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.5,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+            ]
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-space-widgets",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-space-widgets",
+                    "objective": "amazing, can you check what are space widgets for this ui?",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}, {"id": "code.memory.search"}, {"id": "kernel.inspect"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            def fake_kernel_tool(_server, path, _body, *, user=None):
+                if path.endswith("/code.memory.search"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.code_memory.v1",
+                        "primitive": "code.memory.search",
+                        "route_id": "wasm-agent.avatar-chat.ui",
+                        "query": "space widgets",
+                        "engine": "search_graph",
+                        "items": [
+                            {"label": "Space widget registry", "path": "public/modules/spaces/widgets.js", "line": 12},
+                            {"label": "Space widget renderer", "path": "public/app.js", "line": 29800},
+                        ],
+                    }
+                return {
+                    "ok": True,
+                    "code": "ok",
+                    "schema": "hermes.wasm_agent.kernel.inspect_result.v1",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "observations": [{
+                        "kind": "files",
+                        "ok": True,
+                        "result": {"count": 2},
+                    }],
+                }
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "agent_kernel_tool", side_effect=fake_kernel_tool):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"], {"limit": ["500"]})["events"]
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+
+            self.assertIn("Code memory search for `space widgets` returned 2 route-scoped result", result["reply"])
+            self.assertIn("public/modules/spaces/widgets.js", result["reply"])
+            self.assertNotIn("route_to_kernel_inspect", result["reply"])
+            self.assertEqual(len([event for event in events if event["type"] == "head.continued"]), 0)
+            self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 1)
+            self.assertEqual(stored_run["token_ledger"]["input_tokens"], 6)
+            self.assertEqual(stored_run["token_ledger"]["output_tokens"], 4)
+            self.assertEqual(stored_run["token_ledger"]["total_tokens"], 10)
+            self.assertEqual(events[-1]["type"], "run.final")
+
+    def test_direct_head_answers_realure_meta_analysis_from_repo_object_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.body = {
+                "model": "stub-model",
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "answer": "I don't yet have inspected evidence about what the meta-analysis widget from realure space does. Searching the owned repo for references before answering.",
+                            "decision": "route to kernel.inspect on the owned repo for 'meta-analysis widget' and 'realure space' before answering",
+                            "actions": [],
+                            "state_delta": {},
+                            "needs": [],
+                            "confidence": 0.4,
+                        })
+                    }
+                }],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 5, "total_tokens": 13},
+            }
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-realure-meta-analysis",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-realure-meta-analysis",
+                    "objective": "what does the meta-analysis widget from realure space does?",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}, {"id": "code.memory.search"}, {"id": "kernel.inspect"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            def fake_kernel_tool(_server, path, _body, *, user=None):
+                if path.endswith("/code.memory.search"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.code_memory.v1",
+                        "primitive": "code.memory.search",
+                        "route_id": "wasm-agent.avatar-chat.ui",
+                        "query": "meta-analysis",
+                        "engine": "search_graph",
+                        "items": [{
+                            "label": "Meta-analysis widget",
+                            "path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                            "line": 1,
+                        }],
+                    }
+                if path.endswith("/file.read_bounded"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.route.file_read_bounded.v1",
+                        "route_id": "wasm-agent.avatar-chat.ui",
+                        "path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                        "text": "async function rankSubject() { await postJson('/agent/tools/node.chat', { node_id: 'paracelsus', objective: 'Use your scientific-paper-meta-analysis workflow for this subject.' }); } function assessIntegrity() {} function exportFindings() {} function persist() { localStorage.setItem('metaAnalysisQueue', ''); }",
+                    }
+                return {
+                    "ok": True,
+                    "code": "ok",
+                    "schema": "hermes.wasm_agent.kernel.inspect_result.v1",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "observations": [{"kind": "files", "ok": True, "result": {"count": 1}}],
+                }
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "agent_kernel_tool", side_effect=fake_kernel_tool):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"], {"limit": ["500"]})["events"]
+
+            self.assertIn("The meta-analysis widget is a browser-side research workflow panel", result["reply"])
+            self.assertIn("sends the subject to the `paracelsus` research node's `scientific-paper-meta-analysis` workflow", result["reply"])
+            self.assertIn("flags bias/integrity signals from the returned finding text", result["reply"])
+            self.assertIn("turns saved findings into an exportable report", result["reply"])
+            self.assertIn("live realure runtime proof", result["reply"])
+            self.assertNotIn("Code memory proof", result["reply"])
+            self.assertNotIn("Code memory search for `meta-analysis`", result["reply"])
+            self.assertNotIn("public/modules/meta-analysis/meta-analysis-widget.js", result["reply"])
+            self.assertNotIn("Source anchor", result["reply"])
+            self.assertNotIn("The source-backed understanding is", result["reply"])
+            self.assertNotIn("don't yet have inspected evidence", result["reply"])
+            self.assertTrue(any(event["type"] == "tool.finished" and "code.memory.search" in event["summary"] for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and "file.read_bounded" in event["summary"] for event in events))
+            frontier_proofs = [event for event in events if event["type"] == "frontier.proof"]
+            self.assertTrue(frontier_proofs)
+            proof_packet = frontier_proofs[-1]["payload"]["frontier_proof"]
+            self.assertIn("QS/1", proof_packet["qs_line"])
+            self.assertIn("SRC/1", proof_packet["source_line"])
+            self.assertEqual(proof_packet["controller_decision"], "answer_with_runtime_caveat")
+            self.assertFalse(any(event["type"] == "tool.finished" and event["summary"].startswith("kernel.inspect") for event in events))
+            self.assertEqual(events[-1]["type"], "run.final")
+
+    def test_frontier_proof_event_streams_as_timeline_action(self) -> None:
+        payload = server_mod.agent_run_event_stream_payload(
+            object(),
+            {
+                "type": "frontier.proof",
+                "run_id": "wa_run_test",
+                "seq": 7,
+                "summary": "MF/1 stage:final_gate route:wasm-agent.avatar-chat.ui",
+                "payload": {"frontier_proof": {"line": "MF/1 stage:final_gate"}},
+            },
+            user=self.admin(),
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["type"], "action")
+        self.assertEqual(payload["action"]["label"], "frontier.proof")
+        self.assertEqual(payload["action"]["event_type"], "frontier.proof")
+        self.assertIn("MF/1", payload["action"]["detail"])
+
+    def test_envelope_v2_event_streams_as_timeline_action(self) -> None:
+        payload = server_mod.agent_run_event_stream_payload(
+            object(),
+            {
+                "type": "semantic.decision",
+                "run_id": "wa_run_test",
+                "seq": 8,
+                "summary": "kernel.inspect",
+                "payload": {"envelope_v2": {"type": "semantic.decision"}},
+            },
+            user=self.admin(),
+        )
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["type"], "action")
+        self.assertEqual(payload["action"]["label"], "semantic.decision")
+        self.assertEqual(payload["action"]["event_type"], "semantic.decision")
+
+    def test_direct_head_repairs_kernel_inspect_decision_without_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
+            ProviderStubHandler.response_bodies = [
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Not inspected yet - I need to search the wasm-agent repo before I can describe space widgets.",
+                                "decision": "Route to kernel.inspect on the owned repo to find space widget components/definitions.",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.4,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 6, "completion_tokens": 4, "total_tokens": 10},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "",
+                                "decision": "kernel.resolve + code.memory.search",
+                                "actions": [
+                                    {
+                                        "action": "kernel.resolve",
+                                        "args": {
+                                            "route_id": "wasm-agent.avatar-chat.ui",
+                                            "query": "space widgets",
+                                        },
+                                    },
+                                    {
+                                        "action": "code.memory.search",
+                                        "args": {
+                                            "route_id": "wasm-agent.avatar-chat.ui",
+                                            "query": "space widgets",
+                                        },
+                                    },
+                                ],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.7,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+                {
+                    "model": "stub-model",
+                    "choices": [{
+                        "message": {
+                            "content": json.dumps({
+                                "answer": "Not inspected yet - I need to search the wasm-agent repo before I can describe space widgets.",
+                                "decision": "answer",
+                                "actions": [],
+                                "state_delta": {},
+                                "needs": [],
+                                "confidence": 0.4,
+                            })
+                        }
+                    }],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 4, "total_tokens": 11},
+                },
+            ]
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-space-widgets-actionless",
+                "provider_config": self.body(stub.base_url)["provider_config"],
+                "envelope": {
+                    "trace_id": "trace-space-widgets-actionless",
+                    "objective": "can you check what are space widgets for this ui?",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}, {"id": "kernel.inspect"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            def fake_kernel_tool(_server, path, _body, *, user=None):
+                if path.endswith("/code.memory.search"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.code_memory.v1",
+                        "primitive": "code.memory.search",
+                        "route_id": "wasm-agent.avatar-chat.ui",
+                        "query": "widget",
+                        "engine": "search_graph",
+                        "items": [{
+                            "label": "Variable",
+                            "name": "SPACE_APP_DEFINITIONS",
+                            "qualified_name": "workspace.public.app.SPACE_APP_DEFINITIONS",
+                            "file_path": "public/app.js",
+                        }],
+                    }
+                if path.endswith("/lookup.symbol"):
+                    return {
+                        "ok": True,
+                        "code": "ok",
+                        "schema": "hermes.wasm_agent.route.lookup_symbol.v1",
+                        "route_id": "wasm-agent.avatar-chat.ui",
+                        "query": "widget",
+                        "matches": [
+                            {"path": "public/app.js", "line": 800, "text": "const SPACE_APP_DEFINITIONS = ["},
+                            {"path": "public/app.js", "line": 18259, "text": "function widgetAvailableInPanel(widgetId, panel = state.activePanel) {"},
+                            {"path": "public/index.html", "line": 504, "text": "<article class=\"widget resources-widget\" data-widget-id=\"resources\">"},
+                        ],
+                        "count": 3,
+                    }
+                return {
+                    "ok": True,
+                    "code": "ok",
+                    "schema": "hermes.wasm_agent.kernel.inspect_result.v1",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "observations": [{
+                        "kind": "files",
+                        "ok": True,
+                        "result": {"count": 3},
+                    }],
+                }
+
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "agent_kernel_tool", side_effect=fake_kernel_tool):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                events = server_mod.read_agent_run_events(self.admin(), result["run_id"], {"limit": ["500"]})["events"]
+                stored_run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
+
+            self.assertIn("Code memory proof", result["reply"])
+            self.assertIn("Code memory search for `widget` returned 1 route-scoped result", result["reply"])
+            self.assertIn("SPACE_APP_DEFINITIONS", result["reply"])
+            self.assertNotIn("Kernel inspection proof", result["reply"])
+            self.assertNotIn("Runtime route:", result["reply"])
+            self.assertNotIn("Not inspected yet", result["reply"])
+            self.assertNotIn("don't have inspected evidence", result["reply"])
+            self.assertNotIn("checking the owned repo", result["reply"])
+            self.assertTrue(any(event["type"] == "head.repair" for event in events))
+            self.assertFalse(any(event["type"] == "tool.finished" and "kernel.inspect" in event["summary"] for event in events))
+            self.assertFalse(any(event["type"] == "tool.finished" and "kernel.resolve" in event["summary"] for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and "code.memory.search" in event["summary"] for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and "lookup.symbol" in event["summary"] for event in events))
+            self.assertEqual(stored_run["token_ledger"]["provider_call_count"], 2)
+            self.assertEqual(stored_run["token_ledger"]["input_tokens"], 13)
+            self.assertEqual(stored_run["token_ledger"]["output_tokens"], 8)
+            self.assertEqual(stored_run["token_ledger"]["total_tokens"], 21)
+
+    def test_repo_object_question_does_not_trigger_runtime_entity_preflight(self) -> None:
+        envelope = {
+            "objective": "what are space widgets for this UI?",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "runtime_entity_routes": [{"route_id": "wasm-agent.frontier.provider"}],
+        }
+
+        self.assertTrue(server_mod.direct_head_objective_is_repo_object_question(envelope))
+        self.assertFalse(server_mod.direct_head_runtime_entity_objective_needs_local_inspection(envelope))
+        actions = server_mod.direct_head_repo_object_probe_actions(envelope, [])
+        self.assertEqual([action["action"] for action in actions], ["code.memory.search", "lookup.symbol"])
+        self.assertEqual(actions[0]["args"]["query"], "widget")
+        self.assertFalse(server_mod.master_frontier_entity_resolution.needs_runtime_scope_proof(envelope))
+
+    def test_scoped_repo_object_question_answers_with_missing_scope_caveat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-scoped-repo-object",
+                "receiver": "openai-codex",
+                "envelope": {
+                    "trace_id": "trace-scoped-repo-object",
+                    "objective": "what does the meta-analysis widget from realure space does?",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+            self.assertTrue(server_mod.master_frontier_entity_resolution.needs_runtime_scope_proof(body["envelope"]))
+
+            provider_result = {
+                "model": "stub-model",
+                "reply": "From the source, the meta-analysis widget ranks queued subjects, adds an Evidence Integrity bias-risk layer, persists results locally, and can export a report. I do not have Realure runtime proof yet, so I would treat Realure availability as unverified.",
+                "parsed": {
+                    "answer": "From the source, the meta-analysis widget ranks queued subjects, adds an Evidence Integrity bias-risk layer, persists results locally, and can export a report. I do not have Realure runtime proof yet, so I would treat Realure availability as unverified.",
+                    "decision": "answer",
+                    "actions": [],
+                    "state_delta": {},
+                    "needs": [],
+                    "confidence": 0.74,
+                },
+                "usage": {"input_tokens": 10, "output_tokens": 8, "total_tokens": 18},
+            }
+            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "openai_responses_completion", return_value=provider_result) as provider:
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                run_id = server_mod.list_agent_runs(self.admin(), {"limit": ["1"]})["runs"][0]["run_id"]
+                events = server_mod.read_agent_run_events(self.admin(), run_id, {"limit": ["500"]})["events"]
+                stored_run = server_mod.read_agent_run(self.admin(), run_id)["run"]
+
+            provider.assert_called_once()
+            sent_envelope = provider.call_args.args[2]
+            self.assertIn("QS/1 G:realure-meta-analysis-widget", server_mod.direct_envelope_semantic_text(sent_envelope))
+            self.assertIn("SRC/1", server_mod.direct_envelope_semantic_text(sent_envelope))
+            self.assertEqual(stored_run["status"], "completed")
+            self.assertIn("Realure runtime proof", result["reply"])
+            self.assertTrue(any(event["type"] == "tool.finished" and "code.memory.search" in event["summary"] for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and "file.read_bounded" in event["summary"] for event in events))
+            self.assertTrue(any(event["summary"] == "runtime_scope_missing" and event["payload"]["code"] == "runtime_scope_missing" for event in events))
+            quest_state = stored_run["final"]["diagnostics"]["state_writeback"]["next"]["quest_state"]
+            self.assertEqual(quest_state["missing"], ["rt:realure"])
+            self.assertIn("NX:answer|inspect", quest_state["line"])
+
+    def test_scoped_repo_object_question_answers_after_unrelated_runtime_preflight_with_caveat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {
+                "HERMES_WASM_AGENT_DB_PATH": str(Path(tmp) / "wa.sqlite3"),
+                "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "local",
+            }
+            body = {
+                "session_id": "direct-session",
+                "turn_id": "direct-scoped-unrelated-runtime",
+                "receiver": "openai-codex",
+                "envelope": {
+                    "trace_id": "trace-scoped-unrelated-runtime",
+                    "objective": "what does the meta-analysis widget from realure space does?",
+                    "intent": "Paracelsus runtime context is active.",
+                    "surface": "avatar-chat",
+                    "route_id": "wasm-agent.avatar-chat.ui",
+                    "capabilities": ["repo.read", "runtime.inspect", "proof.report"],
+                    "allowed_actions": [{"id": "answer"}],
+                    "budget": {"max_output_tokens": 128},
+                    "stream": True,
+                },
+            }
+
+            original_kernel_tool = server_mod.agent_kernel_tool
+
+            def fake_kernel_tool(_server, path, payload, *, user=None):
+                if path.endswith("/kernel.inspect"):
+                    return {
+                        "tool": "kernel.inspect",
+                        "ok": True,
+                        "code": "ok",
+                        "route_id": "hermes-node.paracelsus.runtime",
+                        "summary": {"entity": "paracelsus"},
+                        "result": {"entity": "paracelsus", "route_id": "hermes-node.paracelsus.runtime"},
+                    }
+                return original_kernel_tool(_server, path, payload, user=user)
+
+            provider_result = {
+                "model": "stub-model",
+                "reply": "The widget source says it ranks queued subjects, adds an Evidence Integrity bias-risk layer, persists results locally, and exports findings as a report. The runtime evidence I have is Paracelsus, not Realure, so Realure availability remains unverified.",
+                "parsed": {
+                    "answer": "The widget source says it ranks queued subjects, adds an Evidence Integrity bias-risk layer, persists results locally, and exports findings as a report. The runtime evidence I have is Paracelsus, not Realure, so Realure availability remains unverified.",
+                    "decision": "answer",
+                    "actions": [],
+                    "state_delta": {},
+                    "needs": [],
+                    "confidence": 0.72,
+                },
+                "usage": {"input_tokens": 9, "output_tokens": 7, "total_tokens": 16},
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch.object(server_mod, "openai_responses_completion", return_value=provider_result) as provider,
+                patch.object(server_mod, "agent_kernel_tool", side_effect=fake_kernel_tool),
+            ):
+                result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
+                run_id = server_mod.list_agent_runs(self.admin(), {"limit": ["1"]})["runs"][0]["run_id"]
+                events = server_mod.read_agent_run_events(self.admin(), run_id, {"limit": ["500"]})["events"]
+                stored_run = server_mod.read_agent_run(self.admin(), run_id)["run"]
+
+            provider.assert_called_once()
+            self.assertTrue(any(event["type"] == "head.decision" and event["summary"] == "repo_object_runtime_scope_preflight" for event in events))
+            self.assertTrue(any(event["type"] == "tool.finished" and "kernel.inspect" in event["summary"] for event in events))
+            self.assertEqual(stored_run["status"], "completed")
+            self.assertIn("Realure availability remains unverified", result["reply"])
+            self.assertEqual(stored_run["final"]["diagnostics"]["state_writeback"]["next"]["quest_state"]["missing"], ["rt:realure"])
+
+    def test_repo_object_code_memory_evidence_must_match_resolved_object(self) -> None:
+        envelope = {
+            "objective": "great, can you check the meta-analysis widget inside realure?",
+            "route_id": "wasm-agent.avatar-chat.ui",
+        }
+        generic_widget_hits = [{
+            "tool": "code.memory.search",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "result": {
+                "query": "meta-analysis widget realure",
+                "fallback_query": "widget",
+                "items": [{
+                    "label": "Variable",
+                    "name": "FIXED_WIDGET_LAYOUT",
+                    "qualified_name": "workspace.public.app.FIXED_WIDGET_LAYOUT",
+                    "file_path": "public/app.js",
+                }],
+            },
+        }]
+        matching_hits = [{
+            "tool": "code.memory.search",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "result": {
+                "query": "meta-analysis",
+                "items": [{
+                    "label": "File",
+                    "name": "meta-analysis-widget.js",
+                    "qualified_name": "workspace.public.modules.meta-analysis.meta-analysis-widget.__file__",
+                    "file_path": "public/modules/meta-analysis/meta-analysis-widget.js",
+                }],
+            },
+        }]
+
+        self.assertFalse(server_mod.direct_head_code_memory_has_object_evidence(envelope, generic_widget_hits))
+        self.assertTrue(server_mod.direct_head_code_memory_has_object_evidence(envelope, matching_hits))
+
     def test_direct_head_repairs_invalid_dispatch_intent_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:
             ProviderStubHandler.response_bodies = [
@@ -2826,6 +4028,28 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertIn("first character", repaired["instructions"])
         self.assertGreaterEqual(repaired["max_output_tokens"], 1200)
         self.assertEqual(body["max_output_tokens"], 128)
+
+    def test_direct_head_does_not_finalize_let_me_inspect_after_local_tools(self) -> None:
+        local_tool_results = [{
+            "tool": "kernel.inspect",
+            "ok": True,
+            "code": "ok",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "summary": {
+                "observations": [{"kind": "files", "count": 3}],
+            },
+        }]
+        stale = "Hi! Let me inspect the avatar-chat UI codebase to explain what widgets are in this space."
+        live_stale = "Not inspected yet — I need to look into the wasm-agent repo to identify what space widgets exist for the avatar-chat UI."
+        latest_live_stale = "I don't have inspected evidence yet on what space widgets are in this UI — checking the owned repo codebase now."
+
+        self.assertTrue(server_mod.direct_head_answer_still_requests_local_tools(stale, local_tool_results))
+        self.assertTrue(server_mod.direct_head_answer_still_requests_local_tools(live_stale, local_tool_results))
+        self.assertTrue(server_mod.direct_head_answer_still_requests_local_tools(latest_live_stale, local_tool_results))
+        summary = server_mod.direct_head_local_tool_summary_reply("", local_tool_results)
+        self.assertIn("Kernel inspection proof", summary)
+        self.assertIn("Route file lookup returned 3 declared path receipts", summary)
+        self.assertNotIn("Let me inspect", summary)
 
     def test_direct_head_dispatches_hermes_through_bridge_surface(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, ProviderStub() as stub:

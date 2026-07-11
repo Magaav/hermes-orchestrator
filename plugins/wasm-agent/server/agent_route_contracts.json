@@ -9,6 +9,13 @@
       "allowed_read_roots": ["."],
       "allowed_write_roots": ["."],
       "likely_paths": [
+        "public/modules/master-frontier/timeline.js",
+        "public/modules/master-frontier/continuation.js",
+        "server/master_frontier/controller_v3.py",
+        "server/master_frontier/cyphers_v3.py",
+        "server/master_frontier/proof_gate.py",
+        "server/master_frontier/trace.py",
+        "server/master_frontier/token_ledger.py",
         "public/styles.css",
         "public/app.js",
         "public/index.html"
@@ -30,6 +37,31 @@
         "default": "local-first",
         "hermes": "bounded-skill-only",
         "missing_route": "fail"
+      },
+      "source_index": {
+        "include_roots": ["server", "public", "tests", "../../docs/context", "../../tools/context"],
+        "exclude_globs": [
+          "public/modules/**/onnx/**",
+          "public/modules/**/*.wasm",
+          "public/modules/**/tokenizer*.json",
+          "public/modules/**/vocab.json",
+          "public/modules/**/merges.txt",
+          "tools/vendor/**",
+          "../../tools/vendor/**",
+          "reports/**",
+          "../../reports/**",
+          "state/**",
+          "../../state/**",
+          "**/node_modules/**",
+          "**/__pycache__/**",
+          "**/*.onnx",
+          "**/*.wasm",
+          "**/*.tar.gz",
+          "**/*.zip"
+        ],
+        "max_file_bytes": 262144,
+        "max_total_bytes": 8000000,
+        "max_results": 12
       },
       "budget": {
         "head_tokens_max": 3000,
@@ -86,6 +118,31 @@
         "hermes": "bounded-skill-only",
         "missing_route": "fail"
       },
+      "source_index": {
+        "include_roots": ["server", "public", "tests", "../../docs/context", "../../tools/context"],
+        "exclude_globs": [
+          "public/modules/**/onnx/**",
+          "public/modules/**/*.wasm",
+          "public/modules/**/tokenizer*.json",
+          "public/modules/**/vocab.json",
+          "public/modules/**/merges.txt",
+          "tools/vendor/**",
+          "../../tools/vendor/**",
+          "reports/**",
+          "../../reports/**",
+          "state/**",
+          "../../state/**",
+          "**/node_modules/**",
+          "**/__pycache__/**",
+          "**/*.onnx",
+          "**/*.wasm",
+          "**/*.tar.gz",
+          "**/*.zip"
+        ],
+        "max_file_bytes": 262144,
+        "max_total_bytes": 8000000,
+        "max_results": 12
+      },
       "budget": {
         "head_tokens_max": 3000,
         "provider_tokens_max": 8000,
@@ -140,6 +197,31 @@
         "hermes": "bounded-skill-only",
         "missing_route": "fail"
       },
+      "source_index": {
+        "include_roots": ["public/modules/speech-transcription", "tests"],
+        "exclude_globs": [
+          "public/modules/**/onnx/**",
+          "public/modules/**/*.wasm",
+          "public/modules/**/tokenizer*.json",
+          "public/modules/**/vocab.json",
+          "public/modules/**/merges.txt",
+          "tools/vendor/**",
+          "../../tools/vendor/**",
+          "reports/**",
+          "../../reports/**",
+          "state/**",
+          "../../state/**",
+          "**/node_modules/**",
+          "**/__pycache__/**",
+          "**/*.onnx",
+          "**/*.wasm",
+          "**/*.tar.gz",
+          "**/*.zip"
+        ],
+        "max_file_bytes": 262144,
+        "max_total_bytes": 3000000,
+        "max_results": 12
+      },
       "budget": {
         "head_tokens_max": 3000,
         "provider_tokens_max": 10000,
@@ -170,10 +252,35 @@
       "allowed_read_roots": ["."],
       "allowed_write_roots": ["."],
       "likely_paths": [
+        "public/modules/master-frontier/target.js",
+        "public/modules/master-frontier/protocol.js",
         "server/static_server.py",
+        "server/master_frontier/route_contracts.py",
+        "server/master_frontier/protocol.py",
         "server/README.md",
         "tests/provider_proxy.test.py",
         "tests/security_loop_policy.test.py"
+      ],
+      "entities": [
+        {
+          "id": "frontier",
+          "name": "Master:frontier",
+          "kind": "first-class-agent-target",
+          "node_id": "frontier",
+          "selector": "__target:master_frontier__",
+          "route_symbol": "AGENT_MASTER_FRONTIER_TARGET_ID",
+          "symbols": [
+            "AGENT_MASTER_FRONTIER_TARGET_ID",
+            "AGENT_FRONTIER_NODE_ID",
+            "MASTER_FRONTIER_CAPS",
+            "masterFrontierNodeId"
+          ],
+          "proof": [
+            "route_contract",
+            "selector_target",
+            "kernel_capabilities"
+          ]
+        }
       ],
       "lookup_handles": [
         "route.files",
@@ -192,6 +299,31 @@
         "default": "local-first",
         "hermes": "bounded-skill-only",
         "missing_route": "fail"
+      },
+      "source_index": {
+        "include_roots": ["server", "tests", "../../docs/context", "../../tools/context"],
+        "exclude_globs": [
+          "public/modules/**/onnx/**",
+          "public/modules/**/*.wasm",
+          "public/modules/**/tokenizer*.json",
+          "public/modules/**/vocab.json",
+          "public/modules/**/merges.txt",
+          "tools/vendor/**",
+          "../../tools/vendor/**",
+          "reports/**",
+          "../../reports/**",
+          "state/**",
+          "../../state/**",
+          "**/node_modules/**",
+          "**/__pycache__/**",
+          "**/*.onnx",
+          "**/*.wasm",
+          "**/*.tar.gz",
+          "**/*.zip"
+        ],
+        "max_file_bytes": 262144,
+        "max_total_bytes": 8000000,
+        "max_results": 12
       },
       "budget": {
         "head_tokens_max": 3000,
@@ -245,6 +377,31 @@
         "default": "local-first",
         "hermes": "bounded-skill-only",
         "missing_route": "fail"
+      },
+      "source_index": {
+        "include_roots": ["server", "public", "tests"],
+        "exclude_globs": [
+          "public/modules/**/onnx/**",
+          "public/modules/**/*.wasm",
+          "public/modules/**/tokenizer*.json",
+          "public/modules/**/vocab.json",
+          "public/modules/**/merges.txt",
+          "tools/vendor/**",
+          "../../tools/vendor/**",
+          "reports/**",
+          "../../reports/**",
+          "state/**",
+          "../../state/**",
+          "**/node_modules/**",
+          "**/__pycache__/**",
+          "**/*.onnx",
+          "**/*.wasm",
+          "**/*.tar.gz",
+          "**/*.zip"
+        ],
+        "max_file_bytes": 262144,
+        "max_total_bytes": 8000000,
+        "max_results": 12
       },
       "budget": {
         "head_tokens_max": 3000,

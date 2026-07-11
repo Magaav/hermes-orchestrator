@@ -8,6 +8,7 @@ Run the smallest command that proves the claim being made. Record proof paths in
 ```bash
 python3 tools/context/check-context-sync.py
 python3 tools/context/check-harness-promises.py
+python3 tools/context/check-monolith-growth.py
 python3 tools/context/watch-loop-copilot.py
 make context-check
 rg -n "127\\.0\\.0\\.1:8877|localhost:8877|0\\.0\\.0\\.0:8877|10\\.0\\.2\\.2:8877|win-unpacked|Durable Next Step|current next action|TODO|FIXME|proposal|future|verified|unverified|stale|unknown|fixed|done|complete" \
@@ -29,6 +30,14 @@ The harness promise registry validator reads
 
 ```text
 reports/context/latest/harness-promises-result.json
+```
+
+The monolith growth guard checks the current diff for frozen-monolith growth,
+new route branches in `static_server.py`, and oversized new source files. It
+writes:
+
+```text
+reports/context/latest/monolith-growth-result.json
 ```
 
 The loop copilot watcher reads cheap local process, git, and harness evidence
@@ -65,13 +74,22 @@ the loop.
 
 ```bash
 python3 tools/context/check-harness-promises.py
+python3 tools/context/check-monolith-growth.py
 python3 tools/context/prove-master-frontier-production.py
+```
+
+The command emits one `MF_PROOF/1` JSON summary capped at 2048 UTF-8 bytes.
+Full per-command stdout/stderr is pull-only in:
+
+```text
+reports/context/latest/master-frontier-production-proof.json
 ```
 
 Expected report:
 
 ```text
 reports/context/latest/harness-promises-result.json
+reports/context/latest/monolith-growth-result.json
 reports/context/latest/master-frontier-production-proof.json
 ```
 
@@ -81,6 +99,18 @@ route-contract, code-memory, provider-proxy, and smoke checks; it proves the
 static/behavioral contract layer only. Run
 `python3 tools/context/prove-master-frontier-production.py --include-runtime`
 before claiming live node-brain availability.
+
+The automatic watcher replays compact route/tool contract quests without
+provider calls. Static fixtures can promote only through L4. Independently
+produced avatar proof may promote to L5, and fresh avatar plus node proof may
+promote to L6. The watcher must not write source fixtures, manufacture edit
+receipts, or promote a quest it authored during the same run:
+
+```bash
+python3 tools/context/watch-master-frontier-loop.py
+python3 tools/context/watch-master-frontier-loop.py --require-proof-artifacts
+python3 tools/context/run-master-frontier-autonomy-loop.py
+```
 
 ## Loop-Aware Evidence
 
@@ -370,3 +400,21 @@ horc build doctor
 ```
 
 Use a script-specific `--help`, doctor, or focused smoke path for scoped edits.
+# Master:frontier V4 source investigation
+
+```bash
+python3 plugins/wasm-agent/tests/master_frontier_v4_source_investigation.test.py
+python3 tools/context/evaluate-master-frontier-v4.py
+python3 plugins/wasm-agent/tests/agent_run_store.test.py
+python3 tools/context/check-harness-promises.py
+python3 tools/context/check-monolith-growth.py
+```
+
+These are deterministic static/behavioral and recorded-provider replay proofs.
+They do not prove a live frontier provider or production behavior.
+
+When provider access is configured, the separate dev-only source check is
+`python3 tools/context/run-master-frontier-v4-live.py`. Treat V4 as
+live-frontier verified only when
+`reports/master-frontier-v4/live-evaluation.json` has `ok: true`; this never
+constitutes production proof.

@@ -45,8 +45,22 @@ from master_frontier import route_contracts as master_frontier_routes
 from master_frontier import dispatch as master_frontier_dispatch
 from master_frontier import protocol as master_frontier_protocol
 from master_frontier import envelope as master_frontier_envelope
+from master_frontier import envelope_v2 as master_frontier_envelope_v2
 from master_frontier import code_memory as master_frontier_code_memory
-from master_frontier import planner as master_frontier_planner
+from master_frontier import entity_resolution as master_frontier_entity_resolution
+from master_frontier import proof_packet as master_frontier_proof_packet
+from master_frontier import budget as master_frontier_budget
+from master_frontier import controller as master_frontier_controller
+from master_frontier import cyphers_v3 as master_frontier_cyphers_v3
+from master_frontier import node_skills as master_frontier_node_skills
+from master_frontier import token_ledger as master_frontier_token_ledger
+from master_frontier import run_protocol as master_frontier_run_protocol
+from master_frontier import controller_v4 as master_frontier_controller_v4
+from master_frontier import controller_v5 as master_frontier_controller_v5
+from master_frontier import inspect_contract as master_frontier_inspect
+from master_frontier import persistence as master_frontier_persistence
+from master_frontier import provider_tools as master_frontier_provider_tools
+from master_frontier import planner as master_frontier_planner, repair as master_frontier_repair, loop as master_frontier_loop, answer_shaping as master_frontier_answer_shaping
 
 try:
     from PIL import Image
@@ -2750,6 +2764,7 @@ def provider_reply_from_payload(payload: dict[str, Any]) -> str:
 DIRECT_ENVELOPE_SCHEMA = master_frontier_envelope.SCHEMA
 DIRECT_ENVELOPE_RESULT_SCHEMA = master_frontier_envelope.RESULT_SCHEMA
 DIRECT_ENVELOPE_MAX_JSON_CHARS = master_frontier_envelope.MAX_JSON_CHARS
+OPENAI_DIRECT_ENVELOPE_MAX_JSON_CHARS = 3200
 DIRECT_ENVELOPE_ALLOWED_KEYS = master_frontier_envelope.ALLOWED_KEYS
 DIRECT_ENVELOPE_DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = master_frontier_envelope.DEFAULT_OUTPUT_SCHEMA
 DIRECT_HEAD_HERMES_ALLOWED_CAPS = master_frontier_dispatch.ALLOWED_CAPS
@@ -3251,11 +3266,17 @@ def transcript_read_tool(body: dict[str, Any]) -> dict[str, Any]:
     digest = str(cache.get("digest") or "")
     if not digest:
         digest = hashlib.sha256("|".join(str(turn.get("sha16") or "") for turn in turns).encode("utf-8")).hexdigest()[:16]
+    cover_material = "|".join(
+        f"{turn.get('i')}:{turn.get('role')}:{turn.get('kind')}:{turn.get('anchor')}:{turn.get('sha16')}"
+        for turn in selected
+    )
+    cover_digest = hashlib.sha256(cover_material.encode("utf-8")).hexdigest() if cover_material else ""
     return route_tool_ok(
         "hermes.wasm_agent.transcript.read_result.v1",
         handle=clipped(str(body.get("handle") or cache.get("handle") or ""), 240),
         covers=clipped(str(cache.get("covers") or ""), 80),
         digest=clipped(digest, 80),
+        cover_digest=clipped(cover_digest, 80),
         turns=selected,
         turn_count=len(selected),
         available_turn_count=len(turns),
@@ -3263,6 +3284,7 @@ def transcript_read_tool(body: dict[str, Any]) -> dict[str, Any]:
         proof={
             "cache_present": True,
             "digest": clipped(digest, 80),
+            "cover_digest": clipped(cover_digest, 80),
             "source": "request.transcript_cache",
             "bounded": True,
         },
@@ -3712,7 +3734,7 @@ def node_id_from_body(body: dict[str, Any], contract: dict[str, Any] | None = No
     for entity in entities:
         if not isinstance(entity, dict):
             continue
-        candidate = _safe_agent_node_id(entity.get("id") or entity.get("node_id") or entity.get("name"))
+        candidate = _safe_agent_node_id(entity.get("node_id") or entity.get("nodeId") or entity.get("id") or entity.get("name"))
         if candidate:
             return candidate
     return ""
@@ -3751,6 +3773,8 @@ def node_capabilities_tool(server: WasmAgentServer, body: dict[str, Any], user: 
         or raw.get("default_model_env")
         or ""
     ), 180)
+    skill_id = master_frontier_node_skills.requested_skill_id(body)
+    skill = master_frontier_node_skills.skill_manifest(skill_id) if skill_id else None
     return route_tool_ok(
         "hermes.wasm_agent.node.capabilities_result.v1",
         route_id=str(contract.get("route_id") or "") if isinstance(contract, dict) else "",
@@ -3763,6 +3787,7 @@ def node_capabilities_tool(server: WasmAgentServer, body: dict[str, Any], user: 
             "provider": model_provider,
             "model": model_id,
         },
+        skill=skill,
         node=direct_envelope_redact(node),
         proof={
             "source": "bridge:/nodes/{id}",
@@ -3781,6 +3806,12 @@ def node_chat_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str
     objective = clipped(str(body.get("objective") or body.get("message") or body.get("prompt") or body.get("task") or "").strip(), 4000)
     if not objective:
         raise BrowserError("node_objective_missing", "node.chat requires objective/message.", status=HTTPStatus.BAD_REQUEST)
+    skill_id = master_frontier_node_skills.requested_skill_id(body)
+    skill = master_frontier_node_skills.skill_manifest(skill_id) if skill_id else None
+    if skill_id and not skill.get("available"):
+        raise BrowserError("node_skill_missing", f"The requested node skill `{skill_id}` is not installed.", status=HTTPStatus.CONFLICT)
+    if skill:
+        objective = clipped(f"{master_frontier_node_skills.skill_directive(skill)}\n\nUser objective:\n{objective}", 6000)
     timeout_sec = max(5.0, min(float(body.get("timeout_sec") or body.get("timeoutSec") or 90), 600.0))
     model_id = clipped(str(body.get("model") or body.get("model_id") or body.get("modelId") or "").strip(), 180)
     system_content = clipped(str(body.get("system") or body.get("system_content") or "").strip(), 4000)
@@ -3799,6 +3830,7 @@ def node_chat_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str
         timeout_sec=timeout_sec,
         run_options={"route_id": str(contract.get("route_id") or "")} if isinstance(contract, dict) else None,
     )
+    skill_receipt = master_frontier_node_skills.skill_receipt(skill, bridge_trace) if skill else None
     return route_tool_ok(
         "hermes.wasm_agent.node.chat_result.v1",
         route_id=str(contract.get("route_id") or "") if isinstance(contract, dict) else "",
@@ -3807,6 +3839,7 @@ def node_chat_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str
         source=source,
         usage=usage,
         bridge_trace=bridge_trace,
+        skill=skill_receipt,
         proof={
             "source": "bridge:/nodes/{id}/prompt",
             "model_source": "node-runtime-default" if not model_id else "request",
@@ -3892,7 +3925,7 @@ def kernel_capability_manifest(contract: dict[str, Any] | None = None) -> dict[s
         "master_frontier": {
             "build": MASTER_FRONTIER_RELIABILITY_BUILD,
             "features": dict(MASTER_FRONTIER_RELIABILITY_FEATURES),
-            "required_event_types": ["head.repair", "head.continued", "kernel.evidence_ready", "tool.finished", "files.changed"],
+            "required_event_types": ["head.repair", "head.continued", "frontier.proof", "kernel.evidence_ready", "tool.finished", "files.changed"],
             "policy": "route-first local-proof repair-loop",
         },
         "continuity": {
@@ -3932,26 +3965,43 @@ def kernel_capabilities_tool(body: dict[str, Any]) -> dict[str, Any]:
 
 def kernel_resolve_tool(body: dict[str, Any]) -> dict[str, Any]:
     resolved = route_resolve_tool(body)
+    entity_contract = None
+    # ARCH_EXCEPTION: owner=master-frontier; reason=monolith keeps kernel tool HTTP wiring until resolver extraction; expires=2026-08-07
+    entity_text = " ".join(
+        str(body.get(key) or "")
+        for key in ("objective", "query", "entity", "node", "target")
+    )
+    if entity_text:
+        entity_contract = resolve_runtime_entity_route_contract(entity_text)
     result = {
         **resolved,
         "schema": "hermes.wasm_agent.kernel.resolve_result.v1",
         "primitive": "kernel.resolve",
-        "root_cause_class": "route" if resolved.get("ok") else "missing_route_contract",
+        "root_cause_class": "entity_route" if entity_contract else "route" if resolved.get("ok") else "missing_route_contract",
         "next_local_primitives": ["kernel.inspect", "kernel.prove"] if resolved.get("ok") else [],
     }
-    if resolved.get("ok") and isinstance(resolved.get("route_contract"), dict):
-        result["capabilities"] = kernel_capability_manifest(resolved["route_contract"])
+    if entity_contract:
+        result["ok"] = True
+        result["code"] = "ok"
+        entities = entity_contract.get("entities") if isinstance(entity_contract.get("entities"), list) else []
+        result["entity"] = entities[0] if entities else {
+            "id": "",
+            "name": "",
+            "kind": "runtime-entity",
+        }
+        result["entity_route"] = entity_contract
+        result["route_id"] = str(entity_contract.get("route_id") or result.get("route_id") or "")
+        result["route_contract"] = entity_contract
+        result["summary"] = route_contract_summary(entity_contract)
+        result["next_local_primitives"] = ["lookup.files", "code.memory.search", "kernel.inspect", "kernel.prove"]
+        result["capabilities"] = kernel_capability_manifest(entity_contract)
+    elif resolved.get("ok") and isinstance(resolved.get("route_contract"), dict):
+        result["capabilities"] = kernel_capability_manifest(result["route_contract"] if entity_contract else resolved["route_contract"])
     return result
 
 
 def kernel_inspect_kind_items(body: dict[str, Any]) -> list[str]:
-    raw = body.get("inspect") or body.get("kinds") or body.get("kind") or body.get("need") or []
-    if isinstance(raw, str):
-        raw = [item.strip() for item in re.split(r"[, ]+", raw) if item.strip()]
-    if not isinstance(raw, list):
-        raw = []
-    items = [clipped(str(item or "").strip().lower(), 80) for item in raw[:12] if str(item or "").strip()]
-    return items or ["route"]
+    return master_frontier_inspect.kinds(body)
 
 
 def kernel_entity_file_kind(path: Path) -> str:
@@ -4444,6 +4494,7 @@ def kernel_runtime_entity_compact_summary(result: dict[str, Any]) -> dict[str, A
     }
 
 
+# ARCH_EXCEPTION: owner=master-frontier; reason=bounded HTTP adapter wiring from owned inspect contract to server-local primitives; expires=2026-08-10
 def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
     kinds = kernel_inspect_kind_items(body)
@@ -4459,21 +4510,24 @@ def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dic
             "result": direct_envelope_redact(result),
         })
 
-    for kind in kinds:
-        if kind in {"route", "contract", "map"}:
+    # ARCH_EXCEPTION: owner=master-frontier; reason=bounded adapter dispatch to server-local tool primitives; expires=2026-08-10
+    for requested_kind in kinds:
+        kind = master_frontier_inspect.canonical(requested_kind)
+        if kind == "route":
             add_observation("map", route_map_summary_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
-        elif kind in {"files", "file", "receipts"}:
+        elif kind == "files":
             tool_body = {"route_id": contract.get("route_id"), "route_contract": contract}
             if isinstance(body.get("paths"), list):
                 tool_body["paths"] = body["paths"]
             add_observation("files", route_lookup_files_tool(tool_body))
-        elif kind in {"symbol", "symbols", "code"}:
+        elif kind == "symbols":
             query = clipped(str(body.get("query") or body.get("symbol") or body.get("entity") or "").strip(), 240)
             if query:
                 add_observation("symbols", route_lookup_symbol_tool({"route_id": contract.get("route_id"), "route_contract": contract, "query": query}))
             else:
                 unknowns.append({"kind": "symbols", "code": "query_missing", "message": "kernel.inspect symbols requires query/entity."})
-        elif kind in {"proof", "timeline", "run"}:
+        # ARCH_EXCEPTION: owner=master-frontier; reason=bounded proof adapter to server-local persisted-run primitive; expires=2026-08-10
+        elif kind == "proof":
             scope = {
                 "run_id": body.get("run_id"),
                 "quest_id": body.get("quest_id") or body.get("session_id"),
@@ -4483,7 +4537,7 @@ def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dic
                 add_observation("proof", route_proof_collect_tool(user, scope))
             else:
                 unknowns.append({"kind": "proof", "code": "scope_missing", "message": "kernel.inspect proof requires run_id, quest_id, or turn_id."})
-        elif kind in {"cost", "tokens", "ledger"}:
+        elif kind == "cost":
             scope = {
                 "run_id": body.get("run_id"),
                 "quest_id": body.get("quest_id") or body.get("session_id"),
@@ -4493,22 +4547,22 @@ def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dic
                 add_observation("cost", agent_token_ledger_status(user, scope))
             else:
                 unknowns.append({"kind": "cost", "code": "scope_missing", "message": "kernel.inspect cost requires run_id, quest_id, or turn_id."})
-        elif kind in {"transcript", "messages", "history", "continuity"}:
+        elif kind == "transcript":
             transcript_result = transcript_read_tool(body)
             add_observation("transcript", transcript_result)
             if not transcript_result.get("ok"):
                 unknowns.append({"kind": "transcript", "code": transcript_result.get("code") or "transcript_unavailable", "message": "No bounded transcript cache was available for transcript.read."})
-        elif kind in {"diff", "changes"}:
+        elif kind == "diff":
             add_observation("diff", route_git_diff_summary_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
-        elif kind in {"capabilities", "capability"}:
+        elif kind == "capabilities":
             add_observation("capabilities", kernel_capabilities_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
-        elif kind in {"runtime", "entity", "entities", "workspace"}:
+        elif kind == "runtime_entity":
             runtime_result = kernel_runtime_entity_inspect_tool(user, contract, body)
             runtime_entity_summaries.append(kernel_runtime_entity_compact_summary(runtime_result))
             add_observation("runtime_entity", runtime_result)
             unknowns.extend(runtime_result.get("unknowns") if isinstance(runtime_result.get("unknowns"), list) else [])
         else:
-            unknowns.append({"kind": kind, "code": "inspect_kind_unsupported", "message": "Unsupported kernel.inspect kind."})
+            unknowns.append(master_frontier_inspect.unsupported(requested_kind))
     return route_tool_ok(
         "hermes.wasm_agent.kernel.inspect_result.v1",
         route_id=str(contract.get("route_id") or ""),
@@ -4519,6 +4573,8 @@ def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dic
         runtime_entity_summaries=runtime_entity_summaries,
         unknowns=unknowns,
         unknown_count=len(unknowns),
+        supported_kinds=list(master_frontier_inspect.CANONICAL_KINDS),
+        capability_health=master_frontier_inspect.capability_health(observations, unknowns),
         root_cause_class="inspected_with_unknowns" if unknowns else "inspected",
     )
 
@@ -4789,6 +4845,7 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
             envelope[key] = direct_envelope_redact(raw[key])
     envelope["schema"] = clipped(str(envelope.get("schema") or DIRECT_ENVELOPE_SCHEMA), 120)
     envelope["objective"] = objective
+    apply_previous_state_writeback_to_envelope(body, envelope)
     route_contract = direct_head_dispatch_workspace_contract({}, envelope)
     if route_contract:
         envelope.setdefault("route_id", route_contract.get("route_id"))
@@ -4807,6 +4864,7 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
     if route_contract:
         envelope["kernel"] = direct_envelope_kernel_projection(envelope)
         envelope["task_contract"] = master_frontier_planner.task_contract(envelope)
+        envelope["budget"] = master_frontier_budget.from_envelope(envelope)
         envelope["allowed_actions"] = [
             *existing_actions,
             *[item for item in kernel_actions if item["id"] not in existing_action_ids],
@@ -4817,36 +4875,45 @@ def direct_envelope_from_body(body: dict[str, Any]) -> dict[str, Any]:
     return envelope
 
 
+def apply_previous_state_writeback_to_envelope(body: dict[str, Any], envelope: dict[str, Any]) -> None:
+    # ARCH_EXCEPTION: owner=master-frontier-state; reason=database lookup wiring delegates state merge to envelope owner; expires=2026-08-15
+    session_id = safe_agent_run_key(body.get("session_id"), "")
+    turn_id = safe_agent_run_key(body.get("turn_id") or body.get("turnId"), "")
+    if not session_id:
+        return
+    try:
+        with auth_connect() as conn:
+            row = conn.execute(
+                """
+                SELECT final_json FROM agent_run_tb
+                 WHERE session_id = ?
+                   AND status = 'completed'
+                   AND (? = '' OR turn_id != ?)
+                 ORDER BY terminal_at DESC, updated_at DESC
+                 LIMIT 1
+                """,
+                (session_id, turn_id, turn_id),
+            ).fetchone()
+    except Exception:
+        return
+    if not row:
+        return
+    final = json_dict(str(row["final_json"] or "{}"))
+    diagnostics = final.get("diagnostics") if isinstance(final.get("diagnostics"), dict) else {}
+    writeback = diagnostics.get("state_writeback") if isinstance(diagnostics.get("state_writeback"), dict) else {}
+    if not writeback:
+        return
+    master_frontier_envelope.apply_state_writeback(envelope, writeback)
+
+
 def direct_envelope_messages(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     envelope = direct_envelope_from_body(body)
     envelope["head_identity"] = direct_head_identity_from_body(body)
     transcript_cache = transcript_cache_from_body(body)
     if transcript_cache:
         envelope["transcript_cache"] = direct_envelope_redact(transcript_cache)
-    instructions = clipped(str(body.get("instructions") or "").strip(), 4000)
     semantic = direct_envelope_semantic_text(envelope)
-    content = [
-        "Treat this compact semantic envelope as the complete context for this decision.",
-        (
-            "For a direct answer, return plain human-readable text only. "
-            "Do not wrap normal answers in JSON. If any tool, file, runtime, transcript, "
-            "kernel, or Hermes work is required, return only minified JSON as the first byte "
-            "of the response: no prose, no markdown fence, no explanation before or after. "
-            "Action JSON must contain answer, decision, actions, state_delta, needs, and "
-            "confidence. Use actions like {\"action\":\"kernel.inspect\",\"args\":{...}} "
-            "or {\"action\":\"dispatch.hermes\",\"objective\":\"...\",\"caps\":[...],"
-            "\"escalation_reason\":\"...\",\"refs\":[...],\"proof\":[...]}. "
-            "Never say you are dispatching, inspecting, reading, running, or executing unless "
-            "the same JSON contains that executable action."
-        ),
-        semantic,
-    ]
-    if instructions:
-        content.insert(2, f"Additional operator instructions:\n{instructions}")
-    return [
-        {"role": "system", "content": DIRECT_ENVELOPE_SYSTEM_PROMPT},
-        {"role": "user", "content": "\n\n".join(content)},
-    ], envelope
+    return master_frontier_envelope.provider_messages(body, envelope, semantic, clip=clipped), envelope
 
 
 def direct_envelope_with_metrics(body: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any], str, dict[str, Any]]:
@@ -4861,22 +4928,12 @@ def direct_envelope_with_metrics(body: dict[str, Any]) -> tuple[list[dict[str, A
 
 
 def openai_direct_envelope_text(body: dict[str, Any], envelope: dict[str, Any]) -> str:
-    receiver = direct_envelope_receiver(body)
-    provider_envelope = dict(envelope)
-    if isinstance(provider_envelope.get("task_contract"), dict):
-        task_contract = master_frontier_envelope.task_contract_projection(provider_envelope)
-        task_contract.pop("p", None)
-        task_contract.pop("h", None)
-        provider_envelope.pop("task_contract", None)
-        provider_envelope["p"] = (
-            f"{task_contract.get('i')}>{task_contract.get('x')}:"
-            f"{','.join(str(item) for item in task_contract.get('t', [])[:5])}"
-        )
-    return (
-        "ENV agent-envelope-v1\n"
-        f"RECEIVER {receiver}\n"
-        "RAW true\n"
-        f"{direct_envelope_json(provider_envelope, limit=DIRECT_ENVELOPE_MAX_JSON_CHARS)}"
+    return master_frontier_cyphers_v3.transport_text(
+        envelope,
+        receiver=direct_envelope_receiver(body),
+        render=direct_envelope_json,
+        limit=OPENAI_DIRECT_ENVELOPE_MAX_JSON_CHARS,
+        project_task=master_frontier_envelope.task_contract_projection,
     )
 
 
@@ -5045,8 +5102,8 @@ def openai_responses_completion(
                                 "delta": delta,
                             },
                         })
-                if event_type == "response.completed" and isinstance(event.get("response"), dict):
-                    completed_response = event["response"]
+                if event_type in {"response.completed", "response.done", "response.output.done"}:
+                    completed_response = event["response"] if isinstance(event.get("response"), dict) else event
                 if event_type in {"response.failed", "response.incomplete"}:
                     error = event.get("error") if isinstance(event.get("error"), dict) else {}
                     response_detail = event.get("response") if isinstance(event.get("response"), dict) else {}
@@ -5259,7 +5316,12 @@ def direct_head_requires_structured_action(parsed: Any, reply: str) -> bool:
     return master_frontier_envelope.requires_structured_action(parsed, reply)
 
 
-def enforce_direct_head_structured_action(parsed: Any, reply: str) -> None:
+def enforce_direct_head_structured_action(parsed: Any, reply: str, envelope: dict[str, Any] | None = None) -> None:
+    # ARCH_EXCEPTION: owner=master-frontier-envelope; reason=typed HTTP error wiring delegates action policy to envelope owner; expires=2026-08-15
+    if master_frontier_envelope.downgraded_conceptual_answer(envelope, parsed, reply):
+        return
+    if master_frontier_envelope.salvage_conversation_answer(envelope, parsed, reply):
+        return
     if not direct_head_requires_structured_action(parsed, reply):
         return
     direct_envelope_error(
@@ -5271,6 +5333,15 @@ def enforce_direct_head_structured_action(parsed: Any, reply: str) -> None:
 
 def direct_head_action_repair_body(body: dict[str, Any], bad_reply: str) -> dict[str, Any]:
     return master_frontier_envelope.action_repair_body(body, bad_reply)
+
+
+direct_head_evidence_floor = master_frontier_envelope.evidence_floor
+
+
+direct_head_conceptual_evidence_floor = master_frontier_envelope.conceptual_evidence_floor
+
+
+direct_head_normalize_conceptual_result = master_frontier_envelope.normalize_conceptual_result
 
 
 def direct_head_empty_response_repair_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -5310,6 +5381,160 @@ def direct_head_answer_text(parsed: Any, fallback: str) -> str:
         if answer:
             return answer
     return str(fallback or "")
+
+
+direct_head_objective_repo_query = master_frontier_entity_resolution.objective_query
+
+
+direct_head_repo_object_probe_actions = master_frontier_entity_resolution.probe_actions
+
+
+direct_head_objective_is_repo_object_question = master_frontier_entity_resolution.envelope_is_repo_object_question
+
+
+def ensure_direct_head_repo_object_probe(
+    server: WasmAgentServer,
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+    local_tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # ARCH_EXCEPTION: owner=master-frontier-entity; reason=local tool side-effect wiring uses entity-owned probe policy; expires=2026-08-15
+    actions = direct_head_repo_object_probe_actions(envelope, local_tool_results)
+    if not actions:
+        return local_tool_results
+    results = execute_direct_head_local_tool_actions(server, actions, envelope, user=user, run_id=run_id)
+    record_direct_head_local_tool_events(server, run_id, results)
+    return [*local_tool_results, *results]
+
+
+direct_head_code_memory_has_object_evidence = master_frontier_entity_resolution.code_memory_has_object_evidence
+
+
+direct_head_repo_object_source_paths = master_frontier_entity_resolution.source_paths
+
+
+def ensure_direct_head_repo_object_source_read(
+    server: WasmAgentServer,
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+    local_tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # ARCH_EXCEPTION: owner=master-frontier-entity; reason=local tool side-effect wiring uses entity-owned source policy; expires=2026-08-15
+    action = master_frontier_entity_resolution.source_read_action(envelope, local_tool_results)
+    if not action:
+        return local_tool_results
+    results = execute_direct_head_local_tool_actions(server, [action], envelope, user=user, run_id=run_id)
+    record_direct_head_local_tool_events(server, run_id, results)
+    return [*local_tool_results, *results]
+
+
+def ensure_direct_head_repo_object_runtime_scope_preflight(
+    server: WasmAgentServer,
+    envelope: dict[str, Any],
+    *,
+    user: dict[str, Any] | None,
+    run_id: str,
+    local_tool_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # ARCH_EXCEPTION: owner=master-frontier-entity; reason=run-event wiring uses entity-owned runtime-scope evidence policy; expires=2026-08-15
+    if not master_frontier_entity_resolution.needs_runtime_scope_proof(envelope):
+        return local_tool_results
+    if master_frontier_entity_resolution.runtime_scope_proof_satisfied(envelope, local_tool_results):
+        return local_tool_results
+    if direct_head_has_runtime_entity_routes(envelope):
+        append_agent_run_event(
+            server,
+            run_id,
+            "head.decision",
+            summary="repo_object_runtime_scope_preflight",
+            payload={
+                "decision": "repo_object_runtime_scope_preflight",
+                "reason": "scoped repo-object question requires bounded runtime-scope proof after source lookup",
+                "entity_resolution": master_frontier_entity_resolution.resolve(envelope),
+            },
+        )
+        local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
+            server,
+            envelope,
+            user=user,
+            run_id=run_id,
+            local_tool_results=local_tool_results,
+        )
+        if master_frontier_entity_resolution.runtime_scope_proof_satisfied(envelope, local_tool_results):
+            return local_tool_results
+    else:
+        append_agent_run_event(
+            server,
+            run_id,
+            "head.decision",
+            summary="repo_object_runtime_scope_preflight",
+            payload={
+                "decision": "repo_object_runtime_scope_preflight",
+                "reason": "scoped repo-object question requires bounded runtime-scope proof after source lookup",
+                "entity_resolution": master_frontier_entity_resolution.resolve(envelope),
+            },
+        )
+    packet = master_frontier_entity_resolution.evidence_packet(envelope, local_tool_results)
+    append_agent_run_event(
+        server,
+        run_id,
+        "scope.missing",
+        summary="runtime_scope_missing",
+        payload={
+            "code": "runtime_scope_missing",
+            "entity_resolution": master_frontier_entity_resolution.resolve(envelope),
+            "evidence_packet": packet,
+        },
+    )
+    return local_tool_results
+
+
+def direct_head_only_redundant_repo_lookup_actions(parsed: Any) -> bool:
+    actions = direct_head_local_tool_actions(parsed)
+    redundant = {"kernel.resolve", "kernel.inspect", "code.memory.search", "lookup.symbol", "lookup.files"}
+    return bool(actions) and all(direct_head_canonical_action_name(action) in redundant for action in actions)
+
+
+def direct_head_repo_object_answer_needs_receipts(parsed: Any, reply: str) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    if direct_head_local_tool_actions(parsed):
+        return False
+    decision = str(parsed.get("decision") or "").lower()
+    answer = str(parsed.get("answer") or reply or "").lower()
+    if any(term in decision for term in ("lookup", "search", "inspect")):
+        return True
+    return "bounded lookup" in answer or "found the" in answer and "widget" in answer
+
+
+def direct_head_repo_object_answer_from_evidence(
+    envelope: dict[str, Any],
+    parsed: Any,
+    result: dict[str, Any],
+    local_tool_results: list[dict[str, Any]],
+) -> tuple[Any, dict[str, Any]]:
+    if not direct_head_objective_is_repo_object_question(envelope):
+        return parsed, result
+    if not direct_head_code_memory_has_object_evidence(envelope, local_tool_results):
+        return parsed, result
+    if not direct_head_only_redundant_repo_lookup_actions(parsed) and not direct_head_repo_object_answer_needs_receipts(parsed, str(result.get("reply") or "")):
+        return parsed, result
+    final_answer = master_frontier_answer_shaping.repo_object_summary_reply(envelope, local_tool_results)
+    if not final_answer.strip():
+        return parsed, result
+    answered = {
+        "answer": final_answer,
+        "decision": "answer",
+        "actions": [],
+        "state_delta": {},
+        "needs": [],
+        "confidence": 1,
+    }
+    return answered, {**result, "parsed": answered, "reply": final_answer}
 
 
 def direct_head_local_tool_body(action: dict[str, Any], envelope: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -5464,7 +5689,15 @@ def direct_head_kernel_result_summary(result: dict[str, Any]) -> dict[str, Any]:
     return summary
 
 
-def record_direct_head_local_tool_events(server: WasmAgentServer, run_id: str, results: list[dict[str, Any]]) -> None:
+def record_direct_head_local_tool_events(
+    server: WasmAgentServer,
+    run_id: str,
+    results: list[dict[str, Any]],
+    *,
+    turn_id: str = "",
+    inference_id: str = "",
+) -> None:
+    # ARCH_EXCEPTION: owner=master-frontier-envelope-v2; reason=run-event persistence wiring emits owned command receipts; expires=2026-08-15
     for item in results:
         tool = clipped(str(item.get("tool") or "local-tool"), 120)
         append_agent_run_event(server, run_id, "tool.started", summary=tool, payload={"tool": tool})
@@ -5475,6 +5708,45 @@ def record_direct_head_local_tool_events(server: WasmAgentServer, run_id: str, r
             summary=f"{tool}: {item.get('code') or 'ok'}",
             payload={"tool": item},
         )
+    append_envelope_v2_events(
+        server,
+        run_id,
+        master_frontier_envelope_v2.command_receipt_events(
+            results,
+            turn_id=turn_id or run_id,
+            inference_id=inference_id or "local-tool",
+        ),
+    )
+
+
+def append_master_frontier_proof_event(
+    server: WasmAgentServer,
+    run_id: str,
+    envelope: dict[str, Any],
+    *,
+    stage: str,
+    local_tool_results: list[dict[str, Any]],
+    parsed: Any = None,
+    loop_state: dict[str, Any] | None = None,
+    dispatch_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    # ARCH_EXCEPTION: owner=master-frontier-proof-packet; reason=frozen server emits owned packet as run-event wiring; expires=2026-08-08
+    packet = master_frontier_proof_packet.build(
+        envelope,
+        stage=stage,
+        local_tool_results=local_tool_results,
+        parsed=parsed,
+        loop_state=loop_state,
+        dispatch_result=dispatch_result,
+    )
+    append_agent_run_event(
+        server,
+        run_id,
+        "frontier.proof",
+        summary=master_frontier_proof_packet.summary(packet),
+        payload={"frontier_proof": packet},
+    )
+    return packet
 
 
 def direct_head_runtime_entity_preflight_actions(action: dict[str, Any], envelope: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5690,10 +5962,97 @@ def enforce_direct_head_goal_completion(
     )
 
 
+def enforce_master_frontier_loop_completion(
+    server: WasmAgentServer,
+    run_id: str,
+    envelope: dict[str, Any],
+    parsed: Any,
+    reply: str,
+    *,
+    local_tool_results: list[dict[str, Any]],
+    change_proof: dict[str, Any],
+    dispatch_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    # ARCH_EXCEPTION: owner=master-frontier-loop; reason=frozen server delegates completion gate to owned loop module before run.final; expires=2026-08-08
+    loop_state = master_frontier_loop.evaluate_completion(
+        envelope,
+        parsed,
+        reply,
+        local_tool_results=local_tool_results,
+        change_proof=change_proof,
+        dispatch_result=dispatch_result,
+    )
+    status = master_frontier_loop.completion_status(loop_state)
+    append_agent_run_event(
+        server,
+        run_id,
+        "loop.critique",
+        summary=str(loop_state.get("critique", {}).get("reason") or status),
+        payload=loop_state,
+    )
+    loop_state["frontier_proof"] = append_master_frontier_proof_event(
+        server,
+        run_id,
+        envelope,
+        stage="final_gate",
+        local_tool_results=local_tool_results,
+        parsed=parsed,
+        loop_state=loop_state,
+        dispatch_result=dispatch_result,
+    )
+    critique = loop_state.get("critique") if isinstance(loop_state.get("critique"), dict) else {}
+    append_envelope_v2_events(
+        server,
+        run_id,
+        master_frontier_envelope_v2.final_gate_events(
+            turn_id=clipped(str(envelope.get("trace_id") or run_id), 160),
+            status=status,
+            reason=str(loop_state.get("critique", {}).get("reason") or status),
+            proof_refs=["frontier.proof"],
+            missing=critique.get("missing") if isinstance(critique.get("missing"), list) else [],
+        ),
+    )
+    if status == master_frontier_loop.FINISHED:
+        append_agent_run_event(
+            server,
+            run_id,
+            "loop.finished",
+            summary="Master:frontier loop finished",
+            payload={"status": status, "critique": loop_state.get("critique")},
+        )
+        append_envelope_v2_events(
+            server,
+            run_id,
+            master_frontier_envelope_v2.answer_events(
+                turn_id=clipped(str(envelope.get("trace_id") or run_id), 160),
+                answer=reply,
+            ),
+        )
+        return loop_state
+    if critique.get("reason") == "changed_file_proof_missing":
+        code = "implementation_goal_incomplete"
+    else:
+        code = "master_frontier_loop_blocked" if status == master_frontier_loop.BLOCKED else "master_frontier_loop_incomplete"
+    append_agent_run_event(
+        server,
+        run_id,
+        "loop.blocked" if status == master_frontier_loop.BLOCKED else "loop.incomplete",
+        summary=str(critique.get("reason") or status),
+        payload={"status": status, "critique": critique},
+    )
+    direct_envelope_error(
+        code,
+        "Master:frontier loop did not satisfy the objective/proof gate. Continue with an executable action, produce critique-backed proof, or return a typed block.",
+        HTTPStatus.CONFLICT,
+    )
+
+
 def direct_head_runtime_entity_objective_needs_local_inspection(envelope: dict[str, Any]) -> bool:
     if not direct_head_has_runtime_entity_routes(envelope):
         return False
     if direct_head_objective_is_implementation_intent(envelope):
+        return False
+    if direct_head_objective_is_repo_object_question(envelope):
         return False
     text = " ".join(
         str(value or "")
@@ -5757,166 +6116,14 @@ def direct_head_local_runtime_proof_satisfies_dispatch(
 
 
 def direct_head_local_tool_summary_reply(reply: str, local_tool_results: list[dict[str, Any]]) -> str:
-    summaries: list[str] = []
-    synthesized_intro = ""
-    synthesized_history = ""
-    for item in local_tool_results[:8]:
-        if not isinstance(item, dict):
-            continue
-        route_id = str(item.get("route_id") or "")
-        if not route_id:
-            continue
-        summary = item.get("summary") if isinstance(item.get("summary"), dict) else {}
-        observations = summary.get("observations") if isinstance(summary.get("observations"), list) else []
-        if not observations:
-            continue
-        route_entity = route_id.split(".")[1] if route_id.startswith("hermes-node.") and len(route_id.split(".")) >= 3 else route_id
-        entity_label = route_entity.replace("-", " ").replace("_", " ").strip().title() or "The runtime entity"
-        route_line = f"Kernel inspection resolved `{route_id}` for entity `{route_entity}`."
-        details: list[str] = [route_line]
-        for obs in observations:
-            if not isinstance(obs, dict):
-                continue
-            if obs.get("kind") == "runtime_entity":
-                identity = obs.get("route_identity") if isinstance(obs.get("route_identity"), dict) else {}
-                workspace_root = str(identity.get("workspace_root") or "").strip()
-                data_roots = obs.get("data_roots") if isinstance(obs.get("data_roots"), list) else []
-                data_root = ""
-                for root in data_roots:
-                    if isinstance(root, dict) and str(root.get("root") or "").strip():
-                        data_root = str(root.get("root") or "").strip()
-                        break
-                details.append(
-                    "Runtime route: "
-                    f"surface `{identity.get('surface')}`, owner `{identity.get('owner')}`, root `{identity.get('workspace_root')}`."
-                )
-                investigation = obs.get("investigation") if isinstance(obs.get("investigation"), dict) else {}
-                inferred = investigation.get("inferred_identity") if isinstance(investigation.get("inferred_identity"), list) else []
-                if inferred:
-                    details.append("Entity investigation inferred: " + ", ".join(f"`{item}`" for item in inferred[:5]) + ".")
-                conversations = investigation.get("conversations") if isinstance(investigation.get("conversations"), dict) else {}
-                conv_bits = []
-                if conversations:
-                    for key in ("sessions", "messages", "session_files"):
-                        if conversations.get(key) not in (None, "", 0):
-                            conv_bits.append(f"{key}={conversations.get(key)}")
-                    if conv_bits:
-                        details.append(f"Conversation/runtime memory evidence from `{conversations.get('source') or 'runtime store'}`: " + ", ".join(conv_bits) + ".")
-                assets = investigation.get("data_assets") if isinstance(investigation.get("data_assets"), dict) else {}
-                asset_bits = []
-                for key in ("summary_md_count", "raw_paper_json_count", "pdf_count"):
-                    if assets.get(key):
-                        asset_bits.append(f"{key}={assets.get(key)}")
-                if asset_bits:
-                    details.append("Data asset evidence: " + ", ".join(asset_bits) + ".")
-                documents = investigation.get("documents") if isinstance(investigation.get("documents"), list) else []
-                for doc in documents[:3]:
-                    if isinstance(doc, dict) and doc.get("path"):
-                        details.append(f"`{doc.get('path')}` says: {clipped(str(doc.get('excerpt') or ''), 180)}")
-                databases = investigation.get("databases") if isinstance(investigation.get("databases"), list) else []
-                for db in databases[:3]:
-                    if not isinstance(db, dict):
-                        continue
-                    tables = db.get("tables") if isinstance(db.get("tables"), dict) else {}
-                    semantic = db.get("semantic_tables") if isinstance(db.get("semantic_tables"), list) else []
-                    if tables:
-                        table_text = ", ".join(f"{key}={value}" for key, value in list(tables.items())[:6])
-                        details.append(f"`{db.get('path')}` table evidence: {table_text}.")
-                    for table in semantic[:2]:
-                        if isinstance(table, dict) and table.get("table"):
-                            details.append(f"`{table.get('table')}` semantic evidence count={table.get('count')}.")
-                metadata_files = obs.get("metadata_files") if isinstance(obs.get("metadata_files"), list) else []
-                bootstrap_facts: list[str] = []
-                for meta in metadata_files[:3]:
-                    if not isinstance(meta, dict):
-                        continue
-                    parsed = meta.get("json") if isinstance(meta.get("json"), dict) else {}
-                    if parsed:
-                        facts = []
-                        for key in ("bootstrapped_at", "reseeded_at", "state_code", "node_role", "timezone"):
-                            if parsed.get(key) not in (None, ""):
-                                facts.append(f"{key}={parsed.get(key)}")
-                                if key in {"bootstrapped_at", "reseeded_at", "state_code"}:
-                                    bootstrap_facts.append(f"{key}={parsed.get(key)}")
-                        if facts:
-                            details.append(f"`{meta.get('path')}`: " + ", ".join(facts) + ".")
-                    elif meta.get("preview"):
-                        details.append(f"`{meta.get('path')}` is readable ({meta.get('bytes')} bytes).")
-                data_roots = obs.get("data_roots") if isinstance(obs.get("data_roots"), list) else []
-                for root in data_roots[:2]:
-                    if not isinstance(root, dict):
-                        continue
-                    details.append(f"Data root `{root.get('root')}` exposed {root.get('file_count')} bounded file receipts.")
-                    for file_item in (root.get("files") if isinstance(root.get("files"), list) else [])[:4]:
-                        if not isinstance(file_item, dict):
-                            continue
-                        tables = file_item.get("sqlite_tables") if isinstance(file_item.get("sqlite_tables"), dict) else {}
-                        if tables:
-                            table_text = ", ".join(f"{key}={value}" for key, value in list(tables.items())[:6])
-                            details.append(f"`{file_item.get('path')}` tables: {table_text}.")
-                        else:
-                            details.append(f"`{file_item.get('path')}` is present ({file_item.get('bytes')} bytes).")
-                if conversations or asset_bits or bootstrap_facts:
-                    timeline_bits = []
-                    if bootstrap_facts:
-                        timeline_bits.append(", ".join(dict.fromkeys(bootstrap_facts)))
-                    if conversations:
-                        timeline_bits.append(
-                            "runtime conversations "
-                            + ", ".join(
-                                f"{key}={conversations.get(key)}"
-                                for key in ("sessions", "messages", "session_files")
-                                if conversations.get(key)
-                            )
-                        )
-                    if asset_bits:
-                        timeline_bits.append("data corpus " + ", ".join(asset_bits))
-                    details.append("What it has done over time, from bounded evidence: " + "; ".join(timeline_bits) + ".")
-                    identity_phrase = ", ".join(f"`{value}`" for value in inferred[:3]) if inferred else "`runtime entity`"
-                    root_phrase = f" and rooted at `{workspace_root}`" if workspace_root else ""
-                    data_phrase = f", with related data under `{data_root}`" if data_root else ""
-                    synthesized_intro = (
-                        f"{entity_label} is represented in bounded workspace evidence as {identity_phrase}, "
-                        f"exposed through `{route_id}`{root_phrase}{data_phrase}."
-                    )
-                    synthesized_history = (
-                        "Over time, the bounded evidence shows "
-                        f"{route_entity} has accumulated " + ", ".join([*conv_bits, *asset_bits, *dict.fromkeys(bootstrap_facts)]) + "."
-                    )
-            elif obs.get("kind") == "files":
-                count = obs.get("count")
-                if count is not None:
-                    details.append(f"Route file lookup returned {count} declared path receipts.")
-        if details:
-            summaries.append("\n".join(dict.fromkeys(details)))
-    if not summaries:
-        return reply
-    proof_lines = list(dict.fromkeys(line for summary in summaries for line in summary.splitlines() if line.strip()))
-    suffix = "\n\nKernel inspection proof:\n" + "\n".join(f"- {line}" for line in proof_lines)
-    if "Kernel inspection proof:" in reply:
-        return reply
-    clean_reply = "\n\n".join(part for part in (synthesized_intro, synthesized_history) if part).strip()
-    if not clean_reply:
-        clean_reply = str(reply or "").strip() or "The declared runtime entity was inspected locally."
-    return clipped(clean_reply.rstrip() + suffix, 120000)
+    return master_frontier_answer_shaping.local_tool_summary_reply(reply, local_tool_results)
 
 
 def direct_head_answer_still_requests_local_tools(reply: str, local_tool_results: list[dict[str, Any]]) -> bool:
-    if not local_tool_results:
-        return False
-    text = str(reply or "").strip().lower()
-    if not text:
-        return True
-    stale_patterns = (
-        r"\bi\s+need\s+to\s+(?:inspect|read|recover|locate|check)\b",
-        r"\bbefore\s+i\s+can\s+(?:answer|give|provide|instruct)\b",
-        r"\bneed\s+to\s+(?:inspect|read|recover|locate|check)\b",
-        r"\bdispatching\s+(?:inspection|inspect|local|kernel|tool|read|search)\s+actions?\s+now\b",
-        r"\bdispatching\s+.*\b(?:inspect|inspection|kernel|tool|read|search).*\bnow\b",
-        r"\broute_to_kernel_inspect\b",
-        r"\bpending\s*[:=]\s*[a-z0-9_-]+",
-    )
-    return any(re.search(pattern, text) for pattern in stale_patterns)
+    return master_frontier_answer_shaping.answer_still_requests_local_tools(reply, local_tool_results)
+
+
+direct_head_stream_delta_should_emit = master_frontier_answer_shaping.stream_delta_should_emit
 
 
 def direct_head_local_evidence_projection(local_tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -5931,6 +6138,43 @@ def direct_head_local_evidence_projection(local_tool_results: list[dict[str, Any
         for item in local_tool_results[:10]
         if isinstance(item, dict)
     ]
+
+
+def append_envelope_v2_events(server: WasmAgentServer, run_id: str, events: list[dict[str, Any]]) -> None:
+    # ARCH_EXCEPTION: owner=master-frontier-envelope-v2; reason=run-event persistence wiring emits owned envelope events; expires=2026-08-15
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        append_agent_run_event(
+            server,
+            run_id,
+            str(event.get("type") or "envelope.v2"),
+            summary=clipped(str(event.get("summary") or event.get("type") or ""), 500),
+            payload={"envelope_v2": event},
+        )
+
+
+def append_envelope_v2_inference_usage(
+    server: WasmAgentServer,
+    run_id: str,
+    *,
+    result: dict[str, Any],
+    turn_id: str,
+    inference_id: str,
+    stage: str,
+    prior_calls: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    # ARCH_EXCEPTION: owner=master-frontier-envelope-v2; reason=token-ledger persistence wiring emits owned inference usage; expires=2026-08-15
+    events, calls = master_frontier_envelope_v2.inference_completed_events(
+        result.get("usage") if isinstance(result.get("usage"), dict) else None,
+        prior_calls or [],
+        turn_id=turn_id,
+        inference_id=inference_id,
+        stage=stage,
+        model=clipped(str(result.get("model") or ""), 180),
+    )
+    append_envelope_v2_events(server, run_id, events)
+    return calls
 
 
 def direct_head_local_continuation_body(body: dict[str, Any], envelope: dict[str, Any], local_tool_results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -5964,12 +6208,22 @@ def direct_head_should_continue_after_local_tools(
 ) -> bool:
     if dispatch_result or not local_tool_results:
         return False
+    if direct_head_local_tool_actions(parsed) and not direct_head_answer_text(parsed, "").strip():
+        return True
     if direct_head_goal_requires_change_artifact(envelope):
         return not direct_head_local_tool_changed_files(local_tool_results)
     if direct_head_answer_still_requests_local_tools(direct_head_answer_text(parsed, reply), local_tool_results):
         return True
     needs = direct_head_declared_needs(parsed)
     return bool(needs and not direct_head_local_tool_actions(parsed))
+
+
+direct_head_usage_components = master_frontier_controller.usage_components
+
+
+direct_head_aggregate_token_usage = lambda usages, *, source, model="": master_frontier_controller.aggregate_token_usage(
+    usages, source=source, model=model, normalize=normalize_token_usage, token_int=token_int_value,
+)
 
 
 def direct_head_continue_after_local_tools(
@@ -5985,55 +6239,56 @@ def direct_head_continue_after_local_tools(
     local_tool_results: list[dict[str, Any]],
     action_callback: Any | None = None,
 ) -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
-    if not direct_head_should_continue_after_local_tools(envelope, parsed, result.get("reply", ""), local_tool_results, None):
-        return parsed, result, local_tool_results
-    append_agent_run_event(
-        server,
-        run_id,
-        "head.continued",
-        summary="Continuing direct head with local tool evidence",
-        payload={
-            "reason": "local_tool_evidence_available",
-            "local_tool_count": len(local_tool_results),
-            "receiver": receiver,
+    return master_frontier_controller.continue_after_local_tools(
+        ports={
+            "monotonic": time.monotonic,
+            "error": lambda code, message: direct_envelope_error(code, message, HTTPStatus.CONFLICT),
+            "should_continue": direct_head_should_continue_after_local_tools,
+            "repo_answer": direct_head_repo_object_answer_from_evidence,
+            "append_v2": lambda events: append_envelope_v2_events(server, run_id, events),
+            "append_event": lambda event_type, summary, payload: append_agent_run_event(server, run_id, event_type, summary=summary, payload=payload),
+            "continuation_body": direct_head_local_continuation_body,
+            "complete": lambda continued: openai_responses_completion(
+                server, continued, continued["envelope"], run_id=run_id, user=user, action_callback=action_callback,
+            ) if receiver in {"openai-responses", "openai-codex"} else provider_envelope_completion(
+                server, continued, user=user, action_callback=action_callback,
+            ),
+            "append_usage": lambda continued, turn, inference: append_envelope_v2_inference_usage(
+                server, run_id, result=continued, turn_id=turn, inference_id=inference, stage="head.continued",
+            ),
+            "answer_stale": direct_head_answer_still_requests_local_tools,
+            "answer_text": direct_head_answer_text,
+            "summary": direct_head_local_tool_summary_reply,
+            "enforce_action": enforce_direct_head_structured_action,
+            "aggregate_usage": lambda usages, current_receiver, continued, original: direct_head_aggregate_token_usage(
+                usages,
+                source=f"{current_receiver.replace('-', '_')}_direct_continuation",
+                model=clipped(str(continued.get("model") or original.get("model") or ""), 180),
+            ),
+            "execute_actions": lambda actions: execute_direct_head_local_tool_actions(
+                server, actions, envelope, user=user, run_id=run_id,
+            ),
+            "record_results": lambda results, turn, inference: record_direct_head_local_tool_events(
+                server, run_id, results, turn_id=turn, inference_id=inference,
+            ),
+            "ensure_probe": lambda results: ensure_direct_head_repo_object_probe(
+                server, envelope, user=user, run_id=run_id, local_tool_results=results,
+            ),
+            "ensure_source": lambda results: ensure_direct_head_repo_object_source_read(
+                server, envelope, user=user, run_id=run_id, local_tool_results=results,
+            ),
+            "ensure_runtime": lambda results: ensure_direct_head_repo_object_runtime_scope_preflight(
+                server, envelope, user=user, run_id=run_id, local_tool_results=results,
+            ),
         },
-    )
-    continued_body = direct_head_local_continuation_body(body, envelope, local_tool_results)
-    if receiver in {"openai-responses", "openai-codex"}:
-        continued_result = openai_responses_completion(
-            server,
-            continued_body,
-            continued_body["envelope"],
-            run_id=run_id,
-            user=user,
-            action_callback=action_callback,
-        )
-    else:
-        continued_result = provider_envelope_completion(server, continued_body, user=user, action_callback=action_callback)
-    continued_parsed = continued_result.get("parsed") if isinstance(continued_result.get("parsed"), dict) else {}
-    enforce_direct_head_structured_action(continued_parsed, continued_result.get("reply", ""))
-    decision = clipped(str(continued_parsed.get("decision") or continued_parsed.get("answer") or continued_result.get("reply") or "continued direct head replied"), 240)
-    append_agent_run_event(
-        server,
-        run_id,
-        "head.decision",
-        summary=decision,
-        payload={
-            "decision": clipped(str(continued_parsed.get("decision") or ""), 120),
-            "actions": continued_parsed.get("actions") if isinstance(continued_parsed.get("actions"), list) else [],
-            "needs": continued_parsed.get("needs") if isinstance(continued_parsed.get("needs"), list) else [],
-            "confidence": continued_parsed.get("confidence"),
-            "continued": True,
-        },
-    )
-    more_results = execute_direct_head_local_tool_actions(
-        server,
-        direct_head_local_tool_actions(continued_parsed),
-        envelope,
-        user=user,
+        body=body,
+        route_envelope=envelope,
+        receiver=receiver,
         run_id=run_id,
+        parsed=parsed,
+        result=result,
+        local_tool_results=local_tool_results,
     )
-    return continued_parsed, continued_result, [*local_tool_results, *more_results]
 
 
 def direct_head_dispatch_caps(action: dict[str, Any]) -> list[str]:
@@ -6284,6 +6539,8 @@ def provider_envelope_run_context(body: dict[str, Any]) -> dict[str, Any]:
         "envelope": body.get("envelope") if isinstance(body.get("envelope"), dict) else body.get("llm_envelope"),
         "provider_config": provider_summary,
         "receiver": receiver,
+        "protocol": body.get("protocol"),
+        "investigation_mode": body.get("investigation_mode"),
     }
     return {
         "envelope": envelope,
@@ -6566,618 +6823,20 @@ def provider_envelope_run_execute(
     run: dict[str, Any],
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    envelope = context["envelope"]
-    try:
-        route_contract = require_direct_envelope_route_contract(envelope)
-    except ProviderProxyError as exc:
-        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
-        raise
-    semantic_envelope = str(context.get("semantic_envelope") or "")
-    measurement = context["measurement"]
-    receiver = str(context.get("receiver") or "provider")
-    proxy_provider_config = context.get("proxy_provider_config") if isinstance(context.get("proxy_provider_config"), dict) else {}
-    task_contract = envelope.get("task_contract") if isinstance(envelope.get("task_contract"), dict) else {}
-    before_tree = safe_worktree_tree_sha(server) if str(task_contract.get("intent") or "") == "implementation" else ""
-    objective = str(envelope.get("objective") or body.get("message") or "direct envelope")
-    space_id = safe_state_id(str(body.get("space_id") or "home"), "home")
-    append_agent_run_event(
+    selected_protocol = master_frontier_run_protocol.persisted(run)
+    if selected_protocol == master_frontier_run_protocol.V5:
+        return master_frontier_controller_v5.execute_owned(server, body, user=user, run_record=run, context=context, runtime=globals())
+    if selected_protocol == master_frontier_run_protocol.V4:
+        return master_frontier_controller_v4.execute_owned(server, body, user=user, run_record=run, context=context, runtime=globals())
+    # ARCH_EXCEPTION: owner=master-frontier-controller; reason=compatibility port binding while HTTP side effects remain server-owned; expires=2026-08-15
+    master_frontier_controller.bind_runtime(globals())
+    return master_frontier_controller.provider_envelope_run_execute_owned(
         server,
-        str(run.get("run_id") or ""),
-        "envelope.created",
-        summary=clipped(str(envelope.get("objective") or "Direct envelope"), 180),
-        payload={
-            "envelope": {
-                "schema": "agent-envelope-v1",
-                "trace_id": envelope.get("trace_id", ""),
-                "objective": clipped(str(envelope.get("objective") or ""), 500),
-                "caps": direct_envelope_names(envelope.get("capabilities")),
-                "refs": direct_envelope_names(envelope.get("evidence_refs") or envelope.get("evidence"), key="ref"),
-                "actions": direct_envelope_names(envelope.get("allowed_actions")),
-                "stream": bool(envelope.get("stream")),
-                "receiver": receiver,
-            },
-            "context_measurement": measurement,
-        },
+        body,
+        user=user,
+        run=run,
+        context=context,
     )
-    append_agent_run_event(
-        server,
-        str(run.get("run_id") or ""),
-        "route.resolved",
-        summary=f"{route_contract.get('route_id')} -> {route_contract.get('owner')}",
-        payload={
-            "route_contract": route_contract,
-            "map_summary": route_contract_summary(route_contract),
-        },
-    )
-    append_agent_run_event(
-        server,
-        str(run.get("run_id") or ""),
-        "head.started",
-        summary="Direct head request started",
-        payload={"context_measurement": measurement},
-    )
-    preflight_local_tool_results: list[dict[str, Any]] = []
-    if direct_head_runtime_entity_objective_needs_local_inspection(envelope):
-        run_id = str(run.get("run_id") or "")
-        append_agent_run_event(
-            server,
-            run_id,
-            "head.decision",
-            summary="local_runtime_route_inspection",
-            payload={
-                "decision": "local_runtime_route_inspection",
-                "reason": "declared runtime entity objective requires bounded local inspection before provider answer",
-            },
-        )
-        preflight_local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
-            server,
-            envelope,
-            user=user,
-            run_id=run_id,
-            local_tool_results=[],
-        )
-        append_agent_run_event(
-            server,
-            run_id,
-            "kernel.evidence_ready",
-            summary="Local runtime route proof attached for LLM composition",
-            payload={
-                "reason": "local_runtime_route_proof_for_llm",
-                "local_tools": [
-                    {
-                        "tool": item.get("tool"),
-                        "ok": item.get("ok"),
-                        "code": item.get("code"),
-                        "route_id": item.get("route_id"),
-                        "summary": item.get("summary"),
-                    }
-                    for item in preflight_local_tool_results[:8]
-                    if isinstance(item, dict)
-                ],
-            },
-        )
-        envelope["local_kernel_evidence"] = [
-            {
-                "tool": item.get("tool"),
-                "ok": item.get("ok"),
-                "code": item.get("code"),
-                "route_id": item.get("route_id"),
-                "summary": item.get("summary"),
-            }
-            for item in preflight_local_tool_results[:8]
-            if isinstance(item, dict)
-        ]
-        semantic_envelope = direct_envelope_semantic_text(envelope)
-        measurement = compact_context_measurement(
-            "direct-head-envelope",
-            semantic_envelope,
-            baseline_text=direct_envelope_json(envelope),
-        )
-    try:
-        if receiver in {"openai-responses", "openai-codex"}:
-            def emit_openai_event(progress: dict[str, Any]) -> None:
-                if progress.get("type") == "head.delta":
-                    append_agent_run_event(
-                        server,
-                        str(run.get("run_id") or ""),
-                        "head.delta",
-                        summary=clipped(str(progress.get("summary") or "OpenAI delta"), 180),
-                        payload=progress.get("payload") if isinstance(progress.get("payload"), dict) else {},
-                    )
-                    return
-                record_agent_run_action(server, str(run.get("run_id") or ""), progress)
-
-            try:
-                result = openai_responses_completion(
-                    server,
-                    body,
-                    envelope,
-                    run_id=str(run.get("run_id") or ""),
-                    user=user,
-                    action_callback=emit_openai_event,
-                )
-            except ProviderProxyError as exc:
-                if not direct_head_provider_error_is_repairable_empty(exc):
-                    raise
-                append_agent_run_event(
-                    server,
-                    str(run.get("run_id") or ""),
-                    "head.repair",
-                    summary="Retrying direct head after empty provider content",
-                    payload={"reason": "provider_empty_response", "receiver": receiver},
-                )
-                result = openai_responses_completion(
-                    server,
-                    direct_head_empty_response_repair_body(body),
-                    envelope,
-                    run_id=str(run.get("run_id") or ""),
-                    user=user,
-                    action_callback=emit_openai_event,
-                )
-            parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
-            if direct_head_requires_structured_action(parsed, result.get("reply", "")):
-                append_agent_run_event(
-                    server,
-                    str(run.get("run_id") or ""),
-                    "head.repair",
-                    summary="Retrying direct head with strict action-only output contract",
-                    payload={"reason": "structured_action_required", "receiver": receiver},
-                )
-                result = openai_responses_completion(
-                    server,
-                    direct_head_action_repair_body(body, result.get("reply", "")),
-                    envelope,
-                    run_id=str(run.get("run_id") or ""),
-                    user=user,
-                    action_callback=emit_openai_event,
-                )
-                parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
-            enforce_direct_head_structured_action(parsed, result.get("reply", ""))
-            if not direct_head_has_runtime_entity_routes(envelope):
-                enforce_kernel_before_unknown_answer(parsed)
-            decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "OpenAI receiver replied"), 240)
-            append_agent_run_event(
-                server,
-                str(run.get("run_id") or ""),
-                "head.decision",
-                summary=decision,
-                payload={
-                    "receiver": receiver,
-                    "decision": clipped(str(parsed.get("decision") or "answer"), 120),
-                    "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
-                    "needs": parsed.get("needs") if isinstance(parsed.get("needs"), list) else [],
-                    "confidence": parsed.get("confidence"),
-                },
-            )
-            local_tool_results = [
-                *preflight_local_tool_results,
-                *execute_direct_head_local_tool_actions(
-                server,
-                direct_head_local_tool_actions(parsed),
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                ),
-            ]
-            local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
-                server,
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                local_tool_results=local_tool_results,
-            )
-            parsed, result, local_tool_results = direct_head_continue_after_local_tools(
-                server,
-                body,
-                envelope,
-                receiver=receiver,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                parsed=parsed,
-                result=result,
-                local_tool_results=local_tool_results,
-                action_callback=emit_openai_event,
-            )
-            dispatch_action = direct_head_hermes_dispatch_action(parsed)
-            local_tool_results = ensure_direct_head_runtime_entity_preflight(
-                server,
-                dispatch_action,
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                local_tool_results=local_tool_results,
-            )
-            if direct_head_local_runtime_proof_satisfies_dispatch(dispatch_action, envelope, local_tool_results):
-                append_agent_run_event(
-                    server,
-                    str(run.get("run_id") or ""),
-                    "hermes.skipped",
-                    summary="Local runtime route proof satisfied dispatch request",
-                    payload={"reason": "local_runtime_proof_satisfied"},
-                )
-                dispatch_action = None
-            dispatch_result = (
-                execute_direct_head_hermes_dispatch(
-                    server,
-                    dispatch_action,
-                    envelope,
-                    user=user,
-                    run_id=str(run.get("run_id") or ""),
-                    local_tool_results=local_tool_results,
-                )
-                if dispatch_action
-                else None
-            )
-            dispatch_result = maybe_repair_direct_head_completion_dispatch(
-                server,
-                envelope=envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                dispatch_result=dispatch_result if isinstance(dispatch_result, dict) else None,
-                local_tool_results=local_tool_results,
-            )
-            final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else direct_head_answer_text(parsed, result.get("reply", ""))
-            stale_local_tool_answer = direct_head_answer_still_requests_local_tools(final_reply, local_tool_results)
-            if not dispatch_result and (
-                not final_reply.strip()
-                or re.fullmatch(r"\s*dispatch(?:\.|\s+)hermes\.?\s*", final_reply, flags=re.IGNORECASE)
-                or stale_local_tool_answer
-            ):
-                final_reply = direct_head_local_tool_summary_reply("" if stale_local_tool_answer else final_reply, local_tool_results)
-            target_node = (dispatch_result or {}).get("target_node") or "direct-head"
-            head_token_usage = token_usage_with_raw_usage(
-                exact_llm_token_usage(
-                    result.get("usage"),
-                    source=f"{receiver.replace('-', '_')}_direct",
-                    model=clipped(str(result.get("model") or ""), 180),
-                ),
-                result.get("raw_usage"),
-            )
-            bridge_token_usage = (dispatch_result or {}).get("usage") if isinstance(dispatch_result, dict) else None
-            change_proof = direct_head_change_proof(
-                server,
-                user=user,
-                before_tree=before_tree,
-                after_tree=safe_worktree_tree_sha(server) if before_tree else "",
-                target_node=target_node,
-                objective=objective,
-                space_id=space_id,
-            )
-            change_proof = direct_head_merge_local_change_proof(change_proof, local_tool_results)
-            final = {
-                "schema": "hermes.wasm_agent.direct_head_run.final.v1",
-                "run_id": run.get("run_id"),
-                "turn_id": run.get("turn_id"),
-                "route_id": route_contract.get("route_id"),
-                "route_contract": route_contract,
-                "reply": final_reply,
-                "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
-                "local_tools": local_tool_results,
-                "hermes_dispatch": dispatch_result,
-                "diagnostics": {
-                    "source": f"{receiver.replace('-', '_')}_hermes_dispatch" if dispatch_result else f"{receiver.replace('-', '_')}_direct",
-                    "mode": "direct-head",
-                    "receiver": receiver,
-                    "target_node": target_node,
-                    "route_id": route_contract.get("route_id"),
-                    "route_contract": route_contract,
-                    "context_measurement": result.get("context_measurement") or measurement,
-                    "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
-                    "local_tool_results": local_tool_results,
-                    "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
-                    "token_usage": head_token_usage,
-                    "token_usage_head": head_token_usage,
-                    "token_usage_bridge": bridge_token_usage,
-                    "openai_response": result.get("openai_response"),
-                    "changed_files_complete": True,
-                    "before_checkpoint": change_proof.get("before_checkpoint"),
-                    "auto_checkpoint": change_proof.get("auto_checkpoint"),
-                },
-                "changed_files": change_proof.get("changed_files") or [],
-                "context_preview": [{"tool": f"{receiver.replace('-', '_')}_envelope", "preview": semantic_envelope[:1200]}],
-                "actions": [
-                    {
-                        "id": receiver.replace("-", "_"),
-                        "topic": "run-api",
-                        "kind": "api",
-                        "label": "OpenAI Codex OAuth" if receiver == "openai-codex" else "OpenAI Responses",
-                        "status": "done",
-                        "detail": decision,
-                        "meta": result.get("model") or "openai",
-                    }
-                ] + bridge_trace_action_events((dispatch_result or {}).get("bridge_trace")) + direct_head_change_actions(change_proof),
-                "proof": [
-                    "route-used:/agent/provider/envelope/stream",
-                    f"receiver:{receiver}",
-                    f"target-node:{target_node}",
-                    f"local-tools:{len(local_tool_results)}",
-                ],
-            }
-            enforce_direct_head_goal_completion(
-                server,
-                str(run.get("run_id") or ""),
-                envelope,
-                change_proof,
-                dispatch_result if isinstance(dispatch_result, dict) else None,
-            )
-            record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
-            finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
-            return {
-                **result,
-                "reply": final_reply,
-                "envelope_text": semantic_envelope,
-                "hermes_dispatch": dispatch_result,
-                "run": run,
-                "run_id": run.get("run_id"),
-                "turn_id": run.get("turn_id"),
-            }
-        if direct_head_server_provider_requested(body) and not (proxy_provider_config.get("api_key") or proxy_provider_config.get("apiKey")):
-            decision = "Server direct-head provider unavailable; Hermes default fallback is disabled."
-            append_agent_run_event(
-                server,
-                str(run.get("run_id") or ""),
-                "head.decision",
-                summary=decision,
-                payload={
-                    "decision": "provider_unavailable",
-                    "actions": [],
-                    "needs": [],
-                    "confidence": 1,
-                    "provider_head_unavailable": True,
-                    "fallback_reason": "server direct-head provider API key is not configured",
-                    "blocked_dispatch": "hermes_default_fallback_disabled",
-                },
-            )
-            direct_envelope_error(
-                "provider_head_unavailable",
-                "Server direct-head provider key is not configured. Configure the direct-head provider or request an explicit bounded Hermes subagent dispatch; Hermes is not a default fallback.",
-                HTTPStatus.BAD_GATEWAY,
-            )
-        def emit_provider_event(progress: dict[str, Any]) -> None:
-            if progress.get("type") == "head.delta":
-                append_agent_run_event(
-                    server,
-                    str(run.get("run_id") or ""),
-                    "head.delta",
-                    summary=clipped(str(progress.get("summary") or "Provider delta"), 180),
-                    payload=progress.get("payload") if isinstance(progress.get("payload"), dict) else {},
-                )
-                return
-            record_agent_run_action(server, str(run.get("run_id") or ""), progress)
-
-        try:
-            result = provider_envelope_completion(server, body, user=user, action_callback=emit_provider_event)
-        except ProviderProxyError as exc:
-            if not direct_head_provider_error_is_repairable_empty(exc):
-                raise
-            append_agent_run_event(
-                server,
-                str(run.get("run_id") or ""),
-                "head.repair",
-                summary="Retrying direct head after empty provider content",
-                payload={"reason": "provider_empty_response", "receiver": receiver},
-            )
-            result = provider_envelope_completion(
-                server,
-                direct_head_empty_response_repair_body(body),
-                user=user,
-                action_callback=emit_provider_event,
-            )
-        parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
-        if direct_head_requires_structured_action(parsed, result.get("reply", "")):
-            append_agent_run_event(
-                server,
-                str(run.get("run_id") or ""),
-                "head.repair",
-                summary="Retrying direct head with strict action-only output contract",
-                payload={"reason": "structured_action_required", "receiver": receiver},
-            )
-            result = provider_envelope_completion(
-                server,
-                direct_head_action_repair_body(body, result.get("reply", "")),
-                user=user,
-                action_callback=emit_provider_event,
-            )
-            parsed = result.get("parsed") if isinstance(result.get("parsed"), dict) else {}
-        enforce_direct_head_structured_action(parsed, result.get("reply", ""))
-        if not direct_head_has_runtime_entity_routes(envelope):
-            enforce_kernel_before_unknown_answer(parsed)
-        decision = clipped(str(parsed.get("decision") or parsed.get("answer") or result.get("reply") or "direct head replied"), 240)
-        append_agent_run_event(
-            server,
-            str(run.get("run_id") or ""),
-            "head.decision",
-            summary=decision,
-            payload={
-                "decision": clipped(str(parsed.get("decision") or ""), 120),
-                "actions": parsed.get("actions") if isinstance(parsed.get("actions"), list) else [],
-                "needs": parsed.get("needs") if isinstance(parsed.get("needs"), list) else [],
-                "confidence": parsed.get("confidence"),
-            },
-        )
-        local_tool_results = [
-            *preflight_local_tool_results,
-            *execute_direct_head_local_tool_actions(
-            server,
-            direct_head_local_tool_actions(parsed),
-            envelope,
-            user=user,
-            run_id=str(run.get("run_id") or ""),
-            ),
-        ]
-        if not direct_head_objective_is_implementation_intent(envelope):
-            local_tool_results = ensure_direct_head_objective_runtime_entity_preflight(
-                server,
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                local_tool_results=local_tool_results,
-            )
-        parsed, result, local_tool_results = direct_head_continue_after_local_tools(
-            server,
-            body,
-            envelope,
-            receiver=receiver,
-            user=user,
-            run_id=str(run.get("run_id") or ""),
-            parsed=parsed,
-            result=result,
-            local_tool_results=local_tool_results,
-            action_callback=emit_provider_event,
-        )
-        dispatch_action = direct_head_hermes_dispatch_action(parsed)
-        local_tool_results = ensure_direct_head_runtime_entity_preflight(
-            server,
-            dispatch_action,
-            envelope,
-            user=user,
-            run_id=str(run.get("run_id") or ""),
-            local_tool_results=local_tool_results,
-        )
-        if direct_head_local_runtime_proof_satisfies_dispatch(dispatch_action, envelope, local_tool_results):
-            append_agent_run_event(
-                server,
-                str(run.get("run_id") or ""),
-                "hermes.skipped",
-                summary="Local runtime route proof satisfied dispatch request",
-                payload={"reason": "local_runtime_proof_satisfied"},
-            )
-            dispatch_action = None
-        dispatch_result = (
-            execute_direct_head_hermes_dispatch(
-                server,
-                dispatch_action,
-                envelope,
-                user=user,
-                run_id=str(run.get("run_id") or ""),
-                local_tool_results=local_tool_results,
-            )
-            if dispatch_action
-            else None
-        )
-        dispatch_result = maybe_repair_direct_head_completion_dispatch(
-            server,
-            envelope=envelope,
-            user=user,
-            run_id=str(run.get("run_id") or ""),
-            dispatch_result=dispatch_result if isinstance(dispatch_result, dict) else None,
-            local_tool_results=local_tool_results,
-        )
-        final_reply = dispatch_result.get("reply") if isinstance(dispatch_result, dict) else direct_head_answer_text(parsed, result.get("reply", ""))
-        stale_local_tool_answer = direct_head_answer_still_requests_local_tools(final_reply, local_tool_results)
-        if not dispatch_result and (
-            not final_reply.strip()
-            or re.fullmatch(r"\s*dispatch(?:\.|\s+)hermes\.?\s*", final_reply, flags=re.IGNORECASE)
-            or stale_local_tool_answer
-        ):
-            final_reply = direct_head_local_tool_summary_reply("" if stale_local_tool_answer else final_reply, local_tool_results)
-        target_node = (dispatch_result or {}).get("target_node") or "direct-head"
-        head_token_usage = token_usage_with_raw_usage(
-            exact_llm_token_usage(
-                result.get("usage"),
-                source="direct_envelope",
-                model=clipped(str(result.get("model") or ""), 180),
-            ),
-            result.get("raw_usage"),
-        )
-        bridge_token_usage = (dispatch_result or {}).get("usage") if isinstance(dispatch_result, dict) else None
-        change_proof = direct_head_change_proof(
-            server,
-            user=user,
-            before_tree=before_tree,
-            after_tree=safe_worktree_tree_sha(server) if before_tree else "",
-            target_node=target_node,
-            objective=objective,
-            space_id=space_id,
-        )
-        change_proof = direct_head_merge_local_change_proof(change_proof, local_tool_results)
-        final = {
-            "schema": "hermes.wasm_agent.direct_head_run.final.v1",
-            "run_id": run.get("run_id"),
-            "turn_id": run.get("turn_id"),
-            "route_id": route_contract.get("route_id"),
-            "route_contract": route_contract,
-            "reply": final_reply,
-            "provider": {k: v for k, v in result.items() if k not in {"envelope_text"}},
-            "local_tools": local_tool_results,
-            "hermes_dispatch": dispatch_result,
-            "diagnostics": {
-                "source": "direct_head_hermes_dispatch" if dispatch_result else "direct_envelope",
-                "mode": "direct-head",
-                "target_node": target_node,
-                "route_id": route_contract.get("route_id"),
-                "route_contract": route_contract,
-                "context_measurement": result.get("context_measurement") or measurement,
-                "dispatch_context_measurement": (dispatch_result or {}).get("context_measurement"),
-                "local_tool_results": local_tool_results,
-                "bridge_trace": (dispatch_result or {}).get("bridge_trace"),
-                "token_usage": head_token_usage,
-                "token_usage_head": head_token_usage,
-                "token_usage_bridge": bridge_token_usage,
-                "changed_files_complete": True,
-                "before_checkpoint": change_proof.get("before_checkpoint"),
-                "auto_checkpoint": change_proof.get("auto_checkpoint"),
-            },
-            "changed_files": change_proof.get("changed_files") or [],
-            "context_preview": [{"tool": "direct_envelope", "preview": semantic_envelope[:1200]}],
-            "actions": [
-                {
-                    "id": "direct_envelope",
-                    "topic": "run-api",
-                    "kind": "api",
-                    "label": "Direct envelope",
-                    "status": "done",
-                    "detail": decision,
-                    "meta": "admin direct-head",
-                }
-            ] + bridge_trace_action_events((dispatch_result or {}).get("bridge_trace")) + direct_head_change_actions(change_proof),
-            "proof": [
-                "route-used:/agent/provider/envelope/stream",
-                f"receiver:{receiver}",
-                f"target-node:{target_node}",
-                f"local-tools:{len(local_tool_results)}",
-            ],
-        }
-        enforce_direct_head_goal_completion(
-            server,
-            str(run.get("run_id") or ""),
-            envelope,
-            change_proof,
-            dispatch_result if isinstance(dispatch_result, dict) else None,
-        )
-        record_agent_run_final_proof_events(server, str(run.get("run_id") or ""), final)
-        finish_agent_run(server, str(run.get("run_id") or ""), status="completed", final=final)
-        return {
-            **result,
-            "reply": final_reply,
-            "hermes_dispatch": dispatch_result,
-            "run": run,
-            "run_id": run.get("run_id"),
-            "turn_id": run.get("turn_id"),
-        }
-    except ProviderProxyError as exc:
-        fallback = direct_head_runtime_entity_transport_fallback(
-            server,
-            body=body,
-            user=user,
-            run=run,
-            envelope=envelope,
-            route_contract=route_contract,
-            semantic_envelope=semantic_envelope,
-            measurement=measurement,
-            receiver=receiver,
-            before_tree=before_tree,
-            objective=objective,
-            space_id=space_id,
-            error=exc,
-        )
-        if fallback is not None:
-            return fallback
-        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": exc.code, "message": exc.message})
-        raise
-    except Exception as exc:
-        finish_agent_run(server, str(run.get("run_id") or ""), status="failed", error={"code": "direct_envelope_error", "message": str(exc)})
-        raise
 
 
 def provider_envelope_run_completion(
@@ -7266,6 +6925,7 @@ def provider_proxy_completion(
         "messages": messages,
     }
     payload.update(provider_proxy_payload_options(body))
+    payload.update(master_frontier_provider_tools.request_fields(body))
     data = json.dumps(payload).encode("utf-8")
     request = Request(
         endpoint,
@@ -7293,15 +6953,16 @@ def provider_proxy_completion(
                         delta = str(delta_obj.get("content") or "")
                     if delta:
                         deltas.append(delta)
-                        action_callback({
-                            "type": "head.delta",
-                            "summary": clipped(delta, 180),
-                            "payload": {
-                                "receiver": config.get("provider") or "provider",
-                                "event_type": event_type,
-                                "delta": delta,
-                            },
-                        })
+                        if direct_head_stream_delta_should_emit(delta):
+                            action_callback({
+                                "type": "head.delta",
+                                "summary": clipped(delta, 180),
+                                "payload": {
+                                    "receiver": config.get("provider") or "provider",
+                                    "event_type": event_type,
+                                    "delta": delta,
+                                },
+                            })
                     if event_type in {"message_stop"} or (choices and choices[0].get("finish_reason")):
                         completed_response = event
         except HTTPError as exc:
@@ -7386,7 +7047,8 @@ def provider_proxy_completion(
         diagnostic = provider_http_diagnostic(status, provider_error_message(response_payload, raw[:600]), endpoint=endpoint, model=model)
         raise ProviderProxyError(diagnostic["category"], diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
     reply = provider_reply_from_payload(response_payload)
-    if not reply:
+    tool_calls = master_frontier_provider_tools.response_calls(response_payload)
+    if not reply and not tool_calls:
         diagnostic = provider_diagnostic("unreachable", "request-shape-error", "Provider returned no message content.", HTTPStatus.BAD_GATEWAY, endpoint=endpoint, model=model)
         raise ProviderProxyError("provider-empty-response", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
     duration_ms = round((time.monotonic() - started) * 1000)
@@ -7401,6 +7063,7 @@ def provider_proxy_completion(
         "provider": config["provider"],
         "model": response_model,
         "reply": reply,
+        "tool_calls": tool_calls,
         "usage": exact_llm_token_usage(raw_usage, source="provider_proxy", model=response_model),
         "raw_usage": direct_envelope_redact(raw_usage) if isinstance(raw_usage, dict) else {},
         "duration_ms": duration_ms,
@@ -9711,6 +9374,7 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
           target_node TEXT NOT NULL DEFAULT '',
           kind TEXT NOT NULL DEFAULT 'avatar-chat',
           status TEXT NOT NULL,
+          protocol TEXT NOT NULL DEFAULT 'v3',
           direct_head INTEGER NOT NULL DEFAULT 0,
           admin_trace INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
@@ -9790,6 +9454,9 @@ def ensure_account_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS agent_token_ledger_quest_idx ON agent_token_ledger_tb(user_id, quest_id, created_at)",
     ):
         conn.execute(statement)
+    agent_run_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(agent_run_tb)").fetchall()}
+    if "protocol" not in agent_run_columns:
+        conn.execute("ALTER TABLE agent_run_tb ADD COLUMN protocol TEXT NOT NULL DEFAULT 'v3'")
 
 
 def auth_connect() -> sqlite3.Connection:
@@ -9854,13 +9521,44 @@ AGENT_RUN_EVENT_TYPES = {
     "head.decision",
     "head.continued",
     "head.repair",
+    "frontier.proof",
     "kernel.evidence_ready",
+    # ARCH_EXCEPTION: owner=master-frontier-envelope-v2; reason=event allow-list exposes owned Envelope V2 state machine in existing run stream; expires=2026-08-08
+    "llm.inference.started",
+    "llm.reason.summary",
+    "semantic.decision",
+    "command.proposed",
+    "command.accepted",
+    "command.rejected",
+    "command.dispatched",
+    "command.started",
+    "evidence.received",
+    "evidence.missing",
+    "command.failed",
+    "llm.inference.completed",
+    "turn.usage.updated",
+    "gate.started",
+    "gate.decision",
+    "answer.started",
+    "answer.final",
+    "loop_contract_violation",
+    "route.missing",
+    "capability.missing",
+    # ARCH_EXCEPTION: owner=master-frontier-loop; reason=event allow-list exposes owned loop state machine in existing run stream; expires=2026-08-08
+    "loop.reason",
+    "loop.action",
+    "loop.observe",
+    "loop.critique",
+    "loop.finished",
+    "loop.incomplete",
+    "loop.blocked",
     "lookup.requested",
     "lookup.loaded",
     "hermes.dispatch",
     "hermes.progress",
     "hermes.skipped",
     "tokens.used",
+    "state.writeback",
     "tool.started",
     "tool.finished",
     "files.touched",
@@ -9889,16 +9587,7 @@ def safe_agent_run_key(raw: Any, fallback: str) -> str:
 
 
 def bounded_json_text(value: Any, max_chars: int) -> str:
-    text = json.dumps(value if value is not None else {}, ensure_ascii=True, separators=(",", ":"), default=str)
-    if len(text) <= max_chars:
-        return text
-    marker = {
-        "schema": "hermes.wasm_agent.truncated_json.v1",
-        "truncated": True,
-        "original_chars": len(text),
-        "preview": text[: max(0, max_chars - 220)],
-    }
-    return json.dumps(marker, ensure_ascii=True, separators=(",", ":"), default=str)[:max_chars]
+    return master_frontier_persistence.bounded_json_text(value, max_chars)
 
 
 def json_dict(text: str | None) -> dict[str, Any]:
@@ -9962,6 +9651,9 @@ def agent_run_request_hash(body: dict[str, Any]) -> str:
             "receiver",
             "envelope_receiver",
             "openai_model",
+            "protocol",
+            "investigation_mode",
+            "resume_checkpoint",
         )
     }
     encoded = json.dumps(agent_run_hash_value(material), ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
@@ -9977,11 +9669,13 @@ def agent_run_request_summary(body: dict[str, Any], user: dict[str, Any] | None)
     return {
         "schema": "hermes.wasm_agent.agent_run.request_summary.v1",
         "kind": "avatar-chat",
+        **master_frontier_run_protocol.request_fields(body),
         "user_id": user_id(user),
         "session_id": safe_agent_run_key(body.get("session_id"), "local"),
         "turn_id": safe_agent_run_key(body.get("turn_id"), ""),
         "message_chars": len(message),
         "message_sha256": hashlib.sha256(message.encode("utf-8", errors="ignore")).hexdigest() if message else "",
+        "resume_key": clipped(str(body.get("resume_key") or f"{safe_agent_run_key(body.get('session_id'), 'local')}:{safe_agent_run_key(body.get('turn_id'), '')}"), 240),
         "mode": clipped(str(body.get("mode") or "auto"), 40),
         "target_node": clipped(str(body.get("target_node") or body.get("node_id") or ""), 120),
         "model": clipped(str(body.get("model") or ""), 180),
@@ -10010,6 +9704,7 @@ def public_agent_run(row: sqlite3.Row | dict[str, Any], *, include_payloads: boo
         "session_id": str(data.get("session_id") or ""),
         "kind": str(data.get("kind") or "avatar-chat"),
         "status": str(data.get("status") or ""),
+        "protocol": master_frontier_run_protocol.persisted(data),
         "mode": str(data.get("mode") or ""),
         "target_node": str(data.get("target_node") or ""),
         "direct_head": bool(data.get("direct_head")),
@@ -10119,6 +9814,7 @@ def begin_agent_run(
     session_id = safe_agent_run_key(body.get("session_id"), "local")
     body["turn_id"] = turn_id
     body["session_id"] = session_id
+    body.update(master_frontier_run_protocol.request_fields(body))
     uid = user_id(user)
     now = agent_run_now_ms()
     request_hash = agent_run_request_hash(body)
@@ -10151,9 +9847,9 @@ def begin_agent_run(
                 """
                 INSERT INTO agent_run_tb (
                   run_id, turn_id, request_hash, user_id, session_id, account_scope,
-                  mode, target_node, kind, status, direct_head, admin_trace,
+                  mode, target_node, kind, status, protocol, direct_head, admin_trace,
                   created_at, updated_at, request_summary_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'avatar-chat', 'running', ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'avatar-chat', 'running', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -10164,6 +9860,7 @@ def begin_agent_run(
                     uid,
                     mode,
                     target_node,
+                    body["protocol"],
                     1 if direct_head else 0,
                     1 if (direct_head and user_is_admin(user)) else 0,
                     now,
@@ -10276,6 +9973,11 @@ def token_usage_summary(usage: dict[str, Any]) -> str:
 def agent_run_token_usage_payload(result: dict[str, Any]) -> dict[str, Any] | None:
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     components: dict[str, dict[str, Any]] = {}
+    head_components = diagnostics.get("token_usage_head_components") if isinstance(diagnostics.get("token_usage_head_components"), list) else []
+    for index, raw in enumerate(head_components[:20], start=1):
+        usage = normalize_token_usage(raw, source=f"head_{index}")
+        if usage and (token_int_value(usage.get("api_calls")) or token_int_value(usage.get("total_tokens"))):
+            components[f"head_{index}"] = usage
     for name, raw in (
         ("head", diagnostics.get("token_usage_head")),
         ("bridge", diagnostics.get("token_usage_bridge")),
@@ -10283,12 +9985,14 @@ def agent_run_token_usage_payload(result: dict[str, Any]) -> dict[str, Any] | No
     ):
         usage = normalize_token_usage(raw, source=name)
         if usage and (token_int_value(usage.get("api_calls")) or token_int_value(usage.get("total_tokens"))):
-            components[name] = usage
+            if not (name == "head" and head_components):
+                components[name] = usage
     dispatch = result.get("hermes_dispatch") if isinstance(result.get("hermes_dispatch"), dict) else {}
     dispatch_usage = normalize_token_usage(dispatch.get("usage"), source=str(dispatch.get("source") or "hermes_dispatch"))
     if dispatch_usage and (token_int_value(dispatch_usage.get("api_calls")) or token_int_value(dispatch_usage.get("total_tokens"))):
         components.setdefault("bridge", dispatch_usage)
-    if ("head" in components or "bridge" in components) and "run" in components:
+    has_head_component = any(key == "head" or key.startswith("head_") for key in components)
+    if (has_head_component or "bridge" in components) and "run" in components:
         components.pop("run", None)
     if not components:
         usage = token_usage_from_payloads(result, diagnostics, source="agent_run")
@@ -10296,8 +10000,13 @@ def agent_run_token_usage_payload(result: dict[str, Any]) -> dict[str, Any] | No
             components["run"] = usage
     if not components:
         return None
-    if "head" in components and "bridge" in components:
-        head = components["head"]
+    head_call_components = {key: value for key, value in components.items() if key == "head" or key.startswith("head_")}
+    if head_call_components and "bridge" in components:
+        head = direct_head_aggregate_token_usage(
+            list(head_call_components.values()),
+            source="head",
+            model=clipped(str(next(iter(head_call_components.values())).get("model") or ""), 180),
+        ) or {}
         bridge = components["bridge"]
         primary_name = "total"
         primary = normalize_token_usage({
@@ -10314,6 +10023,13 @@ def agent_run_token_usage_payload(result: dict[str, Any]) -> dict[str, Any] | No
         primary["usage_accuracy"] = "provider_exact"
         primary["billable"] = True
         components["total"] = primary
+    elif len(head_call_components) > 1:
+        primary_name = "head"
+        primary = direct_head_aggregate_token_usage(
+            list(head_call_components.values()),
+            source="head",
+            model=clipped(str(next(iter(head_call_components.values())).get("model") or ""), 180),
+        ) or next(iter(head_call_components.values()))
     else:
         primary_name = "bridge" if "bridge" in components else "run" if "run" in components else next(iter(components))
         primary = components[primary_name]
@@ -10494,65 +10210,14 @@ def agent_token_ledger_summary_from_calls(
     turn_id: str = "",
     include_turns: bool = True,
 ) -> dict[str, Any]:
-    exact_calls = [call for call in calls if call.get("exact")]
-    estimated_calls = [call for call in calls if not call.get("exact")]
-    exact_total = sum(int(call.get("total_tokens") or 0) for call in exact_calls)
-    exact_input = sum(int(call.get("input_tokens") or 0) for call in exact_calls)
-    exact_output = sum(int(call.get("output_tokens") or 0) for call in exact_calls)
-    exact_cached = sum(int(call.get("cached_input_tokens") or 0) for call in exact_calls)
-    exact_reasoning = sum(int(call.get("reasoning_tokens") or 0) for call in exact_calls)
-    estimated_input = sum(int(call.get("estimated_input_tokens") or 0) for call in estimated_calls)
-    estimated_output = sum(int(call.get("estimated_output_tokens") or 0) for call in estimated_calls)
-    estimated_total = sum(int(call.get("estimated_total_tokens") or 0) for call in estimated_calls)
-    summary = {
-        "schema": "hermes.wasm_agent.token_ledger.summary.v1",
-        "run_id": safe_agent_run_key(run_id, ""),
-        "quest_id": safe_agent_run_key(quest_id, ""),
-        "turn_id": safe_agent_run_key(turn_id, ""),
-        "exact": len(exact_calls) == len(calls),
-        "provider_call_count": len(calls),
-        "exact_provider_call_count": len(exact_calls),
-        "input_tokens": exact_input,
-        "output_tokens": exact_output,
-        "cached_input_tokens": exact_cached,
-        "reasoning_tokens": exact_reasoning,
-        "total_tokens": exact_total,
-        "estimated_input_tokens": estimated_input if estimated_input else None,
-        "estimated_output_tokens": estimated_output if estimated_output else None,
-        "estimated_total_tokens": estimated_total if estimated_total else None,
-        "calls": calls,
-    }
-    if include_turns:
-        turn_groups: dict[str, list[dict[str, Any]]] = {}
-        turn_order: list[str] = []
-        for call in calls:
-            key = str(call.get("turn_id") or "")
-            if key not in turn_groups:
-                turn_groups[key] = []
-                turn_order.append(key)
-            turn_groups[key].append(call)
-        turns: list[dict[str, Any]] = []
-        for key in turn_order:
-            provider_calls = turn_groups[key]
-            run_ids = sorted({str(call.get("run_id") or "") for call in provider_calls if call.get("run_id")})
-            turn_quest_id = quest_id
-            if not turn_quest_id and provider_calls:
-                turn_quest_id = str(provider_calls[0].get("quest_id") or "")
-            turn_summary = agent_token_ledger_summary_from_calls(
-                provider_calls,
-                run_id=run_ids[0] if len(run_ids) == 1 else "",
-                quest_id=turn_quest_id,
-                turn_id=key,
-                include_turns=False,
-            )
-            turn_summary["schema"] = "hermes.wasm_agent.token_ledger.turn.v1"
-            turn_summary["run_ids"] = run_ids
-            turn_summary["provider_calls"] = provider_calls
-            turn_summary.pop("calls", None)
-            turns.append(turn_summary)
-        summary["turn_count"] = len(turns)
-        summary["turns"] = turns
-    return summary
+    return master_frontier_token_ledger.summary_from_calls(
+        calls,
+        run_id=run_id,
+        quest_id=quest_id,
+        turn_id=turn_id,
+        include_turns=include_turns,
+        sanitize=safe_agent_run_key,
+    )
 
 
 def agent_token_ledger_summary_conn(
@@ -10607,9 +10272,10 @@ def agent_token_ledger_status(user: dict[str, Any] | None, body: dict[str, Any])
             turn_id=turn_id,
             exact_only=exact_only,
         )
+    has_usage = bool(summary.get("provider_call_count"))
     return {
-        "ok": True,
-        "code": "ok",
+        "ok": has_usage,
+        "code": "ok" if has_usage else "token_usage_missing",
         "schema": "hermes.wasm_agent.cost.status_result.v1",
         "ledger": summary,
     }
@@ -10648,6 +10314,16 @@ def agent_run_with_canonical_token_usage(result: dict[str, Any] | None) -> dict[
 
 def record_agent_run_final_proof_events(server: WasmAgentServer, run_id: str, result: dict[str, Any]) -> None:
     record_agent_run_token_usage_event(server, run_id, result)
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    state_writeback = diagnostics.get("state_writeback") if isinstance(diagnostics.get("state_writeback"), dict) else {}
+    if state_writeback:
+        append_agent_run_event(
+            server,
+            run_id,
+            "state.writeback",
+            summary=f"{state_writeback.get('last_action') or 'answer'} / {state_writeback.get('last_feedback') or 'accepted'}",
+            payload={"state_writeback": state_writeback},
+        )
     touched: list[dict[str, Any]] = []
     raw_touched = result.get("touched_files") if isinstance(result.get("touched_files"), list) else []
     for item in raw_touched[:80]:
@@ -10678,7 +10354,6 @@ def record_agent_run_final_proof_events(server: WasmAgentServer, run_id: str, re
     changed = result.get("changed_files") if isinstance(result.get("changed_files"), list) else []
     if changed:
         append_agent_run_event(server, run_id, "files.changed", summary=f"{len(changed)} changed files", payload={"changed_files": changed[:80], "count": len(changed)})
-    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     proof: dict[str, Any] = {}
     for key in ("before_checkpoint", "auto_checkpoint"):
         value = diagnostics.get(key)
@@ -10775,7 +10450,26 @@ def mark_interrupted_agent_runs(server: WasmAgentServer) -> None:
             ).fetchall()
             now = agent_run_now_ms()
             for row in rows:
-                error = {"code": "agent_run_interrupted", "message": "Agent run was interrupted by a server restart."}
+                summary = json_dict(str(row["request_summary_json"] or "{}"))
+                objective_event = conn.execute(
+                    "SELECT payload_json FROM agent_run_event_tb WHERE run_id = ? AND type = 'envelope.created' ORDER BY seq DESC LIMIT 1",
+                    (str(row["run_id"]),),
+                ).fetchone()
+                objective_payload = json_dict(str(objective_event["payload_json"] or "{}")) if objective_event else {}
+                objective_envelope = objective_payload.get("envelope") if isinstance(objective_payload.get("envelope"), dict) else {}
+                checkpoint = {
+                    "schema": "hermes.wasm_agent.restart_checkpoint.v1",
+                    "original_objective": clipped(str(objective_envelope.get("objective") or ""), 1200),
+                    "resume_key": clipped(str(summary.get("resume_key") or f"{row['session_id']}:{row['turn_id']}"), 240),
+                    "previous_run_id": str(row["run_id"]),
+                    "previous_turn_id": str(row["turn_id"]),
+                    "instruction": "Inspect persisted run events and proof before repeating any side effect.",
+                }
+                error = {
+                    "code": "agent_run_interrupted",
+                    "message": "Agent run was interrupted by a server restart and remains resumable.",
+                    "resume_checkpoint": checkpoint,
+                }
                 conn.execute(
                     """
                     UPDATE agent_run_tb
@@ -10910,6 +10604,7 @@ def agent_run_event_stream_payload(
         "envelope.created",
         "head.started",
         "head.decision",
+        "frontier.proof",
         "hermes.dispatch",
         "files.touched",
         "files.changed",
@@ -10917,6 +10612,26 @@ def agent_run_event_stream_payload(
         "tests.finished",
         "proof.collected",
         "tokens.used",
+        "llm.inference.started",
+        "llm.reason.summary",
+        "semantic.decision",
+        "command.proposed",
+        "command.accepted",
+        "command.rejected",
+        "command.dispatched",
+        "command.started",
+        "evidence.received",
+        "evidence.missing",
+        "command.failed",
+        "llm.inference.completed",
+        "turn.usage.updated",
+        "gate.started",
+        "gate.decision",
+        "answer.started",
+        "answer.final",
+        "loop_contract_violation",
+        "route.missing",
+        "capability.missing",
     }:
         seq = int(event.get("seq") or 0)
         label = {
@@ -10924,6 +10639,7 @@ def agent_run_event_stream_payload(
             "envelope.created": "Envelope created",
             "head.started": "Direct head started",
             "head.decision": "Direct head decision",
+            "frontier.proof": "Master:frontier proof",
             "hermes.dispatch": "Hermes dispatch",
             "files.touched": "Touched files",
             "files.changed": "Changed files",
@@ -10931,6 +10647,26 @@ def agent_run_event_stream_payload(
             "tests.finished": "Tests finished",
             "proof.collected": "Proof collected",
             "tokens.used": "tokens.used",
+            "llm.inference.started": "LLM inference started",
+            "llm.reason.summary": "Reason summary",
+            "semantic.decision": "Semantic decision",
+            "command.proposed": "Command proposed",
+            "command.accepted": "Command accepted",
+            "command.rejected": "Command rejected",
+            "command.dispatched": "Command dispatched",
+            "command.started": "Command started",
+            "evidence.received": "Evidence received",
+            "evidence.missing": "Evidence missing",
+            "command.failed": "Command failed",
+            "llm.inference.completed": "LLM inference completed",
+            "turn.usage.updated": "Turn usage updated",
+            "gate.started": "Gate started",
+            "gate.decision": "Gate decision",
+            "answer.started": "Answer started",
+            "answer.final": "Answer final",
+            "loop_contract_violation": "Loop contract violation",
+            "route.missing": "Route missing",
+            "capability.missing": "Capability missing",
         }.get(event_type, "Trace event")
         return {
             "type": "action",
@@ -11172,8 +10908,10 @@ def stream_agent_run_text_ndjson(
                 # Flush any buffered deltas before handling a non-delta event
                 if delta_buffer:
                     try:
-                        handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
-                        handler.wfile.flush()
+                        delta_text = "".join(delta_buffer)
+                        if direct_head_stream_delta_should_emit(delta_text):
+                            handler.wfile.write(json.dumps(delta_text, ensure_ascii=False).encode("utf-8") + b"\n")
+                            handler.wfile.flush()
                     except (BrokenPipeError, ConnectionResetError):
                         return
                     delta_buffer = []
@@ -11216,8 +10954,10 @@ def stream_agent_run_text_ndjson(
             # Flush any remaining buffered deltas after processing all rows
             if delta_buffer:
                 try:
-                    handler.wfile.write(json.dumps("".join(delta_buffer), ensure_ascii=False).encode("utf-8") + b"\n")
-                    handler.wfile.flush()
+                    delta_text = "".join(delta_buffer)
+                    if direct_head_stream_delta_should_emit(delta_text):
+                        handler.wfile.write(json.dumps(delta_text, ensure_ascii=False).encode("utf-8") + b"\n")
+                        handler.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     return
         elif str(run["status"] or "") in AGENT_RUN_TERMINAL_STATUSES:

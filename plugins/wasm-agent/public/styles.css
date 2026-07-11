@@ -1876,7 +1876,7 @@ body.is-app-dragging .app-layer::before {
 .node-context-menu,
 .app-context-menu {
   position: fixed;
-  z-index: 27000;
+  z-index: 32020;
   display: grid;
   gap: 4px;
   padding: 5px;
@@ -2055,7 +2055,6 @@ body.is-app-dragging .app-layer::before {
 }
 
 .agent-person-context-menu {
-  z-index: 32020;
   width: 176px;
 }
 

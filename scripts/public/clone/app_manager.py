@@ -77,6 +77,7 @@ APPS: tuple[AppSpec, ...] = (
             (ROOT / "projects" / "zaiaecainelli" / "frontend" / "dist", ROOT / "projects" / "zaiaecainelli" / "frontend" / "dist", "ro"),
             (ROOT / "projects" / "zaiaecainelli" / "stages", ROOT / "projects" / "zaiaecainelli" / "stages", "ro"),
             (ROOT / "projects" / "zaiaecainelli" / "data", ROOT / "projects" / "zaiaecainelli" / "data", "rw"),
+            (Path("/etc/ssl/certs/ca-certificates.crt"), Path("/etc/ssl/certs/ca-certificates.crt"), "ro"),
         ),
         port=18081,
         container_port=18081,

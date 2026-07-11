@@ -38,8 +38,25 @@ class MasterFrontierIntentTests(unittest.TestCase):
         self.assertTrue(intent.objective_is_implementation_intent(envelope))
         self.assertTrue(intent.goal_requires_change_artifact(envelope))
 
+    def test_codebase_understanding_is_not_implementation(self) -> None:
+        envelope = self.envelope("Search the code base to understand what the meta-analysis widget does")
+
+        self.assertFalse(intent.objective_is_implementation_intent(envelope))
+        self.assertFalse(intent.goal_requires_change_artifact(envelope))
+
     def test_possibility_to_ship_is_capability_inquiry(self) -> None:
         envelope = self.envelope("check out the possibility to ship widgets to the spaces")
+
+        self.assertTrue(intent.text_is_capability_inquiry(envelope["objective"]))
+        self.assertFalse(intent.objective_is_implementation_intent(envelope))
+        self.assertFalse(intent.goal_requires_change_artifact(envelope))
+
+    def test_self_capability_location_probe_is_not_implementation(self) -> None:
+        envelope = self.envelope(
+            "hello i am going to test your power\n"
+            "check what you can do for us and your conecientness build up\n"
+            "so, where are you?"
+        )
 
         self.assertTrue(intent.text_is_capability_inquiry(envelope["objective"]))
         self.assertFalse(intent.objective_is_implementation_intent(envelope))

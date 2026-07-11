@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-06-22",
+  "updatedAt": "2026-07-08",
   "resultStatuses": [
     "pass",
     "fail",
@@ -705,10 +705,113 @@
       ]
     },
     {
+      "id": "wasm-agent-avatar-chat-reflective-intent-fidelity",
+      "owner": "plugins/wasm-agent",
+      "claim": "avatar-chat reflective/self-critique requests preserve the user's meta intent while keeping route proof intact, instead of collapsing into generic capability or status text.",
+      "whenToUse": "After changing direct-head envelope routing, intent classification, fallback response shaping, provider prompt projection, kernel proof projection, or avatar-chat submission for reflective/meta requests.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a reflective request such as `critique your own envelope from within` resolves to `wasm-agent.avatar-chat.ui` before provider or fallback response composition",
+        "the task contract records a reflective/meta intent mode rather than only a UI route or runtime-inspection decision",
+        "the final response includes self-critique of the answering envelope, not just route/capability status",
+        "the final response names the generic failure class when route proof succeeds but user intent fidelity degrades",
+        "the final response gives a concrete improvement path such as a fixture, promise, or compact envelope field",
+        "the final response does not present route proof, source tests, or generic capability text as completion of the reflective request"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If route proof is missing, repair the declarative route contract or preflight before changing response wording.",
+        "If the answer becomes generic status text, add a reflective intent field to the compact task contract and prove response shaping from that field.",
+        "If the test only matches one prompt string, replace it with a small reflective-intent fixture class before expanding examples."
+      ]
+    },
+    {
+      "id": "master-frontier-c3-model-led-loop",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier V3 exposes semantic operations to one model-led load-on-demand loop while keeping versioned C3 codes internal to receipts, with advisory token targets and explicit hard-budget admission.",
+      "whenToUse": "After changing the C3 registry, semantic-operation bootstrap, operation mapping, compact observations, provider continuation, budget admission, browser envelope, or V3 run finalization.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v3_integration.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the browser selects hermes.wasm_agent.master_frontier.v3 without objective-kind planning",
+        "the initial C3 bootstrap stays below the focused token ceiling and excludes verbose transport state",
+        "the bootstrap names C3 as the envelope, CSC/1 as continuity, and the registry digest as a digest without identity ambiguity",
+        "the model sees semantic operation names and arguments without the internal one-character tool dictionary",
+        "the head chooses one semantic operation at a time and the host maps it to a declared route-scoped canonical tool",
+        "cyphers remain present in persisted receipts and history while model continuation receives semantic operation and evidence projections",
+        "compact cypher JSON remains decode-only compatibility and unresolved operation-shaped output cannot leak as a final answer",
+        "bounded source observations preserve enough provider budget for a synthesis call",
+        "stateless provider continuation retains multiple prior evidence details inside one bounded context window",
+        "empty and unsupported tool results do not count as satisfying evidence",
+        "identical repeated tool calls stop before re-execution",
+        "default provider-token and API-call targets are advisory while explicitly hard budgets block before the next call",
+        "the output ceiling permits long requested answers without spending unused capacity",
+        "a server integration run persists exact per-call usage, compact evidence, a plain final answer, and protocol c3"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr",
+        "agent run/event/token rows in the integration test database"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/MASTER_FRONTIER_V3.md",
+        "plugins/wasm-agent/public/modules/master-frontier/cyphers-v3.json",
+        "plugins/wasm-agent/public/modules/master-frontier/cyphers-v3.js",
+        "plugins/wasm-agent/server/master_frontier/cyphers_v3.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v3.py",
+        "plugins/wasm-agent/server/master_frontier/controller.py",
+        "plugins/wasm-agent/server/master_frontier/envelope.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/tests/master_frontier_*v3*.test.py",
+        "plugins/wasm-agent/tests/master_frontier_cyphers_v3.test.js"
+      ],
+      "nextSuggestedSteps": [
+        "If the model repeats an identical call, improve the compact observation rather than adding an autonomous planner.",
+        "If the bootstrap grows, move detail behind a mapped handle instead of adding another always-on field.",
+        "If a live answer is weak, harvest the objective as a model-led outcome fixture; do not add product-specific query extraction."
+      ]
+    },
+    {
       "id": "master-frontier-production-gates",
       "owner": "plugins/wasm-agent",
-      "claim": "Master:frontier route-first, tool-first, budgeted, bounded-harness production gates pass without provider or rebuild work.",
-      "whenToUse": "After changing Master:frontier planner, envelope, dispatch, protocol, code-memory, route contracts, provider proxy, local kernel tools, or before claiming the direct-head harness is production-ready at the static/behavioral contract layer.",
+      "claim": "Master:frontier C3 model-led execution and retained V1/V2 compatibility gates pass without rebuild work.",
+      "whenToUse": "After changing Master:frontier V3 cyphers/controller, compatibility planner/envelope, code-memory, route contracts, provider proxy, local kernel tools, or before claiming the direct-head harness is ready at the local static/behavioral layer.",
       "command": [
         "python3",
         "tools/context/prove-master-frontier-production.py"
@@ -726,12 +829,16 @@
       ],
       "passRequires": [
         "harness registry validation passes",
-        "Master:frontier planner, dispatch, protocol, envelope, prompt-audit, route-contract, intent, and code-memory tests pass",
+        "frozen monolith growth guard passes without a file-wide exception bypass",
+        "C3 registry, semantic-operation bootstrap, internal cypher receipt, semantic observation, budget admission, model-led loop, browser, and server integration tests pass",
+        "retained V1/V2 planner, dispatch, protocol, envelope, prompt-audit, route-contract, entity-resolution, intent, and code-memory compatibility tests pass",
         "code-memory helper returns route-scoped compact results",
+        "legacy watch-loop quest fixtures stay isolated from the C3 execution authority",
         "provider proxy direct-head, local-tool, Hermes-gating, node-tool, changed-file, token-ledger, and proof tests pass",
         "avatar-chat records stale Master:frontier reliability manifests as degraded evidence instead of blocking direct-head dispatch",
         "wasm-agent smoke test passes",
-        "report JSON has ok true"
+        "report JSON has ok true",
+        "CLI emits one MF_PROOF/1 summary capped at 2048 UTF-8 bytes while full command evidence remains pull-only in the report artifact"
       ],
       "outputArtifacts": [
         "reports/context/latest/master-frontier-production-proof.json"
@@ -749,9 +856,105 @@
         "docs/context/HARNESS_PROMISES.json"
       ],
       "nextSuggestedSteps": [
-        "If a Master:frontier unit gate fails, fix the owning module under server/master_frontier instead of adding policy to static_server.py.",
+        "If a C3 gate fails, fix the registry, codec, or model-led controller owner instead of adding planner policy to static_server.py.",
         "If provider-proxy fails, inspect the failing test name and repair the contract layer it names before touching provider fallback behavior.",
-        "Run with --include-runtime before claiming live node-brain availability."
+        "Restart the server and run a real avatar-chat C3 turn before claiming live V3 behavior."
+      ]
+    },
+    {
+      "id": "master-frontier-autonomy-loop",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier checks can run in cheap-to-expensive order while keeping static quest results separate from optional browser and node runtime evidence.",
+      "whenToUse": "After changing Master:frontier watch-loop scoring, avatar quest proof, node bridge proof, production gate composition, or before claiming Master:frontier reduced engineering work beyond isolated tests.",
+      "command": [
+        "python3",
+        "tools/context/run-master-frontier-autonomy-loop.py"
+      ],
+      "timeoutSec": 300,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral",
+        "runtime"
+      ],
+      "passRequires": [
+        "watch-loop step runs before production-gate",
+        "watch summary reports a promoted capability level",
+        "watch summary reports useful engineering outcome status and the real engineering problem solved",
+        "failed watch-loop skips production and returns repair",
+        "report JSON has ok true when all required steps pass"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-autonomy-loop.json"
+      ],
+      "invalidatedBy": [
+        "tools/context/run-master-frontier-autonomy-loop.py",
+        "tools/context/watch-master-frontier-loop.py",
+        "tools/context/prove-master-frontier-production.py",
+        "tools/context/prove-wasm-agent-node-bridge.py",
+        "plugins/wasm-agent/tests/master_frontier_autonomy_loop.test.py",
+        "plugins/wasm-agent/tests/master_frontier_watch_loop.test.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If the usefulness loop fails, harvest the first failed step into a compact quest or fix its owning contract layer.",
+        "Use --include-avatar and --include-node when fresh behavioral/runtime proof is required before promotion.",
+        "Add a reviewed quest fixture only after an independently observed failure names its owning contract."
+      ]
+    },
+    {
+      "id": "master-frontier-watch-loop",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier can replay compact route/tool contract quests without provider calls and can ingest independently produced avatar/node proof without manufacturing edit, harvest, or promotion evidence.",
+      "whenToUse": "After changing Master:frontier planner, envelope repair, Hermes dispatch gating, route contracts, quest fixtures, or before claiming Master:frontier reduces repeated engineering uncertainty beyond static contract readiness.",
+      "command": [
+        "python3",
+        "tools/context/watch-master-frontier-loop.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "compact quest suite loads",
+        "route-first capability inquiry quest passes",
+        "implementation quest selects local_kernel with changed-file/check/proof requirements",
+        "missing-route quest blocks with route_contract_missing",
+        "fake Hermes dispatch prose requires structured action repair",
+        "bounded Hermes quest requires subagent_harness role, route contract, allowed capabilities, proof, and escalation reason",
+        "report JSON has ok true and a nonzero capability level",
+        "static quests promote no higher than L4_bounded_subagent",
+        "fresh avatar proof may promote to L5_avatar_behavioral",
+        "fresh avatar plus node proof may promote to L6_node_runtime",
+        "the watcher does not write source fixtures or count self-authored artifacts as runtime evidence"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-watch.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/fixtures/master_frontier_quests.json",
+        "plugins/wasm-agent/tests/master_frontier_watch_loop.test.py",
+        "tools/context/watch-master-frontier-loop.py",
+        "docs/context/HARNESS_PROMISES.json"
+      ],
+      "nextSuggestedSteps": [
+        "If a quest fails, repair the owning Master:frontier contract layer before adding prompt prose.",
+        "If all compact quests pass, run the live avatar quest or runtime node proof before claiming live behavior.",
+        "Add repeated observed failures as reviewed compact quests outside the watcher run."
       ]
     },
     {
@@ -905,6 +1108,153 @@
       ]
     },
     {
+      "id": "monolith-growth-guard",
+      "owner": "docs/context",
+      "claim": "Frozen survival monoliths do not grow without an explicit temporary architecture exception, source files at 5000+ lines are treated as monolith-class surfaces, and new source files do not enter as fresh monoliths.",
+      "whenToUse": "Before finalizing changes that touch known monolith files, add backend routes, move frontend feature logic, edit native shell coordinators, or add large new source files.",
+      "command": [
+        "python3",
+        "tools/context/check-monolith-growth.py"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "the checker exits 0",
+        "reports/context/latest/monolith-growth-result.json has ok true",
+        "frozen files do not have net growth in the current diff unless an added ARCH_EXCEPTION marker names owner, reason, and expiry",
+        "new route branches are not added directly to static_server.py",
+        "any touched source file at or above 5000 lines is treated as monolith-class and must be modularized or carry an explicit temporary architecture exception",
+        "new large source files stay below the monolith threshold or carry a temporary architecture exception"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/monolith-growth-result.json"
+      ],
+      "invalidatedBy": [
+        "AGENTS.md",
+        "docs/context/README.md",
+        "tools/context/check-monolith-growth.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/public/styles.css",
+        "scripts/public/clone/clone_manager.py",
+        "native/windows/src/main.js",
+        "native/android/app/src/main/java/com/colmeio/wasmagent/MainActivity.kt",
+        "plugins/wasm-agent/server/routes.py",
+        "current git diff"
+      ],
+      "nextSuggestedSteps": [
+        "If monolith_growth fails, extract the touched concern into the owning module or reduce the frozen file before finalizing.",
+        "If route_branch_in_static_server fails, add the route to a declared route contract or owning route module.",
+        "Use ARCH_EXCEPTION only as a temporary debt marker with owner, reason, and expiry."
+      ]
+    },
+    {
+      "id": "wasm-agent-bounded-entity-resolution",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier resolves object + kind + optional scope/location questions into bounded entity contracts before choosing source or runtime inspection.",
+      "whenToUse": "After changing entity phrase parsing, repo-object query shaping, scope/location extraction, route contracts, or direct-head handling for questions that name an object inside a space or runtime location.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_entity_resolution.test.py"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "object + kind + scope phrases resolve to object_id, kind, scope_id, route_id, evidence_needed, and next_tool",
+        "specific object questions such as a named widget inside a named space use the object id for source lookup before runtime scope proof",
+        "category questions such as space widgets use the kind as the query instead of a broad natural-language phrase",
+        "the resolver works for multiple object and scope examples without product-specific routing branches"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/entity_resolution.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/tests/master_frontier_entity_resolution.test.py",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json"
+      ],
+      "nextSuggestedSteps": [
+        "If an object phrase resolves to a noisy query, fix generic phrase extraction before changing prompts.",
+        "If a scope/location is present, require explicit runtime-scope proof after source identity is known.",
+        "Add new fixtures only when they represent a generic grammar or contract class."
+      ]
+    },
+    {
+      "id": "wasm-agent-repo-object-answer-contract",
+      "owner": "plugins/wasm-agent",
+      "claim": "Direct-head repo-object UI questions answer with a plain functional explanation from route-scoped code-memory/source evidence instead of dumping kernel/runtime inspection receipts.",
+      "whenToUse": "After changing direct-head repo-object classification, code-memory search, local evidence summarization, runtime-entity preflight, kernel proof projection, or avatar-chat handling for UI object questions.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "ProviderProxyTests.test_direct_head_bounded_continuation_summarizes_repeated_local_actions",
+        "ProviderProxyTests.test_direct_head_repairs_kernel_inspect_decision_without_action",
+        "ProviderProxyTests.test_direct_head_answers_realure_meta_analysis_from_repo_object_evidence",
+        "ProviderProxyTests.test_repo_object_question_does_not_trigger_runtime_entity_preflight"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "repo-object UI questions are classified as repo-object lookups before runtime-entity history inspection",
+        "code.memory.search can be selected as the primary local evidence lane for named UI objects before any kernel.inspect receipt exists",
+        "the fallback final answer leads with a direct functional explanation of what the repo object does",
+        "the fallback final answer does not contain Code memory proof, source anchors, file paths, or route receipt dumps unless the user asks for proof",
+        "recorded tool events or diagnostics still contain code-memory and bounded source-read proof",
+        "the fallback final answer does not contain Kernel inspection proof or Runtime route receipt dumps for repo-object UI questions",
+        "the fallback final answer does not use provenance-first phrasing such as The source-backed understanding is",
+        "stale model text such as Not inspected yet is replaced by inspected local evidence"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/master_frontier/answer_shaping.py",
+        "plugins/wasm-agent/server/master_frontier/entity_resolution.py",
+        "plugins/wasm-agent/server/master_frontier/loop.py",
+        "plugins/wasm-agent/server/master_frontier/code_memory.py",
+        "plugins/wasm-agent/server/master_frontier/envelope.py",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/tests/master_frontier_entity_resolution.test.py",
+        "plugins/wasm-agent/tests/master_frontier_loop.test.py",
+        "plugins/wasm-agent/tests/master_frontier_code_memory.test.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json"
+      ],
+      "nextSuggestedSteps": [
+        "If repo-object questions trigger local_runtime_route_inspection, fix the generic intent/classification contract before adding product-specific strings.",
+        "If the answer is a receipt dump, fix local evidence summarization to prefer the smallest satisfying proof.",
+        "If code-memory returns no useful route-scoped symbols, repair the code-memory contract or index before changing prompts."
+      ]
+    },
+    {
       "id": "wasm-agent-agent-kernel-contract",
       "owner": "plugins/wasm-agent",
       "claim": "The wasm-agent Agent Kernel exposes generic local-first capabilities, resolve, inspect, act, and prove primitives; direct-head can use kernel.inspect for unknown runtime/entity state without Hermes fallback.",
@@ -931,6 +1281,8 @@
         "kernel.act executes declared local tools and rejects external-provider dispatch",
         "kernel.prove returns route, timeline, token-ledger, and check proof projections",
         "direct-head local tool action handling can execute kernel.inspect before final answer",
+        "direct-head requires code.memory.search, lookup, or kernel action before claiming a named repo object is missing from context",
+        "direct-head requires an executable action before claiming future tool work such as inspection, reading, checking, or searching",
         "direct-head fails closed when it declares missing state/proof needs without a kernel or bounded dispatch action",
         "Hermes is not called for locally inspectable kernel work",
         "Hermes dispatch still requires route, capability need, budget, proof, and escalation reason"
@@ -940,7 +1292,9 @@
       ],
       "invalidatedBy": [
         "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/master_frontier/envelope.py",
         "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/master_frontier_envelope.test.py",
         "plugins/wasm-agent/tests/provider_proxy.test.py",
         "plugins/wasm-agent/server/README.md",
         "plugins/wasm-agent/README.md"
@@ -949,6 +1303,114 @@
         "If kernel primitives fail, fix the generic kernel contract before adding product-specific prompt affordances.",
         "If unknown runtime/entity state is answered without kernel inspection, tighten the compact kernel projection or direct-head action handling.",
         "If Hermes is called for local work, restore local-first capability gating before provider dispatch."
+      ]
+    },
+    {
+      "id": "master-frontier-session-replay-dataflow",
+      "owner": "plugins/wasm-agent",
+      "claim": "Master:frontier turns keep accepted human answers separate from buffered function/dataflow traces, recover bounded action/tool failures, stop unavailable capabilities from looping, and account for every inference.",
+      "whenToUse": "After changing the V3 controller, semantic action parser, proof gate, per-inference usage persistence, continuation recovery, or per-turn avatar-chat trace projection.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_session_replay.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "conversation answers can complete without defensive tool calls",
+        "a stale capability executes once and later requests receive typed feedback instead of another call",
+        "empty parentheses normalize for argumentless semantic operations",
+        "invalid action syntax receives one bounded repair opportunity",
+        "implementation claims cannot complete without mutation, diff, check, and proof receipts",
+        "an empty token scope is not labeled exact zero",
+        "a trusted scoped zero-result can complete as not_found_trusted",
+        "a stale lookup remains inconclusive and must pivot before a source-dependent final"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v3.py",
+        "plugins/wasm-agent/server/master_frontier/cyphers_v3.py",
+        "plugins/wasm-agent/server/master_frontier/proof_gate.py",
+        "plugins/wasm-agent/server/master_frontier/intent.py",
+        "plugins/wasm-agent/server/master_frontier/planner.py",
+        "plugins/wasm-agent/server/master_frontier/trace.py",
+        "plugins/wasm-agent/server/master_frontier/token_ledger.py",
+        "plugins/wasm-agent/public/modules/master-frontier/cyphers-v3.json",
+        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
+        "plugins/wasm-agent/tests/master_frontier_session_replay.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "If internal operation text reaches the answer body, restore provider-delta buffering and structured action projection.",
+        "If a stale or missing capability repeats, fix the generic failure-class circuit breaker before changing prompts.",
+        "If exact inference usage is absent after interruption, persist usage at inference completion instead of only at finalization."
+      ]
+    },
+    {
+      "id": "master-frontier-v4-source-investigation-adversarial",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "The opt-in Master:frontier V4 read-only source-investigation slice accepts only cited source claims, calibrates negative coverage, resumes deterministically, preserves V3 defaults, and resists adversarial source content within hard bounds.",
+      "whenToUse": "After changing V4 investigation, evidence, completion, gate, compound discovery, controller, protocol persistence, or trace behavior.",
+      "command": [
+        "python3",
+        "tools/context/evaluate-master-frontier-v4.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "all deterministic adversarial and recorded-provider fixtures pass",
+        "zero unsupported fixture claims are accepted",
+        "V3 is the default and V4 requires the explicit read-only flag",
+        "evidence handles bind content, location, scope, and freshness",
+        "incomplete negative coverage cannot become not_found_with_coverage",
+        "stale semantic memory uses bounded route fallback",
+        "rename and move metamorphic fixtures pass without runtime changes",
+        "prompt-injection source remains untrusted data",
+        "cancellation, revision, state, evidence, call, and byte bounds are enforced",
+        "ordinary success uses two frontier calls and no post-sufficiency discovery"
+      ],
+      "outputArtifacts": [
+        "reports/master-frontier-v4/v3-baseline.json",
+        "reports/master-frontier-v4/adversarial-evaluation.json",
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/investigation.py",
+        "plugins/wasm-agent/server/master_frontier/evidence.py",
+        "plugins/wasm-agent/server/master_frontier/completion.py",
+        "plugins/wasm-agent/server/master_frontier/gate_v4.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v4.py",
+        "plugins/wasm-agent/server/master_frontier/run_protocol.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/tests/master_frontier_v4_source_investigation.test.py",
+        "tools/context/run-master-frontier-v4-live.py",
+        "tools/context/evaluate-master-frontier-v4.py",
+        "plugins/wasm-agent/tests/fixtures/master_frontier_v4_adversarial.json",
+        "reports/master-frontier-v4/v3-baseline.json"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first typed epistemic failure and rerun the bounded adversarial command.",
+        "If deterministic and replay lanes pass, run one live frontier source objective without enabling production.",
+        "If live provider access is absent, report that lane blocked without weakening deterministic gates."
       ]
     }
   ]

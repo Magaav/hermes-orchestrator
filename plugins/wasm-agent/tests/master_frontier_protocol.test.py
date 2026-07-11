@@ -28,6 +28,10 @@ class MasterFrontierProtocolTests(unittest.TestCase):
     def test_default_output_schema_is_action_capable(self) -> None:
         self.assertIn("actions", protocol.DEFAULT_OUTPUT_SCHEMA["required"])
         self.assertEqual(protocol.DEFAULT_OUTPUT_SCHEMA["properties"]["confidence"]["type"], "number")
+        self.assertFalse(protocol.DEFAULT_OUTPUT_SCHEMA["additionalProperties"])
+        action_schema = protocol.DEFAULT_OUTPUT_SCHEMA["properties"]["actions"]["items"]
+        self.assertFalse(action_schema["additionalProperties"])
+        self.assertIn("route_id", action_schema["properties"])
 
 
 if __name__ == "__main__":

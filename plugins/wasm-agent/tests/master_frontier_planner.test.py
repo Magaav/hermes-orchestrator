@@ -67,6 +67,83 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertIn("code.memory.impact", contract["tools_first"])
         self.assertIn("changed_files", contract["proof_required"])
 
+    def test_explicit_conversation_kind_keeps_plain_chat_in_answer_lane(self) -> None:
+        envelope = self.route_envelope("hello, tell me a short story")
+        envelope["objective_kind"] = "conversation"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "answer")
+        self.assertEqual(contract["executor"], "provider_head")
+        self.assertEqual(contract["evidence_floor"], "conceptual")
+        self.assertEqual(contract["depth"]["level"], "normal")
+        self.assertEqual(contract["recall_budget"]["mode"], "on_demand")
+        self.assertNotIn("changed_files", contract["proof_required"])
+
+    def test_explicit_answer_directly_proof_prompt_stays_answer_lane(self) -> None:
+        envelope = self.route_envelope("avatar-chat quest proof turn one: answer directly with route and token proof only.")
+        envelope["objective_kind"] = "conversation"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "answer")
+        self.assertEqual(contract["executor"], "provider_head")
+        self.assertEqual(contract["evidence_floor"], "conceptual")
+        self.assertEqual(contract["tools_first"], ["kernel.resolve"])
+        self.assertNotIn("cause", contract["proof_required"])
+
+    def test_critique_infers_evidence_backed_diagnosis_without_prompt_fixture(self) -> None:
+        contract = planner.task_contract(self.route_envelope(
+            "check out the current node and critisize its architecture"
+        ))
+
+        self.assertEqual(contract["intent"], "diagnosis")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertEqual(contract["route_intent"], "runtime_support")
+        self.assertEqual(contract["depth"]["level"], "deep")
+        self.assertEqual(contract["recall_budget"]["mode"], "bounded_recent")
+        self.assertIn("code.memory.search", contract["tools_first"])
+        self.assertIn("kernel.inspect", contract["tools_first"])
+
+    def test_free_depth_is_open_budget_hint_not_model_metadata(self) -> None:
+        envelope = self.route_envelope("critique your envelope from within")
+        envelope["depth"] = "free"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["depth"]["level"], "free")
+        self.assertEqual(contract["depth"]["budget_hint"], "open")
+        self.assertEqual(contract["recall_budget"]["mode"], "bounded_recent")
+        self.assertIn("harness/proof loops", contract["depth"]["rule"])
+        self.assertNotIn("model", contract)
+        self.assertNotIn("model_caps", contract)
+
+    def test_implementation_gets_proof_floor(self) -> None:
+        contract = planner.task_contract(self.route_envelope("go ahead and build the widget in the realure space"))
+
+        self.assertEqual(contract["evidence_floor"], "proof")
+        self.assertEqual(contract["route_intent"], "implementation")
+
+    def test_runtime_question_gets_runtime_floor(self) -> None:
+        contract = planner.task_contract(self.route_envelope("what happened in the node runtime since creation?"))
+
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertEqual(contract["route_intent"], "runtime_support")
+
+    def test_explicit_evidence_floor_override_is_preserved(self) -> None:
+        envelope = self.route_envelope("answer from route proof only")
+        envelope["evidence_floor"] = "route"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["evidence_floor"], "route")
+
+    def test_repository_ui_object_question_requires_conclusive_source_investigation(self) -> None:
+        contract = planner.task_contract(self.route_envelope("explain what an unknown space is in this UI"))
+
+        self.assertEqual(contract["evidence_floor"], "source")
+        self.assertEqual(contract["route_intent"], "informational")
+
     def test_envelope_budget_override_is_preserved_in_contract(self) -> None:
         envelope = self.route_envelope("answer from this route")
         envelope["budget"] = {
@@ -79,6 +156,24 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["budget"]["head_tokens_max"], 1200)
         self.assertEqual(contract["budget"]["provider_tokens_max"], 8000)
         self.assertEqual(contract["budget"]["max_output_tokens"], 300)
+
+    def test_envelope_budget_cannot_expand_route_limits(self) -> None:
+        envelope = self.route_envelope("answer from this route")
+        envelope["budget"] = {
+            "head_tokens_max": 99999,
+            "provider_tokens_max": 99999,
+            "api_calls_max": 99,
+            "wall_ms_max": 999999,
+            "max_output_tokens": 99999,
+        }
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["budget"]["head_tokens_max"], 3000)
+        self.assertEqual(contract["budget"]["provider_tokens_max"], 8000)
+        self.assertEqual(contract["budget"]["api_calls_max"], 6)
+        self.assertEqual(contract["budget"]["wall_ms_max"], 90000)
+        self.assertEqual(contract["budget"]["max_output_tokens"], 65536)
 
     def test_missing_route_blocks_before_executor_choice(self) -> None:
         contract = planner.task_contract({"objective": "inspect this unknown surface", "capabilities": ["repo.read"]})

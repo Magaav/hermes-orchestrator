@@ -1,4 +1,5 @@
 const STORAGE_KEY = "wasmAgent.metaAnalysis.v1";
+const META_ANALYSIS_SKILL_ID = "scientific-paper-meta-analysis";
 const INTEGRITY_SIGNAL_GROUPS = [
   {
     id: "funding",
@@ -215,9 +216,13 @@ function initMetaAnalysisWidget() {
     const payload = await postJson("/agent/tools/node.capabilities", {
       node_id: "paracelsus",
       route_id: "hermes-node.paracelsus.runtime",
+      skill_id: META_ANALYSIS_SKILL_ID,
     });
     if (payload.ok === false || payload.can_answer === false) {
       throw new Error(payload?.error?.message || payload?.code || "Paracelsus is not available.");
+    }
+    if (payload?.skill?.available !== true) {
+      throw new Error(`Paracelsus is missing required skill ${META_ANALYSIS_SKILL_ID}.`);
     }
     return payload;
   }
@@ -284,9 +289,12 @@ function initMetaAnalysisWidget() {
       const payload = await postJson("/agent/tools/node.chat", {
         node_id: "paracelsus",
         route_id: "hermes-node.paracelsus.runtime",
+        skill_id: META_ANALYSIS_SKILL_ID,
         objective: [
-          "Use your scientific-paper-meta-analysis workflow for this subject.",
+          `Use the required ${META_ANALYSIS_SKILL_ID} skill and its bundled pipeline for this subject.`,
           `Subject: ${subject}`,
+          "Preserve the original subject, normalize likely terminology or identifier typos, and show the normalized query.",
+          "If a literal query is empty, try corrected terminology and broader academic synonyms before reporting no results.",
           "Return a compact ranked list of papers with title, source/year if known, why it matters, and thesis/protocol notes.",
           "Add an Evidence Integrity layer for every top paper: funding/COI, sponsor role, preregistration/protocol, absolute vs relative effect, endpoint type, adverse-event accounting, dropout/missing-data risk, and independent replication.",
           "Separate journal prestige from trust. Downgrade industry-funded, sponsor-authored, surrogate-endpoint, selectively reported, or non-replicated findings even when the journal is top tier.",
@@ -295,11 +303,19 @@ function initMetaAnalysisWidget() {
         ].join("\n"),
         timeout_sec: 240,
       });
-      const reply = payload.reply || "Paracelsus returned no text.";
+      const reply = String(payload.reply || "").trim();
+      if (!reply || /returned an empty assistant response/i.test(reply)) {
+        throw new Error("Paracelsus returned no usable findings.");
+      }
+      if (payload?.skill?.used !== true) {
+        throw new Error(`Paracelsus did not prove ${META_ANALYSIS_SKILL_ID} was loaded.`);
+      }
       const proof = [
         `node=${payload.node_id || "paracelsus"}`,
         `source=${payload.source || "unknown"}`,
         `ready=${caps.can_answer !== false}`,
+        `skill=${payload.skill.id}`,
+        `skill_used=${payload.skill.used}`,
         `model=${payload?.usage?.model || ""}`,
         `tokens=${payload?.usage?.total_tokens || 0}`,
       ].filter(Boolean).join(" ");

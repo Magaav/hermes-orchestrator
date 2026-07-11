@@ -1,0 +1,121 @@
+{
+  "schema": "hermes.wasm_agent.master_frontier.quest_suite.v1",
+  "quests": [
+    {
+      "id": "capability-widget-local-first",
+      "objective": "amazing. can we ship a widget to the realure space?",
+      "surface": "avatar-chat",
+      "route_id": "wasm-agent.avatar-chat.ui",
+      "parsed": {
+        "answer": "I should inspect the route first.",
+        "decision": "kernel.inspect",
+        "actions": [
+          {
+            "action": "kernel.inspect",
+            "args": {
+              "kind": "route",
+              "route_id": "wasm-agent.avatar-chat.ui"
+            }
+          }
+        ]
+      },
+      "expect": {
+        "intent": "capability_inquiry",
+        "executor": "provider_head",
+        "tools_first": ["kernel.resolve", "code.memory.search", "kernel.inspect"],
+        "block_codes": [],
+        "structured_action_required": false,
+        "hermes_dispatch": "absent"
+      }
+    },
+    {
+      "id": "implementation-widget-local-kernel",
+      "objective": "go ahead and build the widget in the realure space",
+      "surface": "avatar-chat",
+      "route_id": "wasm-agent.avatar-chat.ui",
+      "parsed": {
+        "answer": "I will use the local kernel action lane and collect proof.",
+        "decision": "kernel.act",
+        "actions": [
+          {
+            "action": "kernel.act",
+            "args": {
+              "route_id": "wasm-agent.avatar-chat.ui",
+              "proof": ["changed_files", "checks"]
+            }
+          }
+        ]
+      },
+      "expect": {
+        "intent": "implementation",
+        "executor": "local_kernel",
+        "tools_first": ["kernel.resolve", "code.memory.search", "code.memory.impact", "kernel.act", "kernel.prove"],
+        "proof_required": ["changed_files", "checks", "proof"],
+        "block_codes": [],
+        "structured_action_required": false,
+        "hermes_dispatch": "absent"
+      }
+    },
+    {
+      "id": "missing-route-hard-stop",
+      "objective": "inspect this unknown surface and find the files",
+      "surface": "unknown-surface",
+      "parsed": {
+        "answer": "I cannot route this surface without a declared route contract.",
+        "decision": "blocked",
+        "needs": ["route_contract"]
+      },
+      "expect": {
+        "intent": "diagnosis",
+        "executor": "blocked",
+        "block_codes": ["route_contract_missing"],
+        "structured_action_required": false,
+        "hermes_dispatch": "absent"
+      }
+    },
+    {
+      "id": "fake-dispatch-prose-caught",
+      "objective": "Use Hermes to inspect declared refs before answering.",
+      "surface": "avatar-chat",
+      "route_id": "wasm-agent.avatar-chat.ui",
+      "reply": "I'm dispatching to Hermes for proof now.",
+      "parsed": {
+        "answer": "I'm dispatching to Hermes for proof now.",
+        "decision": "dispatch.hermes"
+      },
+      "expect": {
+        "intent": "diagnosis",
+        "executor": "provider_head",
+        "structured_action_required": true,
+        "hermes_dispatch": "absent"
+      }
+    },
+    {
+      "id": "bounded-hermes-only-with-proof",
+      "objective": "Use Hermes for this bounded bridge proof.",
+      "surface": "avatar-chat",
+      "route_id": "wasm-agent.avatar-chat.ui",
+      "parsed": {
+        "answer": "Dispatch Hermes.",
+        "decision": "dispatch.hermes",
+        "actions": [
+          {
+            "action": "dispatch.hermes",
+            "role": "subagent_harness",
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "caps": ["repo.read", "proof.report"],
+            "objective": "Use Hermes for this bounded bridge proof.",
+            "escalation_reason": "Local deterministic tools need bounded bridge proof for an explicitly requested Hermes check.",
+            "proof": ["route", "summary", "token_usage"]
+          }
+        ]
+      },
+      "expect": {
+        "intent": "answer",
+        "executor": "provider_head",
+        "structured_action_required": false,
+        "hermes_dispatch": "bounded"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "quests": [
+    {
+      "expect": {
+        "block_codes": [
+          "route_contract_missing"
+        ],
+        "executor": "blocked",
+        "hermes_dispatch": "absent",
+        "structured_action_required": false
+      },
+      "id": "harvested-missing-route-fixture",
+      "objective": "inspect unsupported surface from fixture",
+      "surface": "unsupported-fixture-surface"
+    }
+  ],
+  "schema": "hermes.wasm_agent.master_frontier.harvested_quest_suite.v1",
+  "sourceArtifact": "failure-harvest-quest-candidate"
+}

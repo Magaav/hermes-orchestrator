@@ -90,6 +90,23 @@ class AgentRunStoreTest(unittest.TestCase):
                 static_server.begin_agent_run(self.server, {**body, "message": "Different"}, user=self.user)
             self.assertEqual(raised.exception.code, "agent_turn_conflict")
 
+    def test_run_protocol_defaults_v3_and_v4_is_explicit_persisted_immutable(self) -> None:
+        base = {"session_id": "protocol-session", "message": "inspect source", "mode": "direct-head"}
+        with patch.dict(os.environ, self.env, clear=True):
+            legacy, _ = static_server.begin_agent_run(self.server, {**base, "turn_id": "legacy"}, user=self.user)
+            self.assertEqual(legacy["protocol"], "v3")
+            with self.assertRaises(static_server.master_frontier_run_protocol.ProtocolError):
+                static_server.begin_agent_run(self.server, {**base, "turn_id": "missing-flag", "protocol": "v4-source-investigation"}, user=self.user)
+            request = {**base, "turn_id": "v4", "protocol": "v4-source-investigation", "investigation_mode": "source-investigation-read-only"}
+            selected, _ = static_server.begin_agent_run(self.server, dict(request), user=self.user)
+            replay, created = static_server.begin_agent_run(self.server, dict(request), user=self.user)
+            self.assertFalse(created)
+            self.assertEqual(selected["protocol"], "v4-source-investigation")
+            self.assertEqual(replay["request_summary"]["protocol"], "v4-source-investigation")
+            with self.assertRaises(static_server.BrowserError) as raised:
+                static_server.begin_agent_run(self.server, {**base, "turn_id": "v4"}, user=self.user)
+            self.assertEqual(raised.exception.code, "agent_turn_conflict")
+
     def test_run_worker_records_action_and_final_event(self) -> None:
         body = {
             "session_id": "agent_session",
@@ -305,11 +322,23 @@ class AgentRunStoreTest(unittest.TestCase):
         }
         with patch.dict(os.environ, self.env, clear=True):
             run, _created = static_server.begin_agent_run(self.server, dict(body), user=self.user)
+            static_server.append_agent_run_event(
+                self.server,
+                run["run_id"],
+                "envelope.created",
+                summary="checkpoint",
+                payload={"envelope": {"objective": "Hello"}},
+            )
             static_server.mark_interrupted_agent_runs(self.server)
 
             interrupted = static_server.read_agent_run(self.user, run["run_id"])["run"]
             self.assertEqual(interrupted["status"], "interrupted")
             self.assertEqual(interrupted["error"]["code"], "agent_run_interrupted")
+            checkpoint = interrupted["error"]["resume_checkpoint"]
+            self.assertEqual(checkpoint["original_objective"], "Hello")
+            self.assertEqual(checkpoint["previous_run_id"], run["run_id"])
+            self.assertEqual(checkpoint["previous_turn_id"], "turn-interrupted")
+            self.assertTrue(checkpoint["resume_key"])
 
             events = static_server.read_agent_run_events(self.user, run["run_id"])["events"]
             self.assertEqual(events[-1]["type"], "run.error")

@@ -52,6 +52,10 @@ resource caps. If a Go binary is missing or older than its source/templates,
 Override runtime limits with `HORC_APP_IMAGE`, `HORC_APP_MEMORY`,
 `HORC_APP_CPUS`, or `HORC_APP_PIDS_LIMIT`.
 
+The Zaia e Cainelli slim container mounts the host CA bundle read-only at
+`/etc/ssl/certs/ca-certificates.crt` so Google OAuth and other outbound HTTPS
+clients retain certificate verification without a custom runtime image.
+
 ## Logs Commands
 
 ```bash

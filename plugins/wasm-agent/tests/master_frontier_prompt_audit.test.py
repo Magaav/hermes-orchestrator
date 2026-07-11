@@ -26,6 +26,7 @@ envelope = load_module("master_frontier.envelope", SERVER_ROOT / "master_frontie
 intent = load_module("master_frontier.intent", SERVER_ROOT / "master_frontier" / "intent.py")
 protocol = load_module("master_frontier.protocol", SERVER_ROOT / "master_frontier" / "protocol.py")
 planner = load_module("master_frontier.planner", SERVER_ROOT / "master_frontier" / "planner.py")
+repair = load_module("master_frontier.repair", SERVER_ROOT / "master_frontier" / "repair.py")
 
 
 class MasterFrontierPromptAuditTests(unittest.TestCase):
@@ -90,6 +91,36 @@ class MasterFrontierPromptAuditTests(unittest.TestCase):
         self.assertTrue(envelope.requires_structured_action({}, "I'm dispatching to Hermes now."))
         self.assertTrue(envelope.requires_structured_action({}, '{"decision":"transcript.read","actions":[{"action"'))
         self.assertFalse(envelope.requires_structured_action({"answer": "Done.", "decision": "answer", "actions": []}, "Done."))
+
+    def test_conversation_repair_salvages_action_claim_without_retry(self) -> None:
+        calls = []
+
+        def completion(**_kwargs):
+            calls.append(_kwargs)
+            return {"reply": "retry should not run", "parsed": {"answer": "retry should not run"}}
+
+        parsed, result = repair.repair_structured_action(
+            body={"instructions": "Use the envelope."},
+            route_envelope={"objective_kind": "conversation"},
+            receiver="test",
+            result={
+                "reply": "Here is my critique. I'm dispatching to Hermes now. The envelope should keep objective kind explicit.",
+                "parsed": {
+                    "answer": "Here is my critique. I'm dispatching to Hermes now. The envelope should keep objective kind explicit.",
+                    "decision": "answer",
+                    "actions": [],
+                },
+            },
+            completion=completion,
+            completion_kwargs={},
+            record_event=lambda *_args: None,
+        )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(parsed["decision"], "answer")
+        self.assertEqual(parsed["actions"], [])
+        self.assertIn("objective kind explicit", result["reply"])
+        self.assertNotIn("dispatching to Hermes", result["reply"])
 
     def test_code_memory_is_in_manifest_before_broad_file_reads(self) -> None:
         self.assertEqual(protocol.LOCAL_TOOL_PATHS["code.memory.search"], "/agent/tools/code.memory.search")

@@ -47,6 +47,35 @@ Keep the simpler path readable and owned. Extra work is allowed only when it is
 explicitly justified by correctness, safety, compatibility, or observability
 that shortens future proof/debug loops.
 
+### Pre-Code Monolith Routing Gate
+
+Before applying any code patch, check whether the intended target file is a
+known frozen monolith or is 5000+ lines. If yes, do not patch durable logic into
+that file first.
+
+Stop and classify the concern with bounded context:
+
+- transport, HTTP, auth, or run persistence
+- routing, intent, proof, policy, evidence, answer shaping, or diagnostics
+- UI behavior or widget logic
+- native shell primitive
+- compatibility shim
+- deletion or extraction
+
+Then route the concern before editing:
+
+- If an owning module exists, patch the owning module.
+- If no owning module exists, create the smallest owning module first.
+- The monolith may only keep delegation, bootstrap wiring, compatibility shim,
+  or deletion.
+- Any exception must use `ARCH_EXCEPTION` with owner, reason, and expiry.
+
+A patch that starts by adding helper functions, policy branches, schemas,
+answer-shaping logic, diagnostics contracts, route/entity/proof logic, or other
+durable behavior to a monolith is invalid even if tests pass and even if some
+other part of the file shrinks. The pre-code reflection must name the owning
+module path and the exact monolith line shape that remains.
+
 ## LLM-Native Architecture Law
 
 Every durable implementation in this repo should be designed for LLM operation
@@ -126,6 +155,47 @@ the third repeat must be promoted into the registry or blocked on missing
 primitive/access/observability. Validate the registry with
 `python3 tools/context/check-harness-promises.py`.
 
+## Monolith Growth Guard
+
+Known survival monoliths are frozen growth surfaces, not feature destinations:
+`plugins/wasm-agent/public/app.js`,
+`plugins/wasm-agent/server/static_server.py`,
+`plugins/wasm-agent/public/styles.css`,
+`scripts/public/clone/clone_manager.py`,
+`native/windows/src/main.js`,
+`native/android/app/src/main/java/com/colmeio/wasmagent/MainActivity.kt`, and
+`plugins/wasm-agent/server/routes.py`.
+
+Before editing one of these files, classify the change reason without broad
+token spend: categorically decide whether the change must stay in the monolith
+as bootstrap wiring, delegation, compatibility shim, or removal-only cleanup, or
+whether it belongs in a new or existing owned module. Durable logic must move to
+the module path first, then the monolith keeps only the shortest readable
+delegation.
+
+Shrink-on-touch is mandatory. Any non-exception patch that touches a frozen
+monolith must include a small follow-up extraction/removal so the monolith has a
+net line-count reduction in the same diff. If the touched concern cannot be
+shrunk immediately, stop and add the missing module/contract, or carry a
+temporary architecture exception with proof of why shrinkage is unsafe now.
+
+Net shrink alone is not enough. Before adding any line to a frozen monolith,
+check whether the durable logic can live in an existing owned module. If yes,
+append to that module and leave only the shortest delegation/removal in the
+monolith. If no module exists, create the smallest owned module first and then
+delegate from the monolith. Only unavoidable bootstrap wiring, compatibility
+shims, or removal-only cleanup may stay solely in the monolith without a paired
+owned-module change.
+
+Growth in a frozen monolith requires an added-line marker with owner, reason,
+and expiry:
+`ARCH_EXCEPTION: owner=<id>; reason=<why>; expires=YYYY-MM-DD`.
+Temporary exceptions do not prove good architecture; they are debt markers to
+remove. Run `python3 tools/context/check-monolith-growth.py` before finalizing
+changes that touch frozen files. The guard must fail when frozen-file additions
+lack a paired owned-module change or explicit exception; treat that failure as
+a required refactor prompt rather than optional advice.
+
 ## Verified Loop-Aware Engineering
 
 For meaningful native, bridge, wake-word, hot-op, runtime-control, release, or
@@ -147,6 +217,24 @@ Prime Checkpoints.
 - Record rebuild command, target, duration or approximate duration, validation
   command, proof inspected, and the next loop-shortening opportunity whenever a
   rebuild-heavy operation is performed.
+
+### Command Isolation Guard
+
+Parallelize discovery, serialize commitment.
+
+Cheap read-only discovery may run in parallel: `rg`, `sed`, `git diff`,
+`json.tool`, `wc`, small file reads, and tiny focused checks.
+
+Any command that may exceed 10 seconds, mutate state, start a server, run a
+full suite, build/install, contact a runtime/device/bridge, or produce proof
+artifacts must run alone, never inside a parallel tool batch. Announce the
+exact long/stateful command before starting it, wait for it to finish, and do
+not start another tool call while it is running.
+
+After any user interruption or aborted tool turn, check for leftover matching
+processes before continuing. Report whether the interrupted command completed,
+was aborted, or is still running before launching the next long/stateful
+command.
 
 ## Final Response Next-Step Law
 

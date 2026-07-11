@@ -14,7 +14,9 @@ download/update, and bridge work.
 | Client-first workspace state | implemented-unverified | focused tests under `tests/` | Server is for auth, presence/relay, sync, backup, provisioning, diagnostics, release metadata. |
 | Omni-device feature default | verified | Root/context/agent docs | Ship shared PWA/runtime behavior first. Prefer browser APIs, WASM, WebGPU/WebNN, downloaded model/runtime artifacts, version/SHA metadata, browser cache, and IndexedDB before native shell code. |
 | LLM-native context default | proposal | docs only | Embedded-agent/model-facing context should become a tiny text envelope plus on-demand lookup tools, with expanded human diagnostics kept separate from prompt input. |
-| Cheap autonomous agent architecture | implemented-unverified first slice | `LLM_NATIVE_AGENT_ARCHITECTURE.md`; focused server tests | wasm-agent resolves declarative route contracts before direct-head/provider work. The Agent Kernel layer exposes generic `kernel.capabilities`, `kernel.resolve`, `kernel.inspect`, `kernel.act`, and `kernel.prove` primitives over route, map, lookup, bounded read, scoped patch, focused test, diff, proof, cost, and bounded Hermes capability/dispatch tools. Hermes remains a bounded skill/bridge executor, not the owner of product routing or broad workspace search. |
+| C3 model-led execution harness | implemented-unverified | `MASTER_FRONTIER_V3.md`; V3 focused, session-replay, and integration tests | One capable head chooses mapped load-on-demand tools; the host owns route safety, execution, semantic observations, budget admission, diffs, checks, proof, buffered human output, per-turn function/dataflow trace rows, and progressive exact usage persistence. This is Codex-style execution, not autonomous planning. Live server restart/avatar-chat proof remains required. |
+| V4 read-only source investigation | locally verified, replay verified | `MASTER_FRONTIER_V4_SOURCE_INVESTIGATION.md`; `python3 tests/master_frontier_v4_source_investigation.test.py`; `python3 ../../tools/context/evaluate-master-frontier-v4.py` | Explicit opt-in only; persisted immutable protocol, bounded model-visible evidence, typed re-probe, exact resume, `INVESTIGATION/1`, compound discovery, `EVIDENCE/1`, `COMPLETION/1`, Gate V4, and independent 14-fixture evaluation. V3 remains default. Live provider attempt has not passed; no runtime, deployment, or production claim. |
+| V5 persistent natural-tool loop | implemented, default, dev-live source verified | `MASTER_FRONTIER_V5.md`; `python3 tests/master_frontier_v5.test.py`; dev run `wa_run_7cd1e73160514744a1231620ef5a6487` | Default Master:frontier path. One Frontier loop uses native natural `search`, `read`, and runtime-only `inspect`, persists completed work, stops semantic repetition, and records exact usage without objective-level token ceilings. V3/V4 remain explicit rollback paths; fresh authenticated-browser terminal proof remains required after default promotion. |
 | Account auth allowlist | implemented-unverified | auth tests; `conf/README.md` | `ADMIN_EMAIL` and optional `USER_EMAILS`; empty allowlists reject all Google accounts. |
 | Native release feed | implemented-unverified | `plugins/wasm-agent/public/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json` | Current local Windows feed guard fails without `native/windows/release/VERIFY.json`; feed publication is not installed runtime proof. |
 | Downloaded native runtime feed | implemented-unverified | `artifacts.runtime.launcher` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js` | Requires installed native shells with downloaded-runtime sync before runtime IDs/SHAs are installed evidence. |
@@ -45,8 +47,10 @@ download/update, and bridge work.
 | Path | Owns | Read / verify |
 | --- | --- | --- |
 | `AGENTS.md` | Local binding contract | Read before any plugin edit. |
-| `LLM_NATIVE_AGENT_ARCHITECTURE.md` | Cheap autonomous embedded-agent architecture | Read before embedded-agent, avatar-chat routing, Hermes dispatch, context budget, or token accounting work. |
-| `LLM_NATIVE_AGENT_MANIFEST_PLAN.md` | Implementation plan, critique loop, acceptance gates, and frontier prompt for the cheap autonomous agent | Read before implementing route contracts, provider adapters, token ledgers, or run timelines. |
+| `MASTER_FRONTIER_V3.md` | Current C3 semantic-operation, model-led execution contract with internal cypher receipts | Read first for Master:frontier execution, context, tool, budget, or proof changes. |
+| `MASTER_FRONTIER_V4_SOURCE_INVESTIGATION.md` | Opt-in V4 read-only source-investigation architecture | Read before V4 state, evidence, discovery, completion, gate, or protocol changes. |
+| `LLM_NATIVE_AGENT_ARCHITECTURE.md` | LLM-native product architecture and V3 direction | Read after the V3 contract for route, context, or token accounting work. |
+| `LLM_NATIVE_AGENT_MANIFEST_PLAN.md` | Historical V1/V2 implementation plan | Do not use its autonomous planner/executor language as current V3 behavior. |
 | `LLM_NATIVE_AGENT_SOURCE_HARVEST.md` | Source-harvested acceptance gates for map, recall, receipts, and token economics | Read before changing the wasm-agent kernel path or adding new route/proof/token contracts. |
 | `DESIGN.md` | Frontend shell and visual regression contract | Read before UI/CSS/HTML work. |
 | `conf/README.md` | Configuration defaults and private env handling | Read before auth/env/deployment changes. |
@@ -109,6 +113,11 @@ two-turn avatar-chat UI quest: it verifies route contract resolution before
 provider dispatch on each turn, exact token ledger persistence by
 quest/turn/provider call, summed quest totals, no broad Hermes fallback, and
 contained timeline/token-ledger UI.
+
+Source-dependent Master:frontier questions distinguish positive matches,
+trusted scoped negatives, ambiguity, and unavailable lookup capabilities. This
+lets impossible or misunderstood requests finish honestly without forcing a
+match, while preventing a stale index from being treated as proof of absence.
 
 The first Agent Kernel slice is exposed under `POST /agent/tools/*` and is
 MCP-compatible by shape rather than a separate MCP server. The LLM-facing

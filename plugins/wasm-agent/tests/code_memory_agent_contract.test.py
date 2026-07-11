@@ -2,33 +2,44 @@
 from __future__ import annotations
 
 import json
-import subprocess
+import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_ROOT = ROOT / "plugins" / "wasm-agent"
+SERVER_ROOT = PLUGIN_ROOT / "server"
+if str(SERVER_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVER_ROOT))
+
+from master_frontier import code_memory, route_contracts  # noqa: E402
 
 
 class CodeMemoryAgentContractTests(unittest.TestCase):
     def test_code_memory_helper_returns_compact_route_scoped_results(self) -> None:
-        proc = subprocess.run(
-            [
-                "python3",
-                "tools/context/code-memory-query.py",
-                "--route-id",
-                "wasm-agent.avatar-chat.ui",
-                "requires_structured_action",
-            ],
-            cwd=str(ROOT),
-            text=True,
-            capture_output=True,
-            timeout=20,
-            check=False,
-        )
+        contracts = route_contracts.load_contracts(SERVER_ROOT / "agent_route_contracts.json", PLUGIN_ROOT.resolve())
+        contract = next(item for item in contracts if item.get("route_id") == "wasm-agent.avatar-chat.ui")
 
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        result = json.loads(proc.stdout)
+        def runner(argv: list[str], cwd: Path, timeout_sec: int) -> tuple[int, str, str]:
+            payload = {
+                "results": [{
+                    "name": "requires_structured_action",
+                    "file_path": "server/master_frontier/envelope.py",
+                    "line": 265,
+                    "body": "not included without include_raw",
+                }]
+            }
+            return 0, json.dumps(payload), ""
+
+        with patch.object(code_memory.shutil, "which", return_value="/usr/bin/docker"), patch.object(
+            code_memory,
+            "freshness",
+            return_value={"state": "fresh", "trusted": True, "workspace_fingerprint": "test", "indexed_fingerprint": "test"},
+        ):
+            result = code_memory.search(contract, {"query": "requires_structured_action"}, runner=runner)
+
         self.assertTrue(result["ok"])
         self.assertEqual(result["primitive"], "code.memory.search")
         self.assertEqual(result["route_id"], "wasm-agent.avatar-chat.ui")

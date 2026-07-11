@@ -1,0 +1,22 @@
+{
+  "schema": "hermes.wasm_agent.master_frontier.c3_cost_fixture.v1",
+  "measurement": "deterministic_c3_integration_fixture",
+  "live": false,
+  "providerUsages": [
+    {
+      "prompt_tokens": 220,
+      "completion_tokens": 16,
+      "total_tokens": 236
+    },
+    {
+      "prompt_tokens": 300,
+      "completion_tokens": 28,
+      "total_tokens": 328
+    },
+    {
+      "prompt_tokens": 520,
+      "completion_tokens": 28,
+      "total_tokens": 548
+    }
+  ]
+}

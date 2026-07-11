@@ -15,6 +15,35 @@ It must not import Hermes Agent internals or patch runtime node state directly.
 
 ## LLM-Native Direct Envelope
 
+The current browser default is Master:frontier V3/C3. V3 sends a compact
+semantic-operation bootstrap to one capable head. The head answers directly or
+requests exactly one semantic operation; the host maps it to a declared tool,
+scopes and executes that tool, returns a compact semantic observation, and calls the same head again. Internal cyphers compress receipts and persisted history but are not model-facing. The host
+does not choose `tools_first`, infer entity search strings, or autonomously
+dispatch Hermes. See `../MASTER_FRONTIER_V3.md`.
+
+Canonical V3 ownership:
+
+- `../public/modules/master-frontier/cyphers-v3.json`: shared mapping;
+- `master_frontier/cyphers_v3.py`: bootstrap/action/observation/budget codec;
+- `master_frontier/controller_v3.py`: model-led execution loop.
+
+V1/V2 handling below remains a compatibility lane for older clients and tests.
+
+The first V4 slice is an explicit `protocol=v4-source-investigation` opt-in and
+also requires `investigation_mode=source-investigation-read-only`. Run creation
+persists that selection immutably; absent/legacy values decode as V3. V4 owns a
+two-frontier-call read-only path under `master_frontier/{investigation,evidence,
+completion,gate_v4,controller_v4,run_protocol}.py`, reusing this server's
+provider, run-event, redaction, trace, token, interruption, and replay substrate.
+It cannot edit repositories or claim runtime/deployed/build/installed/production
+proof. See `../MASTER_FRONTIER_V4_SOURCE_INVESTIGATION.md`.
+V4 reuses configured provider transport but owns its phase messages and a
+12 KB model-visible evidence projection. The gate cannot accept handles omitted
+from that projection. One typed re-probe may merge evidence for ambiguity,
+contradiction, incomplete coverage, or capability recovery without exceeding
+the three-call ceiling.
+
 `POST /agent/provider/envelope` and
 `POST /agent/provider/envelope/stream` are the compact LLM-native head lanes
 for admin avatar-chat and related embedded-agent decisions. They intentionally
@@ -55,6 +84,30 @@ worktree state, return `changed_files`, include timeline checkpoint diagnostics,
 and emit changed-file/proof run events. The UI already renders diff and
 Stepback from that payload; do not replace it with a text-only proof summary.
 
+Envelope V2 timeline events are the controller-facing proof lane for direct-head
+turns. The server persists and streams compact events for:
+`llm.inference.started`, `llm.reason.summary`, `semantic.decision`,
+`command.proposed`, `command.accepted`/`command.rejected`,
+`command.dispatched`, `command.started`, `evidence.received`/
+`evidence.missing`/`command.failed`, `llm.inference.completed`,
+`turn.usage.updated`, `gate.started`, `gate.decision`, `answer.started`, and
+`answer.final`. A second LLM inference is invalid unless new evidence or a
+typed missing/failure event exists after the previous decision; violations stop
+with `loop_contract_violation`.
+
+V3 provider deltas are buffered until the current inference resolves. Raw
+semantic-operation text does not stream into the human answer. The existing
+per-turn action chain receives compact `LLM decision`, function-call, and
+returned-evidence rows from structured run events; arguments/results are
+redacted and bounded, while exact usage is persisted after every inference so
+failed or interrupted turns remain accountable.
+
+Repository/UI object questions use a `source` evidence floor. Their completion
+gate accepts a conclusive `found`, `not_found_trusted`, or `ambiguous` receipt;
+route resolution alone is insufficient. Stale indexes, missing scope, and
+execution failures remain inconclusive and must not be phrased as evidence that
+an object does not exist.
+
 ## Agent Tool Layer
 
 `POST /agent/tools/*` is the wasm-agent-owned local tool protocol for
@@ -69,14 +122,10 @@ with focused tests. `static_server.py` is allowed to provide HTTP/auth wiring,
 route-contract loading, run-event recording, provider calls, and side-effect
 execution, but it must delegate MCP policy to Master:frontier modules.
 
-Master:frontier emits a compact `task_contract` before provider or harness
-selection. The contract classifies intent, pins `route_id` and
-`workspace_root`, lists allowed capabilities, names `tools_first`, selects the
-initial executor (`local_kernel`, `provider_head`, or `blocked`), declares
-proof requirements, and carries block codes. Capability questions such as
-"can we ship a widget?" must plan as `capability_inquiry` with
-`code.memory.search`/`kernel.inspect` before any Hermes path. Implementation
-requests must plan for local route-scoped action and changed-file proof.
+V3 resolves route/workspace and publishes semantic operations before the provider
+call, but the head chooses the tool sequence. Legacy `task_contract`,
+`tools_first`, and executor fields may still be present in transport state for
+V1/V2 compatibility; they do not control the V3 loop.
 
 Current kernel tools: `kernel.capabilities`, `kernel.resolve`,
 `kernel.inspect`, `kernel.act`, and `kernel.prove`. These are the generic

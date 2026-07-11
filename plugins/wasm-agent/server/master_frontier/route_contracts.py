@@ -84,6 +84,7 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
             "description": clipped(str(item.get("description") or ""), 240),
         })
     aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
+    source_index = raw.get("source_index") if isinstance(raw.get("source_index"), dict) else {}
     return {
         "kind": "route-contract",
         "route_id": route_id,
@@ -102,6 +103,7 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
         "caps": [clipped(str(item or ""), 80) for item in (raw.get("caps") if isinstance(raw.get("caps"), list) else [])[:24]],
         "aliases": [clipped(str(item or ""), 120) for item in aliases[:24]],
         "provider_policy": raw.get("provider_policy") if isinstance(raw.get("provider_policy"), dict) else {},
+        "source_index": source_index,
         "budget": raw.get("budget") if isinstance(raw.get("budget"), dict) else {},
         "proof": [clipped(str(item or ""), 80) for item in (raw.get("proof") if isinstance(raw.get("proof"), list) else [])[:24]],
         "checks": checks,
@@ -110,6 +112,24 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
                 "id": clipped(str(item.get("id") or item.get("name") or "").strip(), 120),
                 "name": clipped(str(item.get("name") or item.get("id") or "").strip(), 160),
                 "kind": clipped(str(item.get("kind") or "runtime-entity").strip(), 80),
+                "node_id": clipped(str(item.get("node_id") or item.get("nodeId") or item.get("id") or "").strip(), 120),
+                "selector": clipped(str(item.get("selector") or item.get("target") or "").strip(), 160),
+                "route_symbol": clipped(str(item.get("route_symbol") or item.get("routeSymbol") or "").strip(), 160),
+                "symbols": [
+                    clipped(str(symbol or "").strip(), 160)
+                    for symbol in (item.get("symbols") if isinstance(item.get("symbols"), list) else [])[:12]
+                    if str(symbol or "").strip()
+                ],
+                "match_terms": [
+                    clipped(str(term or "").strip(), 160)
+                    for term in (item.get("match_terms") if isinstance(item.get("match_terms"), list) else [])[:12]
+                    if str(term or "").strip()
+                ],
+                "proof": [
+                    clipped(str(proof or "").strip(), 120)
+                    for proof in (item.get("proof") if isinstance(item.get("proof"), list) else [])[:12]
+                    if str(proof or "").strip()
+                ],
             }
             for item in (raw.get("entities") if isinstance(raw.get("entities"), list) else [])[:24]
             if isinstance(item, dict) and str(item.get("id") or item.get("name") or "").strip()
@@ -195,8 +215,13 @@ def entity_match_tokens(contract: dict[str, Any]) -> set[str]:
     for item in entities[:24]:
         if not isinstance(item, dict):
             continue
-        for key in ("id", "name"):
+        for key in ("name",):
             value = str(item.get(key) or "").strip().lower()
+            if value:
+                tokens.add(value)
+        match_terms = item.get("match_terms") if isinstance(item.get("match_terms"), list) else []
+        for term in match_terms[:12]:
+            value = str(term or "").strip().lower()
             if value:
                 tokens.add(value)
     return tokens

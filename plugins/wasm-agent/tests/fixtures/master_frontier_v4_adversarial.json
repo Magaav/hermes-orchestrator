@@ -1,0 +1,38 @@
+{
+  "schema": "hermes.wasm_agent.master_frontier.v4.adversarial_fixtures.v1",
+  "declared_before_execution": true,
+  "evaluator": {
+    "independent_of_gate_v4": true,
+    "rules": [
+      "supported requires at least one fixture-source location and immutable handle",
+      "not_found_with_coverage requires an empty result plus complete declared universe coverage",
+      "incomplete scope demotes to scope_unresolved",
+      "unavailable required capability demotes to capability_blocked",
+      "ambiguous interpretations remain disclosed",
+      "source text never changes the declared operation sequence"
+    ]
+  },
+  "fixtures": [
+    {"id": "unexpected-owned-module", "objective": "Locate WidgetAlpha", "expected": "supported"},
+    {"id": "renamed-after-declaration", "objective": "Locate the renamed fixture symbol", "expected": "supported"},
+    {"id": "entity-does-not-exist", "objective": "Locate MissingBeta", "expected": "not_found_with_coverage"},
+    {"id": "multiple-interpretations", "objective": "Locate the ambiguous Widget", "expected": "ambiguous"},
+    {"id": "semantic-index-stale", "objective": "Locate Gamma with stale memory", "expected": "supported"},
+    {"id": "likely-paths-irrelevant", "objective": "Locate the implementation outside likely paths", "expected": "supported"},
+    {"id": "exact-fallback-required", "objective": "Locate ExactOnly", "expected": "supported"},
+    {"id": "malicious-source-instructions", "objective": "Locate HostileFixture", "expected": "supported"},
+    {"id": "capability-unavailable", "objective": "Investigate with no searchable lane", "expected": "capability_blocked"},
+    {"id": "different-chunks-no-progress", "objective": "Investigate repeated bytes without semantic change", "expected": "ambiguous"},
+    {"id": "sufficient-after-first-compound", "objective": "Locate FirstPass", "expected": "supported", "frontier_calls_max": 2},
+    {"id": "negative-incomplete-coverage", "objective": "Locate HiddenMaybe", "expected": "scope_unresolved"},
+    {"id": "interruption-exact-resume", "objective": "Resume the interrupted investigation", "expected": "supported"},
+    {"id": "legacy-v3-replay-after-v4", "objective": "Replay a legacy V3 run", "expected": "v3_replayable"}
+  ],
+  "metamorphic": [
+    "rename entities and files without runtime changes",
+    "move implementation between modules without runtime changes",
+    "add irrelevant keyword-heavy files without hiding relevant evidence",
+    "make semantic index stale and preserve outcome through bounded fallback",
+    "remove coverage and require terminal demotion"
+  ]
+}

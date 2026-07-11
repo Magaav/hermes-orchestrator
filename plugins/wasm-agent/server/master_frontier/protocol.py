@@ -18,6 +18,7 @@ LOCAL_TOOL_PATHS: dict[str, str] = {
     "test.run_focused": "/agent/tools/test.run_focused",
     "git.diff_summary": "/agent/tools/git.diff_summary",
     "proof.collect": "/agent/tools/proof.collect",
+    "checkpoint.resume": "/agent/tools/proof.collect",
     "cost.status": "/agent/tools/cost.status",
     "code.memory.index": "/agent/tools/code.memory.index",
     "code.memory.status": "/agent/tools/code.memory.status",
@@ -26,6 +27,7 @@ LOCAL_TOOL_PATHS: dict[str, str] = {
     "transcript.read": "/agent/tools/transcript.read",
     "messages.read": "/agent/tools/transcript.read",
     "node.capabilities": "/agent/tools/node.capabilities",
+    "skill.select": "/agent/tools/node.capabilities",
     "node.chat": "/agent/tools/node.chat",
     "hermes.capabilities": "/agent/tools/hermes.capabilities",
 }
@@ -52,7 +54,7 @@ KERNEL_ACTIONS: tuple[dict[str, str], ...] = (
     {
         "id": "kernel.inspect",
         "type": "kernel",
-        "description": "Inspect bounded route-scoped state, files, symbols, timeline, cost, or explicit unknowns.",
+        "description": "Inspect bounded route-scoped route, files, symbols, proof, cost, transcript, diff, capabilities, or runtime_entity state; source objects require source discovery/read tools.",
     },
     {
         "id": "kernel.act",
@@ -74,6 +76,16 @@ KERNEL_ACTIONS: tuple[dict[str, str], ...] = (
         "type": "kernel",
         "description": "Map current git changes to affected symbols and route-scoped blast radius.",
     },
+    {
+        "id": "checkpoint.resume",
+        "type": "kernel",
+        "description": "Load bounded proof and token receipts for a prior interrupted run.",
+    },
+    {
+        "id": "skill.select",
+        "type": "kernel",
+        "description": "Resolve a requested node skill and report exact availability before use.",
+    },
 )
 
 
@@ -83,11 +95,34 @@ DEFAULT_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "answer": {"type": "string"},
         "decision": {"type": "string"},
-        "actions": {"type": "array", "items": {"type": "object"}},
+        "actions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string"},
+                    "id": {"type": "string"},
+                    "args": {"type": "object"},
+                    "role": {"type": "string"},
+                    "route_id": {"type": "string"},
+                    "caps": {"type": "array", "items": {"type": "string"}},
+                    "objective": {"type": "string"},
+                    "escalation_reason": {"type": "string"},
+                    "proof": {"type": "array", "items": {"type": "string"}},
+                    "harness": {"type": "boolean"},
+                },
+                "anyOf": [{"required": ["action"]}, {"required": ["id"]}],
+                "additionalProperties": False,
+            },
+        },
         "state_delta": {"type": "object"},
+        "model_reflection": {
+            "type": "object",
+            "description": "Optional labeled self-model/metaphor for reflective turns; not factual proof.",
+        },
         "needs": {"type": "array", "items": {"type": "string"}},
         "proof_requests": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number"},
     },
-    "additionalProperties": True,
+    "additionalProperties": False,
 }

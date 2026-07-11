@@ -3,6 +3,12 @@ import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
 import { isMasterFrontierTarget, masterFrontierNodeId, masterFrontierSelectionTarget } from "./modules/master-frontier/target.js";
 import { MASTER_FRONTIER_CAPS, MASTER_FRONTIER_OUTPUT_SCHEMA, masterFrontierAllowedActions } from "./modules/master-frontier/protocol.js";
+import { createAgentSessionRow } from "./modules/assistant/session-row.js";
+import { masterFrontierObjectiveKind, masterFrontierUsefulFallback } from "./modules/master-frontier/useful-fallback.js";
+import { masterFrontierExplicitProtocol, masterFrontierProtocolRequest } from "./modules/master-frontier/source-investigation.js";
+import { MASTER_FRONTIER_V3_SCHEMA, masterFrontierV3Instructions, masterFrontierV3OutputBudget } from "./modules/master-frontier/cyphers-v3.js";
+import { isMasterFrontierTimelineAction } from "./modules/master-frontier/timeline.js";
+import { isAgentContinuationRequest, markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal } from "./modules/master-frontier/continuation.js";
 
 const RESOURCE_PROFILE_MAX_ENTRIES = 320;
 const RESOURCE_PROFILE_SLOW_MS = 24;
@@ -13942,19 +13948,6 @@ function buildAgentContinuityState(session = activeAgentSession(), options = {})
   };
 }
 
-function isAgentContinuationRequest(text = "") {
-  const normalized = cleanText(text, "").toLowerCase().replace(/[.!?]+$/g, "").trim();
-  return [
-    "continue",
-    "go on",
-    "keep going",
-    "resume",
-    "continue please",
-    "please continue",
-    "carry on",
-  ].includes(normalized);
-}
-
 function compactAgentTimelineRows(message = {}, limit = 10) {
   const timeline = Array.isArray(message.timeline) ? message.timeline : [];
   const actions = Array.isArray(message.actions) ? message.actions : [];
@@ -13969,49 +13962,7 @@ function compactAgentTimelineRows(message = {}, limit = 10) {
 }
 
 function latestAgentContinuationContext(session = activeAgentSession()) {
-  const messages = Array.isArray(session?.messages) ? session.messages : [];
-  const candidates = messages
-    .map((message, index) => ({ message, index }))
-    .filter(({ message }) => message && message.role === "assistant" && message.content !== AGENT_DEFAULT_MESSAGE_CONTENT)
-    .map(({ message, index }) => {
-      const content = cleanText(message.content || "", "");
-      const status = cleanText(message.agent_run_status || "", "").toLowerCase();
-      const phase = cleanText(message.phase || "", "").toLowerCase();
-      const timelineCount = compactAgentTimelineRows(message, 20).length;
-      const changedCount = Array.isArray(message.changed_files) ? message.changed_files.length : 0;
-      const hollow = /no active task context|provide objective/i.test(content);
-      const score = (
-        (message.pending ? 60 : 0)
-        + (status === "interrupted" ? 50 : 0)
-        + (phase.includes("error") ? 35 : 0)
-        + (/not finished|interrupted|could not answer|needs attention/i.test(content) ? 25 : 0)
-        + Math.min(20, timelineCount)
-        + Math.min(20, changedCount * 4)
-        + (message.run_id ? 5 : 0)
-        - (hollow ? 35 : 0)
-        + Math.min(10, index / Math.max(1, messages.length))
-      );
-      return { message, score };
-    })
-    .filter((item) => item.score > 0)
-    .sort((a, b) => b.score - a.score);
-  const candidate = candidates[0]?.message || null;
-  if (!candidate) return null;
-  return {
-    schema: "hermes.wasm_agent.avatar_chat.continuation_context.v1",
-    source: "avatar-chat-session",
-    previous_run_id: cleanText(candidate.run_id || "", ""),
-    previous_turn_id: cleanText(candidate.turn_id || "", ""),
-    previous_status: cleanText(candidate.agent_run_status || (candidate.pending ? "running" : ""), ""),
-    previous_phase: cleanText(candidate.phase || "", ""),
-    previous_answer: truncateText(cleanText(candidate.content || "", ""), 900),
-    changed_files: (Array.isArray(candidate.changed_files) ? candidate.changed_files : [])
-      .map((file) => cleanText(file.path || file.file || file, ""))
-      .filter(Boolean)
-      .slice(0, 12),
-    timeline: compactAgentTimelineRows(candidate, 12),
-    instruction: "Continue the previous avatar-chat objective from this compact context; do not ask the user to restate the objective unless the context is empty or contradictory.",
-  };
+  return masterFrontierContinuationContext(session, { timelineRows: compactAgentTimelineRows });
 }
 
 function readAgentLayout() {
@@ -23595,9 +23546,7 @@ async function resumePendingAgentRun(origin = "bootstrap") {
       redacted: true,
     });
   } catch (error) {
-    pendingMessage.content = `I could not resume the embedded assistant run: ${error.message}`;
-    pendingMessage.pending = false;
-    pendingMessage.phase = "Resume error";
+    Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, error));
     pendingMessage.duration_ms = Date.now() - Number(pendingMessage.turn_started_at || Date.now());
     pendingMessage.actions = (pendingMessage.actions || []).map((action) => (
       action.status === "running" ? { ...action, status: "error", detail: error.message } : action
@@ -25431,10 +25380,14 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     dimensions: cleanText(card.dimensions || "", ""),
     reason: cleanText(card.reason || "", ""),
   }));
+  const objectiveKind = masterFrontierObjectiveKind(message);
+  const explicitProtocol = masterFrontierExplicitProtocol(window.location.search, window.localStorage?.getItem("wasmAgent.frontierProtocol"));
+  const protocolSelection = masterFrontierProtocolRequest(message, objectiveKind, explicitProtocol);
   return {
-    schema: "hermes.wasm_agent.master_frontier.envelope.v1",
+    schema: protocolSelection.schema || MASTER_FRONTIER_V3_SCHEMA,
     trace_id: cleanText(options.turnId || "", ""),
     objective: message,
+    objective_kind: objectiveKind === "diagnosis" && protocolSelection.protocol === "v4-source-investigation" ? "source-investigation" : objectiveKind,
     surface: "avatar-chat",
     route_id: "wasm-agent.avatar-chat.ui",
     route_contract: routeContract || undefined,
@@ -25519,8 +25472,9 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
       "target-node:frontier",
     ],
     budget: {
-      max_output_tokens: 900,
+      max_output_tokens: masterFrontierV3OutputBudget(message),
       max_dispatch_caps: AGENT_MASTER_FRONTIER_CAPS.length,
+      enforcement: objectiveKind === "conversation" ? "soft" : "hard",
     },
     stream: true,
     output_schema: MASTER_FRONTIER_OUTPUT_SCHEMA,
@@ -25532,22 +25486,18 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
     ? options.continuity
     : buildAgentContinuityState(activeAgentSession());
   const envelope = masterFrontierEnvelope(message, transcript, observation, { ...options, continuity });
+  const explicitProtocol = masterFrontierExplicitProtocol(window.location.search, window.localStorage?.getItem("wasmAgent.frontierProtocol"));
+  const protocolSelection = masterFrontierProtocolRequest(message, envelope.objective_kind === "source-investigation" ? "diagnosis" : envelope.objective_kind, explicitProtocol);
   const body = {
     session_id: activeAgentSession().id,
     turn_id: cleanText(options.turnId || "", ""),
     space_id: activeSpaceStorageId(),
     envelope,
+    protocol: protocolSelection.protocol,
+    investigation_mode: protocolSelection.investigation_mode,
     transcript_cache: continuity.cache,
-    instructions: [
-      `You are the ${AGENT_MASTER_FRONTIER_LABEL} direct head for avatar-chat.`,
-      "Receive this wasm-agent envelope through the server-configured direct-head receiver.",
-      "Continuity is CSC/1 plus TRC/1; exact prior turns are available only through bounded transcript.read.",
-      "Answer from the envelope protocol; return dispatch.hermes only when the envelope requires bounded bridge tool/proof work.",
-      "If choosing any tool or dispatch action, return only minified JSON with a complete actions array; no prose, no markdown fences, no recap before JSON.",
-      "Do not narrate token usage; runtime diagnostics render exact provider-reported LLM usage outside the answer.",
-      "Be proof-honest: distinguish conceptual possibility from inspected or verified runtime proof.",
-    ].join(" "),
-    max_output_tokens: 900,
+    instructions: masterFrontierV3Instructions(),
+    max_output_tokens: masterFrontierV3OutputBudget(message),
     text_verbosity: "low",
   };
   let response = null;
@@ -25595,7 +25545,17 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
       const payload = handleAgentStreamLine(buffer, options.pendingMessage);
       if (payload?.type === "final") finalAgent = payload.agent;
     }
-    if (!finalAgent) throw new Error("The direct-head stream ended without a final response.");
+    if (!finalAgent) {
+      finalAgent = await recoverMasterFrontierFinal(options.pendingMessage, {
+        signal: options.signal,
+        fetchRun: (runId, fetchOptions) => fetchJson(`/agent/runs/${encodeURIComponent(runId)}`, { timeoutMs: fetchOptions.timeoutMs || 8000, signal: fetchOptions.signal }),
+      });
+    }
+    if (!finalAgent) {
+      const error = new Error("The direct-head stream ended without a final response.");
+      error.partial_reply = masterFrontierPartialReplyFromPending(options.pendingMessage);
+      throw error;
+    }
     response = { ok: true, provider: finalAgent.provider || {}, ...finalAgent };
   } else {
     response = await fetchJson("/agent/provider/envelope", {
@@ -29395,23 +29355,16 @@ async function sendDirectReaction(message, emoji) {
 function renderAgentSessions() {
   if (!els.agentSessionList) return;
   els.agentSessionList.replaceChildren(
-    ...state.agentSessions.map((session) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "agent-session-row";
-      button.classList.toggle("active", session.id === state.activeAgentSessionId);
-      button.dataset.sessionId = session.id;
-      const title = document.createElement("strong");
-      const meta = document.createElement("span");
-      title.textContent = session.title || "Session";
-      meta.textContent = session.kind === "direct" ? "DM" : session.kind === "shared-space" ? "Space chat" : `${session.messages?.length || 0} turns`;
-      button.append(title, meta);
-      button.addEventListener("click", () => {
+    ...state.agentSessions.map((session) => createAgentSessionRow(session, {
+      active: session.id === state.activeAgentSessionId,
+      meta: session.kind === "direct" ? "DM" : session.kind === "shared-space" ? "Space chat" : `${session.messages?.length || 0} turns`,
+      onOpen: () => {
         switchAgentSession(session.id);
         setAgentBalloon("");
-      });
-      return button;
-    })
+      },
+      onCopied: (reference) => pushSocialToast("session", "Session reference copied", reference, `session-reference:${reference}:${Date.now()}`),
+      onCopyError: (error) => pushSocialToast("error", "Could not copy session reference", error.message, `session-reference-error:${session.id}:${Date.now()}`),
+    }))
   );
 }
 
@@ -29807,6 +29760,9 @@ function agentTimelineIcon(item = {}) {
   if (status === "running") return "⏳";
   if (label === "run.started" || eventType === "run.started") return "▶️";
   if (label === "run.final" || eventType === "run.final") return "🏁";
+  if (eventType === "loop.finished" || label === "loop.finished") return "🏁";
+  if (eventType === "loop.incomplete" || eventType === "loop.blocked" || label === "loop.incomplete" || label === "loop.blocked") return "⚠️";
+  if (eventType.startsWith("loop.") || label.startsWith("loop.")) return "◈";
   if (label === "hermes.dispatch" || eventType === "hermes.dispatch") return "🪽";
   if (label === "tool.started" || eventType === "tool.started") return "🔧";
   if (label === "tool.finished" || eventType === "tool.finished") return "✓";
@@ -30014,7 +29970,7 @@ function renderAgentTokenLedger(message = {}) {
   const summary = document.createElement("summary");
   summary.className = "agent-token-ledger-summary";
   const title = document.createElement("strong");
-  title.textContent = "Token ledger";
+  title.textContent = turns.length ? "Quest token ledger" : "Turn token ledger";
   const badge = document.createElement("span");
   badge.className = `agent-token-ledger-badge ${ledger.exact === false ? "estimated" : "exact"}`;
   badge.textContent = ledger.exact === false ? "estimated" : "exact";
@@ -30085,27 +30041,7 @@ function isAgentPollAction(action = {}) {
 }
 
 function isAgentTimelineAction(action = {}) {
-  const label = cleanText(action.label, "").toLowerCase();
-  const meta = cleanText(action.meta, "").toLowerCase();
-  const id = cleanText(action.id, "").toLowerCase();
-  const eventType = cleanText(action.event_type, "").toLowerCase();
-  if (label === "bridge.run.poll" || id === "bridge_run_poll") return false;
-  if (label === "tokens.used" || id === "tokens_used" || id === "bridge_token_usage") return true;
-  if (label === "route.resolved" || eventType === "route.resolved") return true;
-  if (label === "route_contract_missing" || eventType === "route_contract_missing") return true;
-  if (label === "run.started" || eventType === "run.started") return true;
-  if (label === "hermes.dispatch" || eventType === "hermes.dispatch") return true;
-  if (label === "tool.started" || meta.startsWith("tool.started")) return true;
-  if (label === "tool.finished" || meta.startsWith("tool.completed") || meta.startsWith("tool.finished")) return true;
-  if (label.includes("files") || label.includes("file") || eventType.startsWith("files.")) return true;
-  if (label.includes("test") || eventType.startsWith("tests.")) return true;
-  if (label.includes("proof") || eventType.startsWith("proof.")) return true;
-  if (label === "run.final" || eventType === "run.final") return true;
-  if (label === "bridge.run.started" || label === "bridge.run.completed") return true;
-  if (label === "backend.run.started" || label === "backend.run.completed") return true;
-  if (label === "head.started" || label === "head.decision") return true;
-  if (label === "envelope.created") return true;
-  return false;
+  return isMasterFrontierTimelineAction(action);
 }
 
 function compactAgentActionRows(actions = []) {
@@ -33266,6 +33202,8 @@ async function sendAgentMessage(text) {
       space_id: activeSpaceStorageId(),
       space_name: activeSpace.name,
       active_space: activeSpace,
+      original_objective: userMessageContent,
+      resume_key: `${activeSession.id}:${backendTurnId || runHintId}`,
       actions: initialActions,
     });
     startAgentTurnTimer(pendingMessage);
@@ -33387,29 +33325,69 @@ async function sendAgentMessage(text) {
         const diagnostic = directHeadError.diagnostic || directHeadError.payload?.error || providerDiagnosticFromError(directHeadError) || {};
         const reason = diagnostic.message || directHeadError.message;
         const category = cleanText(diagnostic.code || diagnostic.category || diagnostic.mode || "", "error");
+        const partialReply = masterFrontierPartialReplyFromError(directHeadError, pendingMessage);
+        Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, directHeadError));
+        const continuationCheckpoint = latestAgentContinuationContext(activeSession);
+        const usefulFallback = masterFrontierUsefulFallback(userMessageContent, {
+          diagnostic,
+          reason,
+          route_id: pendingMessage.route_contract?.route_id || kernelRouteProof?.route_contract?.route_id || "wasm-agent.avatar-chat.ui",
+          surface: pendingMessage.route_contract?.surface || kernelRouteProof?.route_contract?.surface || "avatar-chat",
+          provider_interrupted: true,
+          original_objective: pendingMessage.original_objective,
+          continuation_context: continuationCheckpoint,
+        });
+        const recoveredReply = partialReply || usefulFallback?.answer || "";
         mergeAgentAction(pendingMessage, {
           id: category === "route_contract_missing" ? "tl_route_contract_missing" : "tl_direct_head_error",
-          label: category === "route_contract_missing" ? "route_contract_missing" : "direct_head.error",
-          status: "error",
-          detail: reason,
+          label: category === "route_contract_missing" ? "route_contract_missing" : recoveredReply ? "direct_head.interrupted" : "direct_head.error",
+          status: recoveredReply ? "done" : "error",
+          detail: partialReply ? "partial stream preserved" : usefulFallback ? "recovered locally" : reason,
           kind: "timeline",
-          event_type: category === "route_contract_missing" ? "route_contract_missing" : "direct_head.error",
+          event_type: category === "route_contract_missing" ? "route_contract_missing" : recoveredReply ? "direct_head.interrupted" : "direct_head.error",
           arguments: { error: diagnostic },
         });
-        pendingMessage.content = `The ${AGENT_MASTER_FRONTIER_LABEL} direct head could not answer: ${reason}`;
+        pendingMessage.content = recoveredReply || `The ${AGENT_MASTER_FRONTIER_LABEL} direct head could not answer: ${reason}`;
         pendingMessage.pending = false;
-        pendingMessage.phase = "Direct head error";
+        pendingMessage.phase = partialReply ? "Partial stream preserved" : usefulFallback ? "Recovered locally" : "Direct head error";
         pendingMessage.duration_ms = Date.now() - turnStartedAt;
         pendingMessage.actions = (pendingMessage.actions || initialActions).map((action) => (
           action.id === askActionId
-            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: "error", detail: reason, meta: category }
+            ? { ...action, label: AGENT_MASTER_FRONTIER_LABEL, status: recoveredReply ? "done" : "error", detail: partialReply ? "partial stream preserved" : usefulFallback ? "recovered locally" : reason, meta: partialReply ? "stream-interrupted" : usefulFallback ? "local-recovery" : category }
             : action
         ));
+        if (partialReply) {
+          pendingMessage.actions.push(agentAction("Partial stream preserved", "done", category, {
+            id: "client_master_frontier_partial_stream_preserved",
+            topic: "run-api",
+            kind: "answer",
+            meta: "stream-interrupted",
+            arguments: {
+              reason,
+              category,
+              partial_chars: partialReply.length,
+              fallback_suppressed: Boolean(usefulFallback),
+            },
+          }));
+        } else if (usefulFallback) {
+          pendingMessage.actions.push(agentAction("Recovered answer", "done", usefulFallback.status, {
+            id: "client_master_frontier_useful_fallback",
+            topic: "run-api",
+            kind: "answer",
+            meta: "local-contract",
+            arguments: usefulFallback,
+          }));
+        }
         pendingMessage.diagnostics = {
-          source: "master_frontier_direct_head_error",
+          source: partialReply ? "master_frontier_partial_stream_preserved" : usefulFallback ? "master_frontier_local_recovery_answer" : "master_frontier_direct_head_error",
           mode: "direct_head",
           target_node: AGENT_FRONTIER_NODE_ID,
           provider_error: diagnostic,
+          useful_fallback: usefulFallback,
+          partial_stream_preserved: partialReply ? {
+            chars: partialReply.length,
+            fallback_suppressed: Boolean(usefulFallback),
+          } : null,
           direct_head: {
             label: AGENT_MASTER_FRONTIER_LABEL,
             endpoint: "/agent/provider/envelope/stream",

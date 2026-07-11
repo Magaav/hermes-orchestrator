@@ -383,6 +383,11 @@ Read it before changing `public/index.html`, `public/styles.css`, or
 - Assistant action chains render above the final answer. They stay expanded
   while the turn is running, collapse after completion, and keep the final
   answer text below the chain.
+- Master:frontier action chains use a Codex-style two-channel presentation.
+  Only the accepted human answer streams into the message body; buffered public
+  model decisions, semantic function calls, redacted arguments, bounded
+  returned information, and exact per-inference usage render as expandable rows
+  inside the same turn card. Hidden chain-of-thought must not be displayed.
 - Action rows must be meaningful: show the action kind, status, concise detail,
   and an expandable arguments/result preview when the adapter has one.
   Do not render empty media rows on text-only turns. Bridge/provider traces may

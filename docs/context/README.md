@@ -124,6 +124,76 @@ agent must return `route_contract_missing` or add the missing contract before
 dispatch. Do not use Hermes or any model to broad-search arbitrary roots as a
 replacement for route ownership.
 
+## Monolith Growth Guard
+
+Frozen monoliths are not normal edit destinations:
+`plugins/wasm-agent/public/app.js`,
+`plugins/wasm-agent/server/static_server.py`,
+`plugins/wasm-agent/public/styles.css`,
+`scripts/public/clone/clone_manager.py`,
+`native/windows/src/main.js`,
+`native/android/app/src/main/java/com/colmeio/wasmagent/MainActivity.kt`, and
+`plugins/wasm-agent/server/routes.py`.
+
+Future agents must treat edits to these files as extraction prompts. Before
+editing, classify the change with bounded context: either the change must stay
+in the monolith as bootstrap wiring, delegation, compatibility shim, or
+removal-only cleanup, or it belongs in a new or existing owned module. Durable
+logic must move to that module first, with only the shortest readable delegation
+left behind.
+
+### Pre-Code Monolith Routing Gate
+
+Before any patch, if the intended target is a known frozen monolith or a source
+file at or above 5000 lines, stop and route the concern before editing.
+
+Classify the concern as transport/run persistence, routing/intent/proof/policy,
+UI behavior, native shell primitive, compatibility shim, or deletion/extraction.
+Then patch the owning module first. If the owning module does not exist, create
+the smallest one before touching the monolith. The monolith may only receive
+delegation, bootstrap wiring, compatibility shim code with an explicit
+`ARCH_EXCEPTION`, or deletion.
+
+The required pre-code reflection must state:
+
+- the monolith or 5000+ line file that would otherwise be touched
+- the durable concern being routed out
+- the owning module path, existing or newly created
+- the exact delegation/removal shape left in the monolith
+
+Adding helper functions, policy branches, schemas, answer shaping, diagnostics
+contracts, route/entity/proof logic, or other durable behavior to a monolith is
+invalid even when tests pass, the diff net-shrinks, or a later cleanup is
+planned.
+
+Shrink-on-touch is mandatory. A non-exception patch touching a frozen monolith
+must include a small follow-up extraction/removal so the monolith has a net
+line-count reduction in the same diff. If shrinkage is unsafe, the diff must
+carry a temporary architecture exception that names the owner, reason, and
+expiry.
+
+Net shrink does not authorize adding durable logic to a frozen monolith. Any
+added monolith line must be paired with a changed owned module under that
+monolith's target area, unless the added line is removal/delegation-only wiring
+or carries a temporary architecture exception. If an existing owned module can
+hold the concern, update it. If not, create the smallest owned module first and
+leave only bootstrap wiring or compatibility delegation in the monolith.
+
+The deterministic guard is:
+
+```bash
+python3 tools/context/check-monolith-growth.py
+```
+
+The guard fails on frozen-file touches that do not net-shrink, frozen-file
+additions without a paired owned-module change, new route branches in
+`static_server.py`, touched source files at or above 5000 lines, and newly
+added source files that exceed the monolith threshold. A 5000+ line source file
+is monolith-class even if it is not listed as a known survival monolith; touch
+it only to modularize, delegate, or remove. An allowed temporary exception must
+be present in an added line as
+`ARCH_EXCEPTION: owner=<id>; reason=<why>; expires=YYYY-MM-DD`.
+
 ## Root-Cause Gate
 
 Observation is not authorization to patch the observed edge. When a watch,

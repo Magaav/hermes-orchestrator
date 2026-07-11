@@ -44,28 +44,34 @@ state, and product UI surfaces.
   modules with focused tests. `static_server.py` may provide auth, HTTP
   routing, route-contract loading, run-event recording, and side-effect
   execution only; it must delegate MCP policy to the owning module.
+- Before adding any line to `server/static_server.py`, check for an existing
+  owned Master:frontier module that can hold the durable logic. If one exists,
+  patch that module and keep `static_server.py` as delegation only. If no
+  module exists, create the smallest focused `server/master_frontier/` module
+  first. A net line-count shrink in `static_server.py` is insufficient by
+  itself when the added behavior could live in an owned module.
 - For codebase understanding, ownership lookup, symbol search, caller/callee
   tracing, and change blast-radius work, use the Master:frontier code-memory
   lane before broad `rg` or multi-file reads. From the terminal, prefer
   `python3 tools/context/code-memory-query.py --route-id <route> "<query>"`
   for the first pass. Use `rg` after code-memory when the graph is missing,
   stale, unavailable, or when exact raw-text matching is explicitly needed.
-- Master:frontier must emit a compact `task_contract` before provider or
-  harness selection. The contract owns intent, route, workspace, capabilities,
-  `tools_first`, executor choice, proof requirements, and block codes.
-  Capability inquiries must prefer code-memory and kernel inspection before
-  model/harness dispatch; implementation requests must require route-scoped
-  action plus changed-file proof.
-- The embedded agent must be cheap, strong, and autonomous by protocol:
-  wasm-agent resolves surface/owner/workspace/capabilities/proof/budget first,
-  then calls Hermes or another provider only as a bounded skill/bridge executor.
-  Hermes must not be asked to infer the product map, broad-search unknown roots,
-  or do work that deterministic wasm-agent routing/lookup can do locally.
-  Hermes is a subagent/harness, not the Master:frontier brain: direct-head
-  provider unavailability, malformed model output, and missing changed-file
-  proof must fail with typed contract errors unless an action explicitly
-  declares `role=subagent_harness` or `harness=true` with a resolved route,
-  allowed capabilities, proof request, and escalation reason.
+- Master:frontier V3 is a Codex-style model-led execution harness. The host
+  resolves route, workspace, capabilities, safety limits, cypher version, and
+  budget before provider work; the head owns search terms, tool choice, edit
+  strategy, tests, and synthesis. `tools_first`, executor selection, regex
+  entity plans, and receipt-driven autonomous continuation are not V3 control
+  surfaces.
+- Model-facing context must use compact semantic operations plus load-on-demand
+  detail. The canonical versioned C3 mapping is host-internal for receipts,
+  persisted history, and replay. The host maps exactly the semantic operation
+  requested by the head to a declared tool, injects route scope, returns a
+  compact semantic observation, and records proof. Empty or unsupported
+  receipts must not count as evidence.
+- Hermes is not a fallback planner or autonomous subagent in the V3 hot path.
+  Named node capability/chat tools may expose it as an explicitly selected,
+  route-bounded capability; provider unavailability and missing proof remain
+  typed errors.
 - When avatar-chat, direct-head, or run-api observation exposes a weak answer,
   do not add a node name, product string, selector, filename, or one-off prompt
   affordance to fix that observed miss. First name the missing generic kernel

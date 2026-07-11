@@ -14,13 +14,32 @@ export const MASTER_FRONTIER_OUTPUT_SCHEMA = Object.freeze({
   properties: {
     answer: { type: "string" },
     decision: { type: "string" },
-    actions: { type: "array", items: { type: "object" } },
+    actions: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          action: { type: "string" },
+          id: { type: "string" },
+          args: { type: "object" },
+          role: { type: "string" },
+          route_id: { type: "string" },
+          caps: { type: "array", items: { type: "string" } },
+          objective: { type: "string" },
+          escalation_reason: { type: "string" },
+          proof: { type: "array", items: { type: "string" } },
+          harness: { type: "boolean" },
+        },
+        anyOf: [{ required: ["action"] }, { required: ["id"] }],
+        additionalProperties: false,
+      },
+    },
     state_delta: { type: "object" },
     needs: { type: "array", items: { type: "string" } },
     proof_requests: { type: "array", items: { type: "string" } },
     confidence: { type: "number" },
   },
-  additionalProperties: true,
+  additionalProperties: false,
 });
 
 export function masterFrontierAllowedActions(caps = MASTER_FRONTIER_CAPS) {
