@@ -1,0 +1,30 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "opencode-version-preflight-ephemeral-home-contract",
+  "observedAt": "2026-07-12T00:35:00Z",
+  "observedAdapter": "opencode-1.17.18",
+  "classification": "harness_package_preflight_contract_failure",
+  "observed": {
+    "operation": "offline unprivileged version preflight",
+    "error": "read-only file system creating /home/frontier/.local",
+    "network": "none",
+    "providerCalls": 0,
+    "partialVolumeRemoved": true
+  },
+  "rootCauseContract": "OpenCode initializes user state before reporting its version, so a read-only-root preflight also requires a private disposable writable home.",
+  "expectedBehavior": {
+    "identity": "10000:10000",
+    "rootFilesystem": "read_only",
+    "adapterMount": "read_only",
+    "network": "none",
+    "home": "/tmp/home",
+    "homeBacking": "bounded_tmpfs",
+    "hostStateCopied": false
+  },
+  "regressionChecks": [
+    "the preflight receives only a bounded tmpfs home",
+    "config, data, and cache directories resolve under the disposable home",
+    "model fetches, plugins, Claude state, and updates remain disabled",
+    "the version preflight runs as UID 10000 with no network"
+  ]
+}

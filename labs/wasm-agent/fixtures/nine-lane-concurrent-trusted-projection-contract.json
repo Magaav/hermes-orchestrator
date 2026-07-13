@@ -1,0 +1,15 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "nine-lane-concurrent-trusted-projection-contract",
+  "classification": "harness_projection_failure",
+  "observedRun": "loop3-live-nine-20260712",
+  "symptom": "Eight concurrent lanes rejected verified registry projections while one lane accepted the same contract and only that lane reached the provider.",
+  "rootCauseContract": "Both live-proof and live execution must consume the host-verified adapter projection; live incorrectly reloaded the stale registry from the immutable source snapshot.",
+  "correction": {
+    "secretProjection": "0600 env file",
+    "modelAndAdapterProjection": "exact Docker environment argv consumed by both live modes",
+    "providerCallsBeforeFailure": 1,
+    "cleanupComplete": true
+  },
+  "regressionAssertion": "All nine lanes must report verified identity, the same task digest, and concurrent start/end intervals before ranking is allowed."
+}

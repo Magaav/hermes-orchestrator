@@ -1,0 +1,22 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "codex-responses-broker-contract",
+  "observedAt": "2026-07-11T21:45:00Z",
+  "observedAdapter": "codex-cli-0.144.0-alpha.4",
+  "classification": "missing_harness_transport_primitive",
+  "rootCauseContract": "Codex custom providers use the Responses wire API, while the safe-lab broker originally exposed only Chat Completions.",
+  "expectedBehavior": {
+    "laneWireApi": "responses",
+    "upstreamWireApi": "chat_completions",
+    "modelIdentity": "frank/GLM-5.2",
+    "translationOwner": "labs/wasm-agent/responses_bridge.py",
+    "duplicateAndTotalCallAdmissionOwner": "labs/wasm-agent/model-gateway.py",
+    "providerCredentialInLane": false
+  },
+  "regressionProof": [
+    "Codex config validates a custom Responses provider",
+    "Responses text and function-call events round-trip through deterministic unit checks",
+    "gateway receipts preserve exact upstream model and usage",
+    "a real Codex CLI run completes through the private broker"
+  ]
+}

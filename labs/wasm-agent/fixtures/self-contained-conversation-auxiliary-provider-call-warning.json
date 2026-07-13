@@ -1,0 +1,32 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "self-contained-conversation-auxiliary-provider-call-warning",
+  "observedAt": "2026-07-12T13:15:20Z",
+  "observedAdapter": "opencode-1.17.18",
+  "classification": "candidate_efficiency_warning",
+  "warningCode": "unnecessary_auxiliary_provider_call_for_self_contained_conversation",
+  "observed": {
+    "requestClass": "conversation",
+    "objectiveClass": "self_contained_greeting",
+    "providerCalls": 2,
+    "distinctRequests": 2,
+    "promptTokens": 7341,
+    "completionTokens": 180,
+    "toolCalls": 0,
+    "duplicateRequests": 0,
+    "semanticResult": "passed",
+    "budgetResult": "passed"
+  },
+  "adjudication": {
+    "runSuccessful": true,
+    "duplicateError": false,
+    "stabilityCheck": false,
+    "warningRequired": true,
+    "reason": "The headless self-contained task required one answer, but the harness made a distinct auxiliary model call without a tool loop."
+  },
+  "expectedBehavior": {
+    "preferredProviderCalls": 1,
+    "rankingPolicy": "retain_success_and_attach_cost_warning",
+    "futureQuestion": "Can deterministic session metadata suppress the auxiliary call without changing reasoning or repository-grounded performance?"
+  }
+}

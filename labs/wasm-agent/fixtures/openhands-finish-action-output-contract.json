@@ -1,0 +1,14 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "openhands-finish-action-output-contract",
+  "classification": "adapter_output_contract",
+  "observedRun": "loop3-live-nine-20260712c",
+  "observedAdapter": "openhands-1.16.0",
+  "symptom": "The model completed through OpenHands' native finish tool, but the runner accepted only MessageEvent output and emitted an empty answer.",
+  "rootCauseContract": "OpenHands has two official terminal response forms: agent FinishAction.action.message and agent MessageEvent content.",
+  "correction": {
+    "finishEvent": {"source": "agent", "tool_name": "finish", "answerPath": "action.message"},
+    "messageEvent": {"source": "agent", "answerPath": "llm_message.content"}
+  },
+  "regressionAssertion": "Either declared terminal form must yield the bounded final answer; observations and non-terminal tool events must not."
+}

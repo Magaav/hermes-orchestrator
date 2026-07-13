@@ -1,0 +1,29 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "gemini-cli-generate-content-broker-contract",
+  "observedAt": "2026-07-12T00:15:00Z",
+  "observedAdapter": "gemini-cli-0.50.0",
+  "classification": "missing_harness_transport_primitive",
+  "rootCauseContract": "Gemini CLI gateway mode uses Google GenerateContent and countTokens surfaces, while the safe-lab broker originally exposed only Chat Completions, Responses, and Anthropic Messages.",
+  "expectedBehavior": {
+    "laneWireApi": "google_generate_content",
+    "inferencePaths": [
+      "/v1beta/models/glm-5.2:generateContent",
+      "/v1beta/models/glm-5.2:streamGenerateContent"
+    ],
+    "localCountPath": "/v1beta/models/glm-5.2:countTokens",
+    "upstreamWireApi": "chat_completions",
+    "modelIdentity": "frank/GLM-5.2",
+    "brokerCredentialHeaders": ["x-goog-api-key"],
+    "directProviderCredentialInLane": false,
+    "providerCallBudgetShared": true,
+    "duplicateAdmissionShared": true
+  },
+  "regressionChecks": [
+    "system instructions, contents, tools, function calls, and function responses translate deterministically",
+    "streaming GenerateContent returns bounded SSE with exact model and usage metadata",
+    "countTokens is local and consumes no provider-call budget",
+    "a path model other than glm-5.2 is rejected before provider work",
+    "the run-scoped broker token is the only model credential in the lane"
+  ]
+}

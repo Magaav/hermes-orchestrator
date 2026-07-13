@@ -1,0 +1,58 @@
+services:
+  seed:
+    build: .
+    command: ["seed"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1
+    volumes:
+      - wasm_agent_lab_local:/local
+      - ./seed:/lab-seed:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+
+  canary:
+    build: .
+    command: ["canary"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 512m
+    cpus: 1
+    volumes:
+      - wasm_agent_lab_local:/local
+      - wasm_agent_lab_output:/lab-output
+      - ./canary:/lab-canary:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+
+  frontier:
+    build: .
+    command: ["frontier"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    mem_limit: 8g
+    cpus: 2
+    stop_grace_period: 10s
+    volumes:
+      - wasm_agent_lab_local:/local
+      - wasm_agent_lab_output:/lab-output
+      - ./canary:/lab-canary:ro
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g
+      - /run:rw,nosuid,nodev,noexec,size=64m
+
+volumes:
+  wasm_agent_lab_local:
+    name: wasm-agent-safe-lab-local-v11
+  wasm_agent_lab_output:
+    name: wasm-agent-safe-lab-output-v1

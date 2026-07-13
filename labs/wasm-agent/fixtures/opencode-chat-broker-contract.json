@@ -1,0 +1,27 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "opencode-chat-broker-contract",
+  "observedAt": "2026-07-12T00:31:00Z",
+  "observedAdapter": "opencode-1.17.18",
+  "classification": "adapter_transport_contract",
+  "rootCauseContract": "OpenCode officially supports custom OpenAI-compatible providers through @ai-sdk/openai-compatible, so a new transport bridge would duplicate the common Chat Completions broker.",
+  "expectedBehavior": {
+    "laneWireApi": "chat_completions",
+    "providerPackage": "@ai-sdk/openai-compatible",
+    "modelName": "lab/glm-5.2",
+    "upstreamModel": "frank/GLM-5.2",
+    "configSurface": "OPENCODE_CONFIG_CONTENT",
+    "credential": "run_scoped_broker_token",
+    "providerCredentialInLane": false,
+    "providerCallBudgetShared": true,
+    "duplicateAdmissionShared": true,
+    "hostOpenCodeStateCopied": false
+  },
+  "regressionChecks": [
+    "the official CLI runs from an immutable integrity-bound package",
+    "pure one-shot JSON mode exits without TUI interaction",
+    "only completed text events become the benchmark answer",
+    "remote model fetches, plugins, Claude state, LSP downloads, updates, sharing, and internet tools are disabled",
+    "no adapter-specific gateway path is introduced"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "wasm-agent.safe-lab.loop5-v5-strategies.v1",
+  "matrixId": "v5-direct-completion-20260712",
+  "sourceBenchmark": "loop3-ranked-nine-20260712",
+  "genericContract": "Declared self-contained conversation tasks require direct completion without inspect/action evidence; lexical heuristics are forbidden.",
+  "model": "frank/GLM-5.2",
+  "fixtureId": "fx_d3154de08df6150be9c9",
+  "taskDigest": "6494926b311486ad01410e33c1d1ec5a3a6c8199cb5fde65bda16f113c5861d1",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "variants": [
+    {"slot":"v5-variant-01","strategy":"minimal_class_allowlist","hypothesis":"Normalized membership in the two declared self-contained classes is the smallest safe policy."},
+    {"slot":"v5-variant-02","strategy":"deny_first_class_policy","hypothesis":"Explicit grounded classes must override conversational declarations before allowlist evaluation."},
+    {"slot":"v5-variant-03","strategy":"explicit_completion_mode","hypothesis":"A typed completion_mode=direct field is a stronger authority boundary than class inference."},
+    {"slot":"v5-variant-04","strategy":"proof_policy_gate","hypothesis":"Direct completion requires self-contained class plus proof_policy=none."},
+    {"slot":"v5-variant-05","strategy":"capability_requirement_gate","hypothesis":"Direct completion requires self-contained class plus an explicitly empty required-capabilities set."},
+    {"slot":"v5-variant-06","strategy":"evidence_requirement_gate","hypothesis":"Direct completion requires self-contained class plus explicitly empty structured evidence requirements."},
+    {"slot":"v5-variant-07","strategy":"route_owned_execution_profile","hypothesis":"A registered answer_only route profile should own zero-tool and zero-proof policy."},
+    {"slot":"v5-variant-08","strategy":"structured_policy_decision","hypothesis":"A typed mode/reason/authority decision improves diagnostics while preserving fail-closed selection."},
+    {"slot":"v5-variant-09","strategy":"single_context_profile_constructor","hypothesis":"One policy-owned prompt/tool profile prevents inconsistent repeated policy evaluation."}
+  ],
+  "sharedAssertions": [
+    "no prompt text, filename, selector, or product string influences selection",
+    "source_investigation and runtime_inspection retain the natural tool loop",
+    "semantic, safety, proof, and grounded-completion regressions are zero",
+    "each candidate receives an independent artifact digest and Loop 4 proof"
+  ],
+  "status": "strategies_declared_artifacts_pending"
+}

@@ -1,0 +1,47 @@
+{
+  "schema": "wasm-agent.safe-lab.tool-authority.v1",
+  "version": 1,
+  "identity": {"uid": 10000, "gid": 10000, "rootlessProcess": true},
+  "process": {
+    "readOnlyRootFilesystem": true,
+    "capabilities": [],
+    "noNewPrivileges": true,
+    "boundedPidsMemoryCpu": true
+  },
+  "network": {
+    "laneNetwork": "private-internal-only",
+    "allowedHttpOrigin": "run-scoped-model-gateway",
+    "directInternet": false,
+    "hostNetwork": false
+  },
+  "mounts": [
+    {"path": "/adapter", "mode": "read-only", "purpose": "versioned adapter artifact"},
+    {"path": "/source", "mode": "read-only", "purpose": "immutable source snapshot"},
+    {"path": "/fixtures", "mode": "read-only", "purpose": "immutable fixture snapshot"},
+    {"path": "/workspace", "mode": "read-write-private", "purpose": "agent-owned edits and state"}
+  ],
+  "semanticCapabilities": [
+    "read_source",
+    "read_fixtures",
+    "inspect_workspace",
+    "execute_workspace_command",
+    "create_update_delete_workspace_files"
+  ],
+  "deniedAuthorities": [
+    "host_workspace_write",
+    "host_root_filesystem",
+    "container_runtime_socket",
+    "host_pid_namespace",
+    "host_device_access",
+    "provider_credential",
+    "direct_production_access"
+  ],
+  "requiredProofs": [
+    "exact_model_receipt",
+    "broker_only_credential",
+    "direct_egress_blocked",
+    "workspace_mutation_by_agent_tool",
+    "source_and_fixtures_read_only",
+    "runtime_sockets_and_block_devices_absent"
+  ]
+}

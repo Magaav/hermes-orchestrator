@@ -1,0 +1,25 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "adapter-package-source-layout-contract",
+  "observedAt": "2026-07-11T21:30:09Z",
+  "observedAdapter": "master-frontier-v5",
+  "classification": "harness_packaging_contract_failure",
+  "rootCauseContract": "A packaged Python module that derives owned roots from __file__ must retain a source-equivalent relative directory depth or receive an explicit packaged-root contract.",
+  "failureSignal": {
+    "phase": "adapter_import_before_provider",
+    "exceptionClass": "IndexError",
+    "providerCalls": 0,
+    "cleanupComplete": true
+  },
+  "expectedBehavior": {
+    "packageLayout": "/adapter/plugins/wasm-agent/server/master_frontier",
+    "preflightImport": "master_frontier.v5.loop",
+    "providerDispatchAllowedOnlyAfterImport": true,
+    "productSourcePatchRequired": false
+  },
+  "regressionProof": [
+    "package receipt binds the source-relative paths",
+    "a no-network container imports master_frontier.v5.loop from the packaged artifact",
+    "the live lane reaches the broker only after the import proof passes"
+  ]
+}

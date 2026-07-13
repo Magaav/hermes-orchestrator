@@ -1,0 +1,10 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "nine-lane-duplicate-budget-scope-contract",
+  "classification": "harness_budget_scope_failure",
+  "observedRun": "loop5-v5-nine-20260712",
+  "symptom": "Nine isolated candidates made the same first request, but the shared gateway counted cross-lane equality as repeated duplicate waste and blocked lanes four through nine.",
+  "rootCauseContract": "Duplicate ordinal is scoped to one authenticated lane and request digest; equality across independent benchmark lanes is comparability evidence.",
+  "correction": {"budgetKey": ["laneId", "requestSha256"], "benchmarkDuplicateLimitPerLane": 3},
+  "regressionAssertion": "The first identical request from every one of nine lanes has duplicateOrdinal=1; only repeated requests within the same lane advance its ordinal."
+}

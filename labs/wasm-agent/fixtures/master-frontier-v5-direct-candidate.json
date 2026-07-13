@@ -1,0 +1,18 @@
+{
+  "slot": "harness-01",
+  "id": "master-frontier-v5",
+  "displayName": "Master:frontier V5 direct-completion candidate",
+  "executable": "python3",
+  "adapterVersion": "v5-df565ed7df69",
+  "adapterVolume": "wasm-agent-adapter-master-frontier-v5-20260712-direct-v4",
+  "adapterArtifactSha256": "df565ed7df69ff54495f8b89f20efa0a1dfc52de510c10952b0eef0837d9a01c",
+  "modelContractStatus": "verified",
+  "toolAuthorityStatus": "verified",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "verificationArtifact": "reports/context/latest/master-frontier-v5-adapter-package-result.json",
+  "liveCommand": ["python3", "/adapter/master-frontier-v5-live-runner.py", "--task", "{task}"],
+  "liveReady": true,
+  "benchmarkReady": false,
+  "candidateDigest": "df565ed7df69ff54495f8b89f20efa0a1dfc52de510c10952b0eef0837d9a01c",
+  "promotionStatus": "loop4_pending"
+}

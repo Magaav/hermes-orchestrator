@@ -9,7 +9,12 @@ from .v5.errors import V5Error
 
 def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | None, run_record: dict[str, Any], context: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
     envelope = context["envelope"]
-    route = runtime["require_direct_envelope_route_contract"](envelope)
+    route = dict(runtime["require_direct_envelope_route_contract"](envelope))
+    declared_task = envelope.get("task_contract") if isinstance(envelope.get("task_contract"), dict) else {}
+    route["task_contract"] = {
+        "objective_kind": str(envelope.get("objective_kind") or declared_task.get("objective_kind") or ""),
+        "request_class": str(declared_task.get("request_class") or ""),
+    }
     run_id = str(run_record.get("run_id") or ""); turn_id = str(run_record.get("turn_id") or run_id)
     objective = str(envelope.get("objective") or body.get("message") or "")
     receiver = str(context.get("receiver") or "provider")
@@ -21,7 +26,7 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         inference_id = hashlib.sha256(f"{run_id}:{index}".encode()).hexdigest()
         runtime["append_agent_run_event"](server, run_id, "llm.inference.started", summary=f"decision {index}", payload={"protocol": "v5", "inference_id": inference_id})
         proxy_body = {**body, "provider_config": runtime["provider_config_for_proxy_body"](body), "messages": messages}
-        if not v5_context._evidence_status(state)["owner_fully_read"]:
+        if not v5_context.completion_only(state, route):
             proxy_body.update({"tools": policy.provider_tools(), "tool_choice": "auto"})
         proxy_body.pop("max_output_tokens", None); proxy_body.pop("max_tokens", None)
         result = runtime["provider_proxy_completion"](server, proxy_body, user=user)

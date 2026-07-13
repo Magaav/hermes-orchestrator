@@ -1,0 +1,29 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "adapter-volume-bootstrap-ownership-contract",
+  "observedAt": "2026-07-12T00:19:00Z",
+  "observedAdapter": "aider-0.86.2",
+  "classification": "harness_packaging_contract_failure",
+  "observed": {
+    "operation": "create isolated Python venv in a new adapter volume",
+    "error": "permission denied for /adapter/venv",
+    "dependencyDownloadStarted": false,
+    "providerCalls": 0,
+    "partialVolumeRemoved": true
+  },
+  "rootCauseContract": "The safe-lab image defaults to UID 10000, while a newly created Docker volume root is owned by root and requires an explicit privileged bootstrap phase before immutable unprivileged use.",
+  "expectedBehavior": {
+    "bootstrapIdentity": "root_in_package_builder_only",
+    "installIdentity": "root_in_package_builder_only",
+    "preflightIdentity": "10000:10000",
+    "liveIdentity": "10000:10000",
+    "failedBootstrapCleanupRequired": true,
+    "providerSpendBeforePackagePreflight": 0
+  },
+  "regressionChecks": [
+    "only package creation and dependency installation may write the root-owned volume as root",
+    "the final package is mounted read-only for unprivileged preflight and live lanes",
+    "a failed bootstrap removes its partial volume",
+    "no runtime socket, host state, or credential is available during bootstrap"
+  ]
+}

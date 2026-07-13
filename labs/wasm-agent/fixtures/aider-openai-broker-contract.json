@@ -1,0 +1,26 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "aider-openai-broker-contract",
+  "observedAt": "2026-07-12T00:18:00Z",
+  "observedAdapter": "aider-0.86.2",
+  "classification": "adapter_transport_contract",
+  "rootCauseContract": "Aider supports OpenAI-compatible endpoints directly, so a new transport bridge would duplicate the existing safe-lab Chat Completions contract.",
+  "expectedBehavior": {
+    "laneWireApi": "chat_completions",
+    "modelName": "openai/glm-5.2",
+    "upstreamModel": "frank/GLM-5.2",
+    "baseUrlEnvironment": "OPENAI_API_BASE",
+    "credentialEnvironment": "OPENAI_API_KEY",
+    "providerCredentialInLane": false,
+    "providerCallBudgetShared": true,
+    "duplicateAdmissionShared": true,
+    "hostAiderStateCopied": false
+  },
+  "regressionChecks": [
+    "the official CLI runs from an immutable isolated venv",
+    "one-shot message mode exits without interactive input",
+    "git commits, analytics, update checks, browser tooling, and host history are disabled",
+    "all writable configuration and history paths remain inside the private workspace",
+    "no adapter-specific gateway path is introduced"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "fixtureId": "harness_gateway_streaming_contract_001",
+  "origin": "live_adapter_proof",
+  "candidateSignal": {
+    "classification": "duplicate_model_request",
+    "observedIdenticalRequests": 3,
+    "thirdRequestPolicy": "waste_error_outside_explicit_benchmark"
+  },
+  "adjudication": {
+    "classification": "classifier_false_positive",
+    "owner": "harness_gateway_transport",
+    "rootCause": "The gateway removed stream=true and returned JSON to an SSE client, so two valid visible model answers were observed by the adapter as empty.",
+    "agentDefect": false,
+    "harnessDefect": true,
+    "confidence": "high"
+  },
+  "boundedEvidence": {
+    "model": "frank/GLM-5.2",
+    "successfulUpstreamResponses": 3,
+    "contentCharsPerResponse": 2,
+    "finishReason": "stop",
+    "adapterVisibleAnswerChars": 0,
+    "providerCredentialInLane": false,
+    "directLaneEgressBlocked": true
+  },
+  "regressionExpectation": {
+    "transport": "sse",
+    "maximumUpstreamIdenticalRequests": 2,
+    "expectedIdenticalRequestsForThisTask": 1,
+    "visibleAnswerChars": 2,
+    "thirdIdenticalRequestMustReachUpstream": false
+  },
+  "replayCommand": "python3 labs/wasm-agent/prove-hermes-live-adapter.py"
+}

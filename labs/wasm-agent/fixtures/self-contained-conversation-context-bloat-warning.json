@@ -1,0 +1,32 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "self-contained-conversation-context-bloat-warning",
+  "observedAt": "2026-07-12T00:11:42Z",
+  "observedAdapter": "gemini-cli-0.50.0",
+  "classification": "candidate_efficiency_warning",
+  "warningCode": "excessive_prompt_context_for_self_contained_conversation",
+  "observed": {
+    "requestClass": "conversation",
+    "objectiveClass": "self_contained_greeting",
+    "providerCalls": 1,
+    "promptTokens": 10427,
+    "completionTokens": 81,
+    "toolCalls": 0,
+    "duplicateRequests": 0,
+    "semanticResult": "passed",
+    "budgetResult": "passed"
+  },
+  "adjudication": {
+    "runSuccessful": true,
+    "duplicateError": false,
+    "warningRequired": true,
+    "warningThresholdTokens": 8192,
+    "reason": "One valid direct answer remained inside the hard task budgets, but the harness supplied disproportionate context for a self-contained greeting."
+  },
+  "expectedBehavior": {
+    "preferredProviderCalls": 1,
+    "preferredToolCalls": 0,
+    "rankingPolicy": "retain_success_and_attach_cost_warning",
+    "futureQuestion": "Which generic context-loading reductions lower prompt overhead without degrading tool-required or repository-grounded fixtures?"
+  }
+}

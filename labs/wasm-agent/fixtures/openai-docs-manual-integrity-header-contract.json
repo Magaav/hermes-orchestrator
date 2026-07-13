@@ -1,0 +1,22 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "openai-docs-manual-integrity-header-contract",
+  "observedAt": "2026-07-11T22:30:00Z",
+  "classification": "documentation_harness_transport_failure",
+  "rootCauseContract": "The Codex manual helper requires an x-content-sha256 response header and must reject a manual response when that integrity proof is absent.",
+  "failureSignal": {
+    "helper": "openai-docs/scripts/fetch-codex-manual.mjs",
+    "code": "manual_response_missing_content_sha256",
+    "unverifiedManualConsumed": false
+  },
+  "expectedBehavior": {
+    "failClosed": true,
+    "fallbackOrder": ["official_docs_mcp", "official_openai_web_docs", "bounded_uncertainty"],
+    "workspaceMutationRequired": false
+  },
+  "regressionProof": [
+    "missing integrity metadata cannot populate the trusted manual cache",
+    "the task continues only through an official source fallback",
+    "claims derived from fallback sources retain direct source attribution"
+  ]
+}

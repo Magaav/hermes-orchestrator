@@ -1,0 +1,23 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "claude-code-anthropic-broker-contract",
+  "observedAt": "2026-07-11T23:00:00Z",
+  "observedAdapter": "claude-code-2.1.207",
+  "classification": "missing_harness_transport_primitive",
+  "rootCauseContract": "Claude Code LLM gateways require Anthropic Messages and count_tokens surfaces, while the safe-lab broker originally exposed only Chat Completions and Responses.",
+  "expectedBehavior": {
+    "laneWireApi": "anthropic_messages",
+    "inferencePath": "/v1/messages",
+    "localCountPath": "/v1/messages/count_tokens",
+    "upstreamWireApi": "chat_completions",
+    "modelIdentity": "frank/GLM-5.2",
+    "translationOwner": "labs/wasm-agent/anthropic_bridge.py",
+    "providerCredentialInLane": false
+  },
+  "regressionProof": [
+    "Anthropic text, tool-use, tool-result, usage, and SSE projections pass deterministic checks",
+    "count_tokens returns locally without consuming provider budget",
+    "gateway receipts retain the shared duplicate and total-call admission contract",
+    "a real Claude Code binary completes through the private broker"
+  ]
+}

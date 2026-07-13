@@ -1,0 +1,14 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "openhands-pip-resolver-contract",
+  "classification": "packaging_contract",
+  "observedAdapter": "openhands-1.16.0",
+  "symptom": "pip reported ResolutionImpossible between the OpenHands SDK dependency graph and lmnr.",
+  "rootCauseContract": "The official OpenHands CLI installation path requires uv resolution for its evolving dependency graph.",
+  "correction": {
+    "package": "openhands==1.16.0",
+    "resolver": "uv pip install",
+    "postResolutionProof": "dependency freeze SHA-256 and immutable tree receipt"
+  },
+  "regressionAssertion": "Packaging must resolve with uv and then pass offline version preflight without weakening or manually overriding dependency constraints."
+}

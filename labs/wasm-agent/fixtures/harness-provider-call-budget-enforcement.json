@@ -1,0 +1,33 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "fixtureId": "harness_provider_call_budget_001",
+  "origin": "generic_live_fixture_proof",
+  "candidateSignal": {
+    "classification": "provider_call_budget_exhaustion",
+    "declaredMaxProviderCalls": 4,
+    "observedUpstreamCalls": 15,
+    "terminalOutcome": "wall_clock_timeout"
+  },
+  "adjudication": {
+    "classification": "valid_harness_defect",
+    "owner": "model_gateway_budget_enforcement",
+    "rootCause": "The task declared a total provider-call ceiling, but the gateway enforced only identical-request duplication and allowed distinct tool-loop calls past the ceiling.",
+    "agentDefect": false,
+    "harnessDefect": true,
+    "confidence": "high"
+  },
+  "contributingFixtureDefect": {
+    "classification": "replay_environment_incomplete",
+    "historicalRouteRoot": "/local/agents/nodes/paracelsus",
+    "routeSurfacePresentInReplay": false,
+    "broadExplorationWasPromptedByMissingSurface": true
+  },
+  "regressionExpectation": {
+    "fifthDistinctProviderCallMustReachUpstream": false,
+    "budgetBlockReceiptRequired": true,
+    "missingRequiredRouteMustBlockBeforeModelExecution": true,
+    "timeoutMustStillWriteBoundedLaneResult": true,
+    "rankingAllowed": false
+  },
+  "replayCommand": "python3 labs/wasm-agent/live-fixture-orchestrator.py --slot harness-03 --fixture-id fx_2cb86d7cdebc6a33aad6"
+}

@@ -1,0 +1,195 @@
+{
+  "schema": "wasm-agent.harness.five-loop-contract.v2",
+  "version": 2,
+  "owner": "docs/context",
+  "updatedAt": "2026-07-11",
+  "invariant": "A cycle may repeat only with new evidence, a materially different hypothesis, or measurable improvement.",
+  "banks": {
+    "candidate": "Redacted bounded signals awaiting adjudication; presence is not defect proof.",
+    "classifierDispute": "False positives, false negatives, exceptions, and insufficient-context cases.",
+    "golden": "Adjudicated immutable fixtures with stable expected properties and provenance.",
+    "regression": "Previously proven behavior and safety properties that every proposed improvement must preserve.",
+    "insight": "Cross-harness processing differences and reusable strategies awaiting bounded implementation."
+  },
+  "sharedRequirements": {
+    "redaction": true,
+    "boundedTrajectoryWindow": true,
+    "immutableReplayInput": true,
+    "provenance": true,
+    "versionedComponents": ["agent", "fixture_spawner", "classifier", "judge", "prompt", "route_contract"],
+    "repeatRequiresAny": ["new_evidence", "materially_different_hypothesis", "measurable_improvement"]
+  },
+  "benchmarkMatrix": {
+    "model": "frank/GLM-5.2",
+    "harnessCount": 9,
+    "parallel": true,
+    "harnessSlots": [
+      "harness-01", "harness-02", "harness-03", "harness-04", "harness-05",
+      "harness-06", "harness-07", "harness-08", "harness-09"
+    ],
+    "comparabilityRequires": [
+      "identical model id and model artifact/version",
+      "identical immutable fixture snapshot",
+      "identical starting state and route contract",
+      "equivalent tool capability schema and authority",
+      "identical token, tool-call, wall-clock, and retry budgets",
+      "independent isolated workspace per harness",
+      "recorded prompts, tool calls, evidence, costs, and terminal outcomes"
+    ],
+    "rankingRule": "No harness is ranked or mined for insights unless every comparability requirement is proven.",
+    "extractionRule": "Transfer generic strategies and contracts into V5, never product-specific strings or unproved outputs."
+  },
+  "improvementMatrix": {
+    "model": "frank/GLM-5.2",
+    "variantCount": 9,
+    "parallel": true,
+    "variantSlots": [
+      "v5-variant-01", "v5-variant-02", "v5-variant-03", "v5-variant-04", "v5-variant-05",
+      "v5-variant-06", "v5-variant-07", "v5-variant-08", "v5-variant-09"
+    ],
+    "diversityRequires": [
+      "one shared benchmark insight and generic V5 contract target",
+      "a distinct declared strategy hypothesis per variant",
+      "independent isolated workspace and candidate digest per variant",
+      "identical immutable tuning and holdout fixtures",
+      "identical model artifact, tools, authority, and resource budgets",
+      "no cross-variant state, patch, prompt, or result leakage before completion"
+    ],
+    "regressionRule": "Every variant returns through Loop 4 and receives its own digest-bound regression proof; one proof cannot authorize another variant.",
+    "promotionRule": "Rank only regression-passing variants and promote the smallest generic improvement with the best grounded multi-objective result."
+  },
+  "loops": [
+    {
+      "id": "human-agent-operation",
+      "ordinal": 1,
+      "purpose": "Produce user value while capturing weak machine and human signals as fixture candidates.",
+      "initialState": "objective_received",
+      "states": ["objective_received", "agent_working", "answer_delivered", "feedback_observed", "candidate_captured"],
+      "signals": ["explicit_correction", "explicit_dissatisfaction", "repeat_question", "retry", "abandonment", "cancellation", "manual_takeover", "machine_warning", "session_classification_requested", "inferred_irritability_low_confidence"],
+      "rules": [
+        "Human affect is a low-confidence candidate signal, never defect proof.",
+        "A machine warning must cite a violated contract or remain an unclassified signal.",
+        "Candidate capture must not replace delivery of the best bounded honest answer."
+      ],
+      "transitions": [
+        {"from": "objective_received", "event": "start", "to": "agent_working"},
+        {"from": "agent_working", "event": "answer", "to": "answer_delivered"},
+        {"from": "answer_delivered", "event": "signal", "to": "feedback_observed"},
+        {"from": "feedback_observed", "event": "capture", "to": "candidate_captured"}
+      ],
+      "terminalOutcomes": ["accepted", "best_bounded_answer", "safely_resumable", "stopped", "redirected"],
+      "budgets": {"maxCandidateSignalsPerTurn": 8, "maxTrajectoryEventsPerCandidate": 48, "maxCandidateBytes": 24000},
+      "outputs": ["answer", "redacted_trajectory_ref", "fixture_candidate_refs"]
+    },
+    {
+      "id": "candidate-adjudication",
+      "ordinal": 2,
+      "purpose": "Determine whether a candidate represents an agent defect, harness defect, justified exception, or insufficient evidence.",
+      "initialState": "candidate_received",
+      "states": ["candidate_received", "contract_checked", "independently_reviewed", "classified", "banked"],
+      "classifications": ["valid_agent_defect", "valid_harness_defect", "valid_both_defect", "valid_exception", "classifier_false_positive", "classifier_false_negative", "insufficient_context", "non_actionable", "needs_human_review"],
+      "rules": [
+        "Judge the action using evidence available at action time, not hindsight.",
+        "Run deterministic contract checks before model judgment.",
+        "The warning-producing classifier cannot independently confirm itself.",
+        "A raw candidate cannot enter the golden bank without adjudication."
+      ],
+      "transitions": [
+        {"from": "candidate_received", "event": "check_contract", "to": "contract_checked"},
+        {"from": "contract_checked", "event": "independent_review", "to": "independently_reviewed"},
+        {"from": "independently_reviewed", "event": "decide", "to": "classified"},
+        {"from": "classified", "event": "store", "to": "banked"}
+      ],
+      "terminalOutcomes": ["golden_fixture", "classifier_dispute", "valid_exception", "archived_non_actionable", "insufficient_context", "needs_human_review"],
+      "budgets": {"maxAdjudicationRounds": 3, "maxJudgeCalls": 3, "maxReclassificationCycles": 2},
+      "outputs": ["classification", "confidence", "evidence_refs", "bank_destination", "reopen_condition"]
+    },
+    {
+      "id": "parallel-harness-benchmark",
+      "ordinal": 3,
+      "purpose": "Run nine comparable harnesses in isolated parallel workspaces against the same Frontier GLM-5.2 model and immutable fixtures, then explain processing differences.",
+      "initialState": "fixtures_selected",
+      "states": ["fixtures_selected", "comparability_proven", "parallel_runs_completed", "differences_analyzed", "insights_banked"],
+      "metrics": ["grounded_completion", "answer_usefulness", "recovery_success", "information_gain", "token_cost", "latency", "redundant_actions", "unsupported_claims", "safety_violations"],
+      "rules": [
+        "All nine harnesses must use the declared identical model and benchmark contract.",
+        "Each harness runs in its own disposable safe-lab workspace.",
+        "Unavailable or non-comparable harnesses are reported, never silently substituted.",
+        "Compare processing trajectories, evidence use, recovery, cost, and outcome rather than prose style alone.",
+        "Extract generic strategies into the insight bank without changing V5 in this loop."
+      ],
+      "transitions": [
+        {"from": "fixtures_selected", "event": "prove_comparability", "to": "comparability_proven"},
+        {"from": "comparability_proven", "event": "run_parallel", "to": "parallel_runs_completed"},
+        {"from": "parallel_runs_completed", "event": "analyze_differences", "to": "differences_analyzed"},
+        {"from": "differences_analyzed", "event": "bank_insights", "to": "insights_banked"}
+      ],
+      "terminalOutcomes": ["benchmark_complete", "partially_comparable", "comparability_failed", "deferred", "unresolved_bounded"],
+      "budgets": {"maxHarnesses": 9, "maxParallelHarnesses": 9, "maxBenchmarkRounds": 3, "requiresExplicitTokenBudget": true, "requiresExplicitWallClockBudget": true},
+      "outputs": ["harness_results", "comparability_proof", "processing_differences", "ranked_insights", "evidence_refs"]
+    },
+    {
+      "id": "regression-protection",
+      "ordinal": 4,
+      "purpose": "Prove that proposed V5 improvements preserve all prior grounded, safety, cost, and convergence gains before promotion can be considered.",
+      "initialState": "proposal_received",
+      "states": ["proposal_received", "regression_bank_frozen", "baseline_replayed", "candidate_replayed", "regression_gate_decided"],
+      "metrics": ["golden_pass_rate", "holdout_pass_rate", "safety_invariants", "grounded_completion", "token_cost", "latency", "warning_precision", "warning_recall"],
+      "rules": [
+        "The regression bank is immutable for the duration of a comparison.",
+        "Baseline and candidate use identical fixtures, model, budgets, tools, and starting state.",
+        "No safety, proof, or grounded-completion regression is allowed.",
+        "Performance tradeoffs require an explicit predeclared tolerance; hidden averaging cannot mask a severe regression.",
+        "Loop 5 cannot promote without a passing Loop 4 gate bound to the exact candidate digest."
+      ],
+      "transitions": [
+        {"from": "proposal_received", "event": "freeze_bank", "to": "regression_bank_frozen"},
+        {"from": "regression_bank_frozen", "event": "replay_baseline", "to": "baseline_replayed"},
+        {"from": "baseline_replayed", "event": "replay_candidate", "to": "candidate_replayed"},
+        {"from": "candidate_replayed", "event": "decide", "to": "regression_gate_decided"}
+      ],
+      "terminalOutcomes": ["regression_pass", "regression_fail", "baseline_invalid", "reclassified", "deferred", "unresolved_bounded"],
+      "budgets": {"maxRegressionRounds": 3, "maxReclassificationCycles": 2, "maxSafetyRegressionCount": 0, "maxGroundedCompletionRegressionCount": 0, "requiresExplicitPerformanceTolerance": true},
+      "outputs": ["candidate_digest", "regression_outcome", "metric_deltas", "failed_fixture_refs", "regression_proof"]
+    },
+    {
+      "id": "bounded-improvement",
+      "ordinal": 5,
+      "purpose": "Generate nine isolated parallel implementations of the same generic benchmark insight for V5, regress each candidate independently, and promote only the strongest non-regressing improvement.",
+      "initialState": "insights_received",
+      "states": ["insights_received", "nine_strategies_declared", "parallel_variants_completed", "per_variant_regressions_attached", "passing_variants_ranked", "promotion_decided"],
+      "lanes": ["agent", "fixture_spawner", "classifier"],
+      "rules": [
+        "Every variant cites the benchmark insight and generic contract it implements.",
+        "Exactly nine variants use the same GLM-5.2 model, fixtures, authority, and budgets in isolated parallel workspaces.",
+        "Each variant declares a materially distinct strategy hypothesis before observing another variant's result.",
+        "Product-specific strings and fixture-specific overfitting are forbidden.",
+        "Fewer warnings alone is not an improvement.",
+        "A separate passing Loop 4 proof for each exact candidate digest is mandatory before ranking.",
+        "A regression failure disqualifies only its bound variant and cannot be averaged away.",
+        "Only a reviewed promotion may update V5 defaults or canonical fixture classifiers."
+      ],
+      "transitions": [
+        {"from": "insights_received", "event": "declare_nine_strategies", "to": "nine_strategies_declared"},
+        {"from": "nine_strategies_declared", "event": "run_parallel_variants", "to": "parallel_variants_completed"},
+        {"from": "parallel_variants_completed", "event": "attach_per_variant_regressions", "to": "per_variant_regressions_attached"},
+        {"from": "per_variant_regressions_attached", "event": "rank_passing_variants", "to": "passing_variants_ranked"},
+        {"from": "passing_variants_ranked", "event": "decide", "to": "promotion_decided"}
+      ],
+      "terminalOutcomes": ["promoted", "rejected", "reclassified", "deferred", "unresolved_bounded", "saturated", "needs_human_decision"],
+      "budgets": {"variantsPerRound": 9, "maxParallelVariants": 9, "maxImprovementRounds": 4, "noProgressPatienceRounds": 2, "requiresExplicitTokenBudget": true, "requiresExplicitWallClockBudget": true, "requiresMinimumMeaningfulImprovement": true},
+      "outputs": ["terminal_outcome", "nine_variant_results", "winning_variant_or_null", "candidate_digests", "per_variant_regression_proof_refs", "strategy_differences", "metric_deltas", "reopen_condition"]
+    }
+  ],
+  "crossLoopTransitions": [
+    {"from": "human-agent-operation.candidate_captured", "to": "candidate-adjudication.candidate_received"},
+    {"from": "candidate-adjudication.classified", "to": "parallel-harness-benchmark.fixtures_selected"},
+    {"from": "parallel-harness-benchmark.insights_banked", "to": "bounded-improvement.insights_received"},
+    {"from": "bounded-improvement.parallel_variants_completed", "to": "regression-protection.proposal_received", "fanOut": "one transition per candidate digest"},
+    {"from": "regression-protection.regression_pass", "to": "bounded-improvement.per_variant_regressions_attached", "condition": "all candidate digests have typed Loop 4 outcomes"},
+    {"from": "regression-protection.regression_fail", "to": "bounded-improvement.insights_received"},
+    {"from": "regression-protection.reclassified", "to": "candidate-adjudication.candidate_received"},
+    {"from": "bounded-improvement.reclassified", "to": "candidate-adjudication.candidate_received"},
+    {"from": "candidate-adjudication.insufficient_context", "to": "human-agent-operation.objective_received", "condition": "bounded_new_evidence_request"}
+  ]
+}

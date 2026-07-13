@@ -1,0 +1,10 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "v5-runtime-identity-capability-contract",
+  "classification": "missing_capability_manifest",
+  "observedFixture": "fx_6930a8be2704b71c12d3",
+  "symptom": "Two stable V5 answers failed to name GLM-5.2 because the model-facing context omitted the broker-verified runtime model identity.",
+  "rootCauseContract": "An LLM must receive a compact declared runtime identity to answer identity questions without guessing or scraping provider state.",
+  "correction": {"contextField":"runtime_identity.model","source":"FRONTIER_MODEL exact-model contract","lexicalQuestionDetection":false},
+  "regressionAssertion": "The model identity fixture passes while source/runtime task routing and direct conversation policy remain unchanged."
+}

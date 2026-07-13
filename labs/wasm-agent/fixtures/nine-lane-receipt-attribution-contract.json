@@ -1,0 +1,14 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "nine-lane-receipt-attribution-contract",
+  "classification": "missing_observability_primitive",
+  "observedRun": "loop3-live-nine-20260712d",
+  "symptom": "Aggregate gateway receipts proved model and budgets but could not safely attribute token, call, or tool cost to individual lanes.",
+  "rootCauseContract": "Per-agent efficiency ranking requires a broker-authenticated lane identity on every receipt; timing and transport inference are forbidden.",
+  "correction": {
+    "credential": "run-secret plus validated harness slot suffix",
+    "receiptField": "laneId",
+    "allowedPattern": "harness-[0-9]{2}"
+  },
+  "regressionAssertion": "Ranking fails closed unless all nine registered slots have at least one exactly attributed successful receipt and no receipt names an unknown lane."
+}

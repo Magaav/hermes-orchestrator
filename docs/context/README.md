@@ -13,6 +13,7 @@ future empty-context agent cheap, fast, and hard to mislead.
 | `VERIFY.md` | Exact commands and proof artifacts |
 | `REVIEW.md` | Writer/watcher pass, fresh-agent test, scorecard |
 | `HARNESS.md` | Self-improving harness contract and promotion rules |
+| `HARNESS_LOOPS.json` | Machine-readable five-loop state machines, benchmark matrix, regression gate, budgets, banks, and terminal outcomes |
 | `HARNESS_PROMISES.json` | Machine-readable deterministic promise registry |
 
 ## Status Enum

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from . import context, policy, trajectory
+from . import completion, context, policy, trajectory
 from .errors import V5Error
 
 
@@ -46,10 +46,20 @@ def normalize(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def run(objective: str, route: dict[str, Any], state: dict[str, Any], *, complete: Callable[[list[dict[str, str]], int], dict[str, Any]], execute: Callable[[str, dict[str, Any]], dict[str, Any]]) -> Outcome:
-    calls = 0; invalid = 0; no_progress = 0; tools: list[dict[str, Any]] = []; usages: list[dict[str, Any]] = []
+    calls = 0; invalid = 0; no_progress = 0; transient_retries = 0; tools: list[dict[str, Any]] = []; usages: list[dict[str, Any]] = []
     while True:
         try: result = complete(context.messages(objective, route, state), calls + 1)
         except Exception as exc:
+            code = str(getattr(exc, "code", "provider_failed"))
+            if code == "network-timeout" and transient_retries < 1:
+                transient_retries += 1
+                assessment = completion.assess(state)
+                state["completion_assessment"] = assessment
+                if assessment["status"] == "sufficient":
+                    state["pending"] = "frontier_completion"
+                state["last_error"] = {"code": code, "message": "Provider timed out; retrying once without discarding accumulated evidence."}
+                trajectory.append(state, {"kind": "system", "status": "retry", "summary": "Transient provider timeout; retrying once.", "result": assessment})
+                continue
             raise V5Error(str(getattr(exc, "code", "provider_failed")), str(exc), checkpoint=trajectory.checkpoint(state, str(getattr(exc, "code", "provider_failed")), str(exc))) from exc
         calls += 1
         if isinstance(result.get("usage"), dict): usages.append(result["usage"])
@@ -66,11 +76,20 @@ def run(objective: str, route: dict[str, Any], state: dict[str, Any], *, complet
         action_id = trajectory.action_id(name, arguments)
         if action_id in state["completed_actions"]:
             no_progress += 1
-            if no_progress >= 2: raise V5Error("no_semantic_progress", "Frontier repeated a completed action twice.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Repeated completed action."))
+            if state.get("pending") == "frontier_completion":
+                raise V5Error("no_semantic_progress", "Frontier requested a tool during completion-only synthesis.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Completion-only synthesis requested a tool."))
             prior = state["completed_actions"][action_id]
-            state["last_error"] = {"code": "action_already_completed", "message": f"Do not repeat {name}. Use its returned paths with read, choose a different relevant action, or answer."}
+            assessment = completion.assess(state)
+            state["completion_assessment"] = assessment
             trajectory.append(state, {"kind": "system", "tool": name, "status": "duplicate", "summary": "Equivalent completed action reused.", "result": prior})
-            continue
+            if assessment["status"] == "sufficient":
+                state["pending"] = "frontier_completion"
+                state["last_error"] = {"code": "action_already_completed", "message": f"Do not repeat {name}. Answer now from the accumulated evidence."}
+                continue
+            if assessment["status"] == "incomplete" and no_progress < 2:
+                state["last_error"] = {"code": "evidence_incomplete", "message": assessment["reason"], "next_actions": assessment["next_actions"]}
+                continue
+            raise V5Error("evidence_incomplete", assessment["reason"], checkpoint=trajectory.checkpoint(state, "evidence_incomplete", assessment["reason"]))
         observed = execute(name, arguments); tools.append(observed)
         compact = {key: observed.get(key) for key in ("ok", "code", "summary", "focus", "path", "start_line", "end_line", "truncated", "content", "limitations") if observed.get(key) not in (None, "")}
         if isinstance(observed.get("matches"), list):

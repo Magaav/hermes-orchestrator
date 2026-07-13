@@ -1,0 +1,16 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "goose-openai-broker-contract",
+  "classification": "adapter_contract",
+  "observedAdapter": "goose-1.41.0",
+  "contract": {
+    "provider": "openai",
+    "model": "glm-5.2",
+    "endpointEnvironment": "OPENAI_BASE_URL",
+    "endpointIncludesV1": true,
+    "backgroundProviderCallsDisabled": ["session_naming", "tool_call_summary"],
+    "sessionPersistence": false,
+    "defaultExtensionsLoaded": false
+  },
+  "expected": "One broker-authorized OpenAI-compatible model path with ephemeral state and native structured output."
+}

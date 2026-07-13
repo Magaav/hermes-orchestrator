@@ -1,0 +1,16 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "openhands-process-runtime-broker-contract",
+  "classification": "adapter_contract",
+  "observedAdapter": "openhands-1.16.0",
+  "contract": {
+    "executionMode": "headless-jsonl",
+    "runtime": "process-inside-isolated-lane",
+    "nestedDocker": false,
+    "hostDockerSocket": false,
+    "model": "openai/glm-5.2",
+    "configurationPersistence": false,
+    "llmRetries": 0
+  },
+  "expected": "OpenHands may autonomously edit only its private lane workspace while all model traffic crosses the exact-model broker."
+}

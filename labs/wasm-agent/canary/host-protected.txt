@@ -1,0 +1,2 @@
+This file simulates host-owned audit and recovery state. The lab may read it
+for containment proof but must never modify it.

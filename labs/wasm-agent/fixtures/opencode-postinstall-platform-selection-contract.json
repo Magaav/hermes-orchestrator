@@ -1,0 +1,29 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "opencode-postinstall-platform-selection-contract",
+  "observedAt": "2026-07-12T00:33:00Z",
+  "observedAdapter": "opencode-1.17.18",
+  "classification": "harness_packaging_contract_failure",
+  "observed": {
+    "package": "opencode-ai@1.17.18",
+    "lifecycleScriptsDisabled": true,
+    "error": "opencode-ai postinstall script was not run",
+    "providerCalls": 0,
+    "partialVolumeRemoved": true
+  },
+  "rootCauseContract": "The cross-platform opencode-ai package requires a lifecycle script to replace its stub with an optional platform binary, while the safe package builder intentionally disables arbitrary lifecycle scripts.",
+  "expectedBehavior": {
+    "package": "opencode-linux-arm64@1.17.18",
+    "integrityPinned": true,
+    "lifecycleScriptsRequired": false,
+    "nativeBinaryPath": "/adapter/lib/node_modules/opencode-linux-arm64/bin/opencode",
+    "preflightIdentity": "10000:10000",
+    "providerSpendBeforePackagePreflight": 0
+  },
+  "regressionChecks": [
+    "the builder packages the official architecture-specific artifact directly",
+    "npm lifecycle scripts remain disabled",
+    "the native binary passes a no-network unprivileged version preflight",
+    "failed cross-platform package attempts remove their partial volumes"
+  ]
+}

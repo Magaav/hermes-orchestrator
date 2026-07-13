@@ -1,0 +1,30 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "gemini-cli-gateway-auth-validation-contract",
+  "observedAt": "2026-07-12T00:09:38Z",
+  "observedAdapter": "gemini-cli-0.50.0",
+  "classification": "harness_adapter_configuration_failure",
+  "failedProof": "reports/context/latest/live-fixture-gemini-cli-semantic-result.json",
+  "observed": {
+    "returnCode": 41,
+    "message": "Invalid auth method selected.",
+    "providerCalls": 0,
+    "gatewayReceipts": 0,
+    "cleanupComplete": true
+  },
+  "rootCauseContract": "Gemini CLI 0.50.0 advertises and auto-selects gateway auth from GOOGLE_GEMINI_BASE_URL, but its headless auth validator rejects the gateway enum before request construction.",
+  "expectedBehavior": {
+    "ephemeralSelectedType": "gemini-api-key",
+    "customBaseUrlRetained": true,
+    "credential": "run_scoped_broker_token",
+    "hostGeminiStateCopied": false,
+    "immutableAdapterRevisionRequired": true,
+    "providerSpendBeforeAuthValidation": 0
+  },
+  "regressionChecks": [
+    "the runner writes selectedType only inside its private ephemeral home",
+    "the custom base URL still routes every model request through the private broker",
+    "the broker token is sent as the Gemini API key and no Google credential enters the lane",
+    "a runner change creates a new immutable adapter volume rather than overwriting v1"
+  ]
+}

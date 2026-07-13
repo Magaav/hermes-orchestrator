@@ -1,0 +1,15 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "goose-cli-output-shaping-contract",
+  "classification": "harness_false_assumption",
+  "observedAdapter": "goose-1.41.0",
+  "failedProof": "reports/context/latest/live-fixture-goose-semantic-result.json",
+  "symptom": "The provider returned valid answer text but the adapter emitted no answer because it assumed undocumented top-level JSON fields.",
+  "rootCauseContract": "The harness must consume a CLI's declared answer-only surface and must not guess a structured output schema.",
+  "correction": {
+    "flags": ["--quiet", "--output-format", "text"],
+    "parser": "trim stdout",
+    "preservesProviderCalls": true
+  },
+  "regressionAssertion": "A successful quiet Goose run with nonempty stdout becomes the answer without field-name inference."
+}

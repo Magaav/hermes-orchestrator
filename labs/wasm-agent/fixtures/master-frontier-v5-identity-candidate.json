@@ -1,0 +1,9 @@
+{
+  "slot":"harness-01","id":"master-frontier-v5","displayName":"V5 minimal policy plus runtime identity","executable":"python3",
+  "adapterVersion":"v5-4c211c4fb3c8","adapterVolume":"wasm-agent-v5-minimal-class-identity-v2",
+  "adapterArtifactSha256":"4c211c4fb3c86d3d77eae911ee1111789b6f4200e212efce1395840b3d73a450",
+  "candidateDigest":"4c211c4fb3c86d3d77eae911ee1111789b6f4200e212efce1395840b3d73a450",
+  "modelContractStatus":"verified","toolAuthorityStatus":"verified","toolAuthoritySha256":"b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "verificationArtifact":"reports/context/latest/v5-minimal-class-identity-package.json",
+  "liveCommand":["python3","/adapter/master-frontier-v5-live-runner.py","--task","{task}"],"liveReady":true,"benchmarkReady":false,"promotionStatus":"loop4_pending"
+}

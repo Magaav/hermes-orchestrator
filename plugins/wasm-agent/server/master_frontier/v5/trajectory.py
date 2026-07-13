@@ -9,14 +9,14 @@ SCHEMA = "master.frontier.v5.trajectory.v1"
 
 
 def new(run_id: str, turn_id: str, objective: str, route_id: str) -> dict[str, Any]:
-    return {"schema": SCHEMA, "run_id": run_id, "turn_id": turn_id, "objective": objective, "route_id": route_id, "status": "running", "steps": [], "completed_actions": {}, "pending": None, "last_error": None, "final_answer": None}
+    return {"schema": SCHEMA, "run_id": run_id, "turn_id": turn_id, "objective": objective, "route_id": route_id, "status": "running", "steps": [], "completed_actions": {}, "pending": None, "last_error": None, "completion_assessment": None, "final_answer": None}
 
 
 def restore(value: Any, *, run_id: str, turn_id: str, objective: str, route_id: str) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("schema") != SCHEMA:
         return new(run_id, turn_id, objective, route_id)
     result = new(run_id, turn_id, objective, route_id)
-    result.update({key: value.get(key) for key in ("steps", "completed_actions", "pending", "last_error", "final_answer")})
+    result.update({key: value.get(key) for key in ("steps", "completed_actions", "pending", "last_error", "completion_assessment", "final_answer")})
     result["steps"] = list(result["steps"] or [])[-24:]
     result["completed_actions"] = dict(result["completed_actions"] or {})
     return result
@@ -36,4 +36,3 @@ def checkpoint(state: dict[str, Any], code: str, message: str) -> dict[str, Any]
     state["pending"] = "frontier_completion"
     state["last_error"] = {"code": code, "message": message}
     return state
-

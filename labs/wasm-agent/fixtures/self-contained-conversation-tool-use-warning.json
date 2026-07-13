@@ -1,0 +1,33 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "self-contained-conversation-tool-use-warning",
+  "observedAt": "2026-07-11T23:52:37Z",
+  "observedAdapter": "claude-code-2.1.207",
+  "classification": "candidate_efficiency_warning",
+  "warningCode": "unnecessary_tool_use_for_self_contained_conversation",
+  "observed": {
+    "requestClass": "conversation",
+    "objectiveClass": "self_contained_greeting",
+    "providerCalls": 3,
+    "toolCalls": 3,
+    "toolNames": [
+      "Bash",
+      "Read"
+    ],
+    "duplicateRequests": 0,
+    "semanticResult": "passed",
+    "budgetResult": "passed"
+  },
+  "adjudication": {
+    "runSuccessful": true,
+    "duplicateError": false,
+    "warningRequired": true,
+    "reason": "Distinct tool-bearing calls were within the declared budget, but no external evidence was needed to answer the greeting."
+  },
+  "expectedBehavior": {
+    "preferredProviderCalls": 1,
+    "preferredToolCalls": 0,
+    "rankingPolicy": "retain_success_and_attach_cost_warning",
+    "futureQuestion": "Does a generic task-level tool-necessity contract reduce cost without lowering performance on tool-requiring fixtures?"
+  }
+}

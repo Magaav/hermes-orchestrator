@@ -102,6 +102,16 @@ returned-evidence rows from structured run events; arguments/results are
 redacted and bounded, while exact usage is persisted after every inference so
 failed or interrupted turns remain accountable.
 
+V5 treats a request for an already-completed action as a stalled-planning
+signal, then runs an explicit evidence-sufficiency assessment. Successful
+primary-source reads or runtime inspection permit completion-only synthesis;
+search-only evidence instead exposes bounded suggested reads, and missing
+primary evidence terminates honestly as `evidence_incomplete` after one repair.
+A provider that requests a tool during completion-only synthesis is stopped
+with `no_semantic_progress`. A `network-timeout` receives one bounded retry;
+the retry becomes completion-only only when the same evidence assessment is
+sufficient. A second timeout remains a resumable typed interruption.
+
 Repository/UI object questions use a `source` evidence floor. Their completion
 gate accepts a conclusive `found`, `not_found_trusted`, or `ambiguous` receipt;
 route resolution alone is insufficient. Stale indexes, missing scope, and

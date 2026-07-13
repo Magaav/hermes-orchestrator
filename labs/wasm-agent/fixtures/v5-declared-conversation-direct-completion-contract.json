@@ -1,0 +1,17 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "id": "v5-declared-conversation-direct-completion-contract",
+  "classification": "generic_improvement_candidate",
+  "sourceBenchmark": "loop3-ranked-nine-20260712",
+  "observedAdapter": "master-frontier-v5",
+  "symptom": "A self-contained conversation passed semantics but V5 requested search, used two provider calls, and emitted an unnecessary-tool warning.",
+  "rootCauseContract": "A task explicitly declared as conversation or general_conversation has no inspect/action evidence requirement and must begin in direct completion mode.",
+  "constraints": {
+    "lexicalPromptHeuristics": false,
+    "declaredMetadataRequired": true,
+    "sourceAndRuntimeToolLoopsPreserved": true,
+    "semanticRegressionAllowed": false
+  },
+  "expected": {"providerCalls": 1, "toolCalls": 0, "semanticPassed": true, "warnings": []},
+  "promotionGate": "Loop 4 proof bound to exact candidate digest"
+}

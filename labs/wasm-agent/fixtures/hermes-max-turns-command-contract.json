@@ -1,0 +1,25 @@
+{
+  "schema": "wasm-agent.fixture.v1",
+  "fixtureId": "hermes_max_turns_command_contract_001",
+  "origin": "generic_live_fixture_proof",
+  "candidateSignal": {
+    "classification": "adapter_command_rejected",
+    "providerCalls": 0,
+    "cleanupComplete": true
+  },
+  "adjudication": {
+    "classification": "valid_harness_defect",
+    "owner": "hermes_live_adapter_mapping",
+    "rootCause": "The adapter wrapper inserted a max-turn option at a CLI position Hermes parsed as a command value even though agent.max_turns was already supported in config.",
+    "agentDefect": false,
+    "harnessDefect": true,
+    "confidence": "high"
+  },
+  "regressionExpectation": {
+    "maxTurnsSource": "config_and_environment",
+    "adapterCommandMustParse": true,
+    "parserFailureMustConsumeProviderCalls": 0,
+    "rankingAllowed": false
+  },
+  "replayCommand": "python3 labs/wasm-agent/live-fixture-orchestrator.py --slot harness-03 --fixture-id fx_d3154de08df6150be9c9"
+}

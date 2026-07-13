@@ -1,0 +1,33 @@
+{
+  "schema": "wasm-agent.harness-regression-fixture.v1",
+  "id": "aider-cli-output-shaping-contract",
+  "observedAt": "2026-07-12T00:23:13Z",
+  "observedAdapter": "aider-0.86.2",
+  "classification": "harness_answer_shaping_failure",
+  "failedProof": "reports/context/latest/live-fixture-aider-semantic-result.json",
+  "observed": {
+    "technicalReadinessPassed": true,
+    "providerCalls": 1,
+    "promptTokens": 615,
+    "completionTokens": 385,
+    "upstreamContentChars": 5,
+    "forwardedStdoutChars": 2172,
+    "semanticFailure": "maxChars",
+    "cleanupComplete": true
+  },
+  "rootCauseContract": "Aider CLI stdout combines the assistant response with banners and status text, while the benchmark result contract requires only the final assistant answer.",
+  "expectedBehavior": {
+    "source": "private_workspace_chat_history",
+    "parser": "aider.utils.split_chat_history_markdown",
+    "selection": "last_assistant_message",
+    "statusAndToolOutputExcluded": true,
+    "semanticThresholdUnchanged": true,
+    "immutableAdapterRevisionRequired": true
+  },
+  "regressionChecks": [
+    "successful CLI stdout is never forwarded as the benchmark answer",
+    "only the final assistant role from the bounded private history is emitted",
+    "absence of an assistant history entry fails closed",
+    "the raw failed proof remains available for replay and adjudication"
+  ]
+}

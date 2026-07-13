@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-08",
+  "updatedAt": "2026-07-11",
   "resultStatuses": [
     "pass",
     "fail",
@@ -59,6 +59,613 @@
       ],
       "nextSuggestedSteps": [
         "Fix the first reported registry error and rerun the validator."
+      ]
+    },
+    {
+      "id": "harness-five-loop-contract-valid",
+      "owner": "docs/context",
+      "claim": "The self-improving harness declares five bounded loops with independent candidate adjudication, nine-harness same-model benchmarking, mandatory regression protection, and gated improvement.",
+      "whenToUse": "After changing the five-loop contract, fixture-bank lifecycle, benchmark matrix, regression policy, or improvement termination rules.",
+      "command": [
+        "python3",
+        "tools/context/check-harness-loops.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
+      "passRequires": [
+        "the contract declares exactly five ordered loops",
+        "candidate, classifier-dispute, golden, regression, and insight banks are distinct",
+        "redaction, bounded trajectory windows, immutable replay, and provenance are mandatory",
+        "a cycle repeats only for new evidence, a materially different hypothesis, or measurable improvement",
+        "loop three requires nine comparable parallel harness slots on frank/GLM-5.2",
+        "loop four permits zero safety or grounded-completion regressions",
+        "loop five generates nine isolated parallel GLM-5.2 V5 variants",
+        "every loop-five variant requires its own digest-bound loop-four proof before ranking",
+        "loop five requires explicit resource bounds, no-progress patience, and typed terminal outcomes"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/harness-loops-result.json"
+      ],
+      "invalidatedBy": [
+        "docs/context/HARNESS.md",
+        "docs/context/HARNESS_LOOPS.json",
+        "tools/context/check-harness-loops.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first structural error without weakening a loop bound or independent adjudication rule.",
+        "If the contract passes, implement candidate capture and replay as separate owned modules."
+      ]
+    },
+    {
+      "id": "safe-lab-nine-lane-topology",
+      "owner": "labs/wasm-agent",
+      "claim": "The safe lab launches nine isolated sibling containers for Loop 3 and nine for Loop 5, proves concurrent overlap and immutable input equality, and forbids ranking simulated adapters.",
+      "whenToUse": "After changing safe-lab lane isolation, adapter registry, Loop 3/5 orchestration, result collection, concurrency proof, or ranking gates.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-nine-lane-topology.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "benchmark and improve modes each launch exactly nine unique sibling containers",
+        "every lane has a unique writable workspace and result volume",
+        "all lanes observe the same source digest and 400-fixture bank",
+        "at least two lanes overlap on the bounded proof host",
+        "Loop 5 uses nine distinct predeclared strategy hypotheses",
+        "simulated topology lanes remain non-comparable and ranking is forbidden",
+        "proof-owned volumes are removed after result validation"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/nine-lane-topology-result.json",
+        "labs/wasm-agent/staging/loop3-promise-*-benchmark-nine-lane.json",
+        "labs/wasm-agent/staging/loop5-promise-*-improve-nine-lane.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/harness-adapters.json",
+        "labs/wasm-agent/lane-runner.py",
+        "labs/wasm-agent/nine-lane-orchestrator.py",
+        "labs/wasm-agent/check-nine-lane-results.py",
+        "labs/wasm-agent/prove-nine-lane-topology.py",
+        "docs/context/HARNESS_LOOPS.json"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first isolation, concurrency, fixture equality, or ranking-gate failure and rerun the promise.",
+        "Do not treat topology proof as a live agent benchmark; live mode requires nine verified adapters and brokered GLM-5.2 receipts."
+      ]
+    },
+    {
+      "id": "safe-lab-hermes-live-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "Packaged Hermes reaches exact frank/GLM-5.2 only through the private broker and can use canonical terminal authority to mutate only its private workspace.",
+      "whenToUse": "After changing Hermes packaging, the model gateway, duplicate policy, live adapter configuration, tool authority, or lane containment.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-hermes-live-adapter.py"
+      ],
+      "timeoutSec": 180,
+      "cost": {
+        "tokenCost": "medium",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the lane reaches the broker but cannot reach the upstream provider directly",
+        "every upstream receipt reports exact frank/GLM-5.2 over SSE",
+        "the provider credential is absent from the lane",
+        "source and fixture mounts are read-only while the private workspace is writable",
+        "runtime sockets and host block devices are absent",
+        "Hermes emits a terminal tool call and creates the exact nonce-bound workspace artifact",
+        "no identical request reaches upstream more than twice and a third is blocked outside explicit benchmark scenarios",
+        "all proof-owned containers, networks, volumes, and temporary credential files are removed"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/hermes-live-adapter-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/responses_bridge.py",
+        "labs/wasm-agent/package-hermes-adapter.py",
+        "labs/wasm-agent/prove-hermes-live-adapter.py",
+        "labs/wasm-agent/tool-authority-contract.json",
+        "labs/wasm-agent/harness-adapters.json",
+        "hermes-agent/**"
+      ],
+      "nextSuggestedSteps": [
+        "Adjudicate a duplicate warning against gateway transport evidence before blaming the adapter.",
+        "Keep Hermes non-rankable until the generic nine-lane fixture task and broker wiring are complete."
+      ]
+    },
+    {
+      "id": "safe-lab-generic-live-fixture",
+      "owner": "labs/wasm-agent",
+      "claim": "A redacted SQL fixture is materialized into a digest-bound task and executed through a generic brokered adapter lane with hard model, authority, call, duplicate, time, output, cleanup, and ranking gates.",
+      "whenToUse": "After changing fixture materialization, live adapter commands, lane execution, model-gateway budgets, source-volume routing, result validation, or readiness promotion fields.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-generic-live-fixture.py"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "medium",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the selected fixture comes from the immutable 400-candidate SQL bank and has a stable task digest",
+        "missing required route surfaces block before any provider call",
+        "the lane receives only a run-scoped broker token and cannot reach the upstream provider directly",
+        "every upstream call reports exact frank/GLM-5.2",
+        "the gateway blocks a third identical request and any provider call above the task total-call ceiling",
+        "adapter turns, wall clock, answer bytes, and provider calls remain within the task budgets",
+        "the lane writes a bounded result even on timeout",
+        "semantic correctness marked unresolved keeps ranking disabled",
+        "all proof-owned containers, networks, volumes, and temporary credential files are removed"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/generic-live-fixture-proof.json",
+        "reports/context/latest/live-fixture-hermes-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/safe_lab_host.py",
+        "labs/wasm-agent/materialize-fixture-task.py",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/lane-runner.py",
+        "labs/wasm-agent/hermes-live-runner.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/prove-generic-live-fixture.py",
+        "labs/wasm-agent/check-live-fixture-result.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Reuse the independently adjudicated semantic slice for every adapter readiness proof.",
+        "Implement the next adapter against the same task, authority, broker, and result contract."
+      ]
+    },
+    {
+      "id": "safe-lab-semantic-adjudication",
+      "owner": "labs/wasm-agent/private_evaluator",
+      "claim": "A private immutable overlay admits a deduplicated golden/holdout slice only after two independent checks agree, exposes only contract digests to lanes, and gates ranking on trusted post-run semantic scoring.",
+      "whenToUse": "After changing fixture selection, semantic properties, holdout policy, materialization, live scoring, safe-lab seed exclusions, or adapter benchmark readiness.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/private_evaluator/check_adjudication_overlay.py",
+        "labs/wasm-agent/staging/avatar-chat-adjudication-v1.sqlite3",
+        "--bank",
+        "labs/wasm-agent/staging/avatar-chat-fixtures-v2.sqlite3",
+        "--report",
+        "reports/context/latest/semantic-adjudication-proof.json"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the overlay digest matches the registered semantic fixture contract and immutable SQL bank",
+        "all selected objectives are deduplicated and retain pending status in the 400-candidate source bank",
+        "each admitted fixture has agreeing eligibility and task-stability judgments independent of the preliminary classifier",
+        "the slice contains five golden and two holdout fixtures",
+        "raw runtime identifiers, secrets, historical reply bodies, expected properties, and holdout criteria do not enter lane tasks",
+        "trusted post-run scoring matches the digest projected into the task",
+        "benchmark readiness requires both technical and semantic proof"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/semantic-adjudication-proof.json",
+        "reports/context/latest/live-fixture-hermes-semantic-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/private_evaluator/**",
+        "labs/wasm-agent/migration-manifest.json",
+        "labs/wasm-agent/materialize-fixture-task.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/check-live-fixture-result.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Prove the next adapter against the identical admitted task and semantic scorer.",
+        "Do not launch a nine-way ranking run until every adapter has matching benchmark readiness proof."
+      ]
+    },
+    {
+      "id": "safe-lab-master-frontier-v5-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "Master:frontier V5 is a minimal immutable adapter artifact that preserves owned source layout, passes a no-network import preflight before provider work, and earns benchmark readiness only through the common live semantic gate.",
+      "whenToUse": "After changing V5 owned modules, its safe-lab runner, adapter packaging, registry metadata, or common live fixture execution.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-master-frontier-v5-adapter.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains only the runner and V5 dependency closure",
+        "the package receipt binds every included file and contains no credentials or runtime state",
+        "the source-relative plugins/wasm-agent/server depth is preserved",
+        "a no-network unprivileged cache-hit preflight imports and executes master_frontier.v5.loop",
+        "the live lane receives the same task, model, tool authority, budgets, and private semantic scorer used by other adapters",
+        "exact frank/GLM-5.2, broker-only access, direct-egress denial, bounded output, semantic success, and cleanup are proven before benchmark promotion"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v5-adapter-package-result.json",
+        "reports/context/latest/live-fixture-master-frontier-v5-semantic-result-passed.json",
+        "reports/context/latest/master-frontier-v5-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/v5/**",
+        "plugins/wasm-agent/server/master_frontier/code_memory.py",
+        "plugins/wasm-agent/server/master_frontier/evidence.py",
+        "plugins/wasm-agent/server/master_frontier/route_contracts.py",
+        "labs/wasm-agent/master-frontier-v5-live-runner.py",
+        "labs/wasm-agent/package-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/check-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Package the next harness behind the identical task, broker, authority, result, and semantic contracts.",
+        "Keep the nine-way benchmark blocked until every registry slot has matching proof."
+      ]
+    },
+    {
+      "id": "safe-lab-codex-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "The real Codex CLI runs from an immutable credential-free package with ephemeral state and reaches the common GLM-5.2 broker through a bounded Responses compatibility bridge before earning semantic benchmark readiness.",
+      "whenToUse": "After changing the installed Codex artifact, Codex runner/config, Responses bridge, model gateway, package receipt, or Codex registry readiness.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-codex-adapter.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains the installed Codex distribution and runner but no Codex home, auth, config, sessions, memories, plugins, or MCP credentials",
+        "a no-network unprivileged package preflight reports codex-cli 0.144.0-alpha.4",
+        "the runner uses an ephemeral isolated Codex home and the externally-sandboxed automation mode inside the outer safe-lab boundary",
+        "the custom provider uses the supported Responses wire API and only a run-scoped broker token",
+        "the broker deterministically translates Responses text, function calls, prior tool outputs, and exact usage while retaining the common duplicate and total-call admission gate",
+        "the live lane proves exact frank/GLM-5.2, direct-egress denial, bounded output, semantic success, and cleanup before benchmark promotion"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/codex-adapter-package-result.json",
+        "reports/context/latest/live-fixture-codex-semantic-result.json",
+        "reports/context/latest/codex-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/codex-live-runner.py",
+        "labs/wasm-agent/package-codex-adapter.py",
+        "labs/wasm-agent/check-codex-adapter.py",
+        "labs/wasm-agent/responses_bridge.py",
+        "labs/wasm-agent/check-responses-bridge.py",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Reuse the common broker admission and semantic gate for the next harness protocol.",
+        "Keep readiness observations separate from Loop 3 multi-fixture ranking."
+      ]
+    },
+    {
+      "id": "safe-lab-claude-code-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "The real Claude Code CLI runs from an immutable credential-free package with ephemeral state and reaches the common GLM-5.2 broker through bounded Anthropic Messages compatibility before earning semantic benchmark readiness.",
+      "whenToUse": "After changing the installed Claude Code artifact, runner environment, Anthropic bridge, model gateway, package receipt, efficiency warnings, or Claude registry readiness.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-claude-code-adapter.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains the installed Claude Code binary, runner, and version receipt but no host auth, config, sessions, memories, or runtime state",
+        "a no-network unprivileged package preflight reports Claude Code 2.1.207",
+        "the runner uses ephemeral isolated home and config directories with bare, safe, non-persistent execution inside the outer safe-lab boundary",
+        "the Anthropic Messages and local count_tokens surfaces receive only a run-scoped broker credential",
+        "the broker translates bounded text, tools, tool results, streaming events, and exact usage while retaining the common duplicate and total-call admission gate",
+        "the live lane proves exact frank/GLM-5.2, direct-egress denial, bounded output, semantic success, and cleanup before benchmark promotion",
+        "unnecessary tools on a self-contained conversation preserve success but emit a machine-readable efficiency warning with bounded tool names"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/claude-code-adapter-package-result.json",
+        "reports/context/latest/live-fixture-claude-code-semantic-result-warned.json",
+        "reports/context/latest/claude-code-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/claude-code-live-runner.py",
+        "labs/wasm-agent/package-claude-code-adapter.py",
+        "labs/wasm-agent/check-claude-code-adapter.py",
+        "labs/wasm-agent/anthropic_bridge.py",
+        "labs/wasm-agent/check-anthropic-bridge.py",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/fixtures/self-contained-conversation-tool-use-warning.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Benchmark a generic task-level tool-necessity contract against both self-contained and tool-required fixtures.",
+        "Keep the warning non-fatal until Loop 3 evidence proves a safe cost improvement."
+      ]
+    },
+    {
+      "id": "safe-lab-gemini-cli-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "The official Gemini CLI runs from an immutable credential-free package with ephemeral state and reaches the common GLM-5.2 broker through bounded Google GenerateContent compatibility before earning semantic benchmark readiness.",
+      "whenToUse": "After changing the Gemini CLI version, pinned Node runtime, runner auth/config, GenerateContent bridge, model gateway, package receipt, efficiency warnings, or Gemini registry readiness.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-gemini-cli-adapter.py"
+      ],
+      "timeoutSec": 90,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains integrity-pinned @google/gemini-cli 0.50.0, a pinned Node 22 runtime, and the runner but no host Gemini auth, config, conversations, memory, installation id, or runtime state",
+        "a no-network unprivileged package preflight reports Gemini CLI 0.50.0 and the complete package tree matches its immutable digest",
+        "the runner uses private ephemeral home/config paths and selects Gemini API-key auth only inside that home to avoid the 0.50.0 headless gateway-validator defect",
+        "GOOGLE_GEMINI_BASE_URL remains the private broker and GEMINI_API_KEY contains only the run-scoped broker token",
+        "GenerateContent text, tools, function calls, function results, streaming, exact usage, and local countTokens retain common duplicate and total-call admission",
+        "the live lane proves exact frank/GLM-5.2, direct-egress denial, bounded output, semantic success, and cleanup before benchmark promotion",
+        "disproportionate prompt context on a self-contained conversation preserves success but emits a machine-readable efficiency warning"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/gemini-cli-adapter-package-result.json",
+        "reports/context/latest/live-fixture-gemini-cli-semantic-result.json",
+        "reports/context/latest/live-fixture-gemini-cli-semantic-result-passed.json",
+        "reports/context/latest/gemini-cli-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/gemini-cli-live-runner.py",
+        "labs/wasm-agent/package-gemini-cli-adapter.py",
+        "labs/wasm-agent/check-gemini-cli-adapter.py",
+        "labs/wasm-agent/gemini_bridge.py",
+        "labs/wasm-agent/check-gemini-bridge.py",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/Dockerfile",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/fixtures/gemini-cli-gateway-auth-validation-contract.json",
+        "labs/wasm-agent/fixtures/self-contained-conversation-context-bloat-warning.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Benchmark context-loading reductions against both self-contained and repository-grounded fixtures before altering Gemini defaults.",
+        "Keep the context-cost warning non-fatal until Loop 3 evidence proves a safe improvement."
+      ]
+    },
+    {
+      "id": "safe-lab-aider-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "Official Aider runs from an immutable credential-free Python package, reaches exact GLM-5.2 through the common Chat broker, and emits only its final assistant message before earning semantic benchmark readiness.",
+      "whenToUse": "After changing the Aider version, package builder, runner flags, OpenAI-compatible endpoint, history answer shaping, registry metadata, or Aider readiness proof.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-aider-adapter.py"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains official aider-chat 0.86.2 and its dependency-locked isolated venv plus the runner but no host config, history, secrets, or runtime state",
+        "the complete package tree and dependency freeze match immutable digests and an offline unprivileged preflight reports Aider 0.86.2",
+        "only package bootstrap writes a new root-owned volume as root while preflight and live execution remain UID 10000",
+        "the runner uses one-shot openai/glm-5.2 through the private OPENAI_API_BASE with only the run-scoped broker token",
+        "git, commits, analytics, updates, browser tooling, streaming, host history, and interactive confirmations are disabled",
+        "only the final assistant role parsed from private bounded chat history becomes the benchmark answer",
+        "the live lane proves exact frank/GLM-5.2, direct-egress denial, bounded output, semantic success, and cleanup before benchmark promotion"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/aider-adapter-package-result.json",
+        "reports/context/latest/live-fixture-aider-semantic-result.json",
+        "reports/context/latest/live-fixture-aider-semantic-result-passed.json",
+        "reports/context/latest/aider-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/aider-live-runner.py",
+        "labs/wasm-agent/package-aider-adapter.py",
+        "labs/wasm-agent/check-aider-adapter.py",
+        "labs/wasm-agent/fixtures/aider-openai-broker-contract.json",
+        "labs/wasm-agent/fixtures/adapter-volume-bootstrap-ownership-contract.json",
+        "labs/wasm-agent/fixtures/aider-cli-output-shaping-contract.json",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Reuse the existing Chat broker and answer-shaping gate for the next compatible harness.",
+        "Keep CLI diagnostics as evidence artifacts, never as semantic answer content."
+      ]
+    },
+    {
+      "id": "safe-lab-opencode-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "Official OpenCode runs from an immutable architecture-specific native package, reaches exact GLM-5.2 through the common Chat broker, and emits only completed structured text events before earning semantic benchmark readiness.",
+      "whenToUse": "After changing the OpenCode version, platform package, preflight state, runner config, structured event parsing, registry metadata, or OpenCode readiness proof.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/package-opencode-adapter.py"
+      ],
+      "timeoutSec": 90,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the package contains integrity-pinned opencode-linux-arm64 1.17.18 and the runner but no host auth, config, sessions, plugins, secrets, or runtime state",
+        "npm lifecycle scripts remain disabled and the architecture-specific native binary passes an offline unprivileged version preflight",
+        "the preflight root and adapter remain read-only while config, data, and cache use only a bounded disposable tmpfs home",
+        "pure one-shot lab/glm-5.2 uses @ai-sdk/openai-compatible and only the run-scoped broker token",
+        "remote model fetches, plugins, Claude state import, LSP downloads, updates, sharing, and internet tools are disabled",
+        "only completed structured text events become the benchmark answer",
+        "the live lane proves exact frank/GLM-5.2, direct-egress denial, bounded output, semantic success, and cleanup before benchmark promotion",
+        "multiple distinct calls without a tool loop on a self-contained conversation preserve success but emit the shared auxiliary-call warning"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/opencode-adapter-package-result.json",
+        "reports/context/latest/live-fixture-opencode-semantic-result.json",
+        "reports/context/latest/opencode-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/opencode-live-runner.py",
+        "labs/wasm-agent/package-opencode-adapter.py",
+        "labs/wasm-agent/check-opencode-adapter.py",
+        "labs/wasm-agent/fixtures/opencode-chat-broker-contract.json",
+        "labs/wasm-agent/fixtures/opencode-postinstall-platform-selection-contract.json",
+        "labs/wasm-agent/fixtures/opencode-version-preflight-ephemeral-home-contract.json",
+        "labs/wasm-agent/fixtures/self-contained-conversation-auxiliary-provider-call-warning.json",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Benchmark deterministic session metadata as a cost hypothesis without changing the raw readiness evidence.",
+        "Reuse direct platform packaging when a cross-platform wrapper requires lifecycle scripts."
+      ]
+    },
+    {
+      "id": "safe-lab-efficiency-warning-policy",
+      "owner": "labs/wasm-agent",
+      "claim": "Successful self-contained conversation runs retain semantic success while shared deterministic policy emits bounded warnings for unnecessary tool use and disproportionate prompt context.",
+      "whenToUse": "After changing live receipt fields, conversation request classes, efficiency thresholds, warning fixtures, adapter warning metadata, or Loop 2/3 cost adjudication.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/check-efficiency-policy.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a self-contained conversation with tool calls emits unnecessary_tool_use_for_self_contained_conversation with bounded unique tool names",
+        "a self-contained conversation above eight times its output allowance emits excessive_prompt_context_for_self_contained_conversation",
+        "multiple distinct provider calls without a tool loop on a self-contained conversation emit unnecessary_auxiliary_provider_call_for_self_contained_conversation",
+        "both warning classes preserve semantic success and ranking eligibility",
+        "repository-grounded and other non-self-contained request classes are excluded from these heuristics",
+        "the checker report has ok true"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/efficiency-policy-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/efficiency_policy.py",
+        "labs/wasm-agent/check-efficiency-policy.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/fixtures/self-contained-conversation-tool-use-warning.json",
+        "labs/wasm-agent/fixtures/self-contained-conversation-context-bloat-warning.json",
+        "labs/wasm-agent/fixtures/self-contained-conversation-auxiliary-provider-call-warning.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Adjudicate warning frequency and cost deltas across the full Loop 3 fixture matrix before changing a harness default.",
+        "Promote a warning to an error only when a declared hard budget or safety contract is violated."
       ]
     },
     {
@@ -1411,6 +2018,161 @@
         "Fix the first typed epistemic failure and rerun the bounded adversarial command.",
         "If deterministic and replay lanes pass, run one live frontier source objective without enabling production.",
         "If live provider access is absent, report that lane blocked without weakening deterministic gates."
+      ]
+    },
+    {
+      "id": "safe-lab-goose-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "Goose 1.41.0 runs the canonical fixture through the private exact-model broker from an immutable credential-free adapter volume and is rankable only after private semantic proof.",
+      "whenToUse": "After changing Goose packaging, invocation, broker routing, answer shaping, or benchmark readiness.",
+      "command": ["python3", "labs/wasm-agent/check-goose-adapter.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "medium"},
+      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "passRequires": [
+        "the adapter uses the integrity-pinned official ARM64 GNU Goose 1.41.0 release",
+        "all runtime state is ephemeral and no host config, sessions, secrets, or keyring are packaged",
+        "the OpenAI-compatible request is brokered to exact frank/GLM-5.2 with bounded calls",
+        "quiet native text output supplies the answer without guessed JSON fields",
+        "the private semantic fixture passes before benchmark promotion"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/goose-adapter-package-result.json",
+        "reports/context/latest/live-fixture-goose-semantic-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/goose-live-runner.py",
+        "labs/wasm-agent/package-goose-adapter.py",
+        "labs/wasm-agent/check-goose-adapter.py",
+        "labs/wasm-agent/fixtures/goose-openai-broker-contract.json",
+        "labs/wasm-agent/fixtures/goose-cli-output-shaping-contract.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "If output shaping fails, inspect Goose's declared CLI output contract and harvest the miss before changing parsing.",
+        "If extra provider calls appear, classify their owned feature and disable it generically before promotion.",
+        "Keep the nine-way benchmark blocked until OpenHands has matching live semantic proof."
+      ]
+    },
+    {
+      "id": "safe-lab-openhands-adapter",
+      "owner": "labs/wasm-agent",
+      "claim": "OpenHands 1.16.0 runs headlessly inside the isolated lane with no Docker or host authority and becomes rankable only after exact-model and private semantic proof.",
+      "whenToUse": "After changing OpenHands packaging, process runtime, event shaping, broker configuration, or benchmark readiness.",
+      "command": ["python3", "labs/wasm-agent/check-openhands-adapter.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "medium"},
+      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "passRequires": [
+        "the immutable package contains official openhands 1.16.0 with a dependency-freeze receipt",
+        "the process runtime operates only inside the private lane workspace without Docker socket or host state",
+        "all LLM traffic is brokered to exact frank/GLM-5.2 with zero automatic retries",
+        "native JSONL agent messages provide bounded answer evidence",
+        "the private semantic fixture passes before benchmark promotion"
+      ],
+      "outputArtifacts": ["reports/context/latest/openhands-adapter-package-result.json", "reports/context/latest/live-fixture-openhands-semantic-result.json", "reports/context/latest/openhands-benchmark-readiness-proof.json"],
+      "invalidatedBy": ["labs/wasm-agent/openhands-live-runner.py", "labs/wasm-agent/package-openhands-adapter.py", "labs/wasm-agent/check-openhands-adapter.py", "labs/wasm-agent/fixtures/openhands-process-runtime-broker-contract.json", "labs/wasm-agent/fixtures/openhands-pip-resolver-contract.json", "labs/wasm-agent/harness-adapters.json"],
+      "nextSuggestedSteps": [
+        "If dependency resolution fails, preserve official constraints and use the documented uv path rather than manual overrides.",
+        "If an unexpected action appears, harvest its generic authority or runtime contract before changing prompts.",
+        "With all nine adapters proven, run the first simultaneous nine-lane benchmark and validate immutable equality."
+      ]
+    },
+    {
+      "id": "nine-lane-attributed-efficiency-ranking",
+      "owner": "labs/wasm-agent",
+      "claim": "A proven nine-lane benchmark is ranked only after every exact-model gateway receipt is broker-attributed to a registered lane and every lane passes private semantic scoring.",
+      "whenToUse": "After changing lane credentials, gateway receipts, efficiency policy, ranking weights, golden-pattern extraction, or Loop 3 benchmark output.",
+      "command": ["python3", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "passRequires": [
+        "all nine lanes completed the identical digest-bound task and passed the private semantic contract",
+        "every successful receipt has one validated registered laneId and every lane has attributed receipts",
+        "semantic correctness gates ranking and is never traded against efficiency",
+        "latency, prompt tokens, provider calls, tool calls, and warning penalties are explicit and reproducible",
+        "golden patterns remain candidates until Loop 4 regression authorizes promotion"
+      ],
+      "outputArtifacts": ["reports/context/latest/nine-lane-ranking-result.json", "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"],
+      "invalidatedBy": ["labs/wasm-agent/model-gateway.py", "labs/wasm-agent/safe_lab_host.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/efficiency_policy.py", "labs/wasm-agent/fixtures/nine-lane-receipt-attribution-contract.json"],
+      "nextSuggestedSteps": [
+        "Convert the highest-confidence golden pattern into a bounded V5 candidate without product-specific routing heuristics.",
+        "Run Loop 4 against the exact candidate digest before any promotion.",
+        "Expand ranking across admitted fixtures before treating one-fixture ordering as a general harness ranking."
+      ]
+    },
+    {
+      "id": "v5-declared-conversation-direct-completion-loop4",
+      "owner": "plugins/wasm-agent/server/master_frontier/v5",
+      "claim": "A V5 candidate uses direct completion only for explicitly declared self-contained conversation classes and cannot enter promotion review without an exact-digest Loop 4 regression pass.",
+      "whenToUse": "After changing V5 task policy, direct completion context, controller metadata projection, candidate packaging, or Loop 4 proof rules.",
+      "command": ["python3", "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "passRequires": [
+        "direct completion is selected from declared conversation metadata without lexical prompt heuristics",
+        "source and runtime task classes retain the natural tool loop",
+        "the exact immutable candidate digest matches package and candidate projection receipts",
+        "all focused V5 regressions pass with zero safety regressions",
+        "live private semantic scoring passes with one provider call, zero tools, zero warnings, exact model, and complete cleanup"
+      ],
+      "outputArtifacts": ["reports/context/latest/loop4-v5-direct-candidate-regression-proof.json", "reports/context/latest/loop4-v5-direct-candidate-live-result.json", "reports/context/latest/master-frontier-v5-adapter-package-result.json"],
+      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/controller_v5.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/live-fixture-orchestrator.py", "labs/wasm-agent/package-master-frontier-v5-adapter.py", "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"],
+      "nextSuggestedSteps": [
+        "Generate the remaining Loop 5 strategy variants as independent candidate digests.",
+        "Attach a separate Loop 4 proof to every candidate before cross-candidate ranking.",
+        "Promote only the smallest non-regressing generic candidate after the nine-way Loop 5 decision."
+      ]
+    },
+    {
+      "id": "loop5-nine-v5-direct-completion-promotion",
+      "owner": "labs/wasm-agent",
+      "claim": "Loop 5 packages nine unique V5 strategy artifacts, runs them concurrently under identical authority, attaches an exact-digest Loop 4 pass to each, and promotes only the smallest non-regressing generic candidate.",
+      "whenToUse": "After changing V5 variant strategies, candidate packaging, improvement orchestration, duplicate budgets, Loop 4 matrix proof, ranking, or promoted harness slot 1.",
+      "command": ["python3", "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "passRequires": [
+        "nine strategies, artifact digests, and immutable volumes are unique",
+        "all candidates use the identical fixture, model, tool authority, and budgets with nine-way overlap",
+        "duplicate budgets are scoped per authenticated lane",
+        "all nine candidates pass private semantics with one provider call and zero tools",
+        "every promoted candidate has its own exact-digest Loop 4 proof with zero safety regressions",
+        "promotion selects the smallest generic passing policy and updates only the winning registry slot"
+      ],
+      "outputArtifacts": ["labs/wasm-agent/loop5-v5-candidates.json", "labs/wasm-agent/staging/loop5-v5-nine-20260712b-improve-nine-lane.json", "reports/context/latest/loop4-loop5-v5-matrix-proof.json", "reports/context/latest/loop5-v5-promotion-decision.json"],
+      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "labs/wasm-agent/loop5-v5-strategies.json", "labs/wasm-agent/package-master-frontier-v5-adapter.py", "labs/wasm-agent/package-loop5-v5-candidates.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/model-gateway.py", "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py", "labs/wasm-agent/rank-loop5-v5-candidates.py", "labs/wasm-agent/harness-adapters.json"],
+      "nextSuggestedSteps": [
+        "Run the promoted slot through the next multi-fixture Loop 3 benchmark before generalizing beyond conversation fixtures.",
+        "Keep the eight non-winning volumes only as reproducible evidence until retention policy harvests them.",
+        "If a grounded task bypasses tools, revert promotion and reclassify the task metadata contract."
+      ]
+    },
+    {
+      "id": "promoted-v5-golden-holdout-generalization",
+      "owner": "plugins/wasm-agent/server/master_frontier/v5",
+      "claim": "The promoted V5 minimal declared-class policy exposes compact broker-verified runtime identity and passes every frozen golden and holdout semantic fixture without weakening grounded tool loops.",
+      "whenToUse": "After changing V5 runtime identity context, task policy, promoted artifact, fixture-suite runner, or golden/holdout overlay.",
+      "command": ["python3", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "--candidate-adapter", "labs/wasm-agent/fixtures/master-frontier-v5-identity-candidate.json"],
+      "timeoutSec": 240,
+      "cost": {"tokenCost": "medium", "runtimeCost": "medium", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["runtime", "behavioral"],
+      "passRequires": [
+        "all five golden and both holdout fixtures bind to the exact promoted artifact digest",
+        "private semantic pass rate is 100 percent",
+        "runtime identity comes from the exact broker model contract and is never guessed from prompt text",
+        "conversation fixtures remain direct while grounded capability questions retain their evidence tool loop",
+        "every fixture proves exact model, private network isolation, bounded output, and complete cleanup"
+      ],
+      "outputArtifacts": ["reports/context/latest/promoted-v5-fixture-suite-proof.json", "reports/context/latest/v5-identity-candidate-target-proof.json", "reports/context/latest/v5-minimal-class-identity-package.json"],
+      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "labs/wasm-agent/fixtures/v5-runtime-identity-capability-contract.json", "labs/wasm-agent/harness-adapters.json"],
+      "nextSuggestedSteps": [
+        "Add additional admitted source/runtime fixtures before generalizing beyond the current seven-fixture suite.",
+        "If model identity changes, refresh the broker contract and rerun the suite instead of hardcoding a model name in prompts.",
+        "Retain the previous promoted digest as rollback evidence until the next multi-fixture regression cycle passes."
       ]
     }
   ]

@@ -195,3 +195,37 @@ reports/context/latest/loop-copilot-signals.jsonl
 
 Treat `blocker` signals as Gatekeeper stops until the named proof or demotion is
 handled. Treat `warn` signals as edit/final-review friction, not runtime proof.
+
+## Five-Loop Improvement Contract
+
+The machine-readable contract is `docs/context/HARNESS_LOOPS.json`; validate it
+with `python3 tools/context/check-harness-loops.py`.
+
+1. **Human-agent operation** delivers the best honest answer and captures
+   redacted machine warnings or human dissatisfaction as candidate signals.
+   Inferred affect is low-confidence evidence, never proof of a defect.
+2. **Candidate adjudication** applies deterministic checks and independent
+   review using only evidence available when the questioned action occurred.
+3. **Parallel harness benchmark** compares nine isolated harnesses against the
+   same immutable fixtures, authority, budgets, and `frank/GLM-5.2` model. It
+   banks generic processing insights but does not patch V5.
+4. **Regression protection** freezes the golden/holdout regression bank and
+   compares baseline with the exact candidate digest. Any safety or grounded
+   completion regression blocks promotion.
+5. **Parallel bounded improvement** creates nine isolated GLM-5.2 V5 variants
+   from the same insight using nine predeclared strategy hypotheses. Every
+   candidate receives its own digest-bound Loop 4 proof; only regression-passing
+   variants are ranked, and one variant's proof cannot authorize another.
+
+A candidate is not a fixture, and its warning-producing classifier cannot
+confirm itself. Every repeat must introduce new evidence, a materially
+different hypothesis, or measurable improvement. Otherwise the loop terminates
+with its typed bounded outcome. Loop five ends as `promoted`, `rejected`,
+`reclassified`, `deferred`, `unresolved_bounded`, `saturated`, or
+`needs_human_decision`; it may not continue merely because more variants exist.
+
+Semantic fixture admission uses an immutable overlay rather than mutating the
+candidate bank. The overlay records two independent decisions, a deduplicated
+objective group, golden/holdout membership, and a private expected-property
+contract. Agent lanes receive only contract digests; expected properties and
+holdout criteria remain host-only and are scored after execution.

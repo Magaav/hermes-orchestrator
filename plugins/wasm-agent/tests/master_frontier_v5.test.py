@@ -11,7 +11,7 @@ SERVER = Path(__file__).resolve().parents[1] / "server"
 sys.path.insert(0, str(SERVER))
 
 from master_frontier import provider_tools, run_protocol
-from master_frontier.v5 import loop, tools, trajectory
+from master_frontier.v5 import completion, loop, task_policy, tools, trajectory
 from master_frontier.v5 import context
 from master_frontier.v5.errors import V5Error
 
@@ -21,6 +21,40 @@ def route(root: Path) -> dict[str, object]:
 
 
 class MasterFrontierV5Tests(unittest.TestCase):
+    def test_declared_conversation_uses_direct_completion_without_tools(self) -> None:
+        state = trajectory.new("run", "turn", "hello", "fixture.ui")
+        direct_route = {"route_id": "fixture.ui", "task_contract": {"request_class": "conversation"}}
+        calls = []
+        def complete(messages, _index):
+            calls.append(messages)
+            self.assertEqual(json.loads(messages[1]["content"])["tools"], [])
+            self.assertIn("self-contained conversation", messages[0]["content"])
+            return {"reply": "Hello."}
+        outcome = loop.run("hello", direct_route, state, complete=complete, execute=lambda *_: self.fail("tool execution must not occur"))
+        self.assertEqual(outcome.answer, "Hello.")
+        self.assertEqual(outcome.calls, 1)
+        self.assertEqual(outcome.tools, [])
+
+    def test_direct_completion_requires_declared_class_not_prompt_heuristics(self) -> None:
+        self.assertTrue(task_policy.direct_completion({"task_contract": {"objective_kind": "general_conversation"}}))
+        self.assertFalse(task_policy.direct_completion({"task_contract": {"request_class": "source_investigation"}}))
+        self.assertFalse(task_policy.direct_completion({"objective": "hello conversation answer directly"}))
+
+    def test_all_loop5_strategies_preserve_declared_direct_and_grounded_modes(self) -> None:
+        matrix = json.loads((Path(__file__).resolve().parents[3] / "labs/wasm-agent/loop5-v5-strategies.json").read_text())
+        direct_fields = {"request_class":"conversation","declared_classes":["conversation"],"completion_mode":"direct","proof_policy":"none","required_capabilities":[],"evidence_requirements":[],"execution_profile":"answer_only","authority_source":"declared_task_contract","context_profile":"direct"}
+        grounded_fields = {"request_class":"source_investigation","declared_classes":["source_investigation"],"completion_mode":"tool_loop","proof_policy":"grounded","required_capabilities":["inspect"],"evidence_requirements":["grounded"],"execution_profile":"grounded","authority_source":"declared_task_contract","context_profile":"natural_tool_loop"}
+        for item in matrix["variants"]:
+            self.assertTrue(task_policy.direct_completion({"task_contract":{**direct_fields,"strategy":item["strategy"]}}), item["strategy"])
+            self.assertFalse(task_policy.direct_completion({"task_contract":{**grounded_fields,"strategy":item["strategy"]}}), item["strategy"])
+
+    def test_context_exposes_bounded_declared_runtime_identity(self) -> None:
+        state = trajectory.new("run", "turn", "which model", "fixture.ui")
+        messages = context.messages("which model", {"route_id":"fixture.ui","runtime_identity":{"model":"frank/GLM-5.2"}}, state)
+        payload = json.loads(messages[1]["content"])
+        self.assertEqual(payload["runtime_identity"], {"model":"frank/GLM-5.2"})
+        self.assertIn("runtime_identity", messages[0]["content"])
+
     def test_protocol_is_explicit_and_resume_immutable(self) -> None:
         self.assertEqual(run_protocol.select({"protocol": "v5"}), "v5")
         self.assertEqual(run_protocol.request_fields({"protocol": "v5"}), {"protocol": "v5", "investigation_mode": ""})
@@ -75,14 +109,92 @@ class MasterFrontierV5Tests(unittest.TestCase):
             self.assertEqual(executed, ["search", "read"])
             self.assertEqual(outcome.trajectory["status"], "completed")
 
-    def test_duplicate_actions_stop_without_token_ceiling(self) -> None:
+    def test_duplicate_action_synthesizes_only_after_primary_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / "x.js").write_text("x\n")
+            state = trajectory.new("run", "turn", "find x", "fixture.ui")
+            responses = iter([
+                {"reply": '{"tool":"search","arguments":{"query":"x"}}'},
+                {"reply": '{"tool":"read","arguments":{"path":"x.js"}}'},
+                {"reply": '{"tool":"search","arguments":{"query":"x"}}'},
+                {"reply": "The source contains x."},
+            ])
+            executed = []
+            def execute(name, args):
+                executed.append(name)
+                return tools.execute(name, args, route(root), invoke=lambda *_: {})
+            outcome = loop.run("find x", route(root), state, complete=lambda *_: next(responses), execute=execute)
+            self.assertEqual(executed, ["search", "read"])
+            self.assertEqual(outcome.answer, "The source contains x.")
+            self.assertEqual(outcome.trajectory["status"], "completed")
+            self.assertEqual(outcome.trajectory["steps"][-1]["status"], "duplicate")
+            self.assertEqual(outcome.trajectory["completion_assessment"]["status"], "sufficient")
+
+    def test_duplicate_search_identifies_read_gap_before_completion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "x.js").write_text("x\n")
             state = trajectory.new("run", "turn", "find x", "fixture.ui")
             response = {"reply": '{"tool":"search","arguments":{"query":"x"}}'}
             with self.assertRaises(V5Error) as raised:
                 loop.run("find x", route(root), state, complete=lambda *_: response, execute=lambda name, args: tools.execute(name, args, route(root), invoke=lambda *_: {}))
-            self.assertEqual(raised.exception.code, "no_semantic_progress")
+            self.assertEqual(raised.exception.code, "evidence_incomplete")
+            assessment = raised.exception.checkpoint["completion_assessment"]
+            self.assertEqual(assessment["status"], "incomplete")
+            self.assertEqual(assessment["required_gaps"], ["primary_source_read"])
+            self.assertEqual(assessment["next_actions"][0]["tool"], "read")
+
+    def test_completion_assessment_blocks_without_primary_evidence(self) -> None:
+        state = trajectory.new("run", "turn", "answer", "fixture.ui")
+        self.assertEqual(completion.assess(state)["status"], "blocked")
+
+    def test_network_timeout_without_evidence_preserves_tool_mode(self) -> None:
+        class NetworkTimeout(RuntimeError):
+            code = "network-timeout"
+
+        state = trajectory.new("run", "turn", "explain x", "fixture.ui")
+        calls = []
+        def complete(messages, index):
+            calls.append(messages)
+            if len(calls) == 1:
+                raise NetworkTimeout("Provider request timed out.")
+            return {"reply": "Recovered from accumulated evidence."}
+        outcome = loop.run("explain x", {"route_id": "fixture.ui"}, state, complete=complete, execute=lambda *_: {})
+        self.assertEqual(outcome.answer, "Recovered from accumulated evidence.")
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(json.loads(calls[-1][1]["content"])["tools"])
+
+    def test_network_timeout_with_primary_evidence_retries_completion_only(self) -> None:
+        class NetworkTimeout(RuntimeError):
+            code = "network-timeout"
+
+        state = trajectory.new("run", "turn", "explain x", "fixture.ui")
+        trajectory.append(state, {"kind": "tool", "tool": "read", "status": "completed", "result": {"ok": True, "path": "x.js", "content": "1: x"}})
+        calls = []
+        def complete(messages, index):
+            calls.append(messages)
+            if len(calls) == 1: raise NetworkTimeout("Provider request timed out.")
+            return {"reply": "Recovered from primary evidence."}
+        outcome = loop.run("explain x", {"route_id": "fixture.ui"}, state, complete=complete, execute=lambda *_: {})
+        self.assertEqual(outcome.answer, "Recovered from primary evidence.")
+        self.assertEqual(json.loads(calls[-1][1]["content"])["tools"], [])
+
+    def test_network_timeout_retries_only_once(self) -> None:
+        class NetworkTimeout(RuntimeError):
+            code = "network-timeout"
+
+        state = trajectory.new("run", "turn", "explain x", "fixture.ui")
+        with self.assertRaises(V5Error) as raised:
+            loop.run("explain x", {"route_id": "fixture.ui"}, state, complete=lambda *_: (_ for _ in ()).throw(NetworkTimeout("Provider request timed out.")), execute=lambda *_: {})
+        self.assertEqual(raised.exception.code, "network-timeout")
+
+    def test_completion_only_rejects_ignored_tool_instruction(self) -> None:
+        state = trajectory.new("run", "turn", "find x", "fixture.ui")
+        state["pending"] = "frontier_completion"
+        action = trajectory.action_id("search", {"query": "x"})
+        state["completed_actions"][action] = {"ok": True, "summary": "Found x."}
+        with self.assertRaises(V5Error) as raised:
+            loop.run("find x", {"route_id": "fixture.ui"}, state, complete=lambda *_: {"reply": '{"tool":"search","arguments":{"query":"x"}}'}, execute=lambda *_: {})
+        self.assertEqual(raised.exception.code, "no_semantic_progress")
 
     def test_malformed_output_repairs_once_then_stops(self) -> None:
         state = trajectory.new("run", "turn", "hello", "fixture.ui")
