@@ -136,7 +136,7 @@ caps only when the envelope explicitly sets `enforcement: hard`. A separate
 high emergency call ceiling, the no-progress guard, declared tools, and
 read/write roots remain hard boundaries.
 The head-output value is a per-call ceiling and does not reserve or consume
-tokens merely by being high; the browser default is 8,192 so explicitly long
+tokens merely by being high; the V3 compatibility browser default is 32,768 so explicitly long
 answers are possible.
 
 Cheapness is measured by:
@@ -153,7 +153,8 @@ come from compact contracts and bounded observations, not premature stopping.
 ## Compatibility
 
 V1/V2 envelopes and controllers remain compatibility lanes for stored tests and
-older clients. The PWA sends the V3 schema by default. V3 must not import V2
+older clients. The PWA sends V5 by default; V3 is an explicit compatibility
+selection. V3 must not import V2
 planning, entity-resolution, autonomous continuation, or answer-shaping policy.
 
 ## Verification

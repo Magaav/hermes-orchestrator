@@ -3,8 +3,11 @@
 This is the target architecture for avatar-chat, embedded agent routing, Hermes
 dispatch, context budgeting, and per-turn proof.
 
-The current executable contract is `MASTER_FRONTIER_V3.md`. The older manifest
-plan is retained for V1/V2 history only.
+The current executable contract is `MASTER_FRONTIER_V5.md`. V5 preserves the
+model-led/load-on-demand principles below while adding durable continuity,
+natural scoped coding tools, evidence coverage, and proof. V3 remains an
+explicit compatibility contract; the older manifest plan is retained for
+V1/V2 history only.
 
 ## Goal
 

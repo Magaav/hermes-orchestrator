@@ -1,38 +1,122 @@
 #!/usr/bin/env python3
-"""Rank a proven nine-lane benchmark without weakening semantic gates."""
+"""Rank proven outcomes; expose strategy candidates only with trajectory proof."""
 from __future__ import annotations
-import argparse,json
+
+import argparse
+import json
 from pathlib import Path
+from typing import Any
+
 from efficiency_policy import warnings_for
+from golden_pattern_extractor import extract
 
-def inverse(values, value):
-    low,high=min(values),max(values)
-    return 1.0 if high==low else 1.0-(value-low)/(high-low)
 
-def main():
-    p=argparse.ArgumentParser();p.add_argument("report");p.add_argument("--output",default="reports/context/latest/nine-lane-ranking-result.json");a=p.parse_args()
-    report=json.loads(Path(a.report).read_text()); errors=[]
-    if report.get("status")!="benchmark_complete" or report.get("semanticAllPassed") is not True or report.get("rankingAllowed") is not True: errors.append("benchmark is not admitted for ranking")
-    results=report.get("results") or []; receipts=report.get("gatewayReceipts") or []; task=report.get("task") or {}
-    slots={x.get("slot") for x in results}; attributed={x.get("laneId") for x in receipts}
-    if len(results)!=9 or slots!={f"harness-{i:02d}" for i in range(1,10)}: errors.append("nine unique lanes required")
-    if not attributed.issubset(slots) or not slots.issubset(attributed): errors.append("every receipt must have an exact registered lane attribution")
-    rows=[]
+SLOTS = {f"harness-{index:02d}" for index in range(1, 10)}
+
+
+def inverse(values: list[int], value: int) -> float:
+    low, high = min(values), max(values)
+    return 1.0 if high == low else 1.0 - (value - low) / (high - low)
+
+
+def rank(report: dict[str, Any]) -> dict[str, Any]:
+    errors: list[str] = []
+    if (
+        report.get("status") != "benchmark_complete"
+        or report.get("semanticAllPassed") is not True
+        or report.get("rankingAllowed") is not True
+    ):
+        errors.append("benchmark is not admitted for ranking")
+    results = report.get("results") if isinstance(report.get("results"), list) else []
+    receipts = report.get("gatewayReceipts") if isinstance(report.get("gatewayReceipts"), list) else []
+    task = report.get("task") if isinstance(report.get("task"), dict) else {}
+    slots = {item.get("slot") for item in results if isinstance(item, dict)}
+    attributed = {item.get("laneId") for item in receipts if isinstance(item, dict)}
+    if len(results) != 9 or slots != SLOTS:
+        errors.append("nine unique lanes required")
+    if not attributed.issubset(slots) or not slots.issubset(attributed):
+        errors.append("every receipt must have an exact registered lane attribution")
+
+    rows: list[dict[str, Any]] = []
     for item in results:
-        lane=item.get("lane") or {}; slot=item.get("slot"); own=[x for x in receipts if x.get("laneId")==slot and x.get("status")==200 and x.get("upstreamCalled")]
-        semantic=(item.get("answer") or {}).get("semantic") or {}
-        warnings=warnings_for(task,own)
-        rows.append({"slot":slot,"adapter":lane.get("adapter"),"semanticPassed":semantic.get("passed") is True,"latencyMs":int(lane.get("durationMs") or 0),"promptTokens":sum(int(x.get("promptTokens") or 0) for x in own),"completionTokens":sum(int(x.get("completionTokens") or 0) for x in own),"providerCalls":len(own),"toolCalls":sum(int(x.get("toolCallCount") or 0) for x in own),"warnings":warnings})
-    if any(not x["semanticPassed"] for x in rows): errors.append("semantic failure forbids ranking")
+        if not isinstance(item, dict):
+            continue
+        lane = item.get("lane") if isinstance(item.get("lane"), dict) else {}
+        slot = item.get("slot")
+        own = [
+            receipt for receipt in receipts
+            if isinstance(receipt, dict) and receipt.get("laneId") == slot
+            and receipt.get("status") == 200 and receipt.get("upstreamCalled") is True
+        ]
+        if not own or any(
+            isinstance(receipt.get("toolCallCount"), bool)
+            or not isinstance(receipt.get("toolCallCount"), (int, float))
+            for receipt in own
+        ):
+            errors.append(f"tool visibility is unknown for {slot}")
+        semantic = (item.get("answer") or {}).get("semantic") if isinstance(item.get("answer"), dict) else {}
+        semantic = semantic if isinstance(semantic, dict) else {}
+        rows.append({
+            "slot": slot, "adapter": lane.get("adapter"),
+            "semanticPassed": semantic.get("passed") is True,
+            "latencyMs": int(lane.get("durationMs") or 0),
+            "promptTokens": sum(int(receipt.get("promptTokens") or 0) for receipt in own),
+            "completionTokens": sum(int(receipt.get("completionTokens") or 0) for receipt in own),
+            "providerCalls": len(own),
+            "toolCalls": sum(int(receipt.get("toolCallCount") or 0) for receipt in own),
+            "warnings": warnings_for(task, own),
+        })
+    if any(not row["semanticPassed"] for row in rows):
+        errors.append("semantic failure forbids ranking")
     if errors:
-        out={"schema":"wasm-agent.safe-lab.nine-lane-ranking.v1","ok":False,"errors":errors};print(json.dumps(out,indent=2));return 1
-    lat=[x["latencyMs"] for x in rows];prompt=[x["promptTokens"] for x in rows];calls=[x["providerCalls"] for x in rows];tools=[x["toolCalls"] for x in rows];warn=[len(x["warnings"]) for x in rows]
-    for x in rows:
-        parts={"latency":35*inverse(lat,x["latencyMs"]),"promptEfficiency":30*inverse(prompt,x["promptTokens"]),"callEfficiency":15*inverse(calls,x["providerCalls"]),"toolEfficiency":10*inverse(tools,x["toolCalls"]),"warningCleanliness":10*inverse(warn,len(x["warnings"]))}
-        x["scoreParts"]={k:round(v,3) for k,v in parts.items()};x["efficiencyScore"]=round(sum(parts.values()),3)
-    rows.sort(key=lambda x:(-x["efficiencyScore"],x["latencyMs"],x["adapter"]))
-    for i,x in enumerate(rows,1):x["rank"]=i
-    leaders=[x["adapter"] for x in rows[:3]]
-    out={"schema":"wasm-agent.safe-lab.nine-lane-ranking.v1","ok":True,"classification":"nine_lane_ranking_pass","sourceRunId":report.get("runId"),"semanticGate":"all_passed","weights":{"latency":35,"promptEfficiency":30,"callEfficiency":15,"toolEfficiency":10,"warningCleanliness":10},"ranking":rows,"goldenPatternCandidates":[{"pattern":"direct_semantic_answer","evidence":"All ranked lanes passed the same private semantic contract."},{"pattern":"single_provider_call","leaders":[x["adapter"] for x in rows if x["providerCalls"]==1]},{"pattern":"zero_nonterminal_tools","leaders":[x["adapter"] for x in rows if x["toolCalls"]==0]},{"pattern":"compact_context_and_low_latency","leaders":leaders}],"promotionDecision":"candidate_patterns_only_loop4_regression_required"}
-    path=Path(a.output);path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(out,indent=2)+"\n");print(json.dumps(out,indent=2));return 0
-if __name__=="__main__":raise SystemExit(main())
+        return {"schema": "wasm-agent.safe-lab.nine-lane-ranking.v1", "ok": False, "errors": errors}
+
+    latency = [row["latencyMs"] for row in rows]
+    prompts = [row["promptTokens"] for row in rows]
+    calls = [row["providerCalls"] for row in rows]
+    tools = [row["toolCalls"] for row in rows]
+    warning_counts = [len(row["warnings"]) for row in rows]
+    for row in rows:
+        parts = {
+            "latency": 35 * inverse(latency, row["latencyMs"]),
+            "promptEfficiency": 30 * inverse(prompts, row["promptTokens"]),
+            "callEfficiency": 15 * inverse(calls, row["providerCalls"]),
+            "toolEfficiency": 10 * inverse(tools, row["toolCalls"]),
+            "warningCleanliness": 10 * inverse(warning_counts, len(row["warnings"])),
+        }
+        row["scoreParts"] = {key: round(value, 3) for key, value in parts.items()}
+        row["efficiencyScore"] = round(sum(parts.values()), 3)
+    rows.sort(key=lambda row: (-row["efficiencyScore"], row["latencyMs"], str(row["adapter"])))
+    for position, row in enumerate(rows, 1):
+        row["rank"] = position
+
+    pattern_evidence = extract([report])
+    strategy_comparable = pattern_evidence["eligibleTrajectories"] == len(results)
+    candidates = pattern_evidence["patterns"]
+    return {
+        "schema": "wasm-agent.safe-lab.nine-lane-ranking.v1", "ok": True,
+        "classification": "nine_lane_ranking_pass", "sourceRunId": report.get("runId"),
+        "semanticGate": "all_passed",
+        "comparability": {"efficiency": True, "strategy": strategy_comparable},
+        "weights": {"latency": 35, "promptEfficiency": 30, "callEfficiency": 15, "toolEfficiency": 10, "warningCleanliness": 10},
+        "ranking": rows, "patternEvidence": pattern_evidence, "goldenPatternCandidates": candidates,
+        "promotionDecision": "candidate_patterns_only_loop4_regression_required" if candidates else "cross_fixture_strategy_evidence_required",
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("report")
+    parser.add_argument("--output", default="reports/context/latest/nine-lane-ranking-result.json")
+    args = parser.parse_args()
+    result = rank(json.loads(Path(args.report).read_text(encoding="utf-8")))
+    if result["ok"]:
+        path = Path(args.output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(result, indent=2))
+    return 0 if result["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

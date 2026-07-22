@@ -23,8 +23,8 @@ TOOL_AUTHORITY = LAB / "tool-authority-contract.json"
 IMAGE = "wasm-agent-frontier:latest"
 SOURCE_VOLUME = "wasm-agent-safe-lab-local-v11"
 FIXTURE_VOLUME = "wasm-agent-safe-lab-output-v1"
-ADJUDICATION_VOLUME = "wasm-agent-safe-lab-adjudication-v1"
-ADJUDICATION_PATH = LAB / "staging/avatar-chat-adjudication-v1.sqlite3"
+ADJUDICATION_VOLUME = "wasm-agent-safe-lab-adjudication-v3"
+ADJUDICATION_PATH = LAB / "staging/avatar-chat-adjudication-v3.sqlite3"
 SAFE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 STRATEGIES = [
     "evidence-first", "minimal-tool", "recovery-first", "plan-then-act", "counterexample-first",
@@ -213,6 +213,9 @@ def main() -> int:
     all_ok = all(item["ok"] for item in results)
     semantic_pass = all((item.get("answer") or {}).get("semantic", {}).get("passed") is True for item in results) if args.execution == "live" else False
     comparable = all(bool((item.get("lane") or {}).get("comparable")) for item in results) and (semantic_pass if args.execution == "live" else True)
+    strategy_comparable = comparable and all(
+        (item.get("lane") or {}).get("strategyComparable") is True for item in results
+    )
     intervals = [item.get("lane") or {} for item in results]
     peak_concurrency = max_concurrency(intervals)
     overlap = peak_concurrency >= 2
@@ -220,6 +223,7 @@ def main() -> int:
         "schema": "wasm-agent.safe-lab.nine-lane-result.v1", "runId": args.run_id,
         "mode": args.mode, "execution": args.execution, "model": data["modelContract"]["model"],
         "laneCount": len(results), "allLanesCompleted": all_ok, "maxConcurrentLanes": peak_concurrency, "parallelOverlapProven": overlap, "comparable": comparable,
+        "strategyComparable": strategy_comparable,
         "rankingAllowed": comparable, "status": "benchmark_complete" if comparable else ("topology_proven" if all_ok and overlap else "failed"),
         "results": results,
         "candidateMatrix": data.get("candidateMatrix") or {},

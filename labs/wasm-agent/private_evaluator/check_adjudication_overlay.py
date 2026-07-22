@@ -40,10 +40,10 @@ def main() -> int:
         errors.append("overlay schema mismatch")
     if metadata.get("bankSha256") != digest(bank):
         errors.append("source bank digest mismatch")
-    if len(rows) != 7 or metadata.get("fixtureCount") != 7:
-        errors.append("expected seven independently adjudicated fixtures")
-    if sum(row["split"] == "golden" for row in rows) != 5 or sum(row["split"] == "holdout" for row in rows) != 2:
-        errors.append("expected five golden and two holdout fixtures")
+    if len(rows) != 9 or metadata.get("fixtureCount") != 9:
+        errors.append("expected nine independently adjudicated fixtures")
+    if sum(row["split"] == "golden" for row in rows) != 7 or sum(row["split"] == "holdout" for row in rows) != 2:
+        errors.append("expected seven golden and two holdout fixtures")
     if len({row["duplicate_group_sha256"] for row in rows}) != len(rows):
         errors.append("duplicate objective group entered the semantic slice")
     allowed_keys = {"nonempty", "maxChars", "containsAnyGroups", "excludesAny"}

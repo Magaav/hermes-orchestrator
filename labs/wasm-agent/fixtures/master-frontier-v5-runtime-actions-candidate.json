@@ -1,0 +1,18 @@
+{
+  "slot": "harness-01",
+  "id": "master-frontier-v5",
+  "displayName": "V5 scoped runtime actions, current model contract, and durable retry budget",
+  "executable": "python3",
+  "adapterVersion": "v5-dcf96ef8bd55",
+  "adapterVolume": "wasm-agent-v5-durable-retry-20260714-v3",
+  "adapterArtifactSha256": "dcf96ef8bd55d66ba7e274055649cbaac6e5f75b2b4f9116fb7ba63f43b40619",
+  "candidateDigest": "dcf96ef8bd55d66ba7e274055649cbaac6e5f75b2b4f9116fb7ba63f43b40619",
+  "modelContractStatus": "verified",
+  "toolAuthorityStatus": "verified",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "verificationArtifact": "reports/context/latest/v5-durable-retry-v3-package.json",
+  "liveCommand": ["python3", "/adapter/master-frontier-v5-live-runner.py", "--task", "{task}"],
+  "liveReady": true,
+  "benchmarkReady": false,
+  "promotionStatus": "suite_pending"
+}

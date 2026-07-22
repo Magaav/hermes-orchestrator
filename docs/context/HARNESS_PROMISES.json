@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-11",
+  "updatedAt": "2026-07-17",
   "resultStatuses": [
     "pass",
     "fail",
@@ -264,7 +264,7 @@
       "command": [
         "python3",
         "labs/wasm-agent/private_evaluator/check_adjudication_overlay.py",
-        "labs/wasm-agent/staging/avatar-chat-adjudication-v1.sqlite3",
+        "labs/wasm-agent/staging/avatar-chat-adjudication-v3.sqlite3",
         "--bank",
         "labs/wasm-agent/staging/avatar-chat-fixtures-v2.sqlite3",
         "--report",
@@ -286,7 +286,7 @@
         "the overlay digest matches the registered semantic fixture contract and immutable SQL bank",
         "all selected objectives are deduplicated and retain pending status in the 400-candidate source bank",
         "each admitted fixture has agreeing eligibility and task-stability judgments independent of the preliminary classifier",
-        "the slice contains five golden and two holdout fixtures",
+        "the slice contains seven golden and two holdout fixtures, including grounded source and runtime fixtures with balanced tool and route evidence",
         "raw runtime identifiers, secrets, historical reply bodies, expected properties, and holdout criteria do not enter lane tasks",
         "trusted post-run scoring matches the digest projected into the task",
         "benchmark readiness requires both technical and semantic proof"
@@ -1445,10 +1445,14 @@
         "avatar-chat records stale Master:frontier reliability manifests as degraded evidence instead of blocking direct-head dispatch",
         "wasm-agent smoke test passes",
         "report JSON has ok true",
+        "the deterministic V5 production campaign passes exactly 50 cases spanning lifecycle, cost, causal proof, transactions, diff, worktree integrity, detached restart, and authority",
+        "the read-only cloud-canary contract rejects public localhost exposure, non-cloud deployment identity, open anonymous health, invalid anonymous sessions, and an unavailable native shell",
+        "the launcher exports only allowlisted non-secret deployment coordinates and cloud app config projects the same-origin bridge instead of its internal loopback target",
         "CLI emits one MF_PROOF/1 summary capped at 2048 UTF-8 bytes while full command evidence remains pull-only in the report artifact"
       ],
       "outputArtifacts": [
-        "reports/context/latest/master-frontier-production-proof.json"
+        "reports/context/latest/master-frontier-production-proof.json",
+        "reports/context/latest/master-frontier-v5-production-campaign.json"
       ],
       "invalidatedBy": [
         "plugins/wasm-agent/server/master_frontier/**",
@@ -1460,12 +1464,85 @@
         "plugins/wasm-agent/tests/wasm_agent_smoke.test.js",
         "plugins/wasm-agent/tests/code_memory_agent_contract.test.py",
         "tools/context/prove-master-frontier-production.py",
+        "tools/context/evaluate-master-frontier-v5-production.py",
+        "tools/context/prove-master-frontier-cloud-canary.py",
+        "plugins/wasm-agent/scripts/deployment_env.sh",
+        "plugins/wasm-agent/server/app_config.py",
         "docs/context/HARNESS_PROMISES.json"
       ],
       "nextSuggestedSteps": [
         "If a C3 gate fails, fix the registry, codec, or model-led controller owner instead of adding planner policy to static_server.py.",
         "If provider-proxy fails, inspect the failing test name and repair the contract layer it names before touching provider fallback behavior.",
         "Restart the server and run a real avatar-chat C3 turn before claiming live V3 behavior."
+      ]
+    },
+    {
+      "id": "master-frontier-cloud-canary",
+      "owner": "plugins/wasm-agent",
+      "claim": "The public Master:frontier production host exposes cloud-only configuration and correct anonymous security boundaries without mutating production.",
+      "whenToUse": "After a production deploy or before claiming the cloud host is a valid Master:frontier production candidate.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-cloud-canary.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "production"
+      ],
+      "passRequires": [
+        "all probes remain on https://wa.colmeio.com",
+        "anonymous health requires authentication",
+        "public config declares cloud mode, configured Google auth, and no localhost or loopback URLs",
+        "anonymous session contains no user identity",
+        "the native Electron route returns the WASM Agent HTML shell",
+        "the report contains hashes and compact projections instead of response bodies"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-cloud-canary.json"
+      ],
+      "invalidatedBy": [
+        "production deployment or environment configuration change",
+        "plugins/wasm-agent/server master config, auth, health, or shell route change",
+        "tools/context/prove-master-frontier-cloud-canary.py"
+      ],
+      "nextSuggestedSteps": [
+        "If public config exposes a local origin or local deployment identity, repair the production environment/deploy contract and redeploy before testing authenticated agent work.",
+        "After this anonymous canary passes, run an owned authenticated synthetic Master:frontier task with a documented rollback path."
+      ]
+    },
+    {
+      "id": "master-frontier-authenticated-cloud-canary",
+      "owner": "plugins/wasm-agent",
+      "claim": "A temporary non-admin identity can run one exact-objective MF5 production task and is revoked afterward.",
+      "whenToUse": "After production auth, direct-head authorization, MF5 routing, provider transport, or cloud state changes.",
+      "command": ["python3", "tools/context/prove-master-frontier-authenticated-canary.py"],
+      "timeoutSec": 300,
+      "cost": {"tokenCost": "small", "runtimeCost": "medium", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["production", "runtime", "behavioral"],
+      "passRequires": [
+        "the temporary identity authenticates with role user, never admin",
+        "the grant matches one exact objective digest, session id, and expiry",
+        "the admin-only direct envelope route remains unchanged",
+        "the canary route returns one run id and non-empty reply",
+        "the grant and user are deleted in finally and the same cookie becomes unauthenticated",
+        "the report stores no cookie, signing secret, email, or response body"
+      ],
+      "outputArtifacts": ["reports/context/latest/master-frontier-authenticated-canary.json"],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/synthetic_canary.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "tools/context/prove-master-frontier-authenticated-canary.py",
+        "plugins/wasm-agent/server/master_frontier/**"
+      ],
+      "nextSuggestedSteps": [
+        "If authentication fails, repair signing/session compatibility without relaxing auth.",
+        "If cleanup fails, revoke the grant and synthetic user before any retry."
       ]
     },
     {
@@ -1655,6 +1732,7 @@
       ],
       "invalidatedBy": [
         "tools/app-simulator/avatar-paracelsus-live.js",
+        "tools/app-simulator/core/run-evidence.js",
         "tools/app-simulator/web.js",
         "plugins/wasm-agent/public/app.js",
         "plugins/wasm-agent/public/styles.css",
@@ -1966,7 +2044,7 @@
     {
       "id": "master-frontier-v4-source-investigation-adversarial",
       "owner": "plugins/wasm-agent/server/master_frontier",
-      "claim": "The opt-in Master:frontier V4 read-only source-investigation slice accepts only cited source claims, calibrates negative coverage, resumes deterministically, preserves V3 defaults, and resists adversarial source content within hard bounds.",
+      "claim": "The opt-in Master:frontier V4 read-only source-investigation slice accepts only cited source claims, calibrates negative coverage, resumes deterministically, preserves explicit V3 compatibility, and resists adversarial source content within hard bounds.",
       "whenToUse": "After changing V4 investigation, evidence, completion, gate, compound discovery, controller, protocol persistence, or trace behavior.",
       "command": [
         "python3",
@@ -1986,7 +2064,7 @@
       "passRequires": [
         "all deterministic adversarial and recorded-provider fixtures pass",
         "zero unsupported fixture claims are accepted",
-        "V3 is the default and V4 requires the explicit read-only flag",
+        "V5 is the default; V3 and the V4 read-only slice require explicit compatibility selection",
         "evidence handles bind content, location, scope, and freshness",
         "incomplete negative coverage cannot become not_found_with_coverage",
         "stale semantic memory uses bounded route fallback",
@@ -2092,12 +2170,12 @@
         "every successful receipt has one validated registered laneId and every lane has attributed receipts",
         "semantic correctness gates ranking and is never traded against efficiency",
         "latency, prompt tokens, provider calls, tool calls, and warning penalties are explicit and reproducible",
-        "golden patterns remain candidates until Loop 4 regression authorizes promotion"
+        "golden-pattern candidates stay empty unless the report and every lane expose admissible normalized strategy evidence with observable tool-call counts; admitted patterns remain candidates until Loop 4 regression authorizes promotion"
       ],
       "outputArtifacts": ["reports/context/latest/nine-lane-ranking-result.json", "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"],
-      "invalidatedBy": ["labs/wasm-agent/model-gateway.py", "labs/wasm-agent/safe_lab_host.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/efficiency_policy.py", "labs/wasm-agent/fixtures/nine-lane-receipt-attribution-contract.json"],
+      "invalidatedBy": ["labs/wasm-agent/model-gateway.py", "labs/wasm-agent/safe_lab_host.py", "labs/wasm-agent/lane-runner.py", "labs/wasm-agent/agent_trajectory.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/test_strategy_ranking.py", "labs/wasm-agent/efficiency_policy.py", "labs/wasm-agent/fixtures/nine-lane-receipt-attribution-contract.json"],
       "nextSuggestedSteps": [
-        "Convert the highest-confidence golden pattern into a bounded V5 candidate without product-specific routing heuristics.",
+        "Wire and prove one real adapter's normalized strategy trajectory before converting any pattern into a V5 candidate.",
         "Run Loop 4 against the exact candidate digest before any promotion.",
         "Expand ranking across admitted fixtures before treating one-fixture ordering as a general harness ranking."
       ]
@@ -2152,27 +2230,268 @@
       ]
     },
     {
+      "id": "master-frontier-runtime-snapshot-contract",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "The runtime snapshot boundary, scoped run-store collector, and opaque proof resolver expose only compact redacted historical evidence under exact user, route, entity, freshness, and digest scope without granting model-visible database, host, or control authority.",
+      "whenToUse": "After changing the runtime snapshot schema, normalization, freshness trust, compact projection, run-store scoping, proof resolution, redaction limits, or before connecting either surface to kernel.inspect.",
+      "command": ["python3", "tools/context/prove-runtime-snapshot-contract.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "the contract grants read-only snapshot authority and explicitly forbids control actions, secrets, raw logs, binary, base64, and host paths",
+        "freshness is trusted only when the collector marks it fresh and its age is within the declared maximum",
+        "capabilities, counters, unknowns, proof references, text fields, and total encoded bytes remain bounded",
+        "redaction is mandatory and every compact model projection revalidates and digest-binds the normalized snapshot",
+        "the collector opens SQLite read-only/query-only, scopes by exact user and route, and scans at most 64 recent rows",
+        "run ids, user ids, sessions, prompts, replies, event payloads, database paths, host paths, and control access never cross the snapshot boundary",
+        "historical run evidence is degraded rather than claimed as current live state, and missing stores or schemas fail closed",
+        "runtime.proof.get resolves only an exact recomputed opaque id under the same user, route, and entity scope and demotes stale evidence",
+        "model-facing runtime.snapshot.get and runtime.proof.get schemas omit user identity, database paths, host paths, and control authority",
+        "the dispatcher rejects extra arguments, missing capability, route/entity mismatch, malformed proof ids, and invalid freshness authority before adapter invocation",
+        "wrong scope, malformed ids, missing proofs, source errors, and oversized receipts fail closed without a write or proof-index database",
+        "the modules perform no polling, device access, Docker access, HTTP exposure, kernel.inspect connection, or production connection"
+      ],
+      "outputArtifacts": [
+        "plugins/wasm-agent/server/master_frontier/runtime_snapshot.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_snapshot_collector.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_proof.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_actions.py",
+        "reports/context/latest/runtime-snapshot-contract-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/runtime_snapshot.py",
+        "plugins/wasm-agent/tests/master_frontier_runtime_snapshot.test.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_snapshot_collector.py",
+        "plugins/wasm-agent/tests/master_frontier_runtime_snapshot_collector.test.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_proof.py",
+        "plugins/wasm-agent/tests/master_frontier_runtime_proof.test.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_actions.py",
+        "plugins/wasm-agent/tests/master_frontier_runtime_actions.test.py",
+        "plugins/wasm-agent/server/master_frontier/runtime_inspect.py",
+        "plugins/wasm-agent/tests/master_frontier_runtime_inspect.test.py",
+        "plugins/wasm-agent/server/master_frontier/run_protocol.py",
+        "plugins/wasm-agent/tests/master_frontier_v5.test.py",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "tools/context/prove-runtime-snapshot-contract.py",
+        "plugins/wasm-agent/server/master_frontier/inspect_contract.py",
+        "plugins/wasm-agent/server/master_frontier/protocol.py"
+      ],
+      "nextSuggestedSteps": [
+        "Add a separate live-health collector before interpreting historical run evidence as current process state.",
+        "Run authenticated cloud snapshot-to-proof verification after the candidate is deployed and a production session is available."
+      ]
+    },
+    {
       "id": "promoted-v5-golden-holdout-generalization",
       "owner": "plugins/wasm-agent/server/master_frontier/v5",
-      "claim": "The promoted V5 minimal declared-class policy exposes compact broker-verified runtime identity and passes every frozen golden and holdout semantic fixture without weakening grounded tool loops.",
-      "whenToUse": "After changing V5 runtime identity context, task policy, promoted artifact, fixture-suite runner, or golden/holdout overlay.",
-      "command": ["python3", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "--candidate-adapter", "labs/wasm-agent/fixtures/master-frontier-v5-identity-candidate.json"],
-      "timeoutSec": 240,
+      "claim": "The promoted V5 minimal declared-class policy exposes compact broker-verified runtime identity, preserves one durable transient retry across resume, and passes every frozen golden and holdout semantic fixture without weakening grounded tool loops.",
+      "whenToUse": "After changing V5 runtime identity context, task policy, provider reliability, promoted artifact, fixture-suite runner, or golden/holdout overlay.",
+      "command": ["python3", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "--candidate-adapter", "labs/wasm-agent/fixtures/master-frontier-v5-runtime-actions-candidate.json"],
+      "timeoutSec": 360,
       "cost": {"tokenCost": "medium", "runtimeCost": "medium", "rebuildCost": "none", "confidence": "high"},
       "evidenceClasses": ["runtime", "behavioral"],
       "passRequires": [
-        "all five golden and both holdout fixtures bind to the exact promoted artifact digest",
+        "all seven golden and both holdout fixtures bind to the exact promoted artifact digest",
         "private semantic pass rate is 100 percent",
         "runtime identity comes from the exact broker model contract and is never guessed from prompt text",
+        "network timeout and upstream-unavailable failures share one trajectory-persisted retry budget that cannot reset on resume",
         "conversation fixtures remain direct while grounded capability questions retain their evidence tool loop",
         "every fixture proves exact model, private network isolation, bounded output, and complete cleanup"
       ],
-      "outputArtifacts": ["reports/context/latest/promoted-v5-fixture-suite-proof.json", "reports/context/latest/v5-identity-candidate-target-proof.json", "reports/context/latest/v5-minimal-class-identity-package.json"],
-      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "labs/wasm-agent/fixtures/v5-runtime-identity-capability-contract.json", "labs/wasm-agent/harness-adapters.json"],
+      "outputArtifacts": ["reports/context/latest/promoted-v5-fixture-suite-proof.json", "reports/context/latest/v5-runtime-actions-model-contract-v2-package.json"],
+      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "plugins/wasm-agent/server/master_frontier/v5/policy.py", "plugins/wasm-agent/server/master_frontier/v5/reliability.py", "plugins/wasm-agent/server/master_frontier/v5/trajectory.py", "plugins/wasm-agent/server/master_frontier/v5/tools.py", "plugins/wasm-agent/server/master_frontier/v5/loop.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "labs/wasm-agent/fixtures/v5-runtime-identity-capability-contract.json", "labs/wasm-agent/harness-adapters.json"],
       "nextSuggestedSteps": [
-        "Add additional admitted source/runtime fixtures before generalizing beyond the current seven-fixture suite.",
+        "Add a second runtime fixture with available live evidence before generalizing beyond the current nine-fixture suite.",
         "If model identity changes, refresh the broker contract and rerun the suite instead of hardcoding a model name in prompts.",
         "Retain the previous promoted digest as rollback evidence until the next multi-fixture regression cycle passes."
+      ]
+    },
+    {
+      "id": "master-frontier-native-session-continuity",
+      "owner": "labs/wasm-agent",
+      "claim": "Multi-turn benchmarks use twelve immutable ordered lifecycle fixtures and remain non-rankable until Master:frontier, Codex, Claude Code, and Gemini CLI each prove native isolated continuation under identical model, route, tools, budgets, and attribution.",
+      "whenToUse": "After changing session reconstruction, compaction, interruption/resume, completed-action receipts, session fixtures, adapter continuation, or multi-turn comparability gates.",
+      "command": ["python3", "labs/wasm-agent/prove-session-continuity-contract.py"],
+      "timeoutSec": 30,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static"],
+      "passRequires": [
+        "the exact twelve required lifecycle cases are present with ordered user, assistant, tool, restart, interruption, compaction, checkpoint, and fork events where applicable",
+        "every fixture carries session, process, branch, turn, task-transition, receipt, terminal, route, authority, budget, and attribution contracts",
+        "raw run and session ids, secrets, historical private payloads, and holdout expectations are absent",
+        "task digests bind exact event order, expectations, model, route contract, tool authority, and budgets",
+        "follow-up referents and completed-action receipts are deterministic rather than placeholder prose",
+        "the observed fix-all failure is admitted only as a redacted generic contract fixture",
+        "live ranking remains blocked unless the four required adapters have verified native-session proof artifacts",
+        "other adapters are explicitly typed session_capability_unavailable rather than silently flattened into one prompt"
+      ],
+      "outputArtifacts": [
+        "labs/wasm-agent/fixtures/master-frontier-session-suite-v1.json",
+        "reports/context/latest/session-fixture-proof.json",
+        "reports/context/latest/session-comparability-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/session_context.py",
+        "plugins/wasm-agent/server/master_frontier/token_ledger.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v5.py",
+        "plugins/wasm-agent/server/master_frontier/v5/context.py",
+        "plugins/wasm-agent/server/master_frontier/v5/task_policy.py",
+        "labs/wasm-agent/session_fixture_contract.py",
+        "labs/wasm-agent/build-session-fixtures.py",
+        "labs/wasm-agent/check-session-fixtures.py",
+        "labs/wasm-agent/session-route-contract.json",
+        "labs/wasm-agent/session-adapter-capabilities.json",
+        "labs/wasm-agent/check-session-comparability.py",
+        "labs/wasm-agent/prove-session-continuity-contract.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
+      "nextSuggestedSteps": [
+        "Implement and prove Master:frontier's real wasm-agent run-ledger lifecycle before provider-consuming session comparison.",
+        "Implement Codex thread resume, Claude session resume, and Gemini saved-session resume in private lane homes.",
+        "Run the four-lane comparability proof before expanding to nine adapters or ranking any session result."
+      ]
+    },
+    {
+      "id": "master-frontier-v5-coding-continuity",
+      "owner": "plugins/wasm-agent/server/master_frontier/v5",
+      "claim": "Master:frontier V5 has a compact fail-closed coding loop with server-owned restart continuity, exact route/task authority, bounded repository evidence, preconditioned transactional patches, registered checks, and revision-bound diff/test/proof receipts.",
+      "whenToUse": "After changing V5 context, trajectory, continuity, authority, repository read/edit/check/diff primitives, proof gating, browser continuation, or agent-trajectory learning contracts.",
+      "command": ["python3", "tools/context/prove-master-frontier-v5-evolution.py"],
+      "timeoutSec": 180,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "model-visible tools are the exact intersection of route capabilities, declared task authority, coherent request/declared workflow classes, nonempty write roots, evidence modality, exact runtime entity scope, planner block state, and complete workflow capability minima; capability presence never selects runtime intent",
+        "repository reads reach arbitrary late line ranges without prefix materialization, and streaming search stays route-scoped under its route-owned scan ceiling while sharing sensitive-path redaction and denying secrets, binaries, generated state, databases, and private keys",
+      "V5 patches require an observed preimage or explicit absence; create operations automatically bind expected_absent=true because the serialized transaction still atomically rejects existing targets, while replace/delete/move bind observed SHA preimages; model-relative paths that repeat the configured workspace root are canonicalized instead of creating a nested workspace; autonomous implementation's native edit schema omits redundant dry_run because the transaction validates atomically, while execution remains fail-closed if an undeclared dry run arrives; explicitly temporary paths, temporary-directory targets, and empty or placeholder-only creates are rejected as non-durable artifacts; any failed tool observation becomes the current typed repair signal and discards remaining calls selected in the same provider batch before that failure was visible; mutations use fsynced, recoverable multi-file transactions whose durable journal blocks new mutations when corrupt",
+        "focused checks execute only registered argv without a shell or inherited secrets, retain bounded output rings, and return by an absolute deadline with typed process-leak evidence even when an escaped descendant retains a pipe",
+        "diff proof includes modified, staged, deleted, renamed, and untracked paths and fails closed if its machine receipt is truncated",
+        "implementation cannot finalize without a real mutation unless fresh successful source evidence, a passing registered revision-zero check, no open outcomes, and a model-owned blocked/rejected decision jointly prove that the requested patch is unjustified; ordinary mutation-free finals remain implementation_incomplete; advisory call targets never terminate or force a workflow transition in autonomous implementation, while explicit hard route budgets, cooperative per-run cancellation, task leases, provider/tool failures, and the final-answer mutation gate remain enforced; a successful exact read may retire broad search, but model-declared open search or read outcomes preserve the corresponding bounded tool until resolved while novelty still rejects equivalent repeated actions; three consecutive discovery actions rejected as non-progress retire search/read even when stale open outcomes remain, without terminating the task or removing checkpoint/edit/verification; three consecutive completed checkpoint actions temporarily retire checkpoint until any non-checkpoint tool action reopens it, preventing planning prose from becoming an infinite workflow; once durable receipts prove the route-selected owner is fully covered or a passing revision-zero baseline check follows a selected model decision with no open read outcome, exhausted read tools and stale queued discovery batches are withdrawn while edit remains available and checkpoint, mutation, verification, and final-answer freedom remain; only a passing check after a real mutation revision may seal further edits; each mutation binds postimages and completion requires a passing check, covering diff, and scoped proof at the same route-wide Git HEAD/status/dirty-content fingerprint, with route-declared source exclusions removing generated-artifact churn while undeclared files still invalidate identity",
+      "server-owned checkpoints are digest, user, session, route-contract, and source-run bound; strict restore rejects every scope mismatch, while a separately validated stale-route replacement accepts only a signed checkpoint whose principal, session, route ID, and source run still match, preserves only its root objective and lineage, starts a zero-revision trajectory without replaying old evidence or authority, records stale_checkpoint_replaced, recalculates current authority through the existing grounded lineage gate, and persists a fresh current-contract checkpoint so contextual continue does not abort; checkpoints omit raw source/diff/output while retaining content-free read SHA receipts so safe edit preconditions bind after restart across canonical relative or absolute route paths; prefix-code operation paths; reject mutations that cannot fit the restart ledger; and reconcile durable action events idempotently",
+        "decision, tool, retry, wall-time, route-call, provider-token, and proof-repair counters survive restart; provider usage keeps a bounded recent receipt ring plus durable cumulative calls/tokens that remain exact beyond sixteen calls and drive hard enforcement, pre-call reservation, and final diagnostics; provider diagnostics distinguish durable attempts from successful metered calls and never call missing usage exact; head tokens are per-call, provider/call targets are advisory by default, strict hard budgets require a positive route-owned reservation and subtract the larger host-derived bound over actual messages/tool schemas before enforcing cumulative allowance and measurable usage; zero and sub-second wall limits remain exact; successful retry recovery ends temporary evidence clipping, resets only the consecutive-incident allowance, and never resets the bounded durable total retry count",
+        "the avatar browser requests advisory provider accounting rather than claiming a strict input-token cap it cannot measure before dispatch",
+        "the exact restart-regression critique remains source-only through the real planner path even when runtime capability exists, completes with the five-call 16211-token quality fixture below its declared advisory target, and a contextual fix inherits mutation authority only from an explicit referential request and the immediately preceding grounded parent on the same user, session, and route; that parent is labeled as the active implementation specification and projected once within the bounded continuity budget without destructive double clipping, while its declared heading outline survives clipping, broad specifications explicitly permit a proved coherent slice with remaining outcomes recorded, and an empty executive checkpoint cannot masquerade as durable progress",
+        "source completion requires full-owner or declared-focus coverage, runtime completion requires a scoped snapshot/proof, cross-modality evidence cannot force finalization, host-enforced completion-only mode rejects raw hidden tools, explicit verification intent cannot be downgraded by diagnosis wording, verification requires a passing check plus scoped proof and then deterministically enters completion-only synthesis, implementation requires mutation/check/diff/proof, and evidence cannot short-circuit mutation workflow",
+        "startup recovery scans unfinished runs in fixed-size pages rather than materializing the full table",
+        "MF5/2 removes repeated native schemas, remains below one third of the deterministic legacy base projection, shares one evidence-content budget, retains multiple recent bounded ranges from the same file by path/start/end identity within its fixed twelve-step projection instead of overwriting earlier code context, exposes compact advisory read-overlap, duplicate, and understand/edit/test/diff/prove progress without hidden advisory stops, rejects fully covered reads before execution, and classifies search results with no new source locations as typed non-progress",
+        "candidate failures are disqualified individually; the deterministic agent-event fixture proves bounded redacted adapter/lane provenance and terminal-owned trajectory normalization; full normalized sequences cross the lane boundary; golden candidates are extracted only from observed successful motifs supported by at least two agents across three task instances; and strategy candidates stay empty without complete trusted trajectories and observable tool-call counts",
+        "implementation planning is an explicit read-only authority class preserved through direct-envelope transport and planner regeneration; it exposes evidence tools plus a model-owned checkpoint but no edit, test, diff, or proof action, and it completes only with a valid operational decision containing state, candidate, target paths, acceptance criterion, blocker when applicable, next action, and bounded confidence rather than hidden reasoning; at its advisory target it enters a durable checkpoint-only two-decision finalization window; the signed restart checkpoint preserves both the executive decision and finalization phase, while a completed final persists the bounded decision and the next turn reconstructs it as one compact MF5/2 decision record",
+        "the ordered A-through-E isolation matrix attributes the first missing evidence category across patch capacity, repository navigation, planning-to-execution handoff, prioritization, and multi-turn continuity instead of collapsing every miss into a generic agent failure",
+        "autonomous tasks keep a bounded model-authored executive capsule and optional open/done/dropped/blocked outcome ledger across restart; unavailable declared tools convert open outcomes to blocked, actionable open outcomes receive a bounded three-attempt resolution window before durable resumable termination rather than looping; persisted browser turns reconcile run identity and terminal server truth before reconnect streaming, and a missing server run becomes interrupted/resumable instead of remaining pending forever; native tool calls plus plain final text have no competing JSON decision requirement, every native call in a provider batch executes sequentially without invented provider usage, and output-length stops are bounded resumable continuations",
+        "the frozen server monolith only delegates repository primitives and passes its growth guard",
+        "the proof hashes every declared invalidating input plus the complete owned Python/strategy/browser import closure before and after execution and fails if the input set changes during the run",
+        "the proof labels deployed runtime, production provider behavior, and real external-agent trajectory quality as unproven"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v5-evolution-proof.json",
+        "plugins/wasm-agent/server/master_frontier/budget.py",
+        "plugins/wasm-agent/server/master_frontier/repository_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v5/continuity.py",
+        "plugins/wasm-agent/server/master_frontier/v5/operation_ledger.py",
+        "plugins/wasm-agent/server/master_frontier/v5/usage.py",
+        "plugins/wasm-agent/server/master_frontier/v5/epistemics.py",
+        "plugins/wasm-agent/server/master_frontier/v5/executive.py",
+        "plugins/wasm-agent/server/master_frontier/v5/tool_stage.py",
+        "plugins/wasm-agent/server/master_frontier/repository_checks.py",
+        "plugins/wasm-agent/server/master_frontier/repository_diff.py",
+        "plugins/wasm-agent/server/master_frontier/repository_reads.py",
+        "plugins/wasm-agent/server/master_frontier/repository_state.py",
+        "reports/context/latest/master-frontier-v5-live-implementation-result.json"
+      ],
+      "invalidatedBy": [
+        "docs/context/HARNESS_PROMISES.json",
+        "plugins/wasm-agent/server/master_frontier/authority.py",
+        "plugins/wasm-agent/server/master_frontier/budget.py",
+        "plugins/wasm-agent/server/master_frontier/code_memory.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v5.py",
+        "plugins/wasm-agent/server/master_frontier/evidence.py",
+        "plugins/wasm-agent/server/master_frontier/intent.py",
+        "plugins/wasm-agent/server/master_frontier/planner.py",
+        "plugins/wasm-agent/server/master_frontier/provider_transport.py",
+        "plugins/wasm-agent/server/master_frontier/session_context.py",
+        "plugins/wasm-agent/server/master_frontier/repository_actions.py",
+        "plugins/wasm-agent/server/master_frontier/repository_checks.py",
+        "plugins/wasm-agent/server/master_frontier/repository_diff.py",
+        "plugins/wasm-agent/server/master_frontier/repository_reads.py",
+        "plugins/wasm-agent/server/master_frontier/repository_state.py",
+        "plugins/wasm-agent/server/master_frontier/run_protocol.py",
+        "plugins/wasm-agent/server/master_frontier/route_contracts.py",
+        "plugins/wasm-agent/server/master_frontier/run_recovery.py",
+        "plugins/wasm-agent/server/master_frontier/v5/completion.py",
+        "plugins/wasm-agent/server/master_frontier/v5/context.py",
+        "plugins/wasm-agent/server/master_frontier/v5/continuity.py",
+        "plugins/wasm-agent/server/master_frontier/v5/errors.py",
+        "plugins/wasm-agent/server/master_frontier/v5/executive.py",
+        "plugins/wasm-agent/server/master_frontier/v5/learned_patterns.py",
+        "plugins/wasm-agent/server/master_frontier/v5/loop.py",
+        "plugins/wasm-agent/server/master_frontier/v5/novelty.py",
+        "plugins/wasm-agent/server/master_frontier/v5/operation_ledger.py",
+        "plugins/wasm-agent/server/master_frontier/v5/policy.py",
+        "plugins/wasm-agent/server/master_frontier/v5/progress.py",
+        "plugins/wasm-agent/server/master_frontier/v5/proof.py",
+        "plugins/wasm-agent/server/master_frontier/v5/reliability.py",
+        "plugins/wasm-agent/server/master_frontier/v5/task_lineage.py",
+        "plugins/wasm-agent/server/master_frontier/v5/task_policy.py",
+        "plugins/wasm-agent/server/master_frontier/v5/tools.py",
+        "plugins/wasm-agent/server/master_frontier/v5/trajectory.py",
+        "plugins/wasm-agent/server/master_frontier/v5/wire.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/routes.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_resilience.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_authority.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_budget.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_epistemics.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_tool_stage.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_compact_context.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_operation_ledger.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_novelty.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_progress.test.py",
+        "plugins/wasm-agent/tests/master_frontier_budget.test.py",
+        "plugins/wasm-agent/tests/master_frontier_planner.test.py",
+        "plugins/wasm-agent/tests/master_frontier_provider_transport.test.py",
+        "plugins/wasm-agent/tests/master_frontier_route_contracts.test.py",
+        "plugins/wasm-agent/tests/master_frontier_repository_actions.test.py",
+        "plugins/wasm-agent/tests/master_frontier_repository_checks.test.py",
+        "plugins/wasm-agent/tests/master_frontier_repository_diff.test.py",
+        "plugins/wasm-agent/tests/master_frontier_repository_reads.test.py",
+        "plugins/wasm-agent/tests/master_frontier_repository_state.test.py",
+        "plugins/wasm-agent/tests/agent_run_store.test.py",
+        "plugins/wasm-agent/tests/provider_proxy.test.py",
+        "plugins/wasm-agent/tests/security_loop_policy.test.py",
+        "plugins/wasm-agent/tests/master_frontier_continuation.test.js",
+        "plugins/wasm-agent/tests/master_frontier_source_investigation.test.js",
+        "tools/app-simulator/core/run-evidence.js",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/master-frontier/continuation.js",
+        "plugins/wasm-agent/public/modules/master-frontier/cyphers-v3.json",
+        "plugins/wasm-agent/public/modules/master-frontier/source-investigation.js",
+        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
+        "labs/wasm-agent/agent_trajectory.py",
+        "labs/wasm-agent/golden_pattern_extractor.py",
+        "labs/wasm-agent/implementation_lab_actions.py",
+        "labs/wasm-agent/materialize-implementation-task.py",
+        "labs/wasm-agent/prove-master-frontier-v5-implementation-lab.py",
+        "labs/wasm-agent/check-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/package-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/loop5_candidate_policy.py",
+        "labs/wasm-agent/lane-runner.py",
+        "labs/wasm-agent/nine-lane-orchestrator.py",
+        "labs/wasm-agent/rank-nine-lane-benchmark.py",
+        "labs/wasm-agent/test_strategy_ranking.py",
+        "labs/wasm-agent/test_learning_harness.py",
+        "labs/wasm-agent/test_agent_trajectory_fixture.py",
+        "labs/wasm-agent/test_golden_pattern_extractor.py",
+        "labs/wasm-agent/test_implementation_lab.py",
+        "labs/wasm-agent/live-implementation-orchestrator.py",
+        "tools/context/check-monolith-growth.py",
+        "tools/context/prove-master-frontier-v5-evolution.py"
+      ],
+      "nextSuggestedSteps": [
+        "Expand the brokered implementation suite to three distinct task instances before mining any coding motif.",
+        "Wire one real external adapter to the normalized event contract before comparing or mining its golden patterns."
       ]
     }
   ]

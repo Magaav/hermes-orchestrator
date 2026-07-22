@@ -22,6 +22,9 @@ spec.loader.exec_module(envelope)
 
 
 class MasterFrontierEnvelopeTests(unittest.TestCase):
+    def test_task_contract_is_a_declared_direct_envelope_field(self) -> None:
+        self.assertIn("task_contract", envelope.ALLOWED_KEYS)
+
     def test_capped_action_json_requires_structured_action_repair(self) -> None:
         capped_action_reply = (
             '{"answer":"Reading exact turn 6 content before self-criticism.",'

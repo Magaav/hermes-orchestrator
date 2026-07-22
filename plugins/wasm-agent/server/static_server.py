@@ -56,11 +56,18 @@ from master_frontier import node_skills as master_frontier_node_skills
 from master_frontier import token_ledger as master_frontier_token_ledger
 from master_frontier import run_protocol as master_frontier_run_protocol
 from master_frontier import controller_v4 as master_frontier_controller_v4
-from master_frontier import controller_v5 as master_frontier_controller_v5
+from master_frontier import controller_v5 as master_frontier_controller_v5, run_control as master_frontier_run_control
 from master_frontier import inspect_contract as master_frontier_inspect
+from master_frontier import runtime_inspect as master_frontier_runtime_inspect
+from master_frontier import repository_actions as master_frontier_repository_actions
+from master_frontier import repository_checks as master_frontier_repository_checks
+from master_frontier import repository_diff as master_frontier_repository_diff
+from master_frontier import run_recovery as master_frontier_run_recovery
 from master_frontier import persistence as master_frontier_persistence
-from master_frontier import provider_tools as master_frontier_provider_tools
+from master_frontier import provider_tools as master_frontier_provider_tools, provider_transport as master_frontier_provider_transport
 from master_frontier import planner as master_frontier_planner, repair as master_frontier_repair, loop as master_frontier_loop, answer_shaping as master_frontier_answer_shaping
+import app_config as wasm_agent_app_config
+import synthetic_canary
 
 try:
     from PIL import Image
@@ -94,7 +101,6 @@ DEFAULT_AGENT_BRIDGE_IMAGE_SINGLE_BYTES = 640 * 1024
 DEFAULT_AGENT_BRIDGE_REQUEST_BYTES = 1536 * 1024
 DEFAULT_AGENT_BRIDGE_FORWARD_IMAGE_URLS = False
 DEFAULT_AGENT_MODEL_SETUP_TIMEOUT_SEC = 6 * 60
-DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC = 45
 DEFAULT_PROVIDER_MODELS_TIMEOUT_SEC = 15
 PROVIDER_MODELS_CACHE_TTL_SEC = 10 * 60
 DEFAULT_AGENT_ATTACHMENT_MAX_BYTES = 2 * 1024 * 1024
@@ -397,6 +403,7 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.shared_space_live_clients: dict[str, set[Any]] = {}
         self.shared_space_live_clients_lock = threading.Lock()
         self.observability_hub = ObservabilityHub(self)
+        master_frontier_repository_actions.recover_pending()
         if should_mark_interrupted_agent_runs_on_startup(self):
             mark_interrupted_agent_runs(self)
 
@@ -1071,6 +1078,11 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                 {"ok": False, "error": {"code": "origin_rejected", "message": "POST origin does not match this wasm-agent host."}},
             )
             return
+        cancel_run_match = re.fullmatch(r"/agent/runs/([A-Za-z0-9_.:-]+)/cancel", path)
+        if cancel_run_match:
+            status, payload = master_frontier_run_control.request_http(self.server, cancel_run_match.group(1), user, globals())
+            self._json(status, payload)
+            return
         if path == "/browser/open":
             try:
                 require_browser_feature_enabled(self)
@@ -1743,9 +1755,16 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     },
                 )
             return
+        canary_request = synthetic_canary.is_canary_path(path)
+        path = synthetic_canary.canonical_provider_path(path)
         if path in {"/agent/provider/probe", "/agent/provider/chat", "/agent/provider/envelope"}:
             try:
                 body = self._read_json(max_bytes=8 * 1024 * 1024)
+                if canary_request:
+                    with auth_connect() as conn:
+                        if not synthetic_canary.authorize(conn, user_id(user), body):
+                            raise BrowserError("canary_grant_invalid", "Synthetic canary grant is missing, expired, or out of scope.", status=HTTPStatus.FORBIDDEN)
+                    body["_synthetic_canary_authorized"] = True
                 provider = (
                     provider_envelope_run_completion(self.server, body, user=user)
                     if path.endswith("/envelope")
@@ -3500,79 +3519,22 @@ def route_patch_operations_from_body(body: dict[str, Any]) -> list[dict[str, Any
 def route_patch_apply_scoped_tool(body: dict[str, Any]) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
     operations = route_patch_operations_from_body(body)
-    if not operations:
-        raise BrowserError("patch_missing_operations", "patch.apply_scoped requires operations.")
-    if len(operations) > AGENT_MUTATION_MAX_OPS:
-        raise BrowserError("patch_too_many_operations", f"Too many operations: {len(operations)} > {AGENT_MUTATION_MAX_OPS}.")
     dry_run = request_bool(body.get("dry_run") if "dry_run" in body else body.get("dryRun"))
-    pending: dict[Path, str] = {}
-    originals: dict[Path, str] = {}
-    changed: set[str] = set()
-    total_replace_bytes = 0
-    for operation in operations:
-        op = str(operation.get("op") or operation.get("operation") or "replace").strip().lower()
-        path = route_contract_write_file_path(contract, str(operation.get("path") or ""))
-        if path.exists() and path.stat().st_size > AGENT_MUTATION_MAX_FILE_BYTES:
-            raise BrowserError("patch_file_too_large", "Patch target file is too large.")
-        if not path.exists() and op != "append":
-            raise BrowserError("patch_file_missing", "Patch target file does not exist.")
-        current = pending.get(path)
-        if current is None:
-            current = path.read_text(encoding="utf-8") if path.exists() else ""
-            originals[path] = current
-        if op == "replace":
-            find = str(operation.get("find") or "")
-            replace = str(operation.get("replace") or "")
-            if not find:
-                raise BrowserError("patch_invalid_replace", "Replace operations require a non-empty find string.")
-            count = current.count(find)
-            if count != 1:
-                raise BrowserError("patch_non_unique_match", f"Replace match count for {route_rel_to_root(contract, path)} was {count}, expected 1.")
-            total_replace_bytes += len(find.encode("utf-8")) + len(replace.encode("utf-8"))
-            if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
-                raise BrowserError("patch_payload_too_large", "Patch replacement payload is too large.")
-            pending[path] = current.replace(find, replace, 1)
-        elif op == "append":
-            insert = str(operation.get("insert") or operation.get("text") or operation.get("content") or "")
-            after = str(operation.get("after") or "")
-            if not insert:
-                raise BrowserError("patch_invalid_append", "Append operations require a non-empty insert field.")
-            total_replace_bytes += len(insert.encode("utf-8"))
-            if total_replace_bytes > AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES:
-                raise BrowserError("patch_payload_too_large", "Patch append payload is too large.")
-            if after:
-                count = current.count(after)
-                if count != 1:
-                    raise BrowserError("patch_non_unique_match", f"Append anchor count for {route_rel_to_root(contract, path)} was {count}, expected 1.")
-                pending[path] = current.replace(after, after + insert, 1)
-            else:
-                pending[path] = current + insert
-        else:
-            raise BrowserError("patch_invalid_op", f"Unsupported patch op: {op}.")
-        changed.add(route_rel_to_root(contract, path))
-    diff_chunks: list[str] = []
-    for path, updated in pending.items():
-        original = originals.get(path, "")
-        rel = route_rel_to_root(contract, path)
-        diff_chunks.extend(difflib.unified_diff(
-            original.splitlines(),
-            updated.splitlines(),
-            fromfile=f"a/{rel}",
-            tofile=f"b/{rel}",
-            lineterm="",
-            n=3,
-        ))
-        if not dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(updated, encoding="utf-8")
+    try:
+        result = master_frontier_repository_actions.apply(
+            operations, dry_run=dry_run,
+            resolve=lambda value: route_contract_write_file_path(contract, value),
+            relative=lambda path: route_rel_to_root(contract, path),
+            max_operations=AGENT_MUTATION_MAX_OPS,
+            max_file_bytes=AGENT_MUTATION_MAX_FILE_BYTES,
+            max_payload_bytes=AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES,
+        )
+    except master_frontier_repository_actions.RepositoryActionError as exc:
+        raise BrowserError(exc.code, str(exc)) from exc
     return route_tool_ok(
         "hermes.wasm_agent.route.patch_apply_scoped.v1",
         route_id=str(contract.get("route_id") or ""),
-        applied=not dry_run,
-        dry_run=dry_run,
-        changed_files=sorted(changed),
-        operations=len(operations),
-        diff=clipped("\n".join(diff_chunks), 12000),
+        **{**result, "diff": clipped(str(result.get("diff") or ""), 12000)},
     )
 
 
@@ -3595,49 +3557,28 @@ def route_test_run_focused_tool(body: dict[str, Any]) -> dict[str, Any]:
     check = route_registered_check(contract, check_id)
     command = [str(part) for part in check.get("command", [])]
     timeout_sec = int(check.get("timeout_sec") or 30)
-    started = time.monotonic()
-    proc = subprocess.run(
+    result = master_frontier_repository_checks.run(
         command,
         cwd=str(contract.get("workspace_root") or wasm_agent_plugin_root()),
-        text=True,
-        capture_output=True,
-        timeout=timeout_sec,
-        check=False,
+        timeout_sec=timeout_sec,
     )
-    duration_ms = round((time.monotonic() - started) * 1000)
     return {
-        "ok": proc.returncode == 0,
-        "code": "ok" if proc.returncode == 0 else "test_failed",
-        "schema": "hermes.wasm_agent.route.test_run_focused.v1",
+        **result,
+        "schema": "hermes.wasm_agent.route.test_run_focused.v2",
         "route_id": str(contract.get("route_id") or ""),
         "check_id": check_id,
-        "command": command,
-        "returncode": int(proc.returncode),
-        "duration_ms": duration_ms,
-        "stdout": clipped(proc.stdout or "", 12000),
-        "stderr": clipped(proc.stderr or "", 12000),
+        "command": result["argv"],
     }
 
 
 def route_git_diff_summary_tool(body: dict[str, Any]) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
-    root = Path(str(contract.get("workspace_root") or "")).resolve()
-    stat = subprocess.run(["git", "-C", str(root), "diff", "--stat", "--", "."], text=True, capture_output=True, timeout=10, check=False)
-    names = subprocess.run(["git", "-C", str(root), "diff", "--name-status", "--", "."], text=True, capture_output=True, timeout=10, check=False)
-    files: list[dict[str, str]] = []
-    for line in (names.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            files.append({"status": clipped(parts[0], 20), "path": clipped(parts[1], 240)})
-    return route_tool_ok(
-        "hermes.wasm_agent.route.git_diff_summary.v1",
-        route_id=str(contract.get("route_id") or ""),
-        workspace_root=str(root),
-        returncode=int(stat.returncode or names.returncode),
-        changed_files=files,
-        count=len(files),
-        stat=clipped(stat.stdout or stat.stderr or "", 12000),
-    )
+    result = master_frontier_repository_diff.collect(contract, max_entries=ROUTE_LOOKUP_MAX_RESULTS)
+    return {
+        **result,
+        "schema": "hermes.wasm_agent.route.git_diff_summary.v2",
+        "count": len(result["changed_files"]),
+    }
 
 
 def route_proof_collect_tool(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
@@ -4415,85 +4356,6 @@ def kernel_runtime_entity_inspect_tool(
     return result
 
 
-def kernel_runtime_entity_compact_summary(result: dict[str, Any]) -> dict[str, Any]:
-    metadata_files = result.get("metadata_files") if isinstance(result.get("metadata_files"), list) else []
-    data_roots = result.get("data_roots") if isinstance(result.get("data_roots"), list) else []
-    investigation = result.get("investigation") if isinstance(result.get("investigation"), dict) else {}
-    return {
-        "route_id": result.get("route_id"),
-        "entity": result.get("entity"),
-        "route_identity": result.get("route_identity") if isinstance(result.get("route_identity"), dict) else {},
-        "entity_match_count": result.get("entity_match_count"),
-        "investigation": {
-            "inferred_identity": investigation.get("inferred_identity") if isinstance(investigation.get("inferred_identity"), list) else [],
-            "roots": [
-                {
-                    "root": root.get("root"),
-                    "file_count": root.get("file_count"),
-                    "kind_counts": root.get("kind_counts") if isinstance(root.get("kind_counts"), dict) else {},
-                    "top_dirs": root.get("top_dirs") if isinstance(root.get("top_dirs"), dict) else {},
-                }
-                for root in (investigation.get("roots") if isinstance(investigation.get("roots"), list) else [])[:4]
-                if isinstance(root, dict)
-            ],
-            "conversations": investigation.get("conversations") if isinstance(investigation.get("conversations"), dict) else {},
-            "data_assets": investigation.get("data_assets") if isinstance(investigation.get("data_assets"), dict) else {},
-            "documents": [
-                {"path": doc.get("path"), "excerpt": clipped(str(doc.get("excerpt") or ""), 220)}
-                for doc in (investigation.get("documents") if isinstance(investigation.get("documents"), list) else [])[:6]
-                if isinstance(doc, dict)
-            ],
-            "databases": [
-                {
-                    "path": db.get("path"),
-                    "tables": db.get("tables") if isinstance(db.get("tables"), dict) else {},
-                    "semantic_tables": [
-                        {
-                            "table": table.get("table"),
-                            "count": table.get("count"),
-                            "samples": table.get("samples") if isinstance(table.get("samples"), list) else [],
-                        }
-                        for table in (db.get("semantic_tables") if isinstance(db.get("semantic_tables"), list) else [])[:4]
-                        if isinstance(table, dict)
-                    ],
-                }
-                for db in (investigation.get("databases") if isinstance(investigation.get("databases"), list) else [])[:5]
-                if isinstance(db, dict)
-            ],
-        },
-        "metadata_files": [
-            {
-                "path": meta.get("path"),
-                "bytes": meta.get("bytes"),
-                "json": {
-                    key: meta.get("json", {}).get(key)
-                    for key in ("bootstrapped_at", "reseeded_at", "state_code", "node_role", "timezone")
-                    if isinstance(meta.get("json"), dict) and meta.get("json", {}).get(key) not in (None, "")
-                },
-            }
-            for meta in metadata_files[:6]
-            if isinstance(meta, dict)
-        ],
-        "data_roots": [
-            {
-                "root": root.get("root"),
-                "file_count": root.get("file_count"),
-                "files": [
-                    {
-                        "path": file_item.get("path"),
-                        "bytes": file_item.get("bytes"),
-                        "sqlite_tables": file_item.get("sqlite_tables") if isinstance(file_item.get("sqlite_tables"), dict) else {},
-                    }
-                    for file_item in (root.get("files") if isinstance(root.get("files"), list) else [])[:8]
-                    if isinstance(file_item, dict)
-                ],
-            }
-            for root in data_roots[:4]
-            if isinstance(root, dict)
-        ],
-    }
-
-
 # ARCH_EXCEPTION: owner=master-frontier; reason=bounded HTTP adapter wiring from owned inspect contract to server-local primitives; expires=2026-08-10
 def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dict[str, Any] | None) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
@@ -4558,7 +4420,15 @@ def kernel_inspect_tool(server: WasmAgentServer, body: dict[str, Any], user: dic
             add_observation("capabilities", kernel_capabilities_tool({"route_id": contract.get("route_id"), "route_contract": contract}))
         elif kind == "runtime_entity":
             runtime_result = kernel_runtime_entity_inspect_tool(user, contract, body)
-            runtime_entity_summaries.append(kernel_runtime_entity_compact_summary(runtime_result))
+            runtime_result["actions"] = master_frontier_runtime_inspect.action_registration(contract)
+            runtime_result["action_result"] = master_frontier_runtime_inspect.execute_requested_action(
+                body.get("runtime_action"),
+                contract=contract,
+                user_id=user_id(user),
+                db_path=auth_db_path(),
+                now_ms=int(time.time() * 1000),
+            )
+            runtime_entity_summaries.append(master_frontier_runtime_inspect.compact_summary(runtime_result))
             add_observation("runtime_entity", runtime_result)
             unknowns.extend(runtime_result.get("unknowns") if isinstance(runtime_result.get("unknowns"), list) else [])
         else:
@@ -5084,7 +4954,7 @@ def openai_responses_completion(
     deltas: list[str] = []
     completed_response: dict[str, Any] | None = None
     try:
-        with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+        with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec()) as response:
             for event in iter_sse_json(response):
                 event_type = str(event.get("type") or event.get("event") or "")
                 delta = event.get("delta") if isinstance(event.get("delta"), str) else ""
@@ -5233,7 +5103,7 @@ def provider_envelope_completion(
     user: dict[str, Any] | None = None,
     action_callback: Any | None = None,
 ) -> dict[str, Any]:
-    if not user_is_admin(user):
+    if not synthetic_canary.user_allowed(user_is_admin(user), auth_connect, user_id(user), body):
         diagnostic = provider_diagnostic(
             "direct-envelope",
             "admin-required",
@@ -6845,7 +6715,7 @@ def provider_envelope_run_completion(
     *,
     user: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if not user_is_admin(user):
+    if not synthetic_canary.user_allowed(user_is_admin(user), auth_connect, user_id(user), body):
         return provider_envelope_completion(server, body, user=user)
     context = provider_envelope_run_context(body)
     run, created = begin_agent_run(server, dict(context["run_body"]), user=user, direct_head=True)
@@ -6892,6 +6762,7 @@ def start_provider_envelope_run_worker(
             except Exception as exc:
                 finish_agent_run(server, run_id, status="failed", error={"code": "direct_envelope_error", "message": str(exc)})
             finally:
+                master_frontier_run_control.clear(run_id)
                 workers_map, workers_lock = agent_run_worker_maps(server)
                 with workers_lock:
                     current = workers_map.get(run_id)
@@ -6943,7 +6814,7 @@ def provider_proxy_completion(
         deltas: list[str] = []
         completed_response: dict[str, Any] | None = None
         try:
-            with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+            with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec(requested=body.get("_timeout_sec"))) as response:
                 for event in iter_sse_json(response):
                     event_type = str(event.get("type") or event.get("event") or "")
                     delta = ""
@@ -7010,7 +6881,7 @@ def provider_proxy_completion(
             "diagnostic": provider_diagnostic("backend-proxy", "ready", "Backend proxy provider request succeeded.", HTTPStatus.OK, endpoint=endpoint, model=model),
         }
     try:
-        with urlopen(request, timeout=DEFAULT_PROVIDER_PROXY_TIMEOUT_SEC) as response:
+        with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec(requested=body.get("_timeout_sec"))) as response:
             raw = response.read().decode("utf-8", "replace")
             status = int(response.status)
     except HTTPError as exc:
@@ -9685,6 +9556,7 @@ def agent_run_request_summary(body: dict[str, Any], user: dict[str, Any] | None)
         "transcript_turns": len(transcript),
         "image_count": len(images),
         "attachment_count": len(attachments),
+        "worker": master_frontier_run_recovery.worker_identity(),
         "created_at": agent_run_now_ms(),
     }
 
@@ -10293,23 +10165,9 @@ def record_agent_run_token_usage_event(server: WasmAgentServer, run_id: str, res
 
 
 def agent_run_with_canonical_token_usage(result: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not isinstance(result, dict):
-        return result
-    payload = agent_run_token_usage_payload(result)
-    if not payload:
-        return result
-    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
-    if not usage:
-        return result
-    updated = {**result, "token_usage": usage}
-    diagnostics = updated.get("diagnostics") if isinstance(updated.get("diagnostics"), dict) else {}
-    updated["diagnostics"] = {
-        **diagnostics,
-        "token_usage": usage,
-        "token_usage_total": usage,
-        "token_usage_components": payload.get("components") or {},
-    }
-    return updated
+    return master_frontier_token_ledger.with_canonical_usage(
+        result, agent_run_token_usage_payload(result) if isinstance(result, dict) else None,
+    )
 
 
 def record_agent_run_final_proof_events(server: WasmAgentServer, run_id: str, result: dict[str, Any]) -> None:
@@ -10429,58 +10287,19 @@ def finish_agent_run(
 
 
 def should_mark_interrupted_agent_runs_on_startup(server: WasmAgentServer) -> bool:
-    override = str(os.environ.get("HERMES_WASM_AGENT_MARK_INTERRUPTED_ON_STARTUP") or "").strip().lower()
-    if override in {"1", "true", "yes", "on"}:
-        return True
-    if override in {"0", "false", "no", "off"}:
-        return False
-    try:
-        port = int(getattr(server, "server_port", 0) or 0)
-    except (TypeError, ValueError):
-        port = 0
-    return port == 8877
+    return master_frontier_run_recovery.startup_enabled(getattr(server, "server_port", 0), os.environ)
 
 
 def mark_interrupted_agent_runs(server: WasmAgentServer) -> None:
     try:
         with auth_connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT * FROM agent_run_tb WHERE status NOT IN ('completed', 'failed', 'interrupted', 'cancelled')"
-            ).fetchall()
             now = agent_run_now_ms()
-            for row in rows:
-                summary = json_dict(str(row["request_summary_json"] or "{}"))
-                objective_event = conn.execute(
-                    "SELECT payload_json FROM agent_run_event_tb WHERE run_id = ? AND type = 'envelope.created' ORDER BY seq DESC LIMIT 1",
-                    (str(row["run_id"]),),
-                ).fetchone()
-                objective_payload = json_dict(str(objective_event["payload_json"] or "{}")) if objective_event else {}
-                objective_envelope = objective_payload.get("envelope") if isinstance(objective_payload.get("envelope"), dict) else {}
-                checkpoint = {
-                    "schema": "hermes.wasm_agent.restart_checkpoint.v1",
-                    "original_objective": clipped(str(objective_envelope.get("objective") or ""), 1200),
-                    "resume_key": clipped(str(summary.get("resume_key") or f"{row['session_id']}:{row['turn_id']}"), 240),
-                    "previous_run_id": str(row["run_id"]),
-                    "previous_turn_id": str(row["turn_id"]),
-                    "instruction": "Inspect persisted run events and proof before repeating any side effect.",
-                }
-                error = {
-                    "code": "agent_run_interrupted",
-                    "message": "Agent run was interrupted by a server restart and remains resumable.",
-                    "resume_checkpoint": checkpoint,
-                }
-                conn.execute(
-                    """
-                    UPDATE agent_run_tb
-                       SET status = 'interrupted', updated_at = ?, terminal_at = ?, error_json = ?
-                     WHERE run_id = ?
-                    """,
-                    (now, now, bounded_json_text(error, AGENT_RUN_EVENT_MAX_JSON_CHARS), str(row["run_id"])),
-                )
-                updated = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (str(row["run_id"]),)).fetchone()
-                if updated:
-                    agent_run_append_event_conn(conn, updated, "run.error", summary=error["message"], payload={"error": error}, created_at=now)
+            master_frontier_run_recovery.reconcile(
+                conn, now_ms=now, force=False,
+                encode_json=lambda value: bounded_json_text(value, AGENT_RUN_EVENT_MAX_JSON_CHARS),
+                append_event=agent_run_append_event_conn,
+            )
             conn.commit()
     except Exception:
         return
@@ -12411,52 +12230,30 @@ def auth_session(server: WasmAgentServer, cookie_header: str) -> dict[str, Any]:
         return {"ok": True, "authenticated": False, "user": None}
     with auth_connect() as conn:
         row = conn.execute("SELECT * FROM user_tb WHERE id = ?", (int(user_id),)).fetchone()
+        canary_active = synthetic_canary.active(conn, user_id)
     user = public_user(row)
-    if user and not is_allowed_account_email(str(user.get("email") or "")):
+    if user and not canary_active and not is_allowed_account_email(str(user.get("email") or "")):
         user = None
     return {"ok": True, "authenticated": bool(user), "user": user}
 
 
 def app_config_payload(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
-    self = handler
-    return {
-        "appId": PLUGIN_NAME,
-        "service": PLUGIN_NAME,
-        "name": PLUGIN_NAME,
-        "version": PLUGIN_VERSION,
-        "bridgeUrl": server.bridge_url,
-        "agentTurnTimeoutSec": agent_bridge_timeout_sec(),
-        "auth": {
-            "googleClientId": google_client_id(),
-            "googleClientIdConfigured": bool(google_client_id()),
-            "googleLoginUri": google_login_uri(self),
-            "publicOrigin": public_origin(),
-            "required": True,
-            "userTable": "user_tb",
-        },
-        "deployment": {
-            "mode": wasm_agent_deployment_mode(),
-            "instanceId": cloud_instance_id(),
-            "clientFirst": True,
-            "serverRole": "auth-sync-relay-backup-fleet",
-        },
-        "features": {
-            "hostBrowser": {
-                "enabled": browser_feature_enabled(handler),
-                "publicDefaultDisabled": public_deployment(handler),
-            },
-            "sharedVoice": {
-                "enabled": shared_voice_enabled(),
-                "productionDefaultDisabled": True,
-                "iceServers": shared_voice_ice_servers(),
-                "signalingPollMs": 900,
-            },
-        },
-        "bridge": {
-            "owner": "wasm-agent",
-            "url": server.bridge_url,
-        },
-    }
+    client_id = google_client_id()
+    return wasm_agent_app_config.payload(
+        app_name=PLUGIN_NAME,
+        app_version=PLUGIN_VERSION,
+        internal_bridge_url=server.bridge_url,
+        agent_turn_timeout_sec=agent_bridge_timeout_sec(),
+        google_client_id=client_id,
+        google_login_uri=google_login_uri(handler),
+        public_origin=public_origin(),
+        deployment_mode=wasm_agent_deployment_mode(),
+        instance_id=cloud_instance_id(),
+        host_browser_enabled=browser_feature_enabled(handler),
+        public_default_disabled=public_deployment(handler),
+        shared_voice_enabled=shared_voice_enabled(),
+        shared_voice_ice_servers=shared_voice_ice_servers(),
+    )
 
 
 def app_bootstrap_payload(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:

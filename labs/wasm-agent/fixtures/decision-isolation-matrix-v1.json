@@ -1,0 +1,35 @@
+{
+  "schema": "wasm-agent.decision-isolation-matrix.v1",
+  "stages": [
+    {
+      "id": "A",
+      "category": "patch_capacity",
+      "objective": "Fix the exact retry-window boundary in retry_window.py; the registered boundary test must pass.",
+      "requires": ["decision", "mutation", "check", "diff", "proof"]
+    },
+    {
+      "id": "B",
+      "category": "repository_navigation",
+      "objective": "Fix retry-window boundary expiration; locate the production owner and prove the registered test.",
+      "requires": ["owner_resolution", "decision", "mutation", "check", "diff", "proof"]
+    },
+    {
+      "id": "C",
+      "category": "planning_to_execution",
+      "objective": "From one grounded actionable finding, produce an operational decision and execute it.",
+      "requires": ["decision", "selected_handoff", "mutation", "check", "diff", "proof"]
+    },
+    {
+      "id": "D",
+      "category": "prioritization",
+      "objective": "From seven grounded findings with one bounded feasible improvement, select and prove the coherent slice.",
+      "requires": ["decision", "bounded_selection", "selected_handoff", "mutation", "check", "diff", "proof"]
+    },
+    {
+      "id": "E",
+      "category": "multi_turn_continuity",
+      "objective": "After the planning turn, implement its selected decision from a referential follow-up without rediscovery.",
+      "requires": ["parent_binding", "decision_recall", "mutation", "check", "diff", "proof"]
+    }
+  ]
+}

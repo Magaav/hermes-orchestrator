@@ -1,0 +1,16 @@
+{
+  "schema": "wasm-agent.safe-lab.session-adapter-capabilities.v1",
+  "model": "frank/GLM-5.2",
+  "suite": "labs/wasm-agent/fixtures/master-frontier-session-suite-v1.json",
+  "adapters": [
+    {"id":"master-frontier-v5","slot":"harness-01","status":"implementation_pending","nativeLifecycle":"wasm_agent_run_ledger","isolation":"authenticated_user_session_route","reason":"Host reconstruction exists; safe-lab runner does not yet execute the real session/run/transcript path."},
+    {"id":"codex","slot":"harness-02","status":"implementation_pending","nativeLifecycle":"codex_thread_create_resume","isolation":"private_lane_codex_home","reason":"Current runner invokes one fresh exec and does not resume a native thread."},
+    {"id":"claude-code","slot":"harness-04","status":"implementation_pending","nativeLifecycle":"claude_session_resume","isolation":"private_lane_claude_config","reason":"Current runner explicitly disables session persistence."},
+    {"id":"gemini-cli","slot":"harness-05","status":"implementation_pending","nativeLifecycle":"gemini_saved_session_resume","isolation":"private_lane_gemini_home","reason":"Current runner invokes one fresh prompt and does not resume a saved session."},
+    {"id":"hermes","slot":"harness-03","status":"session_capability_unavailable","nativeLifecycle":"","isolation":"private_lane_home","reason":"No native continuation contract is declared for this benchmark generation."},
+    {"id":"aider","slot":"harness-06","status":"session_capability_unavailable","nativeLifecycle":"","isolation":"private_lane_home","reason":"No native continuation contract is declared for this benchmark generation."},
+    {"id":"opencode","slot":"harness-07","status":"session_capability_unavailable","nativeLifecycle":"","isolation":"private_lane_home","reason":"No native continuation contract is declared for this benchmark generation."},
+    {"id":"goose","slot":"harness-08","status":"session_capability_unavailable","nativeLifecycle":"","isolation":"private_lane_home","reason":"No native continuation contract is declared for this benchmark generation."},
+    {"id":"openhands","slot":"harness-09","status":"session_capability_unavailable","nativeLifecycle":"","isolation":"private_lane_home","reason":"No native continuation contract is declared for this benchmark generation."}
+  ]
+}

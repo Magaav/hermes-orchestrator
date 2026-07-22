@@ -1,7 +1,7 @@
 # Master:frontier V4 — Read-only source investigation slice
 
 Status: architecture record for the first locally verified vertical slice. V4
-is opt-in; V3 remains the default and is not replaced.
+is an explicit compatibility selection; V5 is the current default.
 
 ## Boundary and ownership
 
@@ -116,7 +116,7 @@ root, or evidence-originated operation is allowed.
 
 Promotion requires deterministic schema/invariant/gate tests, recorded-provider
 replay, independent adversarial and metamorphic fixtures, exact interruption
-resume, V3 default/replay compatibility, safe trace rendering, enforced hard
+resume, explicit V3 replay compatibility, safe trace rendering, enforced hard
 budgets, prompt-injection resistance, zero unsupported accepted fixture claims,
 and correct fixture terminal classifications. Live frontier evaluation is a
 separate evidence lane and may be blocked by provider access. Production proof

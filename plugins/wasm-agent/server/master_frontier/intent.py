@@ -149,7 +149,13 @@ def objective_is_diagnosis_intent(envelope: dict[str, Any]) -> bool:
 
 def objective_requires_source_evidence(envelope: dict[str, Any]) -> bool:
     objective = str(envelope.get("objective") or "")
-    return bool(SOURCE_OBJECT_RE.search(objective) and SOURCE_QUESTION_RE.search(objective))
+    # Evidence modality is a property of the target plus the declared speech
+    # act.  A diagnosis of a repository object still needs source evidence even
+    # when it is phrased as an imperative critique instead of a wh-question.
+    return bool(
+        SOURCE_OBJECT_RE.search(objective)
+        and (SOURCE_QUESTION_RE.search(objective) or objective_is_diagnosis_intent(envelope))
+    )
 
 
 def goal_requires_change_artifact(envelope: dict[str, Any]) -> bool:

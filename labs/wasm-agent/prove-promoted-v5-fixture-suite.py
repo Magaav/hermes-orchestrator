@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Run promoted V5 across the frozen five-golden/two-holdout semantic suite."""
+"""Run promoted V5 across the frozen seven-golden/two-holdout semantic suite."""
 from __future__ import annotations
 import argparse,json,sqlite3,subprocess,time
 from datetime import datetime,timezone
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2];LAB=Path(__file__).resolve().parent
-OVERLAY=LAB/"staging/avatar-chat-adjudication-v1.sqlite3";REGISTRY=LAB/"harness-adapters.json";OUT=ROOT/"reports/context/latest/promoted-v5-fixture-suite-proof.json"
+OVERLAY=LAB/"staging/avatar-chat-adjudication-v3.sqlite3";REGISTRY=LAB/"harness-adapters.json";OUT=ROOT/"reports/context/latest/promoted-v5-fixture-suite-proof.json"
 def main():
  parser=argparse.ArgumentParser();parser.add_argument("--candidate-adapter");args=parser.parse_args()
  started=time.monotonic();reg=json.loads(REGISTRY.read_text());adapter=reg["adapters"][0]

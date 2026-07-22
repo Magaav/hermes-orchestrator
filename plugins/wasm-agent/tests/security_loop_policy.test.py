@@ -229,6 +229,20 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         self.assertEqual(payload["usage"]["completion_tokens"], 22)
         self.assertEqual(payload["usage"]["cached_input_tokens"], 300)
         self.assertEqual(payload["components"]["bridge"]["total_tokens"], 420)
+        finalized = server_mod.agent_run_with_canonical_token_usage({
+            "diagnostics": {
+                "token_usage": [
+                    {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+                    {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+                ],
+                "token_usage_total": {"exact": True, "total_tokens": 37, "calls": 2, "metered_calls": 2},
+            },
+        })
+        self.assertEqual(finalized["token_usage"]["total_tokens"], 37)
+        self.assertEqual(finalized["diagnostics"]["token_usage_total"]["total_tokens"], 37)
+        self.assertTrue(finalized["diagnostics"]["token_usage_total"]["exact"])
+        self.assertEqual(finalized["diagnostics"]["token_usage_total"]["calls"], 2)
+        self.assertEqual(len(finalized["diagnostics"]["token_usage_components"]), 2)
         zero_call_usage = server_mod.bridge_task_usage({
             "result": {
                 "usage": {
@@ -258,6 +272,7 @@ class SecurityLoopPolicyTest(unittest.TestCase):
             "id": "dispatch.hermes",
             "objective": "Set .agent-timeline gap and .agent-timeline-rows padding.",
             "caps": ["repo.read", "repo.edit", "proof.report"],
+            "escalation_reason": "Exercise the bounded Hermes workspace prompt contract.",
         }
         envelope = {"objective": "CSS fix", "surface": "avatar-chat"}
 
@@ -355,10 +370,11 @@ class SecurityLoopPolicyTest(unittest.TestCase):
         })
         missing_origin = self.fake_handler({"Host": "wa.example.test"})
 
-        self.assertTrue(server_mod.same_origin_websocket(same_origin))
-        self.assertFalse(server_mod.same_origin_websocket(cross_origin))
-        self.assertFalse(server_mod.same_origin_websocket(missing_origin))
-        self.assertTrue(server_mod.same_origin_post(missing_origin))
+        with patch.object(server_mod, "public_origin", return_value=""):
+            self.assertTrue(server_mod.same_origin_websocket(same_origin))
+            self.assertFalse(server_mod.same_origin_websocket(cross_origin))
+            self.assertFalse(server_mod.same_origin_websocket(missing_origin))
+            self.assertTrue(server_mod.same_origin_post(missing_origin))
 
     def test_security_finding_lifecycle_is_append_only_with_current_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

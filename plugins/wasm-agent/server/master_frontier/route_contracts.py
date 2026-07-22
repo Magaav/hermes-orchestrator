@@ -22,6 +22,7 @@ PUBLIC_ROUTE_CONTRACT_KEYS = (
     "budget",
     "proof",
     "checks",
+    "source_index",
     "entities",
     "reason",
 )
@@ -93,7 +94,7 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
         "workspace_root": workspace_root,
         "cwd": workspace_root,
         "allowed_read_roots": paths("allowed_read_roots", [raw.get("workspace_root") or "."]),
-        "allowed_write_roots": paths("allowed_write_roots", [raw.get("workspace_root") or "."]),
+        "allowed_write_roots": paths("allowed_write_roots", []),
         "likely_paths": [
             clipped(rel_path(item), 240)
             for item in (raw.get("likely_paths") if isinstance(raw.get("likely_paths"), list) else [])[:80]
@@ -367,7 +368,8 @@ def dispatch_workspace_contract(action: dict[str, Any], envelope: dict[str, Any]
         for contract in contracts:
             if tokens & match_tokens(contract):
                 add_candidate(public_contract(contract))
-    add_candidate(envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else None)
+    # A client contract is only a selector hint. Authority, roots, checks, and
+    # budgets must always come from the server-owned registry above.
     add_candidate(resolve_contract(
         contracts,
         route_id=action.get("route_id") or envelope.get("route_id") or envelope.get("route"),

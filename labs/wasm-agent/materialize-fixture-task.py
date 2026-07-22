@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sqlite3
 from pathlib import Path
 
 BANK = Path("/fixtures/avatar-chat-fixtures-v2.sqlite3")
-OVERLAY = Path("/adjudication/avatar-chat-adjudication-v1.sqlite3")
+OVERLAY = Path("/adjudication/avatar-chat-adjudication-v3.sqlite3")
+ROUTE_SUMMARY = re.compile(r"^(?P<route>[a-z0-9._-]+)\s+->\s+(?P<root>[^\s]+)$", re.I)
 SOURCE = Path("/source")
 
 
@@ -33,6 +35,20 @@ def find_first(value: object, key: str) -> object | None:
             if found not in (None, "", [], {}):
                 return found
     return None
+
+
+def route_projection(events: list[sqlite3.Row], payloads: list[object]) -> tuple[str, str]:
+    route_id = str(next((find_first(item, "route_id") for item in payloads if find_first(item, "route_id")), ""))
+    workspace_root = str(next((find_first(item, "workspace_root") for item in payloads if find_first(item, "workspace_root")), ""))
+    if route_id and workspace_root:
+        return route_id, workspace_root
+    for event in events:
+        if event["type"] != "route.resolved":
+            continue
+        match = ROUTE_SUMMARY.fullmatch(str(event["summary_redacted"] or "").strip())
+        if match:
+            return route_id or match.group("route"), workspace_root or match.group("root")
+    return route_id, workspace_root
 
 
 def main() -> int:
@@ -65,8 +81,7 @@ def main() -> int:
     warnings = json.loads(row["warning_classes_json"] or "[]")
     event_types = [str(event["type"]) for event in events]
     event_payloads = [json.loads(event["payload_projection_json"] or "{}") for event in events]
-    route_id = str(next((find_first(item, "route_id") for item in event_payloads if find_first(item, "route_id")), ""))
-    historical_root = str(next((find_first(item, "workspace_root") for item in event_payloads if find_first(item, "workspace_root")), ""))
+    route_id, historical_root = route_projection(events, event_payloads)
     if historical_root == "/local":
         replay_root = SOURCE
     elif historical_root.startswith("/local/"):
@@ -74,7 +89,11 @@ def main() -> int:
     else:
         replay_root = SOURCE / historical_root.lstrip("/") if historical_root else Path()
     route_required = row["request_class"] in {"source_investigation", "runtime_inspection"}
-    route_surface_available = bool(historical_root) and replay_root.exists()
+    route_surface_available = (
+        bool(route_id)
+        if row["request_class"] == "runtime_inspection"
+        else bool(historical_root) and replay_root.exists()
+    )
     tool_evidence_sufficient = (
         int(row["tool_started_count"]) == int(row["tool_finished_count"])
         and (int(row["tool_started_count"]) > 0 if route_required else True)

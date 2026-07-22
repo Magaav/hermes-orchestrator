@@ -22,6 +22,7 @@ ALLOWED_KEYS = (
     "trace_id",
     "objective",
     "objective_kind",
+    "task_contract",
     "intent",
     "route",
     "route_id",

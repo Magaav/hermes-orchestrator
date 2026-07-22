@@ -31,8 +31,12 @@ def _workspace_root(route_contract: dict[str, Any]) -> str:
 
 
 def _proof(intent_name: str) -> list[str]:
+    if intent_name == "implementation_planning":
+        return ["route", "evidence", "decision"]
     if intent_name == "implementation":
         return ["route", "changed_files", "checks", "proof"]
+    if intent_name == "verification":
+        return ["route", "checks", "proof"]
     if intent_name == "diagnosis":
         return ["route", "evidence", "cause", "next_action"]
     return ["route", "evidence", "answer"]
@@ -45,8 +49,10 @@ def _evidence_floor(envelope: dict[str, Any], intent_name: str, caps: list[str])
     objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
     if objective_kind == "conversation":
         return "conceptual"
-    if intent_name == "implementation":
+    if intent_name in {"implementation", "verification"}:
         return "proof"
+    if intent_name == "implementation_planning":
+        return "source"
     if intent.objective_requires_source_evidence(envelope):
         return "source"
     if intent_name == "diagnosis" or "runtime.inspect" in caps:
@@ -131,16 +137,18 @@ def _tools_first(intent_name: str, caps: list[str], route_id: str, evidence_floo
         tools.append("code.memory.search")
     if intent_name == "implementation":
         tools.extend(["code.memory.impact", "kernel.act", "kernel.prove"])
-    elif "runtime.inspect" in caps:
+    elif intent_name == "verification":
+        tools.append("kernel.prove")
+    elif evidence_floor == "runtime":
         tools.extend(["kernel.inspect", "kernel.prove"])
-    else:
+    elif evidence_floor == "route":
         tools.append("kernel.inspect")
     return list(dict.fromkeys(tools))
 
 
 def _intent_name(envelope: dict[str, Any]) -> str:
     objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
-    if objective_kind in {"conversation", "implementation", "diagnosis"}:
+    if objective_kind in {"conversation", "implementation", "implementation_planning", "verification", "diagnosis"}:
         if objective_kind == "conversation":
             return "answer"
         return objective_kind
@@ -178,7 +186,7 @@ def task_contract(envelope: dict[str, Any]) -> dict[str, Any]:
         executor = "local_kernel"
     if block_codes:
         executor = "blocked"
-    return {
+    generated = {
         "schema": SCHEMA,
         "intent": intent_name,
         "route_id": route_id,
@@ -196,3 +204,11 @@ def task_contract(envelope: dict[str, Any]) -> dict[str, Any]:
         "block_codes": block_codes,
         "hermes": "subagent_harness_only",
     }
+    declared = envelope.get("task_contract") if isinstance(envelope.get("task_contract"), dict) else {}
+    for key in (
+        "request_class", "objective_kind", "declared_classes", "authority",
+        "decision_mode", "completion_mode", "proof_policy", "execution_profile",
+    ):
+        if key in declared:
+            generated[key] = declared[key]
+    return generated

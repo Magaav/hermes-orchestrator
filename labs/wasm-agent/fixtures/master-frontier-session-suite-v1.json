@@ -1,0 +1,818 @@
+{
+  "schema": "wasm-agent.safe-lab.session-fixture-suite.v1",
+  "model": "frank/GLM-5.2",
+  "routeContractSha256": "7f79099aca90a65be3b4cbb2df930ce1ead2082c8f25143852f032a949998eb9",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "privateHoldoutExpectationsExposed": false,
+  "budgets": {
+    "providerCallsPerTurn": 6,
+    "toolCallsPerTurn": 8,
+    "wallClockSecondsPerTask": 300,
+    "maxContextBytes": 32768
+  },
+  "fixtures": [
+    {
+      "id": "session-adjacent-followup-v1",
+      "case": "adjacent_followup",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-adjacent_followup",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Review the parser."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Concern one is ambiguous ownership. Concern two is that error offsets drift after normalization.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Can you expand the second concern?"
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "fixture_followup",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "resolve_recent_antecedent",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "463fd553fae0d327b2dc1b40ddf83d6c7a6b15d71522cdfacd0a37aad22d706a"
+    },
+    {
+      "id": "session-process-restart-v1",
+      "case": "process_restart",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-process_restart",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Diagnose the failing cache test."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "The cache test fails because the persisted generation is read before invalidation; the fix belongs in the cache owner.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "restart",
+          "turnRef": "turn-01",
+          "fromProcessRef": "process-01",
+          "toProcessRef": "process-02"
+        },
+        {
+          "seq": 4,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Continue with the fix."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "retain_objective_after_restart",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "f323ee5aba974fc55821d8f094164f3c91879d401703c4fad9cc27003c39ccd1"
+    },
+    {
+      "id": "session-context-compaction-v1",
+      "case": "context_compaction",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-context_compaction",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Refactor the bounded reader and preserve its API."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "The bounded reader API is read_lines(path, start, end); preserve those arguments while moving byte accounting into the owner.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "compact",
+          "turnRef": "turn-01",
+          "exactTailTurns": 1,
+          "olderContextRef": "context-capsule-01"
+        },
+        {
+          "seq": 4,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Now update its tests."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "retain_objective_after_compaction",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "a450ce1eed9f661e8c7c4dc618c41f64c5583973f2e9fef367450cfdf4afeda3"
+    },
+    {
+      "id": "session-older-recall-v1",
+      "case": "older_recall",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-older_recall",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Remember the rollback handle named checkpoint-alpha."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "The established rollback handle is checkpoint-alpha.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "checkpoint",
+          "turnRef": "turn-01",
+          "checkpointRef": "checkpoint-alpha",
+          "completedActionRefs": [
+            "action-inspect-01"
+          ]
+        },
+        {
+          "seq": 4,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "What rollback handle did we establish?"
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "fixture_followup",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "exact_older_recall",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "a43a5942abfa3d31f44290b3f559d050e429fc1b4a624d1e25ae61027f83a0a2"
+    },
+    {
+      "id": "session-interruption-resume-v1",
+      "case": "interruption_resume",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-interruption_resume",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Implement the scoped validation change."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "The scoped validation mutation is action-mutation-01; its outcome must be reconciled before any repeat.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "tool_call",
+          "turnRef": "turn-01",
+          "actionRef": "action-mutation-01",
+          "tool": "kernel.act",
+          "argumentsDigest": "sha256:fixture-arguments"
+        },
+        {
+          "seq": 4,
+          "kind": "interrupt",
+          "turnRef": "turn-01",
+          "reasonClass": "fixture_forced_interrupt",
+          "resumable": true
+        },
+        {
+          "seq": 5,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Continue."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "fixture_followup",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": true
+          }
+        ],
+        "terminal": "resume_without_repeating_side_effect",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "cec04c03ddf3be78c0c67a0f94895e5545b8258b8cf165f79d36f25d2849ee6f"
+    },
+    {
+      "id": "session-new-topic-v1",
+      "case": "new_topic",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-new_topic",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Explain the route contract."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "A route contract binds a surface to an owner, roots, capabilities, checks, budget, and proof policy.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Unrelated: write a haiku about rain."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "fixture_followup",
+            "mustResolveHistory": false,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "do_not_inherit_stale_task",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "022d3f5ca0384d6c90c3fcbf85d09377d2b7b1654101bb64d1d5f37c7e46a421"
+    },
+    {
+      "id": "session-user-correction-v1",
+      "case": "user_correction",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-user_correction",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Rename the public method to parseFast."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "The requested public rename is parseFast, pending confirmation before mutation.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Correction: keep the method name and only optimize its body."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "latest_user_instruction_wins",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "4020e7174120ec332913736d9f7a094ffa17fdffcd2314b78db5a2908ff0f6ce"
+    },
+    {
+      "id": "session-fix-all-v1",
+      "case": "fix_all",
+      "origin": "redacted_observed_failure",
+      "session": {
+        "sessionRef": "session-ref-fix_all",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Criticize the meta-analysis widget."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Three widget defects: stale derived state, duplicate resize listeners, and an unbounded evidence render.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "tool_call",
+          "turnRef": "turn-01",
+          "actionRef": "action-inspect-01",
+          "tool": "kernel.inspect",
+          "argumentsDigest": "sha256:fixture-arguments"
+        },
+        {
+          "seq": 4,
+          "kind": "tool_result",
+          "turnRef": "turn-01",
+          "actionRef": "action-inspect-01",
+          "status": "completed",
+          "receiptRef": "receipt-01",
+          "resultDigest": "sha256:fixture-result"
+        },
+        {
+          "seq": 5,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Can you fix them all?"
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "diagnosis",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "transition_diagnosis_to_implementation",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "067f1300b59dff8454ce39f51c2205c18daf62485515a6d9d188fc0aeeb2e1e6"
+    },
+    {
+      "id": "session-fix-second-v1",
+      "case": "fix_second",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-fix_second",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Identify three defects in the fixture module."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Defect one is a leaked handle. Defect two is non-atomic rollback. Defect three is an uncapped output buffer.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Only fix the second one."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "select_referenced_subset",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "fda2bf211927f27b467ff3518a77a6b31fc72e87d43b4a7c4e06928c259078c4"
+    },
+    {
+      "id": "session-continue-interrupted-v1",
+      "case": "continue_interrupted",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-continue_interrupted",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Add the feature and focused tests."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Feature mutation action-mutation-01 completed; focused tests remain pending after interruption.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "tool_call",
+          "turnRef": "turn-01",
+          "actionRef": "action-mutation-01",
+          "tool": "kernel.act",
+          "argumentsDigest": "sha256:fixture-arguments"
+        },
+        {
+          "seq": 4,
+          "kind": "tool_result",
+          "turnRef": "turn-01",
+          "actionRef": "action-mutation-01",
+          "status": "completed",
+          "receiptRef": "receipt-01",
+          "resultDigest": "sha256:fixture-result"
+        },
+        {
+          "seq": 5,
+          "kind": "interrupt",
+          "turnRef": "turn-01",
+          "reasonClass": "fixture_forced_interrupt",
+          "resumable": true
+        },
+        {
+          "seq": 6,
+          "kind": "restart",
+          "turnRef": "turn-01",
+          "fromProcessRef": "process-01",
+          "toProcessRef": "process-02"
+        },
+        {
+          "seq": 7,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Continue."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": true
+          }
+        ],
+        "terminal": "resume_interrupted_implementation",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "965aca371eb0c2b46446cef94db5ba8cf535d4121bdeae97afbb4517f83d34d7"
+    },
+    {
+      "id": "session-no-repeat-v1",
+      "case": "no_repeat",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-no_repeat",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Create the migration file."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Migration action-mutation-01 completed with receipt receipt-01; only the focused test remains.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "tool_call",
+          "turnRef": "turn-01",
+          "actionRef": "action-mutation-01",
+          "tool": "kernel.act",
+          "argumentsDigest": "sha256:fixture-arguments"
+        },
+        {
+          "seq": 4,
+          "kind": "tool_result",
+          "turnRef": "turn-01",
+          "actionRef": "action-mutation-01",
+          "status": "completed",
+          "receiptRef": "receipt-01",
+          "resultDigest": "sha256:fixture-result"
+        },
+        {
+          "seq": 5,
+          "kind": "checkpoint",
+          "turnRef": "turn-01",
+          "checkpointRef": "checkpoint-alpha",
+          "completedActionRefs": [
+            "action-mutation-01"
+          ]
+        },
+        {
+          "seq": 6,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Now add the focused test."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "implementation",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": true
+          }
+        ],
+        "terminal": "honor_completed_action_receipt",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "c1505568cca1f93aeb75212bbbd903c0eed804da014b0b170d5a88e9e3577d23"
+    },
+    {
+      "id": "session-ambiguous-recall-v1",
+      "case": "ambiguous_recall",
+      "origin": "generic_contract_fixture",
+      "session": {
+        "sessionRef": "session-ref-ambiguous_recall",
+        "initialProcessRef": "process-01",
+        "branchRef": "main",
+        "accountRef": "account-fixture",
+        "routeRef": "wasm-agent.avatar-chat.ui"
+      },
+      "events": [
+        {
+          "seq": 1,
+          "kind": "user",
+          "turnRef": "turn-01",
+          "content": "Compare the two candidate modules."
+        },
+        {
+          "seq": 2,
+          "kind": "assistant",
+          "turnRef": "turn-01",
+          "content": "Candidate parser-alpha owns decoding; parser-beta owns validation. No candidate has yet been selected.",
+          "receiptRefs": []
+        },
+        {
+          "seq": 3,
+          "kind": "compact",
+          "turnRef": "turn-01",
+          "exactTailTurns": 1,
+          "olderContextRef": "context-capsule-01"
+        },
+        {
+          "seq": 4,
+          "kind": "user",
+          "turnRef": "turn-02",
+          "content": "Fix that one."
+        }
+      ],
+      "expectations": {
+        "perTurn": [
+          {
+            "turnRef": "turn-01",
+            "taskClass": "fixture_initial",
+            "mustPreserveCapabilities": true
+          },
+          {
+            "turnRef": "turn-02",
+            "taskClass": "fixture_followup",
+            "mustResolveHistory": true,
+            "mustNotRepeatCompletedActions": false
+          }
+        ],
+        "terminal": "bounded_recall_before_action",
+        "requiredProof": [
+          "session_identity",
+          "turn_identity",
+          "provider_ledger",
+          "tool_ledger",
+          "terminal_status"
+        ]
+      },
+      "taskDigest": "b6199f6be3d8910a732a5f9082f93a456593868d4f9954c2323769726e1edac6"
+    }
+  ]
+}

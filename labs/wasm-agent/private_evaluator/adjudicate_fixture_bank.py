@@ -69,6 +69,32 @@ SEEDS = (
             ],
         },
     },
+    {
+        "fixtureId": "fx_c6837b8d71e2571db5dc",
+        "objective": "can you see this code base?",
+        "split": "golden",
+        "contract": {
+            "nonempty": True,
+            "maxChars": 1800,
+            "containsAnyGroups": [
+                ["code", "codebase", "source", "repository", "repo"],
+                ["see", "access", "inspect", "read", "available"],
+            ],
+        },
+    },
+    {
+        "fixtureId": "fx_375a175b322e310800eb",
+        "objective": "Inspect the Paracelsus node, summarize what it is, current navigability/state, and timeline/activity since creation.",
+        "split": "golden",
+        "contract": {
+            "nonempty": True,
+            "maxChars": 2200,
+            "containsAnyGroups": [
+                ["runtime", "node", "entity", "paracelsus"],
+                ["unavailable", "not available", "cannot", "can't", "limited", "no live"],
+            ],
+        },
+    },
 )
 
 
@@ -184,7 +210,18 @@ def main() -> int:
             and not warnings and row["final_reply_available"] and reply
         )
         self_contained = row["request_class"] in {"conversation", "general_question"}
-        decision = "admit" if evidence_ok and self_contained else "insufficient_context"
+        grounded = row["request_class"] in {"source_investigation", "runtime_inspection"}
+        event_types = {
+            event["type"]
+            for event in fixtures.execute("SELECT type FROM fixture_event WHERE fixture_id=?", (row["fixture_id"],))
+        }
+        grounded_evidence = bool(
+            grounded and row["tool_started_count"] > 0
+            and row["tool_started_count"] == row["tool_finished_count"]
+            and "route.resolved" in event_types
+        )
+        task_stable = self_contained or grounded_evidence
+        decision = "admit" if evidence_ok and task_stable else "insufficient_context"
         contract_json = canonical(seed["contract"])
         dst.execute(
             "INSERT INTO fixture_adjudication VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -204,8 +241,8 @@ def main() -> int:
             ),
             (
                 "semantic-contract-v1", "task-stability",
-                "admit" if self_contained else "insufficient_context",
-                {"selfContained": self_contained, "requestClass": row["request_class"], "contractSha256": sha256_bytes(contract_json.encode())},
+                "admit" if task_stable else "insufficient_context",
+                {"selfContained": self_contained, "groundedEvidence": grounded_evidence, "requestClass": row["request_class"], "contractSha256": sha256_bytes(contract_json.encode())},
             ),
         )
         for judge_id, role, judge_decision, evidence in records:

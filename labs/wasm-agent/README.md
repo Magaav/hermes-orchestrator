@@ -75,6 +75,61 @@ closed if any lane, semantic score, or attribution is missing. Semantic success
 is a mandatory gate; the weighted score compares latency, prompt context,
 provider calls, nonterminal tools, and warnings only among passing lanes.
 
+Loop 4 retains one typed outcome for every exact candidate digest. A candidate
+regression disqualifies only that variant; a complete matrix may rank the
+remaining passing variants and may also terminate cleanly with no winner when
+all nine fail. The deterministic policy tests use temporary artifacts only:
+
+```bash
+python3 labs/wasm-agent/test_learning_harness.py
+```
+
+Every lane now reserves `WASM_AGENT_EVENTS_PATH` for optional adapter-emitted
+JSONL. `agent_trajectory.py` maps accepted search/read/edit/command/test/diff,
+checkpoint, proof, and terminal events into a compact shared field dictionary,
+hashes raw arguments, redacts summaries, drops private-reasoning events, and
+caps bytes and event count. The lane always appends its own terminal event.
+The deterministic fake adapter proves that boundary without a provider or
+container:
+
+```bash
+python3 labs/wasm-agent/test_agent_trajectory_fixture.py
+```
+
+Current external adapter runners do not yet emit these optional trajectories,
+so their lane metadata remains ineligible for strategy mining until a runner is
+wired and independently proven.
+
+Nine-lane semantic and efficiency scores remain reportable without strategy
+events, but `rank-nine-lane-benchmark.py` fails closed for learning: it emits no
+golden-pattern candidates unless the report and every lane are strategy
+comparable, every normalized trajectory is admissible, and tool-call counts are
+observable rather than inferred as zero. The deterministic regression is:
+
+```bash
+python3 labs/wasm-agent/test_strategy_ranking.py
+```
+
+Normalized events now cross the lane boundary with explicit `adapter` or
+lane-owned provenance and a fail-closed completeness classification. Pure
+sequence extraction requires the same observed action motif from at least two
+agents across at least three distinct fixture instances; one benchmark run can
+never manufacture a golden pattern. Raw prompts, reasoning, arguments, and tool
+results remain outside the learning projection.
+
+Multi-turn continuity has a separate twelve-case semantic contract covering
+adjacent references, corrections, topic changes, compaction, restart,
+interruption, and completed mutation receipts:
+
+```bash
+python3 labs/wasm-agent/prove-session-continuity-contract.py
+```
+
+This is static fixture/comparability proof. It deliberately reports
+`session_comparability_pending` until Master:frontier, Codex, Claude Code, and
+Gemini CLI each have an isolated native-session artifact; it is not a live
+cross-agent quality score.
+
 Hermes is packaged without host runtime state or credentials:
 
 ```bash

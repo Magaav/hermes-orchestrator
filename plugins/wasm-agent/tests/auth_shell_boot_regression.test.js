@@ -27,7 +27,8 @@ function publicUrlForFile(filePath) {
 
 function resolveLocalImport(fromPath, specifier) {
   if (!specifier.startsWith(".")) return null;
-  const resolved = path.resolve(path.dirname(fromPath), specifier);
+  const fileSpecifier = specifier.replace(/[?#].*$/, "");
+  const resolved = path.resolve(path.dirname(fromPath), fileSpecifier);
   const candidates = path.extname(resolved)
     ? [resolved]
     : [`${resolved}.js`, path.join(resolved, "index.js")];

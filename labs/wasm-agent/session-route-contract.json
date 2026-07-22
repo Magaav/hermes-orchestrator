@@ -1,0 +1,10 @@
+{
+  "schema": "wasm-agent.safe-lab.session-route-contract.v1",
+  "routeId": "wasm-agent.avatar-chat.ui",
+  "owner": "plugins/wasm-agent",
+  "workspaceRoot": "/source/plugins/wasm-agent",
+  "writableRoot": "/workspace",
+  "capabilities": ["repo.read", "repo.edit", "command.run_bounded", "test.run", "git.diff", "proof.report", "rollback.create"],
+  "authority": {"authenticated": true, "accountScoped": true, "sessionScoped": true, "routeScoped": true, "directInternet": false},
+  "proof": ["session_identity", "turn_identity", "changed_files", "diff", "checks", "provider_ledger", "tool_ledger", "rollback_handle"]
+}

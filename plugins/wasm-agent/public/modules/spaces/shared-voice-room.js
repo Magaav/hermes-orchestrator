@@ -17,7 +17,7 @@ export function sharedVoiceSignalPayload(event, schema = DEFAULT_SIGNAL_SCHEMA) 
 
 export function sharedVoiceSignalIsFresh(event, nowMs = Date.now(), staleMs = DEFAULT_STALE_MS) {
   const created = Date.parse(event?.created_at || "");
-  if (!Number.isFinite(created)) return true;
+  if (!Number.isFinite(created)) return false;
   return nowMs - created <= staleMs;
 }
 

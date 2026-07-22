@@ -30,9 +30,15 @@ def sha256(path: Path) -> str:
 
 
 def source_files() -> list[tuple[Path, Path]]:
-    owned = [SOURCE / name for name in ("__init__.py", "code_memory.py", "evidence.py", "route_contracts.py")]
+    owned = [SOURCE / name for name in (
+        "__init__.py", "budget.py", "code_memory.py", "evidence.py", "route_contracts.py",
+        "controller_v5.py", "session_context.py", "run_control.py", "repository_actions.py",
+        "authority.py", "repository_reads.py", "repository_state.py",
+        "repository_checks.py", "repository_diff.py",
+    )]
     owned.extend(sorted((SOURCE / "v5").glob("*.py")))
     files = [(RUNNER, Path("master-frontier-v5-live-runner.py"))]
+    files.append((ROOT / "labs/wasm-agent/implementation_lab_actions.py", Path("labs/wasm-agent/implementation_lab_actions.py")))
     files.extend((path, Path("plugins/wasm-agent/server/master_frontier") / path.relative_to(SOURCE)) for path in owned)
     return files
 
@@ -44,6 +50,7 @@ def preflight_import(volume: str = VOLUME) -> None:
             "--security-opt", "no-new-privileges", "--user", "10000:10000", "-v", f"{volume}:/adapter:ro",
             "--entrypoint", "python3", IMAGE, "-c",
             "import sys; sys.path.insert(0,'/adapter/plugins/wasm-agent/server'); "
+            "from master_frontier import controller_v5,repository_actions,session_context; "
             "from master_frontier.v5 import loop,trajectory; "
             "state=trajectory.new('probe','probe','hello','fixture'); "
             "outcome=loop.run('hello',{'route_id':'fixture'},state,complete=lambda *_:{'reply':'Hello'},execute=lambda *_:{}); "

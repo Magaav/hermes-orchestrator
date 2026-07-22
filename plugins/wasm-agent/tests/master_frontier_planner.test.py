@@ -80,6 +80,28 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["recall_budget"]["mode"], "on_demand")
         self.assertNotIn("changed_files", contract["proof_required"])
 
+    def test_explicit_implementation_planning_preserves_read_only_decision_contract(self) -> None:
+        envelope = self.route_envelope("fix them all")
+        envelope["objective_kind"] = "implementation_planning"
+        envelope["task_contract"] = {
+            "request_class": "implementation_planning",
+            "objective_kind": "implementation_planning",
+            "declared_classes": ["implementation_planning"],
+            "authority": ["repo.read"],
+            "decision_mode": "llm_autonomous",
+            "completion_mode": "operational_decision",
+        }
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "implementation_planning")
+        self.assertEqual(contract["request_class"], "implementation_planning")
+        self.assertEqual(contract["authority"], ["repo.read"])
+        self.assertEqual(contract["evidence_floor"], "source")
+        self.assertEqual(contract["executor"], "provider_head")
+        self.assertEqual(contract["proof_required"], ["route", "evidence", "decision"])
+        self.assertNotIn("kernel.act", contract["tools_first"])
+
     def test_explicit_answer_directly_proof_prompt_stays_answer_lane(self) -> None:
         envelope = self.route_envelope("avatar-chat quest proof turn one: answer directly with route and token proof only.")
         envelope["objective_kind"] = "conversation"
@@ -105,6 +127,17 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertIn("code.memory.search", contract["tools_first"])
         self.assertIn("kernel.inspect", contract["tools_first"])
 
+    def test_repository_critique_uses_source_modality_even_when_runtime_is_available(self) -> None:
+        contract = planner.task_contract(self.route_envelope(
+            "critisize meta-analysis widget inside realure space"
+        ))
+
+        self.assertEqual(contract["intent"], "diagnosis")
+        self.assertEqual(contract["evidence_floor"], "source")
+        self.assertEqual(contract["route_intent"], "informational")
+        self.assertIn("code.memory.search", contract["tools_first"])
+        self.assertNotIn("kernel.inspect", contract["tools_first"])
+
     def test_free_depth_is_open_budget_hint_not_model_metadata(self) -> None:
         envelope = self.route_envelope("critique your envelope from within")
         envelope["depth"] = "free"
@@ -123,6 +156,20 @@ class MasterFrontierPlannerTests(unittest.TestCase):
 
         self.assertEqual(contract["evidence_floor"], "proof")
         self.assertEqual(contract["route_intent"], "implementation")
+
+    def test_explicit_verification_cannot_be_downgraded_by_diagnosis_wording(self) -> None:
+        envelope = self.route_envelope(
+            "Verify the implementation, inspect the source, run the check, diff, and prove."
+        )
+        envelope["objective_kind"] = "verification"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "verification")
+        self.assertEqual(contract["evidence_floor"], "proof")
+        self.assertEqual(contract["route_intent"], "implementation")
+        self.assertEqual(contract["proof_required"], ["route", "checks", "proof"])
+        self.assertIn("kernel.prove", contract["tools_first"])
 
     def test_runtime_question_gets_runtime_floor(self) -> None:
         contract = planner.task_contract(self.route_envelope("what happened in the node runtime since creation?"))

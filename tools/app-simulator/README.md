@@ -18,6 +18,25 @@ Simulator reports, not source/build success, are the runtime source of truth.
 The loop is `boot -> observe -> act -> assert -> collect evidence -> score ->
 report -> patch`.
 
+## Authenticated Avatar-Chat Live Profiles
+
+`node tools/app-simulator/avatar-paracelsus-live.js` preserves the two-turn
+Paracelsus profile. For the one-turn V5 source-critique regression, run:
+
+```bash
+WASM_AGENT_SIM_LIVE_PROFILE=source-critique \
+WASM_AGENT_SIM_LIVE_PROMPT='critisize meta-analysis widget inside realure space' \
+WASM_AGENT_SIM_LIVE_FOLLOWUP_PROMPT='' \
+node tools/app-simulator/avatar-paracelsus-live.js
+```
+
+The source profile writes `reports/sim/avatar-source-critique-live/latest/`
+and requires V5 source evidence, search/read-only tool receipts, exact bounded
+provider usage, no Hermes/runtime-inspect failure, and no changed files. This is
+a local-development live-provider check: it incurs provider usage and creates
+the deterministic simulator admin in the local auth database. It is not
+production proof.
+
 Useful Android overrides:
 
 ```bash

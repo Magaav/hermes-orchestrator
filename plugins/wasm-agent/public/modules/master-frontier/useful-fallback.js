@@ -16,7 +16,7 @@ function userObjectiveSummary(userMessage = "") {
 
 export function masterFrontierObjectiveKind(userMessage = "") {
   const prompt = normalizedPrompt(userMessage);
-  const implementation = /\b(build|implement|edit|patch|change|fix|repair|create|add|remove|wire|ship)\w*\b/.test(prompt)
+  const implementation = /\b(?:build(?:s|ing)?|built|implement(?:s|ed|ing)?|edit(?:s|ed|ing)?|patch(?:es|ed|ing)?|chang(?:e|es|ed|ing)|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|creat(?:e|es|ed|ing)|add(?:s|ed|ing)?|remov(?:e|es|ed|ing)|wir(?:e|es|ed|ing)|ship(?:s|ped|ping)?)\b/.test(prompt)
     && /\b(file|code|repo|implementation|component|module|route|ui|test|proof|bug|issue|feature)\w*\b/.test(prompt);
   if (implementation) return "implementation";
   if (/\b(debug|diagnos\w*|why|fail\w*|inspect\w*|investigat\w*|audit\w*|review\w*|crit\w*|root[- ]cause)\b/.test(prompt)) {

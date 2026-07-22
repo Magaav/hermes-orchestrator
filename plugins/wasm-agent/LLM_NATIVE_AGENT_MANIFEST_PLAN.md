@@ -1,8 +1,9 @@
 # LLM-Native wasm-agent Manifest Plan
 
 > Historical V1/V2 plan. It is not the current execution contract. Master:frontier
-> V3 is model-led Codex-style execution using canonical C3 cyphers and
-> load-on-demand tools; see `MASTER_FRONTIER_V3.md`. Autonomous planner,
+> V5 is the default persistent natural-tool execution lane; see
+> `MASTER_FRONTIER_V5.md`. V3 remains the explicit C3 compatibility path.
+> Autonomous planner,
 > `tools_first`, and executor-selection language below must not be reintroduced
 > into the V3 hot path.
 

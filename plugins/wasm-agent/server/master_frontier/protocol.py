@@ -54,7 +54,7 @@ KERNEL_ACTIONS: tuple[dict[str, str], ...] = (
     {
         "id": "kernel.inspect",
         "type": "kernel",
-        "description": "Inspect bounded route-scoped route, files, symbols, proof, cost, transcript, diff, capabilities, or runtime_entity state; source objects require source discovery/read tools.",
+        "description": "Inspect bounded route-scoped files, symbols, proof, cost, capabilities, or runtime entity state.",
     },
     {
         "id": "kernel.act",

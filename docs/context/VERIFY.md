@@ -285,6 +285,41 @@ idle-gated when the runtime supports it.
 Every substantive reply should end with a next-step phase: one concrete next
 action, its proof/control class, and the reason a rebuild is or is not required.
 
+The local Master:frontier V5 coding/continuity evolution is composed by:
+
+```bash
+python3 tools/context/prove-master-frontier-v5-evolution.py
+```
+
+This checks compact context economics, evidence-modality and route/task
+authority coherence, per-call head limits plus advisory/explicit input-reserved
+hard provider budgets, exact runtime entity scope, immediate same-route grounded
+follow-up action lineage, host-enforced completion-only synthesis,
+modality-aware completion/retry recovery, streaming late-range reads and route-owned search
+coverage, durable recoverable transactional patches, registered argv execution
+with bounded leak handling, untracked-aware diff receipts, route-wide
+revision-bound proof, compact capacity-checked restart ledgers, bounded startup
+recovery, browser checkpoint preservation, monolith delegation, deterministic
+agent-trajectory normalization, and fail-closed strategy-candidate ranking. It
+is local static/behavioral proof only; it does not prove deployed provider
+behavior, production operation, or real external-agent trajectory quality.
+
+The registered generic runtime snapshot boundary is validated with:
+
+```bash
+python3 plugins/wasm-agent/tests/master_frontier_runtime_snapshot.test.py
+python3 plugins/wasm-agent/tests/master_frontier_runtime_snapshot_collector.test.py
+python3 plugins/wasm-agent/tests/master_frontier_runtime_proof.test.py
+python3 plugins/wasm-agent/tests/master_frontier_runtime_actions.test.py
+python3 tools/context/prove-runtime-snapshot-contract.py
+```
+
+This proves schema bounds, redaction, freshness trust, digest binding, compact
+projection, read-only user/route-scoped run-history aggregation, opaque proof
+resolution, and the bounded runtime-action contracts used by `kernel.inspect`.
+It does not prove current live state, a deployed authenticated invocation, host
+control, or production behavior.
+
 ### Android Live Control Example
 
 After an APK/WebView bundle that contains the Android native control agent is

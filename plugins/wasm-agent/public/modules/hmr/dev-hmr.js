@@ -3,6 +3,17 @@ const HMR_REVISION_STORAGE_KEY = "wasmAgent.devHmr.revision.v1";
 const HMR_ENDPOINT = `/modules/hmr/events?client=${encodeURIComponent(HMR_CLIENT_REVISION)}`;
 let hmrSource = null;
 
+async function enabledByDeployment() {
+  try {
+    const response = await fetch("/config.json", { cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) return false;
+    const config = await response.json();
+    return config?.features?.devHmr?.enabled === true;
+  } catch {
+    return false;
+  }
+}
+
 function readStoredRevision() {
   try {
     return localStorage.getItem(HMR_REVISION_STORAGE_KEY) || "";
@@ -40,9 +51,10 @@ function reloadPage(paths, revision = "") {
   window.location.reload();
 }
 
-export function startDevHmr() {
+export async function startDevHmr() {
   if (hmrSource) return;
   if (!("EventSource" in window)) return;
+  if (!await enabledByDeployment()) return;
   const source = new EventSource(HMR_ENDPOINT);
   hmrSource = source;
   source.addEventListener("ready", (event) => {

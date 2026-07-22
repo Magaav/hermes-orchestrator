@@ -250,7 +250,7 @@ def main() -> int:
             payload = parsed(event["payload_json"])
             projection = {
                 key: find_first(payload, key)
-                for key in ("code", "error_code", "tool", "operation", "status", "decision", "reason", "changed_file_count", "reply_chars")
+                for key in ("code", "error_code", "tool", "operation", "status", "decision", "reason", "route_id", "workspace_root", "changed_file_count", "reply_chars")
                 if find_first(payload, key) not in (None, "", [], {})
             }
             dst.execute("INSERT INTO fixture_event VALUES (?,?,?,?,?)", (

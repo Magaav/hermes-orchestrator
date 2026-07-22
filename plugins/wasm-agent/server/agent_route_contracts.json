@@ -20,6 +20,15 @@
         "public/app.js",
         "public/index.html"
       ],
+      "entities": [
+        {
+          "id": "wasm-agent.avatar-chat.ui",
+          "name": "Avatar Chat Run History",
+          "kind": "scoped-run-history",
+          "match_terms": ["avatar chat", "avatar-chat"],
+          "proof": ["scoped_run_history", "live_state_not_collected"]
+        }
+      ],
       "lookup_handles": [
         "route.files",
         "route.symbols",
@@ -60,14 +69,18 @@
           "**/*.zip"
         ],
         "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
         "max_total_bytes": 8000000,
         "max_results": 12
       },
       "budget": {
         "head_tokens_max": 3000,
-        "provider_tokens_max": 8000,
+        "provider_tokens_max": 20000,
         "api_calls_max": 6,
-        "wall_ms_max": 90000
+        "wall_ms_max": 90000,
+        "provider_call_ms_max": 90000,
+        "heartbeat_ms_max": 15000,
+        "task_lease_ms_max": 43200000
       },
       "proof": [
         "route_id",
@@ -98,6 +111,15 @@
         "server/static_server.py",
         "tests/agent_run_store.test.py",
         "tests/provider_proxy.test.py"
+      ],
+      "entities": [
+        {
+          "id": "wasm-agent.agent-run.timeline",
+          "name": "Agent Run Timeline History",
+          "kind": "scoped-run-history",
+          "match_terms": ["agent run timeline", "agent-run-timeline"],
+          "proof": ["scoped_run_history", "live_state_not_collected"]
+        }
       ],
       "lookup_handles": [
         "route.files",
@@ -140,6 +162,7 @@
           "**/*.zip"
         ],
         "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
         "max_total_bytes": 8000000,
         "max_results": 12
       },
@@ -219,6 +242,7 @@
           "**/*.zip"
         ],
         "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
         "max_total_bytes": 3000000,
         "max_results": 12
       },
@@ -322,6 +346,7 @@
           "**/*.zip"
         ],
         "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
         "max_total_bytes": 8000000,
         "max_results": 12
       },
@@ -359,6 +384,15 @@
         "server/README.md",
         "public/android-app.js",
         "tests/bridge_routes.test.py"
+      ],
+      "entities": [
+        {
+          "id": "wasm-agent.native-control",
+          "name": "Native Control Run History",
+          "kind": "scoped-run-history",
+          "match_terms": ["native control", "native-control"],
+          "proof": ["scoped_run_history", "live_state_not_collected"]
+        }
       ],
       "lookup_handles": [
         "route.files",
@@ -400,6 +434,7 @@
           "**/*.zip"
         ],
         "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
         "max_total_bytes": 8000000,
         "max_results": 12
       },

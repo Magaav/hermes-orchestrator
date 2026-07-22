@@ -6,30 +6,35 @@ const INTEGRITY_SIGNAL_GROUPS = [
     label: "Industry funding / COI",
     weight: 3,
     terms: ["industry funded", "sponsored by", "funded by", "pharmaceutical", "pharma", "conflict of interest", "consultant", "advisory board", "honoraria", "employee of", "stock", "equity"],
+    negation: ["no industry funding", "no pharmaceutical funding", "no conflict of interest", "no funding", "unfunded", "independent funding", "no commercial funding"],
   },
   {
     id: "design",
     label: "Design weakness",
     weight: 2,
     terms: ["open label", "single arm", "observational", "retrospective", "post hoc", "subgroup", "underpowered", "small sample", "short follow-up", "early termination"],
+    negation: [],
   },
   {
     id: "endpoint",
     label: "Endpoint / reporting risk",
     weight: 2,
     terms: ["surrogate endpoint", "composite endpoint", "relative risk", "no absolute risk", "secondary endpoint", "exploratory", "p value", "selective reporting"],
+    negation: [],
   },
   {
     id: "replication",
     label: "Replication gap",
     weight: 2,
     terms: ["not replicated", "no independent replication", "single center", "unverified", "preprint", "unpublished", "abstract only"],
+    negation: [],
   },
   {
     id: "safety",
     label: "Safety opacity",
     weight: 2,
     terms: ["adverse events", "serious adverse", "withdrawal", "dropout", "missing data", "loss to follow-up", "safety signal"],
+    negation: [],
   },
   {
     id: "favorable",
@@ -39,10 +44,23 @@ const INTEGRITY_SIGNAL_GROUPS = [
   },
 ];
 
+function migrateState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const version = raw._v || 0;
+  let migrated = raw;
+  // v1: ensure required fields exist
+  if (version < 1) {
+    migrated = { ...migrated, _v: 1 };
+  }
+  return migrated;
+}
+
 function readState() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {};
-  } catch {
+    const raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    return migrateState(raw);
+  } catch (e) {
+    console.warn("[meta-analysis] Failed to read state; starting fresh:", e?.message || e);
     return {};
   }
 }
@@ -50,7 +68,9 @@ function readState() {
 function writeState(state) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch {}
+  } catch (e) {
+    console.error("[meta-analysis] Failed to write state; changes may be lost:", e?.message || e);
+  }
 }
 
 function subjectId(subject) {
@@ -179,10 +199,10 @@ function initMetaAnalysisWidget() {
         return `
         <div class="ma-queue-item ${item.collapsed ? "is-collapsed" : ""}" data-id="${escapeHtml(item.id)}">
           <div class="ma-queue-row">
-            <button class="ma-collapse-button" data-action="toggle" data-idx="${i}" title="${item.collapsed ? "Expand" : "Minimize"} subject" aria-label="${item.collapsed ? "Expand" : "Minimize"} ${escapeHtml(item.subject)}">${item.collapsed ? "+" : "-"}</button>
+            <button class="ma-collapse-button" data-action="toggle" data-idx="${i}" title="${item.collapsed ? "Expand" : "Minimize"} subject" aria-label="${item.collapsed ? "Expand" : "Minimize"} ${escapeHtml(item.subject)}" aria-expanded="${item.collapsed ? "false" : "true"}">${item.collapsed ? "+" : "-"}</button>
             <button class="ma-subject-button" data-action="select" data-idx="${i}" title="Use subject">${i + 1}. ${escapeHtml(item.subject)}</button>
             ${badge}
-            <button data-action="remove" data-idx="${i}" title="Remove subject">x</button>
+            <button data-action="remove" data-idx="${i}" title="Remove subject" aria-label="Remove ${escapeHtml(item.subject)}">x</button>
           </div>
           ${item.collapsed ? "" : `<pre class="ma-subject-result">${escapeHtml(item.result || "No findings yet.")}</pre>`}
         </div>`;
@@ -209,6 +229,8 @@ function initMetaAnalysisWidget() {
   function setStatus(text, mode = "") {
     statusEl.textContent = text;
     statusEl.dataset.mode = mode;
+    statusEl.setAttribute("role", mode === "error" ? "alert" : "status");
+    statusEl.setAttribute("aria-live", mode === "error" ? "assertive" : "polite");
   }
 
   async function assertParacelsusReady() {

@@ -19,8 +19,8 @@ LAB = Path(__file__).resolve().parent
 REGISTRY = LAB / "harness-adapters.json"
 SOURCE_VOLUME = "wasm-agent-safe-lab-local-v11"
 FIXTURE_VOLUME = "wasm-agent-safe-lab-output-v1"
-ADJUDICATION_VOLUME = "wasm-agent-safe-lab-adjudication-v1"
-ADJUDICATION_PATH = LAB / "staging/avatar-chat-adjudication-v1.sqlite3"
+ADJUDICATION_VOLUME = "wasm-agent-safe-lab-adjudication-v3"
+ADJUDICATION_PATH = LAB / "staging/avatar-chat-adjudication-v3.sqlite3"
 SAFE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{2,80}$")
 
 
@@ -32,16 +32,23 @@ def adapter_for(slot: str) -> tuple[dict, dict]:
     return registry["modelContract"], matches[0]
 
 
+def report_path_for(explicit: str | None, slot: str, adapter_id: str = "") -> Path:
+    if explicit:
+        return (ROOT / explicit).resolve()
+    owner = adapter_id if SAFE_ID.fullmatch(adapter_id) else slot
+    return ROOT / "reports/context/latest" / f"live-fixture-{owner}-result.json"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--slot", default="harness-03")
     parser.add_argument("--fixture-id", default="fx_d3154de08df6150be9c9")
-    parser.add_argument("--report", default="reports/context/latest/live-fixture-hermes-result.json")
+    parser.add_argument("--report")
     parser.add_argument("--candidate-adapter", help="Host-only exact candidate projection JSON; does not promote the registry.")
     args = parser.parse_args()
     if not SAFE_ID.fullmatch(args.fixture_id) or not SAFE_ID.fullmatch(args.slot):
         raise SystemExit("unsafe slot or fixture id")
-    report_path = (ROOT / args.report).resolve()
+    report_path = report_path_for(args.report, args.slot)
     host = SafeLabHost("live-fixture")
     errors: list[str] = []
     benchmark_errors: list[str] = []
@@ -57,6 +64,7 @@ def main() -> int:
     started = time.monotonic()
     try:
         model_contract, adapter = adapter_for(args.slot)
+        report_path = report_path_for(args.report, args.slot, str(adapter.get("id") or ""))
         if args.candidate_adapter:
             candidate_path = (ROOT / args.candidate_adapter).resolve()
             if ROOT not in candidate_path.parents or not candidate_path.is_file():
@@ -98,7 +106,8 @@ def main() -> int:
             "--fixture-id", args.fixture_id, "--output", "/task/task.json",
         ], timeout=30)
         if materialized.returncode != 0:
-            raise RuntimeError(materialized.stderr.strip() or "fixture task materialization failed")
+            detail = (materialized.stderr.strip() or materialized.stdout.strip())[-1200:]
+            raise RuntimeError(detail or "fixture task materialization failed")
         task = json.loads(host.read_volume_file(task_volume, "task.json"))
         if not (task.get("adjudication") or {}).get("executionAllowed"):
             raise RuntimeError("fixture adjudication does not allow execution")
@@ -164,6 +173,11 @@ def main() -> int:
             errors.append("gateway did not prove exact GLM-5.2 for every upstream call")
         if len(successful) > int((task.get("budgets") or {}).get("maxProviderCalls") or 0):
             errors.append("fixture provider-call budget exceeded")
+        grounded_class = str((task.get("fixture") or {}).get("requestClass") or "") in {
+            "source_investigation", "runtime_inspection",
+        }
+        if grounded_class and not any(int(item.get("toolCallCount") or 0) > 0 for item in successful):
+            benchmark_errors.append("grounded fixture completed without fresh tool evidence")
         if any(int(item.get("duplicateOrdinal") or 0) > 2 for item in receipts):
             errors.append("identical request duplicate budget exceeded")
         if any(item.get("duplicateClass") == "waste_blocked" for item in receipts):

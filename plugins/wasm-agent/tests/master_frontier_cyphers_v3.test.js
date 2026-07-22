@@ -28,7 +28,7 @@ assert(!values.masterFrontierV3Instructions().includes(">q q='term'"));
 assert(values.masterFrontierV3Instructions().includes("with no prose"));
 assert(!values.masterFrontierV3Instructions().includes('{"c":code,"a":args}'));
 assert(values.masterFrontierV3Instructions().includes("reason like Codex"));
-assert(app.includes("schema: MASTER_FRONTIER_V3_SCHEMA"));
+assert(app.includes("schema: protocolSelection.schema || MASTER_FRONTIER_V3_SCHEMA"));
 assert(app.includes("instructions: masterFrontierV3Instructions()"));
 assert(!/objective_kind:\s*masterFrontierObjectiveKind/.test(app));
 console.log("Master:frontier C3 browser contract: PASS");

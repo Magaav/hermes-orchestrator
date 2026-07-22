@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -44,10 +45,16 @@ def provider_result(payload: dict[str, Any]) -> dict[str, Any]:
         "reply": str(message.get("content") or "").strip(),
         "tool_calls": calls,
         "usage": payload.get("usage") if isinstance(payload.get("usage"), dict) else {},
+        "finish_reason": str(choice.get("finish_reason") or ""),
     }
 
 
 def route_contract(task: dict[str, Any]) -> dict[str, Any]:
+    if task.get("schema") == "wasm-agent.safe-lab.implementation-task.v1":
+        route = task.get("route")
+        if not isinstance(route, dict) or route.get("workspace_root") != "/workspace/repo":
+            raise RuntimeError("implementation task lacks its bounded workspace route")
+        return route
     variant_path = Path("/adapter/variant-contract.json")
     variant = json.loads(variant_path.read_text(encoding="utf-8")) if variant_path.is_file() else {}
     request_class = str((task.get("fixture") or {}).get("requestClass") or "")
@@ -86,15 +93,17 @@ def route_contract(task: dict[str, Any]) -> dict[str, Any]:
 def validate_environment(task: dict[str, Any]) -> tuple[str, str, int, int]:
     endpoint = os.environ.get("FRONTIER_ENDPOINT", "").strip().rstrip("/")
     token = os.environ.get("OPENAI_API_KEY", "")
-    if task.get("schema") != "wasm-agent.safe-lab.fixture-task.v1" or not task.get("taskDigest"):
+    if task.get("schema") not in {
+        "wasm-agent.safe-lab.fixture-task.v1", "wasm-agent.safe-lab.implementation-task.v1",
+    } or not task.get("taskDigest"):
         raise RuntimeError("invalid digest-bound fixture task")
     if os.environ.get("FRONTIER_MODEL") != "frank/GLM-5.2":
         raise RuntimeError("exact model contract missing")
     if not endpoint or not token:
         raise RuntimeError("run-scoped broker endpoint or token missing")
     budgets = task.get("budgets") if isinstance(task.get("budgets"), dict) else {}
-    maximum = min(4096, max(256, int(budgets.get("maxOutputTokensPerCall") or 1024)))
-    timeout = min(180, max(1, int(budgets.get("wallClockSeconds") or 180)))
+    maximum = min(8192, max(256, int(budgets.get("maxOutputTokensPerCall") or 1024)))
+    timeout = min(180, max(1, int(budgets.get("providerCallTimeoutSeconds") or budgets.get("wallClockSeconds") or 180)))
     return endpoint, token, maximum, timeout
 
 
@@ -105,10 +114,11 @@ def main() -> int:
     task = json.loads(Path(args.task).read_text(encoding="utf-8"))
     endpoint, token, maximum, timeout = validate_environment(task)
     sys.path.insert(0, str(ADAPTER_SERVER))
+    from master_frontier import repository_state  # noqa: PLC0415
     from master_frontier.v5 import context, loop, policy, tools, trajectory  # noqa: PLC0415
     from master_frontier.v5.errors import V5Error  # noqa: PLC0415
 
-    objective = str(task.get("prompt") or "").strip()
+    objective = str(task.get("prompt") or task.get("objective") or "").strip()
     if not objective:
         raise SystemExit("fixture prompt missing")
     route = route_contract(task)
@@ -117,11 +127,15 @@ def main() -> int:
     )
 
     def complete(messages: list[dict[str, str]], _index: int) -> dict[str, Any]:
+        queued = state.get("queued_tool_calls") if isinstance(state.get("queued_tool_calls"), list) else []
+        if queued:
+            call, state["queued_tool_calls"] = queued[0], queued[1:]
+            return {"reply": "", "tool_calls": [call], "usage": {}, "_mf5_replayed_tool_call": True}
         payload: dict[str, Any] = {
             "model": "glm-5.2", "messages": messages, "max_tokens": maximum, "stream": False,
         }
         if not context.completion_only(state, route):
-            payload.update({"tools": policy.provider_tools(), "tool_choice": "auto"})
+            payload.update({"tools": policy.active_provider_tools(route, state), "tool_choice": "auto", "parallel_tool_calls": False})
         request = urllib.request.Request(
             endpoint + "/chat/completions", data=json.dumps(payload, separators=(",", ":")).encode(), method="POST",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
@@ -145,7 +159,28 @@ def main() -> int:
             raise ProviderFailure("provider_output_invalid", "Broker response was not an object.")
         return provider_result(payload_out)
 
+    implementation_actions = None
+    if task.get("schema") == "wasm-agent.safe-lab.implementation-task.v1":
+        os.environ["HERMES_WASM_AGENT_REPOSITORY_TRANSACTION_DIR"] = "/workspace/.mf5-transactions"
+        sys.path.insert(0, "/adapter/labs/wasm-agent")
+        from implementation_lab_actions import ImplementationLabActions  # noqa: PLC0415
+        implementation_actions = ImplementationLabActions(route)
+
+    events_path = Path(os.environ.get("WASM_AGENT_EVENTS_PATH", ""))
+
     def execute(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if implementation_actions is not None:
+            observed = tools.execute(name, arguments, route, invoke=implementation_actions.invoke)
+            if events_path.is_absolute():
+                event = {
+                    "kind": name, "status": "ok" if observed.get("ok") else "failed", "tool": name,
+                    "path": arguments.get("path"),
+                    "argumentsDigest": hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                    "summary": observed.get("summary"), "changedFiles": observed.get("changed_files"),
+                }
+                with events_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+            return observed
         return tools.execute(
             name, arguments, route,
             invoke=lambda _tool, _arguments: {
@@ -156,7 +191,10 @@ def main() -> int:
         )
 
     try:
-        outcome = loop.run(objective, route, state, complete=complete, execute=execute)
+        outcome = loop.run(
+            objective, route, state, complete=complete, execute=execute,
+            verify_worktree=lambda ledger: repository_state.verify(route, ledger.get("postimages") or {}),
+        )
     except V5Error as exc:
         print(json.dumps({"code": exc.code, "message": str(exc)}, separators=(",", ":")), file=sys.stderr)
         return 1

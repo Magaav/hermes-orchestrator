@@ -329,6 +329,11 @@ class AgentRunStoreTest(unittest.TestCase):
                 summary="checkpoint",
                 payload={"envelope": {"objective": "Hello"}},
             )
+            with static_server.auth_connect() as connection:
+                row = connection.execute("SELECT request_summary_json FROM agent_run_tb WHERE run_id=?", (run["run_id"],)).fetchone()
+                summary = json.loads(row["request_summary_json"]); summary["worker"] = {"host": "dead-host", "pid": 1, "start": "dead"}
+                connection.execute("UPDATE agent_run_tb SET request_summary_json=?,updated_at=0 WHERE run_id=?", (json.dumps(summary), run["run_id"]))
+                connection.commit()
             static_server.mark_interrupted_agent_runs(self.server)
 
             interrupted = static_server.read_agent_run(self.user, run["run_id"])["run"]
@@ -343,6 +348,40 @@ class AgentRunStoreTest(unittest.TestCase):
             events = static_server.read_agent_run_events(self.user, run["run_id"])["events"]
             self.assertEqual(events[-1]["type"], "run.error")
 
+    def test_restart_reconciliation_pages_without_skipping_runs(self) -> None:
+        runs = []
+        with patch.dict(os.environ, self.env, clear=True):
+            for index in range(3):
+                run, _created = static_server.begin_agent_run(
+                    self.server,
+                    {
+                        "session_id": "agent_session",
+                        "turn_id": f"turn-paged-{index}",
+                        "message": "Hello",
+                    },
+                    user=self.user,
+                )
+                runs.append(run)
+            with static_server.auth_connect() as connection:
+                for run in runs:
+                    row = connection.execute(
+                        "SELECT request_summary_json FROM agent_run_tb WHERE run_id=?",
+                        (run["run_id"],),
+                    ).fetchone()
+                    summary = json.loads(row["request_summary_json"])
+                    summary["worker"] = {"host": "dead-host", "pid": 1, "start": "dead"}
+                    connection.execute(
+                        "UPDATE agent_run_tb SET request_summary_json=?,updated_at=0 WHERE run_id=?",
+                        (json.dumps(summary), run["run_id"]),
+                    )
+                connection.commit()
+
+            with patch.object(static_server.master_frontier_run_recovery, "RECONCILE_BATCH_SIZE", 1):
+                static_server.mark_interrupted_agent_runs(self.server)
+
+            statuses = [static_server.read_agent_run(self.user, run["run_id"])["run"]["status"] for run in runs]
+            self.assertEqual(statuses, ["interrupted", "interrupted", "interrupted"])
+
     def test_auxiliary_server_startup_does_not_mark_running_run_interrupted(self) -> None:
         primary = SimpleNamespace(server_port=8877)
         auxiliary = SimpleNamespace(server_port=40287)
@@ -352,6 +391,18 @@ class AgentRunStoreTest(unittest.TestCase):
 
         with patch.dict(os.environ, {**self.env, "HERMES_WASM_AGENT_MARK_INTERRUPTED_ON_STARTUP": "1"}, clear=True):
             self.assertTrue(static_server.should_mark_interrupted_agent_runs_on_startup(auxiliary))
+
+        with patch.dict(os.environ, {**self.env, "HERMES_WASM_AGENT_DEPLOYMENT_MODE": "cloud"}, clear=True):
+            self.assertTrue(static_server.should_mark_interrupted_agent_runs_on_startup(auxiliary))
+
+    def test_startup_recovery_preserves_run_owned_by_live_worker(self) -> None:
+        body = {"session_id": "agent_session", "turn_id": "turn-live-worker", "message": "Hello"}
+        with patch.dict(os.environ, self.env, clear=True):
+            run, _created = static_server.begin_agent_run(self.server, body, user=self.user)
+            static_server.mark_interrupted_agent_runs(self.server)
+            current = static_server.read_agent_run(self.user, run["run_id"])["run"]
+            self.assertEqual(current["status"], "running")
+            static_server.finish_agent_run(self.server, run["run_id"], status="cancelled", error={"code":"test_cleanup"})
 
     def test_direct_head_timeline_events_are_compact_and_replayable(self) -> None:
         admin_user = {"id": "101", "role": "admin", "email": "admin@example.test"}

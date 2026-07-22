@@ -1,0 +1,23 @@
+{
+  "slot": "harness-01",
+  "id": "master-frontier-v5",
+  "displayName": "V5 grounded evidence candidate",
+  "executable": "python3",
+  "adapterVersion": "v5-a1a6b15498ea",
+  "adapterVolume": "wasm-agent-v5-grounded-evidence-v3",
+  "adapterArtifactSha256": "a1a6b15498ea0e2f452c37f077890a5ca9872f9f37239408b6586186baebf221",
+  "candidateDigest": "a1a6b15498ea0e2f452c37f077890a5ca9872f9f37239408b6586186baebf221",
+  "modelContractStatus": "verified",
+  "toolAuthorityStatus": "verified",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "verificationArtifact": "reports/context/latest/v5-grounded-evidence-package.json",
+  "liveCommand": [
+    "python3",
+    "/adapter/master-frontier-v5-live-runner.py",
+    "--task",
+    "{task}"
+  ],
+  "liveReady": true,
+  "benchmarkReady": false,
+  "promotionStatus": "suite_pending"
+}

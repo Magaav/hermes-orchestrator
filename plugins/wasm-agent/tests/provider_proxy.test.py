@@ -179,6 +179,45 @@ class ProviderProxyTests(unittest.TestCase):
     def admin(self) -> dict[str, Any]:
         return {"id": 1, "role": "admin", "email": "admin@example.test"}
 
+    def test_unauthenticated_runtime_inspect_stops_before_tool_and_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            server_mod, "authenticated_request_user", return_value=None,
+        ), patch.object(server_mod, "agent_kernel_tool") as kernel_tool, patch.object(
+            server_mod.master_frontier_runtime_inspect.runtime_actions.runtime_snapshot_collector,
+            "collect",
+        ) as collect:
+            root = Path(tmp)
+            server = server_mod.WasmAgentServer(
+                ("127.0.0.1", 0), server_mod.WasmAgentHandler,
+                plugin_root=PLUGIN_ROOT, public_root=PLUGIN_ROOT / "public",
+                state_dir=root / "state", bridge_url="http://127.0.0.1:8790",
+                browser_timeout_sec=1.0,
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                request = Request(
+                    f"http://127.0.0.1:{server.server_address[1]}/agent/tools/kernel.inspect",
+                    data=json.dumps({
+                        "route_id": "test.kernel.contract",
+                        "inspect": ["runtime"],
+                        "runtime_action": {
+                            "name": "runtime.snapshot.get",
+                            "arguments": {"route_id": "test.kernel.contract", "entity_id": "runtime-a"},
+                        },
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with self.assertRaises(HTTPError) as denied:
+                    urlopen(request, timeout=5)
+                payload = json.loads(denied.exception.read().decode("utf-8"))
+            finally:
+                server.shutdown(); server.server_close(); thread.join(timeout=5)
+        self.assertEqual(denied.exception.code, 401)
+        self.assertEqual(payload["error"]["code"], "auth_required")
+        kernel_tool.assert_not_called()
+        collect.assert_not_called()
+
     def test_direct_envelope_preserves_declared_conversation_objective_kind(self) -> None:
         envelope = server_mod.direct_envelope_from_body({
             "envelope": {
@@ -1377,7 +1416,8 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertEqual(patched["changed_files"], ["app.py"])
             self.assertIn("omega = 4", source_path.read_text(encoding="utf-8"))
             self.assertTrue(focused["ok"])
-            self.assertIn("focused-ok", focused["stdout"])
+            self.assertIn("focused-ok", focused["stdout"]["head"])
+            self.assertFalse(focused["stdout"]["truncated"])
             self.assertEqual(diff["changed_files"][0]["path"], "app.py")
             self.assertFalse(code_memory["ok"])
             self.assertEqual(code_memory["code"], "code_memory_unavailable")
@@ -2017,6 +2057,7 @@ class ProviderProxyTests(unittest.TestCase):
                     "likely_paths": ["kernel.txt"],
                     "lookup_handles": ["route.files", "route.symbols", "run.timeline", "cost.status"],
                     "caps": ["repo.read", "repo.edit", "test.run", "runtime.inspect", "proof.report"],
+                    "entities": [{"id": "runtime-a", "name": "Runtime A", "kind": "agent"}],
                     "provider_policy": {"default": "local-first", "hermes": "bounded-skill-only"},
                     "budget": {"head_tokens_max": 100, "provider_tokens_max": 200, "api_calls_max": 2},
                     "proof": ["route_id", "checks", "token_ledger"],
@@ -2041,6 +2082,7 @@ class ProviderProxyTests(unittest.TestCase):
                         "session_id": "kernel-quest",
                         "turn_id": "kernel-turn",
                         "message": "kernel proof",
+                        "route_id": "test.kernel.contract",
                         "mode": "direct-head",
                         "target_node": "direct-head",
                     },
@@ -2072,8 +2114,48 @@ class ProviderProxyTests(unittest.TestCase):
                         "route_id": "test.kernel.contract",
                         "inspect": ["map", "files", "symbols", "runtime"],
                         "query": "alpha",
+                        "runtime_action": {
+                            "name": "runtime.snapshot.get",
+                            "arguments": {"route_id": "test.kernel.contract", "entity_id": "runtime-a"},
+                        },
                     },
                     user=self.admin(),
+                )
+                snapshot_observation = next(item for item in inspected["observations"] if item["kind"] == "runtime_entity")
+                proof_id = snapshot_observation["result"]["action_result"]["snapshot"]["p"][0]["id"]
+                proof_inspected = server_mod.agent_kernel_tool(
+                    fake_server,
+                    "/agent/tools/kernel.inspect",
+                    {
+                        "route_id": "test.kernel.contract",
+                        "inspect": ["runtime"],
+                        "runtime_action": {
+                            "name": "runtime.proof.get",
+                            "arguments": {
+                                "route_id": "test.kernel.contract",
+                                "entity_id": "runtime-a",
+                                "proof_id": proof_id,
+                            },
+                        },
+                    },
+                    user=self.admin(),
+                )
+                cross_user_inspected = server_mod.agent_kernel_tool(
+                    fake_server,
+                    "/agent/tools/kernel.inspect",
+                    {
+                        "route_id": "test.kernel.contract",
+                        "inspect": ["runtime"],
+                        "runtime_action": {
+                            "name": "runtime.proof.get",
+                            "arguments": {
+                                "route_id": "test.kernel.contract",
+                                "entity_id": "runtime-a",
+                                "proof_id": proof_id,
+                            },
+                        },
+                    },
+                    user=self.user(),
                 )
                 acted = server_mod.agent_kernel_tool(
                     fake_server,
@@ -2111,6 +2193,21 @@ class ProviderProxyTests(unittest.TestCase):
             self.assertTrue(any(item["kind"] == "symbols" for item in inspected["observations"]))
             runtime_observation = next(item for item in inspected["observations"] if item["kind"] == "runtime_entity")
             self.assertTrue(runtime_observation["result"]["capabilities"]["runtime_inspect"])
+            self.assertEqual(
+                [item["name"] for item in runtime_observation["result"]["actions"]],
+                ["runtime.snapshot.get", "runtime.proof.get"],
+            )
+            self.assertTrue(runtime_observation["result"]["action_result"]["ok"])
+            self.assertEqual(runtime_observation["result"]["action_result"]["snapshot"]["e"]["id"], "runtime-a")
+            proof_observation = next(item for item in proof_inspected["observations"] if item["kind"] == "runtime_entity")
+            self.assertTrue(proof_observation["result"]["action_result"]["ok"])
+            self.assertEqual(proof_observation["result"]["action_result"]["proof"]["proof"]["id"], proof_id)
+            self.assertEqual(proof_observation["result"]["action_result"]["proof"]["entity"]["id"], "runtime-a")
+            cross_user_observation = next(item for item in cross_user_inspected["observations"] if item["kind"] == "runtime_entity")
+            self.assertEqual(
+                cross_user_observation["result"]["action_result"],
+                {"ok": False, "code": "runtime_proof_not_found"},
+            )
             self.assertGreaterEqual(runtime_observation["result"]["run_count"], 1)
             self.assertEqual(inspected["unknowns"][0]["code"], "entity_not_observed")
             self.assertEqual(inspected["root_cause_class"], "inspected_with_unknowns")

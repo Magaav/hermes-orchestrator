@@ -38,4 +38,9 @@ def require_resume(original: str, body: dict[str, Any]) -> str:
 
 def request_fields(body: dict[str, Any]) -> dict[str, str]:
     protocol = select(body)
-    return {"protocol": protocol, "investigation_mode": V4_FLAG if protocol == V4 else ""}
+    route_id = str(body.get("route_id") or "").strip()[:160]
+    return {
+        "protocol": protocol,
+        "investigation_mode": V4_FLAG if protocol == V4 else "",
+        **({"route_id": route_id} if route_id else {}),
+    }

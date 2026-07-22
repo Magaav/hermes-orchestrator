@@ -8,7 +8,7 @@ import { masterFrontierObjectiveKind, masterFrontierUsefulFallback } from "./mod
 import { masterFrontierExplicitProtocol, masterFrontierProtocolRequest } from "./modules/master-frontier/source-investigation.js";
 import { MASTER_FRONTIER_V3_SCHEMA, masterFrontierV3Instructions, masterFrontierV3OutputBudget } from "./modules/master-frontier/cyphers-v3.js";
 import { isMasterFrontierTimelineAction } from "./modules/master-frontier/timeline.js";
-import { isAgentContinuationRequest, markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal } from "./modules/master-frontier/continuation.js";
+import { markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal, requiredMasterFrontierContinuationContext, resolvePendingAgentRunId } from "./modules/master-frontier/continuation.js";
 
 const RESOURCE_PROFILE_MAX_ENTRIES = 320;
 const RESOURCE_PROFILE_SLOW_MS = 24;
@@ -23398,17 +23398,6 @@ async function refreshAgentRunTokenLedger(message, options = {}) {
   return applyAgentTokenLedger(message, ledger, { source: "cost.status" });
 }
 
-async function fetchAgentRunForPendingMessage(session, message) {
-  if (message.run_id) return cleanText(message.run_id, "");
-  if (!message.turn_id || !session?.id) return "";
-  const payload = await fetchJson(`/agent/runs?session_id=${encodeURIComponent(session.id)}&limit=20`, {
-    timeoutMs: 8000,
-  });
-  const runs = Array.isArray(payload.runs) ? payload.runs : [];
-  const match = runs.find((run) => cleanText(run.turn_id, "") === cleanText(message.turn_id, ""));
-  return cleanText(match?.run_id, "");
-}
-
 async function streamExistingAgentRun(runId, pendingMessage, options = {}) {
   const afterSeq = Math.max(0, Number(pendingMessage.agent_run_seq || 0));
   const controller = new AbortController();
@@ -23526,11 +23515,15 @@ async function resumePendingAgentRun(origin = "bootstrap") {
   if (!session || socialChatSession(session)) return;
   const pendingMessage = [...(session.messages || [])].reverse().find((message) => message.pending && (message.run_id || message.turn_id));
   if (!pendingMessage) return;
-  let runId = "";
   try {
-    runId = await fetchAgentRunForPendingMessage(session, pendingMessage);
-    if (!runId) return;
+    const runId = await resolvePendingAgentRunId(session, pendingMessage, {
+      fetchRuns: (sessionId) => fetchJson(`/agent/runs?session_id=${encodeURIComponent(sessionId)}&limit=20`, { timeoutMs: 8000 }),
+    });
+    if (!runId) { saveAgentSessions(); renderAgentMessages(); return; }
     pendingMessage.run_id = runId;
+    const recovered = await recoverMasterFrontierFinal(pendingMessage, { fetchRun: (id) => fetchJson(`/agent/runs/${encodeURIComponent(id)}`, { timeoutMs: 8000 }) });
+    if (recovered) return await finishAgentBackendPayload(pendingMessage, { ok: true, agent: recovered }, pendingMessage.turn_started_at);
+    if (!pendingMessage.pending) { saveAgentSessions(); renderAgentMessages(); return; }
     state.agentBusy = true;
     state.agentStopRequested = false;
     state.agentAbortController = new AbortController();
@@ -25474,7 +25467,6 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     budget: {
       max_output_tokens: masterFrontierV3OutputBudget(message),
       max_dispatch_caps: AGENT_MASTER_FRONTIER_CAPS.length,
-      enforcement: objectiveKind === "conversation" ? "soft" : "hard",
     },
     stream: true,
     output_schema: MASTER_FRONTIER_OUTPUT_SCHEMA,
@@ -32986,9 +32978,7 @@ async function sendAgentMessage(text) {
     video_card: attachment.video_card,
   }));
   const requestTranscript = agentTranscriptForRequest();
-  const continuationContext = isAgentContinuationRequest(userMessageContent)
-    ? latestAgentContinuationContext(activeSession)
-    : null;
+  const continuationContext = requiredMasterFrontierContinuationContext(userMessageContent, activeSession, { timelineRows: compactAgentTimelineRows });
   clearAgentPendingImages();
   appendAgentMessage("user", userMessageContent, {
     images: userImages,

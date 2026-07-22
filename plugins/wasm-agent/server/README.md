@@ -15,7 +15,8 @@ It must not import Hermes Agent internals or patch runtime node state directly.
 
 ## LLM-Native Direct Envelope
 
-The current browser default is Master:frontier V3/C3. V3 sends a compact
+The current browser default is Master:frontier V5. V3 remains the explicit C3
+compatibility lane and sends a compact
 semantic-operation bootstrap to one capable head. The head answers directly or
 requests exactly one semantic operation; the host maps it to a declared tool,
 scopes and executes that tool, returns a compact semantic observation, and calls the same head again. Internal cyphers compress receipts and persisted history but are not model-facing. The host
@@ -104,13 +105,92 @@ failed or interrupted turns remain accountable.
 
 V5 treats a request for an already-completed action as a stalled-planning
 signal, then runs an explicit evidence-sufficiency assessment. Successful
-primary-source reads or runtime inspection permit completion-only synthesis;
-search-only evidence instead exposes bounded suggested reads, and missing
+owner/focused-range source coverage or a scoped runtime snapshot/proof permits
+completion-only synthesis; one arbitrary successful read/inspection does not.
+Search-only evidence instead exposes bounded suggested reads, and missing
 primary evidence terminates honestly as `evidence_incomplete` after one repair.
 A provider that requests a tool during completion-only synthesis is stopped
 with `no_semantic_progress`. A `network-timeout` receives one bounded retry;
 the retry becomes completion-only only when the same evidence assessment is
 sufficient. A second timeout remains a resumable typed interruption.
+
+V5 coding work is fail-closed at four owned boundaries. `authority.py`
+intersects route capabilities with structured task authority and request class;
+`repository_reads.py` and `repository_actions.py` provide bounded redacted
+reads plus preimage-bound transactional edits; `repository_checks.py` runs only
+route-registered argv with bounded in-memory head/tail rings, an absolute
+deadline, process-group cleanup, and a typed leak result when an escaped
+descendant keeps a pipe open past the grace period;
+and `repository_diff.py` produces one bounded porcelain receipt including
+untracked files. `v5/operation_ledger.py` binds every mutation, check, diff, and
+proof to a causal revision and one route-wide Git state fingerprint, so any
+dirty or untracked route-file change invalidates older verification. Reads can
+stream arbitrary late line ranges; search uses its own route-owned scan ceiling
+rather than the smaller source-index ingestion cap. Transaction journals live
+beside durable server state and block new writes when recovery is corrupt.
+
+Restart continuity is server-owned. The controller persists content-free,
+digest/scope-bound checkpoints after meaningful loop transitions and reloads
+them only under the same user, session, route, and source run. Recent completed
+turns use compact SQLite JSON extraction rather than loading full final
+trajectories. Model input uses `MF5/2`, tool names instead of duplicate schemas,
+one shared 32 KB evidence budget, and a bounded twelve-decision/twelve-tool
+trajectory. `head_tokens_max` bounds each provider output. Provider-token and
+API-call values remain observable targets unless the request explicitly selects
+hard enforcement; hard runs require a positive route-owned per-call input
+reservation, subtract the larger host-derived serialized-request bound, enforce
+cumulative remaining allowance, and require measurable usage. Browser
+avatar-chat uses advisory mode because its provider input cannot be counted
+exactly before dispatch. Exact returned usage and separate attempt/success counts
+are persisted in either mode. Operation-ledger paths
+are prefix-coded and capacity-checked before mutation, while startup recovery
+pages unfinished runs in bounded batches. These changes have local static/behavioral proof; authenticated
+deployed provider behavior remains unverified.
+
+Task modality comes from declared intent/evidence, never from the presence of
+`runtime.inspect`. Runtime mode requires a route-declared entity and projects
+its exact compact id/kind in `MF5/2`. A same-session follow-up becomes an
+implementation only when its immediate same-route parent has source/runtime
+proof, the current turn is an explicit referential mutation request, and the
+route owns edit authority. Blocked or capability-incomplete workflows stop
+before provider dispatch; completion-only decisions cannot execute raw hidden
+tools. Retry projection ends
+after successful recovery without replenishing its durable retry budget.
+
+`master_frontier/runtime_snapshot.py` defines the read-only runtime snapshot
+boundary used by registered `kernel.inspect(runtime_entity)` actions. It
+accepts only bounded redacted identity, availability, freshness, capabilities,
+counters, unknowns, and proof references, then exposes a compact model
+projection. It does not collect runtime state, poll, control a host, or grant
+Docker/device/production access. A trusted collector and proof lookup remain a
+separate live-evidence integration gate.
+
+`master_frontier/runtime_snapshot_collector.py` is the first trusted adapter for
+that boundary. It opens only the wasm-agent run store in SQLite read-only/query-
+only mode, scopes rows by exact user and route, scans at most 64 recent rows,
+and emits aggregate counters plus one opaque proof reference. Run ids, user ids,
+sessions, objectives, replies, event bodies, database paths, and control access
+do not cross the snapshot boundary. Run history is reported as `degraded`
+evidence because the collector deliberately does not claim current live state.
+The bounded action is registered through `kernel.inspect`; it remains a
+historical run-store projection, not live host introspection.
+
+`master_frontier/runtime_proof.py` resolves `runtime.proof.get:<id>` references
+without a proof-index database. It rescans the same bounded read-only user/route
+scope, recomputes each compact proof digest, and returns only status timestamps,
+freshness, redaction metadata, and a receipt digest for an exact match. Wrong
+user, route, entity, malformed id, missing source, and stale evidence remain
+explicit. Exact proof lookup is model-callable only through the authenticated,
+route-scoped runtime action dispatcher.
+
+`master_frontier/runtime_actions.py` defines the model-facing
+`runtime.snapshot.get` and `runtime.proof.get` schemas. Model arguments contain
+only route id, entity id, and the opaque proof id; authenticated user identity,
+database path, freshness ceiling, capabilities, and allowed entities remain
+host authority. Its dispatcher rejects unsupported fields, capability denial,
+and route/entity mismatch before invoking either trusted adapter. These actions
+are registered under `kernel.inspect`; they do not grant shell, control, device,
+Docker, or current-live-state access.
 
 Repository/UI object questions use a `source` evidence floor. Their completion
 gate accepts a conclusive `found`, `not_found_trusted`, or `ambiguous` receipt;

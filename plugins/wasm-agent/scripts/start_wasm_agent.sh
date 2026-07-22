@@ -2,6 +2,8 @@
 set -euo pipefail
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${PLUGIN_DIR}/scripts/deployment_env.sh"
+wasm_agent_load_deployment_env "${PLUGIN_DIR}/conf/wa.env"
 HOST="${HERMES_WASM_AGENT_HOST:-0.0.0.0}"
 PORT="${HERMES_WASM_AGENT_PORT:-8877}"
 STATE_DIR="${HERMES_WASM_AGENT_STATE_DIR:-/local/plugins/wasm-agent/state}"

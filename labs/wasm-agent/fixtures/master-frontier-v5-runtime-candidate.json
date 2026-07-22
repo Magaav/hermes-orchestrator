@@ -1,0 +1,23 @@
+{
+  "slot": "harness-01",
+  "id": "master-frontier-v5",
+  "displayName": "V5 runtime unavailable convergence candidate",
+  "executable": "python3",
+  "adapterVersion": "v5-89010d97372f",
+  "adapterVolume": "wasm-agent-v5-runtime-convergence-v5",
+  "adapterArtifactSha256": "89010d97372fed10112eafe878c99d048741227eff4aa1954327bff6f9e7625a",
+  "candidateDigest": "89010d97372fed10112eafe878c99d048741227eff4aa1954327bff6f9e7625a",
+  "modelContractStatus": "verified",
+  "toolAuthorityStatus": "verified",
+  "toolAuthoritySha256": "b9502d928b23f23007516f8457e5b6463d97e08e79317799ecdb04cfa11b4960",
+  "verificationArtifact": "reports/context/latest/v5-runtime-convergence-package.json",
+  "liveCommand": [
+    "python3",
+    "/adapter/master-frontier-v5-live-runner.py",
+    "--task",
+    "{task}"
+  ],
+  "liveReady": true,
+  "benchmarkReady": false,
+  "promotionStatus": "suite_pending"
+}
