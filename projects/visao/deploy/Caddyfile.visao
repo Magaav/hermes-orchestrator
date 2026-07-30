@@ -1,0 +1,15 @@
+visao.colmeio.com {
+	@compressible not path /api/studio/clean
+	encode @compressible zstd gzip
+	@entry path / /sw.js /manifest.webmanifest /ui-build.json
+	header @entry Cache-Control "no-store, max-age=0"
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	reverse_proxy 127.0.0.1:18083 {
+		flush_interval -1
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

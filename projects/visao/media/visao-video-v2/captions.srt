@@ -1,0 +1,108 @@
+1
+00:00:00,100 --> 00:00:03,552
+Uma operação imobiliária não para por falta de esforço.
+
+2
+00:00:03,502 --> 00:00:08,684
+Ela para quando documentos, decisões, prazos e responsabilidades ficam espalhados.
+
+3
+00:00:08,684 --> 00:00:19,739
+A Visão já possui uma base real: uma PWA segura para organizar atendimentos, dados, documentos, revisão e acompanhamento de processos de venda, em qualquer dispositivo.
+
+4
+00:00:19,739 --> 00:00:23,893
+O próximo passo é transformar essa base em um fluxo compartilhado.
+
+5
+00:00:23,893 --> 00:00:32,161
+Proprietário, comprador, inquilino, corretor, operação e jurídico participam do mesmo processo, cada um com o acesso certo.
+
+6
+00:00:32,161 --> 00:00:33,932
+Cada documento tem lugar.
+
+7
+00:00:33,932 --> 00:00:38,085
+Cada pendência tem responsável, prioridade, prazo e próxima ação.
+
+8
+00:00:38,085 --> 00:00:47,838
+Assim, a equipe ganha visibilidade prática: quais negócios avançam, quais estão parados, há quanto tempo, por qual motivo e quem pode destravar cada etapa.
+
+9
+00:00:47,838 --> 00:00:50,078
+Alertas chegam antes do atraso.
+
+10
+00:00:50,078 --> 00:00:52,981
+Supervisores enxergam a carga da equipe.
+
+11
+00:00:52,981 --> 00:00:56,510
+Corretores sabem exatamente onde concentrar energia.
+
+12
+00:00:56,510 --> 00:01:06,341
+No portal do cliente, compradores, vendedores, proprietários e inquilinos acompanham a timeline, enviam documentos, consultam orientações e abrem chamados.
+
+13
+00:01:06,341 --> 00:01:11,666
+Cada chamado preserva assunto, histórico, anexos, responsável, prazo e status.
+
+14
+00:01:11,666 --> 00:01:13,789
+Menos mensagens perdidas.
+
+15
+00:01:13,789 --> 00:01:15,742
+Mais contexto e confiança.
+
+16
+00:01:15,742 --> 00:01:26,861
+Em uma segunda evolução, a plataforma acompanha também locações e a vida do imóvel: contratos, recebimentos, comissões, despesas autorizadas, vistorias e manutenções.
+
+17
+00:01:26,861 --> 00:01:34,726
+Uma pintura, um vazamento ou um desconto no aluguel deixa de ser uma conversa isolada e passa a fazer parte do prontuário do imóvel.
+
+18
+00:01:34,726 --> 00:01:38,931
+Agenda, tarefas, automações e relatórios conectam a operação.
+
+19
+00:01:38,931 --> 00:01:46,666
+Visitas, assinaturas, entregas de chave, documentos vencendo e pagamentos importantes deixam de depender da memória de alguém.
+
+20
+00:01:46,666 --> 00:01:59,101
+No longo prazo, integrações e inteligência ampliam esse sistema: classificar documentos, identificar inconsistências, resumir históricos, pesquisar processos parados e sugerir próximas ações.
+
+21
+00:01:59,101 --> 00:02:01,341
+Sempre com pessoas no controle.
+
+22
+00:02:01,341 --> 00:02:09,934
+O resultado é simples: menos retrabalho, menos negócios parados, clientes mais bem atendidos e decisões baseadas em evidências.
+
+23
+00:02:09,934 --> 00:02:11,979
+Não é mais um sistema genérico.
+
+24
+00:02:11,979 --> 00:02:19,700
+É a experiência da Visão transformada em uma plataforma própria para vender, alugar, administrar e crescer com consistência.
+
+25
+00:02:19,700 --> 00:02:21,184
+Visão mais Colmeio.
+
+26
+00:02:21,184 --> 00:02:22,825
+Powered by Colmeio.
+
+27
+00:02:22,825 --> 00:02:25,677
+O próximo movimento começa agora.
+

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="pt-BR" class="app-prepaint">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#005596" />
+    <meta name="description" content="Checklist documental e ficha de tratativas da Visão Vendas" />
+    <link rel="stylesheet" href="/launcher.css" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" />
+    <title>Visão Vendas — Gestão de Processos</title>
+  </head>
+  <body>
+    <div id="app-launcher" role="status" aria-label="Carregando Visão Imóveis">
+      <div class="launcher-stage" aria-hidden="true">
+        <div class="launcher-ripples"><span class="launcher-ripple"></span><span class="launcher-ripple"></span><span class="launcher-ripple"></span></div>
+        <span class="launcher-halo"></span>
+        <div class="launcher-eye">
+          <svg viewBox="0 0 96 58">
+            <path class="launcher-eye-arc" d="M5 29C12 11 29 3 46 4 36 10 30 19 30 29H5Z" />
+            <path class="launcher-eye-arc" d="M91 29C84 11 67 3 50 4 60 10 66 19 66 29h25Z" />
+            <circle class="launcher-eye-iris" cx="48" cy="29" r="17" />
+            <circle class="launcher-eye-glint" cx="42" cy="23" r="4" />
+          </svg>
+        </div>
+        <div class="launcher-copy"><strong>VISÃO</strong><small>IMÓVEIS</small></div>
+        <span class="launcher-loading"></span>
+      </div>
+    </div>
+    <div id="root"></div>
+    <noscript><link rel="stylesheet" href="/launcher-noscript.css" /></noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
