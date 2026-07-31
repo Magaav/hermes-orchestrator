@@ -1,9 +1,0 @@
-app.env
-backend/bin/
-data/*.sqlite3
-data/*.sqlite3-*
-data/uploads/*
-!data/uploads/.gitkeep
-frontend/dist/
-frontend/node_modules/
-frontend/tsconfig.tsbuildinfo
