@@ -32,7 +32,6 @@ def start_static_test_server(state_dir: Path) -> tuple[static_server.WasmAgentSe
         public_root=PLUGIN_ROOT / "public",
         state_dir=state_dir,
         bridge_url="http://127.0.0.1:8790",
-        browser_timeout_sec=1.0,
     )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

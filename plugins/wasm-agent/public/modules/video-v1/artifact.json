@@ -1,0 +1,13 @@
+{
+  "schema": "hermes.wasm_agent.video_module.v1",
+  "id": "video-v1",
+  "input": "browser-decodable video/*",
+  "container": "webm",
+  "videoCodec": "av1",
+  "audioCodec": "opus",
+  "poster": "avif",
+  "limits": {"durationSecMin": 1, "durationSecMax": 20, "fps": 30, "pixels": 921600, "maxEdge": 1280, "outputBytes": 3145728},
+  "color": {"range": "sdr", "bitDepth": 8, "chromaSubsampling": "4:2:0"},
+  "tracks": {"video": 1, "audioMax": 1},
+  "metadata": "stripped"
+}

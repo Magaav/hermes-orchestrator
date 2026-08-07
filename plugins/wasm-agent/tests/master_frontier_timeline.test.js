@@ -11,7 +11,10 @@ const sandbox = { exports: {} };
 vm.runInNewContext(
   `${source.replace(/export\s+(function|const)\s+/g, "$1 ")}
 exports.isMasterFrontierTimelineEventType = isMasterFrontierTimelineEventType;
-exports.isMasterFrontierTimelineAction = isMasterFrontierTimelineAction;`,
+exports.isMasterFrontierTimelineAction = isMasterFrontierTimelineAction;
+exports.masterFrontierDecisionCost = masterFrontierDecisionCost;
+exports.masterFrontierNewInputTokens = masterFrontierNewInputTokens;
+exports.masterFrontierTimelineIcon = masterFrontierTimelineIcon;`,
   sandbox,
   { filename: modulePath }
 );
@@ -19,6 +22,9 @@ exports.isMasterFrontierTimelineAction = isMasterFrontierTimelineAction;`,
 const {
   isMasterFrontierTimelineEventType,
   isMasterFrontierTimelineAction,
+  masterFrontierDecisionCost,
+  masterFrontierNewInputTokens,
+  masterFrontierTimelineIcon,
 } = sandbox.exports;
 
 [
@@ -59,8 +65,34 @@ assert(!isMasterFrontierTimelineAction({ id: "node_reply", label: "Node reply", 
 assert(!isMasterFrontierTimelineAction({ id: "mf_llm_1", label: "LLM decision", topic: "run-api", kind: "trace", meta: "buffered" }), "buffered LLM decisions belong in the per-turn action chain");
 assert(!isMasterFrontierTimelineAction({ id: "mf_tool_1", label: "files", topic: "run-api", kind: "tool", meta: "calling" }), "function/dataflow rows belong in the per-turn action chain");
 
+const decisionCost = masterFrontierDecisionCost({
+  event_type: "turn.usage.updated",
+  arguments: { context: {
+    decision: 3,
+    new_chars: 1215,
+    repeated_chars: 5282,
+    provider_usage: { prompt_tokens: 14263, completion_tokens: 147, cached_input_tokens: 12032 },
+  } },
+});
+assert.deepStrictEqual(JSON.parse(JSON.stringify(decisionCost)), {
+  decision: 3,
+  input_tokens: 14263,
+  cached_input_tokens: 12032,
+  new_input_tokens: 2231,
+  output_tokens: 147,
+  projection_new_chars: 1215,
+  projection_repeated_chars: 5282,
+  text: "decision 3 · input 14K · cached 12K · new 2.2K · out 147 · projection new 1.2K chars / reused 5.3K chars",
+});
+assert.strictEqual(masterFrontierDecisionCost({ event_type: "llm.inference.started" }), null);
+assert.strictEqual(masterFrontierNewInputTokens({ input_tokens: 14263, cached_input_tokens: 12032 }), 2231);
+assert.strictEqual(masterFrontierTimelineIcon({ event_type: "turn.usage.updated" }), "🔶");
+
 const appJs = fs.readFileSync(appPath, "utf8");
-assert(appJs.includes('from "./modules/master-frontier/timeline.js"'), "app.js must import the owned timeline classifier");
+assert(appJs.includes('from "./modules/master-frontier/timeline.js'), "app.js must import the owned timeline classifier");
 assert(appJs.includes("return isMasterFrontierTimelineAction(action);"), "app.js timeline predicate must delegate to the owned module");
+assert(appJs.includes("masterFrontierDecisionCost(item)?.text"), "app.js must delegate decision cost formatting");
+assert(appJs.includes('["new", masterFrontierNewInputTokens(call)]'), "completed call rows must preserve exact new-input cost");
+assert(!appJs.includes("function agentTimelineIcon("), "timeline icon policy must stay in the owned module");
 
 console.log("Master:frontier timeline tests: PASS");

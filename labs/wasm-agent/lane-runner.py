@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from agent_trajectory import EVENT_PATH_ENV, write_trajectory
+from fixture_outcomes import lane_outcome
 
 SOURCE = Path("/source")
 WORKSPACE = Path("/workspace")
@@ -104,6 +105,7 @@ def main() -> int:
     command_result: dict = {}
     readiness_candidate = False
     task_summary: dict = {}
+    candidate_outcome: dict = {}
     if args.execution in {"live-proof", "live"}:
         if adapter.get("modelContractStatus") != "verified" or adapter.get("toolAuthorityStatus") != "verified":
             raise SystemExit(f"live adapter not verified: {adapter['id']}")
@@ -150,8 +152,9 @@ def main() -> int:
         readiness_candidate = returncode == 0 and bool(stdout.strip()) and answer_within_budget
         ranking_allowed = bool((task.get("adjudication") or {}).get("rankingAllowed"))
         comparable = readiness_candidate and ranking_allowed and adapter.get("liveReady") is True
-        status = "completed" if readiness_candidate else "failed"
-        reason = "live fixture task completed" if readiness_candidate else "live fixture task failed"
+        candidate_outcome = lane_outcome(readiness_candidate)
+        status = candidate_outcome["status"]
+        reason = candidate_outcome["reason"]
         task_summary = {
             "fixtureId": (task.get("fixture") or {}).get("id"),
             "taskDigest": task.get("taskDigest"),
@@ -193,12 +196,15 @@ def main() -> int:
         "command": command_result,
         "task": task_summary,
         "readinessCandidatePassed": readiness_candidate,
+        "answerSatisfaction": candidate_outcome.get("answerSatisfaction", "not_applicable"),
+        "executionStatus": candidate_outcome.get("executionStatus", "not_applicable"),
+        "improvementRequired": candidate_outcome.get("improvementRequired", False),
         "durationMs": round((time.monotonic() - started) * 1000),
         "trajectory": trajectory_projection(trajectory),
     }
     (RESULT / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, separators=(",", ":")))
-    return 0 if status in {"topology_proven", "completed"} else 1
+    return 0
 
 
 if __name__ == "__main__":

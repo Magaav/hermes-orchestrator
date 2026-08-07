@@ -22,7 +22,8 @@ def llm_autonomous(route: dict[str, Any]) -> bool:
 def direct_completion(route: dict[str, Any]) -> bool:
     # A follow-up is not self-contained merely because its current turn was
     # classified as conversation. Preserve capabilities and let the head decide.
-    if route.get("session_context"):
+    memory = route.get("session_memory") if isinstance(route.get("session_memory"), dict) else {}
+    if route.get("session_context") or memory.get("sessions"):
         return False
     contract = route.get("task_contract") if isinstance(route.get("task_contract"), dict) else {}
     strategy = str(contract.get("strategy") or "minimal_class_allowlist")
@@ -70,4 +71,8 @@ def requires_verification(route: dict[str, Any]) -> bool:
 def accepts_tool_evidence(route: dict[str, Any], result: dict[str, Any]) -> bool:
     if result.get("ok") is True:
         return True
-    return request_class(route) == "runtime_inspection" and result.get("code") == "capability_unavailable"
+    return request_class(route) == "runtime_inspection" and result.get("code") in {
+        "capability_unavailable",
+        "runtime_action_entity_denied",
+        "runtime_entity_not_found",
+    }

@@ -79,7 +79,6 @@ class NativeShellV2Activity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createWebView(): WebView {
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.ALLOW_LOCAL_DEV)
         val bridge = NativeShellV2Bridge(activity = this, config = config, diagnostics = diagnostics, webViewProvider = { webView })
         return WebView(this).apply {
             setBackgroundColor(Color.BLACK)

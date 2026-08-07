@@ -16,6 +16,7 @@ WASM Agent Native.
 | Production app URL | `https://wa.colmeio.com/home?native=electron` |
 | Production local origins | Forbidden: `127.0.0.1:8877`, `localhost`, `0.0.0.0`, source-tree assets, dev fallbacks |
 | Installer secrets | No account secrets or pre-minted device tokens |
+| Installer payload | Native kernel/launcher only; cloud PWA, models, and Android APKs are fetched on demand |
 | Proof floor | Final extracted NSIS installer and installed `app.asar` verification |
 | Runtime proof floor | Real installed app with Google login, close/reopen, route, cookie, expiration metadata, and `/auth/session` |
 
@@ -27,7 +28,7 @@ Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 
 | Evidence | Status | Notes |
 | --- | --- | --- |
-| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260615T135340Z.exe` | verified | Built with `WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1`; verifier extracted final NSIS payload and `app.asar`. Installer SHA `77811e7d3f2a778a0d9adcbc45cef14f92194719a35fc2b02856d3c83575f20d`; `app.asar` SHA `cbaa3e22ffee82630558cab8c481e91e3c5c5f9bca0c5d8cb267a80441c4021f`. Package proof only; installed runtime proof still required after install/reopen. |
+| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260801T002745Z.exe` | verified | Built with `WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1`; verifier extracted the final NSIS payload and `app.asar`, which contains the native web-surface manager and manifest. Installer SHA `3fd4c3ee19a70a3ace883cc103e2fed4ef619dbaba0d0af60c795e354ecd44c0`; `app.asar` SHA `ae5b4bb3d332c85ad154b95806117db768a78f0669b645076a13ea1c9b38e1f3`. Package proof only; installed WhatsApp Web render/login/reopen proof is still required. |
 | `native/windows/release/VERIFY.json` | verified | Present for build `win-x64-20260615T135340Z`; package proof only, not installed runtime proof. |
 | Windows package size audit | implemented-unverified | Re-run after the final NSIS build; `win-unpacked` is not release proof. |
 | Win11 staged update | implemented-unverified | Trigger Go Native / Check Update against the feed, install/restart, then prove the installed shell. |
@@ -108,6 +109,109 @@ Required installed evidence:
 Do not claim fixed from source tests, build success, `win-unpacked`, or feed
 presence.
 
+## Native web surfaces
+
+The installed Electron shell exposes `hermes.wasm_agent.native_web_surfaces.v1`
+through `preload.js`. The owning implementation is `src/main/web-surfaces/manager.js`;
+`main.js` contains bootstrap and disposal delegation only. The shared Browser
+widget positions a real Chromium `WebContentsView` over its viewport and uses a
+persistent, surface-isolated session. Remote content is sandboxed, receives no
+Node.js API, accepts HTTPS navigation only, and has downloads and permissions
+denied until a separate explicit grant contract is implemented.
+Each surface strips Electron/product markers from its Chromium user agent before
+the first navigation so browser-version gates such as WhatsApp Web evaluate the
+embedded Chromium version instead of rejecting the Electron shell identity.
+
+Focused source proof:
+
+```bash
+cd native/windows/src
+npm run test:web-surfaces
+```
+
+Source proof does not establish packaged or installed runtime behavior. A final
+NSIS extraction and installed-app navigation/login/reopen pass are required.
+
+## Bundled Windows supervisor
+
+The installer now bundles `resources/wasm-agent-launcher.exe` as the single
+Start-menu/Desktop entry point. It is part of the same WASM Agent installation
+but runs outside Electron so it can supervise `WASM Agent.exe` when Electron is
+blocked, duplicated, restarting, or being replaced.
+
+The supervisor exposes the compact
+`hermes.wasm_agent.windows_supervisor.v1` contract through
+`%LOCALAPPDATA%/WASM Agent Native/supervisor/`. Its initial bounded capability
+set is `capabilities.describe`, `process.start`, `process.stop`,
+`process.restart`, `process.status`, and `update.activate`. Update activation
+accepts only `.exe` files inside the dedicated staged-update directory and
+requires an exact SHA-256 match before stopping Electron and launching the
+installer. The installer registers the supervisor under the current user's
+Windows `Run` key. Updates copy a bounded runner outside the installation,
+revalidate the staged SHA-256, exit the installed supervisor so its files are
+replaceable, and invoke NSIS silently with an explicit `/currentuser` or
+`/allusers` mode derived from the install root. The runner relaunches only after
+the installed build metadata matches the expected build. Installer failure or
+build mismatch records one bounded result and stays stopped instead of reopening
+the old build into another elevation loop. Electron queues one check immediately on startup and
+checks every six hours afterward through `main/automatic-updates.js`.
+An all-users install also removes stale current-user Desktop and Start-menu
+shortcuts before recreating the launcher in the all-users scope, preventing an
+older parallel install root from becoming authoritative merely because its
+shortcut was opened.
+The supervisor persists `update-timeline.json` across the Electron-offline
+handoff. `observability_status` exposes its bounded phase, command ID,
+install mode, expected/observed build, installer exit/failure, and timestamps on
+demand, so UAC wait, NSIS failure, wrong-root install, and relaunch failure are
+distinguishable without continuous tracing.
+Installer downloads stream into a unique temporary file and are atomically
+renamed into the staged-update path only after the file handle closes; size and
+SHA-256 validation then run against that complete staged file.
+`WASM_AGENT_DISABLE_AUTOMATIC_UPDATES=1` is the recovery opt-out. Electron delegates through `src/main/supervisor-client.js`; direct
+installer launch remains only as a compatibility fallback for apps started
+outside the supervisor.
+
+The supervisor is a stable native primitive, not a claim that every Windows
+capability is downloadable today. Product workflows should continue moving to
+signed runtime/hot-op bundles. Adding a genuinely new privileged OS primitive
+or repairing the supervisor itself still requires an installer update.
+
+Focused source and cross-compile proof:
+
+```bash
+cd native/windows/src
+npm run test:windows-supervisor
+```
+
+Package verification rejects a final NSIS artifact that lacks the supervisor
+executable, Electron client module, or installer delegation. Installed proof
+still requires launching from the installed shortcut, observing supervisor
+status and child PID, activating an update, and confirming the expected build
+reconnects.
+
+### Slim cloud-only package
+
+Production Electron loads `https://wa.colmeio.com/home?native=electron`, so the
+installer does not duplicate the cloud PWA tree, property-photo/speech models,
+or Android APK. Models remain immutable, versioned web/runtime downloads;
+Android diagnostics resolve the current APK through the release feed. The
+installer retains only Electron, the supervisor, native kernel/preload,
+fallback page, bridge-operation emergency modules, icons, and the bounded local
+diagnostic runner.
+
+Final NSIS verification must fail if `resources/public` or a bundled Android
+APK reappears. This keeps every rebuild/update from redundantly compressing,
+downloading, extracting, and scanning gigabytes of remotely owned assets.
+
+Package size is recorded as telemetry and may warn on unusual growth, but size
+alone is not a release failure. The build-breaking invariant is semantic
+ownership: `resources/` may contain only `app.asar`, `bridge-ops`, `horc`, the
+supervisor/default/icon files, and Electron's `elevate.exe`. Any other resource
+owner must be deliberately reviewed and added to the contract. PWA trees,
+Android APKs, ONNX/TFLite models, and old Windows release artifacts are always
+rejected before promotion regardless of their size. Final NSIS verification
+independently checks forbidden extracted paths and records installer bytes.
+
 ## Frontier Commands
 
 The cloud backend exposes gated Frontier routes:
@@ -122,6 +226,11 @@ Authorization requires admin session, localhost operator access, or
 commands such as cache clear or restart require an explicit destructive gate.
 Unknown commands are refused. No global unauthenticated reload endpoint is
 allowed.
+
+Create or rotate the shared operator key with
+`python3 plugins/wasm-agent/scripts/ensure_native_control_key.py`. The private
+value stays in gitignored `plugins/wasm-agent/conf/wa.env`; Windows proof tools
+load it automatically and never print it. Restart the backend after rotation.
 
 Android real-device Hermes Wake proof now uses the stable generic bridge
 operation `run_hot_operation`. Windows is now treated as a hot-op shell: the
@@ -372,7 +481,8 @@ The shell protocol contract is:
     "native.capabilities.releaseFeedValidation.v1",
     "native.capabilities.nativeControlPolling.v1",
     "native.capabilities.crashSafeStatus.v1",
-    "native.capabilities.capabilityManifest.v1"
+    "native.capabilities.capabilityManifest.v1",
+    "native.capabilities.observabilityLease.v1"
   ]
 }
 ```

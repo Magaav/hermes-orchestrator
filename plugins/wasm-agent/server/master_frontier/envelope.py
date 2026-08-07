@@ -31,6 +31,7 @@ ALLOWED_KEYS = (
     "state_summary",
     "compact_state",
     "capabilities",
+    "completion_capabilities",
     "constraints",
     "evidence",
     "evidence_refs",
@@ -195,11 +196,17 @@ def inline(value: Any, limit: int = 1200) -> str:
 def output_schema_projection(value: Any) -> Any:
     if not isinstance(value, dict):
         return value
-    projected = redact(value)
-    properties = projected.get("properties") if isinstance(projected, dict) and isinstance(projected.get("properties"), dict) else {}
-    if "state_feedback" in properties:
-        properties.pop("state_feedback", None)
-    return projected
+    properties = value.get("properties") if isinstance(value.get("properties"), dict) else {}
+    field_types = {
+        str(name): str(spec.get("type") or "any")
+        for name, spec in properties.items()
+        if name != "state_feedback" and isinstance(spec, dict)
+    }
+    required = [
+        str(name) for name in (value.get("required") if isinstance(value.get("required"), list) else [])
+        if str(name) in field_types
+    ]
+    return {"req": required, "types": field_types}
 
 
 def reflection_contract_projection(envelope: dict[str, Any]) -> dict[str, Any]:

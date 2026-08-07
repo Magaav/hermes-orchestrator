@@ -46,15 +46,23 @@ def _evidence_floor(envelope: dict[str, Any], intent_name: str, caps: list[str])
     requested = str(envelope.get("evidence_floor") or envelope.get("evidenceFloor") or "").strip().lower()
     if requested in {"conceptual", "route", "source", "proof", "runtime"}:
         return requested
-    objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
-    if objective_kind == "conversation":
-        return "conceptual"
+    if intent_name == "source_investigation":
+        return "source"
+    if intent_name == "runtime_inspection":
+        return "runtime"
     if intent_name in {"implementation", "verification"}:
         return "proof"
     if intent_name == "implementation_planning":
         return "source"
+    if intent_name == "capability_inquiry":
+        return "route"
+    if intent.objective_requires_runtime_evidence(envelope):
+        return "runtime"
     if intent.objective_requires_source_evidence(envelope):
         return "source"
+    objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
+    if objective_kind in {"conversation", "model_decision"}:
+        return "conceptual"
     if intent_name == "diagnosis" or "runtime.inspect" in caps:
         objective = str(envelope.get("objective") or "").lower()
         runtime_terms = ("runtime", "node", "session", "timeline", "state", "happened", "since creation")
@@ -147,12 +155,24 @@ def _tools_first(intent_name: str, caps: list[str], route_id: str, evidence_floo
 
 
 def _intent_name(envelope: dict[str, Any]) -> str:
-    objective_kind = str(envelope.get("objective_kind") or "").strip().lower()
-    if objective_kind in {"conversation", "implementation", "implementation_planning", "verification", "diagnosis"}:
-        if objective_kind == "conversation":
+    objective_kind = str(envelope.get("objective_kind") or "").strip().lower().replace("-", "_")
+    objective = str(envelope.get("objective") or "")
+    if objective_kind == "model_decision" and intent.text_is_capability_inquiry(objective):
+        return "capability_inquiry"
+    if objective_kind in {
+        "conversation",
+        "general_conversation",
+        "model_decision",
+        "implementation",
+        "implementation_planning",
+        "verification",
+        "diagnosis",
+        "source_investigation",
+        "runtime_inspection",
+    }:
+        if objective_kind in {"conversation", "general_conversation"}:
             return "answer"
         return objective_kind
-    objective = str(envelope.get("objective") or "")
     if intent.text_is_capability_inquiry(objective):
         return "capability_inquiry"
     if intent.objective_is_implementation_intent(envelope) or intent.goal_requires_change_artifact(envelope):

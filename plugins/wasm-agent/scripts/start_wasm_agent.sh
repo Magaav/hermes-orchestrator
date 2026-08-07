@@ -27,7 +27,7 @@ if [[ -s "${PID_FILE}" ]]; then
 fi
 
 if command -v setsid >/dev/null 2>&1; then
-  setsid "${PYTHON_BIN}" "${PLUGIN_DIR}/server/static_server.py" \
+  nohup setsid "${PYTHON_BIN}" "${PLUGIN_DIR}/server/static_server.py" \
     --host "${HOST}" --port "${PORT}" --bridge-url "${BRIDGE_URL}" \
     >"${LOG_FILE}" 2>&1 &
 else

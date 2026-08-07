@@ -14,6 +14,8 @@ const nativeIconIco = path.join(buildRoot, "icon.ico");
 const nativeDefaults = path.join(buildRoot, "native-defaults.json");
 const nativeDefaultsApp = path.join(srcRoot, "native-defaults.json");
 const nativeUninstaller = path.join(buildRoot, "wasm-agent-uninstaller.exe");
+const nativeLauncher = path.join(buildRoot, "wasm-agent-launcher.exe");
+const nativeLauncherRoot = path.join(windowsRoot, "launcher");
 const nativeUninstallerScript = path.join(buildRoot, "uninstaller.nsi");
 const hostNsisRoot = path.join(buildRoot, "nsis-host");
 const packageJsonPath = path.join(srcRoot, "package.json");
@@ -158,6 +160,16 @@ function prepareUninstaller() {
   if (result.status !== 0) throw new Error(`makensis failed while building ${nativeUninstaller}`);
 }
 
+function prepareLauncher() {
+  const env = { ...process.env, GOOS: "windows", GOARCH: "amd64", CGO_ENABLED: "0" };
+  const result = spawnSync("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", nativeLauncher, "."], {
+    cwd: nativeLauncherRoot,
+    env,
+    stdio: "inherit",
+  });
+  if (result.status !== 0) throw new Error(`go build failed while building ${nativeLauncher}`);
+}
+
 function main() {
   fs.mkdirSync(buildRoot, { recursive: true });
   if (!fs.existsSync(pwaIcon)) throw new Error(`Missing PWA icon: ${pwaIcon}`);
@@ -165,6 +177,7 @@ function main() {
   fs.copyFileSync(pwaIcon, nativeIconSvg);
   prepareHostNsisShim();
   prepareUninstaller();
+  prepareLauncher();
 
   const port = String(process.env.HERMES_WASM_AGENT_PORT || "8877").trim() || "8877";
   const host = String(process.env.HERMES_WASM_AGENT_HOST || "").trim();
@@ -233,6 +246,9 @@ function main() {
   }
   if (fs.existsSync(nativeUninstaller)) {
     console.log(`Prepared ${path.relative(windowsRoot, nativeUninstaller)}`);
+  }
+  if (fs.existsSync(nativeLauncher)) {
+    console.log(`Prepared ${path.relative(windowsRoot, nativeLauncher)}`);
   }
 }
 

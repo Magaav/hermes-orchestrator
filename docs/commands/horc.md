@@ -440,12 +440,17 @@ proof. The proof loop is `boot -> observe -> act -> assert -> evidence -> score
 ```bash
 horc space start
 horc space stop
+horc space restart
 horc space status
 horc space backup
 ```
 
 `horc space start` starts the wasm-agent PWA on `http://127.0.0.1:8877` and
 the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
+`horc space restart` stops both processes and relaunches them through the same
+deployment loader. Cloud mode defaults event anchoring on; local/dev mode
+defaults it off. An explicit `WASM_AGENT_EVENT_ANCHORS=false` remains
+authoritative for a bounded rollback.
 
 ## Notes
 
@@ -478,6 +483,8 @@ the wasm-agent-owned Hermes bridge on `http://127.0.0.1:8790`.
   `<HERMES_WASM_AGENT_STATE_DIR>/bridge`.
 - `HERMES_WASM_AGENT_CLOUD_STATE_ROOT`: private wasm-agent-cloud instance state root used by `horc space backup`.
 - `HERMES_WASM_AGENT_CLOUD_INSTANCE_ID`: optional stable id used in wasm-agent-cloud backup archive paths.
+- `WASM_AGENT_EVENT_ANCHORS`: event-anchor persistence policy. Defaults to
+  `true` in cloud mode and `false` otherwise; an explicit value is preserved.
 - `HORC_WIN_BUILD_MODE`: `auto`, `native`, `wine`, or `docker`; default `auto`.
 - `HORC_TARGET_WIN_ARCH`: Windows target architecture; currently only `x64`.
 - `HORC_REQUIRE_VERIFIED_INSTALLER=1`: require installer, unpacked exe, and

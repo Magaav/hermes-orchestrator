@@ -43,12 +43,15 @@ def _bounded_read(handle: Any, limit: int) -> tuple[bytes, bool]:
     return value[:limit], len(value) > limit
 
 
-def _git_status(root: Path, *, timeout_sec: float, capture_bytes: int) -> _GitResult:
+def _git_status(
+    root: Path, *, timeout_sec: float, capture_bytes: int,
+    include_paths: list[str] | None = None,
+) -> _GitResult:
     argv = [
         "git", "--no-optional-locks", "-c", "color.ui=false",
         "-c", "core.quotepath=false", "-c", "status.relativePaths=true",
         "-C", str(root), "status", "--porcelain=v1", "-z", "--renames",
-        "--untracked-files=all", "--", ".",
+        "--untracked-files=all", "--", *(include_paths or ["."]),
     ]
     env = {
         key: value for key, value in os.environ.items()
@@ -242,7 +245,7 @@ def _result(
 def collect(
     route: dict[str, Any], *, max_entries: int = 128,
     max_output_bytes: int = 24 * 1024, max_status_bytes: int = 256 * 1024,
-    timeout_sec: float = 10.0,
+    timeout_sec: float = 10.0, include_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     """Return a complete, bounded status receipt or an explicit typed failure."""
     route_id = str(route.get("route_id") or "") if isinstance(route, dict) else ""
@@ -253,11 +256,19 @@ def collect(
         return _result(route_id=route_id, ok=False, code="diff_root_missing", returncode=2)
     if not raw_root or not root.is_dir():
         return _result(route_id=route_id, ok=False, code="diff_root_missing", returncode=2)
+    scoped_paths = [
+        str(path).strip()
+        for path in (include_paths or [])
+        if _safe_relative(str(path).strip())
+    ][:MAX_ENTRIES]
 
     entry_limit = max(1, min(int(max_entries), MAX_ENTRIES))
     output_limit = max(256, min(int(max_output_bytes), MAX_OUTPUT_BYTES))
     status_limit = max(4096, min(int(max_status_bytes), MAX_STATUS_BYTES))
-    run = _git_status(root, timeout_sec=timeout_sec, capture_bytes=status_limit)
+    run = _git_status(
+        root, timeout_sec=timeout_sec, capture_bytes=status_limit,
+        include_paths=scoped_paths or None,
+    )
     if run.timed_out:
         error = run.stderr[:output_limit].decode("utf-8", errors="replace")
         return _result(route_id=route_id, ok=False, code="diff_timeout", returncode=124, output=error)

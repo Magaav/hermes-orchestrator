@@ -1,0 +1,76 @@
+<header class="bc-header">
+  <div>
+    <h2>Batch Cleaner</h2>
+    <span>Up to 30 property photos · detection and cleaning stay on this device</span>
+  </div>
+  <button type="button" class="bc-close" data-action="close" aria-label="Close Batch Cleaner">×</button>
+</header>
+<div class="bc-body">
+  <aside class="bc-sidebar">
+    <section>
+      <span class="bc-step">1 · Drop pictures</span>
+      <button type="button" class="bc-primary" data-action="open_import">Choose pictures</button>
+      <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+      <p>Drag photos into the workspace or pick them here.</p>
+    </section>
+    <section>
+      <span class="bc-step">2 · Clean</span>
+      <button type="button" class="bc-primary" data-action="clean_all">Clean all</button>
+      <p>Included photos are cleaned one by one with one shared local AI worker.</p>
+      <label class="bc-enhance-reality">
+        <input type="checkbox" data-quality-reconstruction checked>
+        <span><strong>Quality reconstruction · recommended</strong> · scene-aware WebGPU cleaning; downloads a 1.24 GB model once and may take 2–3 minutes</span>
+      </label>
+      <label class="bc-enhance-reality">
+        <input type="checkbox" data-cloud-quality>
+        <span><strong>Perfect reconstruction</strong> · securely sends each photo and removal mask to the configured quality worker; photos are not retained</span>
+      </label>
+      <label class="bc-enhance-reality">
+        <input type="checkbox" data-enhance-reality>
+        <span><strong>Enhance reality</strong> · polish detail, light, contrast, and pixel density after cleaning</span>
+      </label>
+      <label class="bc-watermark-consent">
+        <input type="checkbox" data-watermark-authorized>
+        <span>I own or may remove detected watermarks</span>
+      </label>
+    </section>
+    <section>
+      <span class="bc-step">3 · Export</span>
+      <button type="button" data-action="export_all">Export all</button>
+      <p>Downloads every included cleaned photo in one ZIP.</p>
+    </section>
+    <dl class="bc-counts">
+      <div><dt>Included</dt><dd data-count="included">0</dd></div>
+      <div><dt>Excluded</dt><dd data-count="excluded">0</dd></div>
+      <div><dt>Ready</dt><dd data-count="ready">0</dd></div>
+      <div><dt>Cleaned</dt><dd data-count="cleaned">0</dd></div>
+      <div><dt>Failed</dt><dd data-count="failed">0</dd></div>
+    </dl>
+  </aside>
+  <main class="bc-workspace" data-drop-zone>
+    <div class="bc-toolbar">
+      <strong data-summary>No pictures yet</strong>
+      <span data-overall>Drop up to 30 pictures to begin</span>
+    </div>
+    <div class="bc-grid" data-grid aria-live="polite"></div>
+    <div class="bc-empty" data-empty>
+      <strong>Drop property pictures here</strong>
+      <span>They will appear as square thumbnails and start object detection automatically.</span>
+    </div>
+  </main>
+</div>
+<footer class="bc-footer">
+  <span data-status>Idle</span>
+  <span data-error role="alert"></span>
+</footer>
+<dialog class="bc-preview" data-preview>
+  <header>
+    <strong data-preview-title>Photo preview</strong>
+    <button type="button" data-action="close_preview" aria-label="Close preview">×</button>
+  </header>
+  <div class="bc-preview-toggle">
+    <button type="button" data-action="preview_original">Original</button>
+    <button type="button" data-action="preview_cleaned">Cleaned</button>
+  </div>
+  <img data-preview-image alt="Selected property photo preview">
+</dialog>

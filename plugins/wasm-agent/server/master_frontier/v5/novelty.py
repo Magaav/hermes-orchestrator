@@ -70,6 +70,26 @@ def _uncovered(start: int, end: int, covered: list[list[int]]) -> list[list[int]
     return result
 
 
+def _needs_post_mutation_refresh(
+    state: dict[str, Any], path: str, route: dict[str, Any] | None,
+) -> bool:
+    """Allow one fresh read of a previously covered file after a mutation."""
+    for item in reversed(state.get("steps") or []):
+        if not isinstance(item, dict) or item.get("status") != "completed":
+            continue
+        if item.get("tool") == "edit":
+            return True
+        if item.get("tool") != "read":
+            continue
+        result = item.get("result") if isinstance(item.get("result"), dict) else {}
+        if (
+            result.get("ok") is True
+            and _canonical_path(str(result.get("path") or ""), route) == path
+        ):
+            return False
+    return False
+
+
 def admit(
     state: dict[str, Any], tool: str, arguments: dict[str, Any],
     route: dict[str, Any] | None = None,
@@ -84,6 +104,8 @@ def admit(
     covered, known_line_count = _merged_ranges(state, path, route)
     if not covered:
         return {"ok": True}
+    if _needs_post_mutation_refresh(state, path, route):
+        return {"ok": True, "refresh": "post_mutation"}
     start = arguments.get("start_line", 1)
     end = arguments.get("end_line", known_line_count or None)
     if not isinstance(start, int) or not isinstance(end, int) or start < 1 or end < start:

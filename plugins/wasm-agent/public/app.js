@@ -4,183 +4,27 @@ import { createWisSandbox } from "./modules/wis/engine.js";
 import { isMasterFrontierTarget, masterFrontierNodeId, masterFrontierSelectionTarget } from "./modules/master-frontier/target.js";
 import { MASTER_FRONTIER_CAPS, MASTER_FRONTIER_OUTPUT_SCHEMA, masterFrontierAllowedActions } from "./modules/master-frontier/protocol.js";
 import { createAgentSessionRow } from "./modules/assistant/session-row.js";
-import { masterFrontierObjectiveKind, masterFrontierUsefulFallback } from "./modules/master-frontier/useful-fallback.js";
-import { masterFrontierExplicitProtocol, masterFrontierProtocolRequest } from "./modules/master-frontier/source-investigation.js";
+import { serializeAgentSessions } from "./modules/assistant/session-persistence.js?v=20260728-verification-workflow";
+import { masterFrontierObjectiveKind, masterFrontierRouteId, masterFrontierUsefulFallback } from "./modules/master-frontier/useful-fallback.js?v=20260804-frontier-modality2";
+import { masterFrontierExplicitProtocol, masterFrontierProtocolRequest } from "./modules/master-frontier/source-investigation.js?v=20260806-frontier-protocol1";
 import { MASTER_FRONTIER_V3_SCHEMA, masterFrontierV3Instructions, masterFrontierV3OutputBudget } from "./modules/master-frontier/cyphers-v3.js";
-import { isMasterFrontierTimelineAction } from "./modules/master-frontier/timeline.js";
-import { markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal, requiredMasterFrontierContinuationContext, resolvePendingAgentRunId } from "./modules/master-frontier/continuation.js";
-
-const RESOURCE_PROFILE_MAX_ENTRIES = 320;
-const RESOURCE_PROFILE_SLOW_MS = 24;
-const RESOURCE_PROFILE_LONG_MS = 80;
-
-function installResourceProfiler() {
-  if (typeof window === "undefined" || window.__wasmAgentResourceProfiler?.installed) return window.__wasmAgentResourceProfiler;
-  const profiler = {
-    installed: true,
-    startedAt: Date.now(),
-    seq: 0,
-    entries: new Map(),
-    slow: [],
-    originals: {},
-  };
-  const cleanLabel = (value = "", fallback = "anonymous") => String(value || fallback).replace(/\s+/g, " ").slice(0, 180);
-  const remember = (label, durationMs, detail = {}) => {
-    const duration = Number(durationMs || 0);
-    const key = cleanLabel(label);
-    const existing = profiler.entries.get(key) || {
-      label: key,
-      count: 0,
-      total_ms: 0,
-      max_ms: 0,
-      slow_count: 0,
-      last_ms: 0,
-      last_at: 0,
-      detail,
-    };
-    existing.count += 1;
-    existing.total_ms = Math.round((existing.total_ms + duration) * 100) / 100;
-    existing.max_ms = Math.max(existing.max_ms, Math.round(duration * 100) / 100);
-    existing.last_ms = Math.round(duration * 100) / 100;
-    existing.last_at = Date.now();
-    existing.detail = { ...existing.detail, ...detail };
-    if (duration >= RESOURCE_PROFILE_SLOW_MS) existing.slow_count += 1;
-    profiler.entries.set(key, existing);
-    if (profiler.entries.size > RESOURCE_PROFILE_MAX_ENTRIES) {
-      const oldest = Array.from(profiler.entries.values()).sort((a, b) => Number(a.last_at || 0) - Number(b.last_at || 0))[0];
-      if (oldest) profiler.entries.delete(oldest.label);
-    }
-    if (duration >= RESOURCE_PROFILE_LONG_MS) {
-      profiler.slow.push({
-        at: new Date().toISOString(),
-        label: key,
-        duration_ms: Math.round(duration * 100) / 100,
-        detail,
-      });
-      while (profiler.slow.length > 80) profiler.slow.shift();
-    }
-  };
-  const wrapCallback = (callback, label, detail = {}) => {
-    if (typeof callback !== "function" || callback.__wasmAgentProfileWrapped) return callback;
-    const wrapped = function wasmAgentProfiledCallback(...args) {
-      const started = performance.now();
-      try {
-        return callback.apply(this, args);
-      } finally {
-        remember(label, performance.now() - started, detail);
-      }
-    };
-    try {
-      Object.defineProperty(wrapped, "__wasmAgentProfileWrapped", { value: true });
-      Object.defineProperty(wrapped, "__wasmAgentOriginalCallback", { value: callback });
-    } catch {}
-    return wrapped;
-  };
-  const callbackName = (callback) => cleanLabel(callback?.name || "anonymous");
-  const creationSite = () => {
-    try {
-      const lines = String(new Error().stack || "").split("\n").map((line) => line.trim());
-      const site = lines.find((line) => line.includes("/app.js")
-        && !line.includes("creationSite")
-        && !line.includes("wrapCallback")
-        && !line.includes("profiledAddEventListener")
-        && !line.includes("profiledSetTimeout")
-        && !line.includes("profiledSetInterval")
-        && !line.includes("profiledRequestAnimationFrame"));
-      return cleanLabel(site || lines[3] || "", "");
-    } catch {
-      return "";
-    }
-  };
-  const targetName = (target) => {
-    if (target === window) return "window";
-    if (target === document) return "document";
-    if (target?.id) return `#${target.id}`;
-    if (target?.className && typeof target.className === "string") return `.${target.className.split(/\s+/)[0]}`;
-    if (target?.tagName) return target.tagName.toLowerCase();
-    return target?.constructor?.name || "EventTarget";
-  };
-  profiler.originals.addEventListener = EventTarget.prototype.addEventListener;
-  profiler.originals.removeEventListener = EventTarget.prototype.removeEventListener;
-  profiler.originals.setTimeout = window.setTimeout;
-  profiler.originals.setInterval = window.setInterval;
-  profiler.originals.requestAnimationFrame = window.requestAnimationFrame;
-  profiler.listenerMap = new WeakMap();
-  EventTarget.prototype.addEventListener = function profiledAddEventListener(type, listener, options) {
-    let nextListener = listener;
-    if (typeof listener === "function") {
-      const name = callbackName(listener);
-      const site = name === "anonymous" ? creationSite() : "";
-      nextListener = wrapCallback(listener, `listener:${targetName(this)}:${type}:${name}${site ? `:${site}` : ""}`, {
-        kind: "listener",
-        target: targetName(this),
-        type: String(type || ""),
-        callback: name,
-        site,
-      });
-      let targetMap = profiler.listenerMap.get(this);
-      if (!targetMap) {
-        targetMap = new WeakMap();
-        profiler.listenerMap.set(this, targetMap);
-      }
-      targetMap.set(listener, nextListener);
-    }
-    return profiler.originals.addEventListener.call(this, type, nextListener, options);
-  };
-  EventTarget.prototype.removeEventListener = function profiledRemoveEventListener(type, listener, options) {
-    const mapped = profiler.listenerMap.get(this)?.get(listener) || listener?.__wasmAgentOriginalCallback || listener;
-    return profiler.originals.removeEventListener.call(this, type, mapped, options);
-  };
-  window.setTimeout = function profiledSetTimeout(callback, delay, ...args) {
-    const name = callbackName(callback);
-    const site = name === "anonymous" ? creationSite() : "";
-    return profiler.originals.setTimeout.call(window, wrapCallback(callback, `timer:setTimeout:${name}${site ? `:${site}` : ""}`, {
-      kind: "timer",
-      delay_ms: Number(delay || 0),
-      site,
-    }), delay, ...args);
-  };
-  window.setInterval = function profiledSetInterval(callback, delay, ...args) {
-    const name = callbackName(callback);
-    const site = name === "anonymous" ? creationSite() : "";
-    return profiler.originals.setInterval.call(window, wrapCallback(callback, `timer:setInterval:${name}${site ? `:${site}` : ""}`, {
-      kind: "interval",
-      delay_ms: Number(delay || 0),
-      site,
-    }), delay, ...args);
-  };
-  if (typeof window.requestAnimationFrame === "function") {
-    window.requestAnimationFrame = function profiledRequestAnimationFrame(callback) {
-      return profiler.originals.requestAnimationFrame.call(window, wrapCallback(callback, `raf:${callbackName(callback)}`, {
-        kind: "raf",
-      }));
-    };
-  }
-  profiler.snapshot = (options = {}) => {
-    const entries = Array.from(profiler.entries.values());
-    const sortKey = options.sort || "total_ms";
-    return {
-      schema: "hermes.wasm_agent.resource_profile.v1",
-      captured_at: new Date().toISOString(),
-      started_at: new Date(profiler.startedAt).toISOString(),
-      entry_count: entries.length,
-      top_total: entries.slice().sort((a, b) => Number(b.total_ms || 0) - Number(a.total_ms || 0)).slice(0, Number(options.limit || 24)),
-      top_max: entries.slice().sort((a, b) => Number(b.max_ms || 0) - Number(a.max_ms || 0)).slice(0, Number(options.limit || 24)),
-      top_count: entries.slice().sort((a, b) => Number(b.count || 0) - Number(a.count || 0)).slice(0, Number(options.limit || 24)),
-      sorted: entries.slice().sort((a, b) => Number(b[sortKey] || 0) - Number(a[sortKey] || 0)).slice(0, Number(options.limit || 24)),
-      slow_tail: profiler.slow.slice(-Number(options.slowLimit || 24)),
-    };
-  };
-  profiler.reset = () => {
-    profiler.entries.clear();
-    profiler.slow = [];
-    profiler.startedAt = Date.now();
-    return profiler.snapshot();
-  };
-  window.__wasmAgentResourceProfiler = profiler;
-  return profiler;
-}
-
+import { isMasterFrontierTimelineAction, masterFrontierDecisionCost, masterFrontierNewInputTokens, masterFrontierTimelineIcon } from "./modules/master-frontier/timeline.js?v=20260806-v6-cost1";
+import { masterFrontierCommentaryFromAction, masterFrontierLiveStepFromAction, masterFrontierLiveStepFromPayload } from "./modules/master-frontier/live-commentary.js?v=20260803-codex-commentary1";
+import { masterFrontierActivityText, masterFrontierInitialCommentary, showMasterFrontierRunActivity } from "./modules/master-frontier/activity-presentation.js?v=20260806-codex-stack2";
+import { mergeMasterFrontierStatusUsage, refreshMasterFrontierStatus, renderMasterFrontierStatusPanel } from "./modules/master-frontier/status-panel.js?v=20260806-codex-status6";
+import { markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierFailureDisposition, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal, requiredMasterFrontierContinuationContext, resolvePendingAgentRunId } from "./modules/master-frontier/continuation.js?v=20260804-frontier-modality2";
+import { masterFrontierChangeDiagnostics, renderMasterFrontierChangeEvidence } from "./modules/master-frontier/change-evidence.js";
+import { masterFrontierRouteProofFromFinal } from "./modules/master-frontier/route-proof.js?v=20260806-v6-latency1";
+import { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS, hydrateOpenExternalApps, openExternalAppFromIcon, installExternalAppHosts } from "./modules/app-registry.js?v=20260804-video-v1";
+import { applyWidgetWindowState } from "./modules/widget-window-state.js";
+import { widgetDimensionLimits } from "./modules/widget-dimensions.js";
+import { startClientPresence } from "./modules/client-presence.js?v=20260806-frontier-protocol1";
+import { installResourceProfiler } from "./modules/performance/resource-profiler.js";
+import { applyWidgetIcon, widgetIconDataUri } from "./modules/widget-icons.js";
+import { homeCleanWidgetLayout, initialVisibleWidgetPosition } from "./modules/space-widget-policy.js";
+import { ensureWidgetResizeHandles, resizedWidgetRect } from "./modules/widget-window-contract.js?v=20260802-windows-resize2";
+import { publishAvatarChatLayer } from "./modules/shell-overlay-contract.js?v=20260802-avatar-layer1";
+import { latestObservationEvents, observationBrowserProjection, observationBrowserSummary, observationEventCounts } from "./modules/observation/module.js?v=20260803-observation-contract1";
 installResourceProfiler();
 let WIS_CAMERA_ARTIFACT_SCHEMA = "hermes.wasm_agent.wis.camera_artifact.v1";
 let WIS_CAMERA_ARTIFACT_BUILD = "lazy-camera-runtime-pending";
@@ -415,7 +259,6 @@ import {
   startRemoteControlViewportPixelCapture,
   stopRemoteControlViewportPixelCapture,
 } from "./modules/remote-control/viewport.js";
-
 traceWisCameraBoundary("app.cameraArtifactBuild.loaded", {
   module: "app.js",
   cameraArtifactBuild: WIS_CAMERA_ARTIFACT_BUILD,
@@ -801,21 +644,6 @@ const SIDE_PANEL_IDS = new Set([...ADMIN_PANEL_IDS, "diagnostics"]);
 const GLOBAL_AGENT_NODE_IDS = new Set(["admin-orchestrator", "hermes-orchestrator", "orchestrator"]);
 const AGENT_SANDBOX_NODE_ID = "account-sandbox";
 const SECURITY_FINDING_STATUSES = ["new", "triaged", "accepted", "rejected", "mitigating", "resolved", "watching"];
-const SPACE_APP_DEFINITIONS = [
-  { id: "resources", label: "Resources", short: "Res" },
-  { id: "topology", label: "Topology", short: "Topo" },
-  { id: "studio", label: "Studio", short: "Studio" },
-  { id: "browser-proof", label: "Browser", short: "Web", module: "host-browser" },
-  { id: "wis", label: "Artifacts", short: "Apps", module: "wis" },
-  { id: "drop-to-copy", label: "Drop", short: "Drop" },
-  { id: "security-loop", label: "Security", short: "Sec", desktopOnly: true },
-  { id: "meta-analysis", label: "Meta-Analysis", short: "Meta" },
-];
-const SPACE_APP_MAPPINGS = {
-  home: [],
-  admin: ["resources", "topology", "studio", "browser-proof", "wis", "drop-to-copy", "security-loop", "meta-analysis"],
-  user: ["browser-proof", "wis", "drop-to-copy", "meta-analysis"],
-};
 const FIXED_WIDGET_LAYOUT = {
   timeline: { minimized: true },
 };
@@ -1402,19 +1230,6 @@ const els = {
   promptInput: document.querySelector("#promptInput"),
   promptSendButton: document.querySelector("#promptSendButton"),
   clearButton: document.querySelector("#clearButton"),
-  browserForm: document.querySelector("#browserForm"),
-  browserUrlInput: document.querySelector("#browserUrlInput"),
-  browserBackButton: document.querySelector("#browserBackButton"),
-  browserForwardButton: document.querySelector("#browserForwardButton"),
-  browserReloadButton: document.querySelector("#browserReloadButton"),
-  browserLiveButton: document.querySelector("#browserLiveButton"),
-  browserOpenButton: document.querySelector("#browserOpenButton"),
-  browserStatus: document.querySelector("#browserStatus"),
-  browserScreen: document.querySelector("#browserScreen"),
-  browserCanvas: document.querySelector("#browserCanvas"),
-  browserImage: document.querySelector("#browserImage"),
-  browserEmpty: document.querySelector("#browserEmpty"),
-  browserMeta: document.querySelector("#browserMeta"),
   wisStatus: document.querySelector("#wisStatus"),
   wisCameraConfigButton: document.querySelector("#wisCameraConfigButton"),
   wisLocation: document.querySelector("#wisLocation"),
@@ -2100,19 +1915,6 @@ const state = {
   widgetLayout: INITIAL_SPACE_WIDGET_LAYOUTS.home || {},
   widgetZ: WIDGET_Z_BASE,
   activeWidgetId: "",
-  browserCapture: null,
-  browserSessionId: "",
-  browserBusy: false,
-  browserQueue: Promise.resolve(),
-  browserLive: false,
-  browserLiveTimer: 0,
-  browserSocket: null,
-  browserStreamToken: 0,
-  browserFrameCount: 0,
-  browserResizeTimer: 0,
-  browserUrlDraft: "",
-  browserUrlDirty: false,
-  browserPendingUrl: "",
   wisSandbox: createWisSandbox(),
   wisActiveArtifact: null,
   wisArtifacts: [],
@@ -3138,17 +2940,6 @@ async function androidNativeHydrationYield(reason = "hydration") {
   await androidNativeYield(ANDROID_NATIVE_HYDRATION_STEP_DELAY_MS);
 }
 
-function eventCounts() {
-  return state.userEvents.reduce((counts, event) => {
-    counts[event.type] = (counts[event.type] || 0) + 1;
-    return counts;
-  }, {});
-}
-
-function latestEvents(count = 36) {
-  return state.userEvents.slice(-count).reverse();
-}
-
 function latestNonAgentClick() {
   return [...state.userEvents].reverse().find((event) => {
     if (!["workspace.click", "workspace.context_menu_requested"].includes(event.type)) return false;
@@ -3163,7 +2954,6 @@ function buildObservationSnapshot() {
   const viewportRect = els.spaceViewport?.getBoundingClientRect?.() || { width: 0, height: 0 };
   const usableViewportRect = spaceViewportUsableRect() || viewportRect;
   const visualViewport = window.visualViewport;
-  const browserRect = els.browserScreen?.getBoundingClientRect?.() || { width: 0, height: 0 };
   const activeSpace = activeSpaceContext();
   const recentErrors = state.userEvents
     .filter((event) => event.type.endsWith(".error") || event.data?.error)
@@ -3225,19 +3015,6 @@ function buildObservationSnapshot() {
         applied_canvas_padding_bottom_px: Math.round(appliedCanvasBottomPaddingPx()),
       },
     },
-    browser: {
-      url: state.browserCapture?.url || els.browserUrlInput?.value || "",
-      domain: browserUrlHost(state.browserCapture?.url || els.browserUrlInput?.value || ""),
-      status: els.browserStatus?.textContent || "",
-      stream_mode: isBrowserStreamOpen() ? "websocket" : state.browserLive ? "polling" : "idle",
-      live: Boolean(state.browserLive),
-      busy: Boolean(state.browserBusy),
-      pending_url: state.browserPendingUrl,
-      frame_count: state.browserFrameCount,
-      session_id: state.browserSessionId ? "present" : "",
-      viewport: { width: Math.round(browserRect.width || 0), height: Math.round(browserRect.height || 0) },
-      last_error: state.browserCapture?.status === "error" ? state.browserCapture.meta : "",
-    },
     fleet: {
       bridge_ready: state.bridgeReady,
       bridge_url: state.bridgeUrl,
@@ -3261,6 +3038,7 @@ function buildObservationSnapshot() {
     avatar_chat: {
       target_selector: agentNodeSelectDiagnostic(),
     },
+    browser: observationBrowserProjection({ nativeRuntime: window.wasmAgentNative?.runtime || (window.WasmAgentNative ? "android" : "") }),
     tasks: {
       active_task_id: state.taskId,
       status: state.taskId ? "running" : state.bridgeReady ? "idle" : "offline",
@@ -3282,7 +3060,7 @@ function buildObservationSnapshot() {
     analytics: {
       event_count: state.userEvents.length,
       event_limit: USER_EVENT_LIMIT,
-      counts: eventCounts(),
+      counts: observationEventCounts(state.userEvents),
       recent_errors: recentErrors,
       last_interaction_at: state.userEvents.at(-1)?.timestamp || "",
       last_non_agent_click: latestNonAgentClick(),
@@ -3301,7 +3079,7 @@ function buildObservationSnapshot() {
         distance_px: roundedNumber(Math.hypot(pointer.currentX - pointer.startX, pointer.currentY - pointer.startY)),
       })),
     },
-    user_events: latestEvents(40),
+    user_events: latestObservationEvents(state.userEvents, 40),
   };
   state.observationSnapshot = snapshot;
   return snapshot;
@@ -3354,6 +3132,7 @@ function renderObservation() {
     return;
   }
   const snapshot = buildObservationSnapshot();
+  const browser = observationBrowserSummary(snapshot);
   els.observationCount.textContent = `${state.userEvents.length} events`;
   const counts = snapshot.analytics.counts;
   const topCounts = Object.entries(counts)
@@ -3363,15 +3142,15 @@ function renderObservation() {
     ...[
       ["Panel", snapshot.workspace.active_panel],
       ["Widget", snapshot.workspace.active_widget || "-"],
-      ["Browser", snapshot.browser.domain || "-"],
-      ["Stream", snapshot.browser.stream_mode],
+      ["Browser", browser.domain],
+      ["Stream", browser.stream_mode],
       ["Events", String(snapshot.analytics.event_count)],
       ["Errors", String(snapshot.analytics.recent_errors.length)],
       ...topCounts.map(([type, count]) => [type, String(count)]),
     ].map(([label, value]) => metric(label, value))
   );
   els.observationTimeline.replaceChildren(
-    ...latestEvents(18).map((event) => {
+    ...latestObservationEvents(state.userEvents, 18).map((event) => {
       const item = document.createElement("div");
       item.className = "observation-event";
       const title = document.createElement("strong");
@@ -8965,10 +8744,6 @@ function applyModuleVisibility() {
     element.classList.toggle("module-disabled", !enabled);
   });
   if (!isModuleEnabled("embedded-assistant")) setAgentOpen(false);
-  if (!isModuleEnabled("host-browser")) {
-    if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
-    els.browserScreen.classList.remove("is-busy");
-  }
   if (!isPanelAvailable(state.activePanel)) setPanel("modules");
 }
 
@@ -9120,6 +8895,7 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
     ...defaultWidgetLayoutForPanel(panel),
     ...sanitizeWidgetLayoutForPanel(layout, panel),
   };
+  state.widgetLayout = homeCleanWidgetLayout(state.widgetLayout, spaceId);
   const metadataArea = userSpaceAreaForPanel(panel);
   const area = metadataArea
     ? writeCanvasAreaSize(canvasLayout(), metadataArea)
@@ -9127,6 +8903,9 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
   if (!metadataArea) syncSpaceAreaMetadata(panel, area);
   applyCanvasGeometry({ renderMiniMap: false });
   applyWidgetLayout();
+  void hydrateOpenExternalApps(spaceApps(panel), state.widgetLayout).then((mounted) => {
+    if (mounted && activeSpaceStorageId() === spaceId) applyWidgetLayout();
+  });
   if (isAndroidNativeShell()) scheduleAndroidSpaceMiniMapRender("panel");
   else renderSpaceMiniMap();
 }
@@ -13090,9 +12869,12 @@ async function loadUserSpaces(options = {}) {
     state.userSpaces = sanitizeUserSpaces(payload.spaces);
     state.userStorage = payload.storage || null;
     state.spaceWidgetLayouts = readLocalSpaceWidgetLayouts();
+    const routedPanel = panelFromPath();
+    const routeReconciled = routedPanel !== state.activePanel;
+    if (routeReconciled) setPanel(routedPanel, { updateUrl: false });
     const afterActiveSpace = userSpaceById(activePanel);
     const activeAreaChanged = remoteSpaceAreaChanged(beforeActiveSpace, afterActiveSpace);
-    if (shouldSyncUserSpacesFromServer()) applySpaceWidgetLayout(state.activePanel);
+    if (!routeReconciled && shouldSyncUserSpacesFromServer()) applySpaceWidgetLayout(state.activePanel);
     renderSpaceLauncher();
     renderSpaceTitle();
     updateSharedSpaceSyncPolling();
@@ -13161,9 +12943,6 @@ function moduleDefinitionById(moduleId) {
 }
 
 function moduleServerAvailable(moduleId) {
-  if (moduleId === "host-browser") {
-    return state.config?.features?.hostBrowser?.enabled !== false;
-  }
   return true;
 }
 
@@ -13295,7 +13074,7 @@ function readAgentSessions() {
 
 function saveAgentSessions() {
   try {
-    localStorage.setItem(AGENT_SESSIONS_STORAGE_KEY, JSON.stringify(state.agentSessions.slice(0, 20)));
+    localStorage.setItem(AGENT_SESSIONS_STORAGE_KEY, serializeAgentSessions(state.agentSessions, state.activeAgentSessionId));
   } catch {
     // Session persistence is a convenience; chat should still work without it.
   }
@@ -18259,26 +18038,12 @@ function widgetImage(widgetId) {
   return image.startsWith("data:image/") ? image : "";
 }
 
-function normalizeDimension(value, fallback, min, max) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.round(clamp(number, min, max));
-}
-
 function widgetDimensionBounds(widgetId, surfaceRect = null) {
-  const meta = widgetMeta(widgetId);
-  const maxSurfaceWidth = Math.max(240, Math.round((surfaceRect?.width || 1800) - 16));
-  const maxSurfaceHeight = Math.max(180, Math.round((surfaceRect?.height || 1200) - 16));
-  const minWidth = normalizeDimension(meta.minWidth, 320, 180, maxSurfaceWidth);
-  const minHeight = normalizeDimension(meta.minHeight, 220, 120, maxSurfaceHeight);
-  const maxWidth = Math.max(minWidth, normalizeDimension(meta.maxWidth, maxSurfaceWidth, minWidth, Math.max(minWidth, 4000)));
-  const maxHeight = Math.max(minHeight, normalizeDimension(meta.maxHeight, maxSurfaceHeight, minHeight, Math.max(minHeight, 3000)));
-  return {
-    minWidth,
-    minHeight,
-    maxWidth: Math.min(maxWidth, maxSurfaceWidth),
-    maxHeight: Math.min(maxHeight, maxSurfaceHeight),
-  };
+  const widget = widgetById(widgetId);
+  return widgetDimensionLimits(widgetMeta(widgetId), {
+    minWidth: widget?.dataset.widgetMinWidth,
+    minHeight: widget?.dataset.widgetMinHeight,
+  }, surfaceRect);
 }
 
 function applyWidgetChrome(widget) {
@@ -18286,6 +18051,9 @@ function applyWidgetChrome(widget) {
   if (!id) return;
   const title = widget.querySelector(".widget-head > span:first-child");
   if (title) title.textContent = widgetTitle(id);
+  const definition = appDefinitionById(id) || { icon: id === "timeline" ? "timeline" : "app" };
+  widget.dataset.widgetIcon = definition.icon || "app";
+  widget.style.setProperty("--widget-icon-image", `url("${widgetIconDataUri(definition.icon)}")`);
   widget.querySelectorAll("[data-widget-control='minimize']").forEach((button) => {
     button.setAttribute("aria-label", `Minimize ${widgetTitle(id)}`);
   });
@@ -18331,7 +18099,6 @@ function toggleWidgetMaximized(widgetId) {
   applyWidgetLayout();
   renderAppLayer();
   bringWidgetForward(widget);
-  if (widgetId === "browser-proof") scheduleBrowserResizeSync();
   recordUserEvent("workspace.widget_maximize_toggled", {
     target: `widget:${widgetId}`,
     summary: `${layout.maximized ? "Maximized" : "Restored"} ${widgetId}`,
@@ -18376,15 +18143,7 @@ function syncMaximizedShellState() {
 
 function applyWidgetState(widget) {
   const id = widget.dataset.widgetId;
-  const layout = id ? state.widgetLayout[id] || {} : {};
-  widget.classList.toggle("is-minimized", Boolean(layout.minimized));
-  widget.classList.toggle("is-maximized", Boolean(layout.maximized));
-  widget.hidden = Boolean(layout.minimized);
-  widget.querySelectorAll("[data-widget-control='maximize']").forEach((button) => {
-    button.classList.toggle("active", Boolean(layout.maximized));
-    button.title = layout.maximized ? "Restore" : "Maximize";
-    button.setAttribute("aria-label", layout.maximized ? `Restore ${id}` : `Maximize ${id}`);
-  });
+  applyWidgetWindowState(widget, id ? state.widgetLayout[id] || {} : {});
 }
 
 function spaceApps(panel = state.activePanel) {
@@ -18456,19 +18215,18 @@ function createSpaceAppButton(app) {
 
   const icon = document.createElement("span");
   icon.className = "space-app-icon";
-  icon.textContent = widgetShort(app.id).slice(0, 2);
+  applyWidgetIcon(icon, app, widgetImage(app.id));
   const label = document.createElement("span");
   label.textContent = widgetShort(app.id);
   button.append(icon, label);
-  button.addEventListener("click", (event) => {
+  button.addEventListener("click", async (event) => {
     if (button.dataset.dragMoved === "true") {
       button.dataset.dragMoved = "";
       event.preventDefault();
       event.stopPropagation();
       return;
     }
-    const layout = widgetLayout(app.id);
-    setWidgetMinimized(app.id, !layout.minimized);
+    await openExternalAppFromIcon(app, widgetLayout(app.id).minimized, (minimized) => setWidgetMinimized(app.id, minimized));
   });
   button.addEventListener("contextmenu", (event) => showAppContextMenu(app.id, "app", event));
   installLongPressMenu(button, (event) => showAppContextMenu(app.id, "app", event));
@@ -18483,11 +18241,7 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
   button.classList.toggle("open", !layout.minimized);
   const icon = button.querySelector(".space-app-icon");
   const image = widgetImage(app.id);
-  if (icon) {
-    icon.textContent = image ? "" : widgetShort(app.id).slice(0, 2);
-    icon.style.backgroundImage = image ? `url("${image}")` : "";
-    icon.classList.toggle("has-image", Boolean(image));
-  }
+  applyWidgetIcon(icon, app, image);
   const label = button.querySelector(".space-app-icon + span");
   if (label) label.textContent = widgetShort(app.id);
   const viewportRect = spaceLogicalRect();
@@ -18913,22 +18667,24 @@ function ensureOpenedWidgetContained(widget, widgetId) {
     }
     return;
   }
+  const boardRect = spaceSurface()?.getBoundingClientRect?.();
+  if (!boardRect) return;
+  const initial = initialVisibleWidgetPosition({ visibleRect, boardRect, widgetRect: rect, distance: canvasDistance(), inset: SPACE_CANVAS_EDGE_INSET_PX });
+  const logicalBoardRect = spaceLogicalRect();
   const layout = widgetLayout(widgetId);
-  layout.leftPx = SPACE_CANVAS_EDGE_INSET_PX;
-  layout.topPx = SPACE_CANVAS_EDGE_INSET_PX;
-  layout.leftPct = 0;
-  layout.topPct = 0;
-  widget.style.left = `${SPACE_CANVAS_EDGE_INSET_PX}px`;
-  widget.style.top = `${SPACE_CANVAS_EDGE_INSET_PX}px`;
+  layout.leftPx = initial.left;
+  layout.topPx = initial.top;
+  layout.leftPct = initial.left / Math.max(1, logicalBoardRect.width);
+  layout.topPct = initial.top / Math.max(1, logicalBoardRect.height);
+  widget.style.left = `${logicalToScreenPx(initial.left)}px`;
+  widget.style.top = `${logicalToScreenPx(initial.top)}px`;
   widget.style.right = "auto";
   widget.style.bottom = "auto";
-  els.spaceViewport.scrollLeft = 0;
-  els.spaceViewport.scrollTop = 0;
   saveWidgetLayout();
   recordUserEvent("workspace.widget_initial_point_applied", {
     target: `widget:${widgetId}`,
-    summary: `Moved ${widgetId} to the canvas initial point`,
-    data: { widget_id: widgetId, left_px: SPACE_CANVAS_EDGE_INSET_PX, top_px: SPACE_CANVAS_EDGE_INSET_PX, width_px: fit.changed ? fit.width : Math.round(rect.width), height_px: fit.changed ? fit.height : Math.round(rect.height) },
+    summary: `Moved ${widgetId} into the visible canvas`,
+    data: { widget_id: widgetId, left_px: initial.left, top_px: initial.top, width_px: fit.changed ? fit.width : Math.round(rect.width), height_px: fit.changed ? fit.height : Math.round(rect.height) },
   });
 }
 
@@ -19113,111 +18869,113 @@ function installWidgetWindowControls() {
 function installWidgetResizing() {
   const viewport = spaceSurface();
   if (!viewport) return;
-  document.querySelectorAll(".widget-resize-handle").forEach((handle) => {
-    const widget = handle.closest(".widget[data-widget-id]");
-    if (!widget) return;
-    handle.addEventListener("pointerdown", (event) => {
-      if (!isPrimaryPointer(event)) return;
-      if (widget.classList.contains("is-maximized")) return;
-      event.preventDefault();
-      event.stopPropagation();
+  document.querySelectorAll(".widget[data-widget-id]").forEach(ensureWidgetResizeHandles);
+  document.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest?.(".widget-resize-handle[data-resize-direction]");
+    const widget = handle?.closest?.(".widget[data-widget-id]");
+    if (!handle || !widget || !isPrimaryPointer(event) || widget.classList.contains("is-maximized")) return;
+    event.preventDefault();
+    event.stopPropagation();
 
-      const viewportRect = spaceLogicalRect(viewport);
-      const boardVisualRect = viewport.getBoundingClientRect();
-      const widgetRect = widget.getBoundingClientRect();
-      const startLeft = screenToLogicalPx(widgetRect.left - boardVisualRect.left);
-      const startTop = screenToLogicalPx(widgetRect.top - boardVisualRect.top);
-      const startWidth = widget.offsetWidth;
-      const startHeight = widget.offsetHeight;
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const bounds = widgetDimensionBounds(widget.dataset.widgetId, viewportRect);
-      const minWidth = bounds.minWidth;
-      const minHeight = bounds.minHeight;
-      let finished = false;
+    const direction = handle.dataset.resizeDirection || "se";
+    const viewportRect = spaceLogicalRect(viewport);
+    const boardVisualRect = viewport.getBoundingClientRect();
+    const widgetRect = widget.getBoundingClientRect();
+    const distance = canvasDistance();
+    const start = {
+      left: widgetRect.left - boardVisualRect.left,
+      top: widgetRect.top - boardVisualRect.top,
+      width: widgetRect.width,
+      height: widgetRect.height,
+    };
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const logicalBounds = widgetDimensionBounds(widget.dataset.widgetId, viewportRect);
+    const bounds = {
+      minWidth: logicalBounds.minWidth * distance,
+      minHeight: logicalBounds.minHeight * distance,
+      maxWidth: logicalBounds.maxWidth * distance,
+      maxHeight: logicalBounds.maxHeight * distance,
+    };
+    const screenSurface = { width: boardVisualRect.width, height: boardVisualRect.height };
+    let finished = false;
 
-      widget.style.left = `${logicalToScreenPx(startLeft)}px`;
-      widget.style.top = `${logicalToScreenPx(startTop)}px`;
-      widget.style.right = "auto";
-      widget.style.bottom = "auto";
-      widget.style.width = `${startWidth}px`;
-      widget.style.height = `${startHeight}px`;
-      widget.style.aspectRatio = "auto";
-      widget.classList.add("is-resizing");
-      document.body.classList.add("is-widget-resizing");
-      bringWidgetForward(widget);
-      try {
-        handle.setPointerCapture(event.pointerId);
-      } catch {
-        // Pointer capture can be unavailable during rapid touch/context transitions.
-      }
-      const startedAt = performance.now();
-      recordUserEvent("workspace.widget_resize_started", {
-        target: `widget:${widget.dataset.widgetId}`,
-        summary: `Started resizing ${widget.dataset.widgetId}`,
-        data: { widget_id: widget.dataset.widgetId, width: Math.round(startWidth), height: Math.round(startHeight) },
-      });
-
-      const move = (moveEvent) => {
-        moveEvent.preventDefault();
-        const movementBounds = widgetCanvasMovementBounds(widget);
-        const maxWidth = Math.min(bounds.maxWidth, Math.max(minWidth, (movementBounds?.maxLeft || viewportRect.width) - startLeft + widget.offsetWidth));
-        const maxHeight = Math.min(bounds.maxHeight, Math.max(minHeight, (movementBounds?.maxTop || viewportRect.height) - startTop + widget.offsetHeight));
-        const width = clamp(startWidth + screenToLogicalPx(moveEvent.clientX - startX), minWidth, maxWidth);
-        const height = clamp(startHeight + screenToLogicalPx(moveEvent.clientY - startY), minHeight, maxHeight);
-        widget.style.width = `${width}px`;
-        widget.style.height = `${height}px`;
-      };
-
-      const end = () => {
-        if (finished) return;
-        finished = true;
-        widget.classList.remove("is-resizing");
-        document.body.classList.remove("is-widget-resizing");
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", end);
-        handle.removeEventListener("pointercancel", end);
-        window.removeEventListener("pointermove", move);
-        window.removeEventListener("pointerup", end);
-        window.removeEventListener("pointercancel", end);
-        try {
-          handle.releasePointerCapture(event.pointerId);
-        } catch {
-          // Capture may already be released by the browser.
-        }
-        state.widgetLayout[widget.dataset.widgetId] = {
-          ...(state.widgetLayout[widget.dataset.widgetId] || {}),
-          leftPx: Math.round(screenToLogicalPx(parseFloat(widget.style.left || "0"))),
-          topPx: Math.round(screenToLogicalPx(parseFloat(widget.style.top || "0"))),
-          widthPx: Math.round(widget.offsetWidth),
-          heightPx: Math.round(widget.offsetHeight),
-          leftPct: screenToLogicalPx(parseFloat(widget.style.left || "0")) / Math.max(1, viewportRect.width),
-          topPct: screenToLogicalPx(parseFloat(widget.style.top || "0")) / Math.max(1, viewportRect.height),
-          widthPct: widget.offsetWidth / Math.max(1, viewportRect.width),
-          heightPct: widget.offsetHeight / Math.max(1, viewportRect.height),
-          z: Number(widget.style.zIndex || 4),
-        };
-        saveWidgetLayout();
-        if (widget.dataset.widgetId === "browser-proof") scheduleBrowserResizeSync();
-        recordUserEvent("workspace.widget_resize_finished", {
-          target: `widget:${widget.dataset.widgetId}`,
-          summary: `Finished resizing ${widget.dataset.widgetId}`,
-          data: {
-            widget_id: widget.dataset.widgetId,
-            width: widget.offsetWidth,
-            height: widget.offsetHeight,
-          },
-          duration_ms: performance.now() - startedAt,
-        });
-      };
-
-      handle.addEventListener("pointermove", move, { passive: false });
-      handle.addEventListener("pointerup", end, { once: true });
-      handle.addEventListener("pointercancel", end, { once: true });
-      window.addEventListener("pointermove", move, { passive: false });
-      window.addEventListener("pointerup", end, { once: true });
-      window.addEventListener("pointercancel", end, { once: true });
+    widget.style.left = `${start.left}px`;
+    widget.style.top = `${start.top}px`;
+    widget.style.right = "auto";
+    widget.style.bottom = "auto";
+    widget.style.width = `${start.width / distance}px`;
+    widget.style.height = `${start.height / distance}px`;
+    widget.style.aspectRatio = "auto";
+    widget.classList.add("is-resizing");
+    document.body.classList.add("is-widget-resizing");
+    document.body.dataset.widgetResizeAxis = direction.length === 1
+      ? (direction === "n" || direction === "s" ? "ns" : "ew")
+      : (["ne", "sw"].includes(direction) ? "nesw" : "nwse");
+    bringWidgetForward(widget);
+    try { handle.setPointerCapture(event.pointerId); } catch {}
+    const startedAt = performance.now();
+    recordUserEvent("workspace.widget_resize_started", {
+      target: `widget:${widget.dataset.widgetId}`,
+      summary: `Started resizing ${widget.dataset.widgetId} from ${direction}`,
+      data: { widget_id: widget.dataset.widgetId, direction, width: Math.round(start.width), height: Math.round(start.height) },
     });
+
+    const move = (moveEvent) => {
+      moveEvent.preventDefault();
+      const next = resizedWidgetRect(
+        start,
+        direction,
+        moveEvent.clientX - startX,
+        moveEvent.clientY - startY,
+        bounds,
+        screenSurface,
+      );
+      widget.style.left = `${next.left}px`;
+      widget.style.top = `${next.top}px`;
+      widget.style.width = `${next.width / distance}px`;
+      widget.style.height = `${next.height / distance}px`;
+      widget.dispatchEvent(new CustomEvent("wasm-agent:widget-resize-frame", {
+        detail: { direction, left: next.left, top: next.top, width: next.width, height: next.height },
+      }));
+    };
+
+    const end = () => {
+      if (finished) return;
+      finished = true;
+      widget.classList.remove("is-resizing");
+      document.body.classList.remove("is-widget-resizing");
+      delete document.body.dataset.widgetResizeAxis;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", end);
+      window.removeEventListener("pointercancel", end);
+      try { handle.releasePointerCapture(event.pointerId); } catch {}
+      const left = screenToLogicalPx(parseFloat(widget.style.left || "0"));
+      const top = screenToLogicalPx(parseFloat(widget.style.top || "0"));
+      state.widgetLayout[widget.dataset.widgetId] = {
+        ...(state.widgetLayout[widget.dataset.widgetId] || {}),
+        leftPx: Math.round(left),
+        topPx: Math.round(top),
+        widthPx: Math.round(widget.offsetWidth),
+        heightPx: Math.round(widget.offsetHeight),
+        leftPct: left / Math.max(1, viewportRect.width),
+        topPct: top / Math.max(1, viewportRect.height),
+        widthPct: widget.offsetWidth / Math.max(1, viewportRect.width),
+        heightPct: widget.offsetHeight / Math.max(1, viewportRect.height),
+        z: Number(widget.style.zIndex || 4),
+      };
+      saveWidgetLayout();
+      recordUserEvent("workspace.widget_resize_finished", {
+        target: `widget:${widget.dataset.widgetId}`,
+        summary: `Finished resizing ${widget.dataset.widgetId} from ${direction}`,
+        data: { widget_id: widget.dataset.widgetId, direction, width: widget.offsetWidth, height: widget.offsetHeight },
+        duration_ms: performance.now() - startedAt,
+      });
+    };
+
+    window.addEventListener("pointermove", move, { passive: false });
+    window.addEventListener("pointerup", end, { once: true });
+    window.addEventListener("pointercancel", end, { once: true });
   });
 }
 
@@ -22647,7 +22405,6 @@ async function logout() {
     state.socialSyncInterval = 0;
   }
   closeRemoteControlLiveSocket({ reconnect: false });
-  if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
   state.authenticatedBootstrapped = false;
   renderAuthGate();
   recordUserEvent("auth.logout_finished", {
@@ -22750,97 +22507,6 @@ async function fetchAgentKernelTool(path, body = {}, options = {}) {
     body,
     signal: options.signal,
   });
-}
-
-function agentKernelRouteSummary(proof = {}) {
-  const summary = proof.summary || proof.map_summary || {};
-  const routeId = cleanText(summary.route_id || proof.route_id || proof.route_contract?.route_id || "", "");
-  const fileCount = Number(proof.file_count ?? proof.files?.count ?? 0);
-  return [routeId, fileCount ? `${fileCount} file receipts` : ""].filter(Boolean).join(" / ");
-}
-
-function agentKernelCapabilityManifest(payload = {}) {
-  if (payload.manifest && typeof payload.manifest === "object") return payload.manifest;
-  if (payload.capabilities && typeof payload.capabilities === "object") return payload.capabilities;
-  if (payload.result?.manifest && typeof payload.result.manifest === "object") return payload.result.manifest;
-  if (payload.result?.capabilities && typeof payload.result.capabilities === "object") return payload.result.capabilities;
-  return {};
-}
-
-async function proveAgentKernelRouteTools(objective, pendingMessage, options = {}) {
-  const resolvePayload = await fetchAgentKernelTool("/agent/tools/route.resolve", {
-    route_id: "wasm-agent.avatar-chat.ui",
-    surface_hint: "avatar-chat",
-    objective,
-  }, { signal: options.signal, timeoutMs: 8000 });
-  const routeContract = resolvePayload.route_contract || {};
-  const routeId = cleanText(routeContract.route_id || resolvePayload.summary?.route_id || "", "");
-  if (!routeId) throw new Error(resolvePayload.error?.message || "route_contract_missing");
-  const [mapPayload, filesPayload, capabilitiesPayload] = await Promise.all([
-    fetchAgentKernelTool("/agent/tools/map.summary", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
-    fetchAgentKernelTool("/agent/tools/lookup.files", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
-    fetchAgentKernelTool("/agent/tools/kernel.capabilities", { route_id: routeId }, { signal: options.signal, timeoutMs: 8000 }),
-  ]);
-  const capabilityManifest = agentKernelCapabilityManifest(capabilitiesPayload);
-  const masterFrontierManifest = capabilityManifest.master_frontier && typeof capabilityManifest.master_frontier === "object" ? capabilityManifest.master_frontier : {};
-  const reliabilityFeatures = masterFrontierManifest.features && typeof masterFrontierManifest.features === "object" ? masterFrontierManifest.features : {};
-  const reliabilityMissing = [];
-  if (!reliabilityFeatures.empty_provider_repair) reliabilityMissing.push("empty_provider_repair");
-  if (!reliabilityFeatures.local_evidence_continuation) reliabilityMissing.push("local_evidence_continuation");
-  const proof = {
-    schema: "hermes.wasm_agent.client_kernel_route_proof.v1",
-    route_id: routeId,
-    route_contract: routeContract,
-    summary: resolvePayload.summary || mapPayload.summary || {},
-    map_summary: mapPayload.summary || {},
-    capabilities: capabilityManifest,
-    master_frontier: masterFrontierManifest,
-    files: {
-      count: Number(filesPayload.count || 0),
-      receipts: Array.isArray(filesPayload.files) ? filesPayload.files.slice(0, 12) : [],
-    },
-    reliability: {
-      ok: reliabilityMissing.length === 0,
-      missing: reliabilityMissing,
-      build: cleanText(masterFrontierManifest.build || "", ""),
-      code: reliabilityMissing.length ? "master_frontier_reliability_build_missing" : "ok",
-    },
-    tools: ["route.resolve", "map.summary", "lookup.files", "kernel.capabilities"],
-  };
-  if (pendingMessage) {
-    pendingMessage.kernel_route_proof = proof;
-    pendingMessage.route_contract = routeContract;
-    mergeAgentAction(pendingMessage, agentAction("Kernel route proof", "done", agentKernelRouteSummary(proof), {
-      id: "client_kernel_route_preflight",
-      topic: "run-wasm",
-      kind: "context",
-      meta: "route.resolve/map.summary/lookup.files",
-      arguments: proof,
-      preview: JSON.stringify({
-        route_id: proof.route_id,
-        owner: proof.summary.owner,
-        workspace_root: proof.summary.workspace_root,
-        master_frontier_build: proof.master_frontier.build || "",
-        reliability: proof.reliability,
-        files: proof.files.receipts.map((item) => ({
-          path: item.path,
-          bytes: item.bytes,
-          sha256: item.sha256 ? item.sha256.slice(0, 12) : "",
-        })),
-      }, null, 2),
-    }));
-    if (reliabilityMissing.length) {
-      mergeAgentAction(pendingMessage, agentAction("Master:frontier reliability", "error", reliabilityMissing.join(", "), {
-        id: "client_master_frontier_reliability_degraded",
-        topic: "run-wasm",
-        kind: "context",
-        meta: proof.reliability.code,
-        arguments: proof.reliability,
-        preview: JSON.stringify(proof.reliability, null, 2),
-      }));
-    }
-  }
-  return proof;
 }
 
 async function fetchExternalJson(url, options = {}) {
@@ -23188,7 +22854,7 @@ function handleAgentStreamLine(line, pendingMessage) {
   if (payload.type === "heartbeat") {
     if (payload.action) mergeAgentAction(pendingMessage, payload.action);
     updateAgentPendingMessage(pendingMessage, {
-      phase: agentLiveStepFromPayload(payload) || pendingMessage.phase || "Waiting for agent",
+      phase: masterFrontierLiveStepFromPayload(payload) || pendingMessage.phase || "Waiting for agent",
       content: payload.message || pendingMessage.content,
     });
   }
@@ -23278,44 +22944,6 @@ function extractJsonStringValue(text, key) {
   return { started: true, value, complete: false };
 }
 
-function agentLiveStepFromPayload(payload = {}) {
-  if (!payload || typeof payload !== "object") return "";
-  if (payload.action && typeof payload.action === "object") return agentLiveStepFromAction(payload.action);
-  const phase = cleanText(payload.phase || "", "");
-  if (!phase || phase === "Hermes bridge active") return "";
-  return phase;
-}
-
-function agentLiveStepFromAction(action = {}) {
-  if (!action || typeof action !== "object") return "";
-  const label = cleanText(action.label || "", "");
-  const status = cleanText(action.status || "", "").toLowerCase();
-  const meta = cleanText(action.meta || "", "");
-  const detail = cleanText(action.detail || "", "");
-  if (!label) return "";
-  if (label === "tokens.used") return "";
-  if (label === "bridge.run.poll") return "";
-  if (label === "patch" || label === "repo.edit" || label === "apply_patch") return "Hermes: editing files";
-  if (label === "test.run" || label === "run_tests") return "Hermes: running tests";
-  if (label === "bridge.run.started") return "Dispatching Hermes";
-  if (label === "bridge.run.completed") return "Hermes: preparing final";
-  if (label === "backend.run.completed") return "Hermes: preparing final";
-  if (label === "backend.tool.started") return "Starting tool";
-  if (label === "backend.tool.completed") return "Reviewing tool result";
-  if (meta.startsWith("tool.started") || status === "running") {
-    if (label === "execute_code") {
-      const match = detail.match(/['"]([^'"]+\.(?:test|spec)\.[A-Za-z0-9]+|[^'"]+\.test\.[A-Za-z0-9]+)['"]/);
-      return match ? "Hermes: running tests" : "Running code";
-    }
-    if (label === "patch") return "Hermes: editing files";
-    if (label === "read_file") return "Reading file";
-    return `Running ${label}`;
-  }
-  if ((meta.startsWith("tool.completed") || meta.startsWith("tool.finished")) && status === "done") return `Finished ${label}`;
-  if (status === "error") return `${label} needs attention`;
-  return "";
-}
-
 function agentTokenUsageFromAction(action = {}) {
   if (!action || typeof action !== "object") return null;
   const label = cleanText(action.label || "", "");
@@ -23375,7 +23003,7 @@ function applyAgentTokenLedger(message, ledger, extra = {}) {
   const usage = agentTokenLedgerUsage(normalizedLedger);
   if (usage) {
     message.diagnostics.token_usage = message.diagnostics.token_usage || usage;
-    message.diagnostics.token_usage_total = usage;
+    message.diagnostics.token_usage_total = mergeMasterFrontierStatusUsage(usage, { ...message.diagnostics.token_usage_total, ...normalizedLedger });
     updateAgentTokenUsage(usage);
   }
   return normalizedLedger;
@@ -23562,6 +23190,7 @@ function setAgentOpen(open, options = {}) {
   const changed = state.agentOpen !== nextOpen;
   state.agentOpen = nextOpen;
   els.agentOverlay.dataset.open = nextOpen ? "true" : "false";
+  publishAvatarChatLayer(nextOpen);
   els.agentAvatarButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   if (nextOpen) {
     placeAgentPanel();
@@ -23890,7 +23519,8 @@ function renderAgentMessage(message) {
   wrap.dataset.messageId = message.id || "";
   if (message.pending_state) wrap.dataset.pendingState = message.pending_state;
   if (message.pending) wrap.classList.add("is-thinking");
-  const header = message.role === "assistant" && (message.pending || Number.isFinite(message.duration_ms))
+  const showRunActivity = showMasterFrontierRunActivity(message, socialChat);
+  const header = showRunActivity
     ? agentTurnHeader(message)
     : null;
   const body = socialChat && message.kind === "sticker"
@@ -23919,14 +23549,15 @@ function renderAgentMessage(message) {
   const fileAttachments = renderAgentFileAttachments(message);
   if (fileAttachments) wrap.append(fileAttachments);
   if (header) wrap.append(header);
-  const timeline = !socialChat && message.role === "assistant" ? renderAgentTimeline(message) : null;
+  if (showRunActivity) wrap.append(body);
+  const timeline = showRunActivity ? renderAgentTimeline(message) : null;
   if (timeline) wrap.append(timeline);
-  const tokenLedger = !socialChat && message.role === "assistant" ? renderAgentTokenLedger(message) : null;
+  const tokenLedger = showRunActivity ? renderAgentTokenLedger(message) : null;
   if (tokenLedger) wrap.append(tokenLedger);
-  const actions = !socialChat && message.role === "assistant" ? agentActionsChain(message) : null;
+  const actions = showRunActivity ? agentActionsChain(message) : null;
   if (actions) wrap.append(actions);
-  wrap.append(body);
-  const commandChoices = !socialChat && message.role === "assistant" ? renderAgentCommandChoices(message) : null;
+  if (!showRunActivity) wrap.append(body);
+  const commandChoices = showRunActivity ? renderAgentCommandChoices(message) : null;
   if (commandChoices) wrap.append(commandChoices);
   if (socialChat) {
     const meta = renderDirectMessageMeta(message);
@@ -23934,7 +23565,14 @@ function renderAgentMessage(message) {
     const reactions = direct ? renderDirectReactions(message) : null;
     if (reactions) wrap.append(reactions);
   }
-  const changedFiles = !socialChat && message.role === "assistant" ? changedFilesFooter(message.changed_files || [], message) : null;
+  const changedFiles = showRunActivity
+    ? renderMasterFrontierChangeEvidence(message, {
+      bindOpenState: message.id ? bindAgentDetailsOpenState : null,
+      onStepback: (checkpointRef) => {
+        void stepbackTimeline(checkpointRef, message.space_id || activeSpaceStorageId());
+      },
+    })
+    : null;
   if (changedFiles) wrap.append(changedFiles);
   if (state.agentOpenMessageMenuId === message.id && !header) wrap.append(agentMessageMenu(message));
   installAgentMessageMenuInteractions(wrap, message);
@@ -25374,6 +25012,7 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     reason: cleanText(card.reason || "", ""),
   }));
   const objectiveKind = masterFrontierObjectiveKind(message);
+  const routeId = masterFrontierRouteId(objectiveKind);
   const explicitProtocol = masterFrontierExplicitProtocol(window.location.search, window.localStorage?.getItem("wasmAgent.frontierProtocol"));
   const protocolSelection = masterFrontierProtocolRequest(message, objectiveKind, explicitProtocol);
   return {
@@ -25382,11 +25021,11 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     objective: message,
     objective_kind: objectiveKind === "diagnosis" && protocolSelection.protocol === "v4-source-investigation" ? "source-investigation" : objectiveKind,
     surface: "avatar-chat",
-    route_id: "wasm-agent.avatar-chat.ui",
+    route_id: routeId,
     route_contract: routeContract || undefined,
     state_summary: [
       `surface:avatar-chat`,
-      `route:wasm-agent.avatar-chat.ui`,
+      `route:${routeId}`,
       `target:${AGENT_MASTER_FRONTIER_LABEL}`,
       `node:${AGENT_FRONTIER_NODE_ID}`,
       `space:${cleanText(activeSpace?.display_name || activeSpace?.name || "", "home")}`,
@@ -25397,7 +25036,7 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     ].join(" "),
     compact_state: {
       surface: "avatar-chat",
-      route_id: "wasm-agent.avatar-chat.ui",
+      route_id: routeId,
       target: AGENT_MASTER_FRONTIER_LABEL,
       target_node: AGENT_FRONTIER_NODE_ID,
       endpoint: "/agent/provider/envelope/stream",
@@ -25467,6 +25106,12 @@ function masterFrontierEnvelope(message, transcript = [], observation = {}, opti
     budget: {
       max_output_tokens: masterFrontierV3OutputBudget(message),
       max_dispatch_caps: AGENT_MASTER_FRONTIER_CAPS.length,
+      ...(objectiveKind === "implementation" ? {
+        enforcement: "hard",
+        input_tokens_max: 12000,
+        provider_tokens_max: 50000,
+        api_calls_max: 6,
+      } : {}),
     },
     stream: true,
     output_schema: MASTER_FRONTIER_OUTPUT_SCHEMA,
@@ -25484,10 +25129,12 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
     session_id: activeAgentSession().id,
     turn_id: cleanText(options.turnId || "", ""),
     space_id: activeSpaceStorageId(),
+    route_id: envelope.route_id,
     envelope,
     protocol: protocolSelection.protocol,
     investigation_mode: protocolSelection.investigation_mode,
     transcript_cache: continuity.cache,
+    transcript: envelope.compact_state.transcript,
     instructions: masterFrontierV3Instructions(),
     max_output_tokens: masterFrontierV3OutputBudget(message),
     text_verbosity: "low",
@@ -29427,6 +29074,10 @@ function renderAgentDiagnostics(diagnostics = {}) {
       return row;
     })
   );
+  renderMasterFrontierStatusPanel(document.querySelector("#agentCodexStatus"), {
+    sessionId: activeAgentSession()?.id || "",
+    diagnostics,
+  });
 }
 
 function fmtCompactToken(n) {
@@ -29592,119 +29243,6 @@ function updateAgentTokenUsage(usage = state.agentTokenUsage) {
     : "Model token usage for the last turn";
 }
 
-function agentFileDiffText(file = {}) {
-  return cleanText(file.diff_patch || file.patch || file.unified_diff || "", "");
-}
-
-function agentFileDiffLines(patch = "") {
-  return String(patch || "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("+++") || line.startsWith("---")) return null;
-      if (line.startsWith("+")) return { kind: "now", text: line.slice(1) || " " };
-      if (line.startsWith("-")) return { kind: "before", text: line.slice(1) || " " };
-      return null;
-    })
-    .filter(Boolean);
-}
-
-function renderAgentFileDiffBalloon(patch = "") {
-  const balloon = document.createElement("div");
-  balloon.className = "agent-file-diff-balloon";
-  const lines = agentFileDiffLines(patch);
-  if (!lines.length) {
-    const empty = document.createElement("div");
-    empty.className = "agent-file-diff-empty";
-    empty.textContent = "No changed hunks available.";
-    balloon.append(empty);
-    return balloon;
-  }
-  const list = document.createElement("div");
-  list.className = "agent-file-diff-lines";
-  lines.forEach((line) => {
-    const row = document.createElement("div");
-    const tag = document.createElement("span");
-    const code = document.createElement("code");
-    row.className = `agent-file-diff-line is-${line.kind}`;
-    tag.className = "agent-file-diff-tag";
-    tag.textContent = line.kind === "before" ? "was" : "now";
-    code.textContent = line.text;
-    row.append(tag, code);
-    list.append(row);
-  });
-  balloon.append(list);
-  return balloon;
-}
-
-function changedFilesFooter(files = [], message = {}) {
-  if (!files.length) return null;
-  const checkpoint = message?.diagnostics?.auto_checkpoint || message?.diagnostics?.checkpoint || null;
-  const checkpointRef = checkpoint?.ref || "";
-  const totals = files.reduce(
-    (sum, file) => ({
-      additions: sum.additions + (Number.isFinite(file.additions) ? file.additions : 0),
-      deletions: sum.deletions + (Number.isFinite(file.deletions) ? file.deletions : 0),
-    }),
-    { additions: 0, deletions: 0 }
-  );
-  const details = document.createElement("details");
-  const summary = document.createElement("summary");
-  details.className = "agent-changed-details";
-  if (message?.id) bindAgentDetailsOpenState(details, `changed:${message.id}`);
-  summary.className = "agent-changed-summary";
-  summary.replaceChildren(
-    document.createTextNode(`${files.length} files changed `),
-    statSpan(`+${totals.additions}`, "add"),
-    document.createTextNode(" "),
-    statSpan(`-${totals.deletions}`, "del")
-  );
-  if (checkpointRef) {
-    const stepback = document.createElement("button");
-    stepback.type = "button";
-    stepback.className = "agent-stepback-button";
-    stepback.textContent = "Stepback";
-    stepback.title = "Restore the timeline to the point before this run";
-    stepback.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      void stepbackTimeline(checkpointRef, message.space_id || activeSpaceStorageId());
-    });
-    summary.append(stepback);
-  }
-  const list = document.createElement("div");
-  list.className = "agent-file-list";
-  list.replaceChildren(
-    ...files.map((file) => {
-      const patch = agentFileDiffText(file);
-      const item = document.createElement(patch ? "details" : "div");
-      item.className = "agent-file-row";
-      if (patch && message?.id) bindAgentDetailsOpenState(item, `changed-file:${message.id}:${cleanText(file.path || file.full_path || String(file), "")}`);
-      const row = document.createElement(patch ? "summary" : "div");
-      row.className = "agent-file-row-summary";
-      const path = document.createElement("span");
-      const stats = document.createElement("span");
-      path.className = "agent-file-path";
-      stats.className = "agent-file-diff";
-      path.textContent = file.full_path || file.path || String(file);
-      path.title = patch ? `Show changed hunks for ${path.textContent}` : path.textContent;
-      stats.replaceChildren(
-        statSpan(`+${Number.isFinite(file.additions) ? file.additions : 0}`, "add"),
-        document.createTextNode(" "),
-        statSpan(`-${Number.isFinite(file.deletions) ? file.deletions : 0}`, "del")
-      );
-      row.append(path, stats);
-      item.append(row);
-      if (patch) {
-        item.append(renderAgentFileDiffBalloon(patch));
-      }
-      return item;
-    })
-  );
-  details.append(summary, list);
-  return details;
-}
-
 async function stepbackTimeline(ref, spaceId = activeSpaceStorageId()) {
   const checkpointRef = cleanText(ref, "");
   if (!checkpointRef) return;
@@ -29742,27 +29280,6 @@ async function stepbackTimeline(ref, spaceId = activeSpaceStorageId()) {
       duration_ms: performance.now() - startedAt,
     });
   }
-}
-
-function agentTimelineIcon(item = {}) {
-  const label = cleanText(item.label, "").toLowerCase();
-  const eventType = cleanText(item.event_type, "").toLowerCase();
-  const status = cleanText(item.status, "").toLowerCase();
-  if (status === "error") return "⚠️";
-  if (status === "running") return "⏳";
-  if (label === "run.started" || eventType === "run.started") return "▶️";
-  if (label === "run.final" || eventType === "run.final") return "🏁";
-  if (eventType === "loop.finished" || label === "loop.finished") return "🏁";
-  if (eventType === "loop.incomplete" || eventType === "loop.blocked" || label === "loop.incomplete" || label === "loop.blocked") return "⚠️";
-  if (eventType.startsWith("loop.") || label.startsWith("loop.")) return "◈";
-  if (label === "hermes.dispatch" || eventType === "hermes.dispatch") return "🪽";
-  if (label === "tool.started" || eventType === "tool.started") return "🔧";
-  if (label === "tool.finished" || eventType === "tool.finished") return "✓";
-  if (label.includes("file") || eventType.startsWith("files.")) return "📄";
-  if (label.includes("test") || eventType.startsWith("tests.")) return "🧪";
-  if (label.includes("proof") || eventType.startsWith("proof.")) return "📋";
-  if (label === "tokens.used" || eventType === "tokens.used") return "🔶";
-  return "•";
 }
 
 function agentMessageRouteSummary(message = {}) {
@@ -29821,13 +29338,13 @@ function renderAgentTimeline(message) {
     row.className = `agent-timeline-row ${cleanText(item.status, "done")}`;
     const icon = document.createElement("span");
     icon.className = "agent-timeline-icon";
-    icon.textContent = agentTimelineIcon(item);
+    icon.textContent = masterFrontierTimelineIcon(item);
     const label = document.createElement("span");
     label.className = "agent-timeline-label";
-    label.textContent = cleanAgentActionLabel(item, agentActionInnerKind(item));
+    label.textContent = masterFrontierActivityText(item) || cleanAgentActionLabel(item, agentActionInnerKind(item));
     const detail = document.createElement("span");
     detail.className = "agent-timeline-detail";
-    detail.textContent = cleanText(item.detail, "");
+    detail.textContent = masterFrontierDecisionCost(item)?.text || cleanText(item.detail, "");
     row.append(icon, label);
     if (detail.textContent) row.append(detail);
     rows.append(row);
@@ -29883,6 +29400,7 @@ function renderAgentTokenLedgerCall(call = {}) {
         ["in", call.input_tokens],
         ["out", call.output_tokens],
         ["cached", call.cached_input_tokens],
+        ["new", masterFrontierNewInputTokens(call)],
         ["reason", call.reasoning_tokens],
         ["total", call.total_tokens],
       ]
@@ -30003,7 +29521,7 @@ function agentActionsChain(message) {
   const running = actions.find((action) => action.status === "running");
   const failed = actions.find((action) => action.status === "error");
   const label = message.pending
-    ? message.phase || agentLiveStepFromAction(running) || running?.label || "Working"
+    ? message.phase || masterFrontierLiveStepFromAction(running) || running?.label || "Working"
     : failed
       ? "Actions need attention"
       : `${actions.length} actions completed`;
@@ -30256,7 +29774,7 @@ function agentAction(label, status = "done", detail = "", extra = {}) {
 function mergeAgentAction(message, nextAction) {
   if (!message || !nextAction) return;
   if (isAgentPollAction(nextAction)) {
-    const phase = message.pending ? agentLiveStepFromAction(nextAction) : "";
+    const phase = message.pending ? masterFrontierLiveStepFromAction(nextAction) : "";
     if (phase) updateAgentPendingMessage(message, { phase });
     return;
   }
@@ -30278,8 +29796,8 @@ function mergeAgentAction(message, nextAction) {
     } else {
       timeline.push(normalized);
     }
-    const phase = message.pending ? agentLiveStepFromAction(normalized) : "";
-    updateAgentPendingMessage(message, phase ? { timeline, phase } : { timeline });
+    const phase = message.pending ? masterFrontierLiveStepFromAction(normalized) : "";
+    updateAgentPendingMessage(message, { timeline, ...(phase ? { phase } : {}) });
     return;
   }
   const actions = Array.isArray(message.actions) ? [...message.actions] : [];
@@ -30301,8 +29819,9 @@ function mergeAgentAction(message, nextAction) {
   } else {
     actions.push(normalized);
   }
-  const phase = message.pending ? agentLiveStepFromAction(normalized) : "";
-  updateAgentPendingMessage(message, phase ? { actions, phase } : { actions });
+  const phase = message.pending ? masterFrontierLiveStepFromAction(normalized) : "";
+  const commentary = message.pending ? masterFrontierCommentaryFromAction(normalized) : "";
+  updateAgentPendingMessage(message, { actions, ...(phase ? { phase } : {}), ...(commentary ? { content: commentary } : {}) });
 }
 
 function finalAgentActionStatus(status) {
@@ -33182,7 +32701,7 @@ async function sendAgentMessage(text) {
           : { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
       })
     );
-    const pendingMessage = appendAgentMessage("assistant", useMasterFrontier ? `Calling ${AGENT_MASTER_FRONTIER_LABEL}...` : useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
+    const pendingMessage = appendAgentMessage("assistant", useMasterFrontier ? masterFrontierInitialCommentary() : useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
       pending: true,
       phase: useMasterFrontier ? "Direct head" : useDirectApi ? "Provider" : useOwnedBridge ? "Owned agent" : "Inspecting context",
       target_node: targetNode,
@@ -33201,23 +32720,15 @@ async function sendAgentMessage(text) {
       els.agentStatus.textContent = "Calling direct head";
       updateAgentPendingMessage(pendingMessage, {
         phase: "Resolving route",
-        content: `Preparing ${AGENT_MASTER_FRONTIER_LABEL} route...`,
       });
+      let kernelRouteProof = null;
       try {
-        const kernelRouteProof = await proveAgentKernelRouteTools(userMessageContent, pendingMessage, {
-          signal: state.agentAbortController.signal,
-        });
-        updateAgentPendingMessage(pendingMessage, {
-          phase: "Direct head",
-          content: `Calling ${AGENT_MASTER_FRONTIER_LABEL}...`,
-        });
         const directHead = await callMasterFrontierDirectHead(userMessageContent, transcript, compactObservation, {
           activeSpace,
           imageCards,
           nodeRunConfig,
           continuationContext,
           turnId: backendTurnId,
-          routeContract: kernelRouteProof?.route_contract,
           pendingMessage,
           signal: state.agentAbortController.signal,
         });
@@ -33227,6 +32738,17 @@ async function sendAgentMessage(text) {
         const directHeadUsage = directHead.usage && typeof directHead.usage === "object" ? directHead.usage : {};
         const dispatch = directHead.hermes_dispatch && typeof directHead.hermes_dispatch === "object" ? directHead.hermes_dispatch : null;
         const changedFiles = Array.isArray(directHead.changed_files) ? directHead.changed_files : [];
+        kernelRouteProof = masterFrontierRouteProofFromFinal(directHead);
+        if (kernelRouteProof) {
+          pendingMessage.kernel_route_proof = kernelRouteProof;
+          mergeAgentAction(pendingMessage, agentAction("Kernel route proof", "done", kernelRouteProof.route_id, {
+            id: "client_kernel_route_final",
+            topic: "run-wasm",
+            kind: "context",
+            meta: kernelRouteProof.source,
+            arguments: kernelRouteProof,
+          }));
+        }
         pendingMessage.content = clientOps.reply;
         pendingMessage.pending = false;
         pendingMessage.phase = "";
@@ -33272,6 +32794,7 @@ async function sendAgentMessage(text) {
           context_measurement: directHead.context_measurement || null,
           dispatch_context_measurement: dispatch?.context_measurement || null,
           changed_files_complete: directHead.diagnostics?.changed_files_complete || changedFiles.length > 0,
+          ...masterFrontierChangeDiagnostics(directHead.diagnostics),
           before_checkpoint: directHead.diagnostics?.before_checkpoint || null,
           auto_checkpoint: directHead.diagnostics?.auto_checkpoint || null,
           direct_head: {
@@ -33316,14 +32839,15 @@ async function sendAgentMessage(text) {
         const reason = diagnostic.message || directHeadError.message;
         const category = cleanText(diagnostic.code || diagnostic.category || diagnostic.mode || "", "error");
         const partialReply = masterFrontierPartialReplyFromError(directHeadError, pendingMessage);
-        Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, directHeadError));
-        const continuationCheckpoint = latestAgentContinuationContext(activeSession);
+        const failureDisposition = masterFrontierFailureDisposition({ error: directHeadError, diagnostic });
+        if (failureDisposition.interrupted) Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, directHeadError));
+        const continuationCheckpoint = failureDisposition.interrupted ? latestAgentContinuationContext(activeSession) : null;
         const usefulFallback = masterFrontierUsefulFallback(userMessageContent, {
           diagnostic,
           reason,
           route_id: pendingMessage.route_contract?.route_id || kernelRouteProof?.route_contract?.route_id || "wasm-agent.avatar-chat.ui",
           surface: pendingMessage.route_contract?.surface || kernelRouteProof?.route_contract?.surface || "avatar-chat",
-          provider_interrupted: true,
+          provider_interrupted: failureDisposition.interrupted,
           original_objective: pendingMessage.original_objective,
           continuation_context: continuationCheckpoint,
         });
@@ -39350,7 +38874,7 @@ function renderRoleVisibility() {
   });
   document.querySelectorAll(".widget[data-widget-id]").forEach((widget) => {
     const widgetId = widget.dataset.widgetId || "";
-    const adminOnlyWidget = ["resources", "topology", "studio", "browser-proof", "drop-to-copy", "security-loop", "timeline"].includes(widgetId);
+    const adminOnlyWidget = ["resources", "topology", "studio", "drop-to-copy", "security-loop", "timeline"].includes(widgetId);
     if (adminOnlyWidget && !admin) widget.hidden = true;
   });
   if (!admin && isAdminPanel(state.activePanel)) setPanel("home");
@@ -39507,363 +39031,6 @@ function renderTaskOutput(task = null) {
   } else {
     els.taskOutput.textContent = "Ready";
   }
-}
-
-function renderBrowserCapture(capture = null) {
-  if (capture) {
-    state.browserCapture = capture;
-    state.browserSessionId = capture.sessionId || state.browserSessionId;
-  }
-  const current = state.browserCapture;
-  if (!current) return;
-  els.browserImage.src = current.image || "";
-  els.browserImage.parentElement.classList.toggle("has-image", Boolean(current.image));
-  els.browserImage.parentElement.classList.toggle("has-canvas", false);
-  const stableStatus = state.browserLive && current.status !== "error" ? "live" : current.status || "captured";
-  els.browserStatus.textContent = stableStatus === "screenshot" ? "live" : stableStatus;
-  els.browserStatus.className = `widget-chip ${current.status === "error" ? "err" : "ok"}`;
-  els.browserMeta.textContent = current.meta || current.url || "Remote Chromium capture";
-}
-
-function browserViewportSize() {
-  const rect = els.browserScreen.getBoundingClientRect();
-  return {
-    width: Math.max(360, Math.min(1920, Math.round(rect.width || 1280))),
-    height: Math.max(240, Math.min(1400, Math.round(rect.height || 800))),
-  };
-}
-
-function browserStreamUrl() {
-  return appWebSocketUrl("/browser/stream").toString();
-}
-
-function browserUrlHost(url) {
-  try {
-    return new URL(normalizeBrowserUrl(url)).hostname.replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
-function sameBrowserDestination(a, b) {
-  const hostA = browserUrlHost(a);
-  const hostB = browserUrlHost(b);
-  return Boolean(hostA && hostB && hostA === hostB);
-}
-
-function browserAddressValue() {
-  return state.browserUrlDirty ? state.browserUrlDraft : els.browserUrlInput.value;
-}
-
-function setBrowserUrlInput(url, { force = false } = {}) {
-  if (!url) return;
-  if (state.browserPendingUrl) {
-    if (!sameBrowserDestination(url, state.browserPendingUrl)) return;
-    state.browserPendingUrl = "";
-    force = true;
-  }
-  if (!force && (document.activeElement === els.browserUrlInput || state.browserUrlDirty)) return;
-  state.browserUrlDirty = false;
-  state.browserUrlDraft = url;
-  els.browserUrlInput.value = url;
-}
-
-function isBrowserStreamOpen() {
-  return state.browserSocket && state.browserSocket.readyState === WebSocket.OPEN;
-}
-
-function closeBrowserStream({ silent = false } = {}) {
-  const socket = state.browserSocket;
-  state.browserSocket = null;
-  state.browserStreamToken += 1;
-  window.clearTimeout(state.browserResizeTimer);
-  if (socket && socket.readyState <= WebSocket.OPEN) {
-    try {
-      socket.close(1000, "client closing stream");
-    } catch {
-      // The socket is already going away.
-    }
-  }
-  state.browserLive = false;
-  recordUserEvent("browser.stream_closed", {
-    target: "browser-proof",
-    summary: silent ? "Browser stream closed silently" : "Browser stream stopped",
-    data: { silent, had_socket: Boolean(socket), frame_count: state.browserFrameCount },
-  });
-  if (!silent) {
-    setBrowserLiveButton();
-    els.browserStatus.textContent = state.browserCapture ? "captured" : "pixels";
-    els.browserStatus.className = "widget-chip";
-    if (state.browserCapture) els.browserMeta.textContent = "Stream stopped; last frame remains in the widget.";
-  }
-}
-
-function drawBrowserFrame(message) {
-  const width = Number(message.width || state.browserCapture?.width || 1280);
-  const height = Number(message.height || state.browserCapture?.height || 800);
-  const frame = Number(message.frame || state.browserFrameCount + 1);
-  state.browserFrameCount = Math.max(state.browserFrameCount, frame);
-  state.browserSessionId = message.stream_id || state.browserSessionId;
-  state.browserCapture = {
-    width,
-    height,
-    url: message.url || state.browserCapture?.url || "",
-    sessionId: state.browserSessionId,
-    status: "stream",
-    meta: `${message.url || "Host Chromium"} / ${width}x${height} / stream frame ${frame}`,
-  };
-  if (frame === 1 || frame % 12 === 0 || message.mode === "host_chromium_cdp_snapshot") {
-    recordUserEvent("browser.frame_received", {
-      target: "browser-proof",
-      summary: `Browser frame ${frame} from ${browserUrlHost(message.url) || "unknown"}`,
-      data: {
-        url: message.url,
-        frame,
-        width,
-        height,
-        mode: message.mode || "host_chromium_cdp_screencast",
-      },
-    });
-  }
-  const canvas = els.browserCanvas;
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
-  }
-  const image = new Image();
-  image.onload = () => {
-    if (frame < state.browserFrameCount) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, width, height);
-    ctx.drawImage(image, 0, 0, width, height);
-    els.browserScreen.classList.add("has-canvas");
-    els.browserScreen.classList.remove("has-image", "is-busy");
-    els.browserStatus.textContent = "stream";
-    els.browserStatus.className = "widget-chip ok";
-    els.browserMeta.textContent = state.browserCapture.meta;
-  };
-  image.src = message.image;
-}
-
-function handleBrowserStreamMessage(message) {
-  if (message.type === "ready") {
-    state.browserSessionId = message.stream_id || "";
-    state.browserCapture = {
-      width: message.width,
-      height: message.height,
-      url: message.url,
-      sessionId: state.browserSessionId,
-      status: "stream",
-      meta: `${message.url} / ${message.width}x${message.height} / websocket stream`,
-    };
-    setBrowserUrlInput(message.url);
-    els.browserStatus.textContent = "streaming";
-    els.browserStatus.className = "widget-chip ok";
-    els.browserMeta.textContent = state.browserCapture.meta;
-    recordUserEvent("browser.stream_ready", {
-      target: "browser-proof",
-      summary: `Browser stream ready for ${message.url}`,
-      data: { url: message.url, width: message.width, height: message.height, mode: message.mode },
-    });
-    return;
-  }
-  if (message.type === "frame") {
-    if (state.browserPendingUrl && !sameBrowserDestination(message.url, state.browserPendingUrl)) return;
-    drawBrowserFrame(message);
-    setBrowserUrlInput(message.url);
-    return;
-  }
-  if (message.type === "state") {
-    if (message.url) {
-      setBrowserUrlInput(message.url);
-      if (state.browserCapture) state.browserCapture.url = message.url;
-    }
-    if (message.status === "navigating") {
-      els.browserScreen.classList.add("is-busy");
-      els.browserStatus.textContent = "navigating";
-      els.browserStatus.className = "widget-chip ok";
-      els.browserMeta.textContent = `Navigating to ${message.url || "new page"}...`;
-      recordUserEvent("browser.navigation_started", {
-        target: "browser-proof",
-        summary: `Navigating to ${message.url || "new page"}`,
-        data: { url: message.url, stream_id: message.stream_id },
-      });
-    }
-    return;
-  }
-  if (message.type === "ack") {
-    els.browserStatus.textContent = "stream";
-    els.browserStatus.className = "widget-chip ok";
-    setBrowserUrlInput(message.url);
-    if (message.action) {
-      recordUserEvent("browser.action_ack", {
-        target: "browser-proof",
-        summary: `${message.action} acknowledged`,
-        data: { action: message.action, url: message.url, stream_id: message.stream_id },
-      });
-    }
-    return;
-  }
-  if (message.type === "error") {
-    renderBrowserCapture({
-      image: "",
-      url: state.browserCapture?.url || els.browserUrlInput.value,
-      sessionId: state.browserSessionId,
-      status: "error",
-      meta: message.message || "Browser stream error",
-    });
-    recordUserEvent("browser.stream_error", {
-      target: "browser-proof",
-      summary: message.message || "Browser stream error",
-      data: { error: message.message, code: message.code },
-    });
-  }
-}
-
-function openBrowserStream(targetUrl) {
-  if (!("WebSocket" in window)) return Promise.reject(new Error("WebSocket is not available in this browser."));
-  closeBrowserStream({ silent: true });
-  const viewport = browserViewportSize();
-  const token = state.browserStreamToken + 1;
-  state.browserStreamToken = token;
-  state.browserFrameCount = 0;
-  state.browserLive = true;
-  const startedAt = performance.now();
-  recordUserEvent("browser.stream_open_started", {
-    target: "browser-proof",
-    summary: `Opening browser stream for ${targetUrl}`,
-    data: { url: targetUrl, viewport },
-  });
-  setBrowserLiveButton();
-  els.browserScreen.classList.add("is-busy");
-  els.browserScreen.classList.remove("has-image", "has-canvas");
-  els.browserImage.src = "";
-
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(browserStreamUrl());
-    state.browserSocket = socket;
-    let settled = false;
-    const timeout = window.setTimeout(() => fail(new Error("Browser stream timed out before the first frame.")), 10000);
-
-    const cleanup = () => {
-      window.clearTimeout(timeout);
-      els.browserScreen.classList.remove("is-busy");
-      setBrowserLiveButton();
-    };
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (state.browserSocket === socket) state.browserSocket = null;
-      try {
-        socket.close();
-      } catch {
-        // The socket may not have completed its handshake yet.
-      }
-      reject(error);
-      recordUserEvent("browser.stream_open_error", {
-        target: "browser-proof",
-        summary: error.message,
-        data: { url: targetUrl, error: error.message },
-        duration_ms: performance.now() - startedAt,
-      });
-    };
-    const succeed = (message) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(message);
-      recordUserEvent("browser.stream_open_finished", {
-        target: "browser-proof",
-        summary: `Browser stream opened ${targetUrl}`,
-        data: { url: targetUrl, first_frame_url: message.url, frame: message.frame },
-        duration_ms: performance.now() - startedAt,
-      });
-    };
-
-    socket.addEventListener("open", () => {
-      if (state.browserStreamToken !== token) return;
-      socket.send(JSON.stringify({ type: "open", url: targetUrl, ...viewport }));
-      els.browserStatus.textContent = "streaming";
-      els.browserStatus.className = "widget-chip ok";
-      els.browserMeta.textContent = `Opening ${targetUrl} as a host Chromium stream...`;
-    });
-    socket.addEventListener("message", (event) => {
-      if (state.browserStreamToken !== token) return;
-      let message = {};
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (message.type === "error") {
-        fail(new Error(message.message || "Browser stream failed."));
-        return;
-      }
-      handleBrowserStreamMessage(message);
-      if (message.type === "frame") succeed(message);
-    });
-    socket.addEventListener("error", () => fail(new Error("Browser stream websocket failed.")));
-    socket.addEventListener("close", () => {
-      if (state.browserStreamToken !== token) return;
-      if (!settled) {
-        fail(new Error("Browser stream closed before the first frame."));
-        return;
-      }
-      if (state.browserSocket === socket) state.browserSocket = null;
-      state.browserLive = false;
-      setBrowserLiveButton();
-      if (state.browserCapture?.status !== "error") {
-        els.browserStatus.textContent = "closed";
-        els.browserStatus.className = "widget-chip";
-        els.browserMeta.textContent = "Stream closed; last frame remains in the widget.";
-      }
-    });
-  });
-}
-
-function sendBrowserStreamAction(action, payload = {}) {
-  if (!isBrowserStreamOpen()) return false;
-  state.browserSocket.send(JSON.stringify({ type: "input", action, ...payload }));
-  recordUserEvent(action === "navigate" ? "browser.navigation_requested" : "browser.input_forwarded", {
-    target: "browser-proof",
-    summary: action === "navigate" ? `Navigate to ${payload.url}` : `Forwarded ${action}`,
-    data: {
-      action,
-      url: payload.url,
-      x: payload.x,
-      y: payload.y,
-      delta_x: payload.delta_x,
-      delta_y: payload.delta_y,
-      key: payload.key,
-      text_length: payload.text ? String(payload.text).length : undefined,
-      text_preview: payload.text ? truncateText(payload.text, 24) : undefined,
-    },
-    redacted: Boolean(payload.text),
-  });
-  els.browserStatus.textContent = action === "navigate" ? "navigating" : "stream";
-  els.browserStatus.className = "widget-chip ok";
-  if (action === "navigate" && payload.url) {
-    els.browserScreen.classList.add("is-busy");
-    els.browserScreen.classList.remove("has-image", "has-canvas");
-    els.browserImage.src = "";
-    els.browserMeta.textContent = `Navigating to ${payload.url}...`;
-  }
-  return true;
-}
-
-function scheduleBrowserResizeSync() {
-  if (!isBrowserStreamOpen()) return;
-  window.clearTimeout(state.browserResizeTimer);
-  state.browserResizeTimer = window.setTimeout(() => {
-    const viewport = browserViewportSize();
-    recordUserEvent("browser.resize_synced", {
-      target: "browser-proof",
-      summary: `Synced browser viewport ${viewport.width}x${viewport.height}`,
-      data: viewport,
-    });
-    sendBrowserStreamAction("resize", viewport);
-  }, 140);
 }
 
 function renderAll() {
@@ -42071,266 +41238,6 @@ async function runNodeAction(node, action) {
   }
 }
 
-function normalizeBrowserUrl(raw) {
-  const value = String(raw || "").trim();
-  if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
-  return `https://${value}`;
-}
-
-async function browserRequest(path, body) {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  if (!response.ok || payload.ok === false) {
-    throw new Error(payload?.error?.message || `HTTP ${response.status}`);
-  }
-  return payload;
-}
-
-async function openBrowserProof(url) {
-  const targetUrl = normalizeBrowserUrl(url);
-  if (!targetUrl) return;
-  const startedAt = performance.now();
-  state.browserUrlDirty = false;
-  state.browserUrlDraft = targetUrl;
-  state.browserPendingUrl = targetUrl;
-  els.browserUrlInput.value = targetUrl;
-  els.browserOpenButton.disabled = true;
-  recordUserEvent("browser.url_submitted", {
-    target: "browser-proof",
-    summary: `Submitted ${targetUrl}`,
-    data: { url: targetUrl, stream_open: isBrowserStreamOpen() },
-  });
-  els.browserStatus.textContent = "opening";
-  els.browserStatus.className = "widget-chip";
-  els.browserMeta.textContent = isBrowserStreamOpen() ? `Navigating to ${targetUrl}...` : "Launching Chromium...";
-  let streamError = null;
-  try {
-    if (sendBrowserStreamAction("navigate", { url: targetUrl })) {
-      state.browserLive = true;
-      setBrowserLiveButton();
-      els.browserScreen.focus();
-      recordUserEvent("browser.navigation_dispatched", {
-        target: "browser-proof",
-        summary: `Dispatched stream navigation to ${targetUrl}`,
-        data: { url: targetUrl },
-        duration_ms: performance.now() - startedAt,
-      });
-      return;
-    }
-    await openBrowserStream(targetUrl);
-    els.browserScreen.focus();
-    recordUserEvent("browser.open_finished", {
-      target: "browser-proof",
-      summary: `Opened ${targetUrl}`,
-      data: { url: targetUrl, mode: "stream" },
-      duration_ms: performance.now() - startedAt,
-    });
-    return;
-  } catch (error) {
-    streamError = error;
-    closeBrowserStream({ silent: true });
-  }
-  try {
-    const viewport = browserViewportSize();
-    const data = await browserRequest("/browser/open", { url: targetUrl, ...viewport });
-    const browser = data.browser || {};
-    renderBrowserCapture({
-      image: browser.image,
-      url: browser.url,
-      sessionId: browser.session_id,
-      status: "captured",
-      meta: `${browser.url} / ${browser.width}x${browser.height} / interactive=${Boolean(browser.interactive)} / ${Math.round((browser.bytes || 0) / 1024)} KB${streamError ? " / stream fallback" : ""}`,
-    });
-    state.browserPendingUrl = "";
-    setBrowserUrlInput(browser.url || targetUrl, { force: true });
-    els.browserScreen.focus();
-    startBrowserLive();
-    recordUserEvent("browser.open_finished", {
-      target: "browser-proof",
-      summary: `Opened ${browser.url || targetUrl}`,
-      data: { url: browser.url || targetUrl, mode: "fallback_capture", interactive: Boolean(browser.interactive) },
-      duration_ms: performance.now() - startedAt,
-    });
-  } catch (error) {
-    renderBrowserCapture({
-      image: "",
-      url: targetUrl,
-      status: "error",
-      meta: error.message,
-    });
-    state.browserPendingUrl = "";
-    recordUserEvent("browser.open_error", {
-      target: "browser-proof",
-      summary: error.message,
-      data: { url: targetUrl, error: error.message },
-      duration_ms: performance.now() - startedAt,
-    });
-  } finally {
-    els.browserOpenButton.disabled = false;
-  }
-}
-
-function browserImagePoint(event) {
-  const current = state.browserCapture;
-  if (!current || !current.width || !current.height) return null;
-  const rect = els.browserScreen.getBoundingClientRect();
-  const scaleX = rect.width / current.width;
-  const scaleY = rect.height / current.height;
-  const x = (event.clientX - rect.left) / scaleX;
-  const y = (event.clientY - rect.top) / scaleY;
-  if (x < 0 || y < 0 || x > current.width || y > current.height) return null;
-  return { x: Math.round(x), y: Math.round(y) };
-}
-
-async function sendBrowserInput(action, payload = {}) {
-  if (sendBrowserStreamAction(action, payload)) return Promise.resolve();
-  if (!state.browserSessionId) return;
-  state.browserQueue = state.browserQueue.then(
-    () => sendBrowserInputNow(action, payload),
-    () => sendBrowserInputNow(action, payload)
-  );
-  return state.browserQueue;
-}
-
-async function sendBrowserInputNow(action, payload = {}) {
-  const liveRefresh = action === "screenshot" && payload.live;
-  const startedAt = performance.now();
-  if (!liveRefresh) {
-    recordUserEvent("browser.input_forwarded", {
-      target: "browser-proof",
-      summary: `Forwarded ${action}`,
-      data: {
-        action,
-        x: payload.x,
-        y: payload.y,
-        delta_x: payload.delta_x,
-        delta_y: payload.delta_y,
-        key: payload.key,
-        text_length: payload.text ? String(payload.text).length : undefined,
-        text_preview: payload.text ? truncateText(payload.text, 24) : undefined,
-      },
-      redacted: Boolean(payload.text),
-    });
-  }
-  state.browserBusy = true;
-  if (!liveRefresh) els.browserScreen.classList.add("is-busy");
-  els.browserStatus.textContent = state.browserLive ? "live" : action;
-  try {
-    const data = await browserRequest("/browser/input", {
-      session_id: state.browserSessionId,
-      action,
-      ...payload,
-    });
-    const browser = data.browser || {};
-    renderBrowserCapture({
-      image: browser.image,
-      url: browser.url,
-      sessionId: browser.session_id,
-      status: liveRefresh ? "live" : "interactive",
-      meta: `${browser.action || action} / ${browser.mode || "host_chromium_cdp_interactive_pixels"} / ${Math.round((browser.bytes || 0) / 1024)} KB`,
-    });
-    if (browser.url) els.browserUrlInput.value = browser.url;
-    if (!liveRefresh) {
-      recordUserEvent("browser.input_finished", {
-        target: "browser-proof",
-        summary: `${action} returned pixels`,
-        data: { action, url: browser.url, bytes: browser.bytes },
-        duration_ms: performance.now() - startedAt,
-      });
-    }
-  } catch (error) {
-    renderBrowserCapture({
-      image: state.browserCapture?.image || "",
-      url: state.browserCapture?.url || "",
-      sessionId: state.browserSessionId,
-      status: "error",
-      meta: error.message,
-    });
-    recordUserEvent("browser.input_error", {
-      target: "browser-proof",
-      summary: error.message,
-      data: { action, error: error.message },
-      duration_ms: performance.now() - startedAt,
-    });
-  } finally {
-    state.browserBusy = false;
-    els.browserScreen.classList.remove("is-busy");
-  }
-}
-
-function setBrowserLiveButton() {
-  const streaming = isBrowserStreamOpen();
-  const active = streaming || state.browserLive;
-  els.browserLiveButton.classList.toggle("is-live", active);
-  els.browserLiveButton.setAttribute("aria-pressed", active ? "true" : "false");
-  els.browserLiveButton.textContent = streaming ? "Stream on" : state.browserLive ? "Live on" : "Live";
-}
-
-function startBrowserLive() {
-  recordUserEvent("browser.live_started", {
-    target: "browser-proof",
-    summary: "Browser live mode started",
-    data: { stream_open: isBrowserStreamOpen(), session_present: Boolean(state.browserSessionId) },
-  });
-  if (isBrowserStreamOpen()) {
-    state.browserLive = true;
-    setBrowserLiveButton();
-    return;
-  }
-  if (!state.browserSessionId) return;
-  state.browserLive = true;
-  setBrowserLiveButton();
-  scheduleBrowserLiveTick(650);
-}
-
-function stopBrowserLive() {
-  recordUserEvent("browser.live_stopped", {
-    target: "browser-proof",
-    summary: "Browser live mode stopped",
-    data: { stream_open: isBrowserStreamOpen(), frame_count: state.browserFrameCount },
-  });
-  if (isBrowserStreamOpen()) {
-    closeBrowserStream();
-    return;
-  }
-  state.browserLive = false;
-  window.clearTimeout(state.browserLiveTimer);
-  setBrowserLiveButton();
-  if (state.browserCapture) renderBrowserCapture();
-}
-
-function toggleBrowserLive() {
-  if (isBrowserStreamOpen() || state.browserLive) stopBrowserLive();
-  else startBrowserLive();
-}
-
-function scheduleBrowserLiveTick(delay = 1100) {
-  window.clearTimeout(state.browserLiveTimer);
-  if (isBrowserStreamOpen()) return;
-  if (!state.browserLive || !state.browserSessionId) return;
-  state.browserLiveTimer = window.setTimeout(() => void browserLiveTick(), delay);
-}
-
-async function browserLiveTick() {
-  if (!state.browserLive || !state.browserSessionId) return;
-  if (!state.browserBusy) {
-    await sendBrowserInput("screenshot", { live: true });
-  }
-  scheduleBrowserLiveTick();
-}
-
-function handledBrowserKey(event) {
-  if (event.ctrlKey || event.metaKey || event.altKey) return false;
-  if (event.key.length === 1) return true;
-  return ["Enter", "Backspace", "Tab", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key);
-}
-
 function drawCanvas() {
   const canvas = els.spaceCanvas;
   const rect = canvas.getBoundingClientRect();
@@ -42927,24 +41834,6 @@ function wireEvents() {
     }
   });
   els.logsButton.addEventListener("click", () => void loadLogs());
-  els.browserForm.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void openBrowserProof(browserAddressValue());
-  });
-  els.browserUrlInput.addEventListener("input", () => {
-    state.browserUrlDirty = true;
-    state.browserUrlDraft = els.browserUrlInput.value;
-  });
-  els.browserUrlInput.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      void openBrowserProof(browserAddressValue());
-    }
-  });
-  els.browserBackButton.addEventListener("click", () => void sendBrowserInput("back"));
-  els.browserForwardButton.addEventListener("click", () => void sendBrowserInput("forward"));
-  els.browserReloadButton.addEventListener("click", () => void sendBrowserInput("reload"));
-  els.browserLiveButton.addEventListener("click", toggleBrowserLive);
   els.wisCameraConfigButton?.addEventListener("click", () => {
     void configureFocusedWisCamera().catch((error) => {
       state.lastError = error.message || String(error);
@@ -42976,62 +41865,6 @@ function wireEvents() {
     maybeLoadFocusedWisCameraTimeline("pointer");
   });
   els.wisExportButton?.addEventListener("click", () => exportWisSpace("surface"));
-  els.browserScreen.addEventListener("click", (event) => {
-    const point = browserImagePoint(event);
-    if (!point) return;
-    els.browserScreen.focus();
-    recordUserEvent("browser.click", {
-      target: "browser-proof",
-      summary: `Clicked browser pixels at ${point.x},${point.y}`,
-      data: point,
-    });
-    void sendBrowserInput("click", point);
-  });
-  els.browserScreen.addEventListener("wheel", (event) => {
-    const point = browserImagePoint(event);
-    if (!point) return;
-    event.preventDefault();
-    recordUserEvent("browser.scroll", {
-      target: "browser-proof",
-      summary: `Scrolled browser pixels at ${point.x},${point.y}`,
-      data: {
-        ...point,
-        delta_x: Math.round(event.deltaX),
-        delta_y: Math.round(event.deltaY),
-      },
-    });
-    void sendBrowserInput("scroll", {
-      ...point,
-      delta_x: event.deltaX,
-      delta_y: event.deltaY,
-    });
-  }, { passive: false });
-  els.browserScreen.addEventListener("keydown", (event) => {
-    if (!handledBrowserKey(event)) return;
-    event.preventDefault();
-    if (event.key.length === 1) {
-      recordUserEvent("browser.type_forwarded", {
-        target: "browser-proof",
-        summary: "Forwarded one typed character",
-        data: { text_length: 1 },
-        redacted: true,
-      });
-      void sendBrowserInput("type", { text: event.key });
-    } else {
-      recordUserEvent("browser.key_forwarded", {
-        target: "browser-proof",
-        summary: `Forwarded ${event.key}`,
-        data: { key: event.key },
-      });
-      void sendBrowserInput("key", { key: event.key });
-    }
-  });
-  if ("ResizeObserver" in window) {
-    const browserResizeObserver = new ResizeObserver(scheduleBrowserResizeSync);
-    browserResizeObserver.observe(els.browserScreen);
-  } else {
-    window.addEventListener("resize", scheduleBrowserResizeSync);
-  }
   els.timelineRefreshButton.addEventListener("click", () => void loadTimeline("manual"));
   els.panelButtons.forEach((button) => button.addEventListener("click", () => setPanel(button.dataset.panel)));
   els.addSpaceButton?.addEventListener("click", createUserSpace);
@@ -43292,9 +42125,15 @@ function wireEvents() {
     event.stopPropagation();
     toggleAgentBalloon("sessions");
   });
-  els.agentTokenUsage?.addEventListener("click", (event) => {
+  els.agentTokenUsage?.addEventListener("click", async (event) => {
     event.stopPropagation();
     toggleAgentBalloon("context");
+    if (els.agentContextBalloon?.hidden) return;
+    const refreshed = await refreshMasterFrontierStatus({
+      messages: activeAgentSession()?.messages,
+      refreshLedger: (message) => refreshAgentRunTokenLedger(message),
+    }).catch(() => null);
+    if (refreshed?.message?.diagnostics) renderAgentDiagnostics(refreshed.message.diagnostics);
   });
   els.agentSettingsButton.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -43838,6 +42677,18 @@ async function main() {
   nativeAuthDiagnostic("main_started");
   nativeShellDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
+  startClientPresence({
+    async openWidget(widgetId) {
+      const app = SPACE_APP_DEFINITIONS.find((item) => item.id === widgetId);
+      if (!app?.entry) throw new Error("widget_not_registered");
+      await openExternalAppFromIcon(app, widgetLayout(app.id).minimized, (minimized) => setWidgetMinimized(app.id, minimized));
+    },
+    async applyWindowsUpdate(payload = {}) {
+      const bridge = windowsNativeDiagnosticsBridge();
+      if (!bridge?.run) throw new Error("windows_update_bridge_unavailable");
+      return bridge.run("request_windows_client_update", { ...payload, applyApproved: true });
+    },
+  });
   const startupAuthRedirectCode = authRedirectCodeFromUrl();
   if (startupAuthRedirectCode && window.__WASM_AGENT_AUTH_REDIRECT_PROMISE__) {
     const preloadStartedAt = performance.now();
@@ -43890,6 +42741,7 @@ async function main() {
   nativeAuthDiagnostic("main_apply_launcher_finished");
   installDevHmrBridge();
   if (shouldStartDevHmr()) startDevHmr();
+  installExternalAppHosts((appId) => setWidgetMinimized(appId, true));
   if (androidNativeBoot) {
     window.setTimeout(() => startAndroidNativeControlAgent(), 3000);
     wireAndroidNativeFastEvents();

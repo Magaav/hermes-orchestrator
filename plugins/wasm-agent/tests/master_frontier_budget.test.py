@@ -47,7 +47,7 @@ class MasterFrontierBudgetTests(unittest.TestCase):
     def test_continuations_reserve_already_used_calls(self) -> None:
         self.assertEqual(budget.continuation_limit(self.envelope(hard=True), calls_used=1), 2)
         self.assertEqual(budget.continuation_limit(self.envelope(hard=True), calls_used=3), 0)
-        self.assertEqual(budget.continuation_limit(self.envelope(), calls_used=3), 6)
+        self.assertEqual(budget.continuation_limit(self.envelope(), calls_used=3), 8)
 
     def test_token_and_call_overages_are_typed(self) -> None:
         token_calls = [{"total_tokens": 3000}, {"total_tokens": 3001}, {"total_tokens": 3000}]

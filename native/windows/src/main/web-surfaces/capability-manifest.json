@@ -1,0 +1,17 @@
+{
+  "schema": "hermes.wasm_agent.native_web_surfaces.v1",
+  "version": 1,
+  "capabilities": [
+    "web_surface.create",
+    "web_surface.navigate",
+    "web_surface.bounds",
+    "web_surface.visibility",
+    "web_surface.history",
+    "web_surface.status",
+    "web_surface.close"
+  ],
+  "limits": {
+    "maxSurfacesPerWindow": 8,
+    "protocols": ["https:"]
+  }
+}

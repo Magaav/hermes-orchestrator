@@ -114,25 +114,93 @@ function normalizeQueue(rawQueue, state = {}) {
     .filter(Boolean);
 }
 
+/**
+ * Escape a term for safe inclusion in a RegExp. Allows the caller to
+ * insert hyphen/space flexibility afterward.
+ */
+function escapeRegExp(term) {
+  return term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Build a word-boundary regex for a term so that "pharma" does NOT match
+ * inside "pharmacy" or "pharmacokinetics". Multi-word terms use flexible
+ * whitespace/hyphen separators between words.
+ */
+function buildTermRegex(term, flags) {
+  const escaped = escapeRegExp(term).replace(/\s+/g, "\\s+");
+  const pattern = escaped.replace(/\$[\\s\-]+\$/g, "[\\s\\-]+");
+  // Word-boundary alternatives that work for both ASCII and non-ASCII text.
+  return new RegExp("(?:^|[\\s\\p{P}])" + "(" + pattern + ")" + "(?=$|[\\s\\p{P}])", flags || "iu");
+}
+
+/**
+ * Check whether a whole-word occurrence of `term` exists in `cleanText`.
+ */
+function termMatches(cleanText, term) {
+  return buildTermRegex(term).test(cleanText);
+}
+
+/**
+ * Check whether any negation term from the group appears near `term` or
+ * anywhere in the text. Returns true if the match should be suppressed.
+ */
+function isNegated(cleanText, term, negationTerms) {
+  // First: proximity-based check for generic negation words near the term.
+  // This runs for ALL groups, including those with no explicit negation phrases
+  // (design, endpoint, replication, safety), so "not observational" is
+  // correctly suppressed instead of always triggering.
+  const re = buildTermRegex(term, "giu");
+  const negBeforeRe = /(?:^|[\s\p{P}])(no|not|without|none|nor|never|unfunded|minimally\s+rare|rarely)(?:[\s\p{P}]|$)/iu;
+  let m;
+  while ((m = re.exec(cleanText)) !== null) {
+    const before = cleanText.slice(Math.max(0, m.index - 48), m.index);
+    if (negBeforeRe.test(before)) return true;
+  }
+  // Second: explicit negation phrases. Check proximity — the negation phrase
+  // must appear near the matched term (within 64 chars) rather than anywhere
+  // in the full text.  This prevents "the study reported no industry funding"
+  // at the top of a document from suppressing a legitimate funding match
+  // in a different paragraph.
+  if (negationTerms && negationTerms.length) {
+    re.lastIndex = 0;
+    while ((m = re.exec(cleanText)) !== null) {
+      const window = cleanText.slice(Math.max(0, m.index - 64), Math.min(cleanText.length, m.index + m[0].length + 64));
+      for (const neg of negationTerms) {
+        if (termMatches(window, neg)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function assessIntegrity(text) {
   const clean = String(text || "").toLowerCase();
   const signals = [];
   let risk = 0;
   INTEGRITY_SIGNAL_GROUPS.forEach((group) => {
-    const matches = group.terms.filter((term) => clean.includes(term));
+    const negationTerms = group.negation || [];
+    const matches = group.terms.filter((term) => {
+      if (!termMatches(clean, term)) return false;
+      if (isNegated(clean, term, negationTerms)) return false;
+      return true;
+    });
     if (!matches.length) return;
     signals.push({ id: group.id, label: group.label, matches: matches.slice(0, 4), weight: group.weight });
     risk += group.weight > 0 ? group.weight + Math.min(matches.length - 1, 2) : group.weight;
   });
   const riskScore = Math.max(0, Math.min(10, risk));
   const level = riskScore >= 7 ? "high" : riskScore >= 4 ? "review" : "low";
-  const missing = [
+  const missingRe = [
     ["funding", "funding/COI statement"],
     ["preregister", "preregistration/protocol"],
     ["absolute risk", "absolute effect size"],
     ["adverse", "safety/adverse-event accounting"],
     ["replication", "independent replication"],
-  ].filter(([needle]) => !clean.includes(needle)).map(([, label]) => label);
+  ];
+  const missing = missingRe
+    .filter(([needle]) => !termMatches(clean, needle))
+    .map(([, label]) => label);
   return { score: riskScore, level, signals, missing };
 }
 

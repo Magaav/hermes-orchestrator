@@ -1,0 +1,63 @@
+<div class="artifact-foundry-shell">
+  <header class="artifact-foundry-intro">
+    <div>
+      <p class="artifact-foundry-eyebrow">Deterministic browser-WASM</p>
+      <h2>Artifact Foundry</h2>
+      <p>Generate a content-addressed structured artifact from a small, portable recipe. Seed bytes remain in this browser.</p>
+    </div>
+    <span class="artifact-foundry-chip" data-engine>WASM core</span>
+  </header>
+
+  <section class="artifact-foundry-panel">
+    <label class="artifact-foundry-file">
+      Choose seed
+      <input type="file" data-seed-file>
+    </label>
+    <div class="artifact-foundry-seed">
+      <span data-seed-name>Canonical Stars/Shells seed</span>
+      <strong data-seed-size>Loading…</strong>
+    </div>
+    <label>
+      Maximum rounds
+      <input type="number" min="0" max="8" value="8" data-rounds>
+    </label>
+    <div class="artifact-foundry-actions">
+      <button type="button" data-action="estimate">Estimate</button>
+      <button type="button" data-action="generate">Generate and verify</button>
+    </div>
+  </section>
+
+  <p class="artifact-foundry-status" data-status aria-live="polite">Loading canonical recipe…</p>
+
+  <section class="artifact-foundry-panel" data-estimate hidden>
+    <p class="artifact-foundry-eyebrow">Bounded estimate</p>
+    <div class="artifact-foundry-metrics">
+      <div><span>Seed</span><strong data-estimate-seed>—</strong></div>
+      <div><span>Expected output</span><strong data-estimate-output>—</strong></div>
+      <div><span>Network</span><strong>denied</strong></div>
+      <div><span>Engine</span><strong>WASM + JS</strong></div>
+    </div>
+  </section>
+
+  <section class="artifact-foundry-panel" data-result hidden>
+    <p class="artifact-foundry-eyebrow">Verified receipt</p>
+    <div class="artifact-foundry-metrics">
+      <div><span>Output</span><strong data-output-size>—</strong></div>
+      <div><span>Rounds</span><strong data-output-rounds>—</strong></div>
+      <div><span>Runtime</span><strong data-output-time>—</strong></div>
+      <div><span>Digest</span><strong data-output-state>—</strong></div>
+    </div>
+    <output data-projection></output>
+    <details>
+      <summary>Verification receipt</summary>
+      <pre data-receipt></pre>
+    </details>
+    <div class="artifact-foundry-actions">
+      <button type="button" data-action="export-artifact">Export GGUF</button>
+      <button type="button" data-action="export-recipe">Export recipe capsule</button>
+      <button type="button" data-action="export-receipt">Export receipt</button>
+    </div>
+  </section>
+
+  <p class="artifact-foundry-boundary">Procedural generation only. A recipe does not compress or reconstruct arbitrary unseen data.</p>
+</div>

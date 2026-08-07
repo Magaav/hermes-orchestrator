@@ -33,6 +33,27 @@ class MasterFrontierV5NoveltyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["code"], "evidence_already_covered")
 
+    def test_covered_read_is_admitted_once_after_mutation(self) -> None:
+        state = self.state()
+        trajectory.append(state, {
+            "kind": "tool", "tool": "edit", "status": "completed",
+            "result": {"ok": True},
+        })
+        arguments = {"path": "widget.js", "start_line": 1, "end_line": 520}
+        admitted = novelty.admit(state, "read", arguments)
+        self.assertTrue(admitted["ok"])
+        self.assertEqual(admitted["refresh"], "post_mutation")
+        trajectory.append(state, {
+            "kind": "tool", "tool": "read", "status": "completed",
+            "result": {
+                "ok": True, "path": "widget.js", "start_line": 1,
+                "end_line": 520, "line_count": 520, "sha256": "b" * 64,
+            },
+        })
+        repeated = novelty.admit(state, "read", arguments)
+        self.assertFalse(repeated["ok"])
+        self.assertEqual(repeated["code"], "evidence_already_covered")
+
     def test_uncovered_read_and_other_tools_remain_free(self) -> None:
         state = self.state()
         self.assertTrue(novelty.admit(state, "read", {

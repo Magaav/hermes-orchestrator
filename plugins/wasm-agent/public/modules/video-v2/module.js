@@ -1,0 +1,1 @@
+export const moduleDefinition={id:"video-v2",title:"Video V2",status:"Mediabunny WebCodecs comparison",defaultEnabled:true,firmware:"/modules/video-v2/video-v2.entry.js",artifact:"/modules/video-v2/artifact.json",endpoints:[],state:{input:"ephemeral browser file",output:"operator download",networkPolicy:"media-local; pinned runtime CDN"}};

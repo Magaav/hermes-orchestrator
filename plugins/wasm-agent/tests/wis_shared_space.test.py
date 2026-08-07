@@ -55,7 +55,6 @@ class WisSharedSpaceTest(unittest.TestCase):
             public_root=PLUGIN_ROOT / "public",
             state_dir=state_dir,
             bridge_url="http://127.0.0.1:8790",
-            browser_timeout_sec=1.0,
             shared_space_live_clients={},
             shared_space_live_clients_lock=static_server.threading.Lock(),
         )

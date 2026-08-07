@@ -25,8 +25,6 @@ def payload(
     public_origin: str,
     deployment_mode: str,
     instance_id: str,
-    host_browser_enabled: bool,
-    public_default_disabled: bool,
     shared_voice_enabled: bool,
     shared_voice_ice_servers: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -59,10 +57,6 @@ def payload(
         "features": {
             "devHmr": {
                 "enabled": deployment_mode != "cloud",
-            },
-            "hostBrowser": {
-                "enabled": host_browser_enabled,
-                "publicDefaultDisabled": public_default_disabled,
             },
             "sharedVoice": {
                 "enabled": shared_voice_enabled,

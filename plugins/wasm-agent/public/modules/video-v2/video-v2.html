@@ -1,0 +1,18 @@
+<section class="v2-shell">
+  <header class="v2-intro"><div><p>Mediabunny comparison</p><h2>Video V2</h2></div><span>WebCodecs</span></header>
+  <label class="v2-picker">Choose a video<input data-source type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv"></label>
+  <section class="v2-stage" hidden data-stage>
+    <video data-video playsinline preload="metadata"></video>
+    <div class="v2-player"><button type="button" data-play aria-label="Play selected range">▶</button><output data-current>0:00.0</output><input data-seek type="range" min="0" max="0" step=".01" value="0"><output data-player-end>0:00.0</output></div>
+  </section>
+  <section class="v2-editor" hidden data-editor>
+    <div class="v2-times"><output data-start-label>0:00.0</output><strong data-selection-duration>0.0 s</strong><output data-end-label>0:00.0</output></div>
+    <div class="v2-timeline" data-timeline><div data-filmstrip></div><div class="v2-shade" data-left></div><div class="v2-shade" data-right></div><div class="v2-selection" data-selection></div><input data-start type="range" min="0" step=".05" value="0"><input data-end type="range" min="0" step=".05" value="0"></div>
+    <p>Selection must be 1–20 seconds.</p>
+  </section>
+  <section class="v2-metrics" hidden data-metrics><span data-input-codec></span><span data-input-size></span><span data-input-fps></span><span data-input-dimensions></span></section>
+  <div class="v2-actions"><button type="button" data-export disabled>Encode with Mediabunny</button><button type="button" data-download hidden>Download V2 output</button></div>
+  <div class="v2-progress" hidden data-progress><progress max="1" value="0"></progress><span>Converting through WebCodecs…</span></div>
+  <p class="v2-status" data-status role="status" aria-live="polite">Choose a browser-compatible video to compare V2.</p>
+  <pre class="v2-receipt" hidden data-receipt></pre>
+</section>

@@ -311,6 +311,7 @@ PY
   local component_context_menu_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/space/component-context-menu"
   local fleet_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/fleet"
   local performance_hud_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/performance-hud"
+  local photo_cleaner_bundle_root="${CUSTOMWARE_PATH}/L1/_all/mod/hermes/property-photo-cleaner"
   local fleet_seed_root="${PLUGIN_DIR}/plugin-interface/plugins/hermes-fleet/space-seed/hermes-fleet"
   mkdir -p "${widget_root}" "${conf_root}" "${skill_root}"
 
@@ -329,6 +330,10 @@ PY
   sync_customware_bundle \
     "${PLUGIN_DIR}/plugin-interface/plugins/hermes-performance-hud" \
     "${performance_hud_bundle_root}"
+
+  sync_customware_bundle \
+    "${PLUGIN_DIR}/plugin-interface/plugins/property-photo-cleaner" \
+    "${photo_cleaner_bundle_root}"
 
   should_seed_llm_config() {
     local path="$1"

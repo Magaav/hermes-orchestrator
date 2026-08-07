@@ -1,0 +1,20 @@
+id: hermes/batch-cleaner
+name: Batch Cleaner
+version: 0.2.0
+description: Browser-local batch property-photo cleaning.
+capabilities:
+  - actions
+  - browser-runtime
+  - local-files
+extension_points:
+  - _core/framework/initializer.js/initialize/end
+compatibility:
+  space_agent: ">=0.65"
+runtime:
+  initializer: batch-cleaner.launcher.js
+artifact: artifact.json
+actions:
+  - id: hermes.batch_cleaner.open
+    title: Open Batch Cleaner
+    capability: browser-runtime
+    description: Open the browser-local batch photo cleaner.

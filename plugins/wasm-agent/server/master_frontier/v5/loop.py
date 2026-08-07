@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 from .. import budget as route_budget
-from . import completion, context, executive, novelty, operation_ledger, policy, reliability, task_policy, trajectory, usage as usage_accounting
+from . import answer_satisfaction, completion, context, executive, final_claims, novelty, operation_ledger, policy, reliability, task_policy, tool_stage, trajectory, usage as usage_accounting
 from .errors import V5Error
 
 
@@ -20,6 +21,40 @@ class Outcome:
     tools: list[dict[str, Any]]
     usages: list[dict[str, Any]]
     usage_totals: dict[str, int]
+
+
+def register_repair(
+    state: dict[str, Any], *, code: str, message: str, action_id: str,
+    tool: str, active_tools: set[str], next_actions: list[dict[str, Any]] | None = None,
+) -> int:
+    """Record one cache-busting, bounded repair transition."""
+    state["repair_revision"] = max(0, int(state.get("repair_revision") or 0)) + 1
+    state["repair_streak"] = max(0, int(state.get("repair_streak") or 0)) + 1
+    state["last_error"] = {
+        "code": code,
+        "message": message,
+        "rejected_action_id": action_id,
+        "rejected_tool": tool,
+        "active_tools": sorted(active_tools),
+        **({"next_actions": next_actions} if next_actions else {}),
+    }
+    return state["repair_streak"]
+
+
+def bind_search_objective(arguments: dict[str, Any], objective: str) -> dict[str, Any]:
+    """Keep bounded repository search grounded in distinctive objective terms."""
+    query = str(arguments.get("query") or "").strip()
+    stop = {"about", "after", "again", "button", "called", "first", "from", "have", "inside", "need", "start", "stop", "string", "talking", "than", "that", "this", "turn", "what", "when", "which", "will", "with", "would", "you"}
+    terms: list[str] = []
+    for term in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", str(objective or "")):
+        lowered = term.lower()
+        if lowered in stop or lowered in {item.lower() for item in terms}:
+            continue
+        terms.append(term)
+        if len(terms) >= 12:
+            break
+    grounded = " ".join([query, *terms]).strip()
+    return {**arguments, "query": grounded[:480]}
 
 
 def bind_observed_preimages(arguments: dict[str, Any], state: dict[str, Any], route: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -58,6 +93,19 @@ def bind_observed_preimages(arguments: dict[str, Any], state: dict[str, Any], ro
         path = canonical(result.get("path"))
         if step.get("tool") == "read" and step.get("status") == "completed" and len(digest) == 64 and path:
             observed.setdefault(path, digest)
+    ledger = state.get("operation_ledger") if isinstance(state.get("operation_ledger"), dict) else {}
+    postimages = ledger.get("postimages") if isinstance(ledger.get("postimages"), dict) else {}
+    for value, digest in postimages.items():
+        path = canonical(value)
+        clean_digest = str(digest or "")
+        if path and len(clean_digest) == 64:
+            observed.setdefault(path, clean_digest)
+    durable = state.get("observed_preimages") if isinstance(state.get("observed_preimages"), dict) else {}
+    for value, digest in durable.items():
+        path = canonical(value)
+        clean_digest = str(digest or "")
+        if path and len(clean_digest) == 64:
+            observed.setdefault(path, clean_digest)
     bound = []
     for item in operations:
         operation = dict(item) if isinstance(item, dict) else item
@@ -68,11 +116,27 @@ def bind_observed_preimages(arguments: dict[str, Any], state: dict[str, Any], ro
                 if operation.get(destination_key):
                     operation[destination_key] = canonical(operation.get(destination_key))
             op = str(operation.get("op") or "replace")
-            if op == "create":
-                operation.setdefault("expected_absent", True)
+            if op == "append" and not operation.get("content"):
+                append_content = next(
+                    (operation.get(key) for key in ("insert", "replace", "text", "after") if operation.get(key)),
+                    None,
+                )
+                if append_content is not None:
+                    operation["content"] = str(append_content)
+            path = canonical(operation.get("path"))
+            if op == "create" and path in observed:
+                operation["op"] = "replace"
+                operation.pop("expected_absent", None)
+                operation["expected_sha256"] = observed[path]
+            elif op == "create":
+                # Creation has one authoritative atomic precondition. A model-
+                # supplied digest for a path that must not exist is meaningless
+                # and would turn a safe create into an unrecoverable mismatch.
+                operation.pop("expected_sha256", None)
+                operation["expected_absent"] = True
             else:
-                path = canonical(operation.get("path"))
-                if not operation.get("expected_sha256") and path in observed:
+                if path in observed:
+                    operation.pop("expected_absent", None)
                     operation["expected_sha256"] = observed[path]
         bound.append(operation)
     return {**arguments, "operations": bound}
@@ -169,6 +233,37 @@ def run(
         state["usage_totals"] = usage_totals
         if persist is not None:
             persist(state, reason)
+
+    def complete_unsatisfactory(code: str, message: str) -> Outcome:
+        """Finish safely when bounded recovery cannot produce required evidence."""
+        answer = (
+            "I couldn't complete this grounded request because the run produced no fresh "
+            f"tool evidence. {message}"
+        )
+        state.update({
+            "status": "completed",
+            "pending": None,
+            "last_error": None,
+            "final_answer": answer,
+            "answer_satisfaction": {
+                "status": "unsatisfactory",
+                "code": code,
+                "message": message,
+                "fallback": True,
+            },
+        })
+        state["pending_action"] = None
+        trajectory.append(state, {
+            "kind": "system",
+            "status": "completed_unsatisfactory",
+            "summary": message,
+            "result": {"ok": False, "code": code},
+        })
+        save("completed_unsatisfactory")
+        return Outcome(
+            answer, state, counters["provider_calls"], counters["provider_attempts"],
+            tools, usages, usage_totals,
+        )
 
     while True:
         if cancelled is not None and cancelled():
@@ -281,7 +376,15 @@ def run(
         if remaining_calls:
             state["queued_tool_calls"] = [*remaining_calls, *(state.get("queued_tool_calls") or [])][:16]
         if decision["kind"] == "final":
-            open_outcomes = [] if task_policy.requires_decision(route) else executive.open_outcomes(state.get("executive"))
+            contract_complete = (
+                task_policy.requires_mutation(route)
+                and completion.ready(state, route)
+            )
+            open_outcomes = (
+                []
+                if task_policy.requires_decision(route) or contract_complete
+                else executive.open_outcomes(state.get("executive"))
+            )
             if task_policy.requires_decision(route) and not completion.ready(state, route):
                 counters["outcome_repairs"] += 1
                 assessment = completion.assess(state, route)
@@ -352,7 +455,7 @@ def run(
                     }
                     save("verification_repair_requested")
                     continue
-            missing_proof = [] if task_policy.llm_autonomous(route) else operation_ledger.missing(
+            missing_proof = operation_ledger.missing(
                 state["operation_ledger"],
                 worktree=str(verification.get("digest") or "") if state["operation_ledger"].get("mutations") else None,
             )
@@ -365,6 +468,43 @@ def run(
                     raise V5Error("proof_incomplete", message, checkpoint=checkpoint)
                 state["last_error"] = {"code": "operation_proof_required", "message": "Before completing, obtain: " + ", ".join(missing_proof) + "."}
                 save("proof_repair_requested")
+                continue
+            if task_policy.requires_mutation(route) and not completion.ready(state, route):
+                counters["implementation_repairs"] += 1
+                assessment = completion.assess(state, route)
+                state["completion_assessment"] = assessment
+                if counters["implementation_repairs"] >= 3:
+                    message = assessment["reason"]
+                    checkpoint = trajectory.checkpoint(state, "implementation_incomplete", message)
+                    save("implementation_incomplete")
+                    raise V5Error("implementation_incomplete", message, checkpoint=checkpoint)
+                state["last_error"] = {
+                    "code": "implementation_action_required",
+                    "message": assessment["reason"],
+                    "next_actions": assessment["next_actions"],
+                }
+                state["pending"] = None
+                save("implementation_contract_repair_requested")
+                continue
+            decision["answer"] = final_claims.normalize(decision["answer"], state["operation_ledger"])
+            claim_check = final_claims.validate(
+                decision["answer"],
+                state["operation_ledger"],
+                state.get("steps") if isinstance(state.get("steps"), list) else [],
+            )
+            if claim_check.get("ok") is not True:
+                counters["claim_repairs"] += 1
+                if counters["claim_repairs"] >= 2:
+                    message = str(claim_check.get("message") or "The final answer does not match the applied mutation receipt.")
+                    checkpoint = trajectory.checkpoint(state, str(claim_check.get("code") or "final_claim_mismatch"), message)
+                    save("final_claim_mismatch")
+                    raise V5Error(str(claim_check.get("code") or "final_claim_mismatch"), message, checkpoint=checkpoint)
+                state["last_error"] = {
+                    "code": str(claim_check.get("code") or "final_claim_mismatch"),
+                    "message": str(claim_check.get("message") or "Summarize only the applied and verified mutation."),
+                    "missing": claim_check.get("missing") or [],
+                }
+                save("final_claim_repair_requested")
                 continue
             typed_runtime_negative = task_policy.request_class(route) == "runtime_inspection" and any(
                 item.get("ok") is not True and task_policy.accepts_tool_evidence(route, item)
@@ -379,15 +519,31 @@ def run(
                 counters["evidence_repairs"] += 1
                 if counters["evidence_repairs"] >= 2:
                     message = "Grounded task returned a final answer without fresh tool evidence."
-                    checkpoint = trajectory.checkpoint(state, "evidence_incomplete", message)
-                    save("evidence_incomplete")
-                    raise V5Error("evidence_incomplete", message, checkpoint=checkpoint)
+                    return complete_unsatisfactory("evidence_incomplete", message)
                 state["last_error"] = {
                     "code": "fresh_tool_evidence_required",
                     "message": "Use one declared tool to inspect current evidence before answering this grounded task.",
                 }
                 save("evidence_repair_requested")
                 continue
+            satisfaction = answer_satisfaction.assess(decision["answer"])
+            state["answer_satisfaction"] = satisfaction
+            if satisfaction["status"] != "satisfactory":
+                counters["answer_repairs"] += 1
+                if counters["answer_repairs"] <= answer_satisfaction.MAX_REPAIRS:
+                    state["last_error"] = {
+                        "code": satisfaction["code"],
+                        "message": satisfaction["message"] + " Synthesize a useful plain-text answer from the accumulated evidence; do not emit tool syntax.",
+                    }
+                    state["pending"] = "frontier_completion"
+                    save("answer_satisfaction_repair_requested")
+                    continue
+                decision["answer"] = answer_satisfaction.fallback(satisfaction)
+                state["answer_satisfaction"] = {
+                    **satisfaction,
+                    "fallback": True,
+                    "repair_attempts": counters["answer_repairs"],
+                }
             state.update({"status": "completed", "pending": None, "last_error": None, "final_answer": decision["answer"]})
             state["pending_action"] = None
             save("completed")
@@ -444,19 +600,29 @@ def run(
             counters["duplicate_actions"] += 1
             state["queued_tool_calls"] = []
             message = f"The {name} tool is no longer active for the current workflow stage."
-            state["last_error"] = {
-                "code": "workflow_stage_complete",
-                "message": message + " Choose one of the currently declared tools or return an explicit blocker.",
-                "active_tools": sorted(active_names),
-            }
+            streak = register_repair(
+                state, code="workflow_stage_complete",
+                message=message + " Choose one of the currently declared tools or return an explicit blocker.",
+                action_id=trajectory.action_id(name, arguments, str(route.get("route_id") or "")),
+                tool=name, active_tools=active_names,
+            )
             trajectory.append(state, {
                 "kind": "system", "tool": name, "status": "rejected",
                 "summary": message, "result": {"active_tools": sorted(active_names)},
             })
             save("workflow_stage_action_rejected")
+            if streak >= 2:
+                raise V5Error("no_semantic_progress", "Two consecutive rejected workflow actions produced no progress.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Two consecutive rejected workflow actions produced no progress."))
             continue
+        if name == "search":
+            arguments = bind_search_objective(arguments, objective)
         if name == "edit":
             arguments = bind_observed_preimages(arguments, state, route)
+        if name == "diff" and state["operation_ledger"].get("postimages"):
+            arguments = {
+                **arguments,
+                "paths": sorted(state["operation_ledger"]["postimages"]),
+            }
         revision = int(state["operation_ledger"].get("revision") or 0)
         action_id = trajectory.action_id(name, arguments, str(route.get("route_id") or ""), revision)
         route_action_id = trajectory.action_id(name, arguments, str(route.get("route_id") or ""))
@@ -480,33 +646,43 @@ def run(
             trajectory.append(state, {"kind": "system", "tool": name, "status": "duplicate", "summary": "Equivalent completed action reused.", "result": prior_observation})
             if assessment["status"] == "sufficient":
                 state["pending"] = "frontier_completion"
-                state["last_error"] = {"code": "action_already_completed", "message": f"Do not repeat {name}. Answer now from the accumulated evidence."}
+                register_repair(
+                    state, code="action_already_completed",
+                    message=f"Do not repeat {name}. Answer now from the accumulated evidence.",
+                    action_id=completed_action_id, tool=name, active_tools=active_names,
+                )
                 save("completed_action_reused")
                 continue
             if assessment["status"] == "incomplete" and (
                 not route_budget.hard_enforced(route) or counters["no_progress"] < 2
             ):
-                state["last_error"] = {"code": "evidence_incomplete", "message": assessment["reason"], "next_actions": assessment["next_actions"]}
+                streak = register_repair(
+                    state, code="evidence_incomplete", message=assessment["reason"],
+                    action_id=completed_action_id, tool=name, active_tools=active_names,
+                    next_actions=assessment["next_actions"],
+                )
                 save("duplicate_action_repair_requested")
+                if streak >= 2:
+                    raise V5Error("no_semantic_progress", "Two consecutive duplicate actions produced no progress.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Two consecutive duplicate actions produced no progress."))
                 continue
-            checkpoint = trajectory.checkpoint(state, "evidence_incomplete", assessment["reason"])
-            save("duplicate_action_incomplete")
-            raise V5Error("evidence_incomplete", assessment["reason"], checkpoint=checkpoint)
+            return complete_unsatisfactory("evidence_incomplete", assessment["reason"])
         admission = novelty.admit(state, name, arguments, route)
         if admission.get("ok") is not True:
             counters["no_progress"] += 1
             counters["duplicate_actions"] += 1
             message = str(admission.get("message") or "The requested action adds no new evidence.")
-            state["last_error"] = {
-                "code": str(admission.get("code") or "novelty_required"),
-                "message": message,
-                "next_actions": admission.get("next_actions") or [],
-            }
+            streak = register_repair(
+                state, code=str(admission.get("code") or "novelty_required"), message=message,
+                action_id=action_id, tool=name, active_tools=active_names,
+                next_actions=admission.get("next_actions") or [],
+            )
             trajectory.append(state, {
                 "kind": "system", "tool": name, "status": "rejected",
                 "summary": message, "result": admission,
             })
             save("novelty_action_rejected")
+            if streak >= 2:
+                raise V5Error("no_semantic_progress", "Two consecutive non-novel actions produced no progress.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Two consecutive non-novel actions produced no progress."))
             continue
         if name == "edit":
             operations = arguments.get("operations") if isinstance(arguments.get("operations"), list) else []
@@ -536,6 +712,16 @@ def run(
             save("action_outcome_unknown")
             raise V5Error("action_outcome_unknown", message, checkpoint=checkpoint) from exc
         novelty_result = novelty.classify_observation(state, name, observed)
+        if name == "read" and observed.get("ok") is True:
+            read_path = str(observed.get("path") or "").strip()
+            read_digest = str(observed.get("sha256") or "").strip().lower()
+            if read_path and len(read_digest) == 64:
+                durable_preimages = (
+                    dict(state.get("observed_preimages"))
+                    if isinstance(state.get("observed_preimages"), dict) else {}
+                )
+                durable_preimages[read_path] = read_digest
+                state["observed_preimages"] = dict(list(durable_preimages.items())[-64:])
         if name == "checkpoint" and observed.get("ok") is True:
             state["executive"] = executive.normalize(observed.get("executive"))
         if name in {"test", "diff", "prove"} and state["operation_ledger"].get("mutations"):
@@ -545,6 +731,15 @@ def run(
             else:
                 observed = {**observed, "worktree_sha256": str(verification.get("digest") or "")}
         state["operation_ledger"] = operation_ledger.record(state["operation_ledger"], name, observed, action_id=action_id)
+        if name == "edit" and observed.get("ok") is True:
+            verification_calls = tool_stage.post_mutation_verification_calls(
+                route, state["operation_ledger"],
+            )
+            if verification_calls:
+                state["queued_tool_calls"] = [
+                    *verification_calls,
+                    *(state.get("queued_tool_calls") or []),
+                ][:16]
         if observed.get("ok") is not True:
             # Remaining calls were selected before the model observed this
             # failure and may depend on the failed action's assumptions.
@@ -556,6 +751,14 @@ def run(
         state["completed_actions"] = dict(list(state["completed_actions"].items())[-trajectory.MAX_ACTIONS:])
         state["pending_action"] = None
         trajectory.append(state, {"kind": "tool", "action_id": action_id, "tool": name, "status": "completed" if observed.get("ok") else "failed", "summary": observed.get("summary") or observed.get("code") or name, "result": compact})
+        assessment = completion.assess(state, route)
+        state["completion_assessment"] = assessment
+        if assessment["status"] == "sufficient":
+            # Sibling calls were selected before this receipt existed. Once the
+            # declared evidence contract is satisfied, they are stale work.
+            state["queued_tool_calls"] = []
+            if task_policy.request_class(route) != "source_investigation":
+                state["pending"] = "frontier_completion"
         if not observed.get("ok") and task_policy.accepts_tool_evidence(route, observed):
             state["pending"] = "frontier_completion"
             state["last_error"] = {
@@ -568,25 +771,58 @@ def run(
         if observed.get("ok") and novelty_result.get("novel") is False:
             counters["no_progress"] += 1
             counters["duplicate_actions"] += 1
-            state["last_error"] = {
-                "code": str(novelty_result.get("code") or "novelty_required"),
-                "message": str(novelty_result.get("message") or "The action returned no new evidence."),
-                "next_actions": novelty_result.get("next_actions") or [],
-            }
+            streak = register_repair(
+                state, code=str(novelty_result.get("code") or "novelty_required"),
+                message=str(novelty_result.get("message") or "The action returned no new evidence."),
+                action_id=action_id, tool=name, active_tools=active_names,
+                next_actions=novelty_result.get("next_actions") or [],
+            )
             trajectory.append(state, {
                 "kind": "system", "tool": name, "status": "redundant",
                 "summary": state["last_error"]["message"], "result": novelty_result,
             })
             save("action_completed_without_novelty")
+            if streak >= 2:
+                raise V5Error("no_semantic_progress", "Two consecutive actions returned no novel evidence.", checkpoint=trajectory.checkpoint(state, "no_semantic_progress", "Two consecutive actions returned no novel evidence."))
             continue
         if observed.get("ok"):
             state["last_error"] = None
+            state["repair_streak"] = 0
             counters["no_progress"] = 0
         else:
+            repair_targets = [
+                str(path) for path in (observed.get("durable_targets") or [])[:12]
+                if str(path).strip()
+            ]
+            if name == "edit" and not repair_targets:
+                if str(observed.get("code") or "") == "patch_preimage_exists":
+                    attempted_targets = list(dict.fromkeys(
+                        str(operation.get("path") or "").strip()
+                        for operation in (arguments.get("operations") or [])[:12]
+                        if isinstance(operation, dict) and str(operation.get("path") or "").strip()
+                    ))
+                    summary = str(observed.get("summary") or "").strip()
+                    repair_targets = [
+                        path for path in attempted_targets
+                        if summary.endswith(f": {path}")
+                    ] or attempted_targets
+            if name == "edit" and not repair_targets:
+                repair_targets = list(dict.fromkeys(
+                    str(path).strip()
+                    for check in (route.get("checks") or [])[:24]
+                    if isinstance(check, dict)
+                    for path in (check.get("evidence_paths") or [])[:12]
+                    if str(path).strip()
+                ))[:12]
             state["last_error"] = {
                 "code": str(observed.get("code") or "tool_failed"),
                 "message": str(observed.get("summary") or f"The {name} tool failed."),
                 "tool": name,
+                **({"durable_targets": repair_targets} if repair_targets else {}),
+                **({"next_actions": [
+                    action for action in (observed.get("next_actions") or [])[:8]
+                    if isinstance(action, dict)
+                ]} if observed.get("next_actions") else {}),
             }
             counters["no_progress"] += 1
         save("action_completed")

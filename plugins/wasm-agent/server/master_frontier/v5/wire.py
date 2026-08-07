@@ -42,6 +42,9 @@ def encode(payload: dict[str, Any]) -> str:
     identity = payload.get("runtime_identity") if isinstance(payload.get("runtime_identity"), dict) else {}
     if identity:
         lines.append("I\t" + _pairs(identity, tuple(sorted(identity))[:8]))
+    resolved = payload.get("resolved_entity") if isinstance(payload.get("resolved_entity"), dict) else {}
+    if resolved:
+        lines.append("O!\t" + _pairs(resolved, ("id", "kind", "route_symbol", "symbols")))
     runtime_entities = payload.get("runtime_entities") if isinstance(payload.get("runtime_entities"), list) else []
     if runtime_entities:
         lines.append("E\t" + ",".join(
@@ -54,6 +57,9 @@ def encode(payload: dict[str, Any]) -> str:
     check_ids = payload.get("checks") if isinstance(payload.get("checks"), list) else []
     if check_ids:
         lines.append("K\t" + ",".join(_text(item, 120) for item in check_ids))
+    invariants = payload.get("implementation_invariants") if isinstance(payload.get("implementation_invariants"), list) else []
+    for invariant in invariants[:12]:
+        lines.append("I!\t" + _text(invariant, 400))
     for pattern in payload.get("learned_patterns") if isinstance(payload.get("learned_patterns"), list) else []:
         if isinstance(pattern, dict):
             lines.append(f"G\t{_text(pattern.get('code'), 20)}\t{_text(pattern.get('rule'), 320)}\t{_text(pattern.get('digest'), 20)}")
@@ -111,7 +117,11 @@ def encode(payload: dict[str, Any]) -> str:
     assessment_next = assessment.get("next_actions") if isinstance(assessment.get("next_actions"), list) else []
     error = payload.get("last_error") if isinstance(payload.get("last_error"), dict) else {}
     if error:
-        lines.append("X\t" + _pairs(error, ("code", "message")))
+        repair = {"rev": payload.get("repair_revision"), "streak": payload.get("repair_streak"), **error}
+        lines.append("X\t" + _pairs(repair, (
+            "rev", "streak", "code", "message", "rejected_action_id", "rejected_tool",
+            "active_tools", "durable_targets",
+        )))
         if error.get("next_actions") and not assessment_next:
             lines.append("N\t" + _json(error["next_actions"], 1200))
     if assessment:
@@ -125,7 +135,10 @@ def encode(payload: dict[str, Any]) -> str:
         lines.append("P\t" + _pairs(reliability, ("transient_retries", "retry_limit", "retry_active", "last_code")))
     operations = payload.get("operations") if isinstance(payload.get("operations"), dict) else {}
     if operations:
-        lines.append("L\t" + _pairs(operations, ("rev", "mutations", "changed", "gaps")))
+        lines.append("L\t" + _pairs(operations, (
+            "rev", "mutations", "changed",
+            "check_ok", "check_id", "diff_ok", "diff_files", "proof_ok", "gaps",
+        )))
     progress = payload.get("progress") if isinstance(payload.get("progress"), dict) else {}
     if progress:
         lines.append("W\t" + _json(progress, 2200))

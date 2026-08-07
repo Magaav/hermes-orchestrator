@@ -80,6 +80,31 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["recall_budget"]["mode"], "on_demand")
         self.assertNotIn("changed_files", contract["proof_required"])
 
+    def test_model_decision_words_cannot_promote_conversation_to_runtime_grounding(self) -> None:
+        for objective in (
+            "heard you got upgrades brand new state of art",
+            "tell me about your runtime philosophy",
+            "what state of mind are you in?",
+        ):
+            with self.subTest(objective=objective):
+                envelope = self.route_envelope(objective)
+                envelope["objective_kind"] = "model_decision"
+                contract = planner.task_contract(envelope)
+                self.assertEqual(contract["intent"], "model_decision")
+                self.assertEqual(contract["evidence_floor"], "conceptual")
+                self.assertEqual(contract["route_intent"], "conceptual")
+                self.assertEqual(contract["tools_first"], ["kernel.resolve"])
+
+    def test_model_decision_capability_question_keeps_route_evidence_and_tools(self) -> None:
+        envelope = self.route_envelope("Can you see our code base?")
+        envelope["objective_kind"] = "model_decision"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "capability_inquiry")
+        self.assertEqual(contract["evidence_floor"], "route")
+        self.assertIn("kernel.inspect", contract["tools_first"])
+
     def test_explicit_implementation_planning_preserves_read_only_decision_contract(self) -> None:
         envelope = self.route_envelope("fix them all")
         envelope["objective_kind"] = "implementation_planning"
@@ -138,6 +163,37 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertIn("code.memory.search", contract["tools_first"])
         self.assertNotIn("kernel.inspect", contract["tools_first"])
 
+    def test_contract_explanation_stays_source_only_when_naming_runtime_class(self) -> None:
+        contract = planner.task_contract(self.route_envelope(
+            "Inspect the current planner contract and explain how model_decision differs from runtime_inspection."
+        ))
+
+        self.assertEqual(contract["intent"], "diagnosis")
+        self.assertEqual(contract["evidence_floor"], "source")
+        self.assertEqual(contract["route_intent"], "informational")
+        self.assertNotIn("kernel.inspect", contract["tools_first"])
+
+    def test_currently_open_page_inspection_selects_runtime_evidence(self) -> None:
+        contract = planner.task_contract(self.route_envelope(
+            "Inspect the currently open WASM Agent page and report the active UI right now."
+        ))
+
+        self.assertEqual(contract["intent"], "diagnosis")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertEqual(contract["route_intent"], "runtime_support")
+        self.assertIn("kernel.inspect", contract["tools_first"])
+
+    def test_fresh_live_page_observation_selects_runtime_evidence(self) -> None:
+        envelope = self.route_envelope(
+            "Take a fresh look at this page and identify the active space."
+        )
+        envelope["objective_kind"] = "model_decision"
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertEqual(contract["route_intent"], "runtime_support")
+        self.assertIn("kernel.inspect", contract["tools_first"])
+
     def test_free_depth_is_open_budget_hint_not_model_metadata(self) -> None:
         envelope = self.route_envelope("critique your envelope from within")
         envelope["depth"] = "free"
@@ -184,6 +240,19 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         contract = planner.task_contract(envelope)
 
         self.assertEqual(contract["evidence_floor"], "route")
+
+    def test_explicit_source_investigation_outranks_lexical_runtime_terms(self) -> None:
+        envelope = self.route_envelope(
+            "Read MASTER_FRONTIER_V6.md and state its protocol name."
+        )
+        envelope["objective_kind"] = "source-investigation"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "source_investigation")
+        self.assertEqual(contract["evidence_floor"], "source")
+        self.assertEqual(contract["route_intent"], "informational")
+        self.assertNotIn("kernel.inspect", contract["tools_first"])
 
     def test_repository_ui_object_question_requires_conclusive_source_investigation(self) -> None:
         contract = planner.task_contract(self.route_envelope("explain what an unknown space is in this UI"))

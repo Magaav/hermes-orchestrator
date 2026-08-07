@@ -121,6 +121,12 @@ postimages plus rollback backups. A compact fsynced journal beside durable
 server state is restored on the next server start if the process dies during a
 multi-file commit; corrupt recovery state blocks later mutations.
 
+Autonomous implementation exposes only create, replace, and append unless the
+resolved route explicitly grants additional operations; the avatar-chat route
+does not grant move or delete. The executor enforces the same route field as
+the model-facing schema, so omitted or fabricated tool schemas cannot broaden
+mutation authority.
+
 `test` runs only an argv registered by the route contract—never an arbitrary
 shell string. Continuously drained pipes retain only bounded head/tail rings,
 the child receives a minimal environment, and process-group cleanup runs after
@@ -140,6 +146,11 @@ route's write scope; a later or external edit therefore invalidates proof even
 when it did not touch a V5 postimage. Calling `kernel.prove` before the other
 gates cannot authorize completion.
 
+This proof requirement also applies in autonomous decision mode. Final synthesis
+must name every receipt-backed changed file and cannot present a fresh code block
+as though it were the mutation that actually landed; one repair is allowed, then
+the run fails closed with a typed final-claim error.
+
 Source synthesis becomes completion-only only after the whole owner or every
 declared focused range has been read. Runtime synthesis requires a scoped
 snapshot/proof result. An arbitrary successful read or generic inspection is
@@ -150,6 +161,26 @@ a bounded final-answer repair. Read-only verification cannot finish without a
 passing registered check and scoped proof. One transient retry keeps its
 durable consumed budget while successful recovery ends temporary evidence
 clipping.
+
+Final synthesis has a separate answer-satisfaction contract. Empty answers and
+unevaluated tool directives are durable `unsatisfactory` results, not accepted
+successes. The same head receives typed repair context and accumulated evidence;
+if bounded repairs still cannot produce a useful answer, V5 completes with an
+explicit honest unsatisfactory fallback instead of misclassifying answer quality
+as a provider or infrastructure failure.
+
+Safe-lab observation preserves that separation at every boundary. A lane,
+fixture, or suite that emits its report has `harnessStatus: completed` and an
+explicit `answerSatisfaction`. Provider, adapter, and scorer problems remain
+bounded blockers and force `promotionEligible: false`; they do not turn a
+candidate-quality iteration into harness failure.
+
+The native `browser` tool exposes route-owned CDP operations: snapshot,
+navigate, click, type, and key. `browser.inspect` grants bounded page snapshots;
+`browser.control` separately grants state-changing navigation and input. Page
+selection uses the declarative `browser_entry_url`, interactive elements are
+returned as bounded numeric refs, and the model receives neither arbitrary
+JavaScript execution nor product-specific DOM selectors.
 
 ## Learning from agent lanes
 

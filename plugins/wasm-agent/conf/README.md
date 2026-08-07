@@ -18,6 +18,27 @@ USER_EMAILS=user1@example.com,user2@example.com
 GOOGLE_LOGIN_CLIENT_ID=your-google-web-client-id.apps.googleusercontent.com
 ```
 
+Generate the native-control operator key without printing it:
+
+```bash
+python3 plugins/wasm-agent/scripts/ensure_native_control_key.py
+```
+
+The command writes `WASM_AGENT_NATIVE_CONTROL_KEY` to the canonical private
+`wa.env`, sets mode `0600`, preserves an existing non-empty key, and reports
+only whether it was created or already present. Rotate deliberately with
+`--rotate`; restart the backend after rotation. Native-control tools under
+`tools/windows/` resolve the same file and attach the key automatically. Never
+copy the value into source, logs, reports, screenshots, or command output.
+
+Cloud mode resolves secrets from `<cloud-root>/conf/wa.env`. Synchronize the
+operator key into that private deployment file without exposing it:
+
+```bash
+python3 plugins/wasm-agent/scripts/ensure_native_control_key.py \
+  --sync-to /home/ubuntu/.local/share/wasm-agent-cloud/conf/wa.env
+```
+
 Optional `Master:frontier` direct OpenAI receiver:
 
 ```env
@@ -59,6 +80,9 @@ Security rules:
   Standard accounts receive isolated state roots under
   `state/users/<acc_id>/` and the 1 GB user storage quota.
 - `GOOGLE_LOGIN_CLIENT_ID` is required for the Google sign-in button to render.
+- `WASM_AGENT_NATIVE_CONTROL_KEY` authenticates bounded operator access to the
+  live-client registry and native-control command routes. It does not permit
+  arbitrary shell execution.
 - `OPENAI_API_KEY` is optional, but required if `Master:frontier` should use
   the direct OpenAI Responses receiver.
 - `WASM_AGENT_CODEX_AUTH_JSON` is optional, but recommended if
@@ -85,3 +109,6 @@ For wasm-agent-cloud/private instances, set
 `HERMES_WASM_AGENT_CLOUD_STATE_ROOT` at a private deployment root outside the
 public repo. In that mode the default env path becomes `<cloud-root>/conf/wa.env`
 and the server refuses public plugin state paths for secrets or user data.
+The shared launcher also defaults `WASM_AGENT_EVENT_ANCHORS=true` in cloud
+mode and `false` in local/dev mode. An explicitly supplied value wins, allowing
+an operator to disable anchoring for a bounded rollback without editing source.

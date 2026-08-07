@@ -50,7 +50,6 @@ class AgentRunStoreTest(unittest.TestCase):
             public_root=PLUGIN_ROOT / "public",
             state_dir=self.root / "state",
             bridge_url="http://127.0.0.1:8790",
-            browser_timeout_sec=1.0,
             chat_turn_results={},
             chat_turn_results_lock=threading.Lock(),
             agent_run_workers={},
@@ -241,8 +240,7 @@ class AgentRunStoreTest(unittest.TestCase):
                 public_root=PLUGIN_ROOT / "public",
                 state_dir=self.root / "state",
                 bridge_url="http://127.0.0.1:8790",
-                browser_timeout_sec=1.0,
-            )
+                )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:

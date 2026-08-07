@@ -15,24 +15,31 @@ MAX_EVIDENCE_BLOCK_CHARS = 16_000
 SYSTEM = """You are Master:frontier V5. Solve the user's objective through one natural tool loop.
 The user message uses the compact MF5/2 record protocol; native tool schemas remain authoritative.
 When an H record is marked parent_spec, it is the grounded specification for the current referential implementation request. Preserve its scope, inspect its named paths first, and implement its actionable findings instead of rediscovering an unrelated task. If the specification contains more independently useful work than one bounded run can safely prove, choose and ship the highest-leverage coherent slice, record the remaining findings as explicit outcomes, and state their disposition in the final answer.
+Use the newest relevant H record for ordinary referential follow-ups such as "those", "that", or "it". Preserve its stated verified/unverified distinctions; if a prior claim was wrong, correct it explicitly instead of silently contradicting it.
 For implementation_planning, do not propose a patch as prose alone: use checkpoint to record one operational decision with candidate, target paths, observable acceptance criterion, blocker when applicable, next action, and confidence. This is operational state, not hidden reasoning.
 Read an exact bounded repository path directly when the objective or grounded continuity supplies one. Use search only to locate an unknown path, read to understand exact files, and inspect only for live runtime targets.
+When a host-specific concept is not mapped to an exact owner path, search for its definitions and references before reading; do not substitute the nearest likely file or silently rename the user's concept. If the concept spans several mechanisms, identify the mechanisms from search evidence and bound the answer explicitly.
 Use declared runtime_identity for claims about your active model or harness identity.
+For model_decision, you own the epistemic choice: answer directly when the request is self-contained, or select the smallest bounded source, memory, runtime, or browser evidence action needed for host-specific facts. Do not ask the harness to infer that choice from vocabulary.
 Current tool results outrank memory or assumptions. Do not claim runtime or production behavior from source alone.
+After an edit failure, when the X error record includes durable_targets, retry with substantive code or tests only in those declared paths; do not create probes, scratch files, checkpoints, or diagnostic artifacts.
 For source work, use missing_ranges directly, never repeat completed read_ranges, and reserve one advisory call for the final answer.
 Use the compact progress record to recognize covered ranges, duplication, workflow stage, and unmet work. Repetition is not progress merely because a tool succeeded.
 Use native tool calls for actions; several independent calls may be returned and will execute sequentially. When you decide the objective is complete, return useful plain text.
-An implementation objective is complete only after the native edit tool reports an applied repository mutation; describing a proposed patch is not completion.
+Use memory with a pointer listed in session_memory for historical account-owned session content. When session_memory contains the requested historical intent, call memory before claiming it unavailable. Use inspect only for a declared live runtime entity; it is not a transcript lookup.
+An implementation objective is complete only after the native edit tool reports an applied repository mutation and the current revision has a passing registered test, complete diff inspection, and scoped proof; describing a proposed patch is not completion. In the final answer, name every changed file, summarize only the applied mutation, and do not emit a replacement code block.
 When useful, maintain optional outcomes in checkpoint. Resolve each as done, dropped, or blocked; do not finish while an actionable outcome remains open.
 In autonomous mode, use checkpoint when persisting or revising your goal, situation, plan, hypotheses, open questions, next action, or definition of done will improve continuity.
 Do not emit receipt hashes, internal proof schemas, or JSON-wrapped final answers. When sufficient evidence exists, answer the objective directly."""
 
 FINAL_SYSTEM = """You are Master:frontier V5. The declared task now has conclusive bounded evidence.
 Answer the user's objective now in useful plain text. Do not call tools. Do not return JSON or internal receipts.
+Do not emit, suggest, or serialize a tool request; a tool-shaped response is not an answer. If more evidence would help, answer from the bounded evidence already supplied and state the limitation briefly.
 Ground claims in the observed evidence and distinguish source findings from verified runtime observations."""
 
 FORCED_FINAL_SYSTEM = """You are Master:frontier V5. The last requested operation was already completed and its result is included below.
 Synthesize the best useful answer now from the accumulated evidence. Do not call tools. Do not return JSON or internal receipts.
+Do not emit, suggest, or serialize a tool request; a tool-shaped response is not an answer.
 State any remaining uncertainty briefly instead of repeating an operation."""
 
 DIRECT_SYSTEM = """You are Master:frontier V5. This task is declared as a self-contained conversation.
@@ -47,6 +54,16 @@ def _evidence_status(state: dict[str, Any], route: dict[str, Any] | None = None)
 def completion_only(state: dict[str, Any], route: dict[str, Any] | None = None) -> bool:
     declared_route = route or {}
     if task_policy.llm_autonomous(declared_route):
+        return (
+            state.get("pending") == "frontier_completion"
+            or (
+                task_policy.requires_mutation(declared_route)
+                and completion.ready(state, declared_route)
+            )
+        )
+    if task_policy.request_class(declared_route) == "model_decision":
+        return state.get("pending") == "frontier_completion"
+    if task_policy.request_class(declared_route) == "source_investigation":
         return state.get("pending") == "frontier_completion"
     return (
         task_policy.direct_completion(declared_route)
@@ -137,6 +154,7 @@ def payload(objective: str, route: dict[str, Any], state: dict[str, Any]) -> dic
     retrying = reliability.retry_active(state)
     source_planning = (
         task_policy.request_class(route) == "source_investigation"
+        and live_assessment.get("status") != "sufficient"
         and not force_completion
         and not retrying
     )
@@ -165,31 +183,50 @@ def payload(objective: str, route: dict[str, Any], state: dict[str, Any]) -> dic
         continuity["resume"] = resume
     runtime_entities = []
     if task_policy.request_class(route) == "runtime_inspection":
+        declared_entities = [
+            item for item in (route.get("entities") if isinstance(route.get("entities"), list) else [])[:8]
+            if isinstance(item, dict) and str(item.get("id") or "").strip()
+        ]
+        if route.get("session_memory"):
+            declared_entities.sort(key=lambda item: 0 if str(item.get("kind") or "").endswith("session-memory") else 1)
         runtime_entities = [
             {
                 "id": str(item.get("id") or "")[:120],
                 "kind": str(item.get("kind") or "runtime-entity")[:80],
             }
-            for item in (route.get("entities") if isinstance(route.get("entities"), list) else [])[:8]
-            if isinstance(item, dict) and str(item.get("id") or "").strip()
+            for item in declared_entities
         ]
+    operations = (
+        operation_ledger.verification_project(state.get("operation_ledger") or {})
+        if task_policy.request_class(route) == "verification"
+        else operation_ledger.project(state.get("operation_ledger") or {})
+    )
     return {
         "objective": objective,
         "continuity": continuity,
+        "session_memory": route.get("session_memory") if isinstance(route.get("session_memory"), dict) else {},
         "route": {"id": route.get("route_id"), "root": route.get("workspace_root")},
         "runtime_identity": route.get("runtime_identity") if isinstance(route.get("runtime_identity"), dict) else {},
+        "resolved_entity": route.get("resolved_entity") if isinstance(route.get("resolved_entity"), dict) else {},
         "runtime_entities": runtime_entities,
         "tools": [] if force_completion else [item["name"] for item in policy.active_descriptors(route, state)],
         "checks": [str(item.get("id") or "") for item in (route.get("checks") or [])[:12] if isinstance(item, dict) and item.get("id")],
+        "implementation_invariants": [
+            str(item)[:400]
+            for item in (route.get("implementation_invariants") if isinstance(route.get("implementation_invariants"), list) else [])[:12]
+            if str(item).strip()
+        ],
         "learned_patterns": learned_patterns.project(route),
         "completed": observations,
         "epistemics": epistemics.project(semantic_steps),
         "evidence_status": evidence_status,
         "budget": _budget_projection(route, state),
         "last_error": state.get("last_error"),
+        "repair_revision": max(0, int(state.get("repair_revision") or 0)),
+        "repair_streak": max(0, int(state.get("repair_streak") or 0)),
         "completion_assessment": live_assessment,
         "provider_reliability": state.get("provider_reliability"),
-        "operations": operation_ledger.project(state.get("operation_ledger") or {}),
+        "operations": operations,
         "progress": progress.project(state, route),
         "pending_action": state.get("pending_action"),
         "executive": executive.project(state.get("executive")),

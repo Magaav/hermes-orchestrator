@@ -15,7 +15,7 @@ MAX_CONTENT_CHARS = 24_000
 MAX_OBSERVATION_CHARS = 32_000
 COUNTER_KEYS = (
     "provider_attempts", "provider_calls", "tool_calls", "invalid_decisions",
-    "no_progress", "duplicate_actions", "evidence_repairs", "proof_repairs", "implementation_repairs", "outcome_repairs", "length_continuations", "elapsed_ms",
+    "no_progress", "duplicate_actions", "evidence_repairs", "proof_repairs", "implementation_repairs", "outcome_repairs", "claim_repairs", "answer_repairs", "length_continuations", "elapsed_ms",
 )
 
 
@@ -37,7 +37,10 @@ def new(run_id: str, turn_id: str, objective: str, route_id: str) -> dict[str, A
         "pending_action": None,
         "pending": None,
         "last_error": None,
+        "repair_revision": 0,
+        "repair_streak": 0,
         "completion_assessment": None,
+        "answer_satisfaction": None,
         "provider_reliability": reliability.initial_state(),
         "operation_ledger": operation_ledger.new(route_id),
         "loop_counters": initial_counters(),
@@ -47,6 +50,7 @@ def new(run_id: str, turn_id: str, objective: str, route_id: str) -> dict[str, A
         "executive": executive.empty(),
         "decision_finalization": False,
         "queued_tool_calls": [],
+        "observed_preimages": {},
     }
 
 
@@ -68,7 +72,8 @@ def restore(value: Any, *, run_id: str, turn_id: str, objective: str, route_id: 
     result = new(run_id, turn_id, objective, route_id)
     result.update({key: value.get(key) for key in (
         "root_objective", "steps", "completed_actions", "pending_action", "pending",
-        "last_error", "completion_assessment", "final_answer", "executive", "decision_finalization", "queued_tool_calls",
+        "last_error", "completion_assessment", "answer_satisfaction", "final_answer", "executive", "decision_finalization",
+        "queued_tool_calls", "observed_preimages", "repair_revision", "repair_streak",
     )})
     result["root_objective"] = str(result.get("root_objective") or value.get("objective") or objective)
     result["steps"] = [item for item in list(result["steps"] or []) if isinstance(item, dict)][-MAX_STEPS:]
@@ -77,7 +82,21 @@ def restore(value: Any, *, run_id: str, turn_id: str, objective: str, route_id: 
     result["provider_reliability"] = reliability.normalize_state(value.get("provider_reliability"))
     result["executive"] = executive.normalize(value.get("executive"))
     result["decision_finalization"] = value.get("decision_finalization") is True
+    try:
+        result["repair_revision"] = max(0, int(value.get("repair_revision") or 0))
+    except (TypeError, ValueError):
+        result["repair_revision"] = 0
+    try:
+        result["repair_streak"] = max(0, int(value.get("repair_streak") or 0))
+    except (TypeError, ValueError):
+        result["repair_streak"] = 0
     result["queued_tool_calls"] = [item for item in (result.get("queued_tool_calls") or []) if isinstance(item, dict)][:16]
+    preimages = result.get("observed_preimages") if isinstance(result.get("observed_preimages"), dict) else {}
+    result["observed_preimages"] = {
+        str(path)[:300]: str(digest).lower()
+        for path, digest in list(preimages.items())[-64:]
+        if path and len(str(digest)) == 64
+    }
     result["operation_ledger"] = operation_ledger.normalize(value.get("operation_ledger"), route_id=route_id)
     result["loop_counters"] = normalize_counters(value.get("loop_counters"))
     result["usages"] = [item for item in list(value.get("usages") or []) if isinstance(item, dict)][-16:]
@@ -194,6 +213,7 @@ _RECEIPT_FIELDS = frozenset({
     "changed_files", "postimage_sha256", "checks", "matches", "focus", "coverage", "stat",
     "truncation", "result", "owner_file", "key_symbols", "suggested_ranges",
     "related_tests", "scan_truncated", "name", "line", "files_considered", "bytes_read",
+    "durable_targets", "next_actions",
     "complete", "lanes", "universe", "reported", "staged", "worktree", "modified", "added",
     "deleted", "renamed", "copied", "untracked", "conflicted", "type_changed", "unknown",
 })
@@ -250,6 +270,7 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "provider_reliability": reliability.normalize_state(state.get("provider_reliability")),
         "loop_counters": normalize_counters(state.get("loop_counters")),
         "operations": operation_ledger.project(state.get("operation_ledger") or {}),
+        "answer_satisfaction": _bounded(state.get("answer_satisfaction"), content_limit=0),
         "last_error": _bounded(state.get("last_error"), content_limit=0),
     }
 

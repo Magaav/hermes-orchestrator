@@ -11,7 +11,7 @@ PLUGIN = Path(__file__).resolve().parents[1]
 SERVER = PLUGIN / "server"
 sys.path.insert(0, str(SERVER))
 
-from master_frontier import authority, route_contracts  # noqa: E402
+from master_frontier import authority, planner, route_contracts  # noqa: E402
 from master_frontier.v5 import policy, tools  # noqa: E402
 
 
@@ -61,6 +61,17 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
                 ["search", "read", "edit", "test", "diff", "prove"],
             )
 
+    def test_edit_schema_excludes_empty_transactions_and_postimages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(
+                Path(tmp), ["repo.edit"], request_class="unclassified",
+                task_authority=["repo.edit"], write_roots=[str(tmp)],
+            )
+            edit = next(item for item in policy.descriptors_for(route) if item["name"] == "edit")
+            operations = edit["input_schema"]["properties"]["operations"]
+            self.assertEqual(operations["minItems"], 1)
+            self.assertEqual(operations["items"]["properties"]["content"]["minLength"], 1)
+
     def test_one_route_capability_cannot_execute_sibling_tools(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -73,6 +84,27 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
                 )
                 self.assertEqual(result["code"], "capability_denied")
             self.assertEqual(invoked, [])
+
+    def test_failed_test_flattens_bounded_assertion_detail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(
+                Path(tmp), ["test.run"], request_class="unclassified",
+                task_authority=["test.run"],
+            )
+            route["checks"] = [{"id": "focused", "command": ["true"]}]
+            result = tools.execute(
+                "test", {"check_id": "focused"}, route,
+                invoke=lambda *_: {
+                    "ok": True, "local_action": "test.run_focused",
+                    "result": {
+                        "ok": False, "code": "check_failed",
+                        "stderr": {"head": "AssertionError: missing transcript event", "tail": ""},
+                        "stdout": {"head": "", "tail": ""},
+                    },
+                },
+            )
+            self.assertIn("failure_detail", result, result)
+            self.assertEqual(result["failure_detail"], "AssertionError: missing transcript event")
 
     def test_implementation_planning_is_read_only_even_on_write_capable_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +202,13 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             )
             self.assertEqual(self.names(route), ["inspect"])
 
+    def test_declared_browser_entity_is_valid_runtime_evidence_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            route = self.route(Path(tmp), ["browser.inspect"], request_class="runtime_inspection")
+            route["entities"] = [{"id": "browser-session", "kind": "browser"}]
+            self.assertTrue(authority.coherence(route)["ok"])
+            self.assertEqual(self.names(route), ["browser"])
+
     def test_missing_write_roots_normalize_empty_and_disable_edit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plugin_root = Path(tmp)
@@ -235,6 +274,44 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
         }, route)
         self.assertEqual(diagnosis["request_class"], "source_investigation")
 
+    def test_model_decision_survives_planning_with_read_only_evidence_authority(self) -> None:
+        route = {"caps": ["repo.read", "repo.edit", "runtime.inspect", "proof.report"]}
+        planned = planner.task_contract({
+            "objective": "hello, can you se the Property Photo Cleaner widget?",
+            "objective_kind": "model_decision",
+            "route_id": "fixture.ui",
+            "route_contract": {
+                "route_id": "fixture.ui",
+                "workspace_root": "/tmp/fixture",
+                "caps": route["caps"],
+            },
+        })
+        projected = authority.project_task_contract(
+            {"objective_kind": "model_decision", "task_contract": planned},
+            route,
+        )
+        scoped = {**route, "task_contract": projected}
+        self.assertEqual(projected["intent"], "model_decision")
+        self.assertEqual(projected["request_class"], "model_decision")
+        self.assertEqual(
+            [item["name"] for item in policy.descriptors_for(scoped)],
+            ["search", "read", "inspect"],
+        )
+        self.assertNotIn("edit", [item["name"] for item in policy.descriptors_for(scoped)])
+
+    def test_runtime_evidence_outranks_coarse_model_decision_hint(self) -> None:
+        route = {"caps": ["runtime.inspect"]}
+        projected = authority.project_task_contract({
+            "objective_kind": "model_decision",
+            "task_contract": {
+                "intent": "model_decision",
+                "evidence_floor": "runtime",
+                "route_intent": "runtime_support",
+            },
+        }, route)
+
+        self.assertEqual(projected["request_class"], "runtime_inspection")
+
     def test_capability_presence_never_selects_runtime_modality(self) -> None:
         broad_route = {"caps": ["repo.read", "runtime.inspect"]}
         source = authority.project_task_contract({
@@ -275,7 +352,7 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             status = authority.coherence(missing)
             self.assertFalse(status["ok"])
             self.assertEqual(status["code"], "evidence_capability_missing")
-            self.assertEqual(status["required"], "runtime.inspect")
+            self.assertEqual(status["required_any"], ["browser.inspect", "runtime.inspect"])
 
             source = self.route(root, ["repo.read", "runtime.inspect"], request_class="source_investigation")
             source["task_contract"]["evidence_floor"] = "source"

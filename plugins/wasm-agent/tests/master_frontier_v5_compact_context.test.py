@@ -9,7 +9,7 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[1] / "server"
 sys.path.insert(0, str(SERVER))
 
-from master_frontier.v5 import context, learned_patterns, trajectory, wire  # noqa: E402
+from master_frontier.v5 import context, learned_patterns, operation_ledger, trajectory, wire  # noqa: E402
 
 
 class CompactContextTests(unittest.TestCase):
@@ -125,10 +125,57 @@ class CompactContextTests(unittest.TestCase):
                        "line_count": 520, "truncated": False, "content": "FINAL-SOURCE"},
         })
         final = context.payload("review", route, state)
-        self.assertEqual(final["tools"], [])
+        self.assertEqual(final["tools"], ["search", "read"])
         self.assertEqual(final["completion_assessment"]["status"], "sufficient")
         self.assertEqual(final["completion_assessment"]["next_actions"], [])
         self.assertTrue(any(item.get("result", {}).get("content") == "FINAL-SOURCE" for item in final["completed"]))
+
+    def test_verified_autonomous_implementation_exposes_no_more_tools(self) -> None:
+        state = trajectory.new("run", "turn", "implement", "fixture.ui")
+        ledger = operation_ledger.record(
+            state["operation_ledger"],
+            "edit",
+            {
+                "ok": True,
+                "result": {
+                    "applied": True,
+                    "dry_run": False,
+                    "changed_files": ["widget.js"],
+                    "postimage_sha256": {"widget.js": "a" * 64},
+                },
+            },
+            action_id="act-edit",
+        )
+        worktree = operation_ledger.worktree_digest(ledger)
+        for tool, result in (
+            ("test", {"ok": True, "returncode": 0, "check_id": "focused", "worktree_sha256": worktree}),
+            ("diff", {
+                "ok": True,
+                "code": "ok",
+                "returncode": 0,
+                "changed_files": [{"path": "widget.js"}],
+                "stat": {"complete": True},
+                "truncation": {},
+                "worktree_sha256": worktree,
+            }),
+            ("prove", {"ok": True, "primitive": "kernel.prove", "worktree_sha256": worktree}),
+        ):
+            ledger = operation_ledger.record(ledger, tool, result)
+        state["operation_ledger"] = ledger
+        route = {
+            "route_id": "fixture.ui",
+            "caps": ["repo.read", "repo.edit", "test.run", "proof.report"],
+            "task_contract": {
+                "request_class": "implementation",
+                "decision_mode": "llm_autonomous",
+            },
+        }
+
+        payload = context.payload("implement", route, state)
+
+        self.assertEqual(payload["completion_assessment"]["status"], "sufficient")
+        self.assertEqual(payload["tools"], [])
+        self.assertTrue(context.completion_only(state, route))
 
     def test_base_projection_removes_repeated_schema_cost(self) -> None:
         state = trajectory.new("run", "turn", "implement", "fixture.ui")

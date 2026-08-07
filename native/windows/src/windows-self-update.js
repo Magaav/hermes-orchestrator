@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const { pipeline } = require("stream/promises");
 
 const PLATFORM = "win-x64";
 const FEED_PATH = "/native/releases/latest.json";
@@ -159,6 +160,29 @@ function stagedInstallerPath(stagingRoot, artifact = {}) {
   return path.join(stagingRoot, filename);
 }
 
+async function writeResponseBodyToClosedFile(responseBody, target) {
+  const temporaryTarget = `${target}.part-${process.pid}-${crypto.randomBytes(6).toString("hex")}`;
+  let sizeBytes = 0;
+  try {
+    await pipeline(
+      responseBody,
+      async function* countAndCopy(source) {
+        for await (const chunk of source) {
+          const buffer = Buffer.from(chunk);
+          sizeBytes += buffer.length;
+          yield buffer;
+        }
+      },
+      fs.createWriteStream(temporaryTarget, { flags: "wx" }),
+    );
+    fs.renameSync(temporaryTarget, target);
+    return { ok: true, sizeBytes };
+  } catch (error) {
+    try { fs.unlinkSync(temporaryTarget); } catch { /* The temp file may not have been created. */ }
+    return { ok: false, error: "download_failed", message: String(error && error.message ? error.message : error), target };
+  }
+}
+
 module.exports = {
   FEED_PATH,
   MIN_WINDOWS_INSTALLER_SIZE_BYTES,
@@ -169,5 +193,6 @@ module.exports = {
   stagedInstallerPath,
   validateDownloadedInstaller,
   validateReleaseArtifact,
+  writeResponseBodyToClosedFile,
   windowsArtifactFromFeed,
 };

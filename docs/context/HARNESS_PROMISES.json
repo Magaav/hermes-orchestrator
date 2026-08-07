@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-07-17",
+  "updatedAt": "2026-08-06",
   "resultStatuses": [
     "pass",
     "fail",
@@ -24,6 +24,46 @@
     "thirdRepeat": "Promote the promise or record the missing primitive, access, or observability that blocks promotion."
   },
   "promises": [
+    {
+      "id": "artifact-recipe-exact-vector",
+      "owner": "plugins/wasm-agent/public/modules/artifact-foundry",
+      "claim": "The pinned browser-WASM recipe regenerates the canonical Stars/Shells artifact byte-exactly.",
+      "whenToUse": "After changing the artifact recipe contract, WASM generator core, GGUF packager, canonical seed, or generator manifest.",
+      "command": [
+        "node",
+        "--experimental-vm-modules",
+        "plugins/wasm-agent/public/modules/artifact-foundry/runtime.test.mjs"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the canonical seed SHA-256 is d6e2153402a32eb9c4d2210e4513a906a1506b8f8e7a2d9a501cd83bcb9073ff",
+        "the WASM-core recipe emits exactly 4596880 bytes",
+        "the generated output SHA-256 is ae23392ad473718e2196e525a4355af20cdbd57bbb5dc3e85a8719b62552784d",
+        "the receipt reports engine wasm-core+js-packager and verified true"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/artifact-recipe-result.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/modules/artifact-foundry/**"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first differing byte or numeric rounding rule before changing the expected digest.",
+        "Keep the generator candidate-only if the production-browser vector is stale."
+      ]
+    },
     {
       "id": "harness-promise-registry-valid",
       "owner": "docs/context",
@@ -59,6 +99,410 @@
       ],
       "nextSuggestedSteps": [
         "Fix the first reported registry error and rerun the validator."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-kernel-bounded",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "Master:frontier V6 keeps the provider surface constant while capabilities scale out of prompt, exposes large untrusted evidence only through bounded lenses, runs independent work concurrently, and does not replay a completed operation after snapshot restore.",
+      "whenToUse": "After changing the V6 projection, controller tools, capability catalog, evidence store, operation ledger, snapshot restore, DAG scheduler, or V5 bridge.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-kernel.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "exactly four stable provider tools are exposed with 513 registered capabilities",
+        "a 250000-character executor result is absent by default, a requested 4096-character lens stays below 12000 serialized request characters, and hostile evidence cannot spoof projection records",
+        "stable request records are measured as reusable on the second inference",
+        "snapshot restore replays the prior receipt without invoking the executor again",
+        "64 independent repository reads reach eight concurrent executors"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-kernel-result.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "plugins/wasm-agent/tests/master_frontier_v6_*.test.py",
+        "tools/context/prove-master-frontier-v6-kernel.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first failed invariant before changing any context threshold or concurrency limit.",
+        "Do not infer production model quality or token savings from this structural proof; run the live comparative fixture after V6 route wiring."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-performance-artifact",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "Every completed V6 run exposes a compact non-overlapping latency timeline, exact provider projection-byte counters, checkpoint duration, and per-provider-call duration in its canonical final artifact.",
+      "whenToUse": "After changing V6 routing, provider projection, checkpoint persistence, provider transport, final diagnostics, or production latency behavior.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a completed conceptual V6 run contains master.frontier.v6.performance.v1 diagnostics",
+        "the timeline separates ingress, host-before-provider, provider, host-between-provider, and host-after-provider durations",
+        "projection accounting reports provider body, messages, tools, and message-content UTF-8 byte totals",
+        "provider calls and checkpoint persistence expose bounded duration counters"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr",
+        "completed V6 run diagnostics.performance"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_router.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/provider_step.py",
+        "plugins/wasm-agent/server/master_frontier/v6/performance.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_performance.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect diagnostics.performance.phases and provider_calls before changing architecture.",
+        "Optimize the largest measured non-provider phase and rerun one production CDP turn."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-live-model-self-host",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "A real Codex head can drive the hosted V6 controller through route-scoped repository read, preconditioned patch, registered check, diff, proof, final synthesis, and terminal integrity against a disposable Git repository.",
+      "whenToUse": "After changing V6 hosted routing, provider projection, model tools, semantic working memory, repository adapters, completion gates, commentary, usage accounting, or terminal run integrity.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-live-model.py"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "large",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the configured real Codex model changes only a.py in a disposable registered Git repository",
+        "repo.patch, repo.test, repo.diff, and repo.prove all succeed and clear the implementation completion gate",
+        "model-authored public commentary is emitted without the generic bounded-action placeholder",
+        "every provider call returns exact usage accounting without enforcing a cumulative token quota",
+        "the persisted run completes with a verified terminal integrity proof"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-live-model-result.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/provider_step.py",
+        "plugins/wasm-agent/server/master_frontier/route_contracts.py",
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_*.test.py",
+        "tools/context/prove-master-frontier-v6-live-model.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the bounded semantic event trace before changing prompts, decision ceilings, or context windows.",
+        "Treat missing provider credentials as an invalid environment rather than weakening the proof.",
+        "Do not infer authenticated cloud or installed Electron behavior from this local hosted proof."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-authenticated-cloud-canary",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "An objective-bound temporary non-admin identity can run one read-only V6 source task through the authenticated production endpoint, produce exact usage and terminal integrity proof, and be revoked afterward.",
+      "whenToUse": "After changing V6 production routing, direct-envelope authorization, source capability selection, completion requirements, usage accounting, event anchoring, or synthetic-canary cleanup.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-authenticated-canary.py",
+        "--protocol",
+        "v6"
+      ],
+      "timeoutSec": 300,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "production",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the temporary identity authenticates with role user and an exact objective-bound grant",
+        "the production endpoint returns protocol v6 with one successful repository read",
+        "exact provider usage is measured and all declared completion capabilities are satisfied",
+        "the canary changes no files and closes a verified terminal anchor chain",
+        "the grant and temporary user are revoked even when the provider run fails"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-authenticated-canary.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/synthetic_canary.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "tools/context/prove-master-frontier-authenticated-canary.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect upstreamError and the first unmet completion capability before changing provider limits.",
+        "If cleanup fails, revoke the grant and temporary user before retrying."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-production-client-ui",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "Authenticated production V6 can select the one live Electron renderer that truthfully advertises Browser-widget control, open that widget, and finish only after the installed client acknowledges the exact command.",
+      "whenToUse": "After changing V6 client capability discovery, live-client normalization, renderer presence, route-scoped UI authority, command acknowledgement, completion gates, or production deployment.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-client-ui.py"
+      ],
+      "timeoutSec": 300,
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "production",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "an existing admin session is proven without exposing credentials or changing accounts",
+        "one live production Electron renderer declares control.widget.open and receives open_widget for widget id browser",
+        "the V6 semantic receipt is acknowledged and the native-control command artifact finishes with result ok true",
+        "the production run ledger contains at least one nonempty model-authored public V6 commentary update",
+        "exact provider usage is measured, the client.widget.open completion requirement is clear, and no files change",
+        "the run closes a verified terminal external anchor chain"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-client-ui.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/server/static_server.py",
+        "tools/context/prove-master-frontier-v6-client-ui.py",
+        "production deployment or installed Electron runtime change"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect upstreamError, the selected client manifest, and the exact command artifact before changing prompts or retrying.",
+        "Treat a blank or missing client capability list as no authority; never restore runtime-type defaults or union sibling-client capabilities."
+      ]
+    },
+    {
+      "id": "property-photo-cleaner-delivery-detection",
+      "owner": "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner",
+      "claim": "The browser-local production delivery recognizes every declared cleanup candidate in both property-photo fixtures without uploading photo bytes.",
+      "whenToUse": "After changing object detection, watermark recognition, recognition profiles, detection runtime/model delivery, overlap suppression, or the reference inventory.",
+      "command": [
+        "node",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/models/tools/prove-delivery-detection.mjs"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "visao_before1.jpeg matches all 10 declared cleanup candidates",
+        "visao_before2.jpeg matches all 14 declared cleanup candidates",
+        "the second fixture independently boxes the beige flip-flops, dark floor item, and centered watermark",
+        "the source image is decoded once and inference views run sequentially through one browser-local WASM session",
+        "photo bytes are served only by the local proof server and never uploaded"
+      ],
+      "outputArtifacts": [
+        "/tmp/property-photo-cleaner-detection-delivery-evidence.json",
+        "/tmp/visao_before1-yoloe-wasm-delivery-proof.png",
+        "/tmp/visao_before2-yoloe-wasm-delivery-proof.png"
+      ],
+      "invalidatedBy": [
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/modules/**",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/models/**",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/fixtures/**",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/**"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first missing target in proposal-inspection mode before changing thresholds.",
+        "Reject any tuning that restores recall by introducing obvious architecture or floor-strip boxes."
+      ]
+    },
+    {
+      "id": "property-photo-cleaner-browser-clean-visao2",
+      "owner": "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner",
+      "claim": "The real browser widget locally reconstructs the flip-flop/shoe and center-watermark regions in visao_before2.jpeg without uploading photo bytes.",
+      "whenToUse": "After changing the local object cleaner, LaMa model/runtime, detection mask, widget cleaning orchestration, or production delivery.",
+      "command": [
+        "node",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/models/tools/prove-browser-cleaning.mjs"
+      ],
+      "timeoutSec": 120,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "high",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "human"
+      ],
+      "passRequires": [
+        "the real widget imports visao_before2.jpeg and completes Find objects",
+        "object-11 and object-13 are selected through their detection-box controls",
+        "one browser-local WASM session reconstructs both selected regions",
+        "the widget reports complete with no visible error",
+        "the flip-flop/shoe becomes continuous tile floor and the center watermark becomes coherent mirror structure",
+        "photo bytes are served only by the local proof server and never uploaded"
+      ],
+      "outputArtifacts": [
+        "/tmp/property-photo-cleaner-browser-cleaning-evidence.json",
+        "/tmp/property-photo-cleaner-browser-entry-cleaned.png"
+      ],
+      "invalidatedBy": [
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/modules/local-object-cleaner.js",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/modules/lama-pipeline.js",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/modules/detection-mask.js",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/property-photo-cleaner.entry.js",
+        "plugins/hermes-space-ui/plugin-interface/plugins/property-photo-cleaner/models/lama-256-places2.onnx",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/**"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the generated screenshot and reject any object residue, blurred patch, broken floor line, or broken mirror seam.",
+        "If the browser closes during inference, record the adapter, backend, model size, and browser memory evidence before changing the model."
+      ]
+    },
+    {
+      "id": "property-photo-cleaner-litert-parity",
+      "owner": "plugins/wasm-agent/public/modules/property-photo-cleaner",
+      "claim": "An admitted browser LiteRT inpainting model is digest-bound and pixel-equivalent to its pinned ONNX reference before it can clean a user photo.",
+      "whenToUse": "After changing the inpainting model, conversion recipe, tensor adapter, mask semantics, output compositor, quality gate, or model manifest.",
+      "command": [
+        "node",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/models/tools/prove-litert-parity.mjs"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "package"
+      ],
+      "passRequires": [
+        "the delivered model bytes match the manifest SHA-256",
+        "parity evidence is bound to the model, ONNX reference, and fixture SHA-256 digests",
+        "known-region maximum pixel delta is zero",
+        "masked-region maximum pixel delta is at most two",
+        "the browser runtime is LiteRT.js and no catastrophic patch is observed",
+        "the runtime quality gate rejects a low-variance black patch"
+      ],
+      "outputArtifacts": [
+        "/tmp/property-photo-cleaner-litert-parity.json",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/models/litert-parity-evidence.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/models/**",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/modules/inpainting-runtime.js",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/modules/migan-pipeline.js",
+        "plugins/wasm-agent/public/modules/property-photo-cleaner/modules/reconstruction-quality-gate.js"
+      ],
+      "nextSuggestedSteps": [
+        "Keep the candidate quarantined and generate byte-identical ONNX and LiteRT outputs.",
+        "Promote the manifest only after this promise passes and the private quality holdout is approved."
+      ]
+    },
+    {
+      "id": "batch-cleaner-codex-datacenter",
+      "owner": "plugins/wasm-agent/public/modules/batch-cleaner",
+      "claim": "Batch Cleaner uses at most ten isolated Codex App Server image-generation lanes, returns saved image artifacts, and never silently falls back to local reconstruction.",
+      "whenToUse": "After changing Batch Cleaner cleaning orchestration, the property-photo reconstruction skill, Codex App Server protocol handling, preview/export behavior, or production delivery.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/property_photo_edit.test.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the endpoint requires explicit datacenter consent and one bounded property-photo input",
+        "the adapter starts Codex App Server and consumes an imageGeneration savedPath artifact",
+        "the adapter projects Codex-reported token totals and accepts a saved artifact after a bounded completion-event settle window",
+        "the widget reports current-batch tokens and persists its lifetime cleaned-photo count in widget-owned IndexedDB",
+        "the widget adaptively transcodes input and output through its pinned browser-WASM AVIF encoder and keeps the smaller representation",
+        "ten explicit round-robin lane queues start independently, each lane immediately pulls its next assigned photo after completion, and lifetime metric writes remain serialized",
+        "every photo starts an ephemeral thread in a minimal job workspace containing only the reconstruction skill and reports instruction sources plus input, cached-input, and output token totals",
+        "the reconstruction turn uses the deployed model's lowest supported reasoning effort (none) and the widget distinguishes fresh tokens from cached input and total activity",
+        "all ephemeral photo jobs share one stable skill-only cwd to maximize correct KV-prefix reuse while uploaded photo files remain isolated and temporary",
+        "each lane consumes real NDJSON progress transitions including artifact-generated and finalizing without polling or invented percentages",
+        "the response identifies codex-datacenter-imagegen, records scene inspection and watermark authorization, and does not persist the uploaded photo",
+        "the Batch Cleaner source contains no local reconstruction or Enhance Reality fallback"
+      ],
+      "outputArtifacts": [
+        "/home/ubuntu/.codex/generated_images/<thread-id>/<image-call>.png"
+      ],
+      "invalidatedBy": [
+        ".agents/skills/property-photo-reconstructor/**",
+        "plugins/wasm-agent/public/modules/batch-cleaner/**",
+        "plugins/wasm-agent/server/property_photo_edit.py",
+        "plugins/wasm-agent/server/master_frontier/codex_image_worker.py"
+      ],
+      "nextSuggestedSteps": [
+        "Run one authenticated single-photo datacenter spike and inspect the accepted artifact at original resolution.",
+        "Use the live Batch Cleaner queue to prove visible reconstructing, ready, failed, compare, and export states."
       ]
     },
     {
@@ -357,6 +801,79 @@
       "nextSuggestedSteps": [
         "Package the next harness behind the identical task, broker, authority, result, and semantic contracts.",
         "Keep the nine-way benchmark blocked until every registry slot has matching proof."
+      ]
+    },
+    {
+      "id": "safe-lab-master-frontier-v5-codex-subscription",
+      "owner": "labs/wasm-agent",
+      "claim": "Master:frontier V5 can use a ChatGPT-authenticated Codex CLI as a trusted-host decision head while V5 remains the sole browser and repository tool authority, credentials stay outside fixture artifacts, and weak answers remain completed unsatisfactory outcomes rather than harness failures.",
+      "whenToUse": "After changing the Codex subscription provider, trusted-host lane, V5 runner diagnostics, browser or repository authority, semantic model binding, admitted fixtures, or satisfactory-outcome classification.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-promoted-v5-fixture-suite.py",
+        "--candidate-adapter",
+        "labs/wasm-agent/fixtures/master-frontier-v5-codex-subscription-candidate.json"
+      ],
+      "timeoutSec": 300,
+      "cost": {
+        "tokenCost": "large",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the candidate digest binds the complete V5 runner and owned dependency closure",
+        "Codex runs ephemerally in a read-only empty work directory and cannot execute shell, MCP, web, browser, or repository tools",
+        "the cached ChatGPT authentication remains on the trusted host and is not copied into a task, fixture, report, or adapter artifact",
+        "V5-owned browser inspection satisfies runtime evidence only for an explicitly declared browser entity and capability",
+        "V5-owned repository search and read provide bounded source evidence without objective-specific routing strings",
+        "the private scorer binds model-identity properties to the candidate runtime model without exposing expected properties",
+        "provider or answer weakness completes as an unsatisfactory improvement outcome instead of a harness process failure",
+        "all seven golden and two holdout fixtures are satisfactory and promotion eligible"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/promoted-v5-fixture-suite-proof.json",
+        "reports/context/latest/v5-codex-subscription-grounded-proof.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/authority.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v5.py",
+        "plugins/wasm-agent/server/master_frontier/envelope.py",
+        "plugins/wasm-agent/server/master_frontier/planner.py",
+        "plugins/wasm-agent/server/master_frontier/route_contracts.py",
+        "plugins/wasm-agent/server/master_frontier/v5/**",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/app-loader.js",
+        "plugins/wasm-agent/public/index.html",
+        "plugins/wasm-agent/public/modules/master-frontier/continuation.js",
+        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
+        "plugins/wasm-agent/systemd/wasm-agent-production.service",
+        "labs/wasm-agent/codex_subscription_provider.py",
+        "labs/wasm-agent/trusted_host_lane.py",
+        "labs/wasm-agent/master-frontier-v5-live-runner.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/prove-promoted-v5-fixture-suite.py",
+        "labs/wasm-agent/private_evaluator/semantic_score.py",
+        "labs/wasm-agent/fixtures/master-frontier-v5-codex-subscription-candidate.json",
+        "labs/wasm-agent/test_codex_subscription_provider.py",
+        "labs/wasm-agent/test_trusted_host_lane.py",
+        "labs/wasm-agent/test_semantic_score_model_binding.py",
+        "plugins/wasm-agent/tests/master_frontier_v5_authority.test.py",
+        "plugins/wasm-agent/tests/master_frontier_planner.test.py",
+        "plugins/wasm-agent/tests/master_frontier_route_contracts.test.py",
+        "plugins/wasm-agent/tests/master_frontier_continuation.test.js",
+        "plugins/wasm-agent/tests/master_frontier_useful_fallback.test.js",
+        "plugins/wasm-agent/tests/provider_proxy.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Rerun the focused deterministic tests before spending subscription tokens on the admitted suite.",
+        "Harvest any repeated unsatisfactory class into an owned generic route, capability, proof, or scorer contract before adding fixtures."
       ]
     },
     {
@@ -1501,6 +2018,7 @@
         "public config declares cloud mode, configured Google auth, and no localhost or loopback URLs",
         "anonymous session contains no user identity",
         "the native Electron route returns the WASM Agent HTML shell",
+        "production serves the locally verified V6-default selector, migrates legacy bare V5 storage, and preserves explicitly marked V5 rollback",
         "the report contains hashes and compact projections instead of response bodies"
       ],
       "outputArtifacts": [
@@ -1509,6 +2027,8 @@
       "invalidatedBy": [
         "production deployment or environment configuration change",
         "plugins/wasm-agent/server master config, auth, health, or shell route change",
+        "plugins/wasm-agent/public/modules/master-frontier/source-investigation.js",
+        "plugins/wasm-agent/tests/master_frontier_source_investigation.test.js",
         "tools/context/prove-master-frontier-cloud-canary.py"
       ],
       "nextSuggestedSteps": [
@@ -1639,6 +2159,53 @@
         "If a quest fails, repair the owning Master:frontier contract layer before adding prompt prose.",
         "If all compact quests pass, run the live avatar quest or runtime node proof before claiming live behavior.",
         "Add repeated observed failures as reviewed compact quests outside the watcher run."
+      ]
+    },
+    {
+      "id": "avatar-chat-run-observability",
+      "owner": "docs/context",
+      "claim": "One bounded read-only watcher correlates avatar-chat backend progress, client snapshot state, and optional authorized Chrome CDP state, and flags a UI-terminal/backend-running contradiction.",
+      "whenToUse": "When watching an avatar-chat run, after changing run events or client snapshots, or when the UI and backend disagree about whether a turn stopped.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/avatar_chat_run_watch.test.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral",
+        "runtime"
+      ],
+      "passRequires": [
+        "the watcher opens the production run database read-only and query-only",
+        "the compact backend view reports terminal state, event sequence, attempts, exact calls and tokens, evidence, duplicates, no-progress state, mutations, and cancellation state",
+        "the latest account-scoped client snapshot reports pending/interrupted state without exposing transcript content",
+        "optional CDP inspection is limited to the authorized wa.colmeio.com tab and reports only visibility, interruption, saved run, and pending markers",
+        "UI-terminal/backend-running, runaway-no-mutation, token-target, novelty-loop, and unacknowledged-cancel contradictions are typed signals",
+        "terminal backend state suppresses stale historical runaway signals",
+        "the watcher performs one bounded observation and never polls, cancels, or mutates production"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/avatar-chat-run-watch.json"
+      ],
+      "invalidatedBy": [
+        "tools/context/watch-avatar-chat-run.py",
+        "tools/context/cdp-wasm-agent-observe.js",
+        "plugins/wasm-agent/tests/avatar_chat_run_watch.test.py",
+        "plugins/wasm-agent/server/master_frontier/run_control.py",
+        "plugins/wasm-agent/server/master_frontier/v5/loop.py",
+        "plugins/wasm-agent/public/modules/master-frontier/**",
+        "docs/context/BROWSER_BRIDGE.md"
+      ],
+      "nextSuggestedSteps": [
+        "For a named live session, run watch-avatar-chat-run.py with --cdp only while the user-authorized browser bridge is open.",
+        "Retire CDP correlation once the app exposes the same compact authenticated live UI/run acknowledgement contract directly."
       ]
     },
     {
@@ -2064,7 +2631,7 @@
       "passRequires": [
         "all deterministic adversarial and recorded-provider fixtures pass",
         "zero unsupported fixture claims are accepted",
-        "V5 is the default; V3 and the V4 read-only slice require explicit compatibility selection",
+        "V6 is the default; V3, V4 read-only, and V5 require explicit compatibility or rollback selection",
         "evidence handles bind content, location, scope, and freshness",
         "incomplete negative coverage cannot become not_found_with_coverage",
         "stale semantic memory uses bounded route fallback",
@@ -2355,14 +2922,14 @@
     {
       "id": "master-frontier-v5-coding-continuity",
       "owner": "plugins/wasm-agent/server/master_frontier/v5",
-      "claim": "Master:frontier V5 has a compact fail-closed coding loop with server-owned restart continuity, exact route/task authority, bounded repository evidence, preconditioned transactional patches, registered checks, and revision-bound diff/test/proof receipts.",
+      "claim": "Master:frontier V5 has a compact reliable tool loop with server-owned restart continuity, exact route/task authority, bounded repository and browser evidence, answer-satisfaction repair, preconditioned transactional patches, registered checks, and revision-bound diff/test/proof receipts.",
       "whenToUse": "After changing V5 context, trajectory, continuity, authority, repository read/edit/check/diff primitives, proof gating, browser continuation, or agent-trajectory learning contracts.",
       "command": ["python3", "tools/context/prove-master-frontier-v5-evolution.py"],
       "timeoutSec": 180,
       "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
       "evidenceClasses": ["static", "behavioral"],
       "passRequires": [
-        "model-visible tools are the exact intersection of route capabilities, declared task authority, coherent request/declared workflow classes, nonempty write roots, evidence modality, exact runtime entity scope, planner block state, and complete workflow capability minima; capability presence never selects runtime intent",
+        "model-visible tools are the exact intersection of route capabilities, declared task authority, coherent request/declared workflow classes, nonempty write roots, evidence modality, exact runtime entity scope, planner block state, and complete workflow capability minima; capability presence never selects runtime intent; ambiguous model_decision turns expose only bounded read-only evidence tools so the LLM, not lexical harness routing, chooses direct answer, source, memory, runtime, or browser evidence",
         "repository reads reach arbitrary late line ranges without prefix materialization, and streaming search stays route-scoped under its route-owned scan ceiling while sharing sensitive-path redaction and denying secrets, binaries, generated state, databases, and private keys",
       "V5 patches require an observed preimage or explicit absence; create operations automatically bind expected_absent=true because the serialized transaction still atomically rejects existing targets, while replace/delete/move bind observed SHA preimages; model-relative paths that repeat the configured workspace root are canonicalized instead of creating a nested workspace; autonomous implementation's native edit schema omits redundant dry_run because the transaction validates atomically, while execution remains fail-closed if an undeclared dry run arrives; explicitly temporary paths, temporary-directory targets, and empty or placeholder-only creates are rejected as non-durable artifacts; any failed tool observation becomes the current typed repair signal and discards remaining calls selected in the same provider batch before that failure was visible; mutations use fsynced, recoverable multi-file transactions whose durable journal blocks new mutations when corrupt",
         "focused checks execute only registered argv without a shell or inherited secrets, retain bounded output rings, and return by an absolute deadline with typed process-leak evidence even when an escaped descendant retains a pipe",
@@ -2371,6 +2938,9 @@
       "server-owned checkpoints are digest, user, session, route-contract, and source-run bound; strict restore rejects every scope mismatch, while a separately validated stale-route replacement accepts only a signed checkpoint whose principal, session, route ID, and source run still match, preserves only its root objective and lineage, starts a zero-revision trajectory without replaying old evidence or authority, records stale_checkpoint_replaced, recalculates current authority through the existing grounded lineage gate, and persists a fresh current-contract checkpoint so contextual continue does not abort; checkpoints omit raw source/diff/output while retaining content-free read SHA receipts so safe edit preconditions bind after restart across canonical relative or absolute route paths; prefix-code operation paths; reject mutations that cannot fit the restart ledger; and reconcile durable action events idempotently",
         "decision, tool, retry, wall-time, route-call, provider-token, and proof-repair counters survive restart; provider usage keeps a bounded recent receipt ring plus durable cumulative calls/tokens that remain exact beyond sixteen calls and drive hard enforcement, pre-call reservation, and final diagnostics; provider diagnostics distinguish durable attempts from successful metered calls and never call missing usage exact; head tokens are per-call, provider/call targets are advisory by default, strict hard budgets require a positive route-owned reservation and subtract the larger host-derived bound over actual messages/tool schemas before enforcing cumulative allowance and measurable usage; zero and sub-second wall limits remain exact; successful retry recovery ends temporary evidence clipping, resets only the consecutive-incident allowance, and never resets the bounded durable total retry count",
         "the avatar browser requests advisory provider accounting rather than claiming a strict input-token cap it cannot measure before dispatch",
+        "the session-derived tool-directive and empty-answer fixtures are classified as unsatisfactory; V5 asks the same head to repair them from accumulated evidence and returns an explicit honest unsatisfactory fallback rather than turning repeated answer-quality misses into infrastructure failure",
+        "safe-lab lane, fixture, and suite observation always emit a completed iterable outcome with answerSatisfaction satisfactory or unsatisfactory; provider, adapter, and semantic misses remain explicit blockers while promotionEligible stays false, so candidate quality never masquerades as harness process failure",
+        "a route-owned browser.inspect capability exposes bounded snapshot evidence through loopback CDP, browser.control separately gates navigate/click/type/key, target selection comes from the declarative browser_entry_url contract, and neither arbitrary JavaScript nor product-specific DOM selectors are model-facing",
         "the exact restart-regression critique remains source-only through the real planner path even when runtime capability exists, completes with the five-call 16211-token quality fixture below its declared advisory target, and a contextual fix inherits mutation authority only from an explicit referential request and the immediately preceding grounded parent on the same user, session, and route; that parent is labeled as the active implementation specification and projected once within the bounded continuity budget without destructive double clipping, while its declared heading outline survives clipping, broad specifications explicitly permit a proved coherent slice with remaining outcomes recorded, and an empty executive checkpoint cannot masquerade as durable progress",
         "source completion requires full-owner or declared-focus coverage, runtime completion requires a scoped snapshot/proof, cross-modality evidence cannot force finalization, host-enforced completion-only mode rejects raw hidden tools, explicit verification intent cannot be downgraded by diagnosis wording, verification requires a passing check plus scoped proof and then deterministically enters completion-only synthesis, implementation requires mutation/check/diff/proof, and evidence cannot short-circuit mutation workflow",
         "startup recovery scans unfinished runs in fixed-size pages rather than materializing the full table",
@@ -2402,6 +2972,8 @@
       "invalidatedBy": [
         "docs/context/HARNESS_PROMISES.json",
         "plugins/wasm-agent/server/master_frontier/authority.py",
+        "plugins/wasm-agent/server/master_frontier/browser_actions.py",
+        "plugins/wasm-agent/server/master_frontier/browser_cdp_bridge.cjs",
         "plugins/wasm-agent/server/master_frontier/budget.py",
         "plugins/wasm-agent/server/master_frontier/code_memory.py",
         "plugins/wasm-agent/server/master_frontier/controller_v5.py",
@@ -2419,6 +2991,7 @@
         "plugins/wasm-agent/server/master_frontier/route_contracts.py",
         "plugins/wasm-agent/server/master_frontier/run_recovery.py",
         "plugins/wasm-agent/server/master_frontier/v5/completion.py",
+        "plugins/wasm-agent/server/master_frontier/v5/answer_satisfaction.py",
         "plugins/wasm-agent/server/master_frontier/v5/context.py",
         "plugins/wasm-agent/server/master_frontier/v5/continuity.py",
         "plugins/wasm-agent/server/master_frontier/v5/errors.py",
@@ -2470,6 +3043,7 @@
         "plugins/wasm-agent/public/modules/master-frontier/source-investigation.js",
         "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
         "labs/wasm-agent/agent_trajectory.py",
+        "labs/wasm-agent/fixture_outcomes.py",
         "labs/wasm-agent/golden_pattern_extractor.py",
         "labs/wasm-agent/implementation_lab_actions.py",
         "labs/wasm-agent/materialize-implementation-task.py",
@@ -2478,6 +3052,9 @@
         "labs/wasm-agent/package-master-frontier-v5-adapter.py",
         "labs/wasm-agent/loop5_candidate_policy.py",
         "labs/wasm-agent/lane-runner.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/prove-promoted-v5-fixture-suite.py",
+        "labs/wasm-agent/test_live_fixture_result_semantics.py",
         "labs/wasm-agent/nine-lane-orchestrator.py",
         "labs/wasm-agent/rank-nine-lane-benchmark.py",
         "labs/wasm-agent/test_strategy_ranking.py",
@@ -2492,6 +3069,186 @@
       "nextSuggestedSteps": [
         "Expand the brokered implementation suite to three distinct task instances before mining any coding motif.",
         "Wire one real external adapter to the normalized event contract before comparing or mining its golden patterns."
+      ]
+    },
+    {
+      "id": "property-photo-cleaner-inpainting-corpus",
+      "owner": "plugins/wasm-agent/scripts",
+      "claim": "The property-photo inpainting corpus is deterministic, digest-valid, dimension-aligned, lineage-separated, and keeps holdout details private.",
+      "whenToUse": "Before property-photo cleaner training or after changing visual-teacher approvals, candidate manifests, blobs, masks, or corpus materialization.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/scripts/visual_teacher_materialize_inpainting.py",
+        "--check"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "all admitted source, mask, and target blob digests match their immutable candidate manifests",
+        "all admitted triplets have matching dimensions and non-empty alpha_lt_128_reconstruct masks",
+        "training contains 60 entries across 12 lineage groups",
+        "lineage-contaminated gold pairs are excluded from evaluation",
+        "two holdout entries exist only in the private manifest",
+        "generated manifests byte-match the checked-in corpus manifests"
+      ],
+      "outputArtifacts": [
+        "plugins/wasm-agent/state/visual-teacher/corpora/property-inpainting-v1/training.json",
+        "plugins/wasm-agent/state/visual-teacher/corpora/property-inpainting-v1/gold.json",
+        "plugins/wasm-agent/state/visual-teacher/corpora/property-inpainting-v1/summary.json",
+        "plugins/wasm-agent/state/visual-teacher/private/corpora/property-inpainting-v1-holdout.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/scripts/visual_teacher_materialize_inpainting.py",
+        "plugins/wasm-agent/state/visual-teacher/approved/**",
+        "plugins/wasm-agent/state/visual-teacher/private/holdout/**",
+        "plugins/wasm-agent/state/visual-teacher/candidates/**",
+        "plugins/wasm-agent/state/visual-teacher/blobs/**"
+      ],
+      "nextSuggestedSteps": [
+        "Regenerate the corpus manifests, inspect the first failed invariant, and rerun this promise."
+      ]
+    },
+    {
+      "id": "wasm-agent-external-widget-reload-lifecycle",
+      "owner": "plugins/wasm-agent/public/modules",
+      "claim": "Persisted open external widgets stay hidden until their lazy content remounts after reload, then become visible without an empty shell.",
+      "whenToUse": "After changing external app hosts, widget visibility, saved layout hydration, lazy module mounting, or when an open widget reloads with an empty body.",
+      "command": [
+        "node",
+        "plugins/wasm-agent/public/modules/app-registry.test.mjs"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "external hosts begin in an explicitly unmounted hidden state",
+        "only persisted open external apps are selected for hydration",
+        "mounting is deduplicated and failed mounts remain hidden with bounded diagnostics",
+        "successful mounts remove the unmounted state before one final layout pass",
+        "closing restores the unmounted state and releases the module lifecycle"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/app-registry.js",
+        "plugins/wasm-agent/public/modules/app-registry.test.mjs",
+        "plugins/wasm-agent/public/modules/widget-window-state.js"
+      ],
+      "nextSuggestedSteps": [
+        "If the static promise passes but production is blank, inspect mountError and verify the production module response before changing layout.",
+        "Use a persisted-open production reload as runtime proof before claiming the lifecycle fixed."
+      ]
+    },
+    {
+      "id": "master-frontier-authenticated-implementation-acceptance",
+      "owner": "plugins/wasm-agent/server/master_frontier",
+      "claim": "A bounded authenticated production Master:frontier implementation run reaches a terminal result with compact streamed evidence.",
+      "whenToUse": "After changing implementation routing, provider tools, V5 execution sequencing, production authentication, or run persistence.",
+      "command": [
+        "python3",
+        "tools/context/run-master-frontier-authenticated-acceptance.py",
+        "--objective-file",
+        "<objective-file>",
+        "--allow-write"
+      ],
+      "timeoutSec": 1000,
+      "cost": {
+        "tokenCost": "large",
+        "runtimeCost": "high",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": ["runtime", "behavioral", "production"],
+      "passRequires": [
+        "the production request authenticates without exposing credentials",
+        "the run remains within the declared hard call and token budgets",
+        "the stream reaches a final event rather than an error or disconnect",
+        "the report records session, route, run, and compact terminal evidence"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-authenticated-acceptance.json",
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/**",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/server/static_server.py",
+        "tools/context/run-master-frontier-authenticated-acceptance.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the terminal run ledger and first unmet completion requirement before changing budgets or rerunning."
+      ]
+    },
+    {
+      "id": "windows-supervisor-update-lifecycle",
+      "owner": "native/windows",
+      "claim": "The bundled Windows supervisor owns Electron process lifecycle and activates only SHA-verified staged installers through a compact command contract.",
+      "whenToUse": "After changing Windows startup, shortcuts, Electron restart/update delegation, staged installer validation, or supervisor packaging.",
+      "command": [
+        "npm",
+        "run",
+        "test:windows-release-guards",
+        "--prefix",
+        "native/windows/src"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the Electron client completes a command-inbox/result round trip",
+        "the supervisor rejects installers outside the staged-update root",
+        "the supervisor rejects missing or mismatched SHA-256 metadata",
+        "the compact supervisor capability contract is present",
+        "the supervisor cross-compiles as a Windows x64 executable",
+        "package size is recorded as telemetry rather than used as a correctness proxy",
+        "the package build rejects undeclared resource owners and bundled public, APK, ONNX, and TFLite payloads",
+        "final NSIS verification records compressed size and rejects forbidden extracted paths"
+      ],
+      "outputArtifacts": [
+        "native/windows/src/build/wasm-agent-launcher.exe",
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "native/windows/launcher/**",
+        "native/windows/src/main/supervisor-client.js",
+        "native/windows/src/main/supervisor-client.test.js",
+        "native/windows/scripts/prepare-native-assets.js",
+        "native/windows/scripts/audit-package-size.js",
+        "native/windows/scripts/audit-package-size.test.js",
+        "native/windows/scripts/verify-windows-installer.js",
+        "native/windows/src/electron-builder.json",
+        "native/windows/src/build/installer.nsh"
+      ],
+      "nextSuggestedSteps": [
+        "Run final NSIS extraction verification after source proof.",
+        "Launch the installed shortcut, inspect supervisor status/childPid, activate one update, and verify the expected build reconnects before claiming installed runtime proof."
       ]
     }
   ]

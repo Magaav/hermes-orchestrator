@@ -30,6 +30,17 @@ def load_lane_runner():
 
 
 class AgentTrajectoryFixtureTests(unittest.TestCase):
+    def test_safe_lab_image_packages_shared_trajectory_writer(self) -> None:
+        dockerfile = (LAB / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn(
+            "COPY --chmod=0644 agent_trajectory.py /usr/local/bin/agent_trajectory.py",
+            dockerfile,
+        )
+        self.assertIn(
+            "COPY --chmod=0644 fixture_outcomes.py /usr/local/bin/fixture_outcomes.py",
+            dockerfile,
+        )
+
     def test_lane_normalizes_fake_adapter_events_and_owns_terminal(self) -> None:
         lane_runner = load_lane_runner()
         with tempfile.TemporaryDirectory() as directory:

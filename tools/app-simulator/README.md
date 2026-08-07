@@ -18,6 +18,12 @@ Simulator reports, not source/build success, are the runtime source of truth.
 The loop is `boot -> observe -> act -> assert -> collect evidence -> score ->
 report -> patch`.
 
+`horc simulate web --avatar-quest` starts an isolated authenticated runtime and
+an OpenAI-compatible server-default direct-head stub. It submits two real
+avatar-chat turns and verifies V5 route-before-provider ordering, exact
+quest/turn token ledgers, no Hermes fallback, and contained timeline UI without
+requiring a production API key.
+
 ## Authenticated Avatar-Chat Live Profiles
 
 `node tools/app-simulator/avatar-paracelsus-live.js` preserves the two-turn

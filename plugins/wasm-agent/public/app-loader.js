@@ -1,5 +1,5 @@
 (() => {
-  const ANDROID_APP_BOOT_BUILD = "20260630-route-contracts";
+  const ANDROID_APP_BOOT_BUILD = "20260806-codex-status4";
   const ANDROID_RUNTIME_MODE_STORAGE_KEY = "wasmAgent.androidRuntimeMode.v1";
 
   function androidNativeBootHint() {

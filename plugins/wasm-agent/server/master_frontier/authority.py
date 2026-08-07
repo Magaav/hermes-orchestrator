@@ -10,26 +10,36 @@ TEST_RUN = "test.run"
 RUNTIME_INSPECT = "runtime.inspect"
 RUNTIME_INSPECT_UNAVAILABLE = "runtime.inspect.unavailable"
 PROOF_REPORT = "proof.report"
+SESSION_MEMORY_READ = "session.memory.read"
+BROWSER_INSPECT = "browser.inspect"
+BROWSER_CONTROL = "browser.control"
+CLIENT_UI_INSPECT = "client.ui.inspect"
+CLIENT_UI_CONTROL = "client.ui.control"
 
-V5_TOOLS = ("search", "read", "inspect", "edit", "test", "diff", "prove")
+V5_TOOLS = ("search", "read", "memory", "inspect", "browser", "client", "edit", "test", "diff", "prove")
 TOOL_CAPABILITY = {
     "search": REPO_READ,
     "read": REPO_READ,
+    "memory": SESSION_MEMORY_READ,
     "inspect": RUNTIME_INSPECT,
+    "browser": BROWSER_INSPECT,
+    "client": CLIENT_UI_INSPECT,
     "edit": REPO_EDIT,
     "test": TEST_RUN,
     "diff": PROOF_REPORT,
     "prove": PROOF_REPORT,
 }
 
-_READ_TOOLS = frozenset({"search", "read"})
-_RUNTIME_TOOLS = frozenset({"inspect"})
+_READ_TOOLS = frozenset({"search", "read", "memory", "browser", "client"})
+_RUNTIME_TOOLS = frozenset({"memory", "inspect", "browser", "client"})
+_EVIDENCE_SELECTION_TOOLS = _READ_TOOLS | frozenset({"inspect"})
 _IMPLEMENTATION_TOOLS = frozenset(V5_TOOLS)
 _VERIFICATION_TOOLS = frozenset({"search", "read", "test", "diff", "prove"})
 
 _CLASS_TOOLS = {
     "conversation": _READ_TOOLS,
     "general_conversation": _READ_TOOLS,
+    "model_decision": _EVIDENCE_SELECTION_TOOLS,
     "source_investigation": _READ_TOOLS,
     "implementation_planning": _READ_TOOLS,
     "runtime_inspection": _RUNTIME_TOOLS,
@@ -37,25 +47,26 @@ _CLASS_TOOLS = {
     "verification": _VERIFICATION_TOOLS,
 }
 _CLASS_DEFAULT_AUTHORITY = {
-    "conversation": frozenset({REPO_READ}),
-    "general_conversation": frozenset({REPO_READ}),
-    "source_investigation": frozenset({REPO_READ}),
-    "implementation_planning": frozenset({REPO_READ}),
-    "runtime_inspection": frozenset({RUNTIME_INSPECT}),
-    "implementation": frozenset({REPO_READ, REPO_EDIT, TEST_RUN, PROOF_REPORT}),
-    "verification": frozenset({REPO_READ, TEST_RUN, PROOF_REPORT}),
+    "conversation": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "general_conversation": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "model_decision": frozenset({REPO_READ, RUNTIME_INSPECT, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "source_investigation": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "implementation_planning": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "runtime_inspection": frozenset({RUNTIME_INSPECT, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "implementation": frozenset({REPO_READ, REPO_EDIT, TEST_RUN, PROOF_REPORT, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "verification": frozenset({REPO_READ, TEST_RUN, PROOF_REPORT, SESSION_MEMORY_READ}),
 }
-_KNOWN_CAPABILITIES = frozenset({REPO_READ, REPO_EDIT, TEST_RUN, RUNTIME_INSPECT, PROOF_REPORT})
+_KNOWN_CAPABILITIES = frozenset({REPO_READ, REPO_EDIT, TEST_RUN, RUNTIME_INSPECT, PROOF_REPORT, SESSION_MEMORY_READ, BROWSER_INSPECT, BROWSER_CONTROL, CLIENT_UI_INSPECT, CLIENT_UI_CONTROL})
 _CONCRETE_EVIDENCE_CLASSES = {
-    "conceptual": frozenset({"conversation", "general_conversation"}),
+    "conceptual": frozenset({"conversation", "general_conversation", "model_decision"}),
     "source": frozenset({"source_investigation", "implementation_planning", "implementation", "verification"}),
     "runtime": frozenset({"runtime_inspection", "implementation"}),
     "proof": frozenset({"implementation", "verification"}),
 }
-_EVIDENCE_CAPABILITY = {
-    "source_investigation": REPO_READ,
-    "implementation_planning": REPO_READ,
-    "runtime_inspection": RUNTIME_INSPECT,
+_EVIDENCE_CAPABILITY_OPTIONS = {
+    "source_investigation": frozenset({REPO_READ}),
+    "implementation_planning": frozenset({REPO_READ}),
+    "runtime_inspection": frozenset({RUNTIME_INSPECT, BROWSER_INSPECT}),
 }
 _WORKFLOW_CAPABILITIES = {
     "implementation": frozenset({REPO_READ, REPO_EDIT, TEST_RUN, PROOF_REPORT}),
@@ -83,6 +94,8 @@ def _project_request_class(contract: dict[str, Any], objective_kind: str) -> str
         return "runtime_inspection"
     if evidence == "source":
         return "source_investigation"
+    if intent == "model_decision":
+        return "model_decision"
     if evidence == "conceptual":
         return "conversation"
     return {
@@ -253,17 +266,20 @@ def coherence(route: dict[str, Any] | None) -> dict[str, Any]:
             "evidence": evidence,
             "caps": [],
         }
-    required = _EVIDENCE_CAPABILITY.get(declared_class)
+    required = _EVIDENCE_CAPABILITY_OPTIONS.get(declared_class, frozenset())
     route_available = _route_authority(scoped)
-    if required and required not in route_available:
-        return {
+    if required and required.isdisjoint(route_available):
+        missing = {
             "ok": False,
             "code": "evidence_capability_missing",
             "class": declared_class,
             "evidence": evidence,
-            "required": required,
+            "required_any": sorted(required),
             "caps": sorted(route_available),
         }
+        if len(required) == 1:
+            missing["required"] = next(iter(required))
+        return missing
     if not _runtime_scope_available(scoped):
         return {
             "ok": False,
@@ -286,15 +302,18 @@ def coherence(route: dict[str, Any] | None) -> dict[str, Any]:
             "caps": sorted(base_available),
         }
     available = effective(scoped)
-    if required and required not in available:
-        return {
+    if required and required.isdisjoint(available):
+        missing = {
             "ok": False,
             "code": "evidence_capability_missing",
             "class": declared_class,
             "evidence": evidence,
-            "required": required,
+            "required_any": sorted(required),
             "caps": sorted(available),
         }
+        if len(required) == 1:
+            missing["required"] = next(iter(required))
+        return missing
     return {
         "ok": True,
         "code": "ok",
@@ -314,7 +333,14 @@ def tool_allowed(name: str, route: dict[str, Any] | None) -> bool:
         return False
     scoped = route if isinstance(route, dict) else {}
     explicit = _explicit_task_authority(scoped) is not None
-    return clean in _allowed_tools(scoped, explicit=explicit) and TOOL_CAPABILITY[clean] in effective(scoped)
+    allowed = clean in _allowed_tools(scoped, explicit=explicit) and TOOL_CAPABILITY[clean] in effective(scoped)
+    if clean == "browser":
+        declared = {str(item or "").strip().lower() for item in (scoped.get("caps") or [])}
+        return allowed and BROWSER_INSPECT in declared
+    if clean == "client":
+        declared = {str(item or "").strip().lower() for item in (scoped.get("caps") or [])}
+        return allowed and CLIENT_UI_INSPECT in declared
+    return allowed
 
 
 def required_capability(name: str) -> str:

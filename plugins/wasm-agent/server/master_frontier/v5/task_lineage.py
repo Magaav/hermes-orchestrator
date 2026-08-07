@@ -26,13 +26,16 @@ def _clean(value: Any) -> str:
     return str(value or "").strip().lower().replace("-", "_")
 
 
-def _grounded_parent(turns: list[dict[str, Any]], route_id: str) -> dict[str, Any] | None:
-    """Return only the immediate completed parent on the same owned route."""
+def _grounded_parent(
+    turns: list[dict[str, Any]], route_id: str, *, allow_interrupted: bool = False,
+) -> dict[str, Any] | None:
+    """Return only the immediate grounded parent on the same owned route."""
     if not turns or not route_id:
         return None
     turn = turns[-1]
     status = _clean(turn.get("status"))
-    if status and status != "completed":
+    allowed_statuses = {"completed", "interrupted", "resumable"} if allow_interrupted else {"completed"}
+    if status and status not in allowed_statuses:
         return None
     if str(turn.get("route_id") or "").strip() != route_id:
         return None
@@ -60,16 +63,19 @@ def project(
     result = dict(contract) if isinstance(contract, dict) else {}
     declared_class = _clean(result.get("request_class") or result.get("objective_kind"))
     turns = [item for item in (session_context or []) if isinstance(item, dict)]
-    parent = _grounded_parent(turns, str(route_id or "").strip())
     caps = {_clean(item) for item in (route_caps or [])}
     continuation = continuation_context if isinstance(continuation_context, dict) else {}
+    continuation_requested = continuation.get("requested") is True
+    parent = _grounded_parent(
+        turns, str(route_id or "").strip(), allow_interrupted=continuation_requested,
+    )
     bound_continuation = bool(
-        continuation.get("requested") is True
+        continuation_requested
         and parent is not None
         and str(continuation.get("previous_run_id") or "").strip() == str(parent.get("run_id") or "").strip()
     )
     if (
-        declared_class not in _CONVERSATION_CLASSES
+        (not bound_continuation and declared_class not in _CONVERSATION_CLASSES)
         or parent is None
         or "repo.edit" not in caps
         or not (bound_continuation or _ACTION_REQUEST.search(str(objective or "").strip()))
@@ -100,6 +106,10 @@ def project(
             "parent_run_id": str(parent.get("run_id") or "")[:160],
             "parent_turn_id": str(parent.get("turn_id") or "")[:160],
             "parent_verification": _clean(parent.get("verification_level")),
+            "root_objective": str(
+                (parent.get("root_objective") or parent.get("objective"))
+                if bound_continuation else objective
+            )[:2000],
         },
     })
     return result

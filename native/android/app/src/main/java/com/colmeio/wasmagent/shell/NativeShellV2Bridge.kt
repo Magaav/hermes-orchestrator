@@ -13,6 +13,7 @@ import android.webkit.WebView
 import com.colmeio.wasmagent.BuildConfig
 import com.colmeio.wasmagent.HermesVoiceWakeService
 import com.colmeio.wasmagent.NativeBridgeContract
+import com.colmeio.wasmagent.observability.WebViewObservabilityLease
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -243,6 +244,7 @@ class NativeShellV2Bridge(
         val operationId = manifest.optString("operationId", manifest.optString("operation", ""))
         val inputs = parseJson(inputsJson)
         return when (operationId) {
+            "observability_enable", "observability_collect", "observability_disable", "observability_status" -> WebViewObservabilityLease.execute(activity, operationId, inputs).toString()
             "fetch_wake_word_state", "android.wake_word.state", "fetch_wake_world_state" -> wakeWordState()
                 .put("ok", true)
                 .put("stable", true)

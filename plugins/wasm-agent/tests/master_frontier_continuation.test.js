@@ -9,6 +9,7 @@ const sandbox = { exports: {}, Set };
 vm.runInNewContext(
   `${source
     .replace("export function isAgentContinuationRequest", "function isAgentContinuationRequest")
+    .replace("export function masterFrontierFailureDisposition", "function masterFrontierFailureDisposition")
     .replace("export function masterFrontierContinuationContext", "function masterFrontierContinuationContext")
     .replace("export function requiredMasterFrontierContinuationContext", "function requiredMasterFrontierContinuationContext")
     .replace("export function markMasterFrontierInterrupted", "function markMasterFrontierInterrupted")
@@ -16,10 +17,17 @@ vm.runInNewContext(
     .replace("export async function recoverMasterFrontierFinal", "async function recoverMasterFrontierFinal")
     .replace("export function masterFrontierPartialReplyIsStale", "function masterFrontierPartialReplyIsStale")
     .replace("export function masterFrontierPartialReplyFromPending", "function masterFrontierPartialReplyFromPending")
-    .replace("export function masterFrontierPartialReplyFromError", "function masterFrontierPartialReplyFromError")}\nexports.isAgentContinuationRequest=isAgentContinuationRequest;\nexports.masterFrontierContinuationContext=masterFrontierContinuationContext;\nexports.requiredMasterFrontierContinuationContext=requiredMasterFrontierContinuationContext;\nexports.markMasterFrontierInterrupted=markMasterFrontierInterrupted;\nexports.resolvePendingAgentRunId=resolvePendingAgentRunId;\nexports.recoverMasterFrontierFinal=recoverMasterFrontierFinal;`,
+    .replace("export function masterFrontierPartialReplyFromError", "function masterFrontierPartialReplyFromError")}\nexports.isAgentContinuationRequest=isAgentContinuationRequest;\nexports.masterFrontierFailureDisposition=masterFrontierFailureDisposition;\nexports.masterFrontierContinuationContext=masterFrontierContinuationContext;\nexports.requiredMasterFrontierContinuationContext=requiredMasterFrontierContinuationContext;\nexports.markMasterFrontierInterrupted=markMasterFrontierInterrupted;\nexports.resolvePendingAgentRunId=resolvePendingAgentRunId;\nexports.recoverMasterFrontierFinal=recoverMasterFrontierFinal;`,
   sandbox,
   { filename: modulePath }
 );
+
+const disposition = sandbox.exports.masterFrontierFailureDisposition;
+assert.deepStrictEqual(JSON.parse(JSON.stringify(disposition({ diagnostic: { code: "evidence_incomplete", message: "Grounded task returned a final answer without fresh tool evidence." } }))), {
+  code: "evidence_incomplete", interrupted: false, terminal: "completed_error",
+});
+assert.strictEqual(disposition({ diagnostic: { code: "provider_timeout" } }).interrupted, true);
+assert.strictEqual(disposition({ error: new Error("network error") }).interrupted, true);
 
 const { isAgentContinuationRequest, masterFrontierContinuationContext, requiredMasterFrontierContinuationContext, markMasterFrontierInterrupted, resolvePendingAgentRunId, recoverMasterFrontierFinal } = sandbox.exports;
 assert.strictEqual(isAgentContinuationRequest("continue"), true);
@@ -47,6 +55,18 @@ const checkpoint = {
   state: { schema: "master.frontier.v5.trajectory.v1" },
   sha256: "abc123",
 };
+const v6Checkpoint = {
+  schema: "master.frontier.v6.checkpoint.ref.v1",
+  protocol: "v6",
+  source_run_id: "wa_run_v6",
+  source_turn_id: "turn_v6",
+  sha256: "def456",
+};
+const v6Interrupted = markMasterFrontierInterrupted(
+  { role: "assistant", run_id: "wa_run_v6", pending: true },
+  { message: "restart", resume_checkpoint: v6Checkpoint },
+);
+assert.deepStrictEqual(JSON.parse(JSON.stringify(v6Interrupted.resume_checkpoint)), v6Checkpoint);
 const recoveredMessage = { role: "assistant", run_id: "wa_run_1", pending: true };
 const missingMessage = { role: "assistant", turn_id: "missing", pending: true };
 resolvePendingAgentRunId({ id: "session" }, missingMessage, { fetchRuns: async () => ({ runs: [] }) }).then((runId) => {
@@ -85,3 +105,19 @@ recoverMasterFrontierFinal(recoveredMessage, {
   console.error(error);
   process.exitCode = 1;
 });
+
+for (const status of ["cancelled", "failed"]) {
+  const terminalMessage = { pending: true, run_id: `run-${status}`, content: "Calling Master:frontier..." };
+  recoverMasterFrontierFinal(terminalMessage, {
+    fetchRun: async () => ({ run: { status, error: { message: `${status} run`, resume_checkpoint: checkpoint } } }),
+  }).then((final) => {
+    assert.strictEqual(final, null);
+    assert.strictEqual(terminalMessage.pending, false);
+    assert.strictEqual(terminalMessage.resumable, true);
+    assert.strictEqual(terminalMessage.agent_run_status, "interrupted");
+    assert.strictEqual(terminalMessage.resume_checkpoint.sha256, "abc123");
+  }).catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

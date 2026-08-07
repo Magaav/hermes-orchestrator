@@ -3,17 +3,29 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from .. import authority, code_memory, evidence, repository_reads
+from .. import authority, browser_actions, code_memory, evidence, repository_reads
 from . import decision_record, executive, policy, task_policy
 
 
 SYMBOL_RE = re.compile(r"^(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_$][\w$]*)|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=")
 
 
+def _durable_targets(route: dict[str, Any]) -> list[str]:
+    return list(dict.fromkeys(
+        str(path).strip()
+        for check in (route.get("checks") or [])[:24]
+        if isinstance(check, dict)
+        for path in (check.get("evidence_paths") or [])[:12]
+        if str(path).strip()
+    ))[:12]
+
+
 def _source_focus(matches: list[dict[str, Any]], route: dict[str, Any]) -> dict[str, Any]:
-    if not matches:
+    resolved = route.get("resolved_entity") if isinstance(route.get("resolved_entity"), dict) else {}
+    declared_owner = str(resolved.get("route_symbol") or "").strip()
+    if not matches and not declared_owner:
         return {}
-    owner = str(matches[0].get("path") or "")
+    owner = declared_owner or str(matches[0].get("path") or "")
     try:
         file_path, relative_path = repository_reads.resolve(route, owner)
     except repository_reads.RepositoryReadError:
@@ -51,6 +63,8 @@ def _source_focus(matches: list[dict[str, Any]], route: dict[str, Any]) -> dict[
             ranges[-1]["end_line"] = max(ranges[-1]["end_line"], end)
         else:
             ranges.append({"start_line": start, "end_line": end})
+    if not ranges and line_count:
+        ranges.append({"start_line": 1, "end_line": min(line_count, 260)})
     related = sorted({str(item.get("path")) for item in matches if item.get("path") != owner and ("test" in str(item.get("path")).lower() or "spec" in str(item.get("path")).lower())})[:6]
     return {
         "owner_file": relative_path,
@@ -110,14 +124,45 @@ def execute(name: str, arguments: dict[str, Any], route: dict[str, Any], *, invo
                 start_line=int(arguments.get("start_line") or 1),
                 end_line=int(arguments["end_line"]) if arguments.get("end_line") is not None else None,
             )
-        except (TypeError, ValueError) as exc:
-            return {"ok": False, "code": "file_read_range_invalid", "summary": "Read line bounds must be integers."}
         except repository_reads.RepositoryReadError as exc:
-            return {"ok": False, "code": exc.code, "summary": str(exc)}
+            recovery: dict[str, Any] = {}
+            if exc.code == "file_read_missing":
+                candidates = repository_reads.nearby_files(route, str(arguments.get("path") or ""))
+                requested = str(arguments.get("path") or "")
+                recovery = {
+                    "path": requested,
+                    "candidates": candidates,
+                    "next_action": (
+                        {"tool": "read", "arguments": {"path": candidates[0]}}
+                        if candidates else {"tool": "search", "arguments": {"query": requested}}
+                    ),
+                }
+            elif exc.code == "file_read_scope_denied":
+                candidate = repository_reads.workspace_relative_file(
+                    route, str(arguments.get("path") or ""),
+                )
+                if candidate:
+                    recovery = {
+                        "path": str(arguments.get("path") or ""),
+                        "candidates": [candidate],
+                        "next_action": {"tool": "read", "arguments": {"path": candidate}},
+                    }
+            return {"ok": False, "code": exc.code, "summary": str(exc), **recovery}
+        except (TypeError, ValueError):
+            return {"ok": False, "code": "file_read_range_invalid", "summary": "Read line bounds must be integers."}
         return {
             **result,
             "summary": f"Read {result['path']} lines {result['start_line']}-{result['end_line']}.",
         }
+    if name == "memory":
+        return invoke("session.memory.read", {
+            "pointer": str(arguments.get("pointer") or ""),
+            "limit": min(12, max(1, int(arguments.get("limit") or 6))),
+        })
+    if name == "browser":
+        return browser_actions.execute(arguments, route)
+    if name == "client":
+        return invoke("client.ui.control", arguments)
     if name == "edit":
         operations = arguments.get("operations") if isinstance(arguments.get("operations"), list) else []
         if task_policy.llm_autonomous(route) and task_policy.requires_mutation(route) and arguments.get("dry_run") is True:
@@ -131,40 +176,99 @@ def execute(name: str, arguments: dict[str, Any], route: dict[str, Any], *, invo
             if not isinstance(operation, dict):
                 return {"ok": False, "code": "patch_operation_invalid", "summary": "Every edit operation must be an object."}
             op = str(operation.get("op") or "replace").strip().lower()
+            if op not in policy.allowed_edit_operations(route):
+                return {
+                    "ok": False,
+                    "code": "patch_operation_denied",
+                    "summary": f"The resolved route does not authorize the {op} edit operation.",
+                }
             path = str(operation.get("path") or "")
+            if op != "create" and re.match(r"^(?:/|[A-Za-z]:[\\/])", path):
+                try:
+                    _resolved_path, relative_path = repository_reads.resolve(route, path)
+                except repository_reads.RepositoryReadError as exc:
+                    return {
+                        "ok": False,
+                        "code": "patch_path_scope_denied" if exc.code == "file_read_scope_denied" else exc.code,
+                        "summary": (
+                            "Edit target is outside the routed repository."
+                            if exc.code == "file_read_scope_denied" else str(exc)
+                        ),
+                        "path": path,
+                    }
+                operation["path"] = relative_path
+                path = relative_path
             path_parts = [part.lower() for part in path.replace("\\", "/").split("/") if part]
             basename = path_parts[-1] if path_parts else ""
-            if op == "create" and (basename.startswith(".tmp") or basename.endswith((".tmp", ".temp"))):
+            if op == "create" and (
+                basename.startswith((".tmp", "_probe", "__probe", "probe_", "scratch_"))
+                or basename.endswith((".tmp", ".temp", ".probe", ".scratch"))
+            ):
+                targets = _durable_targets(route)
                 return {
                     "ok": False,
                     "code": "implementation_artifact_not_durable",
-                    "summary": "Autonomous implementation cannot count an explicitly temporary file as a repository mutation.",
+                    "summary": "Autonomous implementation cannot count an explicitly temporary or diagnostic probe file as a repository mutation.",
+                    "durable_targets": targets,
+                    "next_actions": [{"action": "edit_declared_target_with_substantive_content"}],
                 }
             if op == "create" and task_policy.llm_autonomous(route) and task_policy.requires_mutation(route):
                 content = str(operation.get("content") or operation.get("text") or "").strip().lower()
+                semantic_content = re.sub(
+                    r"(?m)^\s*(?://+|#+|/\*+|\*+|\*/)\s?", "", content,
+                ).strip()
                 if any(part in {"tmp", "temp"} for part in path_parts[:-1]):
+                    targets = _durable_targets(route)
                     return {
                         "ok": False,
                         "code": "implementation_artifact_not_durable",
                         "summary": "Autonomous implementation cannot count a file under an explicitly temporary directory as a repository mutation.",
+                        "durable_targets": targets,
+                        "next_actions": [{"action": "edit_declared_target_with_substantive_content"}],
                     }
-                if not content or content in {"placeholder", "todo", "todo.", "tbd", "fixme"}:
+                if not semantic_content or semantic_content in {"placeholder", "todo", "todo.", "tbd", "fixme", "probe"}:
+                    targets = _durable_targets(route)
                     return {
                         "ok": False,
                         "code": "implementation_placeholder_not_durable",
                         "summary": "An empty or placeholder-only file is not a durable implementation mutation.",
+                        "durable_targets": targets,
+                        "next_actions": [{"action": "edit_declared_target_with_substantive_content"}],
                     }
             if path not in preconditioned_paths:
                 if op == "create" and operation.get("expected_absent") is not True:
                     return {"ok": False, "code": "patch_precondition_required", "summary": "Create operations require expected_absent=true."}
                 if op != "create" and not re.fullmatch(r"[0-9a-f]{64}", str(operation.get("expected_sha256") or "")):
-                    return {"ok": False, "code": "patch_precondition_required", "summary": "Mutating an existing file requires its observed expected_sha256."}
+                    return {
+                        "ok": False,
+                        "code": "patch_precondition_required",
+                        "summary": f"Read the current file before mutating it: {path}.",
+                        "paths": [path],
+                        "next_action": {"tool": "read", "arguments": {"path": path}},
+                    }
                 preconditioned_paths.add(path)
         return invoke("kernel.act", {"local_action": "patch.apply_scoped", "args": {"operations": operations, "dry_run": bool(arguments.get("dry_run"))}})
     if name == "test":
-        return invoke("kernel.act", {"local_action": "test.run_focused", "args": {"check_id": str(arguments.get("check_id") or "")}})
+        observed = invoke("kernel.act", {"local_action": "test.run_focused", "args": {"check_id": str(arguments.get("check_id") or "")}})
+        result = observed.get("result") if isinstance(observed.get("result"), dict) else {}
+        if result.get("ok") is False:
+            excerpts: list[str] = []
+            for stream in (result.get("stderr"), result.get("stdout")):
+                if not isinstance(stream, dict):
+                    continue
+                for key in ("head", "tail"):
+                    value = str(stream.get(key) or "").strip()
+                    if value and value not in excerpts:
+                        excerpts.append(value)
+            detail = "\n...\n".join(excerpts)
+            if detail:
+                observed["failure_detail"] = detail[:4000]
+        return observed
     if name == "diff":
-        return invoke("kernel.act", {"local_action": "git.diff_summary", "args": {}})
+        return invoke("kernel.act", {
+            "local_action": "git.diff_summary",
+            "args": {"paths": arguments.get("paths") if isinstance(arguments.get("paths"), list) else _durable_targets(route)},
+        })
     if name == "prove":
         return invoke("kernel.prove", {})
     target = str(arguments.get("target") or "")

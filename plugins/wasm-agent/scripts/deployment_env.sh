@@ -38,4 +38,11 @@ wasm_agent_load_deployment_env() {
     && -f "${path}" ]]; then
     export HERMES_WASM_AGENT_ENV_PATH="${path}"
   fi
+  if [[ -z "${WASM_AGENT_EVENT_ANCHORS+x}" ]]; then
+    if [[ "${HERMES_WASM_AGENT_DEPLOYMENT_MODE:-local}" == "cloud" ]]; then
+      export WASM_AGENT_EVENT_ANCHORS=true
+    else
+      export WASM_AGENT_EVENT_ANCHORS=false
+    fi
+  fi
 }

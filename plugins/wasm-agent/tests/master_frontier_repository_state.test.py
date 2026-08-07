@@ -82,5 +82,47 @@ class RepositoryStateTests(unittest.TestCase):
             source_change = repository_state.verify(route, expected)
             self.assertNotEqual(excluded["digest"], source_change["digest"])
 
+    def test_nested_workspace_applies_workspace_relative_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            git_root = Path(tmp); root = git_root / "nested"; root.mkdir()
+            target = root / "owned.py"; target.write_text("base\n")
+            generated = root / "models" / "large.bin"; generated.parent.mkdir(); generated.write_bytes(b"x" * 4096)
+            subprocess.run(["git", "init", "-q"], cwd=git_root, check=True)
+            subprocess.run(["git", "add", "."], cwd=git_root, check=True)
+            subprocess.run(["git", "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "base"], cwd=git_root, check=True)
+            target.write_text("changed\n"); generated.write_bytes(b"y" * 4096)
+            route = {
+                "workspace_root": str(root), "allowed_write_roots": [str(root)],
+                "source_index": {"exclude_globs": ["models/**"], "proof_max_total_bytes": 1024},
+            }
+            result = repository_state.verify(route, {"owned.py": hashlib.sha256(b"changed\n").hexdigest()})
+            self.assertTrue(result["ok"])
+            self.assertLess(result["route_state"]["bytes"], 1024)
+
+    def test_source_scan_budget_does_not_cap_streamed_route_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "owned.py"
+            target.write_text("changed\n")
+            large = root / "large-source.js"
+            large.write_bytes(b"x" * 4096)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=test", "-c", "user.email=test@example.test", "commit", "-qm", "base"],
+                cwd=root, check=True,
+            )
+            target.write_text("changed again\n")
+            large.write_bytes(b"y" * 4096)
+            expected = {"owned.py": hashlib.sha256(b"changed again\n").hexdigest()}
+            route = {
+                "workspace_root": str(root),
+                "allowed_write_roots": [str(root)],
+                "source_index": {"max_total_bytes": 1, "proof_max_total_bytes": 8192},
+            }
+            result = repository_state.verify(route, expected)
+            self.assertTrue(result["ok"])
+            self.assertGreater(result["route_state"]["bytes"], 1)
+
 
 if __name__ == "__main__": unittest.main()

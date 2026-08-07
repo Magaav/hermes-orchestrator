@@ -1,0 +1,18 @@
+{
+  "schema": "hermes.wasm_agent.artifact.generator.v1",
+  "id": "artifact-foundry-stars-shells-1",
+  "recipeSchema": "hermes.wasm_agent.artifact.recipe.v1",
+  "receiptSchema": "hermes.wasm_agent.artifact.receipt.v1",
+  "generator": "asolaria.stars-shells.v1",
+  "engine": "wasm-core+js-packager",
+  "limits": {
+    "seedBytesMax": 1048576,
+    "outputBytesMax": 67108864,
+    "network": false
+  },
+  "expectedVector": {
+    "seedBytes": 3796,
+    "outputBytes": 4596880,
+    "outputSha256": "ae23392ad473718e2196e525a4355af20cdbd57bbb5dc3e85a8719b62552784d"
+  }
+}

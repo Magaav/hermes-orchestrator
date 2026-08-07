@@ -113,6 +113,17 @@ def _route_state(route: dict[str, Any], root: Path, roots: list[Path]) -> dict[s
         return {"ok": False, "code": "worktree_git_status_unavailable", "digest": ""}
     source_index = route.get("source_index") if isinstance(route.get("source_index"), dict) else {}
     excludes = [str(value).replace("\\", "/") for value in source_index.get("exclude_globs") or [] if str(value).strip()]
+    try:
+        workspace_prefix = root.relative_to(git_root).as_posix().strip("/")
+    except ValueError:
+        workspace_prefix = ""
+
+    def workspace_relative(raw_path: bytes) -> bytes:
+        if not workspace_prefix:
+            return raw_path
+        prefix = workspace_prefix.encode("utf-8", "surrogateescape") + b"/"
+        return raw_path[len(prefix):] if raw_path.startswith(prefix) else raw_path
+
     records = status.split(b"\0")
     paths: list[bytes] = []
     included_records: list[bytes] = []
@@ -130,7 +141,7 @@ def _route_state(route: dict[str, Any], root: Path, roots: list[Path]) -> dict[s
             if index >= len(records) or not records[index]:
                 return {"ok": False, "code": "worktree_git_status_invalid", "digest": ""}
             entry_paths.append(records[index]); index += 1
-        if excludes and any(_excluded(path, excludes) for path in entry_paths):
+        if excludes and any(_excluded(workspace_relative(path), excludes) for path in entry_paths):
             continue
         paths.extend(entry_paths)
         included_records.append(record)
@@ -138,8 +149,10 @@ def _route_state(route: dict[str, Any], root: Path, roots: list[Path]) -> dict[s
         if len(paths) > MAX_ROUTE_STATE_FILES:
             return {"ok": False, "code": "worktree_route_state_too_many_files", "digest": ""}
     status = b"\0".join(included_records) + (b"\0" if included_records else b"")
+    # Source-index scan budgets limit model-facing context. Route-state proof
+    # hashes content incrementally and needs an independent safety bound.
     try:
-        byte_limit = int(source_index.get("max_total_bytes") or DEFAULT_ROUTE_STATE_BYTES)
+        byte_limit = int(source_index.get("proof_max_total_bytes") or MAX_ROUTE_STATE_BYTES)
     except (TypeError, ValueError):
         byte_limit = DEFAULT_ROUTE_STATE_BYTES
     byte_limit = max(1, min(byte_limit, MAX_ROUTE_STATE_BYTES))

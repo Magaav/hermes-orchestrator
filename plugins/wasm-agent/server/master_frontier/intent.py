@@ -11,11 +11,24 @@ DIAGNOSIS_RE = re.compile(
     re.IGNORECASE,
 )
 SOURCE_OBJECT_RE = re.compile(
-    r"\b(?:code|codebase|component|file|function|implementation|module|repo(?:sitory)?|route|source|ui|widget)\b",
+    r"\b(?:code|codebase|component|contract|file|function|implementation|module|repo(?:sitory)?|route|source|ui|widget)\b",
     re.IGNORECASE,
 )
 SOURCE_QUESTION_RE = re.compile(
     r"\b(?:check|describe|explain|find|how|identify|inspect|locate|show|what|where|which|why)\b",
+    re.IGNORECASE,
+)
+LIVE_TARGET_RE = re.compile(
+    r"\b(?:browser|page|screen|runtime|application|app|ui)\b",
+    re.IGNORECASE,
+)
+CURRENT_STATE_RE = re.compile(
+    r"\b(?:currently\s+open|current(?:ly)?\s+(?:visible|active|open)|live|right\s+now)\b",
+    re.IGNORECASE,
+)
+LIVE_OBSERVATION_RE = re.compile(
+    r"\b(?:take\s+(?:a\s+)?(?:fresh\s+)?look|look)\s+at\s+(?:this|the|(?:currently\s+)?open)\s+"
+    r"(?:browser|page|screen|application|app|ui)\b",
     re.IGNORECASE,
 )
 
@@ -155,6 +168,21 @@ def objective_requires_source_evidence(envelope: dict[str, Any]) -> bool:
     return bool(
         SOURCE_OBJECT_RE.search(objective)
         and (SOURCE_QUESTION_RE.search(objective) or objective_is_diagnosis_intent(envelope))
+    )
+
+
+def objective_requires_runtime_evidence(envelope: dict[str, Any]) -> bool:
+    """Select runtime only for an explicit live target, never capability presence."""
+    objective = str(envelope.get("objective") or "")
+    return bool(
+        LIVE_TARGET_RE.search(objective)
+        and (
+            LIVE_OBSERVATION_RE.search(objective)
+            or (
+                CURRENT_STATE_RE.search(objective)
+                and (SOURCE_QUESTION_RE.search(objective) or objective_is_diagnosis_intent(envelope))
+            )
+        )
     )
 
 

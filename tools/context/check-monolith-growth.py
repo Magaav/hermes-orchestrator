@@ -175,7 +175,8 @@ def current_line_count(path: str) -> int:
 
 
 def is_source_file(path: str) -> bool:
-    return Path(path).suffix in SOURCE_EXTENSIONS
+    normalized = f"/{path.replace(chr(92), '/')}/"
+    return "/vendor/" not in normalized and Path(path).suffix in SOURCE_EXTENSIONS
 
 
 def is_new_file(path: str) -> bool:
@@ -208,6 +209,8 @@ def check() -> dict[str, object]:
     warnings: list[dict[str, object]] = []
 
     for path in files:
+        if path not in FROZEN_FILES and not is_source_file(path):
+            continue
         hunks = added_hunks(path)
         lines = [line for hunk in hunks for line in hunk]
         unexcepted_lines = [line for hunk in hunks if not has_exception(hunk) for line in hunk]

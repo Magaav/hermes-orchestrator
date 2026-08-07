@@ -80,6 +80,18 @@ class MasterFrontierIntentTests(unittest.TestCase):
 
         self.assertEqual(artifacts, ["public/app.js"])
 
+    def test_fresh_live_page_observation_requires_runtime_evidence(self) -> None:
+        envelope = self.envelope(
+            "Take a fresh look at this page and tell me whether the assistant is open."
+        )
+
+        self.assertTrue(intent.objective_requires_runtime_evidence(envelope))
+
+    def test_source_file_look_does_not_require_runtime_evidence(self) -> None:
+        envelope = self.envelope("Take a fresh look at this source file and explain it.")
+
+        self.assertFalse(intent.objective_requires_runtime_evidence(envelope))
+
 
 if __name__ == "__main__":
     unittest.main()

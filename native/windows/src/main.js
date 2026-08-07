@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, protocol, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, WebContentsView, ipcMain, protocol, session, shell } = require("electron");
 const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
@@ -25,8 +25,13 @@ const {
   stagedInstallerPath,
   validateDownloadedInstaller,
   validateReleaseArtifact,
+  writeResponseBodyToClosedFile,
   windowsArtifactFromFeed,
 } = require("./windows-self-update");
+const webSurfaceManager = require("./main/web-surfaces/manager").installWebSurfaces({ ipcMain, BrowserWindow, WebContentsView, session, shell });
+const { activateOrLaunchInstaller } = require("./main/supervisor-client");
+const { startAutomaticUpdateLoop } = require("./main/automatic-updates");
+const observabilityKernel = require("./main/observability-kernel").createObservabilityKernel();
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NATIVE_CONTROL_POLL_INTERVAL_MS = 15_000;
@@ -144,6 +149,7 @@ const ALL_NATIVE_KERNEL_CAPABILITIES = [
   "native.capabilities.speaker.v1",
   "native.capabilities.crashSafeStatus.v1",
   "native.capabilities.capabilityManifest.v1",
+  "native.capabilities.observabilityLease.v1",
 ];
 const WINDOWS_NATIVE_KERNEL_CAPABILITIES = [
   "native.capabilities.runtimeLoader.v1",
@@ -161,6 +167,7 @@ const WINDOWS_NATIVE_KERNEL_CAPABILITIES = [
   "native.capabilities.nativeControlPolling.v1",
   "native.capabilities.crashSafeStatus.v1",
   "native.capabilities.capabilityManifest.v1",
+  "native.capabilities.observabilityLease.v1",
 ];
 const BRIDGE_PROTOCOL_CAPABILITIES = [
   "get_bridge_status",
@@ -173,6 +180,10 @@ const BRIDGE_PROTOCOL_CAPABILITIES = [
   "sync_downloaded_hot_ops",
   "run_shell_self_test",
   "run_hot_operation",
+  "observability_enable",
+  "observability_collect",
+  "observability_disable",
+  "observability_status",
 ];
 const bridgeLogsTail = [];
 const NATIVE_CONTROL_DEFAULT_TIMEOUT_MS = 60_000;
@@ -797,20 +808,9 @@ async function downloadWindowsInstallerArtifact(sender, opId, artifact, payload 
   if (!response.ok || !response.body) {
     return { ok: false, error: "download_failed", status: response.status, statusText: response.statusText || "", url: artifact.url };
   }
-  const writer = fs.createWriteStream(target);
-  let sizeBytes = 0;
-  try {
-    for await (const chunk of response.body) {
-      const buffer = Buffer.from(chunk);
-      sizeBytes += buffer.length;
-      if (!writer.write(buffer)) await once(writer, "drain");
-    }
-    writer.end();
-    await once(writer, "finish");
-  } catch (error) {
-    writer.destroy();
-    return { ok: false, error: "download_failed", message: String(error && error.message ? error.message : error), target };
-  }
+  const written = await writeResponseBodyToClosedFile(response.body, target);
+  if (!written.ok) return written;
+  const { sizeBytes } = written;
   emitWindowsUpdateEvent(sender, opId, "update_download_finished", { target, sizeBytes });
   const validation = validateDownloadedInstaller(target, artifact);
   emitWindowsUpdateEvent(sender, opId, validation.ok ? "update_hash_verified" : validation.error || "hash_mismatch", validation);
@@ -881,7 +881,7 @@ async function checkAndStageWindowsSelfUpdate(sender, opId, payload = {}) {
 
 async function promptAndLaunchWindowsInstaller(sender, opId, stagedUpdate) {
   if (process.platform !== "win32") return { ok: false, error: "windows_native_shell_required" };
-  if (activeNativeCommandCount > 0) return { ok: false, error: "native_command_in_progress" };
+  if (activeNativeCommandCount > 1) return { ok: false, error: "native_command_in_progress" };
   const win = currentNativeWindow();
   const staged = stagedUpdate?.staged || stagedUpdate;
   const latest = stagedUpdate?.latest || staged?.artifact || {};
@@ -896,7 +896,8 @@ async function promptAndLaunchWindowsInstaller(sender, opId, stagedUpdate) {
     `New build: ${latest.buildId || "unknown"}`,
     `SHA-256: ${latest.sha256 || validation.sha256}`,
   ].join("\n");
-  const response = await dialog.showMessageBox(win || undefined, {
+  const automatic = stagedUpdate?.automatic === true;
+  const response = automatic ? { response: 0 } : await dialog.showMessageBox(win || undefined, {
     type: "info",
     title: "WASM Agent Update",
     message: "WASM Agent update available",
@@ -911,16 +912,13 @@ async function promptAndLaunchWindowsInstaller(sender, opId, stagedUpdate) {
     return { ok: true, approvalRequired: true, userDeferred: true, detailsOpened: true, manualInstallerPath: staged.path };
   }
   if (response.response !== 0) return { ok: true, approvalRequired: true, userDeferred: true, manualInstallerPath: staged.path };
-  emitWindowsUpdateEvent(sender, opId, "user_approved_install", { installerPath: staged.path });
+  emitWindowsUpdateEvent(sender, opId, automatic ? "automatic_install_approved" : "user_approved_install", { installerPath: staged.path });
   emitWindowsUpdateEvent(sender, opId, "install_started", { installerPath: staged.path, mode: "guided-installer" });
-  try {
-    spawn(staged.path, [], { detached: true, stdio: "ignore", windowsHide: false }).unref();
-  } catch (error) {
-    return { ok: false, error: "installer_failed", message: String(error && error.message ? error.message : error), manualInstallerPath: staged.path };
-  }
+  const launched = await activateOrLaunchInstaller(staged, latest, validation);
+  if (!launched.ok) return { ...launched, manualInstallerPath: staged.path };
   emitWindowsUpdateEvent(sender, opId, "app_restarting", { installerPath: staged.path });
   setTimeout(() => app.quit(), 500).unref();
-  return { ok: true, installStarted: true, restarting: true, expectedNewBuildId: latest.buildId, manualInstallerPath: staged.path };
+  return { ok: true, installStarted: true, restarting: true, supervised: launched.supervised, expectedNewBuildId: latest.buildId, manualInstallerPath: staged.path };
 }
 
 async function runWindowsSelfUpdate(sender, opId, payload = {}) {
@@ -930,7 +928,7 @@ async function runWindowsSelfUpdate(sender, opId, payload = {}) {
   const staged = await checkAndStageWindowsSelfUpdate(sender, opId, payload);
   if (!staged.ok || !staged.updateAvailable) return staged;
   if (!payload.applyApproved) return staged;
-  return promptAndLaunchWindowsInstaller(sender, opId, staged);
+  return promptAndLaunchWindowsInstaller(sender, opId, { ...staged, automatic: payload.automatic === true });
 }
 
 function commandLineDisplay(command, args = []) {
@@ -6069,6 +6067,11 @@ async function executeNativeControlCommand(command = {}) {
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
+  if (type.startsWith("observability_")) {
+    const result = await observabilityKernel.execute(win, type, payload);
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
   if (type === "write_runtime_diagnostics") {
     const pathWritten = writeRuntimeDiagnostics({
       nativeControlCommandId: command.id || "",
@@ -6117,12 +6120,6 @@ async function executeNativeControlCommand(command = {}) {
       app.relaunch();
       app.exit(0);
     }, 2000).unref();
-    return result;
-  }
-  if (type === "open_devtools") {
-    if (win && !win.isDestroyed()) win.webContents.openDevTools({ mode: "detach" });
-    const result = { ok: Boolean(win && !win.isDestroyed()), opened: Boolean(win && !win.isDestroyed()) };
-    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
   if (type === "verify_session") {
@@ -6487,8 +6484,7 @@ function createWindow() {
       additionalArguments: [`--wasm-agent-server-url=${config.serverUrl}`, `--wasm-agent-device-id=${config.deviceId}`],
     },
   });
-  const userAgent = chromeLikeUserAgent(win.webContents.getUserAgent());
-  if (userAgent) win.webContents.setUserAgent(userAgent);
+  const userAgent = chromeLikeUserAgent(win.webContents.getUserAgent()); if (userAgent) win.webContents.setUserAgent(userAgent);
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (isPackagedFallbackUrl(url)) return { action: "allow" };
@@ -6575,6 +6571,7 @@ function createWindow() {
       route: currentRendererUrl(),
     });
   });
+  win.on("closed", () => webSurfaceManager.disposeWindow(win));
   win.webContents.on("did-navigate", (_event, url) => {
     startupDiagnostics.currentRoute = url;
     logNativeDiagnostic("route", {
@@ -6602,15 +6599,8 @@ function createWindow() {
   setTimeout(() => {
     void uploadRendererAuthDiagnostics({ reason: "native-window-created" });
   }, 2500).unref();
-  setTimeout(() => {
-    void checkAndStageWindowsSelfUpdate(win.webContents, `startup-update-${Date.now().toString(36)}`, { startup: true })
-      .then((result) => {
-        if (result?.ok && result.updateAvailable) {
-          writeNativeUpdateAudit({ action: "startup_update_ready", result });
-        }
-      })
-      .catch((error) => writeNativeUpdateAudit({ action: "startup_update_check_failed", error: String(error && error.message ? error.message : error) }));
-  }, 8000).unref();
+  startAutomaticUpdateLoop({ run: (policy) => runWindowsSelfUpdate(win.webContents, `automatic-update-${Date.now().toString(36)}`, policy)
+    .catch((error) => writeNativeUpdateAudit({ action: "automatic_update_failed", error: String(error?.message || error) })) });
   return win;
 }
 
@@ -6769,9 +6759,7 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on("before-quit", () => {
-  void flushNativeAuthCookies({ reason: "before_quit" });
-});
+app.on("before-quit", () => { webSurfaceManager.disposeAll(); void flushNativeAuthCookies({ reason: "before_quit" }); });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

@@ -13,8 +13,9 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-ADAPTER_SERVER = Path("/adapter/plugins/wasm-agent/server")
-SOURCE = Path("/source")
+ADAPTER_SERVER = Path(os.environ.get("MF5_ADAPTER_SERVER", "/adapter/plugins/wasm-agent/server"))
+SOURCE = Path(os.environ.get("MF5_SOURCE_ROOT", "/source"))
+WORKSPACE = Path(os.environ.get("MF5_WORKSPACE_ROOT", "/workspace"))
 
 
 class ProviderFailure(RuntimeError):
@@ -71,40 +72,64 @@ def route_contract(task: dict[str, Any]) -> dict[str, Any]:
         "authority_source": "declared_task_contract",
         "context_profile": "direct" if request_class in {"conversation", "general_conversation"} else "natural_tool_loop",
     }
-    return {
+    extra_caps: list[str] = []
+    try:
+        declared_caps = json.loads(os.environ.get("MF5_ROUTE_CAPS_JSON", "[]"))
+        if isinstance(declared_caps, list):
+            extra_caps = [str(item) for item in declared_caps if str(item)]
+    except ValueError:
+        pass
+    route = {
         "route_id": "safe-lab.fixture.replay",
         "owner": "safe-lab",
         "workspace_root": str(SOURCE),
         "allowed_read_roots": [str(SOURCE)],
-        "allowed_write_roots": ["/workspace"],
+        "allowed_write_roots": [str(WORKSPACE)],
         "source_index": {
             "include_roots": ["."],
             "exclude_globs": ["**/.git/**", "**/node_modules/**", "**/__pycache__/**", "**/*.sqlite*", "**/*.db"],
             "max_file_bytes": 262144,
             "max_total_bytes": 8000000,
         },
-        "caps": ["repo.read", "runtime.inspect.unavailable"],
+        "caps": list(dict.fromkeys(["repo.read", *extra_caps])),
         "task_digest": str(task.get("taskDigest") or ""),
         "task_contract": task_contract,
         "runtime_identity": {"model": os.environ.get("FRONTIER_MODEL", "")},
     }
+    browser_entry_url = os.environ.get("MF5_BROWSER_ENTRY_URL", "").strip()
+    if browser_entry_url:
+        route["browser_entry_url"] = browser_entry_url
+    try:
+        entities = json.loads(os.environ.get("MF5_RUNTIME_ENTITIES_JSON", "[]"))
+        if isinstance(entities, list):
+            route["entities"] = [item for item in entities[:24] if isinstance(item, dict)]
+    except ValueError:
+        pass
+    return route
 
 
-def validate_environment(task: dict[str, Any]) -> tuple[str, str, int, int]:
+def validate_environment(task: dict[str, Any]) -> tuple[str, str, int, int, str]:
     endpoint = os.environ.get("FRONTIER_ENDPOINT", "").strip().rstrip("/")
     token = os.environ.get("OPENAI_API_KEY", "")
+    provider_kind = os.environ.get("MF5_PROVIDER_KIND", "broker").strip()
     if task.get("schema") not in {
         "wasm-agent.safe-lab.fixture-task.v1", "wasm-agent.safe-lab.implementation-task.v1",
     } or not task.get("taskDigest"):
         raise RuntimeError("invalid digest-bound fixture task")
-    if os.environ.get("FRONTIER_MODEL") != "frank/GLM-5.2":
-        raise RuntimeError("exact model contract missing")
-    if not endpoint or not token:
-        raise RuntimeError("run-scoped broker endpoint or token missing")
+    if provider_kind == "broker":
+        if os.environ.get("FRONTIER_MODEL") != "frank/GLM-5.2":
+            raise RuntimeError("exact model contract missing")
+        if not endpoint or not token:
+            raise RuntimeError("run-scoped broker endpoint or token missing")
+    elif provider_kind == "codex_subscription":
+        if not os.environ.get("FRONTIER_MODEL", "").startswith("chatgpt/codex-subscription:"):
+            raise RuntimeError("Codex subscription model contract missing")
+    else:
+        raise RuntimeError("unsupported V5 provider kind")
     budgets = task.get("budgets") if isinstance(task.get("budgets"), dict) else {}
     maximum = min(8192, max(256, int(budgets.get("maxOutputTokensPerCall") or 1024)))
     timeout = min(180, max(1, int(budgets.get("providerCallTimeoutSeconds") or budgets.get("wallClockSeconds") or 180)))
-    return endpoint, token, maximum, timeout
+    return endpoint, token, maximum, timeout, provider_kind
 
 
 def main() -> int:
@@ -112,10 +137,10 @@ def main() -> int:
     parser.add_argument("--task", required=True)
     args = parser.parse_args()
     task = json.loads(Path(args.task).read_text(encoding="utf-8"))
-    endpoint, token, maximum, timeout = validate_environment(task)
+    endpoint, token, maximum, timeout, provider_kind = validate_environment(task)
     sys.path.insert(0, str(ADAPTER_SERVER))
     from master_frontier import repository_state  # noqa: PLC0415
-    from master_frontier.v5 import context, loop, policy, tools, trajectory  # noqa: PLC0415
+    from master_frontier.v5 import completion, context, loop, policy, task_policy, tools, trajectory  # noqa: PLC0415
     from master_frontier.v5.errors import V5Error  # noqa: PLC0415
 
     objective = str(task.get("prompt") or task.get("objective") or "").strip()
@@ -131,11 +156,25 @@ def main() -> int:
         if queued:
             call, state["queued_tool_calls"] = queued[0], queued[1:]
             return {"reply": "", "tool_calls": [call], "usage": {}, "_mf5_replayed_tool_call": True}
+        active_tools = [] if context.completion_only(state, route) else policy.active_provider_tools(route, state)
+        if provider_kind == "codex_subscription":
+            from codex_subscription_provider import complete as codex_complete  # noqa: PLC0415
+
+            return codex_complete(
+                messages,
+                active_tools,
+                completion_only=context.completion_only(state, route),
+                require_tool=(
+                    task_policy.requires_tool_evidence(route) and not completion.ready(state, route)
+                ),
+                timeout=timeout,
+                model=os.environ.get("MF5_CODEX_MODEL", "gpt-5.6-sol"),
+            )
         payload: dict[str, Any] = {
             "model": "glm-5.2", "messages": messages, "max_tokens": maximum, "stream": False,
         }
-        if not context.completion_only(state, route):
-            payload.update({"tools": policy.active_provider_tools(route, state), "tool_choice": "auto", "parallel_tool_calls": False})
+        if active_tools:
+            payload.update({"tools": active_tools, "tool_choice": "auto", "parallel_tool_calls": False})
         request = urllib.request.Request(
             endpoint + "/chat/completions", data=json.dumps(payload, separators=(",", ":")).encode(), method="POST",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"},
@@ -161,27 +200,33 @@ def main() -> int:
 
     implementation_actions = None
     if task.get("schema") == "wasm-agent.safe-lab.implementation-task.v1":
-        os.environ["HERMES_WASM_AGENT_REPOSITORY_TRANSACTION_DIR"] = "/workspace/.mf5-transactions"
+        os.environ["HERMES_WASM_AGENT_REPOSITORY_TRANSACTION_DIR"] = str(WORKSPACE / ".mf5-transactions")
         sys.path.insert(0, "/adapter/labs/wasm-agent")
         from implementation_lab_actions import ImplementationLabActions  # noqa: PLC0415
         implementation_actions = ImplementationLabActions(route)
 
     events_path = Path(os.environ.get("WASM_AGENT_EVENTS_PATH", ""))
 
+    def record_event(name: str, arguments: dict[str, Any], observed: dict[str, Any]) -> None:
+        if not events_path.is_absolute():
+            return
+        event = {
+            "kind": name, "status": "ok" if observed.get("ok") else "failed", "tool": name,
+            "path": arguments.get("path"),
+            "argumentsDigest": hashlib.sha256(
+                json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "summary": observed.get("summary"), "changedFiles": observed.get("changed_files"),
+        }
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+
     def execute(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if implementation_actions is not None:
             observed = tools.execute(name, arguments, route, invoke=implementation_actions.invoke)
-            if events_path.is_absolute():
-                event = {
-                    "kind": name, "status": "ok" if observed.get("ok") else "failed", "tool": name,
-                    "path": arguments.get("path"),
-                    "argumentsDigest": hashlib.sha256(json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-                    "summary": observed.get("summary"), "changedFiles": observed.get("changed_files"),
-                }
-                with events_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+            record_event(name, arguments, observed)
             return observed
-        return tools.execute(
+        observed = tools.execute(
             name, arguments, route,
             invoke=lambda _tool, _arguments: {
                 "ok": False,
@@ -189,6 +234,8 @@ def main() -> int:
                 "summary": "Live runtime inspection is not available in the immutable replay lab.",
             },
         )
+        record_event(name, arguments, observed)
+        return observed
 
     try:
         outcome = loop.run(
@@ -198,6 +245,14 @@ def main() -> int:
     except V5Error as exc:
         print(json.dumps({"code": exc.code, "message": str(exc)}, separators=(",", ":")), file=sys.stderr)
         return 1
+    diagnostics_path = Path(os.environ.get("MF5_RUN_DIAGNOSTICS_PATH", ""))
+    if diagnostics_path.is_absolute():
+        diagnostics_path.write_text(json.dumps({
+            "providerCalls": outcome.calls,
+            "providerAttempts": outcome.attempts,
+            "usageTotals": outcome.usage_totals,
+            "answerSatisfaction": state.get("answer_satisfaction"),
+        }, separators=(",", ":")) + "\n", encoding="utf-8")
     print(outcome.answer)
     return 0
 

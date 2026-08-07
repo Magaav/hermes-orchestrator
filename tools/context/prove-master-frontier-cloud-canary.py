@@ -24,6 +24,7 @@ PROBES = (
     ("public_config", "/config.json", "json"),
     ("anonymous_session", "/auth/session", "json"),
     ("native_shell", "/home?native=electron", "html"),
+    ("frontier_selector", "/modules/master-frontier/source-investigation.js", "javascript"),
 )
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
@@ -115,6 +116,29 @@ def inspect_probe(name: str, result: dict[str, Any], body_kind: str) -> list[dic
         text = body.decode("utf-8", errors="replace").lower()
         if result["status"] != 200 or "<!doctype html" not in text or "wasm agent" not in text:
             failures.append(_failure("native_shell_unavailable", "native Electron route did not return the WASM Agent shell"))
+    elif name == "frontier_selector":
+        local = ROOT / "plugins/wasm-agent/public/modules/master-frontier/source-investigation.js"
+        local_body = local.read_bytes()
+        text = body.decode("utf-8", errors="replace")
+        matches_local = hashlib.sha256(body).digest() == hashlib.sha256(local_body).digest()
+        v6_default = "? requested : MASTER_FRONTIER_V6_PROTOCOL;" in text
+        v5_rollback = (
+            "requested === MASTER_FRONTIER_V5_PROTOCOL"
+            in text
+            and "protocol: MASTER_FRONTIER_V5_PROTOCOL" in text
+        )
+        legacy_v5_migrates = 'storedValue.startsWith("explicit:")' in text
+        result["projection"] = {
+            "matchesLocal": matches_local,
+            "v6Default": v6_default,
+            "v5Rollback": v5_rollback,
+            "legacyV5Migrates": legacy_v5_migrates,
+        }
+        if result["status"] != 200 or not matches_local or not v6_default or not v5_rollback or not legacy_v5_migrates:
+            failures.append(_failure(
+                "frontier_selector_stale",
+                "production does not serve the locally verified V6-default selector with explicit V5 rollback",
+            ))
     return failures
 
 

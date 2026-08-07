@@ -1,0 +1,50 @@
+.widget-head > span:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.widget[data-widget-icon] .widget-head > span:first-child::before {
+  content: "";
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  background: var(--widget-icon-image) center / contain no-repeat;
+}
+
+.space-app-icon.has-system-icon {
+  background-color: rgba(8, 14, 25, 0.78);
+  background-size: 24px 24px;
+  box-shadow: inset 0 0 0 1px rgba(125, 220, 255, 0.08);
+}
+
+.widget-resize-handle {
+  position: absolute;
+  z-index: 12;
+  touch-action: none;
+  background: transparent;
+}
+
+.widget-resize-handle::before { content: none; }
+.widget-resize-handle[data-resize-direction="n"],
+.widget-resize-handle[data-resize-direction="s"] { left: 8px; right: 8px; height: 8px; cursor: ns-resize; }
+.widget-resize-handle[data-resize-direction="n"] { top: 0; }
+.widget-resize-handle[data-resize-direction="s"] { bottom: 0; }
+.widget-resize-handle[data-resize-direction="e"],
+.widget-resize-handle[data-resize-direction="w"] { top: 8px; bottom: 8px; width: 8px; cursor: ew-resize; }
+.widget-resize-handle[data-resize-direction="e"] { right: 0; }
+.widget-resize-handle[data-resize-direction="w"] { left: 0; }
+.widget-resize-handle[data-resize-direction="ne"],
+.widget-resize-handle[data-resize-direction="se"],
+.widget-resize-handle[data-resize-direction="sw"],
+.widget-resize-handle[data-resize-direction="nw"] { width: 12px; height: 12px; }
+.widget-resize-handle[data-resize-direction="ne"] { top: 0; right: 0; cursor: nesw-resize; }
+.widget-resize-handle[data-resize-direction="se"] { right: 0; bottom: 0; cursor: nwse-resize; }
+.widget-resize-handle[data-resize-direction="sw"] { left: 0; bottom: 0; cursor: nesw-resize; }
+.widget-resize-handle[data-resize-direction="nw"] { top: 0; left: 0; cursor: nwse-resize; }
+
+body.is-widget-resizing[data-widget-resize-axis="ns"] { cursor: ns-resize; }
+body.is-widget-resizing[data-widget-resize-axis="ew"] { cursor: ew-resize; }
+body.is-widget-resizing[data-widget-resize-axis="nesw"] { cursor: nesw-resize; }
+body.is-widget-resizing[data-widget-resize-axis="nwse"] { cursor: nwse-resize; }

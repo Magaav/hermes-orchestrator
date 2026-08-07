@@ -26,6 +26,10 @@ Expected local files include:
   provisioning attempts.
 - `db/sqlite/wa_auth_secret`, the local signed-cookie secret. Keep this file
   private; rotating it signs out existing browser sessions.
+- `event-anchors/sqlite/mf_event_anchors.sqlite3`, the proposed separate
+  insert-only Master:frontier run-event anchor store. It contains hashed
+  user/run scopes and compact chain/count commitments, never event content.
+  The module is implemented but not production-wired.
 - `browser/`, runtime Host Browser captures and profile data
 - `users/<acc_id>/spaces/<space_id>/`, account-owned space metadata.
 - `users/<acc_id>/device-settings.json`, the account's current main-device

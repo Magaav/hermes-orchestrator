@@ -3,6 +3,30 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
+STATUS_KEYS = ("context_window_tokens", "rate_limits")
+
+
+def with_status_metadata(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
+    total = diagnostics.get("token_usage_total") if isinstance(diagnostics.get("token_usage_total"), dict) else {}
+    calls = diagnostics.get("token_usage") if isinstance(diagnostics.get("token_usage"), list) else []
+    latest = calls[-1] if calls and isinstance(calls[-1], dict) else {}
+    metadata = {
+        key: total.get(key, latest.get(key))
+        for key in STATUS_KEYS
+        if total.get(key, latest.get(key)) is not None
+    }
+    if not metadata:
+        return payload
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+    return {
+        **payload,
+        "usage": {**usage, **metadata},
+        "components": {name: {**component, **metadata} for name, component in components.items()},
+    }
+
+
 def _token_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -21,6 +45,8 @@ def aggregate_provider_usages(usages: list[dict[str, Any]]) -> tuple[dict[str, A
     """Aggregate explicit provider-call usages without recursively guessing payloads."""
     components: dict[str, dict[str, Any]] = {}
     models: set[str] = set()
+    transports: set[str] = set()
+    provider_threads: set[str] = set()
     for index, raw in enumerate(usages[:64], start=1):
         if not isinstance(raw, dict):
             continue
@@ -42,12 +68,21 @@ def aggregate_provider_usages(usages: list[dict[str, Any]]) -> tuple[dict[str, A
             value = _token_int(raw.get(key))
             if value is not None:
                 component[key] = value
-        for key in ("model", "source", "usage_scope", "usage_accuracy", "billable"):
+        for key in (
+            "model", "source", "usage_scope", "usage_accuracy", "billable",
+            "transport", "provider_thread_id", "context_window_tokens", "rate_limits",
+        ):
             if key in raw:
                 component[key] = raw[key]
         model = str(raw.get("model") or "").strip()
         if model:
             models.add(model)
+        transport = str(raw.get("transport") or "").strip()
+        if transport:
+            transports.add(transport)
+        provider_thread = str(raw.get("provider_thread_id") or "").strip()
+        if provider_thread:
+            provider_threads.add(provider_thread)
         components[f"provider_{index}"] = component
     if not components:
         return None, {}
@@ -65,6 +100,14 @@ def aggregate_provider_usages(usages: list[dict[str, Any]]) -> tuple[dict[str, A
         aggregate[key] = sum(int(row.get(key) or 0) for row in rows)
     if len(models) == 1:
         aggregate["model"] = next(iter(models))
+    if len(transports) == 1 and all(row.get("transport") for row in rows):
+        aggregate["transport"] = next(iter(transports))
+    if len(provider_threads) == 1 and all(row.get("provider_thread_id") for row in rows):
+        aggregate["provider_thread_id"] = next(iter(provider_threads))
+    latest = rows[-1]
+    for key in ("context_window_tokens", "rate_limits"):
+        if latest.get(key) is not None:
+            aggregate[key] = latest[key]
     if all(row.get("usage_scope") == "llm_api_call" for row in rows):
         aggregate["usage_scope"] = "llm_api_call"
     if all(row.get("usage_accuracy") == "provider_exact" for row in rows):
@@ -155,6 +198,17 @@ def summary_from_calls(
         "estimated_total_tokens": sum_key(estimated_calls, "estimated_total_tokens") or None,
         "calls": calls,
     }
+    for call in reversed(calls):
+        active_context_tokens = _token_int(call.get("input_tokens"))
+        if active_context_tokens is not None:
+            summary["active_context_tokens"] = active_context_tokens
+            break
+    for call in reversed(calls):
+        raw = call.get("raw_usage") if isinstance(call.get("raw_usage"), dict) else {}
+        found = {key: raw[key] for key in STATUS_KEYS if raw.get(key) is not None}
+        if found:
+            summary.update(found)
+            break
     if not include_turns:
         return summary
     turn_groups: dict[str, list[dict[str, Any]]] = {}

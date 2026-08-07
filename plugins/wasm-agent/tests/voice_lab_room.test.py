@@ -56,7 +56,6 @@ class VoiceLabRoomTest(unittest.TestCase):
             public_root=PLUGIN_ROOT / "public",
             state_dir=state_dir,
             bridge_url="http://127.0.0.1:8790",
-            browser_timeout_sec=1.0,
         )
         self.user = make_user("101", "voice@example.test")
 

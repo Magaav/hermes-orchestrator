@@ -1,0 +1,8 @@
+{
+  "schema": "hermes.property_photo_cleaner.fixtures.v1",
+  "purpose": "Reference style and quality fixtures; never training data.",
+  "pairs": [
+    {"id": "visao-1", "before": "../media/visao_before1.jpeg", "after": "../media/visao_after1.jpeg"},
+    {"id": "visao-2", "before": "../media/visao_before2.jpeg", "after": "../media/visao_after2.jpeg"}
+  ]
+}

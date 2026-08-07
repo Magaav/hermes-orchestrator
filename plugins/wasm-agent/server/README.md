@@ -13,9 +13,28 @@
 The bridge routes requests through the Hermes Orchestrator CLI/API boundary.
 It must not import Hermes Agent internals or patch runtime node state directly.
 
+## Unified live clients
+
+`live_clients.py` owns the compact `hermes.wasm_agent.live_clients.v1`
+registry returned by authenticated `GET /native/control/clients`. PWA,
+Electron, and Android/Kotlin heartbeats normalize to one client envelope with
+runtime type, build, route, liveness, and bounded observe/control capabilities.
+Commands continue through the audited `/native/control/command` and
+`/native/control/result` paths; the registry does not expose arbitrary code or
+shell execution. Native clients reuse their existing control loop, while a
+plain PWA starts one visibility-aware 15-second loop from
+`public/modules/client-presence.js`.
+
+All client envelopes advertise an explicit on-demand observability shape.
+Electron and Android advertise `observe.cdp.on_demand`; PWA advertises
+`observe.cdp.external_on_demand` and supplies bounded in-page aggregate
+analytics. The audited control operations are `observability_enable`,
+`observability_collect`, `observability_status`, and `observability_disable`.
+
 ## LLM-Native Direct Envelope
 
-The current browser default is Master:frontier V5. V3 remains the explicit C3
+The current browser default is the production-verified Master:frontier V6 lane.
+V5 remains an explicit rollback/compatibility selection; V3 remains the explicit C3
 compatibility lane and sends a compact
 semantic-operation bootstrap to one capable head. The head answers directly or
 requests exactly one semantic operation; the host maps it to a declared tool,
@@ -44,6 +63,17 @@ V4 reuses configured provider transport but owns its phase messages and a
 from that projection. One typed re-probe may merge evidence for ambiguity,
 contradiction, incomplete coverage, or capability recovery without exceeding
 the three-call ceiling.
+
+V6 is owned by `master_frontier/controller_v6.py` and
+`master_frontier/v6/`. Durable objects remain canonical JSON for authority,
+audit, persistence, and replay; the head sees the compact dictionary-backed
+`MF6/1` projection. Its provider interface stays at four tools—`discover`,
+`detail`, `execute`, and `checkpoint`—while repository, client, and authorized
+MCP capabilities remain pull-on-demand. Independent non-conflicting operations
+run concurrently; mutations use conflict domains and an exactly-once ledger.
+Model-authored commentary is emitted from the operation it explains, and final
+completion requires declared semantic capabilities plus terminal integrity.
+See `../MASTER_FRONTIER_V6.md`.
 
 `POST /agent/provider/envelope` and
 `POST /agent/provider/envelope/stream` are the compact LLM-native head lanes
@@ -113,6 +143,16 @@ A provider that requests a tool during completion-only synthesis is stopped
 with `no_semantic_progress`. A `network-timeout` receives one bounded retry;
 the retry becomes completion-only only when the same evidence assessment is
 sufficient. A second timeout remains a resumable typed interruption.
+Final synthesis separately records `satisfactory` or `unsatisfactory`; empty
+answers and leaked tool directives receive bounded same-head repair, then an
+honest user-visible unsatisfactory fallback instead of false success or an
+answer-quality transport failure. Routes with `browser.inspect` may expose the
+bounded native browser snapshot tool; `browser.control` separately authorizes
+navigate/click/type/key, and page ownership comes from `browser_entry_url`.
+V5 also honors the resolved direct-head receiver on every inference:
+`openai-responses` and `openai-codex` use the server-owned Responses transport,
+while other receivers use the configured provider proxy. Browser provider
+configuration cannot override a resolved server-side Codex receiver.
 
 V5 coding work is fail-closed at four owned boundaries. `authority.py`
 intersects route capabilities with structured task authority and request class;
@@ -128,6 +168,58 @@ dirty or untracked route-file change invalidates older verification. Reads can
 stream arbitrary late line ranges; search uses its own route-owned scan ceiling
 rather than the smaller source-index ingestion cap. Transaction journals live
 beside durable server state and block new writes when recovery is corrupt.
+
+`master_frontier/event_integrity.py` is a bounded experiment for the separate
+general run-event lane. It seals compact events with a content chain, declared
+count, and explicit withheld markers, then verifies against a small anchor that
+must be held outside the mutable ledger. A read-only local probe over one
+105-event recorded run detected both content tampering and deletion plus
+renumbering while the current response-derived `event_count == len(events)`
+projection remained internally consistent. This is focused experimental proof,
+not deployed runtime proof; promotion requires live evidence from the external
+anchor boundary.
+
+`master_frontier/event_anchor_store.py` defines that storage contract. It uses
+a separate SQLite database,
+domain-hashes user/run scope identifiers, accepts only monotonic insert-only
+checkpoints, chains every checkpoint to its predecessor, rejects updates and
+deletes with database triggers, supports exact idempotent retries, and closes a
+run permanently on its final anchor. The recommended private runtime path is
+`<state-root>/event-anchors/sqlite/mf_event_anchors.sqlite3`. This protects
+against normal application-path mutation; an off-host signer or transparency
+service is still required to protect against a host administrator replacing
+both stores.
+
+`master_frontier/event_anchor_adapter.py` is the feature-flagged commit adapter.
+The production persistence boundary invokes it only after the primary event
+transaction commits. `WASM_AGENT_EVENT_ANCHORS=true` enables it;
+`WASM_AGENT_EVENT_ANCHOR_INTERVAL` controls bounded nonterminal checkpoints and
+`WASM_AGENT_EVENT_ANCHOR_DB` may override the private database path. Disabled
+and between-interval calls perform no event scan or anchor-store I/O. Terminal
+events always attempt a final anchor. Failures are typed, do not erase or fail
+the primary answer, and return `integrity_proof.status: unavailable`.
+
+Production proof on 2026-07-27 is recorded in
+`reports/context/latest/master-frontier-authenticated-canary.json`. The
+authenticated HTTPS canary completed with a non-empty answer, returned
+`integrity_proof.status: verified`, stored a terminal checkpoint, independently
+verified a final two-checkpoint chain, and revoked its synthetic account.
+The canonical `horc space restart` path was subsequently run without an
+inherited anchor variable; cloud configuration restored anchoring and a second
+authenticated production canary passed the same terminal-chain checks.
+
+V6 production proof on 2026-08-05 is split by authority and behavior. The
+read-only non-admin canary report at
+`reports/context/latest/master-frontier-v6-authenticated-canary.json` proves an
+objective-bound source read, exact usage, zero changed files, a clear completion
+gate, terminal anchor verification, and revocation. The explicitly stateful
+admin report at `reports/context/latest/master-frontier-v6-client-ui.json`
+proves that V6 selected the live Electron renderer declaring
+`control.widget.open`, opened widget id `browser`, received its acknowledgement,
+verified the finished native-control artifact, recorded a model-authored public
+progress update, and only then completed. This is
+installed-renderer behavior proof, not final NSIS/package verification or proof
+of unrelated native capabilities.
 
 Restart continuity is server-owned. The controller persists content-free,
 digest/scope-bound checkpoints after meaningful loop transitions and reloads

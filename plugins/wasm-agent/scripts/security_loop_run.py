@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -95,41 +94,6 @@ def auth_probe(base_url: str, path: str, surface: str, name: str) -> ProbeResult
     )
 
 
-def browser_stream_origin_probe(base_url: str) -> ProbeResult:
-    key = base64.b64encode(uuid.uuid4().bytes).decode("ascii")
-    headers = {
-        "Connection": "Upgrade",
-        "Upgrade": "websocket",
-        "Sec-WebSocket-Key": key,
-        "Sec-WebSocket-Version": "13",
-        "Origin": "https://attacker.invalid",
-    }
-    cookie = local_admin_cookie()
-    if cookie:
-        headers["Cookie"] = cookie
-    status, payload, raw = read_http("GET", f"{base_url}/browser/stream", headers=headers)
-    code = error_code(payload)
-    ok = (
-        status == HTTPStatus.FORBIDDEN
-        and code in {"origin_rejected", "browser_disabled"}
-    ) or (
-        not cookie
-        and status == HTTPStatus.UNAUTHORIZED
-        and code == "auth_required"
-    )
-    auth_note = "authenticated admin cookie" if cookie else "no local admin cookie; auth gate checked before Origin guard"
-    return ProbeResult(
-        name="browser_stream_cross_origin_rejected",
-        ok=ok,
-        status=status,
-        surface="browser",
-        category="websocket-origin",
-        summary="/browser/stream must reject cross-origin WebSocket upgrades",
-        evidence=f"GET /browser/stream upgrade with Origin attacker.invalid ({auth_note}) -> HTTP {status}; body={json.dumps(payload or raw, ensure_ascii=True)[:900]}",
-        proposed_action="Reject missing or cross-origin WebSocket Origin headers before the browser stream upgrade.",
-    )
-
-
 def config_probe(base_url: str) -> ProbeResult:
     status, payload, raw = read_http("GET", f"{base_url}/config.json")
     auth = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
@@ -156,7 +120,6 @@ def run_deterministic_probes(base_url: str) -> list[ProbeResult]:
         auth_probe(clean, "/health", "auth", "health_requires_auth"),
         auth_probe(clean, "/bridge/nodes", "bridge", "bridge_nodes_requires_auth"),
         auth_probe(clean, "/security-loop/status", "auth", "security_loop_requires_auth"),
-        browser_stream_origin_probe(clean),
         config_probe(clean),
     ]
 
@@ -240,7 +203,7 @@ def task_prompt_attack(surfaces: list[str], authenticated_routes: list[dict[str,
     route_text = json.dumps(authenticated_routes or [], indent=2, sort_keys=True, ensure_ascii=True)
     return f"""You are hermes-attack running a bounded defensive audit for owned Hermes/Colmeio surfaces only.
 
-Scope: wasm-agent, Hermes bridge, node lifecycle controls, account auth, storage import/export, attachments, service-worker caching, Host Browser/CDP, and public config.
+Scope: wasm-agent, Hermes bridge, node lifecycle controls, account auth, storage import/export, attachments, service-worker caching, browser portal boundaries, and public config.
 Focus surfaces this run: {surface_text}.
 
 Authenticated platform context:

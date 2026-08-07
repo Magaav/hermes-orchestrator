@@ -24,6 +24,7 @@ object NativeBridgeContract {
         "native.capabilities.nativeControlPolling.v1",
         "native.capabilities.crashSafeStatus.v1",
         "native.capabilities.capabilityManifest.v1",
+        "native.capabilities.observabilityLease.v1",
     )
 
     val androidKernelCapabilities = listOf(
@@ -43,6 +44,7 @@ object NativeBridgeContract {
         "native.capabilities.releaseFeedValidation.v1",
         "native.capabilities.crashSafeStatus.v1",
         "native.capabilities.capabilityManifest.v1",
+        "native.capabilities.observabilityLease.v1",
     )
 
     val nativeKernelMethods = listOf(

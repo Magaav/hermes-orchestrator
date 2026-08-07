@@ -8,6 +8,7 @@ const {
   isAllowlistedReleaseUrl,
   validateDownloadedInstaller,
   validateReleaseArtifact,
+  writeResponseBodyToClosedFile,
   windowsArtifactFromFeed,
 } = require("./windows-self-update");
 
@@ -83,4 +84,54 @@ try {
   fs.rmSync(tempDir, { recursive: true, force: true });
 }
 
-console.log("windows self update ok");
+async function verifyClosedDownloadHandle() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wasm-agent-update-close-test-"));
+  const target = path.join(tempDir, "closed.exe");
+  const originalCreateWriteStream = fs.createWriteStream;
+  let writerClosed = false;
+  fs.createWriteStream = (...args) => {
+    const writer = originalCreateWriteStream(...args);
+    writer.once("close", () => { writerClosed = true; });
+    return writer;
+  };
+  try {
+    const result = await writeResponseBodyToClosedFile([Buffer.from("installer")], target);
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(writerClosed, true, "download helper must not return before the file handle closes");
+  } finally {
+    fs.createWriteStream = originalCreateWriteStream;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+async function verifyAtomicConcurrentDownloads() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wasm-agent-update-atomic-test-"));
+  const target = path.join(tempDir, "atomic.exe");
+  const first = Buffer.alloc(2 * 1024 * 1024, 0x31);
+  const second = Buffer.alloc(2 * 1024 * 1024, 0x32);
+  async function* chunked(data, stride) {
+    for (let offset = 0; offset < data.length; offset += stride) {
+      await new Promise((resolve) => setImmediate(resolve));
+      yield data.subarray(offset, Math.min(offset + stride, data.length));
+    }
+  }
+  try {
+    const results = await Promise.all([
+      writeResponseBodyToClosedFile(chunked(first, 31_337), target),
+      writeResponseBodyToClosedFile(chunked(second, 47_111), target),
+    ]);
+    assert.strictEqual(results.every((result) => result.ok), true);
+    const written = fs.readFileSync(target);
+    assert.strictEqual(written.equals(first) || written.equals(second), true, "concurrent staging must publish one complete stream, never mixed bytes");
+    assert.deepStrictEqual(fs.readdirSync(tempDir), ["atomic.exe"], "temporary download files must not remain after success");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
+Promise.all([verifyClosedDownloadHandle(), verifyAtomicConcurrentDownloads()])
+  .then(() => console.log("windows self update ok"))
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

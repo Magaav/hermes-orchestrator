@@ -3,9 +3,18 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from . import authority, budget, repository_state, run_control, session_context
-from .v5 import continuity, context as v5_context, decision_record, loop, operation_ledger, policy, proof, task_lineage, task_policy, tools, trajectory
+from . import authority, budget, provider_step, repository_state, route_contracts, run_control, session_context, tool_runtime
+from .v5 import context_accounting, continuity, context as v5_context, decision_record, loop, operation_ledger, policy, proof, task_lineage, task_policy, trajectory, verification_answer
 from .v5.errors import V5Error
+
+def _provider_complete(
+    runtime: dict[str, Any], server: Any, body: dict[str, Any], envelope: dict[str, Any],
+    proxy_body: dict[str, Any], *, receiver: str, run_id: str, user: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return provider_step.complete(
+        runtime, server, body, envelope, proxy_body, protocol="v5",
+        receiver=receiver, run_id=run_id, user=user,
+    )
 
 
 def _typed_tool_failure(exc: Exception) -> dict[str, Any] | None:
@@ -47,20 +56,41 @@ def _token_usage_total(usages: list[dict[str, Any]], *, attempts: int) -> dict[s
 
 def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | None, run_record: dict[str, Any], context: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
     envelope = context["envelope"]
+    receiver = str(context.get("receiver") or "provider")
     route = dict(runtime["require_direct_envelope_route_contract"](envelope))
     run_id = str(run_record.get("run_id") or ""); turn_id = str(run_record.get("turn_id") or run_id)
     objective = str(envelope.get("objective") or body.get("message") or "")
     session_id = str(body.get("session_id") or "")
     principal = str(runtime["user_id"](user))
     route_id = str(route.get("route_id") or "")
+    resolved_entity = route_contracts.resolve_entity(objective, route)
+    if resolved_entity:
+        route["resolved_entity"] = resolved_entity
+    memory_manifest = session_context.load_memory_manifest(
+        runtime["auth_connect"], user_id=principal, active_session_id=session_id,
+    )
+    if memory_manifest:
+        route["session_memory"] = memory_manifest
+        route["caps"] = list(dict.fromkeys([*(route.get("caps") or []), authority.SESSION_MEMORY_READ]))
+    continuation_context = continuity.continuation_context(envelope)
     recent_context = session_context.load_recent(
         runtime["auth_connect"],
         session_id=session_id,
         turn_id=turn_id,
         user_id=principal,
     )
-    continuation_context = continuity.continuation_context(envelope)
+    previous_run_id = str(continuation_context.get("previous_run_id") or "")
+    lineage_parent = session_context.load_lineage_parent(
+        runtime["auth_connect"], previous_run_id=previous_run_id,
+        session_id=session_id, user_id=principal,
+    )
+    if lineage_parent and not any(item.get("run_id") == previous_run_id for item in recent_context):
+        recent_context.append(lineage_parent)
     projected_contract = authority.project_task_contract(envelope, route)
+    if memory_manifest and isinstance(projected_contract.get("authority"), list):
+        projected_contract["authority"] = list(dict.fromkeys([
+            *projected_contract["authority"], authority.SESSION_MEMORY_READ,
+        ]))
     route["task_contract"] = task_lineage.project(
         projected_contract,
         objective=objective,
@@ -78,7 +108,6 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         raise V5Error(code, message)
     route_digest = continuity.contract_digest(route)
     route["session_context"] = recent_context
-    previous_run_id = str(continuation_context.get("previous_run_id") or "")
     requested_checkpoint = continuity.request_checkpoint(body, envelope)
     resume_requested = _resume_requested(requested_checkpoint, continuation_context)
     resume = session_context.load_resume(
@@ -161,7 +190,10 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
                     if pending.get("action_id") == action_id:
                         state["pending_action"] = None
     else:
-        state = trajectory.new(run_id, turn_id, objective, route_id)
+        task_contract = route.get("task_contract") if isinstance(route.get("task_contract"), dict) else {}
+        lineage = task_contract.get("lineage") if isinstance(task_contract.get("lineage"), dict) else {}
+        root_objective = str(lineage.get("root_objective") or objective)
+        state = trajectory.new(run_id, turn_id, root_objective, route_id)
     route["resume_context"] = continuity.model_projection(state, {
         **continuation_context,
         "previous_status": resume.get("previous_status") or continuation_context.get("previous_status"),
@@ -185,7 +217,10 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
 
     persist_state(state, "run_started")
 
+    context_fingerprints: set[str] = set()
+
     def complete(messages: list[dict[str, str]], index: int) -> dict[str, Any]:
+        nonlocal context_fingerprints
         queued = state.get("queued_tool_calls") if isinstance(state.get("queued_tool_calls"), list) else []
         if queued:
             call, state["queued_tool_calls"] = queued[0], queued[1:]
@@ -195,8 +230,9 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         proxy_body = {**body, "provider_config": runtime["provider_config_for_proxy_body"](body), "messages": messages}
         proxy_body["_timeout_sec"] = _provider_timeout_sec(route, state)
         if not v5_context.completion_only(state, route):
-            proxy_body.update({"tools": policy.active_provider_tools(route, state), "tool_choice": "auto", "parallel_tool_calls": False})
+            proxy_body.update({"tools": policy.active_provider_tools(route, state), "tool_choice": policy.provider_tool_choice(state), "parallel_tool_calls": False})
         proxy_body.pop("max_output_tokens", None); proxy_body.pop("max_tokens", None)
+        context_measurement, context_fingerprints = context_accounting.measure(proxy_body, context_fingerprints)
         output_remaining = budget.output_tokens_remaining(
             route, state.get("usage_totals") if isinstance(state.get("usage_totals"), dict) else state.get("usages"),
             request_payload={
@@ -210,7 +246,14 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
             if output_remaining <= 0:
                 raise V5Error("provider_token_budget_exhausted", "No routed provider-token budget remains.")
             proxy_body["max_tokens"] = output_remaining
-        result = runtime["provider_proxy_completion"](server, proxy_body, user=user)
+        result = _provider_complete(
+            runtime, server, body, envelope, proxy_body,
+            receiver=receiver, run_id=run_id, user=user,
+        )
+        runtime["append_agent_run_event"](
+            server, run_id, "llm.context.measured", summary=f"decision {index} context",
+            payload={"protocol": "v5", "inference_id": inference_id, **context_accounting.attach_usage(context_measurement, result.get("usage"))},
+        )
         runtime["append_envelope_v2_inference_usage"](server, run_id, result=result, turn_id=turn_id, inference_id=inference_id, stage="v5.loop")
         runtime["record_agent_run_token_usage_event"](server, run_id, {"route_id": route.get("route_id"), "usage": result.get("usage")})
         return result
@@ -231,7 +274,10 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         pending = state.get("pending_action") if isinstance(state.get("pending_action"), dict) else {}
         action_id = str(pending.get("action_id") or trajectory.action_id(name, arguments, route_id))
         try:
-            result = tools.execute(name, arguments, route, invoke=lambda tool, payload: invoke(tool, {**payload, "action_id": action_id}))
+            result = tool_runtime.execute_v5(
+                name, arguments, route, server=server, user=user, runtime=runtime,
+                principal=principal, action_id=action_id, invoke_kernel=invoke,
+            )
         except Exception as exc:
             result = _typed_tool_failure(exc)
             if result is None:
@@ -239,7 +285,12 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         durable_result = trajectory.compact_observation(
             runtime["direct_envelope_redact"](result), content_limit=12_000, max_chars=18_000,
         )
-        runtime["append_agent_run_event"](server, run_id, "evidence.received" if result.get("ok") else "command.failed", summary=str(result.get("summary") or result.get("code") or name), payload={"protocol": "v5", "action_id": action_id, "tool": name, "result": durable_result})
+        event_payload = {"protocol": "v5", "action_id": action_id, "tool": name, "result": durable_result}
+        if result.get("ok") is not True:
+            event_payload["arguments"] = trajectory.compact_observation(
+                runtime["direct_envelope_redact"](arguments), content_limit=1200, max_chars=1800,
+            )
+        runtime["append_agent_run_event"](server, run_id, "evidence.received" if result.get("ok") else "command.failed", summary=str(result.get("summary") or result.get("code") or name), payload=event_payload)
         return result
 
     try:
@@ -256,18 +307,25 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         runtime["direct_envelope_error"](exc.code, str(exc), runtime["HTTPStatus"].CONFLICT)
         raise
     operations = operation_ledger.normalize(outcome.trajectory.get("operation_ledger"), route_id=route_id)
-    proof_summary = proof.summarize(outcome.tools, operations)
+    proof_summary = proof.summarize(outcome.trajectory.get("steps") or [], operations)
+    answer = (
+        verification_answer.build(proof_summary, outcome.tools)
+        if task_policy.request_class(route) == "verification"
+        and proof_summary.get("verification_level") == "proof"
+        else outcome.answer
+    )
     final = {
         "schema": "hermes.wasm_agent.master_frontier.final.v5",
         "protocol": "v5",
         "run_id": run_id,
         "turn_id": turn_id,
         "route_id": route.get("route_id"),
-        "reply": outcome.answer,
+        "reply": answer,
         "decision": decision_record.project((outcome.trajectory.get("executive") or {}).get("decision")),
         "trajectory": trajectory.summary(outcome.trajectory),
         "diagnostics": {
             **proof_summary,
+            "answer_satisfaction": outcome.trajectory.get("answer_satisfaction"),
             "provider_calls": outcome.calls,
             "provider_attempts": outcome.attempts,
             "token_usage": outcome.usages,
@@ -287,6 +345,13 @@ def execute_owned(server: Any, body: dict[str, Any], *, user: dict[str, Any] | N
         "changed_files": proof_summary["changed_files"],
         "local_tools": outcome.tools,
     }
-    runtime["append_agent_run_event"](server, run_id, "gate.decision", summary="accepted", payload={"protocol": "v5", "verification_level": final["diagnostics"]["verification_level"], "changed_file_count": len(final["changed_files"])})
-    runtime["finish_agent_run"](server, run_id, status="completed", final=final)
-    return {**final, "run": run_record}
+    satisfaction = outcome.trajectory.get("answer_satisfaction") if isinstance(outcome.trajectory.get("answer_satisfaction"), dict) else {}
+    gate_summary = "accepted" if satisfaction.get("status") != "unsatisfactory" else "completed_unsatisfactory"
+    runtime["append_agent_run_event"](server, run_id, "gate.decision", summary=gate_summary, payload={"protocol": "v5", "answer_satisfaction": satisfaction.get("status"), "verification_level": final["diagnostics"]["verification_level"], "changed_file_count": len(final["changed_files"])})
+    finished = runtime["finish_agent_run"](server, run_id, status="completed", final=final) or {}
+    integrity_proof = finished.get("integrity_proof") if isinstance(finished, dict) else None
+    return {
+        **final,
+        "run": run_record,
+        **({"integrity_proof": integrity_proof} if isinstance(integrity_proof, dict) else {}),
+    }

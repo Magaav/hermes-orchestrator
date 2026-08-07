@@ -229,3 +229,13 @@ candidate bank. The overlay records two independent decisions, a deduplicated
 objective group, golden/holdout membership, and a private expected-property
 contract. Agent lanes receive only contract digests; expected properties and
 holdout criteria remain host-only and are scored after execution.
+
+Master:frontier V5 also has a trusted-host ChatGPT subscription lane. In that
+lane Codex is only the structured decision head: it runs ephemerally from an
+empty read-only directory with its own shell, MCP, web, browser, and repository
+actions forbidden. V5 alone owns declared browser and source tools. The cached
+ChatGPT credential stays on the host and is never copied into fixture tasks,
+reports, or adapter artifacts. Harness process completion and answer quality
+remain separate: a bounded weak answer is an unsatisfactory improvement result,
+not a harness crash. The maintained proof is
+`safe-lab-master-frontier-v5-codex-subscription`.

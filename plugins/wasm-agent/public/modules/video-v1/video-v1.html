@@ -1,0 +1,40 @@
+<section class="vv-shell" data-editor-state="empty">
+  <header class="vv-intro">
+    <div><p class="vv-kicker">Local media module</p><h2>Video V1</h2></div>
+    <span class="vv-local">No upload</span>
+  </header>
+  <label class="vv-picker">Choose a video<input data-source type="file" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv"></label>
+  <div class="vv-stage" hidden data-stage>
+    <video data-video playsinline preload="metadata"></video>
+    <canvas data-canvas hidden></canvas>
+    <div class="vv-player-controls">
+      <button type="button" data-player-toggle aria-label="Play selected range">▶</button>
+      <output data-player-current>0:00.0</output>
+      <input data-player-seek type="range" min="0" max="0" step="0.01" value="0" aria-label="Selected range playback position">
+      <output data-player-end>0:00.0</output>
+    </div>
+  </div>
+  <section class="vv-trim" hidden data-trim>
+    <div class="vv-range-labels"><label>Start <output data-start-label>0:00.0</output></label><label>End <output data-end-label>0:00.0</output></label></div>
+    <div class="vv-timeline" data-timeline>
+      <div class="vv-filmstrip" data-filmstrip aria-hidden="true"></div>
+      <div class="vv-shade vv-shade-left" data-shade-left aria-hidden="true"></div>
+      <div class="vv-shade vv-shade-right" data-shade-right aria-hidden="true"></div>
+      <div class="vv-selection" data-selection role="slider" tabindex="0" aria-label="Move selected video interval" aria-valuemin="0" aria-valuenow="0"><i></i><i></i></div>
+      <input data-start type="range" min="0" step="0.05" value="0" aria-label="Trim start">
+      <input data-end type="range" min="0" step="0.05" value="0" aria-label="Trim end">
+    </div>
+    <div class="vv-timeline-scale"><span>0:00</span><span data-source-duration>0:00</span></div>
+    <p>Selection: <strong data-duration>0.0 s</strong> (1–20 seconds)</p>
+  </section>
+  <section class="vv-specs" aria-label="Output specification">
+    <span>WebM</span><span>AV1</span><span>Opus</span><span>AVIF poster</span><span>≤30 fps</span><span>≤3 MB</span>
+  </section>
+  <div class="vv-actions"><button type="button" data-download-module>Download module folder (.zip)</button><button type="button" data-preview disabled>Preview range</button><button class="vv-primary" type="button" data-export disabled>Export module</button></div>
+  <div class="vv-progress" hidden data-progress><progress max="1" value="0"></progress><span>Encoding in real time…</span></div>
+  <p class="vv-status" data-status role="status" aria-live="polite">Choose a browser-compatible video to begin.</p>
+  <section class="vv-result" hidden data-result>
+    <img data-poster alt="Generated AVIF poster">
+    <div><strong data-result-title>Module ready</strong><p data-result-detail></p><button type="button" class="vv-primary" data-download>Download files</button></div>
+  </section>
+</section>

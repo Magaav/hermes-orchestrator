@@ -19,6 +19,7 @@ function boundedResumeCheckpoint(value = {}) {
   const schema = cleanText(checkpoint?.schema);
   if (!checkpoint || !new Set([
     "master.frontier.v5.checkpoint.v1",
+    "master.frontier.v6.checkpoint.ref.v1",
     "hermes.wasm_agent.restart_checkpoint.v1",
   ]).has(schema)) return null;
   try {
@@ -32,6 +33,15 @@ function boundedResumeCheckpoint(value = {}) {
         sha256: cleanText(checkpoint.sha256),
       };
     }
+    if (schema === "master.frontier.v6.checkpoint.ref.v1") {
+      return {
+        schema,
+        protocol: "v6",
+        source_run_id: cleanText(checkpoint.source_run_id),
+        source_turn_id: cleanText(checkpoint.source_turn_id),
+        sha256: cleanText(checkpoint.sha256),
+      };
+    }
     return JSON.parse(encoded);
   } catch {
     return null;
@@ -41,6 +51,21 @@ function boundedResumeCheckpoint(value = {}) {
 export function isAgentContinuationRequest(text = "") {
   const normalized = cleanText(text).toLowerCase().replace(/[.!?]+$/g, "").trim();
   return new Set(["continue", "go on", "keep going", "resume", "continue please", "please continue", "carry on"]).has(normalized);
+}
+
+export function masterFrontierFailureDisposition(error = {}) {
+  const source = error?.error || error;
+  const diagnostic = error?.diagnostic || source?.diagnostic || source?.payload?.error || source || {};
+  const code = cleanText(diagnostic.code || diagnostic.category || diagnostic.mode).toLowerCase();
+  const reason = cleanText(diagnostic.message || source?.message || source).toLowerCase();
+  const interrupted = new Set([
+    "agent_run_cancelled",
+    "provider_failed",
+    "provider_interrupted",
+    "provider_timeout",
+    "provider_transport_failed",
+  ]).has(code) || /\b(?:connection reset|network error|server restart(?:ed)?|transport failure|upstream timeout)\b/.test(reason);
+  return { code, interrupted, terminal: interrupted ? "interrupted" : "completed_error" };
 }
 
 function precedingObjective(messages, assistantIndex) {
@@ -134,8 +159,11 @@ export async function recoverMasterFrontierFinal(pendingMessage = {}, options = 
   try {
     const payload = await options.fetchRun(runId, options);
     const run = payload?.run && typeof payload.run === "object" ? payload.run : null;
-    if (run?.status === "interrupted" && run.error) {
-      Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, run.error));
+    if (new Set(["interrupted", "cancelled", "failed"]).has(cleanText(run?.status).toLowerCase())) {
+      const error = run?.error && typeof run.error === "object"
+        ? run.error
+        : new Error(`Saved assistant run ended with status ${cleanText(run?.status, "failed")}.`);
+      Object.assign(pendingMessage, markMasterFrontierInterrupted(pendingMessage, error));
     }
     return run?.status === "completed" && run.final ? run.final : null;
   } catch (error) {

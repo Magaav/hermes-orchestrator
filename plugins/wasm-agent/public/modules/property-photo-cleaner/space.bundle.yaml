@@ -1,0 +1,21 @@
+id: hermes/property-photo-cleaner
+name: Property Photo Cleaner
+version: 0.2.0
+description: Privacy-first real-estate photo correction and local object removal.
+capabilities:
+  - actions
+  - browser-runtime
+  - local-files
+  - local-storage
+extension_points:
+  - _core/framework/initializer.js/initialize/end
+compatibility:
+  space_agent: ">=0.65"
+runtime:
+  initializer: property-photo-cleaner.launcher.js
+artifact: artifact.json
+actions:
+  - id: hermes.property_photo_cleaner.open
+    title: Open Property Photo Cleaner
+    capability: browser-runtime
+    description: Open the lazy-loaded local photo editor.

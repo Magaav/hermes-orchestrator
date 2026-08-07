@@ -1,0 +1,84 @@
+<div class="asolaria-shell">
+  <header class="asolaria-intro">
+    <div>
+      <p class="asolaria-eyebrow">Browser-local deterministic WASM</p>
+      <h2>ASOLARIA reasoning drills</h2>
+      <p>Turn text or a file into a reproducible 3,078-byte receipt. Input bytes stay in this browser.</p>
+      <p class="asolaria-boundary">Experimental receipt and visualization only. No decision authority; tested prediction added no value.</p>
+    </div>
+    <span class="asolaria-runtime-chip" data-runtime>Not loaded</span>
+  </header>
+
+  <section class="asolaria-input-panel">
+    <label for="asolaria-text">Text drill</label>
+    <textarea id="asolaria-text" rows="5" placeholder="Enter material for the receipt engine"></textarea>
+    <div class="asolaria-actions">
+      <button type="button" data-action="run-text">Run text</button>
+      <label class="asolaria-file-button">
+        Run file
+        <input type="file" data-file>
+      </label>
+      <button type="button" data-action="export" disabled>Export receipt</button>
+    </div>
+  </section>
+
+  <p class="asolaria-status" data-status aria-live="polite">Choose text or a file to begin.</p>
+  <section class="asolaria-result" data-lattice>
+    <div>
+      <p class="asolaria-eyebrow">Structural finding</p>
+      <h3>Three-axis lattice</h3>
+      <p>The claimed thirds are exposed as counts, not treated as an answer-changing law.</p>
+    </div>
+    <div class="asolaria-metrics">
+      <div><span>Receipt states</span><strong data-receipt-states>—</strong></div>
+      <div><span>AC states</span><strong data-ac-states>—</strong></div>
+      <div><span>Solid cells</span><strong data-solid-cells>—</strong></div>
+      <div><span>Translucent</span><strong data-translucent-cells>—</strong></div>
+    </div>
+    <output data-lattice-projection></output>
+    <details>
+      <summary>Lattice contract</summary>
+      <pre data-lattice-detail></pre>
+    </details>
+  </section>
+
+  <section class="asolaria-result" data-result hidden>
+    <div class="asolaria-metrics">
+      <div><span>Cells</span><strong data-cells>—</strong></div>
+      <div><span>Chain</span><strong data-chain>—</strong></div>
+      <div><span>Count</span><strong data-count>—</strong></div>
+      <div><span>Prism</span><strong data-prism>—</strong></div>
+    </div>
+    <label>Compact agent projection</label>
+    <output data-projection></output>
+    <details>
+      <summary>Runtime truth</summary>
+      <pre data-inspection></pre>
+    </details>
+  </section>
+
+  <section class="asolaria-input-panel">
+    <div>
+      <p class="asolaria-eyebrow">Power extraction</p>
+      <h3>Calibrate binary results</h3>
+      <p>Import JSON results with <code>expected</code>, <code>predicted</code>, <code>split</code>, and <code>topic</code>. Inversion is allowed only after balanced, stable holdout evidence.</p>
+    </div>
+    <label class="asolaria-file-button">
+      Score benchmark JSON
+      <input type="file" accept="application/json,.json" data-calibration-file>
+    </label>
+    <div class="asolaria-calibration" data-calibration hidden>
+      <div class="asolaria-metrics">
+        <div><span>Direct holdout</span><strong data-direct>—</strong></div>
+        <div><span>Inverted holdout</span><strong data-inverted>—</strong></div>
+        <div><span>Route</span><strong data-route>—</strong></div>
+        <div><span>Authority</span><strong data-authority>—</strong></div>
+      </div>
+      <output data-calibration-projection></output>
+      <details>
+        <summary>Calibration gates</summary>
+        <pre data-calibration-detail></pre>
+      </details>
+    </div>
+  </section>
+</div>

@@ -1,0 +1,163 @@
+.asolaria-widget {
+  display: flex;
+  flex-direction: column;
+}
+
+.asolaria-scroll-host {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-gutter: stable;
+}
+
+.asolaria-shell {
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  min-height: 100%;
+  padding: 1rem;
+  color: var(--text-color, #eef2ff);
+  background: radial-gradient(circle at 10% 0%, rgba(93, 78, 255, .2), transparent 38%), #111522;
+}
+
+.asolaria-intro {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.asolaria-intro h2,
+.asolaria-result h3,
+.asolaria-input-panel h3,
+.asolaria-intro p {
+  margin: 0;
+}
+
+.asolaria-eyebrow {
+  color: #aebaff;
+  font-size: .72rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.asolaria-runtime-chip {
+  flex: none;
+  padding: .35rem .55rem;
+  border: 1px solid #465171;
+  border-radius: 999px;
+  font-size: .72rem;
+}
+
+.asolaria-input-panel,
+.asolaria-result {
+  display: grid;
+  gap: .65rem;
+  padding: .9rem;
+  border: 1px solid #303a55;
+  border-radius: .8rem;
+  background: rgba(13, 18, 31, .82);
+}
+
+.asolaria-input-panel textarea {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  padding: .7rem;
+  color: inherit;
+  border: 1px solid #3a4665;
+  border-radius: .55rem;
+  background: #0a0f1b;
+}
+
+.asolaria-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+
+.asolaria-actions button,
+.asolaria-file-button {
+  cursor: pointer;
+  padding: .55rem .75rem;
+  color: inherit;
+  border: 1px solid #52628b;
+  border-radius: .55rem;
+  background: #202b47;
+  font: inherit;
+}
+
+.asolaria-actions button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.asolaria-file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.asolaria-status {
+  margin: 0;
+  color: #bdc7df;
+}
+
+.asolaria-boundary {
+  margin-top: .5rem !important;
+  color: #f4c879;
+  font-size: .78rem;
+}
+
+.asolaria-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .5rem;
+}
+
+.asolaria-metrics div {
+  display: grid;
+  gap: .15rem;
+  padding: .55rem;
+  border-radius: .55rem;
+  background: #171e31;
+}
+
+.asolaria-metrics span {
+  color: #99a6c7;
+  font-size: .7rem;
+}
+
+.asolaria-result output {
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .75rem;
+}
+
+.asolaria-calibration {
+  display: grid;
+  gap: .65rem;
+}
+
+.asolaria-result pre {
+  max-height: 15rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: .72rem;
+}
+
+@media (max-width: 560px) {
+  .asolaria-intro {
+    display: grid;
+  }
+
+  .asolaria-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -9,17 +9,49 @@ const appPath = path.join(pluginRoot, "public", "app.js");
 const source = fs.readFileSync(modulePath, "utf8");
 const sandbox = { exports: {} };
 vm.runInNewContext(
-  `${source.replace("export function masterFrontierObjectiveKind", "function masterFrontierObjectiveKind").replace("export function masterFrontierOutputBudget", "function masterFrontierOutputBudget").replace("export function masterFrontierUsefulFallback", "function masterFrontierUsefulFallback")}\nexports.masterFrontierObjectiveKind = masterFrontierObjectiveKind;\nexports.masterFrontierOutputBudget = masterFrontierOutputBudget;\nexports.masterFrontierUsefulFallback = masterFrontierUsefulFallback;`,
+  `${source.replace(/export\s+function\s+/g, "function ")}\nexports.masterFrontierObjectiveKind = masterFrontierObjectiveKind;\nexports.masterFrontierOutputBudget = masterFrontierOutputBudget;\nexports.masterFrontierRouteId = masterFrontierRouteId;\nexports.masterFrontierUsefulFallback = masterFrontierUsefulFallback;`,
   sandbox,
   { filename: modulePath }
 );
 
-const { masterFrontierObjectiveKind, masterFrontierOutputBudget, masterFrontierUsefulFallback } = sandbox.exports;
+const { masterFrontierObjectiveKind, masterFrontierOutputBudget, masterFrontierRouteId, masterFrontierUsefulFallback } = sandbox.exports;
 
 {
   const prompt = "check out our master:frontier node inside wasm. critisize it";
   assert.strictEqual(masterFrontierObjectiveKind(prompt), "diagnosis");
   assert.strictEqual(masterFrontierOutputBudget(prompt), 1800);
+}
+
+{
+  assert.strictEqual(masterFrontierObjectiveKind("hello"), "model_decision");
+  assert.strictEqual(
+    masterFrontierObjectiveKind("heard you got upgrades brand new state of art"),
+    "model_decision"
+  );
+  assert.strictEqual(
+    masterFrontierObjectiveKind("hello, can you se the Property Photo Cleaner widget?"),
+    "model_decision"
+  );
+}
+
+{
+  const prompt = "Verify the current widget revision, run its test, inspect the diff, and report the exact changed files.";
+  assert.strictEqual(masterFrontierObjectiveKind(prompt), "verification");
+  const preservedRevision = "Finish the existing widget fixes. Inspect the current worktree, preserve the correct mutation, run the registered focused test, inspect the current diff, collect scoped proof, and finalize only with revision-bound changed-file evidence.";
+  assert.strictEqual(masterFrontierObjectiveKind(preservedRevision), "verification");
+  assert.strictEqual(masterFrontierObjectiveKind("Fix the widget code and test the patch."), "implementation");
+  assert.strictEqual(masterFrontierObjectiveKind("Inspect the current diff, then patch the widget and run its test."), "implementation");
+  assert.strictEqual(
+    masterFrontierObjectiveKind("Inspect the current planner contract and explain it. Cite the files you read."),
+    "diagnosis"
+  );
+  assert.strictEqual(
+    masterFrontierObjectiveKind("I need you to create a new experience where I can start and stop a live transcript."),
+    "implementation"
+  );
+  assert.strictEqual(masterFrontierObjectiveKind("Can you create that?"), "implementation");
+  assert.strictEqual(masterFrontierRouteId("implementation"), "wasm-agent.space.ui");
+  assert.strictEqual(masterFrontierRouteId("conversation"), "wasm-agent.avatar-chat.ui");
 }
 
 {
@@ -59,10 +91,30 @@ const { masterFrontierObjectiveKind, masterFrontierOutputBudget, masterFrontierU
   assert.strictEqual(fallback, null);
 }
 
+{
+  const billingUrl = "https://opencode.ai/workspace/example/billing";
+  const fallback = masterFrontierUsefulFallback("hello", {
+    reason: `Insufficient balance. Manage your billing here: ${billingUrl}`,
+    provider_interrupted: true,
+    continuation_context: { previous_run_id: "wa_run_billing" },
+  });
+  assert(fallback);
+  assert.strictEqual(fallback.status, "provider_billing_required");
+  assert.strictEqual(fallback.continuation_context, null);
+  assert.strictEqual(fallback.metrics.resumable, false);
+  assert(fallback.answer.includes("Insufficient balance"));
+  assert(fallback.answer.includes(billingUrl));
+  assert(fallback.answer.includes("Add funds or switch to a funded provider"));
+  assert(!fallback.answer.includes("I was interrupted"));
+  assert(!fallback.answer.includes("next attempt"));
+  assert(!fallback.answer.includes("Saved run"));
+}
+
 assert(!source.includes("feelings"), "fallback policy must not contain prompt-specific feelings handling");
 assert(!source.includes("improove"), "fallback policy must not contain captured prompt typos");
 const appJs = fs.readFileSync(appPath, "utf8");
-assert(appJs.includes('from "./modules/master-frontier/useful-fallback.js"'));
+assert(/from "\.\/modules\/master-frontier\/useful-fallback\.js(?:\?[^"]+)?"/.test(appJs));
 assert(appJs.includes("original_objective: userMessageContent"));
 assert(appJs.includes("continuation_context: continuationCheckpoint"));
+assert(appJs.includes("route_id: envelope.route_id"), "the immutable run request must preserve the selected route outside the envelope");
 console.log("Master:frontier useful fallback tests: PASS");

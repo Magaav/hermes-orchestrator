@@ -36,6 +36,7 @@ native.capabilities.releaseFeedValidation.v1
 native.capabilities.nativeControlPolling.v1
 native.capabilities.crashSafeStatus.v1
 native.capabilities.capabilityManifest.v1
+native.capabilities.observabilityLease.v1
 ```
 
 Android advertised native capabilities:
@@ -57,6 +58,7 @@ native.capabilities.auditLog.v1
 native.capabilities.releaseFeedValidation.v1
 native.capabilities.crashSafeStatus.v1
 native.capabilities.capabilityManifest.v1
+native.capabilities.observabilityLease.v1
 ```
 
 Control-plane commands:
@@ -71,7 +73,25 @@ refresh_downloaded_hot_ops
 list_hot_operations
 run_shell_self_test
 run_hot_operation
+observability_enable
+observability_collect
+observability_status
+observability_disable
 ```
+
+`observabilityLease.v1` is off by default. `observability_enable` grants a
+5–120 second lease, `observability_collect` returns bounded aggregate analytics
+and performance fields, and expiry or `observability_disable` detaches the
+debugger immediately. Electron uses `webContents.debugger` without a TCP debug
+port; Android enables the WebView DevTools socket only for the lease. A plain
+PWA reports `observe.cdp.external_on_demand` because browser CDP must be supplied
+by an authorized external browser controller.
+
+Windows release evolution is unattended after the first installation: the
+login-persistent supervisor owns Electron, the client validates the HTTPS feed,
+build ordering, artifact type, byte size, origin/path, and SHA-256, then invokes
+NSIS silently and relaunches through the supervisor. Normal checks occur once
+at startup and every six hours; observability remains disabled throughout.
 
 ## Bundle Formats
 

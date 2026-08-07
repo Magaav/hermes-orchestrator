@@ -84,7 +84,7 @@ def _observation(value: dict[str, Any]) -> dict[str, Any]:
         if key in {
             "ok", "code", "summary", "runtime", "focus", "path", "start_line", "end_line",
             "line_count", "sha256", "truncated", "limitations", "primitive", "local_action", "changed_files",
-            "checks", "schema", "check_id", "returncode", "duration_ms",
+            "checks", "schema", "check_id", "returncode", "duration_ms", "durable_targets", "next_actions",
         }
     }
     nested = value.get("result") if isinstance(value.get("result"), dict) else None
@@ -108,6 +108,7 @@ def _receipt(value: dict[str, Any]) -> dict[str, Any]:
             "tool", "ok", "code", "summary", "runtime", "focus", "path", "start_line",
             "end_line", "sha256", "truncated", "limitations", "primitive", "local_action",
             "changed_files", "checks",
+            "durable_targets", "next_actions",
         }
     }
     observation = value.get("observation") if isinstance(value.get("observation"), dict) else value
@@ -140,9 +141,19 @@ def _state_projection(state: dict[str, Any]) -> dict[str, Any]:
             for key, value in list(actions.items())[-MAX_ACTIONS:]
             if isinstance(value, dict)
         },
+        "observed_preimages": {
+            str(path)[:300]: str(digest)[:64]
+            for path, digest in list(
+                state.get("observed_preimages").items()
+                if isinstance(state.get("observed_preimages"), dict) else []
+            )[-24:]
+            if path and len(str(digest)) == 64
+        },
         "pending_action": _bounded(state.get("pending_action"), string_limit=320),
         "pending": _bounded(state.get("pending"), string_limit=120),
         "last_error": _bounded(state.get("last_error"), string_limit=600),
+        "repair_revision": max(0, int(state.get("repair_revision") or 0)),
+        "repair_streak": max(0, int(state.get("repair_streak") or 0)),
         "completion_assessment": _bounded(state.get("completion_assessment"), string_limit=600),
         "executive": _bounded(executive.normalize(state.get("executive")), string_limit=600),
         "decision_finalization": state.get("decision_finalization") is True,

@@ -20,7 +20,7 @@ CAMPAIGN = {
     "lifecycle": ("master_frontier_v5.test.py", [
         "test_compact_budget_exposes_separate_call_and_task_clocks",
         "test_edit_preimage_is_bound_from_fresh_same_trajectory_read",
-        "test_edit_requires_test_diff_and_proof_before_final",
+        "test_missing_mutation_repair_reopens_tools_after_forced_completion",
         "test_expired_task_lease_allows_only_pending_final_synthesis",
         "test_interrupted_action_blocks_before_another_provider_call",
         "test_interrupted_read_is_released_for_safe_retry",

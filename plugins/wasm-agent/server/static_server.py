@@ -55,18 +55,22 @@ from master_frontier import cyphers_v3 as master_frontier_cyphers_v3
 from master_frontier import node_skills as master_frontier_node_skills
 from master_frontier import token_ledger as master_frontier_token_ledger
 from master_frontier import run_protocol as master_frontier_run_protocol
-from master_frontier import controller_v4 as master_frontier_controller_v4
-from master_frontier import controller_v5 as master_frontier_controller_v5, run_control as master_frontier_run_control
+from master_frontier import controller_router as master_frontier_controller_router, run_control as master_frontier_run_control
+from master_frontier.v6.mcp_transport import catalog as master_frontier_mcp_catalog, call as master_frontier_mcp_call
 from master_frontier import inspect_contract as master_frontier_inspect
 from master_frontier import runtime_inspect as master_frontier_runtime_inspect
 from master_frontier import repository_actions as master_frontier_repository_actions
 from master_frontier import repository_checks as master_frontier_repository_checks
 from master_frontier import repository_diff as master_frontier_repository_diff
+from master_frontier import repository_path_policy as master_frontier_repository_path_policy
 from master_frontier import run_recovery as master_frontier_run_recovery
 from master_frontier import persistence as master_frontier_persistence
-from master_frontier import provider_tools as master_frontier_provider_tools, provider_transport as master_frontier_provider_transport
+from master_frontier import provider_step as master_frontier_provider_step, provider_tools as master_frontier_provider_tools, provider_transport as master_frontier_provider_transport
 from master_frontier import planner as master_frontier_planner, repair as master_frontier_repair, loop as master_frontier_loop, answer_shaping as master_frontier_answer_shaping
 import app_config as wasm_agent_app_config
+import live_clients as wasm_agent_live_clients
+import native_control_auth as wasm_agent_native_control_auth
+import property_photo_edit
 import synthetic_canary
 
 try:
@@ -89,10 +93,6 @@ DEPLOYMENT_MODE_LOCAL = "local"
 DEPLOYMENT_MODE_CLOUD = "cloud"
 IMAGE_CARD_ANALYZER_REVISION = "image-card-text-v2"
 WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-DEFAULT_BROWSER_STREAM_FPS = 4.0
-DEFAULT_BROWSER_STREAM_QUALITY = 62
-DEFAULT_BROWSER_STREAM_EVERY_NTH_FRAME = 3
-DEFAULT_BROWSER_SESSION_TTL_SEC = 30 * 60
 DEFAULT_AGENT_BRIDGE_TIMEOUT_SEC = 30 * 60
 DEFAULT_AGENT_IMAGE_MAX_BYTES = 1024 * 1024
 DEFAULT_AGENT_IMAGE_LIMIT = 8
@@ -346,19 +346,6 @@ FLUX_MAIN_NODE_PROVISION_COST = 100
 FLUX_AGENT_HARNESS_COST = 10
 FLUX_MAIN_NODE_PROVIDER = "opencode-go"
 FLUX_MAIN_NODE_MODEL = "deepseek-v4-flash"
-AGENT_MUTATION_ALLOWED_EXTENSIONS = {
-    ".css",
-    ".html",
-    ".js",
-    ".json",
-    ".md",
-    ".py",
-    ".sh",
-    ".toml",
-    ".txt",
-    ".yaml",
-    ".yml",
-}
 AGENT_MUTATION_MAX_OPS = 8
 AGENT_MUTATION_MAX_FILE_BYTES = 2 * 1024 * 1024
 AGENT_MUTATION_MAX_TOTAL_REPLACE_BYTES = 128 * 1024
@@ -379,7 +366,6 @@ class WasmAgentServer(ThreadingHTTPServer):
         public_root: Path,
         state_dir: Path,
         bridge_url: str,
-        browser_timeout_sec: float,
     ) -> None:
         self.observability_hub: ObservabilityHub | None = None
         super().__init__(server_address, handler_class)
@@ -387,9 +373,6 @@ class WasmAgentServer(ThreadingHTTPServer):
         self.public_root = public_root
         self.state_dir = state_dir
         self.bridge_url = bridge_url.rstrip("/")
-        self.browser_timeout_sec = browser_timeout_sec
-        self.browser_sessions: dict[str, dict[str, Any]] = {}
-        self.browser_sessions_lock = threading.Lock()
         self.camera_stream_sessions: dict[str, dict[str, Any]] = {}
         self.camera_stream_sessions_lock = threading.Lock()
         self.camera_push_processes: dict[str, subprocess.Popen[bytes]] = {}
@@ -471,26 +454,6 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             return super().do_GET()
         if path == "/.well-known/assetlinks.json":
             self._json(HTTPStatus.OK, android_asset_links(), headers={"Cache-Control": "no-store"})
-            return
-        if path == "/browser/stream":
-            try:
-                require_browser_feature_enabled(self)
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
-                return
-            if not same_origin_websocket(self):
-                self._json(
-                    HTTPStatus.FORBIDDEN,
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "origin_rejected",
-                            "message": "WebSocket origin does not match this wasm-agent host.",
-                        },
-                    },
-                )
-                return
-            serve_browser_stream(self)
             return
         if path == "/remote-control/live":
             if not same_origin_websocket(self):
@@ -1083,18 +1046,7 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
             status, payload = master_frontier_run_control.request_http(self.server, cancel_run_match.group(1), user, globals())
             self._json(status, payload)
             return
-        if path == "/browser/open":
-            try:
-                require_browser_feature_enabled(self)
-                body = self._read_json()
-                self._json(HTTPStatus.OK, {"ok": True, "browser": capture_browser(self.server, body)})
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
-            except Exception as exc:
-                self._json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "error": {"code": "browser_error", "message": str(exc)}},
-                )
+        if property_photo_edit.dispatch_http(self, path, configured_env_value):
             return
         if path.startswith("/bridge/"):
             try:
@@ -1107,27 +1059,6 @@ class WasmAgentHandler(SimpleHTTPRequestHandler):
                     HTTPStatus.BAD_GATEWAY,
                     {"ok": False, "error": {"code": "bridge_proxy_error", "message": str(exc)}},
                 )
-            return
-        if path == "/browser/input":
-            try:
-                require_browser_feature_enabled(self)
-                body = self._read_json()
-                self._json(HTTPStatus.OK, {"ok": True, "browser": browser_input(self.server, body)})
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
-            except Exception as exc:
-                self._json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "error": {"code": "browser_error", "message": str(exc)}},
-                )
-            return
-        if path == "/browser/close":
-            try:
-                require_browser_feature_enabled(self)
-                body = self._read_json()
-                self._json(HTTPStatus.OK, {"ok": True, "browser": close_browser_session(self.server, body)})
-            except BrowserError as exc:
-                self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
             return
         if path == "/account/devices/sync":
             try:
@@ -3156,7 +3087,7 @@ def route_contract_write_file_path(contract: dict[str, Any], rel_path: str) -> P
     roots = contract.get("allowed_write_roots") if isinstance(contract.get("allowed_write_roots"), list) else [str(root)]
     if not route_path_inside(path, [str(item) for item in roots]):
         raise BrowserError("route_path_denied", "Route write path is outside allowed write roots.", status=HTTPStatus.FORBIDDEN)
-    if path.suffix.lower() not in AGENT_MUTATION_ALLOWED_EXTENSIONS:
+    if not master_frontier_repository_path_policy.writable_text_source(path):
         raise BrowserError("route_path_denied", "Route write path must be a recognized text source file.", status=HTTPStatus.FORBIDDEN)
     return path
 
@@ -3379,81 +3310,77 @@ def route_lookup_symbol_tool(body: dict[str, Any]) -> dict[str, Any]:
     if not query:
         raise BrowserError("lookup_symbol_missing_query", "lookup.symbol requires query.")
     root = Path(str(contract.get("workspace_root") or "")).resolve()
-    likely_paths = contract.get("likely_paths") if isinstance(contract.get("likely_paths"), list) else []
-    search_paths: list[str] = []
-    for rel_path in likely_paths[:ROUTE_LOOKUP_MAX_RESULTS]:
-        try:
-            path = route_contract_file_path(contract, str(rel_path))
-        except BrowserError:
-            continue
-        if path.exists():
-            search_paths.append(str(path))
-    if not search_paths:
-        search_paths = [str(root)]
     matches: list[dict[str, Any]] = []
     returncode = 0
     engine = "rg"
-    try:
-        proc = subprocess.run(
-            [
-                "rg",
-                "--fixed-strings",
-                "--line-number",
-                "--no-heading",
-                "--color=never",
-                "--glob",
-                "!state/**",
-                "--glob",
-                "!reports/**",
-                query,
-                *search_paths,
-            ],
-            text=True,
-            capture_output=True,
-            timeout=8,
-            check=False,
-        )
-        returncode = int(proc.returncode)
-        for line in (proc.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
-            path_text, line_no, text = (line.split(":", 2) + ["", ""])[:3]
+    search_paths: list[str] = []
+    search_batches: list[list[str]] = []
+    for batch in master_frontier_routes.symbol_search_batches(contract):
+        resolved_batch: list[str] = []
+        for rel_path in batch:
             try:
-                rel = str(Path(path_text).resolve().relative_to(root))
-            except ValueError:
-                rel = clipped(path_text, 240)
-            matches.append({
-                "path": rel,
-                "line": int(line_no) if str(line_no).isdigit() else 0,
-                "text": clipped(text.strip(), 300),
-            })
+                path = root if not rel_path else route_contract_file_path(contract, rel_path)
+            except BrowserError:
+                continue
+            if path.exists():
+                resolved_batch.append(str(path))
+        if resolved_batch:
+            search_batches.append(resolved_batch)
+    try:
+        for search_paths in search_batches:
+            proc = subprocess.run(
+                [
+                    "rg", "--fixed-strings", "--line-number", "--no-heading", "--color=never",
+                    "--glob", "!state/**", "--glob", "!reports/**", query, *search_paths,
+                ],
+                text=True, capture_output=True, timeout=8, check=False,
+            )
+            returncode = int(proc.returncode)
+            for line in (proc.stdout or "").splitlines()[:ROUTE_LOOKUP_MAX_RESULTS]:
+                path_text, line_no, text = (line.split(":", 2) + ["", ""])[:3]
+                try:
+                    rel = str(Path(path_text).resolve().relative_to(root))
+                except ValueError:
+                    rel = clipped(path_text, 240)
+                matches.append({
+                    "path": rel,
+                    "line": int(line_no) if str(line_no).isdigit() else 0,
+                    "text": clipped(text.strip(), 300),
+                })
+            if matches:
+                break
     except FileNotFoundError:
         engine = "python"
-        candidate_files: list[Path] = []
-        for item in search_paths:
-            path = Path(item)
-            if path.is_file():
-                candidate_files.append(path)
-            elif path.is_dir():
-                for child in path.rglob("*"):
-                    if len(candidate_files) >= ROUTE_LOOKUP_MAX_RESULTS:
-                        break
-                    if child.is_file() and child.suffix.lower() in AGENT_MUTATION_ALLOWED_EXTENSIONS and "state" not in child.parts and "reports" not in child.parts:
-                        candidate_files.append(child)
-        for path in candidate_files:
-            if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
+        for search_paths in search_batches:
+            candidate_files: list[Path] = []
+            for item in search_paths:
+                path = Path(item)
+                if path.is_file():
+                    candidate_files.append(path)
+                elif path.is_dir():
+                    for child in path.rglob("*"):
+                        if len(candidate_files) >= ROUTE_LOOKUP_MAX_RESULTS:
+                            break
+                        if child.is_file() and master_frontier_repository_path_policy.writable_text_source(child) and "state" not in child.parts and "reports" not in child.parts:
+                            candidate_files.append(child)
+            for path in candidate_files:
+                if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
+                    break
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for index, line in enumerate(text.splitlines(), start=1):
+                    if query in line:
+                        matches.append({
+                            "path": route_rel_to_root(contract, path),
+                            "line": index,
+                            "text": clipped(line.strip(), 300),
+                        })
+                        if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
+                            break
+            if matches:
                 break
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for index, line in enumerate(text.splitlines(), start=1):
-                if query in line:
-                    matches.append({
-                        "path": route_rel_to_root(contract, path),
-                        "line": index,
-                        "text": clipped(line.strip(), 300),
-                    })
-                    if len(matches) >= ROUTE_LOOKUP_MAX_RESULTS:
-                        break
     return route_tool_ok(
         "hermes.wasm_agent.route.lookup_symbol.v1",
         route_id=str(contract.get("route_id") or ""),
@@ -3573,12 +3500,14 @@ def route_test_run_focused_tool(body: dict[str, Any]) -> dict[str, Any]:
 
 def route_git_diff_summary_tool(body: dict[str, Any]) -> dict[str, Any]:
     contract = route_contract_for_tool(body)
-    result = master_frontier_repository_diff.collect(contract, max_entries=ROUTE_LOOKUP_MAX_RESULTS)
+    result = master_frontier_repository_diff.collect(
+        contract, max_entries=ROUTE_LOOKUP_MAX_RESULTS,
+        include_paths=body.get("paths") if isinstance(body.get("paths"), list) else None,
+    )
     return {
         **result,
         "schema": "hermes.wasm_agent.route.git_diff_summary.v2",
-        "count": len(result["changed_files"]),
-    }
+        "count": len(result["changed_files"])}
 
 
 def route_proof_collect_tool(user: dict[str, Any] | None, body: dict[str, Any]) -> dict[str, Any]:
@@ -4799,10 +4728,8 @@ def direct_envelope_with_metrics(body: dict[str, Any]) -> tuple[list[dict[str, A
 
 def openai_direct_envelope_text(body: dict[str, Any], envelope: dict[str, Any]) -> str:
     return master_frontier_cyphers_v3.transport_text(
-        envelope,
-        receiver=direct_envelope_receiver(body),
-        render=direct_envelope_json,
-        limit=OPENAI_DIRECT_ENVELOPE_MAX_JSON_CHARS,
+        envelope, receiver=direct_envelope_receiver(body), render=direct_envelope_json,
+        limit=master_frontier_provider_step.direct_envelope_limit(envelope, OPENAI_DIRECT_ENVELOPE_MAX_JSON_CHARS),
         project_task=master_frontier_envelope.task_contract_projection,
     )
 
@@ -4826,41 +4753,6 @@ def openai_responses_text(response: Any) -> str:
             if isinstance(text, str) and text:
                 chunks.append(text)
     return "".join(chunks).strip()
-
-
-def iter_sse_json(response: Any) -> Any:
-    event_name = ""
-    data_lines: list[str] = []
-    for raw_line in response:
-        line = raw_line.decode("utf-8", "replace").rstrip("\r\n")
-        if not line:
-            if data_lines:
-                data = "\n".join(data_lines).strip()
-                data_lines = []
-                if data and data != "[DONE]":
-                    try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError:
-                        payload = {"type": event_name or "message", "data": data}
-                    if event_name and isinstance(payload, dict) and not payload.get("event"):
-                        payload["event"] = event_name
-                    yield payload
-            event_name = ""
-            continue
-        if line.startswith(":"):
-            continue
-        if line.startswith("event:"):
-            event_name = line.split(":", 1)[1].strip()
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line.split(":", 1)[1].lstrip())
-    if data_lines:
-        data = "\n".join(data_lines).strip()
-        if data and data != "[DONE]":
-            try:
-                yield json.loads(data)
-            except json.JSONDecodeError:
-                yield {"type": event_name or "message", "data": data}
 
 
 def openai_responses_completion(
@@ -4911,6 +4803,7 @@ def openai_responses_completion(
         ],
         "stream": True,
     }
+    request_body.update(master_frontier_provider_tools.responses_request_fields(body))
     if receiver == "openai-codex":
         request_body["store"] = False
     else:
@@ -4951,11 +4844,15 @@ def openai_responses_completion(
             headers["OpenAI-Project"] = project
     request = Request(config["endpoint"], data=data, headers=headers, method="POST")
     started = time.monotonic()
+    transport_timeout = master_frontier_provider_transport.timeout_sec()
+    deadline = master_frontier_provider_transport.deadline_at(started, transport_timeout)
     deltas: list[str] = []
     completed_response: dict[str, Any] | None = None
+    response_calls = master_frontier_provider_tools.ResponsesCallAccumulator()
     try:
-        with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec()) as response:
-            for event in iter_sse_json(response):
+        with urlopen(request, timeout=transport_timeout) as response, master_frontier_provider_transport.deadline_guard(response, deadline=deadline):
+            for event in master_frontier_provider_transport.iter_sse_json(response, deadline=deadline):
+                response_calls.ingest(event)
                 event_type = str(event.get("type") or event.get("event") or "")
                 delta = event.get("delta") if isinstance(event.get("delta"), str) else ""
                 if not delta and event_type == "response.output_text.delta":
@@ -5002,7 +4899,8 @@ def openai_responses_completion(
         diagnostic = provider_diagnostic(diagnostic_label, "network-failed", reason or "Responses request failed.", HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
         raise ProviderProxyError("network-failed", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY) from exc
     reply = "".join(deltas).strip() or openai_responses_text(completed_response or {})
-    if not reply:
+    tool_calls = response_calls.calls(completed_response or {})
+    if not reply and not tool_calls:
         diagnostic = provider_diagnostic(diagnostic_label, "empty-response", "Responses receiver returned no output text.", HTTPStatus.BAD_GATEWAY, endpoint=config["endpoint"], model=config["model"])
         raise ProviderProxyError("openai-empty-response", diagnostic["message"], diagnostic=diagnostic, status=HTTPStatus.BAD_GATEWAY)
     duration_ms = round((time.monotonic() - started) * 1000)
@@ -5017,6 +4915,7 @@ def openai_responses_completion(
         "content_type": "text",
         "parsed": parse_direct_envelope_reply(reply),
         "reply": reply,
+        "tool_calls": tool_calls,
         "usage": usage,
         "raw_usage": direct_envelope_redact(raw_usage) if isinstance(raw_usage, dict) else {},
         "provider": provider_label,
@@ -6297,7 +6196,6 @@ def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[st
         "stream": bool(action.get("stream") or action.get("STREAM")),
         "route_contract": workspace,
     }
-    payload["workspace"] = workspace
     return (
         "Direct-head requested Hermes capability dispatch. Act only within the listed CAPS, "
         "use REFS as handles rather than hidden context, and return compact answer/proof summary. "
@@ -6411,6 +6309,7 @@ def provider_envelope_run_context(body: dict[str, Any]) -> dict[str, Any]:
         "receiver": receiver,
         "protocol": body.get("protocol"),
         "investigation_mode": body.get("investigation_mode"),
+        "transcript": body.get("transcript") if isinstance(body.get("transcript"), list) else [],
     }
     return {
         "envelope": envelope,
@@ -6693,19 +6592,9 @@ def provider_envelope_run_execute(
     run: dict[str, Any],
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    selected_protocol = master_frontier_run_protocol.persisted(run)
-    if selected_protocol == master_frontier_run_protocol.V5:
-        return master_frontier_controller_v5.execute_owned(server, body, user=user, run_record=run, context=context, runtime=globals())
-    if selected_protocol == master_frontier_run_protocol.V4:
-        return master_frontier_controller_v4.execute_owned(server, body, user=user, run_record=run, context=context, runtime=globals())
-    # ARCH_EXCEPTION: owner=master-frontier-controller; reason=compatibility port binding while HTTP side effects remain server-owned; expires=2026-08-15
-    master_frontier_controller.bind_runtime(globals())
-    return master_frontier_controller.provider_envelope_run_execute_owned(
-        server,
-        body,
-        user=user,
-        run=run,
-        context=context,
+    return master_frontier_controller_router.execute(
+        master_frontier_run_protocol.persisted(run), server, body,
+        user=user, run=run, context=context, runtime=globals(),
     )
 
 
@@ -6810,12 +6699,14 @@ def provider_proxy_completion(
         method="POST",
     )
     started = time.monotonic()
+    transport_timeout = master_frontier_provider_transport.timeout_sec(requested=body.get("_timeout_sec"))
+    deadline = master_frontier_provider_transport.deadline_at(started, transport_timeout)
     if action_callback:
         deltas: list[str] = []
         completed_response: dict[str, Any] | None = None
         try:
-            with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec(requested=body.get("_timeout_sec"))) as response:
-                for event in iter_sse_json(response):
+            with urlopen(request, timeout=transport_timeout) as response, master_frontier_provider_transport.deadline_guard(response, deadline=deadline):
+                for event in master_frontier_provider_transport.iter_sse_json(response, deadline=deadline):
                     event_type = str(event.get("type") or event.get("event") or "")
                     delta = ""
                     choices = event.get("choices") if isinstance(event.get("choices"), list) else []
@@ -6881,8 +6772,8 @@ def provider_proxy_completion(
             "diagnostic": provider_diagnostic("backend-proxy", "ready", "Backend proxy provider request succeeded.", HTTPStatus.OK, endpoint=endpoint, model=model),
         }
     try:
-        with urlopen(request, timeout=master_frontier_provider_transport.timeout_sec(requested=body.get("_timeout_sec"))) as response:
-            raw = response.read().decode("utf-8", "replace")
+        with urlopen(request, timeout=transport_timeout) as response, master_frontier_provider_transport.deadline_guard(response, deadline=deadline):
+            raw = master_frontier_provider_transport.read_bytes(response, deadline=deadline).decode("utf-8", "replace")
             status = int(response.status)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:2000]
@@ -8873,13 +8764,6 @@ def public_deployment(handler: BaseHTTPRequestHandler | None = None) -> bool:
     return False
 
 
-def browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> bool:
-    configured = env_bool("HERMES_WASM_AGENT_BROWSER_ENABLED")
-    if configured is not None:
-        return configured
-    return not public_deployment(handler)
-
-
 def shared_voice_enabled() -> bool:
     configured = env_bool("HERMES_WASM_AGENT_SHARED_VOICE_ENABLED")
     return bool(configured) if configured is not None else False
@@ -8918,20 +8802,6 @@ def shared_voice_ice_servers() -> list[dict[str, Any]]:
         if item.strip()
     ]
     return [{"urls": stun_urls or ["stun:stun.l.google.com:19302"]}]
-
-
-def require_browser_feature_enabled(handler: BaseHTTPRequestHandler | None = None) -> None:
-    if browser_feature_enabled(handler):
-        return
-    raise BrowserError(
-        "browser_disabled",
-        (
-            "Host Browser is disabled for public deployments. Set "
-            "HERMES_WASM_AGENT_BROWSER_ENABLED=1 only after CDP and "
-            "private-network isolation are reviewed."
-        ),
-        status=HTTPStatus.FORBIDDEN,
-    )
 
 
 def content_security_policy(handler: BaseHTTPRequestHandler | None = None) -> str:
@@ -9778,6 +9648,14 @@ def append_agent_run_event(
             event = agent_run_append_event_conn(conn, row, event_type, summary=summary, payload=payload)
             conn.execute("UPDATE agent_run_tb SET updated_at = ? WHERE run_id = ?", (agent_run_now_ms(), clean_run_id))
             conn.commit()
+            integrity_proof = master_frontier_persistence.anchor_committed_event(
+                private_state_root=master_frontier_persistence.private_state_root(server, default_private_state_dir()), run=dict(row), event=event,
+                load_events=lambda: [public_agent_run_event(item) for item in conn.execute(
+                    "SELECT * FROM agent_run_event_tb WHERE run_id = ? ORDER BY seq", (clean_run_id,)
+                ).fetchall()],
+            )
+            if integrity_proof:
+                event["integrity_proof"] = integrity_proof
             return event
         except Exception:
             conn.rollback()
@@ -9905,12 +9783,12 @@ def agent_run_token_usage_payload(result: dict[str, Any]) -> dict[str, Any] | No
     else:
         primary_name = "bridge" if "bridge" in components else "run" if "run" in components else next(iter(components))
         primary = components[primary_name]
-    return {
+    return master_frontier_token_ledger.with_status_metadata({
         "schema": "hermes.wasm_agent.agent_run_token_usage.v1",
         "usage": primary,
         "primary": primary_name,
         "components": components,
-    }
+    }, result)
 
 
 def token_usage_is_exact(usage: dict[str, Any]) -> bool:
@@ -10171,7 +10049,6 @@ def agent_run_with_canonical_token_usage(result: dict[str, Any] | None) -> dict[
 
 
 def record_agent_run_final_proof_events(server: WasmAgentServer, run_id: str, result: dict[str, Any]) -> None:
-    record_agent_run_token_usage_event(server, run_id, result)
     diagnostics = result.get("diagnostics") if isinstance(result.get("diagnostics"), dict) else {}
     state_writeback = diagnostics.get("state_writeback") if isinstance(diagnostics.get("state_writeback"), dict) else {}
     if state_writeback:
@@ -10237,6 +10114,8 @@ def finish_agent_run(
     now = agent_run_now_ms()
     if status == "completed":
         final = agent_run_with_canonical_token_usage(final) if isinstance(final, dict) else final
+        if isinstance(final, dict):
+            record_agent_run_token_usage_event(server, clean_run_id, final)
     final_json = bounded_json_text(final or {}, AGENT_RUN_FINAL_MAX_JSON_CHARS)
     error_json = bounded_json_text(error or {}, AGENT_RUN_EVENT_MAX_JSON_CHARS)
     with auth_connect() as conn:
@@ -10260,7 +10139,7 @@ def finish_agent_run(
             )
             updated = conn.execute("SELECT * FROM agent_run_tb WHERE run_id = ?", (clean_run_id,)).fetchone()
             assert updated is not None
-            agent_run_append_event_conn(
+            terminal_record = agent_run_append_event_conn(
                 conn,
                 updated,
                 terminal_event,
@@ -10280,7 +10159,17 @@ def finish_agent_run(
                 created_at=now,
             )
             conn.commit()
-            return public_agent_run(updated, include_payloads=True)
+            result = public_agent_run(updated, include_payloads=True)
+            integrity_proof = master_frontier_persistence.anchor_committed_event(
+                private_state_root=master_frontier_persistence.private_state_root(server, default_private_state_dir()),
+                run=dict(updated), event=terminal_record,
+                load_events=lambda: [public_agent_run_event(item) for item in conn.execute(
+                    "SELECT * FROM agent_run_event_tb WHERE run_id = ? ORDER BY seq", (clean_run_id,)
+                ).fetchall()],
+            )
+            if integrity_proof:
+                result["integrity_proof"] = integrity_proof
+            return result
         except Exception:
             conn.rollback()
             raise
@@ -11458,7 +11347,7 @@ def mutation_path_allowed(
     protected = policy.get("protected_prefixes") if isinstance(policy.get("protected_prefixes"), list) else []
     if protected and path_has_prefix(relative, protected):
         raise BrowserError("agent_mutation_path_denied", "Mutation path targets protected core firmware.")
-    if resolved.suffix.lower() not in AGENT_MUTATION_ALLOWED_EXTENSIONS:
+    if not master_frontier_repository_path_policy.writable_text_source(resolved):
         raise BrowserError("agent_mutation_path_denied", "Mutation path must be a recognized text source file.")
     return resolved
 
@@ -12249,8 +12138,6 @@ def app_config_payload(server: WasmAgentServer, handler: WasmAgentHandler) -> di
         public_origin=public_origin(),
         deployment_mode=wasm_agent_deployment_mode(),
         instance_id=cloud_instance_id(),
-        host_browser_enabled=browser_feature_enabled(handler),
-        public_default_disabled=public_deployment(handler),
         shared_voice_enabled=shared_voice_enabled(),
         shared_voice_ice_servers=shared_voice_ice_servers(),
     )
@@ -13644,13 +13531,17 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "request_windows_client_update",
     "verify_android_oauth",
     "export_diagnostics",
-    "open_devtools",
+    *wasm_agent_live_clients.OBSERVABILITY_COMMAND_TYPES,
     "reload",
     "hard_reload",
     "reload_ignore_cache",
     "restart_app",
     "screenshot",
     "status",
+    "navigate",
+    "open_widget",
+    "browser_navigate",
+    "apply_windows_update",
     "verify_installed_app",
     "verify_session",
 }
@@ -13685,7 +13576,7 @@ FRONTIER_OPERATOR_COMMAND_TYPES = {
     "restart_app",
     "verify_session",
     "verify_installed_app",
-    "open_devtools",
+    *wasm_agent_live_clients.OBSERVABILITY_COMMAND_TYPES,
     "export_diagnostics",
 }
 
@@ -13721,7 +13612,7 @@ FRONTIER_OPERATOR_NATIVE_COMMAND = {
     "restart_app": "restart_app",
     "verify_session": "verify_session",
     "verify_installed_app": "verify_installed_app",
-    "open_devtools": "open_devtools",
+    **wasm_agent_live_clients.OBSERVABILITY_OPERATOR_COMMANDS,
     "export_diagnostics": "export_diagnostics",
 }
 
@@ -13739,22 +13630,22 @@ def native_device_id_from_value(value: Any, fallback: str = "unknown") -> str:
 
 
 def native_control_operator_actor(handler: WasmAgentHandler, user: dict[str, Any] | None) -> str:
-    if user_is_admin(user):
-        label = str(user.get("email") or user.get("id") or "admin").strip() if isinstance(user, dict) else "admin"
-        return f"admin:{safe_state_id(label, 'admin')}"
-    control_key = os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY", "")
-    header_key = handler.headers.get("X-Wasm-Agent-Native-Control-Key", "")
-    if control_key and hmac.compare_digest(control_key, header_key):
-        return "control-key"
-    return "localhost"
+    return wasm_agent_native_control_auth.actor(
+        handler.headers.get("X-Wasm-Agent-Native-Control-Key", ""),
+        wa_env_path(),
+        user,
+        is_admin=user_is_admin,
+        safe_id=safe_state_id,
+    )
 
 
 def native_control_operator_allowed(handler: WasmAgentHandler, user: dict[str, Any] | None) -> bool:
     if user_is_admin(user):
         return True
-    control_key = os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY", "")
-    header_key = handler.headers.get("X-Wasm-Agent-Native-Control-Key", "")
-    if control_key and hmac.compare_digest(control_key, header_key):
+    if wasm_agent_native_control_auth.header_matches(
+        handler.headers.get("X-Wasm-Agent-Native-Control-Key", ""),
+        wa_env_path(),
+    ):
         return True
     host = str(handler.headers.get("Host", "")).split(":", 1)[0].strip("[]").lower()
     try:
@@ -14109,6 +14000,12 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
     device_id = native_device_id_from_value((query.get("device_id") or ["unknown"])[0])
     build_id = clipped_verbatim(str((query.get("build_id") or [""])[0]), 120)
     route = clipped_verbatim(str((query.get("route") or [""])[0]), 600)
+    runtime_type = clipped_verbatim(str((query.get("runtime_type") or [handler.headers.get("X-Wasm-Agent-Native-Runtime", "")])[0]), 40)
+    platform = clipped_verbatim(str((query.get("platform") or [""])[0]), 40)
+    app_version = clipped_verbatim(str((query.get("app_version") or [""])[0]), 40)
+    title = clipped_verbatim(str((query.get("title") or [""])[0]), 160)
+    visibility = clipped_verbatim(str((query.get("visibility") or [""])[0]), 20)
+    capabilities = clipped_verbatim(str((query.get("capabilities") or [""])[0]), 3000).split(",")
     now = iso_timestamp()
     heartbeat = {
         "ok": True,
@@ -14116,11 +14013,18 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
         "device_id": device_id,
         "build_id": build_id,
         "route": route,
+        "runtime_type": runtime_type,
+        "platform": platform,
+        "app_version": app_version,
+        "title": title,
+        "visibility": visibility,
+        "capabilities": capabilities,
         "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
         "received_at": now,
     }
     root = native_control_dir(server)
     write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
+    wasm_agent_live_clients.save_client(server.state_dir, heartbeat)
     server.observability_hub.record_event(device_id, "native.control", "heartbeat", heartbeat, latest_key="native.control.heartbeat")
     commands = native_control_deliver_pending_commands(server, device_id, now)
     return {"ok": True, "deviceId": device_id, "commands": commands, "serverTime": now}
@@ -14187,21 +14091,7 @@ def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], ha
 
 
 def native_control_clients_payload(server: WasmAgentServer) -> dict[str, Any]:
-    root = native_control_dir(server)
-    clients: list[dict[str, Any]] = []
-    for path in sorted((root / "heartbeats").glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)[:80]:
-        heartbeat = read_json_file(path, {})
-        if isinstance(heartbeat, dict):
-            device_id = native_device_id_from_value(heartbeat.get("device_id"), path.stem)
-            diagnostics = read_json_file(native_diagnostics_dir(server) / f"{device_id}.json", {})
-            event_bundle = read_json_file(native_events_dir(server) / f"{device_id}.json", {})
-            clients.append({
-                "device_id": device_id,
-                "heartbeat": heartbeat,
-                "diagnostics_received_at": diagnostics.get("received_at") if isinstance(diagnostics, dict) else "",
-                "latest_event": event_bundle.get("latest") if isinstance(event_bundle, dict) else None,
-            })
-    return {"ok": True, "clients": clients, "count": len(clients)}
+    return wasm_agent_live_clients.list_clients(server.state_dir, native_root=native_control_dir(server))
 
 
 def native_control_clients(server: WasmAgentServer, handler: WasmAgentHandler, user: dict[str, Any] | None) -> dict[str, Any]:
@@ -20062,67 +19952,6 @@ def google_auth_login(server: WasmAgentServer, body: dict[str, Any]) -> dict[str
     return {"ok": True, "authenticated": True, "user": public_user(stored)}
 
 
-def chromium_command() -> str:
-    command = os.getenv("HERMES_WASM_AGENT_CHROMIUM", "").strip()
-    if command:
-        return command
-    for candidate in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
-        found = shutil.which(candidate)
-        if found:
-            return found
-    raise BrowserError(
-        "chromium_not_found",
-        "Chromium was not found. Set HERMES_WASM_AGENT_CHROMIUM to a browser binary.",
-        status=HTTPStatus.SERVICE_UNAVAILABLE,
-    )
-
-
-def normalized_browser_url(raw: Any) -> str:
-    value = str(raw or "").strip()
-    if not value:
-        raise BrowserError("missing_url", "A URL is required.")
-    if "://" not in value:
-        value = f"https://{value}"
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise BrowserError("invalid_url", "Only http and https URLs are supported.")
-    if not private_targets_allowed():
-        reject_private_target(parsed.hostname)
-    return value
-
-
-def browser_dimensions(body: dict[str, Any]) -> tuple[int, int]:
-    return (
-        int(clamp_number(body.get("width") or 1280, 360, 1920)),
-        int(clamp_number(body.get("height") or 800, 240, 1400)),
-    )
-
-
-def private_targets_allowed() -> bool:
-    return os.getenv("HERMES_WASM_AGENT_BROWSER_ALLOW_PRIVATE", "").lower() in {"1", "true", "yes", "on"}
-
-
-def reject_private_target(hostname: str) -> None:
-    lowered = hostname.lower().strip("[]")
-    if lowered in {"localhost", "localhost.localdomain"} or lowered.endswith(".localhost"):
-        raise BrowserError("private_url_blocked", "Localhost browser targets are disabled by default.")
-    try:
-        infos = socket.getaddrinfo(lowered, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise BrowserError("dns_failed", f"Could not resolve browser target: {hostname}") from exc
-    for info in infos:
-        address = info[4][0]
-        try:
-            parsed = ip_address(address)
-        except ValueError:
-            continue
-        if parsed.is_private or parsed.is_loopback or parsed.is_link_local or parsed.is_reserved:
-            raise BrowserError(
-                "private_url_blocked",
-                "Private, loopback, link-local, and reserved browser targets are disabled by default.",
-            )
-
-
 def observation_path(server: WasmAgentServer, user: dict[str, Any] | None = None) -> Path:
     return user_observation_path(server, user)
 
@@ -22410,7 +22239,7 @@ def agent_app_map(server: WasmAgentServer) -> dict[str, Any]:
         "tool": "app_map",
         "content": json.dumps(
             {
-                "goal": "Evolve wasm-agent as the active WASM harness: embedded chat, observation, Timeline recovery, Host Browser stream, and image-card perception.",
+                "goal": "Evolve wasm-agent as the active WASM harness: embedded chat, observation, Timeline recovery, browser portal capabilities, and image-card perception.",
                 "write_boundary": "Orchestrator/admin turns may modify wasm-agent globally; sandboxed nodes must only modify the mounted account-owned wasm-user state and ask orchestrator for core firmware/source changes.",
                 "primary_files": entries,
                 "current_chat_contract": {
@@ -24454,7 +24283,7 @@ def deterministic_agent_reply(message: str, tools: list[dict[str, Any]], reason:
             f"{reason}.\n\n"
             "Current direction: resume from the WASM harness saga. Keep Hermes Orchestrator and wasm-agent "
             "aligned with performance, efficiency, and simplicity. The active work is the in-workspace harness: "
-            "Host Browser stream, Observation, embedded assistant, Timeline recovery, and browser-built image cards "
+            "Browser portal capabilities, Observation, embedded assistant, Timeline recovery, and browser-built image cards "
             "that let text-only nodes reason over compact visual facts.\n\n"
             "What I can do from inside the app now: inspect the latest observation, read allowlisted files, "
             "search the repo, check git status, run the wasm-agent doctor, and request guarded exact-match "
@@ -25105,266 +24934,6 @@ def serve_dev_hmr_events(handler: WasmAgentHandler) -> None:
             handler.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             break
-
-
-def capture_browser(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
-    url = normalized_browser_url(body.get("url"))
-    width, height = browser_dimensions(body)
-    cdp_url = os.getenv("HERMES_WASM_AGENT_BROWSER_CDP_URL", "http://127.0.0.1:9233").strip()
-    if cdp_url:
-        try:
-            return capture_browser_cdp(server, url, width, height, cdp_url.rstrip("/"))
-        except BrowserError:
-            raise
-        except Exception:
-            # Fall back to one-shot Chromium only when CDP is not reachable.
-            if cdp_available(cdp_url.rstrip("/")):
-                raise
-
-    return capture_browser_cli(server, url, width, height)
-
-
-def cdp_available(cdp_url: str) -> bool:
-    try:
-        with urlopen(f"{cdp_url}/json/version", timeout=1) as response:
-            return response.status == 200
-    except Exception:
-        return False
-
-
-def capture_browser_cdp(
-    server: WasmAgentServer,
-    url: str,
-    width: int,
-    height: int,
-    cdp_url: str,
-) -> dict[str, Any]:
-    target: dict[str, Any] | None = None
-    try:
-        create_req = Request(f"{cdp_url}/json/new?{quote(url, safe='')}", method="PUT")
-        with urlopen(create_req, timeout=3) as response:
-            target = json.loads(response.read().decode("utf-8"))
-        ws_url = str(target.get("webSocketDebuggerUrl") or "")
-        if not ws_url:
-            raise BrowserError("cdp_target_failed", "CDP target did not expose a websocket URL.")
-        image = capture_cdp_screenshot(
-            ws_url,
-            width,
-            height,
-            server.browser_timeout_sec,
-            navigate_url=url,
-        )
-    except BrowserError:
-        raise
-    except Exception as exc:
-        raise BrowserError("cdp_capture_failed", f"CDP browser capture failed: {exc}") from exc
-
-    image_bytes = base64.b64decode(image.encode("ascii"))
-    session_id = uuid.uuid4().hex
-    with server.browser_sessions_lock:
-        server.browser_sessions[session_id] = {
-            "session_id": session_id,
-            "target_id": target.get("id") if target else "",
-            "ws_url": ws_url,
-            "cdp_url": cdp_url,
-            "url": url,
-            "width": width,
-            "height": height,
-            "created_at": time.time(),
-            "last_access": time.time(),
-        }
-        prune_browser_sessions(server)
-    return {
-        "schema": "hermes.wasm_agent.browser_capture.v1",
-        "session_id": session_id,
-        "interactive": True,
-        "url": url,
-        "width": width,
-        "height": height,
-        "bytes": len(image_bytes),
-        "captured_at": int(time.time()),
-        "image": "data:image/png;base64," + image,
-        "mode": "host_chromium_cdp_pixels",
-        "iframe": False,
-    }
-
-
-def capture_browser_cli(server: WasmAgentServer, url: str, width: int, height: int) -> dict[str, Any]:
-    browser_root = server.state_dir / "browser"
-    capture_root = browser_root / "captures"
-    profile_root = browser_root / "profile"
-    capture_root.mkdir(parents=True, exist_ok=True)
-    profile_root.mkdir(parents=True, exist_ok=True)
-    capture_path = capture_root / f"{int(time.time())}-{uuid.uuid4().hex[:8]}.png"
-
-    cmd = [
-        chromium_command(),
-        "--headless",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--hide-scrollbars",
-        f"--user-data-dir={profile_root}",
-        f"--window-size={width},{height}",
-        f"--screenshot={capture_path}",
-        url,
-    ]
-    try:
-        proc = subprocess.run(
-            cmd,
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=server.browser_timeout_sec,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BrowserError(
-            "browser_timeout",
-            f"Chromium capture timed out after {server.browser_timeout_sec:.0f}s.",
-            status=HTTPStatus.GATEWAY_TIMEOUT,
-        ) from exc
-
-    if proc.returncode != 0 or not capture_path.exists():
-        stderr = (proc.stderr or proc.stdout or "Chromium capture failed.").strip()
-        raise BrowserError(
-            "browser_capture_failed",
-            stderr[-900:],
-            status=HTTPStatus.BAD_GATEWAY,
-        )
-
-    image_bytes = capture_path.read_bytes()
-    image = "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
-    return {
-        "schema": "hermes.wasm_agent.browser_capture.v1",
-        "session_id": "",
-        "interactive": False,
-        "url": url,
-        "width": width,
-        "height": height,
-        "bytes": len(image_bytes),
-        "captured_at": int(time.time()),
-        "image": image,
-        "mode": "chromium_screenshot_pixels",
-        "iframe": False,
-    }
-
-
-def browser_session_ttl_sec() -> float:
-    raw = os.getenv("HERMES_WASM_AGENT_BROWSER_SESSION_TTL_SEC")
-    if raw in {None, ""}:
-        return DEFAULT_BROWSER_SESSION_TTL_SEC
-    return clamp_number(raw, 60, 24 * 60 * 60)
-
-
-def prune_browser_sessions(server: WasmAgentServer, *, keep: int = 8) -> None:
-    now = time.time()
-    ttl_sec = browser_session_ttl_sec()
-    for session_id, session in list(server.browser_sessions.items()):
-        last_access = float(session.get("last_access") or session.get("created_at") or 0)
-        if last_access and now - last_access > ttl_sec:
-            server.browser_sessions.pop(session_id, None)
-            close_cdp_target(str(session.get("cdp_url") or ""), str(session.get("target_id") or ""))
-
-    sessions = sorted(
-        server.browser_sessions.values(),
-        key=lambda item: float(item.get("last_access") or item.get("created_at") or 0),
-        reverse=True,
-    )
-    for session in sessions[keep:]:
-        server.browser_sessions.pop(str(session.get("session_id")), None)
-        close_cdp_target(str(session.get("cdp_url") or ""), str(session.get("target_id") or ""))
-
-
-def close_cdp_target(cdp_url: str, target_id: str) -> None:
-    if not cdp_url or not target_id:
-        return
-    try:
-        with urlopen(f"{cdp_url}/json/close/{target_id}", timeout=2):
-            pass
-    except Exception:
-        pass
-
-
-def browser_input(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(body.get("session_id") or "").strip()
-    if not session_id:
-        raise BrowserError("missing_session", "A browser session_id is required.")
-    with server.browser_sessions_lock:
-        session = dict(server.browser_sessions.get(session_id) or {})
-        if not session:
-            raise BrowserError("browser_session_not_found", "Browser session was not found.", status=HTTPStatus.NOT_FOUND)
-        session["last_access"] = time.time()
-        server.browser_sessions[session_id] = session
-
-    action = str(body.get("action") or "").strip().lower()
-    width = int(session.get("width") or 1280)
-    height = int(session.get("height") or 800)
-    ws_url = str(session.get("ws_url") or "")
-    url = str(session.get("url") or "")
-    action_result = perform_browser_action(ws_url, action, body, width, height, server.browser_timeout_sec)
-    image = action_result["image"]
-    current_url = str(action_result.get("url") or "")
-    if action == "navigate":
-        url = current_url or normalized_browser_url(body.get("url"))
-        session["url"] = url
-        with server.browser_sessions_lock:
-            server.browser_sessions[session_id] = session
-    elif current_url:
-        url = current_url
-        session["url"] = url
-        with server.browser_sessions_lock:
-            server.browser_sessions[session_id] = session
-
-    image_bytes = base64.b64decode(image.encode("ascii"))
-    return {
-        "schema": "hermes.wasm_agent.browser_capture.v1",
-        "session_id": session_id,
-        "interactive": True,
-        "url": url,
-        "width": width,
-        "height": height,
-        "bytes": len(image_bytes),
-        "captured_at": int(time.time()),
-        "image": "data:image/png;base64," + image,
-        "mode": "host_chromium_cdp_interactive_pixels",
-        "action": action,
-        "iframe": False,
-    }
-
-
-def close_browser_session(server: WasmAgentServer, body: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(body.get("session_id") or "").strip()
-    if not session_id:
-        raise BrowserError("missing_session", "A browser session_id is required.")
-    with server.browser_sessions_lock:
-        session = server.browser_sessions.pop(session_id, None)
-    if not session:
-        return {"session_id": session_id, "closed": False}
-    close_cdp_target(str(session.get("cdp_url") or ""), str(session.get("target_id") or ""))
-    return {"session_id": session_id, "closed": True}
-
-
-def serve_browser_stream(handler: WasmAgentHandler) -> None:
-    key = handler.headers.get("Sec-WebSocket-Key", "").strip()
-    upgrade = handler.headers.get("Upgrade", "").lower()
-    if upgrade != "websocket" or not key:
-        handler.send_error(HTTPStatus.UPGRADE_REQUIRED, "WebSocket upgrade required")
-        return
-
-    accept = base64.b64encode(
-        hashlib.sha1((key + WEBSOCKET_GUID).encode("ascii"), usedforsecurity=False).digest()
-    ).decode("ascii")
-    handler.send_response(HTTPStatus.SWITCHING_PROTOCOLS)
-    handler.send_header("Upgrade", "websocket")
-    handler.send_header("Connection", "Upgrade")
-    handler.send_header("Sec-WebSocket-Accept", accept)
-    handler.end_headers()
-    handler.close_connection = True
-
-    client_ws = BrowserClientWebSocket(handler)
-    try:
-        handle_browser_stream(handler.server, client_ws)
-    finally:
-        client_ws.close()
 
 
 class BrowserClientWebSocket:
@@ -26180,711 +25749,6 @@ def handle_remote_control_live(
             remote_control_live_error(client_ws, request_id, "remote_control_live_error", str(exc))
 
 
-class CdpWebSocket:
-    def __init__(self, ws_url: str, timeout: float) -> None:
-        parsed = urlparse(ws_url)
-        if parsed.scheme != "ws" or not parsed.hostname:
-            raise BrowserError("cdp_ws_unsupported", "Only ws:// CDP websocket URLs are supported.")
-        port = parsed.port or 80
-        path = parsed.path or "/"
-        if parsed.query:
-            path += f"?{parsed.query}"
-        self.sock = socket.create_connection((parsed.hostname, port), timeout=timeout)
-        self.sock.settimeout(timeout)
-        key = base64.b64encode(secrets.token_bytes(16)).decode("ascii")
-        request = (
-            f"GET {path} HTTP/1.1\r\n"
-            f"Host: {parsed.hostname}:{port}\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\n"
-            "Sec-WebSocket-Version: 13\r\n"
-            "\r\n"
-        )
-        self.sock.sendall(request.encode("ascii"))
-        response = self._recv_until(b"\r\n\r\n")
-        if b" 101 " not in response.split(b"\r\n", 1)[0]:
-            raise BrowserError("cdp_ws_handshake_failed", "CDP websocket handshake failed.")
-        accept = base64.b64encode(
-            hashlib.sha1(
-                (key + WEBSOCKET_GUID).encode("ascii"),
-                usedforsecurity=False,
-            ).digest()
-        ).decode("ascii")
-        if f"sec-websocket-accept: {accept}".encode("ascii").lower() not in response.lower():
-            raise BrowserError("cdp_ws_handshake_failed", "CDP websocket accept key did not match.")
-
-    def close(self) -> None:
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-
-    def send_json(self, payload: dict[str, Any]) -> None:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        header = bytearray([0x81])
-        length = len(data)
-        if length < 126:
-            header.append(0x80 | length)
-        elif length < 65536:
-            header.append(0x80 | 126)
-            header.extend(struct.pack("!H", length))
-        else:
-            header.append(0x80 | 127)
-            header.extend(struct.pack("!Q", length))
-        mask = secrets.token_bytes(4)
-        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
-        self.sock.sendall(bytes(header) + mask + masked)
-
-    def recv_json(self) -> dict[str, Any]:
-        while True:
-            message = self._recv_frame()
-            if message is None:
-                continue
-            return json.loads(message.decode("utf-8"))
-
-    def _recv_frame(self) -> bytes | None:
-        first = self._recv_exact(2)
-        opcode = first[0] & 0x0F
-        masked = bool(first[1] & 0x80)
-        length = first[1] & 0x7F
-        if length == 126:
-            length = struct.unpack("!H", self._recv_exact(2))[0]
-        elif length == 127:
-            length = struct.unpack("!Q", self._recv_exact(8))[0]
-        mask = self._recv_exact(4) if masked else b""
-        data = self._recv_exact(length) if length else b""
-        if masked:
-            data = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
-        if opcode == 0x8:
-            raise BrowserError("cdp_ws_closed", "CDP websocket closed.")
-        if opcode == 0x9:
-            self._send_pong(data)
-            return None
-        if opcode not in {0x1, 0x0}:
-            return None
-        return data
-
-    def _send_pong(self, payload: bytes) -> None:
-        header = bytearray([0x8A])
-        length = len(payload)
-        header.append(0x80 | length)
-        mask = secrets.token_bytes(4)
-        masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-        self.sock.sendall(bytes(header) + mask + masked)
-
-    def _recv_exact(self, length: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < length:
-            chunk = self.sock.recv(length - len(chunks))
-            if not chunk:
-                raise BrowserError("cdp_ws_closed", "CDP websocket closed.")
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-    def _recv_until(self, marker: bytes) -> bytes:
-        chunks = bytearray()
-        while marker not in chunks:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise BrowserError("cdp_ws_closed", "CDP websocket closed.")
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-
-class CdpClient:
-    def __init__(self, ws_url: str, timeout: float) -> None:
-        self.ws = CdpWebSocket(ws_url, timeout)
-        self.timeout = timeout
-        self.next_id = 0
-
-    def close(self) -> None:
-        self.ws.close()
-
-    def call(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-        *,
-        wait: float | None = None,
-    ) -> dict[str, Any]:
-        self.next_id += 1
-        message_id = self.next_id
-        timeout = wait or self.timeout
-        self.ws.sock.settimeout(timeout)
-        self.ws.send_json({"id": message_id, "method": method, "params": params or {}})
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            payload = self.ws.recv_json()
-            if payload.get("id") != message_id:
-                continue
-            if "error" in payload:
-                raise BrowserError("cdp_command_failed", json.dumps(payload["error"])[:700])
-            return payload.get("result", {})
-        raise BrowserError("cdp_timeout", f"Timed out waiting for {method}.", status=HTTPStatus.GATEWAY_TIMEOUT)
-
-    def wait_for_load(self, timeout: float) -> None:
-        deadline = time.time() + timeout
-        self.ws.sock.settimeout(0.75)
-        while time.time() < deadline:
-            try:
-                payload = self.ws.recv_json()
-            except socket.timeout:
-                continue
-            if payload.get("method") == "Page.loadEventFired":
-                break
-        self.ws.sock.settimeout(self.timeout)
-
-
-class CdpStreamClient:
-    def __init__(
-        self,
-        ws_url: str,
-        timeout: float,
-        browser_ws: BrowserClientWebSocket,
-        *,
-        width: int,
-        height: int,
-        url: str,
-        stream_id: str,
-    ) -> None:
-        self.ws = CdpWebSocket(ws_url, timeout)
-        self.ws.sock.settimeout(0.5)
-        self.timeout = timeout
-        self.browser_ws = browser_ws
-        self.width = width
-        self.height = height
-        self.url = url
-        self.stream_id = stream_id
-        self.next_id = 0
-        self.frame_count = 0
-        self.last_browser_frame_at = 0.0
-        self.stream_fps = browser_stream_fps()
-        self.pending: dict[int, queue.Queue[dict[str, Any]]] = {}
-        self.pending_lock = threading.Lock()
-        self.send_lock = threading.Lock()
-        self.stop_event = threading.Event()
-        self.load_events: queue.Queue[bool] = queue.Queue(maxsize=4)
-        self.reader_thread = threading.Thread(target=self._read_loop, name=f"browser-stream-{stream_id}", daemon=True)
-
-    def start(self) -> None:
-        self.reader_thread.start()
-
-    def close(self) -> None:
-        self.stop_event.set()
-        try:
-            self.ws.close()
-        except Exception:
-            pass
-
-    def call(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-        *,
-        wait: float | None = None,
-    ) -> dict[str, Any]:
-        response_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1)
-        with self.send_lock:
-            self.next_id += 1
-            message_id = self.next_id
-            with self.pending_lock:
-                self.pending[message_id] = response_queue
-            self.ws.send_json({"id": message_id, "method": method, "params": params or {}})
-        timeout = wait or self.timeout
-        try:
-            payload = response_queue.get(timeout=timeout)
-        except queue.Empty as exc:
-            with self.pending_lock:
-                self.pending.pop(message_id, None)
-            raise BrowserError("cdp_timeout", f"Timed out waiting for {method}.", status=HTTPStatus.GATEWAY_TIMEOUT) from exc
-        if "error" in payload:
-            raise BrowserError("cdp_command_failed", json.dumps(payload["error"])[:700])
-        return payload.get("result", {})
-
-    def send_command(
-        self,
-        method: str,
-        params: dict[str, Any] | None = None,
-    ) -> int:
-        with self.send_lock:
-            self.next_id += 1
-            message_id = self.next_id
-            self.ws.send_json({"id": message_id, "method": method, "params": params or {}})
-        return message_id
-
-    def wait_for_load(self, timeout: float) -> None:
-        try:
-            self.load_events.get(timeout=timeout)
-        except queue.Empty:
-            pass
-
-    def send_browser(self, payload: dict[str, Any]) -> None:
-        if self.stop_event.is_set():
-            return
-        try:
-            self.browser_ws.send_json(payload)
-        except Exception:
-            self.stop_event.set()
-
-    def _read_loop(self) -> None:
-        while not self.stop_event.is_set():
-            try:
-                payload = self.ws.recv_json()
-            except socket.timeout:
-                continue
-            except Exception as exc:
-                if not self.stop_event.is_set():
-                    self.send_browser({"type": "error", "code": "cdp_stream_closed", "message": str(exc)})
-                self.stop_event.set()
-                break
-
-            message_id = payload.get("id")
-            if message_id is not None:
-                with self.pending_lock:
-                    response_queue = self.pending.pop(int(message_id), None)
-                if response_queue is not None:
-                    response_queue.put(payload)
-                continue
-
-            method = str(payload.get("method") or "")
-            params = payload.get("params") or {}
-            if method == "Page.screencastFrame":
-                self._handle_screencast_frame(params)
-            elif method == "Page.loadEventFired":
-                try:
-                    self.load_events.put_nowait(True)
-                except queue.Full:
-                    pass
-            elif method == "Page.frameNavigated":
-                frame = params.get("frame") or {}
-                if not frame.get("parentId"):
-                    url = str(frame.get("url") or "")
-                    if url:
-                        self.url = url
-                        self.send_browser({"type": "state", "stream_id": self.stream_id, "url": url})
-
-    def _handle_screencast_frame(self, params: dict[str, Any]) -> None:
-        data = str(params.get("data") or "")
-        if not data:
-            return
-        metadata = params.get("metadata") or {}
-        session_id = params.get("sessionId")
-        if session_id is not None:
-            self.send_command("Page.screencastFrameAck", {"sessionId": session_id})
-        now = time.monotonic()
-        min_interval = 1.0 / max(1.0, self.stream_fps)
-        if now - self.last_browser_frame_at < min_interval:
-            return
-        self.last_browser_frame_at = now
-        self.frame_count += 1
-        self.send_browser({
-            "type": "frame",
-            "stream_id": self.stream_id,
-            "url": self.url,
-            "width": self.width,
-            "height": self.height,
-            "image": "data:image/jpeg;base64," + data,
-            "frame": self.frame_count,
-            "timestamp": metadata.get("timestamp"),
-            "mode": "host_chromium_cdp_screencast",
-        })
-
-    def send_snapshot_frame(self) -> None:
-        result = self.call("Page.captureScreenshot", {
-            "format": "jpeg",
-            "quality": browser_stream_quality(),
-            "fromSurface": True,
-            "captureBeyondViewport": False,
-        }, wait=min(self.timeout, 6))
-        data = str(result.get("data") or "")
-        if not data:
-            return
-        self.frame_count += 1
-        self.last_browser_frame_at = time.monotonic()
-        self.send_browser({
-            "type": "frame",
-            "stream_id": self.stream_id,
-            "url": self.url,
-            "width": self.width,
-            "height": self.height,
-            "image": "data:image/jpeg;base64," + data,
-            "frame": self.frame_count,
-            "timestamp": time.time(),
-            "mode": "host_chromium_cdp_snapshot",
-        })
-
-
-def setup_cdp_page(client: CdpClient, width: int, height: int) -> None:
-    client.call("Page.enable")
-    client.call("Runtime.enable")
-    set_cdp_viewport(client, width, height)
-
-
-def set_cdp_viewport(client: CdpClient, width: int, height: int) -> None:
-    client.call("Emulation.setDeviceMetricsOverride", {
-        "width": width,
-        "height": height,
-        "deviceScaleFactor": 1,
-        "mobile": False,
-    })
-
-
-def start_cdp_screencast(client: CdpStreamClient, width: int, height: int) -> None:
-    client.call("Page.startScreencast", {
-        "format": "jpeg",
-        "quality": browser_stream_quality(),
-        "maxWidth": width,
-        "maxHeight": height,
-        "everyNthFrame": browser_stream_every_nth_frame(),
-    })
-
-
-def browser_stream_fps() -> float:
-    raw = os.getenv("HERMES_WASM_AGENT_BROWSER_STREAM_FPS")
-    if raw in {None, ""}:
-        return DEFAULT_BROWSER_STREAM_FPS
-    return clamp_number(raw, 1, 12)
-
-
-def browser_stream_quality() -> int:
-    raw = os.getenv("HERMES_WASM_AGENT_BROWSER_STREAM_QUALITY")
-    if raw in {None, ""}:
-        return DEFAULT_BROWSER_STREAM_QUALITY
-    return int(clamp_number(raw, 35, 85))
-
-
-def browser_stream_every_nth_frame() -> int:
-    raw = os.getenv("HERMES_WASM_AGENT_BROWSER_STREAM_EVERY_NTH_FRAME")
-    if raw in {None, ""}:
-        return DEFAULT_BROWSER_STREAM_EVERY_NTH_FRAME
-    return int(clamp_number(raw, 1, 12))
-
-
-def cdp_screenshot(client: CdpClient) -> str:
-    result = client.call("Page.captureScreenshot", {
-        "format": "png",
-        "fromSurface": True,
-        "captureBeyondViewport": False,
-    })
-    image = str(result.get("data") or "")
-    if not image:
-        raise BrowserError("cdp_screenshot_empty", "CDP returned an empty screenshot.")
-    return image
-
-
-def capture_cdp_screenshot(
-    ws_url: str,
-    width: int,
-    height: int,
-    timeout: float,
-    *,
-    navigate_url: str | None = None,
-) -> dict[str, str]:
-    client = CdpClient(ws_url, timeout)
-    try:
-        setup_cdp_page(client, width, height)
-        if navigate_url:
-            client.call("Page.navigate", {"url": navigate_url}, wait=min(timeout, 6))
-            client.wait_for_load(min(timeout, 8))
-        return cdp_screenshot(client)
-    finally:
-        client.close()
-
-
-def perform_browser_action(
-    ws_url: str,
-    action: str,
-    body: dict[str, Any],
-    width: int,
-    height: int,
-    timeout: float,
-) -> str:
-    if action not in {"click", "type", "key", "scroll", "navigate", "screenshot", "back", "forward", "reload"}:
-        raise BrowserError("unsupported_browser_action", "Unsupported browser action.")
-    client = CdpClient(ws_url, timeout)
-    try:
-        setup_cdp_page(client, width, height)
-        if action == "click":
-            x = clamp_number(body.get("x"), 0, width)
-            y = clamp_number(body.get("y"), 0, height)
-            client.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"})
-            client.call("Input.dispatchMouseEvent", {
-                "type": "mousePressed",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "clickCount": 1,
-            })
-            client.call("Input.dispatchMouseEvent", {
-                "type": "mouseReleased",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "clickCount": 1,
-            })
-            time.sleep(0.15)
-        elif action == "type":
-            text = str(body.get("text") or "")
-            if text:
-                client.call("Input.insertText", {"text": text})
-        elif action == "key":
-            key = str(body.get("key") or "")
-            dispatch_key(client, key)
-            if key == "Enter":
-                client.wait_for_load(min(timeout, 4))
-            else:
-                time.sleep(0.2)
-        elif action == "scroll":
-            x = clamp_number(body.get("x"), 0, width)
-            y = clamp_number(body.get("y"), 0, height)
-            delta_x = float(body.get("delta_x") or 0)
-            delta_y = float(body.get("delta_y") or 0)
-            client.call("Input.dispatchMouseEvent", {
-                "type": "mouseWheel",
-                "x": x,
-                "y": y,
-                "deltaX": delta_x,
-                "deltaY": delta_y,
-            })
-            time.sleep(0.15)
-        elif action == "navigate":
-            url = normalized_browser_url(body.get("url"))
-            client.call("Page.navigate", {"url": url}, wait=min(timeout, 6))
-            client.wait_for_load(min(timeout, 8))
-        elif action in {"back", "forward"}:
-            navigate_history(client, direction=action, timeout=timeout)
-        elif action == "reload":
-            client.call("Page.reload", {"ignoreCache": False}, wait=min(timeout, 6))
-            client.wait_for_load(min(timeout, 8))
-        return {"image": cdp_screenshot(client), "url": current_cdp_url(client)}
-    finally:
-        client.close()
-
-
-def clamp_number(value: Any, minimum: float, maximum: float) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = minimum
-    return max(minimum, min(maximum, number))
-
-
-def dispatch_key(client: CdpClient, key: str) -> None:
-    key_map = {
-        "Enter": ("Enter", "Enter", 13),
-        "Backspace": ("Backspace", "Backspace", 8),
-        "Tab": ("Tab", "Tab", 9),
-        "Escape": ("Escape", "Escape", 27),
-        "ArrowLeft": ("ArrowLeft", "ArrowLeft", 37),
-        "ArrowUp": ("ArrowUp", "ArrowUp", 38),
-        "ArrowRight": ("ArrowRight", "ArrowRight", 39),
-        "ArrowDown": ("ArrowDown", "ArrowDown", 40),
-    }
-    normalized = key_map.get(key)
-    if not normalized and len(key) == 1:
-        client.call("Input.insertText", {"text": key})
-        return
-    if not normalized:
-        return
-    key_name, code, vk = normalized
-    payload = {
-        "key": key_name,
-        "code": code,
-        "windowsVirtualKeyCode": vk,
-        "nativeVirtualKeyCode": vk,
-    }
-    client.call("Input.dispatchKeyEvent", {"type": "keyDown", **payload})
-    client.call("Input.dispatchKeyEvent", {"type": "keyUp", **payload})
-
-
-def navigate_history(client: CdpClient, *, direction: str, timeout: float) -> None:
-    history = client.call("Page.getNavigationHistory", wait=3)
-    entries = history.get("entries") or []
-    index = int(history.get("currentIndex") or 0)
-    target_index = index - 1 if direction == "back" else index + 1
-    if target_index < 0 or target_index >= len(entries):
-        return
-    entry_id = entries[target_index].get("id")
-    if entry_id is None:
-        return
-    client.call("Page.navigateToHistoryEntry", {"entryId": entry_id}, wait=min(timeout, 6))
-    client.wait_for_load(min(timeout, 8))
-
-
-def current_cdp_url(client: CdpClient) -> str:
-    try:
-        result = client.call("Runtime.evaluate", {
-            "expression": "location.href",
-            "returnByValue": True,
-        }, wait=2)
-        return str(result.get("result", {}).get("value") or "")
-    except Exception:
-        return ""
-
-
-def create_cdp_target(cdp_url: str, initial_url: str = "about:blank") -> dict[str, Any]:
-    create_req = Request(f"{cdp_url}/json/new?{quote(initial_url, safe='')}", method="PUT")
-    with urlopen(create_req, timeout=3) as response:
-        target = json.loads(response.read().decode("utf-8"))
-    ws_url = str(target.get("webSocketDebuggerUrl") or "")
-    if not ws_url:
-        raise BrowserError("cdp_target_failed", "CDP target did not expose a websocket URL.")
-    return target
-
-
-def handle_browser_stream(server: WasmAgentServer, browser_ws: BrowserClientWebSocket) -> None:
-    stream: CdpStreamClient | None = None
-    target: dict[str, Any] | None = None
-    cdp_url = os.getenv("HERMES_WASM_AGENT_BROWSER_CDP_URL", "http://127.0.0.1:9233").strip().rstrip("/")
-    try:
-        hello = browser_ws.recv_json(wait=8)
-        if str(hello.get("type") or "").lower() != "open":
-            raise BrowserError("browser_stream_expected_open", "First browser stream message must be type=open.")
-        url = normalized_browser_url(hello.get("url"))
-        width, height = browser_dimensions(hello)
-        if not cdp_url:
-            raise BrowserError("cdp_stream_unavailable", "Browser streaming requires HERMES_WASM_AGENT_BROWSER_CDP_URL.")
-        if not cdp_available(cdp_url):
-            raise BrowserError("cdp_stream_unavailable", f"CDP is not reachable at {cdp_url}.")
-
-        target = create_cdp_target(cdp_url)
-        stream_id = uuid.uuid4().hex
-        stream = CdpStreamClient(
-            str(target["webSocketDebuggerUrl"]),
-            server.browser_timeout_sec,
-            browser_ws,
-            width=width,
-            height=height,
-            url=url,
-            stream_id=stream_id,
-        )
-        stream.start()
-        setup_cdp_page(stream, width, height)
-        start_cdp_screencast(stream, width, height)
-        browser_ws.send_json({
-            "type": "ready",
-            "stream_id": stream_id,
-            "url": url,
-            "width": width,
-            "height": height,
-            "mode": "host_chromium_cdp_screencast",
-            "iframe": False,
-        })
-        stream.call("Page.navigate", {"url": url}, wait=min(server.browser_timeout_sec, 6))
-        stream.wait_for_load(min(server.browser_timeout_sec, 6))
-        stream.send_snapshot_frame()
-
-        while not stream.stop_event.is_set():
-            try:
-                message = browser_ws.recv_json()
-            except BrowserError as exc:
-                if exc.code == "browser_ws_closed":
-                    break
-                raise
-            perform_browser_stream_action(stream, message, server.browser_timeout_sec)
-    except BrowserError as exc:
-        try:
-            browser_ws.send_json({"type": "error", "code": exc.code, "message": exc.message})
-        except Exception:
-            pass
-    except Exception as exc:
-        try:
-            browser_ws.send_json({"type": "error", "code": "browser_stream_error", "message": str(exc)})
-        except Exception:
-            pass
-    finally:
-        if stream is not None:
-            try:
-                stream.call("Page.stopScreencast", wait=1)
-            except Exception:
-                pass
-            stream.close()
-        if target is not None:
-            close_cdp_target(cdp_url, str(target.get("id") or ""))
-
-
-def perform_browser_stream_action(client: CdpStreamClient, body: dict[str, Any], timeout: float) -> None:
-    message_type = str(body.get("type") or "").strip().lower()
-    action = str(body.get("action") or message_type).strip().lower()
-    if action not in {"click", "type", "key", "scroll", "navigate", "resize", "back", "forward", "reload", "ping"}:
-        raise BrowserError("unsupported_browser_stream_action", "Unsupported browser stream action.")
-    if action == "ping":
-        client.send_browser({"type": "pong", "stream_id": client.stream_id, "url": client.url})
-        return
-    if action == "click":
-        x = clamp_number(body.get("x"), 0, client.width)
-        y = clamp_number(body.get("y"), 0, client.height)
-        client.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"}, wait=2)
-        client.call("Input.dispatchMouseEvent", {
-            "type": "mousePressed",
-            "x": x,
-            "y": y,
-            "button": "left",
-            "clickCount": 1,
-        }, wait=2)
-        client.call("Input.dispatchMouseEvent", {
-            "type": "mouseReleased",
-            "x": x,
-            "y": y,
-            "button": "left",
-            "clickCount": 1,
-        }, wait=2)
-    elif action == "type":
-        text = str(body.get("text") or "")
-        if text:
-            client.call("Input.insertText", {"text": text}, wait=2)
-    elif action == "key":
-        dispatch_key(client, str(body.get("key") or ""))
-    elif action == "scroll":
-        x = clamp_number(body.get("x"), 0, client.width)
-        y = clamp_number(body.get("y"), 0, client.height)
-        client.call("Input.dispatchMouseEvent", {
-            "type": "mouseWheel",
-            "x": x,
-            "y": y,
-            "deltaX": float(body.get("delta_x") or 0),
-            "deltaY": float(body.get("delta_y") or 0),
-        }, wait=2)
-    elif action == "navigate":
-        url = normalized_browser_url(body.get("url"))
-        client.url = url
-        client.send_browser({"type": "state", "stream_id": client.stream_id, "url": url, "status": "navigating"})
-        try:
-            client.call("Page.stopScreencast", wait=1)
-        except Exception:
-            pass
-        client.call("Page.navigate", {"url": url}, wait=min(timeout, 6))
-        client.wait_for_load(min(timeout, 6))
-        start_cdp_screencast(client, client.width, client.height)
-        client.send_snapshot_frame()
-    elif action in {"back", "forward"}:
-        navigate_history(client, direction=action, timeout=timeout)
-    elif action == "reload":
-        client.call("Page.reload", {"ignoreCache": False}, wait=min(timeout, 6))
-    elif action == "resize":
-        width, height = browser_dimensions(body)
-        client.width = width
-        client.height = height
-        try:
-            client.call("Page.stopScreencast", wait=1)
-        except Exception:
-            pass
-        set_cdp_viewport(client, width, height)
-        start_cdp_screencast(client, width, height)
-        client.send_snapshot_frame()
-
-    should_sync_url = action in {"navigate", "back", "forward", "reload"} or (
-        action == "key" and str(body.get("key") or "") == "Enter"
-    )
-    if should_sync_url:
-        url = current_cdp_url(client)
-        if url:
-            client.url = url
-            client.send_browser({"type": "state", "stream_id": client.stream_id, "url": url})
-    client.send_browser({"type": "ack", "stream_id": client.stream_id, "action": action, "url": client.url})
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Serve the wasm-agent shadow PWA")
     parser.add_argument("--host", default=os.getenv("HERMES_WASM_AGENT_HOST", "127.0.0.1"))
@@ -26893,12 +25757,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--bridge-url",
         default=os.getenv("HERMES_WASM_AGENT_BRIDGE_URL", "http://127.0.0.1:8790"),
         help="Hermes bridge URL exposed to the PWA",
-    )
-    parser.add_argument(
-        "--browser-timeout-sec",
-        type=float,
-        default=float(os.getenv("HERMES_WASM_AGENT_BROWSER_TIMEOUT_SEC", "20")),
-        help="Maximum Chromium browser capture or stream command time",
     )
     return parser
 
@@ -26951,7 +25809,6 @@ def main() -> int:
         public_root=public_root,
         state_dir=state_dir,
         bridge_url=args.bridge_url,
-        browser_timeout_sec=args.browser_timeout_sec,
     )
     print(wasm_agent_startup_banner(host=args.host, port=args.port, state_dir=state_dir, bridge_url=args.bridge_url), flush=True)
     print(f"wasm-agent listening on http://{args.host}:{args.port}", flush=True)

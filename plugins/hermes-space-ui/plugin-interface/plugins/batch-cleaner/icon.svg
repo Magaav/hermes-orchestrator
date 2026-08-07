@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Batch Cleaner">
+  <rect width="64" height="64" rx="14" fill="#102438"/>
+  <rect x="10" y="12" width="26" height="26" rx="5" fill="#57dfca"/>
+  <rect x="28" y="26" width="26" height="26" rx="5" fill="#7ec8ff" stroke="#102438" stroke-width="3"/>
+  <path d="M35 44l6-7 5 5 4-4" fill="none" stroke="#102438" stroke-width="3" stroke-linecap="round"/>
+</svg>

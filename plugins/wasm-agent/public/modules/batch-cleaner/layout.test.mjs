@@ -1,0 +1,45 @@
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+
+const css = await fs.readFile(new URL("./batch-cleaner.css", import.meta.url), "utf8");
+const registry = await fs.readFile(new URL("../app-registry.js", import.meta.url), "utf8");
+const entry = await fs.readFile(new URL("./batch-cleaner.entry.js", import.meta.url), "utf8");
+const html = await fs.readFile(new URL("./batch-cleaner.html", import.meta.url), "utf8");
+
+assert.match(registry, /id: "batch-cleaner"[\s\S]*minWidth: 250,[\s\S]*minHeight: 250,/);
+assert.match(registry, /batch-cleaner\.entry\.js\?v=20260806-deeper-clean1/);
+assert.match(css, /#batch-cleaner-root\s*\{[\s\S]*min-width:\s*0;/);
+assert.match(css, /\.batch-cleaner-widget\s*\{[\s\S]*grid-template-rows:\s*42px minmax\(0, 1fr\);/);
+assert.match(css, /\.external-app-widget-body\s*\{[\s\S]*min-height:\s*0;[\s\S]*overflow:\s*hidden;/);
+assert.match(css, /#batch-cleaner-root\s*\{[\s\S]*position:\s*relative;[\s\S]*width:\s*100%;[\s\S]*height:\s*100%;/);
+assert.doesNotMatch(css, /#batch-cleaner-root\s*\{[^}]*inset:\s*20px;/);
+assert.doesNotMatch(html, /class="bc-header"/);
+assert.match(entry, /const ASSET_REVISION = "20260806-deeper-clean1";/);
+assert.match(entry, /artifact-generated/);
+assert.match(entry, /dataset\.progressEvents/);
+assert.match(entry, /const CLEANING_LANES = 10;/);
+assert.match(entry, /runIndependentLanes/);
+assert.match(entry, /dataset\.cachedInputTokens/);
+assert.match(html, /data-count="fresh-tokens"/);
+assert.match(html, /data-count="cached-tokens"/);
+assert.match(entry, /transcodeToAvif/);
+assert.match(entry, /dataset\.outputType/);
+assert.match(entry, /recordCleanedPhoto/);
+assert.match(html, /data-count="tokens"/);
+assert.match(html, /data-count="lifetime-cleaned"/);
+assert.match(html, /data-action="clean_deeper"[^>]*>Clean deeper/);
+assert.match(html, /same cleanup again on this cleaned result/);
+assert.match(entry, /cleanWithCloudQuality\(item\.output,/);
+assert.match(entry, /cleanupPasses/);
+assert.match(entry, /batch-cleaner\.css\?v=\$\{ASSET_REVISION\}/);
+assert.match(entry, /batch-cleaner\.html\?v=\$\{ASSET_REVISION\}/);
+assert.match(html, /Master:frontier · Codex/);
+assert.doesNotMatch(html, /Quality reconstruction|Perfect reconstruction|Enhance reality/);
+assert.doesNotMatch(entry, /cleanSelectedObjects|reconstructSelectedObjects|enhanceReality/);
+assert.doesNotMatch(entry, /findObjects|object-detector|detection-mask|cleanableDetections/);
+assert.match(css, /container-type:\s*inline-size;/);
+assert.match(css, /@container \(max-width: 520px\)/);
+assert.match(css, /\.bc-body\s*\{\s*display:\s*block;[\s\S]*overflow:\s*auto;/);
+assert.match(css, /overflow-wrap:\s*anywhere;/);
+
+console.log("batch cleaner responsive layout tests passed");

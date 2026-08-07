@@ -1,0 +1,34 @@
+{
+  "schema": "hermes.property_photo_cleaner.reference_inventory.v1",
+  "scope": "Individually selectable foreground cleanup candidates, including physical objects and the authorized watermark layer; architecture and reflections are excluded.",
+  "fixtures": {
+    "visao_before1.jpeg": [
+      { "id": "fan", "labels": ["floor fan"], "box": [654, 361, 723, 500] },
+      { "id": "ladder", "labels": ["step ladder"], "box": [699, 293, 824, 574] },
+      { "id": "upright-roll", "labels": ["rolled carpet", "ironing board"], "box": [878, 240, 904, 430] },
+      { "id": "desk", "labels": ["desk", "table"], "box": [971, 379, 1123, 533] },
+      { "id": "monitor", "labels": ["computer monitor", "laptop"], "box": [1062, 340, 1126, 392] },
+      { "id": "keyboard", "labels": ["keyboard"], "box": [1039, 375, 1117, 397] },
+      { "id": "chair", "labels": ["chair"], "box": [1055, 340, 1126, 531] },
+      { "id": "fan-side-bag", "labels": ["bag", "backpack"], "box": [654, 423, 706, 498] },
+      { "id": "desk-side-clutter", "labels": ["bag", "backpack", "jacket"], "box": [907, 385, 1021, 531] },
+      { "id": "watermark", "labels": ["watermark logo"], "box": [486, 274, 794, 439] }
+    ],
+    "visao_before2.jpeg": [
+      { "id": "top-left-sack", "labels": ["storage box", "bag"], "box": [48, 167, 100, 224] },
+      { "id": "top-red-case", "labels": ["suitcase", "bag"], "box": [114, 195, 242, 251] },
+      { "id": "top-small-box", "labels": ["storage box", "plastic container"], "box": [238, 214, 271, 255] },
+      { "id": "top-dark-case", "labels": ["suitcase", "storage box"], "box": [268, 207, 329, 256] },
+      { "id": "reflected-ladder", "labels": ["step ladder"], "box": [255, 353, 304, 464] },
+      { "id": "hanging-clothes", "labels": ["hanging clothes", "clothing rack"], "box": [381, 315, 440, 491] },
+      { "id": "leaning-board", "labels": ["ironing board", "object"], "box": [421, 356, 483, 490] },
+      { "id": "desk", "labels": ["desk", "table"], "box": [479, 437, 600, 541] },
+      { "id": "desk-camera", "labels": ["camera"], "box": [505, 422, 529, 444] },
+      { "id": "under-desk-bag", "labels": ["bag", "backpack", "trash bin"], "box": [484, 472, 517, 537] },
+      { "id": "clothes-side-bag", "labels": ["bag", "backpack"], "box": [397, 438, 437, 497] },
+      { "id": "shoes", "labels": ["shoes", "object"], "box": [111, 688, 159, 738] },
+      { "id": "flip-flops", "labels": ["object", "rolled carpet", "shoes"], "box": [96, 618, 155, 665] },
+      { "id": "watermark", "labels": ["watermark logo"], "box": [228, 304, 372, 488] }
+    ]
+  }
+}

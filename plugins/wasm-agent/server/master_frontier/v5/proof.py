@@ -16,10 +16,15 @@ def summarize(items: list[dict[str, Any]], ledger: dict[str, Any] | None = None)
     changed: set[str] = set()
     checks: list[dict[str, Any]] = []
     diff_seen = proof_seen = False
+    runtime_seen = False
     files_read: set[str] = set()
     for item in items:
-        if item.get("path"): files_read.add(str(item["path"]))
         payload = _payload(item)
+        path = item.get("path") or payload.get("path")
+        if path:
+            files_read.add(str(path))
+        if item.get("tool") in {"inspect", "browser"} and payload.get("ok") is True:
+            runtime_seen = True
         for value in payload.get("changed_files") or []:
             path = value.get("path") if isinstance(value, dict) else value
             if path: changed.add(str(path))
@@ -27,21 +32,32 @@ def summarize(items: list[dict[str, Any]], ledger: dict[str, Any] | None = None)
         action = str(item.get("local_action") or payload.get("local_action") or "")
         if "test_run_focused" in schema or action == "test.run_focused":
             checks.append({key: payload.get(key) for key in ("check_id", "returncode", "duration_ms", "code") if payload.get(key) is not None})
-        if "git_diff_summary" in schema or action == "git.diff_summary": diff_seen = True
-        if "kernel.prove" in schema or item.get("primitive") == "kernel.prove": proof_seen = True
+        if "git_diff_summary" in schema or action == "git.diff_summary":
+            stat = payload.get("stat") if isinstance(payload.get("stat"), dict) else {}
+            truncation = payload.get("truncation") if isinstance(payload.get("truncation"), dict) else {}
+            diff_seen = diff_seen or (
+                payload.get("ok") is True
+                and stat.get("complete") is True
+                and not any(bool(value) for value in truncation.values())
+            )
+        if "kernel.prove" in schema or item.get("primitive") == "kernel.prove":
+            proof_seen = proof_seen or payload.get("ok") is True
     checks_passed = bool(checks) and all(int(item.get("returncode") or 0) == 0 and item.get("code") in (None, "", "ok") for item in checks)
-    level = "proof" if proof_seen and checks_passed and diff_seen else "behavioral" if checks_passed else "source" if files_read else "route"
+    level = "proof" if proof_seen and checks_passed and diff_seen else "behavioral" if checks_passed else "runtime" if runtime_seen else "source" if files_read else "route"
     summary = {"changed_files": sorted(changed), "checks": checks, "checks_passed": checks_passed, "diff_seen": diff_seen, "proof_seen": proof_seen, "files_read": sorted(files_read), "verification_level": level}
     if ledger is None:
         return summary
     operations = operation_ledger.normalize(ledger)
+    observed_changed = summary["changed_files"]
+    summary["changed_files"] = operations["changed_files"]
+    if observed_changed != summary["changed_files"]:
+        summary["observed_changed_files"] = observed_changed
     gaps = operation_ledger.missing(operations)
     current_check = operations.get("check") or {}
     current_diff = operations.get("diff") or {}
     current_proof = operations.get("proof") or {}
     if operations["mutations"]:
         summary.update({
-            "changed_files": operations["changed_files"],
             "checks_passed": current_check.get("rev") == operations["revision"] and current_check.get("ok") is True,
             "diff_seen": current_diff.get("rev") == operations["revision"] and current_diff.get("ok") is True,
             "proof_seen": current_proof.get("rev") == operations["revision"] and current_proof.get("ok") is True,

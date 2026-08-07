@@ -1,0 +1,18 @@
+{
+  "slot": "harness-01",
+  "id": "master-frontier-v5",
+  "displayName": "V5 answer satisfaction repair and bounded browser actions",
+  "executable": "python3",
+  "adapterVersion": "v5-474774e903e4",
+  "adapterVolume": "wasm-agent-v5-answer-browser-20260804-v2",
+  "adapterArtifactSha256": "474774e903e41838c2b84e6384afd0cb7e9d77df2ef48323845144b7ffcf4c8f",
+  "candidateDigest": "474774e903e41838c2b84e6384afd0cb7e9d77df2ef48323845144b7ffcf4c8f",
+  "modelContractStatus": "verified",
+  "toolAuthorityStatus": "verified",
+  "toolAuthoritySha256": "141e02be8c0b25375da49095c9e01286f679651287f015f409db6a13c60006fd",
+  "verificationArtifact": "reports/context/latest/v5-answer-browser-package.json",
+  "liveCommand": ["python3", "/adapter/master-frontier-v5-live-runner.py", "--task", "{task}"],
+  "liveReady": true,
+  "benchmarkReady": false,
+  "promotionStatus": "suite_pending"
+}

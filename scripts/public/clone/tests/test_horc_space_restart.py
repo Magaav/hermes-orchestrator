@@ -8,9 +8,14 @@ import unittest
 
 
 HORC = Path(__file__).resolve().parents[1] / "horc.sh"
+ROOT = Path(__file__).resolve().parents[4]
 
 
 class HorcSpaceRestartTests(unittest.TestCase):
+    def test_wasm_agent_setsid_start_is_nohup_detached(self) -> None:
+        start = (ROOT / "plugins/wasm-agent/scripts/start_wasm_agent.sh").read_text(encoding="utf-8")
+        self.assertIn('nohup setsid "${PYTHON_BIN}"', start)
+
     def test_space_relaunch_stops_then_starts_workspace(self) -> None:
         with tempfile.TemporaryDirectory(prefix="horc-space-restart-test-") as tmp:
             root = Path(tmp)
@@ -30,7 +35,7 @@ class HorcSpaceRestartTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (scripts_dir / "start_wasm_agent.sh").write_text(
-                f"#!/usr/bin/env bash\nprintf 'start\\n' >> {log_path}\n",
+                f"#!/usr/bin/env bash\nprintf 'start:anchors=%s\\n' \"${{WASM_AGENT_EVENT_ANCHORS:-unset}}\" >> {log_path}\n",
                 encoding="utf-8",
             )
             os.chmod(scripts_dir / "stop_wasm_agent.sh", 0o755)
@@ -40,6 +45,7 @@ class HorcSpaceRestartTests(unittest.TestCase):
             env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
             env["HERMES_WASM_AGENT_PLUGIN_DIR"] = str(plugin_dir)
             env["HERMES_CLONE_MANAGER_SCRIPT"] = str(root / "clone_manager.py")
+            env["WASM_AGENT_EVENT_ANCHORS"] = "true"
             (root / "clone_manager.py").write_text("# test stub\n", encoding="utf-8")
 
             result = subprocess.run(
@@ -55,7 +61,7 @@ class HorcSpaceRestartTests(unittest.TestCase):
             self.assertIn("horc space: restarting wasm-agent workspace", result.stdout)
             self.assertEqual(
                 log_path.read_text(encoding="utf-8").splitlines(),
-                ["stop", "kill-port:-k:8877/tcp", "kill-port:-k:8790/tcp", "start"],
+                ["stop", "kill-port:-k:8877/tcp", "kill-port:-k:8790/tcp", "start:anchors=true"],
             )
 
     def test_space_usage_lists_restart(self) -> None:

@@ -111,9 +111,23 @@ def _apply_locked(
         elif op == "replace":
             if value is None: raise RepositoryActionError("patch_file_missing", f"Replace target is missing: {relative(path)}")
             find, replacement = str(operation.get("find") or ""), str(operation.get("replace") or "")
-            if not find: raise RepositoryActionError("patch_invalid_replace", "Replace requires a non-empty find string.")
-            if value.count(find) != 1: raise RepositoryActionError("patch_non_unique_match", f"Replace match must be unique: {relative(path)}")
-            payload_bytes += len(find.encode()) + len(replacement.encode()); pending[path] = value.replace(find, replacement, 1)
+            if not find and "content" in operation:
+                if not expected_sha:
+                    raise RepositoryActionError(
+                        "patch_precondition_required",
+                        f"Whole-file replace requires expected_sha256: {relative(path)}",
+                    )
+                content = str(operation.get("content") or "")
+                if not content.strip():
+                    raise RepositoryActionError("patch_empty_postimage", f"Replace cannot empty a source file: {relative(path)}")
+                payload_bytes += len(content.encode()); pending[path] = content
+            else:
+                if not find: raise RepositoryActionError("patch_invalid_replace", "Replace requires a non-empty find string or preimage-bound whole-file content.")
+                if value.count(find) != 1: raise RepositoryActionError("patch_non_unique_match", f"Replace match must be unique: {relative(path)}")
+                postimage = value.replace(find, replacement, 1)
+                if not postimage.strip():
+                    raise RepositoryActionError("patch_empty_postimage", f"Replace cannot empty a source file: {relative(path)}")
+                payload_bytes += len(find.encode()) + len(replacement.encode()); pending[path] = postimage
         elif op == "append":
             insert, after = str(operation.get("insert") or operation.get("text") or ""), str(operation.get("after") or "")
             if not insert: raise RepositoryActionError("patch_invalid_append", "Append requires non-empty content.")

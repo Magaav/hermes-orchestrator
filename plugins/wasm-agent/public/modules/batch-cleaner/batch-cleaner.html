@@ -1,0 +1,67 @@
+<div class="bc-body">
+  <aside class="bc-sidebar">
+    <section>
+      <span class="bc-step">1 · Drop pictures</span>
+      <button type="button" class="bc-primary" data-action="open_import">Choose pictures</button>
+      <input type="file" accept="image/jpeg,image/png,image/webp,image/avif" multiple hidden>
+      <p>Drag photos into the workspace or pick them here.</p>
+    </section>
+    <section>
+      <span class="bc-step">2 · Clean</span>
+      <button type="button" class="bc-primary" data-action="clean_all">Clean all</button>
+      <p>Included photos use up to ten isolated Codex sessions in parallel. Quality is prioritized over speed.</p>
+      <div class="bc-datacenter">
+        <strong>Master:frontier · Codex</strong>
+        <span>High-quality AVIF reduces transfer bytes when beneficial. Each photo has its own Codex session; no client reconstruction model is loaded.</span>
+      </div>
+      <label class="bc-watermark-consent">
+        <input type="checkbox" data-watermark-authorized>
+        <span>I own or may remove visible watermarks</span>
+      </label>
+    </section>
+    <section>
+      <span class="bc-step">3 · Export</span>
+      <button type="button" data-action="export_all">Export all</button>
+      <p>Downloads every included cleaned photo in one ZIP.</p>
+    </section>
+    <dl class="bc-counts">
+      <div><dt>Included</dt><dd data-count="included">0</dd></div>
+      <div><dt>Excluded</dt><dd data-count="excluded">0</dd></div>
+      <div><dt>Processed</dt><dd data-count="processed">0</dd></div>
+      <div><dt>Batch cleaned</dt><dd data-count="cleaned">0</dd></div>
+      <div><dt>Failed</dt><dd data-count="failed">0</dd></div>
+      <div><dt>Fresh tokens</dt><dd data-count="fresh-tokens">0</dd></div>
+      <div><dt>Cached input</dt><dd data-count="cached-tokens">0</dd></div>
+      <div><dt>Total tokens</dt><dd data-count="tokens">0</dd></div>
+      <div><dt>Lifetime cleaned</dt><dd data-count="lifetime-cleaned">0</dd></div>
+    </dl>
+  </aside>
+  <main class="bc-workspace" data-drop-zone>
+    <div class="bc-toolbar">
+      <strong data-summary>No pictures yet</strong>
+      <span data-overall>Drop up to 30 pictures to begin</span>
+    </div>
+    <div class="bc-grid" data-grid aria-live="polite"></div>
+    <div class="bc-empty" data-empty>
+      <strong>Drop property pictures here</strong>
+      <span>They appear immediately as square thumbnails, ready for datacenter cleaning.</span>
+    </div>
+  </main>
+</div>
+<footer class="bc-footer">
+  <span data-status>Idle</span>
+  <span data-error role="alert"></span>
+</footer>
+<dialog class="bc-preview" data-preview>
+  <header>
+    <strong data-preview-title>Photo preview</strong>
+    <button type="button" data-action="close_preview" aria-label="Close preview">×</button>
+  </header>
+  <div class="bc-preview-toggle">
+    <button type="button" data-action="preview_original">Original</button>
+    <button type="button" data-action="preview_cleaned">Cleaned</button>
+    <button type="button" class="bc-primary" data-action="clean_deeper" disabled>Clean deeper</button>
+  </div>
+  <p class="bc-preview-hint">Still seeing tiny or unusual objects? Run the same cleanup again on this cleaned result.</p>
+  <img data-preview-image alt="Selected property photo preview">
+</dialog>

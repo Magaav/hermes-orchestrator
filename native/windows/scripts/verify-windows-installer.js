@@ -111,6 +111,7 @@ function findAppAsar(extractRoot) {
 }
 
 if (!fs.existsSync(installerPath)) fail(`Missing installer: ${installerPath}`);
+const installerSizeBytes = fs.statSync(installerPath).size;
 const sevenZip = sevenZipPath();
 if (!sevenZip) fail("Missing 7zip-bin executable for this platform");
 
@@ -130,18 +131,17 @@ const fallbackPath = path.join(asarRoot, "fallback.html");
 const packagePath = path.join(asarRoot, "package.json");
 const resourceDefaultsPath = path.join(path.dirname(appAsarPath), "native-defaults.json");
 const resourcePublicRoot = path.join(path.dirname(appAsarPath), "public");
-const resourceIndexHtmlPath = findFile(resourcePublicRoot, "index.html");
-const resourceAppJsPath = findFile(resourcePublicRoot, "app.js");
-const resourceDevHmrPath = findFile(resourcePublicRoot, "modules/hmr/dev-hmr.js");
-const resourceBootJsPath = findFile(resourcePublicRoot, "boot.js");
 const resourceIconPath = findFile(path.dirname(appAsarPath), "icon.ico");
+const resourceSupervisorPath = findFile(path.dirname(appAsarPath), "wasm-agent-launcher.exe");
 const resourceHorcRunnerPath = findFile(path.dirname(appAsarPath), "horc/horc-local.js");
 const resourceAppSimulatorPath = findFile(path.dirname(appAsarPath), "horc/app-simulator/simulate.js");
 const resourceAndroidApkPath = findFile(path.dirname(appAsarPath), "android/WASM-Agent-arm64.apk");
-const resourceAndroidApkDefaultsPath = findFile(path.dirname(appAsarPath), "android/WASM-Agent-arm64.native-defaults.json");
 const packagedOldInstallers = walkFiles(path.dirname(appAsarPath)).filter((filePath) => /[\\/]public[\\/]native[\\/]releases[\\/]windows[\\/].*\.(exe|blockmap)$/i.test(filePath));
 const mainJsPath = path.join(asarRoot, "main.js");
 const preloadJsPath = path.join(asarRoot, "preload.js");
+const supervisorClientPath = path.join(asarRoot, "main", "supervisor-client.js");
+const observabilityKernelPath = path.join(asarRoot, "main", "observability-kernel.js");
+const automaticUpdatesPath = path.join(asarRoot, "main", "automatic-updates.js");
 const nativeDefaults = fs.existsSync(nativeDefaultsPath)
   ? JSON.parse(fs.readFileSync(nativeDefaultsPath, "utf8"))
   : {};
@@ -153,10 +153,6 @@ const resourceDefaults = fs.existsSync(resourceDefaultsPath)
   : {};
 const fallbackHtml = fs.existsSync(fallbackPath) ? fs.readFileSync(fallbackPath, "utf8") : "";
 const packageJson = fs.existsSync(packagePath) ? JSON.parse(fs.readFileSync(packagePath, "utf8")) : {};
-const resourceIndexHtml = resourceIndexHtmlPath ? fs.readFileSync(resourceIndexHtmlPath, "utf8") : "";
-const resourceAppJs = resourceAppJsPath ? fs.readFileSync(resourceAppJsPath, "utf8") : "";
-const resourceDevHmrJs = resourceDevHmrPath ? fs.readFileSync(resourceDevHmrPath, "utf8") : "";
-const resourceBootJs = resourceBootJsPath ? fs.readFileSync(resourceBootJsPath, "utf8") : "";
 const resourceHorcRunnerJs = resourceHorcRunnerPath ? fs.readFileSync(resourceHorcRunnerPath, "utf8") : "";
 const mainJs = fs.existsSync(mainJsPath) ? fs.readFileSync(mainJsPath, "utf8") : "";
 const preloadJs = fs.existsSync(preloadJsPath) ? fs.readFileSync(preloadJsPath, "utf8") : "";
@@ -221,11 +217,8 @@ if (sourceDefaults.buildId && resourceDefaults.buildId !== sourceDefaults.buildI
 }
 if (!fallbackHtml.includes('value="https://wa.colmeio.com"')) fail("fallback.html default input is not https://wa.colmeio.com");
 if (!asarText.includes("wa.colmeio.com") || !payloadText.includes("wa.colmeio.com")) fail("Installer does not contain wa.colmeio.com");
-if (!resourceAppJs.includes("__wasmAgentAppDevHmr") || !resourceAppJs.includes("renderer_global_error") || !resourceAppJs.includes("loadAuthSessionReached")) {
-  fail("Extracted installer public/app.js is missing Frontier fatal/HMR visibility patches");
-}
-if (!resourceDevHmrJs.includes("__wasmAgentAppDevHmr")) fail("Extracted installer dev-hmr.js does not prefer the app-owned HMR bridge");
-if (!resourceBootJs.includes("renderer_boot_error") || !resourceBootJs.includes("loadAuthSessionReached")) fail("Extracted installer boot.js is missing early fatal diagnostics");
+if (fs.existsSync(resourcePublicRoot)) fail("Cloud-only Windows installer must not bundle the PWA public tree or on-demand models");
+if (resourceAndroidApkPath) fail("Cloud-only Windows installer must download Android APKs on demand instead of bundling them");
 if (!mainJs.includes("frontier_operator_commands_ready") || !mainJs.includes("collectNativeDiagnosticsBundle") || !mainJs.includes("captureNativeScreenshot") || !mainJs.includes("controlledNativeReload")) {
   fail("Extracted installer app.asar main.js is missing Frontier operator capabilities");
 }
@@ -238,16 +231,23 @@ if (!mainJs.includes("run_android_voice_tuning_goal_loop") || !mainJs.includes("
 if (!mainJs.includes("resolveLocalHorcRunner") || !mainJs.includes("bundledHorcRunnerPath") || !mainJs.includes("ELECTRON_RUN_AS_NODE") || !mainJs.includes("WASM_AGENT_SIM_ROOT_DIR") || !mainJs.includes("WASM_AGENT_ANDROID_APK")) {
   fail("Extracted installer app.asar main.js is missing deterministic bundled horc runner resolution");
 }
-if (!preloadJs.includes("nativeDiagnostics") || !preloadJs.includes("wasm-agent:native-diagnostics-operation") || !resourceIndexHtml.includes("Verify Android OAuth on real phone") || !resourceIndexHtml.includes("Start Android OAuth verification") || !resourceAppJs.includes("startAndroidOAuthVerification")) {
-  fail("Extracted installer preload/PWA assets are missing the Windows Android OAuth diagnostics UI");
-}
-if (!resourceIndexHtml.includes("Run Hermes Wake Goal Loop") || !resourceAppJs.includes("run_android_voice_tuning_goal_loop")) {
-  fail("Extracted installer PWA assets are missing the guarded Hermes Wake goal loop UI");
-}
-if (!preloadJs.includes("__wasmAgentDevHmr") || !resourceAppJs.includes("__wasmAgentAppDevHmr")) {
-  fail("Preload/PWA bridge layout does not preserve the native read-only bridge plus app-owned HMR bridge");
-}
+if (!preloadJs.includes("nativeDiagnostics") || !preloadJs.includes("wasm-agent:native-diagnostics-operation")) fail("Extracted installer preload is missing the native diagnostics bridge");
+if (!preloadJs.includes("__wasmAgentDevHmr")) fail("Extracted installer preload is missing the native HMR bridge");
 if (!resourceIconPath || fs.statSync(resourceIconPath).size < 1024) fail("Extracted installer resources/icon.ico is missing or unexpectedly small");
+if (!resourceSupervisorPath || fs.statSync(resourceSupervisorPath).size < 100000) fail("Extracted installer resources/wasm-agent-launcher.exe is missing or unexpectedly small");
+if (!fs.existsSync(supervisorClientPath) || !fs.readFileSync(supervisorClientPath, "utf8").includes("update.activate")) fail("Extracted app.asar is missing the Windows supervisor client contract");
+if (!fs.existsSync(observabilityKernelPath)) fail("Extracted app.asar is missing the observability kernel");
+const observabilityKernelJs = fs.readFileSync(observabilityKernelPath, "utf8");
+if (!["observability_enable", "observability_collect", "observability_status", "observability_disable"].every((operation) => mainJs.includes(operation) && observabilityKernelJs.includes(operation))) {
+  fail("Extracted app.asar is missing the bounded observability command contract");
+}
+if (!mainJs.includes("native.capabilities.observabilityLease.v1") || !observabilityKernelJs.includes("public_debug_port: false")) {
+  fail("Extracted app.asar does not advertise a private on-demand observability lease");
+}
+if (!fs.existsSync(automaticUpdatesPath) || !mainJs.includes("startAutomaticUpdateLoop")) {
+  fail("Extracted app.asar is missing the automatic update policy");
+}
+if (!mainJs.includes("activateOrLaunchInstaller")) fail("Extracted app.asar main.js does not delegate installer activation to the supervisor client");
 if (!resourceHorcRunnerPath || !resourceHorcRunnerJs.includes("horc-local only supports") || !resourceHorcRunnerJs.includes("app-simulator")) {
   fail("Extracted installer resources/horc/horc-local.js is missing or stale");
 }
@@ -266,9 +266,11 @@ const manifest = {
   allowLocalDev: false,
   installerPath,
   installerSha256: sha256(installerPath),
+  installerSizeBytes,
   appAsarSha256: sha256(appAsarPath),
   nativeDefaultsSha256: sha256(nativeDefaultsPath),
   iconSha256: resourceIconPath ? sha256(resourceIconPath) : "",
+  supervisorSha256: resourceSupervisorPath ? sha256(resourceSupervisorPath) : "",
   horcRunnerSha256: resourceHorcRunnerPath ? sha256(resourceHorcRunnerPath) : "",
   appSimulatorSha256: resourceAppSimulatorPath ? sha256(resourceAppSimulatorPath) : "",
   androidApkSha256: resourceAndroidApkPath ? sha256(resourceAndroidApkPath) : "",
@@ -293,19 +295,22 @@ const verifyReport = {
   buildId: String(nativeDefaults.buildId || ""),
   checks: [
     { name: "final NSIS installer extracted", ok: true, evidence: extractRoot },
+    { name: "compressed installer size recorded", ok: true, evidence: `${installerSizeBytes} bytes` },
     { name: "installed app.asar present", ok: true, evidence: appAsarPath },
     { name: "production URL target", ok: nativeDefaults.serverUrl === "https://wa.colmeio.com", evidence: nativeDefaults.serverUrl },
     { name: "localhost production strings absent", ok: true },
-    { name: "patched public/app.js present", ok: true, evidence: path.relative(extractRoot, resourceAppJsPath) },
-    { name: "patched dev-hmr.js present", ok: true, evidence: path.relative(extractRoot, resourceDevHmrPath) },
-    { name: "early boot fatal trap present", ok: true, evidence: path.relative(extractRoot, resourceBootJsPath) },
+    { name: "cloud PWA and on-demand models excluded", ok: true, evidence: "resources/public absent" },
     { name: "frontier native commands present", ok: true, evidence: "main.js" },
     { name: "bundled local horc runner present", ok: true, evidence: resourceHorcRunnerPath ? path.relative(extractRoot, resourceHorcRunnerPath) : "" },
     { name: "bundled app simulator present", ok: true, evidence: resourceAppSimulatorPath ? path.relative(extractRoot, resourceAppSimulatorPath) : "" },
-    { name: "bundled Android APK or release-feed download support present", ok: true, evidence: resourceAndroidApkPath ? `bundled Android APK present: ${path.relative(extractRoot, resourceAndroidApkPath)}` : "no bundled Android APK; release feed download path verified" },
+    { name: "Android APK excluded and release-feed download support present", ok: true, evidence: "resources/android APK absent; main.js release-feed path verified" },
     { name: "old Windows installers excluded from resources", ok: true, evidence: "public/native/releases/windows excluded" },
     { name: "icon metadata present", ok: true, evidence: resourceIconPath ? `${path.relative(extractRoot, resourceIconPath)} ${fs.statSync(resourceIconPath).size} bytes` : "" },
-    { name: "preload bridge does not conflict with PWA bridge", ok: true, evidence: "__wasmAgentDevHmr + __wasmAgentAppDevHmr" },
+    { name: "Windows supervisor executable present", ok: true, evidence: resourceSupervisorPath ? `${path.relative(extractRoot, resourceSupervisorPath)} ${fs.statSync(resourceSupervisorPath).size} bytes` : "" },
+    { name: "Electron update activation delegates to supervisor", ok: true, evidence: "main/supervisor-client.js" },
+    { name: "on-demand observability lease packaged", ok: true, evidence: "main/observability-kernel.js; no public debug port" },
+    { name: "automatic update policy packaged", ok: true, evidence: "login supervisor + startup/six-hour verified update loop" },
+    { name: "native preload bridge present", ok: true, evidence: "nativeDiagnostics + __wasmAgentDevHmr" },
   ],
   caveat: "This verifies the final extracted NSIS artifact and app.asar contents. Real installed close/reopen auth lifecycle still requires verify-installed-app.ps1 on Windows.",
 };

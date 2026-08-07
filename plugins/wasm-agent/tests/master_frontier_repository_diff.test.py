@@ -14,6 +14,24 @@ from master_frontier import repository_diff  # noqa: E402
 
 
 class RepositoryDiffTests(unittest.TestCase):
+    def test_declared_path_scope_excludes_unrelated_dirty_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.git(root, "init")
+            (root / "owned.js").write_text("before\n", encoding="utf-8")
+            (root / "ambient.js").write_text("before\n", encoding="utf-8")
+            self.git(root, "add", ".")
+            self.git(root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+            (root / "owned.js").write_text("after\n", encoding="utf-8")
+            (root / "ambient.js").write_text("after\n", encoding="utf-8")
+
+            result = repository_diff.collect(
+                self.route(root), include_paths=["owned.js"],
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual([item["path"] for item in result["changed_files"]], ["owned.js"])
+
     def test_nested_route_paths_are_route_relative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -27,7 +27,6 @@ def fake_server(root: Path) -> SimpleNamespace:
         public_root=PLUGIN_ROOT / "public",
         state_dir=root / "state",
         bridge_url="http://127.0.0.1:8790",
-        browser_timeout_sec=1.0,
     )
 
 
@@ -46,7 +45,6 @@ def start_test_server(root: Path) -> tuple[server_mod.WasmAgentServer, threading
         public_root=PLUGIN_ROOT / "public",
         state_dir=root / "state",
         bridge_url="http://127.0.0.1:8790",
-        browser_timeout_sec=1.0,
     )
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

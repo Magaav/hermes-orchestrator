@@ -1,0 +1,64 @@
+<header class="ppc-header">
+  <div>
+    <h2>Property Photo Cleaner</h2>
+    <span class="ppc-local">Detection and generative cleaning stay on this device</span>
+  </div>
+  <button class="ppc-icon-button" type="button" data-action="close" aria-label="Close photo cleaner">×</button>
+</header>
+<div class="ppc-body">
+  <aside class="ppc-sidebar" aria-label="Photo workflow">
+    <section class="ppc-step">
+      <span class="ppc-step-label">1 · Add photos</span>
+      <button class="ppc-primary" type="button" data-action="open_import">Choose property photos</button>
+      <button class="ppc-link-button" type="button" data-action="load_examples">View quality examples</button>
+    </section>
+    <input type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+    <div data-photo-rail class="ppc-rail" aria-label="Imported photos"></div>
+    <section class="ppc-step">
+      <span class="ppc-step-label">2 · Clean</span>
+      <button type="button" data-action="start_auto_correction">Improve light &amp; contrast</button>
+      <button type="button" data-action="find_objects">Find objects</button>
+      <button class="ppc-primary" type="button" data-action="clean_objects">Clean objects now</button>
+      <span class="ppc-local">The cleaning model downloads once, then reconstructs selected regions locally.</span>
+      <button type="button" data-action="undo_clean">Undo last clean</button>
+    </section>
+    <details class="ppc-options">
+      <summary>Removal options &amp; disclosure</summary>
+      <label><input type="checkbox" data-watermark-mode> The selected object is a watermark</label>
+      <label><input type="checkbox" data-watermark-confirm> I own it or have permission to remove it</label>
+    </details>
+  </aside>
+  <main class="ppc-workspace">
+    <div class="ppc-review-bar">
+      <div class="ppc-view-toggle" aria-label="Compare photo">
+        <button type="button" data-action="show_original">Original</button>
+        <button type="button" data-action="show_cleaned" aria-pressed="true">Cleaned</button>
+      </div>
+      <span data-review-note>No photo selected</span>
+    </div>
+    <div class="ppc-processing" data-processing hidden role="status" aria-live="polite">
+      <progress data-processing-bar max="1"></progress>
+      <strong data-processing-label>Working locally…</strong>
+    </div>
+    <div class="ppc-canvas-stage">
+      <canvas width="1" height="1" aria-label="Property photo editing canvas"></canvas>
+      <div class="ppc-detection-layer" data-detection-layer aria-live="polite"></div>
+      <div class="ppc-empty" data-empty>
+        <strong>Add a property photo to begin</strong>
+        <span>You will compare every cleaned result with its original before export.</span>
+      </div>
+    </div>
+    <div data-demo class="ppc-demo" hidden></div>
+  </main>
+</div>
+<footer class="ppc-footer">
+  <div class="ppc-feedback">
+    <span data-status>loading-ui</span>
+    <span data-error role="alert"></span>
+  </div>
+  <div class="ppc-footer-actions">
+    <button type="button" data-action="clear_project">Start over</button>
+    <button type="button" data-action="approve_current">Approve cleaned photo</button>
+    <button class="ppc-primary" type="button" data-action="export_approved">Export approved</button>
+  </div>
+</footer>

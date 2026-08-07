@@ -40,7 +40,6 @@ class SpaceRegressionTest(unittest.TestCase):
             public_root=PLUGIN_ROOT / "public",
             state_dir=state_dir,
             bridge_url="http://127.0.0.1:8790",
-            browser_timeout_sec=1.0,
         )
         self.user = make_user("202", "zangao.colmeio@example.test")
         self.user_spaces = state_dir / "users" / "202" / "spaces"
@@ -90,6 +89,24 @@ class SpaceRegressionTest(unittest.TestCase):
         self.assertTrue((self.user_spaces / "admin" / "wis" / "brief.json").exists())
         self.assertFalse((self.user_spaces / "space-home").exists())
         self.assertFalse((self.user_spaces / "space-admin").exists())
+
+    def test_anaminese_widget_is_registered_and_keeps_its_transcript_contract(self) -> None:
+        registry = (PLUGIN_ROOT / "public/modules/app-registry.js").read_text(encoding="utf-8")
+        widget = (PLUGIN_ROOT / "public/modules/anaminese-widget.js").read_text(encoding="utf-8")
+
+        self.assertIn('id: "anaminese"', registry)
+        self.assertIn('/modules/anaminese-widget.js', registry)
+        self.assertIn('user: ["batch-cleaner", "asolaria", "artifact-foundry", "property-photo-cleaner", "browser", "anaminese"]', registry)
+        self.assertIn('class AnamineseWidget extends HTMLElement', widget)
+        self.assertIn('tls-realtime-transcript', widget)
+        self.assertIn('realuse-transcript', widget)
+        self.assertIn('anaminese:start', widget)
+        self.assertIn('anaminese:stop', widget)
+        self.assertIn('export async function mount', widget)
+        self.assertIn('mount({ host, mountRoot }', widget)
+        self.assertIn('mountRoot.replaceChildren', widget)
+        self.assertIn('Start transcription', widget)
+        self.assertIn('Stop transcription', widget)
 
 
 if __name__ == "__main__":

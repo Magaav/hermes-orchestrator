@@ -44,7 +44,7 @@ class MasterFrontierV5ResilienceTests(unittest.TestCase):
         self.assertEqual(assessment["required_gaps"], ["source_coverage"])
         self.assertFalse(context.completion_only(state, SOURCE_ROUTE))
 
-    def test_complete_standalone_read_is_conclusive_source_coverage(self) -> None:
+    def test_complete_standalone_read_is_sufficient_without_forcing_completion(self) -> None:
         state = trajectory.new("run", "turn", "review", "fixture.source")
         append_result(state, "read", {
             "ok": True,
@@ -60,7 +60,8 @@ class MasterFrontierV5ResilienceTests(unittest.TestCase):
 
         self.assertTrue(status["owner_fully_read"])
         self.assertEqual(status["coverage_kind"], "owner_file")
-        self.assertTrue(context.completion_only(state, SOURCE_ROUTE))
+        self.assertEqual(completion.assess(state, SOURCE_ROUTE)["status"], "sufficient")
+        self.assertFalse(context.completion_only(state, SOURCE_ROUTE))
 
     def test_all_declared_focus_ranges_are_required(self) -> None:
         state = trajectory.new("run", "turn", "review", "fixture.source")
@@ -119,6 +120,16 @@ class MasterFrontierV5ResilienceTests(unittest.TestCase):
         })
         self.assertEqual(completion.assess(state, RUNTIME_ROUTE)["status"], "sufficient")
         self.assertTrue(context.completion_only(state, RUNTIME_ROUTE))
+
+    def test_browser_snapshot_is_conclusive_runtime_evidence(self) -> None:
+        state = trajectory.new("run", "turn", "inspect the live page", "fixture.runtime")
+        append_result(state, "browser", {
+            "ok": True, "url": "https://example.com/", "title": "Example",
+            "items": [{"ref": 1, "role": "link", "name": "More"}], "text": "Example",
+        })
+        assessment = completion.assess(state, RUNTIME_ROUTE)
+        self.assertEqual(assessment["status"], "sufficient")
+        self.assertEqual(assessment["covered"], ["inspect"])
 
     def test_runtime_context_names_exact_authorized_entities(self) -> None:
         state = trajectory.new("run", "turn", "inspect", "fixture.runtime")

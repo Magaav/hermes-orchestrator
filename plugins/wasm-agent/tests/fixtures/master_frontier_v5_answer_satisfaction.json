@@ -1,0 +1,35 @@
+{
+  "schema": "hermes.wasm_agent.master_frontier.v5.answer-satisfaction-fixtures.v1",
+  "sourceSession": "agent_ms99oo5p_ge2xl8",
+  "sourceRun": "wa_run_675b187a151e40e690eaf7509d36a4c2",
+  "fixtures": [
+    {
+      "id": "tool-directive-after-sufficient-source-evidence",
+      "objective": "check anaminese widget, what do you think?",
+      "candidate": "@read path='public/modules/assistant/session-memory.js'",
+      "expectedStatus": "unsatisfactory",
+      "expectedCode": "answer_is_tool_request"
+    },
+    {
+      "id": "empty-final-after-sufficient-evidence",
+      "objective": "review the widget",
+      "candidate": "",
+      "expectedStatus": "unsatisfactory",
+      "expectedCode": "answer_empty"
+    },
+    {
+      "id": "prose-prefixed-tool-directive",
+      "objective": "review the widget",
+      "candidate": "I need one more file.\n@read path='widget.js'",
+      "expectedStatus": "unsatisfactory",
+      "expectedCode": "answer_is_tool_request"
+    },
+    {
+      "id": "grounded-plain-answer",
+      "objective": "review the widget",
+      "candidate": "The widget is compact and readable, but its transcript extraction silently ignores non-string event payloads.",
+      "expectedStatus": "satisfactory",
+      "expectedCode": "ok"
+    }
+  ]
+}

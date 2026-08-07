@@ -191,8 +191,7 @@ class ProviderProxyTests(unittest.TestCase):
                 ("127.0.0.1", 0), server_mod.WasmAgentHandler,
                 plugin_root=PLUGIN_ROOT, public_root=PLUGIN_ROOT / "public",
                 state_dir=root / "state", bridge_url="http://127.0.0.1:8790",
-                browser_timeout_sec=1.0,
-            )
+                )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
@@ -236,6 +235,22 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertEqual(envelope["task_contract"]["intent"], "answer")
         self.assertEqual(envelope["task_contract"]["evidence_floor"], "conceptual")
         self.assertEqual(envelope["task_contract"]["tools_first"], ["kernel.resolve"])
+
+    def test_direct_envelope_preserves_declared_source_investigation(self) -> None:
+        envelope = server_mod.direct_envelope_from_body({
+            "envelope": {
+                "objective": "Read MASTER_FRONTIER_V6.md and state its protocol name.",
+                "objective_kind": "source-investigation",
+                "surface": "avatar-chat",
+                "route_id": "wasm-agent.avatar-chat.ui",
+                "completion_capabilities": ["repo.read"],
+            }
+        })
+
+        self.assertEqual(envelope["task_contract"]["intent"], "source_investigation")
+        self.assertEqual(envelope["task_contract"]["evidence_floor"], "source")
+        self.assertEqual(envelope["task_contract"]["route_intent"], "informational")
+        self.assertEqual(envelope["completion_capabilities"], ["repo.read"])
 
     def body(self, base_url: str) -> dict[str, Any]:
         return {
@@ -1040,8 +1055,7 @@ class ProviderProxyTests(unittest.TestCase):
                     public_root=PLUGIN_ROOT / "public",
                     state_dir=root / "state",
                     bridge_url="http://127.0.0.1:8790",
-                    browser_timeout_sec=1.0,
-                )
+                        )
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
@@ -1560,8 +1574,7 @@ class ProviderProxyTests(unittest.TestCase):
                     public_root=PLUGIN_ROOT / "public",
                     state_dir=root / "state",
                     bridge_url="http://127.0.0.1:8790",
-                    browser_timeout_sec=1.0,
-                )
+                        )
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
@@ -1619,8 +1632,7 @@ class ProviderProxyTests(unittest.TestCase):
                     public_root=PLUGIN_ROOT / "public",
                     state_dir=root / "state",
                     bridge_url="http://127.0.0.1:8790",
-                    browser_timeout_sec=1.0,
-                )
+                        )
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:
@@ -1659,8 +1671,7 @@ class ProviderProxyTests(unittest.TestCase):
                     public_root=PLUGIN_ROOT / "public",
                     state_dir=root / "state",
                     bridge_url="http://127.0.0.1:8790",
-                    browser_timeout_sec=1.0,
-                )
+                        )
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
                 try:

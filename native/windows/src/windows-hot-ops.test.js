@@ -137,6 +137,7 @@ assert(diagnosticsManifest.requiredNativeCapabilities.includes("native.capabilit
 assert(diagnosticsOpText.includes("classify_native_diagnostics"), "diagnostics classifier must be a real non-Hermes hot op");
 assert(fs.existsSync(path.join(__dirname, "..", "scripts", "sync-hot-op-override.js")), "sync hot-op override helper must exist");
 assert(mainJs.includes('"get_bridge_status"'), "get_bridge_status must be allowlisted");
+assert(mainJs.includes('activeNativeCommandCount > 1'), "native-control self-update must allow its own active command while refusing additional concurrent commands");
 assert(mainJs.includes("SHELL_PROTOCOL_VERSION = 2"), "shell protocol v2 must be advertised");
 assert(mainJs.includes("MINIMUM_RUNNER_VERSION"), "minimum runner version must be advertised");
 assert(mainJs.includes("logsTail"), "bridge results must include logsTail");

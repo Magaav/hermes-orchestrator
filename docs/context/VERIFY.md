@@ -100,6 +100,43 @@ static/behavioral contract layer only. Run
 `python3 tools/context/prove-master-frontier-production.py --include-runtime`
 before claiming live node-brain availability.
 
+### Master:frontier V6 proof ladder
+
+Run V6 checks from cheapest to most stateful:
+
+```bash
+python3 tools/context/prove-master-frontier-v6-kernel.py
+python3 tools/context/prove-master-frontier-v6-live-model.py
+python3 tools/context/prove-master-frontier-authenticated-canary.py --protocol v6
+python3 tools/context/prove-master-frontier-v6-client-ui.py
+```
+
+The kernel proof is local static/behavioral evidence. The live-model proof uses
+a real Codex head against a disposable Git repository; it is not cloud or
+installed-app proof. The authenticated V6 canary creates an objective-bound
+temporary non-admin identity, performs a read-only production source task, and
+revokes it afterward. The final client-UI proof is intentionally stateful: it
+uses the existing configured admin identity and the live production Electron
+renderer to open widget id `browser`, then verifies the semantic receipt,
+finished native-control command artifact, exact usage, completion gate, and
+terminal external anchor chain. It does not create or modify an account.
+
+Expected reports:
+
+```text
+reports/context/latest/master-frontier-v6-kernel-result.json
+reports/context/latest/master-frontier-v6-live-model-result.json
+reports/context/latest/master-frontier-v6-authenticated-canary.json
+reports/context/latest/master-frontier-v6-client-ui.json
+```
+
+These proofs verify the exercised repository and Electron UI lanes. V6 is the
+browser default; `?frontier=v5` or stored
+`wasmAgent.frontierProtocol=explicit:v5` is the immediate rollback. Legacy bare
+`v5` storage migrates to V6, and persisted runs keep their original protocol. The proofs
+do not cover every MCP transport/configuration or replace final Windows
+installer/login verification.
+
 The automatic watcher replays compact route/tool contract quests without
 provider calls. Static fixtures can promote only through L4. Independently
 produced avatar proof may promote to L5, and fresh avatar plus node proof may
@@ -111,6 +148,19 @@ python3 tools/context/watch-master-frontier-loop.py
 python3 tools/context/watch-master-frontier-loop.py --require-proof-artifacts
 python3 tools/context/run-master-frontier-autonomy-loop.py
 ```
+
+For one avatar-chat session, use the summary-first watcher before manually
+combining SQLite queries, client snapshots, and browser text. CDP is optional
+and is authorized only under `BROWSER_BRIDGE.md`:
+
+```bash
+python3 tools/context/watch-avatar-chat-run.py <session-id> [--run-id <run-id>] [--cdp]
+python3 plugins/wasm-agent/tests/avatar_chat_run_watch.test.py
+```
+
+The watcher is read-only and single-shot. Its CDP shortcut must be retired once
+the product exposes the same authenticated compact live UI/run acknowledgement
+contract without browser inspection.
 
 ## Loop-Aware Evidence
 

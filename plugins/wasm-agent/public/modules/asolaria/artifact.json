@@ -1,0 +1,93 @@
+{
+  "schema": "hermes.wasm_agent.asolaria.artifact.v1",
+  "id": "asolaria-tribit-0.1.0",
+  "title": "ASOLARIA Tribit Receipt Engine",
+  "version": "0.1.0",
+  "runtime": {
+    "kind": "deterministic-wasm",
+    "abi": "raw-c-v1",
+    "wasm": "./asolaria_tribit.wasm",
+    "sha256": "b98abbbb10c1474558afcbb4dc3aa16d7bbf9d04e1fc40645c18440ca8c8cfd7",
+    "inputCapacity": 1048576,
+    "receiptBytes": 3078,
+    "networkRequired": false,
+    "serverRequired": false
+  },
+  "litert": {
+    "compatible": false,
+    "reason": "No executable TFLite FlatBuffer graph, input/output signature, or LiteRT operators are present.",
+    "backend": "standalone-webassembly"
+  },
+  "policy": {
+    "lifecycle": "experimental",
+    "decisionAuthority": "none",
+    "allowedUses": ["deterministic-receipt", "structural-visualization", "bounded-benchmark"],
+    "forbiddenUses": ["answer-transformation", "model-routing", "ASI-claim"]
+  },
+  "capabilities": [
+    {
+      "id": "asolaria.receipt.make",
+      "input": "bytes<=1048576",
+      "output": "receipt3078",
+      "deterministic": true
+    },
+    {
+      "id": "asolaria.receipt.inspect",
+      "input": "current-receipt",
+      "output": "cells+count+chain+concealment+roundtrip",
+      "deterministic": true
+    },
+    {
+      "id": "asolaria.calibration.binary",
+      "input": "labeled-binary-train+holdout-results",
+      "output": "direct+inverted+topic-stability+routing-gates",
+      "deterministic": true
+    },
+    {
+      "id": "asolaria.qa.binary.evaluate",
+      "input": "sealed-binary-questions+labels",
+      "output": "actual-wasm-predictions+baselines+promotion-decision",
+      "deterministic": true
+    },
+    {
+      "id": "asolaria.lattice.inspect",
+      "input": "none",
+      "output": "81-state-lattice+third-partitions",
+      "deterministic": true
+    }
+  ],
+  "contracts": {
+    "receiptVectors": {
+      "count": 6,
+      "source": "TEST-VECTORS.txt",
+      "crossImplementation": true
+    },
+    "integrity": {
+      "channels": ["chain", "count", "withheld-marker"],
+      "roles": ["tampering", "omission", "concealed-omission"]
+    },
+    "lattice": {
+      "receiptStates": 81,
+      "acStates": 27,
+      "spatialCells": 27,
+      "solidCells": 9,
+      "translucentCells": 18,
+      "centreStates": 1
+    },
+    "measurement": {
+      "rule": "measurement-wins-over-claim",
+      "matchedControlsRequired": true,
+      "physicsLanguageWithoutCodeAndReceipt": "metaphor"
+    }
+  },
+  "provenance": {
+    "repository": "https://github.com/JesseBrown1980/ASOLARIA-UNIVERSE-SIMULATOR-with-gravity-light-time-space-color-rime-winding-drills",
+    "commit": "4a684b7f5f40be6c5b522e6baf1c1303f1a31491",
+    "crateDeclaredLicense": "MIT OR Apache-2.0",
+    "ggufRole": "catalog-data-only",
+    "claims": {
+      "asi": "unverified",
+      "accuracyOneThirdRightTwoThirdsWrong": "operator-claimed-unverified"
+    }
+  }
+}

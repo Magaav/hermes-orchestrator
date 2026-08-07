@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import difflib
 import os
 from pathlib import Path
 import re
@@ -64,6 +65,54 @@ def resolve(route: dict[str, Any], value: str) -> tuple[Path, str]:
     except ValueError:
         relative = raw
     return path, relative
+
+
+def nearby_files(route: dict[str, Any], value: str, *, limit: int = 8) -> list[str]:
+    """Return bounded sibling suggestions for a missing route-scoped file."""
+    root, allowed = _roots(route)
+    raw = str(value or "").strip()
+    candidate = Path(raw).expanduser()
+    path = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+    if not raw or not any(path == base or base in path.parents for base in allowed):
+        return []
+    if path.is_dir():
+        return [
+            str(item.relative_to(root)).replace("\\", "/")
+            for item in sorted(path.iterdir(), key=lambda item: item.name)[:256]
+            if item.is_file()
+            and item.name.lower() not in DENIED_NAMES
+            and item.suffix.lower() not in DENIED_SUFFIXES
+        ][:max(1, min(limit, 12))]
+    parent = path.parent
+    if not parent.is_dir():
+        return []
+    siblings = [
+        item for item in sorted(parent.iterdir(), key=lambda item: item.name)[:256]
+        if item.is_file()
+        and item.name.lower() not in DENIED_NAMES
+        and item.suffix.lower() not in DENIED_SUFFIXES
+    ]
+    names = [item.name for item in siblings]
+    ranked = difflib.get_close_matches(path.name, names, n=max(1, min(limit, 12)), cutoff=0.2)
+    return [
+        str((parent / name).relative_to(root)).replace("\\", "/")
+        for name in ranked
+    ]
+
+
+def workspace_relative_file(route: dict[str, Any], value: str) -> str:
+    """Recover a leading-slash path only when it names an existing routed file."""
+    root, allowed = _roots(route)
+    raw = str(value or "").strip()
+    if not raw.startswith("/"):
+        return ""
+    candidate = (root / raw.lstrip("/")).resolve()
+    if (
+        not candidate.is_file()
+        or not any(candidate == base or base in candidate.parents for base in allowed)
+    ):
+        return ""
+    return str(candidate.relative_to(root)).replace("\\", "/")
 
 
 def redact(text: str) -> tuple[str, bool]:

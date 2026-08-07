@@ -5,8 +5,8 @@ const path = require("node:path");
 const windowsRoot = path.resolve(__dirname, "..");
 const defaultRoot = path.join(windowsRoot, "release", "win-unpacked");
 const targetRoot = path.resolve(process.argv[2] || defaultRoot);
-const thresholdMb = Number(process.env.WASM_AGENT_WINDOWS_INSTALLER_WARN_MB || "500");
-const failThresholdMb = Number(process.env.WASM_AGENT_WINDOWS_INSTALLER_FAIL_MB || "0");
+const thresholdMb = Number(process.env.WASM_AGENT_WINDOWS_INSTALLER_WARN_MB || "400");
+const allowedResourceOwners = new Set(["app.asar", "bridge-ops", "elevate.exe", "horc", "icon.ico", "native-defaults.json", "wasm-agent-launcher.exe"]);
 
 function walk(root) {
   const files = [];
@@ -60,6 +60,21 @@ function suspiciousReason(relative) {
   return "";
 }
 
+function forbiddenPayloadReason(relative) {
+  const lower = relative.toLowerCase();
+  if (lower.startsWith("resources/public/")) return "cloud PWA or on-demand model tree";
+  if (/\.apk$/.test(lower)) return "Android APK must be downloaded from the release feed";
+  if (/\.(onnx|tflite)$/.test(lower)) return "model must be downloaded on demand";
+  if (/native\/releases\/windows\/.*\.(exe|blockmap)$/.test(lower)) return "old Windows release artifact";
+  return "";
+}
+
+function unexpectedResourceOwner(relative) {
+  if (!relative.toLowerCase().startsWith("resources/")) return "";
+  const owner = relative.split("/")[1] || "";
+  return allowedResourceOwners.has(owner) ? "" : owner || "(empty)";
+}
+
 function sortedEntries(map) {
   return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
 }
@@ -74,26 +89,35 @@ const total = files.reduce((sum, item) => sum + item.size, 0);
 const byDir = new Map();
 const byType = new Map();
 const suspicious = [];
+const forbidden = [];
+const unexpectedResources = [];
 for (const file of files) {
   add(byDir, topDirectory(file.relative), file.size);
   add(byType, fileType(file.relative), file.size);
   const reason = suspiciousReason(file.relative);
   if (reason) suspicious.push({ ...file, reason });
+  const forbiddenReason = forbiddenPayloadReason(file.relative);
+  if (forbiddenReason) forbidden.push({ ...file, reason: forbiddenReason });
+  const unexpectedOwner = unexpectedResourceOwner(file.relative);
+  if (unexpectedOwner) unexpectedResources.push({ ...file, owner: unexpectedOwner });
 }
 
 const report = {
-  schema: "hermes.wasm_agent.windows_package_size_audit.v1",
+  schema: "hermes.wasm_agent.windows_package_inventory_audit.v1",
+  ok: forbidden.length === 0 && unexpectedResources.length === 0,
   packageRoot: targetRoot,
   generatedAt: new Date().toISOString(),
   totalBytes: total,
   totalMb: Number((total / 1024 / 1024).toFixed(1)),
   thresholdMb,
-  failThresholdMb,
+  allowedResourceOwners: Array.from(allowedResourceOwners).sort(),
   fileCount: files.length,
   byTopDirectory: sortedEntries(byDir).map(([name, bytes]) => ({ name, bytes, mb: Number((bytes / 1024 / 1024).toFixed(1)) })),
   byFileType: sortedEntries(byType).map(([type, bytes]) => ({ type, bytes, mb: Number((bytes / 1024 / 1024).toFixed(1)) })),
   topFiles: files.slice().sort((a, b) => b.size - a.size).slice(0, 20).map((item) => ({ path: item.relative, bytes: item.size, mb: Number((item.size / 1024 / 1024).toFixed(1)) })),
   suspicious: suspicious.sort((a, b) => b.size - a.size).slice(0, 50).map((item) => ({ path: item.relative, bytes: item.size, mb: Number((item.size / 1024 / 1024).toFixed(1)), reason: item.reason })),
+  forbidden: forbidden.sort((a, b) => b.size - a.size).map((item) => ({ path: item.relative, bytes: item.size, reason: item.reason })),
+  unexpectedResources: unexpectedResources.sort((a, b) => a.path.localeCompare(b.path)).map((item) => ({ path: item.relative, owner: item.owner })),
 };
 
 const reportPath = path.join(windowsRoot, "release", "windows-package-size-report.json");
@@ -115,7 +139,14 @@ if (report.suspicious.length) {
 if (thresholdMb > 0 && report.totalMb > thresholdMb) {
   console.warn(`WARNING: Windows package exceeds ${thresholdMb} MB threshold (${report.totalMb} MB).`);
 }
-if (failThresholdMb > 0 && report.totalMb > failThresholdMb) {
-  console.error(`ERROR: Windows package exceeds ${failThresholdMb} MB fail threshold (${report.totalMb} MB).`);
+if (report.forbidden.length) {
+  console.error(`ERROR: Windows package contains ${report.forbidden.length} forbidden payload(s).`);
+  for (const item of report.forbidden) console.error(`  ${item.path}: ${item.reason}`);
+}
+if (report.unexpectedResources.length) {
+  console.error(`ERROR: Windows package contains ${report.unexpectedResources.length} resource(s) without a declared owner.`);
+  for (const item of report.unexpectedResources) console.error(`  ${item.path}: undeclared owner ${item.owner}`);
+}
+if (!report.ok) {
   process.exit(1);
 }

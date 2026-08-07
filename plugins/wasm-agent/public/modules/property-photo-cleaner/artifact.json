@@ -1,0 +1,18 @@
+{
+  "schema": "hermes.space.artifact.v1",
+  "artifactId": "hermes.property-photo-cleaner",
+  "type": "space-widget",
+  "version": "0.2.0",
+  "displayName": "Property Photo Cleaner",
+  "description": "Browser-local object detection with explicit-consent, high-quality cloud AI cleanup.",
+  "entry": "./property-photo-cleaner.entry.js",
+  "icon": "./icon.svg",
+  "launchMode": "lazy",
+  "shareable": true,
+  "requiredCapabilities": ["canvas", "workers", "local-files"],
+  "optionalCapabilities": ["webgpu", "indexeddb", "compression-stream"],
+  "storage": {"owner": "hermes.property-photo-cleaner", "scope": "widget"},
+  "models": [{"manifest": "./models/model-manifest.json", "cacheDefault": false}],
+  "actions": ["open", "close", "inspect_status", "open_import", "load_examples", "start_auto_correction", "find_objects", "clean_objects", "undo_clean", "cancel_processing", "approve_current", "export_approved", "share_artifact", "clear_project", "clear_model_cache"],
+  "disposal": {"workers": "terminate", "decodedImages": "release", "modelSession": "dispose", "gpuResources": "release", "projectMetadata": "preserve"}
+}

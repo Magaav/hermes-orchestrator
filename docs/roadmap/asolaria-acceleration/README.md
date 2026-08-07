@@ -4,8 +4,12 @@ This track absorbs useful patterns from the public
 `JesseBrown1980/what-is-asolaria---how-do-we-get-reductions-in-everything`
 repository into Hermes Orchestrator planning.
 
-Status: `proposal`. This is a pattern source, not a code import and not runtime
-proof for this repo.
+Status: `implemented-unverified`. This remains a pattern source rather than
+runtime proof for upstream ASOLARIA claims, but wasm-agent now has an executable
+ASOLARIA widget, binary calibration lane, rejected actual-WASM QA benchmark,
+omission-aware event-integrity
+experiment, append-only anchor-store contract, and source-owned Capability
+Foundry registry. None are deployed-runtime or ASI proof.
 
 ## Source Boundary
 
@@ -122,11 +126,14 @@ Before rebuilding or asking the user to narrate runtime state, agents should:
 
 ## Durable Next Step
 
-The first static receipt generator exists at
-`tools/windows/emit-waproof-receipts.py`. It reads existing Windows proof
-reports and emits `WAPROOF` rows without changing release feed behavior or
-upgrading runtime claims.
+The first Capability Foundry contract now lives at
+`plugins/wasm-agent/CAPABILITY_FOUNDRY.md`, with its machine registry under
+`server/master_frontier/capability_registry.json`. ASOLARIA capabilities remain
+candidates and are excluded from the hot path. Event integrity and append-only
+anchoring are promoted after authenticated production runtime and independent
+chain proof.
 
-Next: run it after the Windows proof sequence, inspect whether the receipt rows
-make agent handoff faster, and only then consider wiring it into a broader
-proof summary command.
+`horc space restart` now restores event anchoring by default in cloud mode.
+The remaining integrity limit is host administration: use an off-host signer
+or transparency sink before claiming protection against replacement of both
+the primary event store and its local anchor database.

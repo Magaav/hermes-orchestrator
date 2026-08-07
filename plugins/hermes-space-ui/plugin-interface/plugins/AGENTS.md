@@ -13,6 +13,8 @@ Current bundles:
 - `component-context-menu/`: generic Space Agent component context-menu bundle mirrored from the upstream PR fixture; it right-clicks Space widget cards through the Customware Bundle Interface and keeps `Copy ID` available for agent-targeted edits.
 - `hermes-fleet/`: Hermes Fleet control bundle manifest and reference source.
 - `space-agent-brand/`: Hermes browser/PWA icon bundle that overrides Space Agent head metadata through the framework head seam.
+- `property-photo-cleaner/`: privacy-first, lazy-loaded browser photo correction and
+  optional verified local-inpainting widget.
 
 ## Local Contracts
 

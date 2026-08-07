@@ -1,0 +1,17 @@
+{
+  "schema": "hermes.space.artifact.v1",
+  "artifactId": "hermes.batch-cleaner",
+  "type": "space-widget",
+  "version": "0.2.0",
+  "displayName": "Batch Cleaner",
+  "description": "Sequential Codex datacenter property-photo cleaning with per-photo progress, comparison, and ZIP export.",
+  "entry": "./batch-cleaner.entry.js",
+  "icon": "./icon.svg",
+  "launchMode": "lazy",
+  "shareable": true,
+  "requiredCapabilities": ["canvas", "workers", "local-files"],
+  "optionalCapabilities": ["webgpu"],
+  "storage": {"owner": "hermes.batch-cleaner", "scope": "widget"},
+  "actions": ["open", "close", "inspect_status", "open_import", "clean_all", "export_all"],
+  "disposal": {"decodedImages": "release", "objectUrls": "revoke", "modelSession": "dispose"}
+}

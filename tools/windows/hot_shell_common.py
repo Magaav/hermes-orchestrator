@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 import urllib.error
@@ -17,6 +18,7 @@ from typing import Any
 DEFAULT_ORIGIN = "http://127.0.0.1:8877"
 EXPECTED_HOT_OPS_PROTOCOL = 1
 EXPECTED_SHELL_PROTOCOL = 2
+DEFAULT_WA_ENV_PATH = Path("/local/plugins/wasm-agent/conf/wa.env")
 CLASSIFICATIONS = {
     "bridge_unreachable": "Start the local wasm-agent backend and installed Windows app.",
     "command_not_polled": "Restart or reopen the installed Windows app; the command was queued but never picked up by native-control polling.",
@@ -154,9 +156,28 @@ def cleanup_native_control_state(
     return report
 
 
+def native_control_key() -> str:
+    direct = str(os.getenv("WASM_AGENT_NATIVE_CONTROL_KEY") or "").strip()
+    if direct:
+        return direct
+    path = Path(os.getenv("HERMES_WASM_AGENT_ENV_PATH") or DEFAULT_WA_ENV_PATH)
+    if not path.exists():
+        return ""
+    if path.suffix == ".json":
+        return str(read_json(path).get("WASM_AGENT_NATIVE_CONTROL_KEY") or "")
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("WASM_AGENT_NATIVE_CONTROL_KEY="):
+            return stripped.split("=", 1)[1].strip().strip("'\"")
+    return ""
+
+
 def request_json(method: str, url: str, *, body: dict[str, Any] | None = None, timeout: int = 10) -> dict[str, Any]:
     data = None
     headers = {"Accept": "application/json"}
+    control_key = native_control_key()
+    if control_key:
+        headers["X-Wasm-Agent-Native-Control-Key"] = control_key
     if body is not None:
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"

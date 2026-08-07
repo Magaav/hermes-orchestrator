@@ -456,7 +456,7 @@ function freeTcpPort(host = "127.0.0.1") {
   });
 }
 
-function createResponsesStubServer(options = {}) {
+function createDirectHeadStubServer(options = {}) {
   const requests = [];
   const usages = Array.isArray(options.usages) && options.usages.length
     ? options.usages
@@ -465,7 +465,7 @@ function createResponsesStubServer(options = {}) {
     ? options.answers
     : [options.answer || "Avatar quest simulator reply."];
   const server = http.createServer((req, res) => {
-    if (req.method !== "POST" || !String(req.url || "").startsWith("/responses")) {
+    if (req.method !== "POST" || !String(req.url || "").startsWith("/v1/chat/completions")) {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "not_found" }));
       return;
@@ -500,21 +500,18 @@ function createResponsesStubServer(options = {}) {
         content_type: req.headers["content-type"] || "",
         payload,
       });
-      const events = [
-        { type: "response.output_text.delta", delta: reply },
-        {
-          type: "response.completed",
-          response: {
-            id: "resp_avatar_quest_sim",
-            status: "completed",
-            usage,
-            output: [],
-          },
-        },
-      ];
-      const data = `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`;
+      const data = JSON.stringify({
+        id: `chatcmpl_avatar_quest_sim_${requestIndex + 1}`,
+        model: "gpt-5.5-sim",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: reply },
+          finish_reason: "stop",
+        }],
+        usage,
+      });
       res.writeHead(200, {
-        "Content-Type": "text/event-stream",
+        "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(data),
       });
       res.end(data);
@@ -545,10 +542,11 @@ function writeAvatarQuestEnv(envPath, stubBaseUrl) {
     "ADMIN_EMAIL=simulator@wasm-agent.local",
     "USER_EMAILS=simulator@wasm-agent.local",
     "GOOGLE_LOGIN_CLIENT_ID=simulator-client-id",
-    "WASM_AGENT_MASTER_FRONTIER_RECEIVER=openai-responses",
-    `WASM_AGENT_OPENAI_BASE_URL=${stubBaseUrl}`,
-    "WASM_AGENT_OPENAI_API_KEY=simulator-key",
-    "WASM_AGENT_OPENAI_MODEL=gpt-5.5-sim",
+    "WASM_AGENT_MASTER_FRONTIER_RECEIVER=provider",
+    "WASM_AGENT_DIRECT_HEAD_PROVIDER=simulator",
+    `WASM_AGENT_DIRECT_HEAD_BASE_URL=${stubBaseUrl}`,
+    "WASM_AGENT_DIRECT_HEAD_API_KEY=simulator-key",
+    "WASM_AGENT_DIRECT_HEAD_MODEL=gpt-5.5-sim",
   ];
   fs.writeFileSync(envPath, `${lines.join("\n")}\n`, "utf8");
 }
@@ -654,10 +652,11 @@ async function prepareAvatarQuestRuntime(ctx, stub) {
     HERMES_WASM_AGENT_AUTH_SECRET_PATH: secretPath,
     HERMES_WASM_AGENT_HOST: "127.0.0.1",
     HERMES_WASM_AGENT_PORT: String(port),
-    WASM_AGENT_MASTER_FRONTIER_RECEIVER: "openai-responses",
-    WASM_AGENT_OPENAI_BASE_URL: stub.baseUrl,
-    WASM_AGENT_OPENAI_API_KEY: "simulator-key",
-    WASM_AGENT_OPENAI_MODEL: "gpt-5.5-sim",
+    WASM_AGENT_MASTER_FRONTIER_RECEIVER: "provider",
+    WASM_AGENT_DIRECT_HEAD_PROVIDER: "simulator",
+    WASM_AGENT_DIRECT_HEAD_BASE_URL: stub.baseUrl,
+    WASM_AGENT_DIRECT_HEAD_API_KEY: "simulator-key",
+    WASM_AGENT_DIRECT_HEAD_MODEL: "gpt-5.5-sim",
     WASM_AGENT_SIM_USER_EMAIL: "simulator@wasm-agent.local",
   };
   const server = startIsolatedWasmAgentServer({ port, env, ctx });
@@ -946,7 +945,7 @@ async function runAvatarQuestSimulation(options = {}) {
 
   try {
     ctx.startPhase("boot", "start isolated server and provider stub");
-    stub = await createResponsesStubServer({
+    stub = await createDirectHeadStubServer({
       answers: [
         "Avatar quest simulator completed turn one through the real avatar-chat UI.",
         "Avatar quest simulator completed turn two through the real avatar-chat UI.",

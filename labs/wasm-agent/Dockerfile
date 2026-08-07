@@ -12,6 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/safe-lab-entrypoint
 COPY --chmod=0755 containment-canary.sh /usr/local/bin/containment-canary
 COPY --chmod=0755 lane-runner.py /usr/local/bin/lane-runner
+COPY --chmod=0644 agent_trajectory.py /usr/local/bin/agent_trajectory.py
+COPY --chmod=0644 fixture_outcomes.py /usr/local/bin/fixture_outcomes.py
 COPY --chmod=0755 model-gateway.py /usr/local/bin/model-gateway
 COPY --chmod=0644 responses_bridge.py /usr/local/bin/responses_bridge.py
 COPY --chmod=0644 anthropic_bridge.py /usr/local/bin/anthropic_bridge.py

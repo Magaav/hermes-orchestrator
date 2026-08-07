@@ -23,8 +23,6 @@ class WasmAgentAppConfigTests(unittest.TestCase):
             public_origin="https://wa.colmeio.com",
             deployment_mode="cloud",
             instance_id="production",
-            host_browser_enabled=False,
-            public_default_disabled=True,
             shared_voice_enabled=False,
             shared_voice_ice_servers=[],
         )
@@ -46,7 +44,6 @@ class WasmAgentAppConfigTests(unittest.TestCase):
             internal_bridge_url="http://127.0.0.1:8790", agent_turn_timeout_sec=30,
             google_client_id="client", google_login_uri="http://127.0.0.1/auth/google/callback",
             public_origin="http://127.0.0.1:8877", deployment_mode="local", instance_id="dev",
-            host_browser_enabled=False, public_default_disabled=True,
             shared_voice_enabled=False, shared_voice_ice_servers=[],
         )
         self.assertTrue(config["features"]["devHmr"]["enabled"])

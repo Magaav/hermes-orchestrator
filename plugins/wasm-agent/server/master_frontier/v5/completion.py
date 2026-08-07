@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
-from . import decision_record, operation_ledger, task_policy
+from . import decision_record, operation_ledger, task_policy, tool_stage
 
 
 SOURCE_CLASSES = frozenset({"source_investigation"})
@@ -149,6 +150,9 @@ def _successful_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
 def _runtime_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
     conclusive: list[dict[str, Any]] = []
     for step in _successful_steps(state):
+        if step.get("tool") == "browser" and str(_result(step).get("url") or "").strip():
+            conclusive.append(step)
+            continue
         if step.get("tool") != "inspect":
             continue
         runtime = _result(step).get("runtime")
@@ -158,6 +162,28 @@ def _runtime_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
         if isinstance(observed, dict) and observed:
             conclusive.append(step)
     return conclusive
+
+
+def _memory_steps(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return successful exact reads relevant to the model-owned root objective."""
+    objective_terms = {
+        term for term in re.findall(r"[a-z0-9_-]{5,}", str(state.get("root_objective") or "").lower())
+        if term not in {"another", "session", "memory", "answer", "without", "using"}
+    }
+    relevant: list[dict[str, Any]] = []
+    for step in _successful_steps(state):
+        if step.get("tool") != "memory":
+            continue
+        turns = _result(step).get("turns")
+        if not isinstance(turns, list) or not turns:
+            continue
+        content = " ".join(
+            f"{item.get('objective', '')} {item.get('answer', '')}".lower()
+            for item in turns if isinstance(item, dict)
+        )
+        if not objective_terms or len({term for term in objective_terms if term in content}) >= 2:
+            relevant.append(step)
+    return relevant
 
 
 def _missing_source_reads(status: dict[str, Any]) -> list[dict[str, Any]]:
@@ -197,8 +223,11 @@ def verified_noop(state: dict[str, Any], route: dict[str, Any] | None = None) ->
     ledger = state.get("operation_ledger") if isinstance(state.get("operation_ledger"), dict) else {}
     if ledger.get("mutations"):
         return False
-    check = ledger.get("check") if isinstance(ledger.get("check"), dict) else {}
-    if check.get("rev") != 0 or check.get("ok") is not True:
+    receipts = [
+        ledger.get(kind) if isinstance(ledger.get(kind), dict) else {}
+        for kind in ("check", "diff", "proof")
+    ]
+    if any(receipt.get("rev") != 0 or receipt.get("ok") is not True for receipt in receipts):
         return False
     executive = state.get("executive") if isinstance(state.get("executive"), dict) else {}
     decision = executive.get("decision") if isinstance(executive.get("decision"), dict) else {}
@@ -238,19 +267,52 @@ def assess(state: dict[str, Any], route: dict[str, Any] | None = None) -> dict[s
                 "next_actions": [{"tool": "edit", "arguments": {}}],
                 "reason": "Model autonomy owns the workflow, but the declared implementation has no applied mutation yet.",
             }
+        ledger = state.get("operation_ledger") if isinstance(state.get("operation_ledger"), dict) else {}
+        required_owners = {
+            str(path).strip()
+            for path in ((route or {}).get("required_owner_paths") or [])
+            if str(path).strip()
+        }
+        changed_paths = {str(path).strip() for path in (ledger.get("changed_files") or []) if str(path).strip()}
+        proven_owners = tool_stage.owner_reads_after_latest_mutation(state, required_owners, changed_paths)
+        missing_owners = sorted(required_owners - changed_paths - proven_owners)
+        if task_policy.requires_mutation(route or {}) and ledger.get("mutations") and missing_owners:
+            return {
+                "status": "incomplete", "modality": "llm_autonomous", "covered": [],
+                "required_gaps": [f"required owner proof: {path}" for path in missing_owners],
+                "next_actions": [{"tool": "edit", "arguments": {}}],
+                "reason": "The implementation has not changed or freshly verified every route-required owner path.",
+            }
+        workflow_gaps = operation_ledger.missing(ledger) if ledger.get("mutations") else []
+        if workflow_gaps:
+            workflow_actions = []
+            if any("test" in gap for gap in workflow_gaps):
+                workflow_actions.append({"tool": "test", "arguments": {"check_id": "<registered-check-id>"}})
+            if any("diff" in gap for gap in workflow_gaps):
+                workflow_actions.append({"tool": "diff", "arguments": {}})
+            if any("proof" in gap for gap in workflow_gaps):
+                workflow_actions.append({"tool": "prove", "arguments": {}})
+            return {
+                "status": "incomplete", "modality": "llm_autonomous", "covered": [],
+                "required_gaps": workflow_gaps, "next_actions": workflow_actions,
+                "reason": "Model autonomy chooses the implementation, but the host still requires current-revision test, diff, and proof receipts.",
+            }
         return {
             "status": "sufficient", "modality": "llm_autonomous", "covered": [],
             "required_gaps": [], "next_actions": [],
-            "reason": "The task contract delegates completion timing and tool choice to the model, including a proof-backed no-op decision when the requested mutation is not justified.",
+            "reason": "The autonomous implementation has current deterministic completion proof, or a proof-backed no-op decision rejected the requested mutation.",
         }
     successful = _successful_steps(state)
     source = evidence_status(state)
     runtime = _runtime_steps(state)
+    memory = _memory_steps(state)
     modality = _declared_modality(route)
+    resolved_entity = route.get("resolved_entity") if isinstance(route, dict) and isinstance(route.get("resolved_entity"), dict) else {}
+    memory_modality = str(resolved_entity.get("kind") or "").endswith("session-memory")
     source_ready = bool(source["source_evidence_sufficient"])
     runtime_ready = bool(runtime)
     if modality == "runtime":
-        sufficient = runtime_ready
+        sufficient = bool(memory) if memory_modality else runtime_ready
     elif modality == "source":
         sufficient = source_ready
     elif modality == "workflow":
@@ -258,7 +320,7 @@ def assess(state: dict[str, Any], route: dict[str, Any] | None = None) -> dict[s
     else:
         sufficient = source_ready or runtime_ready
     if sufficient:
-        covered = ["inspect"] if modality == "runtime" or (runtime_ready and not source_ready) else ["read"]
+        covered = ["memory"] if memory_modality else ["inspect"] if modality == "runtime" or (runtime_ready and not source_ready) else ["read"]
         return {
             "status": "sufficient",
             "modality": modality or ("source" if source_ready else "runtime"),

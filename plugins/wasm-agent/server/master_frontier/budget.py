@@ -221,7 +221,7 @@ def api_call_diagnostics(
     }
 
 
-def continuation_limit(envelope: dict[str, Any], *, calls_used: int = 0, hard_max: int = 6) -> int:
+def continuation_limit(envelope: dict[str, Any], *, calls_used: int = 0, hard_max: int = 8) -> int:
     budget = from_envelope(envelope)
     allowed = budget.get("api_calls_max")
     if allowed is None or budget.get("enforcement") != HARD_ENFORCEMENT:

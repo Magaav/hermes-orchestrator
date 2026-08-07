@@ -6,40 +6,76 @@
       "surface": "avatar-chat",
       "owner": "plugins/wasm-agent",
       "workspace_root": ".",
+      "browser_entry_url": "https://wa.colmeio.com/",
+      "client_ui": {
+        "runtime_types": ["electron"],
+        "widget_ids": ["browser"],
+        "operations": ["inspect", "open_widget", "browser_navigate", "command_status"]
+      },
       "allowed_read_roots": ["."],
       "allowed_write_roots": ["."],
+      "allowed_edit_operations": ["create", "replace", "append"],
       "likely_paths": [
+        "server/master_frontier/planner.py",
+        "server/master_frontier/authority.py",
+        "tests/master_frontier_planner.test.py",
+        "tests/master_frontier_v5_authority.test.py",
+        "public/modules/assistant/session-memory.js",
+        "public/modules/assistant/session-persistence.js",
+        "server/master_frontier/session_context.py",
+        "server/master_frontier/runtime_actions.py",
+        "server/master_frontier/runtime_snapshot_collector.py",
+        "server/master_frontier/runtime_proof.py",
+        "tests/agent_session_persistence.test.js",
+        "tests/master_frontier_session_replay.test.py",
+        "tests/master_frontier_runtime_snapshot_collector.test.py",
         "public/modules/master-frontier/timeline.js",
         "public/modules/master-frontier/continuation.js",
-        "server/master_frontier/controller_v3.py",
-        "server/master_frontier/cyphers_v3.py",
-        "server/master_frontier/proof_gate.py",
-        "server/master_frontier/trace.py",
-        "server/master_frontier/token_ledger.py",
-        "public/styles.css",
-        "public/app.js",
-        "public/index.html"
+        "server/master_frontier/token_ledger.py"
       ],
       "entities": [
+        {
+          "id": "wasm-agent.master-frontier.planner",
+          "name": "Master Frontier Planner Contract",
+          "kind": "source-owner",
+          "route_symbol": "server/master_frontier/planner.py",
+          "symbols": ["task_contract", "_evidence_floor"],
+          "match_terms": ["planner contract", "master:frontier planner", "master frontier planner"],
+          "proof": ["source_read"]
+        },
         {
           "id": "wasm-agent.avatar-chat.ui",
           "name": "Avatar Chat Run History",
           "kind": "scoped-run-history",
           "match_terms": ["avatar chat", "avatar-chat"],
           "proof": ["scoped_run_history", "live_state_not_collected"]
+        },
+        {
+          "id": "wasm-agent.avatar-chat.session-memory",
+          "name": "Account-Scoped Avatar Session Memory",
+          "kind": "summary-first-session-memory",
+          "match_terms": ["other sessions", "cross-session memory", "remember other sessions", "session summary", "transcript detail"],
+          "proof": ["account_scope", "compact_summary", "exact_read_on_demand", "context_measurement"]
         }
       ],
       "lookup_handles": [
         "route.files",
         "route.symbols",
         "route.tests",
-        "run.timeline"
+        "run.timeline",
+        "sessions.summary",
+        "transcript.read"
       ],
       "caps": [
         "repo.read",
         "repo.edit",
         "test.run",
         "runtime.inspect",
+        "browser.inspect",
+        "browser.control",
+        "client.ui.inspect",
+        "client.ui.control",
+        "session.memory.read",
         "proof.report"
       ],
       "provider_policy": {
@@ -63,8 +99,9 @@
           "../../state/**",
           "**/node_modules/**",
           "**/__pycache__/**",
-          "**/*.onnx",
-          "**/*.wasm",
+      "**/*.onnx",
+      "**/*.tflite",
+      "**/*.wasm",
           "**/*.tar.gz",
           "**/*.zip"
         ],
@@ -91,10 +128,108 @@
       ],
       "checks": [
         {
+          "id": "master-frontier-client-ui",
+          "command": ["python3", "tests/master_frontier_client_ui_actions.test.py"],
+          "evidence_paths": [
+            "server/master_frontier/client_ui_actions.py",
+            "server/master_frontier/authority.py",
+            "server/master_frontier/controller_v5.py",
+            "server/master_frontier/v5/policy.py",
+            "server/master_frontier/v5/tools.py",
+            "server/live_clients.py",
+            "tests/master_frontier_client_ui_actions.test.py"
+          ],
+          "timeout_sec": 30,
+          "description": "Route-scoped live Electron widget control and acknowledgement contract"
+        },
+        {
+          "id": "master-frontier-session-memory",
+          "command": ["python3", "tests/master_frontier_session_memory.test.py"],
+          "evidence_paths": [
+            "server/master_frontier/session_context.py",
+            "server/master_frontier/authority.py",
+            "server/master_frontier/controller_v5.py",
+            "server/master_frontier/v5/context.py",
+            "server/master_frontier/v5/policy.py",
+            "server/master_frontier/v5/task_policy.py",
+            "server/master_frontier/v5/tools.py",
+            "tests/master_frontier_session_memory.test.py"
+          ],
+          "timeout_sec": 30,
+          "description": "Account-scoped compact cross-session memory and exact-read contract"
+        },
+        {
+          "id": "agent-session-persistence",
+          "command": [
+            "node",
+            "tests/agent_session_persistence.test.js"
+          ],
+          "evidence_paths": [
+            "public/modules/assistant/session-persistence.js",
+            "tests/agent_session_persistence.test.js"
+          ],
+          "timeout_sec": 30,
+          "description": "Focused compact avatar session persistence contract"
+        },
+        {
           "id": "provider-proxy",
           "command": ["python3", "tests/provider_proxy.test.py"],
           "timeout_sec": 90,
           "description": "Focused direct-head, route-contract, local-tool, Hermes-gating, and token-ledger server tests"
+        }
+      ]
+    },
+    {
+      "route_id": "wasm-agent.space.ui",
+      "surface": "space-ui",
+      "owner": "plugins/wasm-agent",
+      "workspace_root": ".",
+      "allowed_read_roots": ["."],
+      "allowed_write_roots": ["."],
+      "allowed_edit_operations": ["create", "replace"],
+      "implementation_invariants": [
+        "New user-visible Space components must be wired into their discovered registry or owner; an orphan module is incomplete."
+      ],
+      "required_owner_paths": ["public/modules/app-registry.js"],
+      "likely_paths": [
+        "public/modules/app-registry.js",
+        "public/modules/space-widget-policy.js",
+        "public/modules/widget-window-contract.js",
+        "public/modules",
+        "tests"
+      ],
+      "lookup_handles": ["route.files", "route.symbols", "route.tests"],
+      "caps": ["repo.read", "repo.edit", "test.run", "proof.report"],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "source_index": {
+        "include_roots": ["public/modules", "tests", "../../docs/context"],
+        "exclude_globs": ["public/modules/**/onnx/**", "public/modules/**/models/**", "public/modules/**/vendor/**/*.wasm", "public/modules/**/*.wasm", "public/modules/**/*.tflite", "**/node_modules/**", "state/**", "reports/**"],
+        "max_file_bytes": 262144,
+        "max_scan_bytes_per_file": 2097152,
+        "max_total_bytes": 8000000,
+        "max_results": 12
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "input_tokens_max": 12000,
+        "provider_tokens_max": 50000,
+        "api_calls_max": 8,
+        "provider_call_ms_max": 90000,
+        "heartbeat_ms_max": 15000,
+        "task_lease_ms_max": 900000
+      },
+      "proof": ["route_id", "workspace_root", "changed_files", "checks", "token_ledger"],
+      "checks": [
+        {
+          "id": "space-ui-regression",
+          "command": ["python3", "tests/spaces_regression.test.py"],
+          "evidence_paths": [],
+          "timeout_sec": 90,
+          "description": "Focused space UI registration and rendering regression contract"
         }
       ]
     },

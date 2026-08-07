@@ -361,6 +361,23 @@ def verification_missing(ledger: dict[str, Any]) -> list[str]:
     return gaps
 
 
+def verification_project(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Return the compact revision-zero proof record used by final synthesis."""
+    value = normalize(ledger)
+    check = value.get("check") if isinstance(value.get("check"), dict) else {}
+    diff = value.get("diff") if isinstance(value.get("diff"), dict) else {}
+    proof = value.get("proof") if isinstance(value.get("proof"), dict) else {}
+    return {
+        "rev": value["revision"],
+        "check_ok": check.get("ok") is True,
+        "check_id": str(check.get("id") or "")[:120],
+        "diff_ok": diff.get("ok") is True,
+        "diff_files": [str(path) for path in (diff.get("files") or [])[:24]],
+        "proof_ok": proof.get("ok") is True,
+        "gaps": verification_missing(value),
+    }
+
+
 def project(ledger: dict[str, Any]) -> dict[str, Any]:
     value = normalize(ledger)
     return {

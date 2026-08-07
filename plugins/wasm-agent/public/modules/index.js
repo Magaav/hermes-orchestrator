@@ -19,6 +19,10 @@
 // from "./speech-transcription/module.js"
 // from "./cv-shapes/module.js"
 // from "./semantic-vision/module.js"
+// from "./asolaria/module.js"
+// from "./artifact-foundry/module.js"
+// from "./video-v1/module.js"
+// from "./video-v2/module.js"
 const moduleDefinition = (definition) => Object.freeze(definition);
 
 export const MODULE_DEFINITIONS = Object.freeze([
@@ -80,7 +84,7 @@ export const MODULE_DEFINITIONS = Object.freeze([
     title: "Native Standby",
     status: "native companion",
     detail: "Tracks the native companion contract for wake phrase standby, live transcription, device presence, and platform-specific installer delivery.",
-    defaultEnabled: false,
+    defaultEnabled: true,
     firmware: "/modules/native-standby/module.js",
     endpoints: ["/native/resolve", "/native/download", "/account/devices/native", "/account/devices/native/download"],
     state: {
@@ -130,15 +134,15 @@ export const MODULE_DEFINITIONS = Object.freeze([
     },
   }),
   moduleDefinition({
-    id: "host-browser",
-    title: "Host Browser",
-    status: "pixel stream",
-    detail: "Renders host Chromium pixels and forwards confirmed browser input from the widget.",
+    id: "browser",
+    title: "Browser",
+    status: "native Chromium",
+    detail: "Owns an Electron WebContentsView portal with persistent isolated sessions and bounded navigation proof.",
     defaultEnabled: true,
-    firmware: "/modules/browser/module.js",
-    endpoints: ["/browser/stream", "/browser/open", "/browser/input", "/browser/close"],
+    firmware: "/modules/browser/browser.entry.js",
+    capabilities: ["browser.session.status", "browser.navigate", "browser.history", "browser.native.surface", "browser.prove"],
     state: {
-      runtimeRoot: "state/browser",
+      browserStorage: "wasmAgent.browserPortal.v2",
       layoutRoot: "state/users/<acc_id>/spaces/<space_id>/widget-layout.json",
     },
   }),
@@ -163,6 +167,70 @@ export const MODULE_DEFINITIONS = Object.freeze([
     state: {
       artifactSchema: "hermes.wasm_agent.wis.space.v1",
       browserStorage: "session-local runtime state",
+    },
+  }),
+  moduleDefinition({
+    id: "property-photo-cleaner",
+    title: "Property Photo Cleaner",
+    status: "browser-local LiteRT",
+    detail: "Cleans property photos locally with lazy-loaded correction and inpainting assets.",
+    defaultEnabled: true,
+    firmware: "/modules/property-photo-cleaner/property-photo-cleaner.entry.js",
+    endpoints: [],
+    state: {
+      browserStorage: "hermes.property-photo-cleaner.models",
+      networkPolicy: "photo-bytes-local",
+    },
+  }),
+  moduleDefinition({
+    id: "batch-cleaner",
+    title: "Batch Cleaner",
+    status: "browser-local batch pipeline",
+    detail: "Detects and cleans objects across up to 30 property photos with observable sequential queues.",
+    defaultEnabled: true,
+    firmware: "/modules/batch-cleaner/batch-cleaner.entry.js",
+    endpoints: [],
+    state: {
+      browserStorage: "session-local runtime state",
+      networkPolicy: "photo-bytes-local",
+    },
+  }),
+  moduleDefinition({
+    id: "asolaria",
+    title: "ASOLARIA Drills",
+    status: "experimental; no decision authority",
+    detail: "Browser-local receipt and lattice research artifact. Its tested binary predictor adds no value and must not alter agent answers.",
+    defaultEnabled: true,
+    firmware: "/modules/asolaria/asolaria.entry.js",
+    runtime: "/modules/asolaria/runtime.js",
+    artifact: "/modules/asolaria/artifact.json",
+    artifactSchema: "hermes.wasm_agent.asolaria.artifact.v1",
+    receiptSchema: "hermes.wasm_agent.asolaria.receipt.v1",
+    calibrationSchema: "hermes.wasm_agent.asolaria.calibration.v1",
+    endpoints: [],
+    state: {
+      runtime: "lazy browser singleton",
+      input: "ephemeral browser memory",
+      output: "operator-exported receipt only",
+      networkPolicy: "no input upload",
+      decisionAuthority: "none",
+    },
+  }),
+  moduleDefinition({
+    id: "artifact-foundry",
+    title: "Artifact Foundry",
+    status: "candidate deterministic generator",
+    detail: "Generates content-addressed structured artifacts from bounded recipes with a WASM transform core and explicit verification receipts.",
+    defaultEnabled: true,
+    firmware: "/modules/artifact-foundry/runtime.js",
+    artifact: "/modules/artifact-foundry/artifact.json",
+    recipeSchema: "hermes.wasm_agent.artifact.recipe.v1",
+    receiptSchema: "hermes.wasm_agent.artifact.receipt.v1",
+    endpoints: [],
+    state: {
+      input: "ephemeral browser memory",
+      output: "operator-exported artifact",
+      networkPolicy: "generator-network-denied",
     },
   }),
   moduleDefinition({
@@ -313,5 +381,31 @@ export const MODULE_DEFINITIONS = Object.freeze([
       evidence: "semantic_labels",
       candidate_library: "onnxruntime-web or WebNN/WebGPU model",
     },
+  }),
+  moduleDefinition({
+    id: "video-v1",
+    title: "Video V1",
+    status: "browser-local media editor",
+    detail: "Trims local MP4 files and exports bounded WebM AV1/Opus modules with an AVIF poster.",
+    defaultEnabled: true,
+    firmware: "/modules/video-v1/video-v1.entry.js",
+    artifact: "/modules/video-v1/artifact.json",
+    endpoints: [],
+    state: {
+      input: "ephemeral browser file",
+      output: "operator-exported media",
+      networkPolicy: "media-bytes-local",
+    },
+  }),
+  moduleDefinition({
+    id: "video-v2",
+    title: "Video V2",
+    status: "Mediabunny WebCodecs comparison",
+    detail: "Trims and transcodes local video through pinned Mediabunny demux/mux plus WebCodecs AV1/Opus, then inspects the produced bytes.",
+    defaultEnabled: true,
+    firmware: "/modules/video-v2/video-v2.entry.js",
+    artifact: "/modules/video-v2/artifact.json",
+    endpoints: [],
+    state: { input: "ephemeral browser file", output: "operator download", networkPolicy: "media-local; pinned runtime CDN" },
   }),
 ]);

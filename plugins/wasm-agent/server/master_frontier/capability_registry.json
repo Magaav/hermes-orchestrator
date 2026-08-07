@@ -1,0 +1,169 @@
+{
+  "schema": "hermes.wasm_agent.capability_registry.v1",
+  "version": 1,
+  "capabilities": [
+    {
+      "id": "asolaria.receipt.make",
+      "class": "exact",
+      "state": "candidate",
+      "claim_status": "implemented-unverified",
+      "owner": "public/modules/asolaria/runtime.js",
+      "version": "0.1.0",
+      "entry": "makeAsolariaReceipt",
+      "artifact_sha256": "b98abbbb10c1474558afcbb4dc3aa16d7bbf9d04e1fc40645c18440ca8c8cfd7",
+      "input": "bytes<=1048576",
+      "output": "receipt3078+inspection",
+      "limits": ["browser-local", "not-source-reconstruction", "not-semantic-proof"],
+      "side_effects": [],
+      "routes": [],
+      "required_caps": ["wasm.execute"],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral"],
+        "verifier": "node --experimental-vm-modules public/modules/asolaria/runtime.test.mjs"
+      },
+      "blockers": ["production-browser-runtime-proof"],
+      "invalidated_by": ["public/modules/asolaria/runtime.js", "public/modules/asolaria/asolaria_tribit.wasm", "public/modules/asolaria/artifact.json"]
+    },
+    {
+      "id": "asolaria.calibration.binary",
+      "class": "exact",
+      "state": "candidate",
+      "claim_status": "implemented-unverified",
+      "owner": "public/modules/asolaria/calibration.js",
+      "version": "1",
+      "entry": "scoreBinaryCalibration",
+      "artifact_sha256": "",
+      "input": "binary-train+holdout-results",
+      "output": "direct+inverted+topic-gates",
+      "limits": ["binary-only", "minimum-holdout-30", "authority-none-unless-gates-pass"],
+      "side_effects": [],
+      "routes": [],
+      "required_caps": [],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "negative-control"],
+        "verifier": "node --experimental-vm-modules public/modules/asolaria/calibration.test.mjs"
+      },
+      "blockers": ["no-qualified-asolaria-predictor"],
+      "invalidated_by": ["public/modules/asolaria/calibration.js", "public/modules/asolaria/calibration.test.mjs", "public/modules/asolaria/qa-adapter.js", "public/modules/asolaria/qa-adapter.test.mjs"]
+    },
+    {
+      "id": "asolaria.qa.binary.evaluate",
+      "class": "predictive",
+      "state": "rejected",
+      "claim_status": "implemented-unverified",
+      "owner": "public/modules/asolaria/qa-adapter.js",
+      "version": "1",
+      "entry": "evaluateAsolariaBinaryQuestions",
+      "artifact_sha256": "b98abbbb10c1474558afcbb4dc3aa16d7bbf9d04e1fc40645c18440ca8c8cfd7",
+      "input": "sealed-binary-questions+labels",
+      "output": "receipt-bit-predictions+baseline-decision",
+      "limits": ["binary-only", "extractor-fixed-before-scoring", "arithmetic-benchmark-only", "authority-none"],
+      "side_effects": [],
+      "routes": [],
+      "required_caps": ["wasm.execute"],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "sealed-holdout", "baseline"],
+        "verifier": "node --experimental-vm-modules public/modules/asolaria/qa-adapter.test.mjs"
+      },
+      "blockers": ["holdout-no-added-value"],
+      "invalidated_by": ["public/modules/asolaria/qa-adapter.js", "public/modules/asolaria/qa-adapter.test.mjs", "public/modules/asolaria/asolaria_tribit.wasm"]
+    },
+    {
+      "id": "asolaria.lattice.inspect",
+      "class": "exact",
+      "state": "candidate",
+      "claim_status": "implemented-unverified",
+      "owner": "public/modules/asolaria/structure.js",
+      "version": "1",
+      "entry": "inspectAsolariaLattice",
+      "artifact_sha256": "b98abbbb10c1474558afcbb4dc3aa16d7bbf9d04e1fc40645c18440ca8c8cfd7",
+      "input": "none",
+      "output": "81-receipt-states+27-cell-third-partitions",
+      "limits": ["structural-counts-only", "not-semantic-prediction", "not-physics-proof"],
+      "side_effects": [],
+      "routes": [],
+      "required_caps": [],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "cross-implementation-vectors"],
+        "verifier": "node --experimental-vm-modules public/modules/asolaria/structure.test.mjs"
+      },
+      "blockers": ["production-browser-runtime-proof"],
+      "invalidated_by": ["public/modules/asolaria/structure.js", "public/modules/asolaria/structure.test.mjs", "public/modules/asolaria/artifact.json"]
+    },
+    {
+      "id": "master_frontier.event_integrity.verify",
+      "class": "proof",
+      "state": "promoted",
+      "claim_status": "verified",
+      "owner": "server/master_frontier/event_integrity.py",
+      "version": "1",
+      "entry": "verify",
+      "artifact_sha256": "",
+      "input": "bounded-run-events+trusted-anchor",
+      "output": "chain+count+withheld-verification",
+      "limits": ["max-events-256", "trusted-anchor-required-for-truncation", "not-host-admin-proof"],
+      "side_effects": [],
+      "routes": ["wasm-agent.agent-run.timeline"],
+      "required_caps": ["proof.report"],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "recorded-run", "production-runtime", "independent-chain"],
+        "verifier": "python3 tools/context/prove-master-frontier-authenticated-canary.py --origin https://wa.colmeio.com",
+        "runtime_report": "reports/context/latest/master-frontier-authenticated-canary.json"
+      },
+      "blockers": [],
+      "invalidated_by": ["server/master_frontier/event_integrity.py", "server/master_frontier/event_anchor_store.py", "server/master_frontier/event_anchor_adapter.py", "server/master_frontier/persistence.py", "server/static_server.py"]
+    },
+    {
+      "id": "master_frontier.event_anchor.append",
+      "class": "proof",
+      "state": "promoted",
+      "claim_status": "verified",
+      "owner": "server/master_frontier/event_anchor_store.py",
+      "version": "1",
+      "entry": "EventAnchorStore.append",
+      "artifact_sha256": "",
+      "input": "user+run+monotonic-anchor",
+      "output": "append-only-anchor-checkpoint",
+      "limits": ["max-checkpoints-512", "same-host-process-boundary", "no-event-content"],
+      "side_effects": ["private-anchor-sqlite-insert"],
+      "routes": ["wasm-agent.agent-run.timeline"],
+      "required_caps": ["proof.report"],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "negative-control", "production-runtime", "independent-chain"],
+        "verifier": "python3 tools/context/prove-master-frontier-authenticated-canary.py --origin https://wa.colmeio.com",
+        "runtime_report": "reports/context/latest/master-frontier-authenticated-canary.json"
+      },
+      "blockers": [],
+      "invalidated_by": ["server/master_frontier/event_anchor_store.py", "server/master_frontier/event_integrity.py", "server/master_frontier/event_anchor_adapter.py", "server/master_frontier/persistence.py", "server/static_server.py"]
+    },
+    {
+      "id": "image.teacher_edit",
+      "class": "predictive",
+      "state": "candidate",
+      "claim_status": "implemented-unverified",
+      "owner": "server/master_frontier/visual_teacher_store.py",
+      "version": "1",
+      "entry": "scripts/visual_teacher_pair.py",
+      "artifact_sha256": "",
+      "input": "source+alpha-mask+teacher-output+bounded-contract",
+      "output": "immutable-pair-manifest+approval-partition+digests",
+      "limits": ["supervised-session-only", "max-image-32mb", "no-inline-binary-metadata", "holdout-details-withheld", "not-production-image-generation"],
+      "side_effects": ["private-content-addressed-blob-write", "append-only-approval-write"],
+      "routes": [],
+      "required_caps": ["image.teacher.supervise"],
+      "evidence": {
+        "status": "pass",
+        "classes": ["static", "behavioral", "negative-control"],
+        "verifier": "python3 tests/master_frontier_visual_teacher_store.test.py"
+      },
+      "blockers": ["gpu-student-training-worker", "holdout-quality-proof"],
+      "invalidated_by": ["server/master_frontier/visual_teacher_store.py", "scripts/visual_teacher_pair.py", "tests/master_frontier_visual_teacher_store.test.py"]
+    }
+  ]
+}

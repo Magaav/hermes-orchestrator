@@ -6,17 +6,24 @@ export const MASTER_FRONTIER_V4_MODE = "source-investigation-read-only";
 export const MASTER_FRONTIER_V4_SCHEMA = "hermes.wasm_agent.master_frontier.v4.request.v1";
 export const MASTER_FRONTIER_V5_PROTOCOL = "v5";
 export const MASTER_FRONTIER_V5_SCHEMA = "hermes.wasm_agent.master_frontier.v5";
+export const MASTER_FRONTIER_V6_PROTOCOL = "v6";
+export const MASTER_FRONTIER_V6_SCHEMA = "hermes.wasm_agent.master_frontier.v6";
 
 export function masterFrontierProtocolRequest(objective = "", objectiveKind = "", explicitProtocol = "") {
   const requested = String(explicitProtocol || "").trim();
   if (requested === "v3") return { protocol: "v3", investigation_mode: "", schema: "hermes.wasm_agent.master_frontier.v3" };
   if (requested === MASTER_FRONTIER_V4_PROTOCOL) return { protocol: MASTER_FRONTIER_V4_PROTOCOL, investigation_mode: MASTER_FRONTIER_V4_MODE, schema: MASTER_FRONTIER_V4_SCHEMA };
-  return { protocol: MASTER_FRONTIER_V5_PROTOCOL, investigation_mode: "", schema: MASTER_FRONTIER_V5_SCHEMA };
+  if (requested === MASTER_FRONTIER_V5_PROTOCOL) return { protocol: MASTER_FRONTIER_V5_PROTOCOL, investigation_mode: "", schema: MASTER_FRONTIER_V5_SCHEMA };
+  if (requested === MASTER_FRONTIER_V6_PROTOCOL) return { protocol: MASTER_FRONTIER_V6_PROTOCOL, investigation_mode: "", schema: MASTER_FRONTIER_V6_SCHEMA };
+  return { protocol: MASTER_FRONTIER_V6_PROTOCOL, investigation_mode: "", schema: MASTER_FRONTIER_V6_SCHEMA };
 }
 
 export function masterFrontierExplicitProtocol(search = "", stored = "") {
-  const requested = new URLSearchParams(String(search || "")).get("frontier") || String(stored || "");
-  return ["v3", MASTER_FRONTIER_V4_PROTOCOL, MASTER_FRONTIER_V5_PROTOCOL].includes(requested) ? requested : MASTER_FRONTIER_V5_PROTOCOL;
+  const queryRequested = new URLSearchParams(String(search || "")).get("frontier");
+  if (["v3", MASTER_FRONTIER_V4_PROTOCOL, MASTER_FRONTIER_V5_PROTOCOL, MASTER_FRONTIER_V6_PROTOCOL].includes(queryRequested)) return queryRequested;
+  const storedValue = String(stored || "").trim();
+  const requested = storedValue.startsWith("explicit:") ? storedValue.slice("explicit:".length) : "";
+  return ["v3", MASTER_FRONTIER_V4_PROTOCOL, MASTER_FRONTIER_V5_PROTOCOL, MASTER_FRONTIER_V6_PROTOCOL].includes(requested) ? requested : MASTER_FRONTIER_V6_PROTOCOL;
 }
 
 export function masterFrontierSourceInvestigationRequest(objective = "", objectiveKind = "") {

@@ -19,6 +19,7 @@ PROMISE_ID = "master-frontier-v5-coding-continuity"
 COMMANDS = (
     ("v5-loop", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_v5.test.py"], "behavioral"),
     ("v5-resilience", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_v5_resilience.test.py"], "behavioral"),
+    ("browser-actions", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_browser_actions.test.py"], "behavioral"),
     ("v5-budget", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_v5_budget.test.py"], "behavioral"),
     ("shared-budget", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_budget.test.py"], "behavioral"),
     ("authority", ["python3", "-B", "plugins/wasm-agent/tests/master_frontier_v5_authority.test.py"], "static"),
@@ -42,6 +43,7 @@ COMMANDS = (
     ("browser-selection", ["node", "plugins/wasm-agent/tests/master_frontier_source_investigation.test.js"], "behavioral"),
     ("kernel-wiring", ["python3", "-B", "plugins/wasm-agent/tests/provider_proxy.test.py", "ProviderProxyTests.test_agent_kernel_local_tools_are_route_scoped_and_bounded"], "behavioral"),
     ("learning-policy", ["python3", "-B", "labs/wasm-agent/test_learning_harness.py"], "behavioral"),
+    ("fixture-result-semantics", ["python3", "-B", "labs/wasm-agent/test_live_fixture_result_semantics.py"], "behavioral"),
     ("strategy-ranking", ["python3", "-B", "labs/wasm-agent/test_strategy_ranking.py"], "behavioral"),
     ("trajectory-fixture", ["python3", "-B", "labs/wasm-agent/test_agent_trajectory_fixture.py"], "behavioral"),
     ("golden-pattern-extractor", ["python3", "-B", "labs/wasm-agent/test_golden_pattern_extractor.py"], "behavioral"),

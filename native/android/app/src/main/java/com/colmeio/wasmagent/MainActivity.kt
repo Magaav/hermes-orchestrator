@@ -54,6 +54,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import com.colmeio.wasmagent.voice.WakeModelSelector
+import com.colmeio.wasmagent.observability.WebViewObservabilityLease
 import com.colmeio.wasmagent.voice.FalseWakeStore
 import com.colmeio.wasmagent.voice.LocalCommandTranscriptionEngine
 import com.colmeio.wasmagent.voice.OpenWakeWordBundleEngine
@@ -806,7 +807,6 @@ class MainActivity : Activity() {
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun createConfiguredWebView(origin: String): WebView {
-        WebView.setWebContentsDebuggingEnabled(BuildConfig.ALLOW_LOCAL_DEV)
         val view = WebView(this)
         view.setBackgroundColor(BRAND_BG)
         view.alpha = 0f
@@ -840,10 +840,8 @@ class MainActivity : Activity() {
         }
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(view, true)
-        view.addJavascriptInterface(AndroidBridge(origin), "wasmAgentAndroid")
-        view.addJavascriptInterface(AndroidNativeBridge(origin), NativeBridgeContract.GENERAL_BRIDGE_OBJECT)
-        view.addJavascriptInterface(AndroidVoiceTuningBridge(origin), NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
-        view.addJavascriptInterface(AndroidDiagnosticsBridge(origin), "WasmAgentAndroidDiagnostics")
+        view.addJavascriptInterface(AndroidBridge(origin), "wasmAgentAndroid"); view.addJavascriptInterface(AndroidNativeBridge(origin), NativeBridgeContract.GENERAL_BRIDGE_OBJECT)
+        view.addJavascriptInterface(AndroidVoiceTuningBridge(origin), NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT); view.addJavascriptInterface(AndroidDiagnosticsBridge(origin), "WasmAgentAndroidDiagnostics")
         logDiagnostic("voice_tuning_bridge_registered", JSONObject()
             .put("voice_tuning_bridge_registered", true)
             .put("bridge_object_name", NativeBridgeContract.VOICE_TUNING_BRIDGE_OBJECT)
@@ -2834,6 +2832,7 @@ class MainActivity : Activity() {
                 .put("kernel", nativeKernelStatus())
         }
         return when (operationId) {
+            "observability_enable", "observability_collect", "observability_disable", "observability_status" -> WebViewObservabilityLease.execute(this, operationId, inputs)
             "get_native_kernel_status", "native.status", "android_native_status" -> JSONObject()
                 .put("ok", true)
                 .put("stable", true)

@@ -308,3 +308,21 @@ properties and holdout membership stay in `private_evaluator/`, which the seed
 manifest excludes from lane `/source` snapshots. The materialized task exposes
 only contract and overlay digests; trusted host scoring happens after the lane
 has finished.
+## Master:frontier V5 with ChatGPT subscription
+
+`master-frontier-v5-codex-subscription-candidate.json` runs the authenticated
+Codex CLI as an ephemeral, read-only decision head on the trusted host. Codex
+does not own shell, browser, MCP, web, or repository actions; the V5 authority
+contract executes and records every declared tool call. Cached ChatGPT auth is
+used in place and is not exported into tasks, reports, or adapter artifacts.
+
+Run the admitted seven-golden/two-holdout proof with:
+
+```bash
+python3 labs/wasm-agent/prove-promoted-v5-fixture-suite.py \
+  --candidate-adapter labs/wasm-agent/fixtures/master-frontier-v5-codex-subscription-candidate.json
+```
+
+The aggregate distinguishes harness execution from answer satisfaction. A
+bounded weak or unavailable answer remains a completed, unsatisfactory outcome
+requiring improvement; it does not become a harness process failure.

@@ -7,6 +7,7 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css?v=20260630-route-contracts">
     <link rel="stylesheet" href="/modules/chat-composer/chat-composer.css?v=20260622-android-responsive35">
+    <link rel="stylesheet" href="/modules/master-frontier/status-panel.css?v=20260806-wasm-status1">
     <title>WASM Agent</title>
     <script src="/boot.js?v=20260622-android-responsive35"></script>
   </head>
@@ -561,34 +562,6 @@
               <div class="widget-resize-handle" data-widget-resize="timeline" title="Resize Timeline" aria-hidden="true"></div>
             </article>
 
-            <article class="widget browser-widget" data-widget-id="browser-proof" data-module-target="host-browser">
-              <header class="widget-head" title="Drag to move. Double-click to reset.">
-                <span>Host Browser</span>
-                <span class="widget-head-actions">
-                  <button class="widget-control-button widget-minimize-button" type="button" data-widget-control="minimize" title="Minimize" aria-label="Minimize Host Browser"></button>
-                  <button class="widget-control-button widget-maximize-button" type="button" data-widget-control="maximize" title="Maximize" aria-label="Maximize Host Browser"></button>
-                  <span id="browserStatus" class="widget-chip">pixels</span>
-                </span>
-              </header>
-              <form id="browserForm" class="browser-bar" autocomplete="off">
-                <div class="browser-nav" aria-label="Host browser controls">
-                  <button id="browserBackButton" type="button" title="Back">Back</button>
-                  <button id="browserForwardButton" type="button" title="Forward">Forward</button>
-                  <button id="browserReloadButton" type="button" title="Reload">Reload</button>
-                  <button id="browserLiveButton" type="button" title="Toggle live pixels" aria-pressed="false">Live</button>
-                </div>
-                <input id="browserUrlInput" type="text" value="https://example.com" aria-label="Browser URL">
-                <button id="browserOpenButton" type="submit">Open</button>
-              </form>
-              <div id="browserScreen" class="browser-screen" tabindex="0" role="application" aria-label="Interactive host browser pixels">
-                <canvas id="browserCanvas"></canvas>
-                <img id="browserImage" alt="Remote browser screenshot">
-                <div id="browserEmpty" class="browser-empty">Open a page to render it as pixels inside WASM Agent.</div>
-              </div>
-              <div id="browserMeta" class="browser-meta">Click pixels to focus. Type, Enter, and scroll are forwarded to host Chromium.</div>
-              <div class="widget-resize-handle" data-widget-resize="browser-proof" title="Resize Host Browser" aria-hidden="true"></div>
-            </article>
-
             <article class="widget wis-widget" data-widget-id="wis" data-module-target="wis" data-widget-dblclick-reset="false">
               <header class="widget-head" title="Drag to move.">
                 <span>Artifacts</span>
@@ -937,15 +910,9 @@
             </div>
             <s-select id="agentModelSelect" class="agent-model-select" aria-label="Legacy chat model" search-placeholder="Search models" hidden></s-select>
             <button id="agentTokenUsage" class="agent-token-usage" type="button" title="Exact model token usage for the last turn" aria-expanded="false">Tokens -</button>
-            <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Context used" hidden>
-              <div class="agent-balloon-head">
-                <strong>Context used</strong>
-              </div>
-              <dl id="agentDiagnostics" class="agent-diagnostics" aria-label="Last agent turn diagnostics">
-                <div><dt>Tokens</dt><dd>-</dd></div>
-                <div><dt>Turns</dt><dd>-</dd></div>
-                <div><dt>Context</dt><dd>-</dd></div>
-              </dl>
+            <section id="agentContextBalloon" class="agent-balloon agent-context-balloon" aria-label="Status" hidden>
+              <div id="agentCodexStatus" class="codex-status"></div>
+              <dl id="agentDiagnostics" class="agent-diagnostics" aria-label="Last agent turn diagnostics" hidden></dl>
               <div id="agentContextPreview" class="agent-context-preview" hidden></div>
             </section>
             <button id="agentMicButton" class="agent-mic-button" type="button" aria-label="Start voice input" title="Start voice input" data-speech-state="idle">
@@ -1098,7 +1065,7 @@
       <div id="agentToastStack" class="agent-toast-stack" aria-live="polite"></div>
     </section>
     <script src="/auth-redirect.js?v=20260621-android-bootstrap19"></script>
-    <script src="/app-loader.js?v=20260630-route-contracts"></script>
+    <script src="/app-loader.js?v=20260806-codex-status4"></script>
     <script type="module" src="/modules/meta-analysis/meta-analysis-widget.js?v=1"></script>
   </body>
 </html>

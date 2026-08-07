@@ -1,3 +1,5 @@
+@import url("/modules/widget-window.css");
+
 :root {
   color-scheme: dark;
   --bg: #000;
@@ -3250,28 +3252,6 @@ body.is-nodes-panel-dragging {
   user-select: none;
 }
 
-.widget-resize-handle {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 20px;
-  height: 20px;
-  z-index: 5;
-  cursor: nwse-resize;
-  touch-action: none;
-}
-
-.widget-resize-handle::before {
-  content: "";
-  position: absolute;
-  right: 5px;
-  bottom: 5px;
-  width: 10px;
-  height: 10px;
-  border-right: 2px solid rgba(125, 220, 255, 0.58);
-  border-bottom: 2px solid rgba(125, 220, 255, 0.58);
-}
-
 .widget-chip {
   min-height: 24px;
   font-size: 11px;
@@ -3309,16 +3289,6 @@ body.is-nodes-panel-dragging {
   height: 260px;
   display: grid;
   grid-template-rows: 42px 82px minmax(0, 1fr);
-}
-
-.browser-widget {
-  right: 4%;
-  bottom: 7%;
-  width: clamp(620px, 58vw, 980px);
-  height: auto;
-  aspect-ratio: 16 / 11.8;
-  display: grid;
-  grid-template-rows: 42px 76px minmax(0, 1fr) 30px;
 }
 
 .wis-widget {
@@ -4207,132 +4177,6 @@ textarea:focus {
 
 .panel-security-queue {
   padding-bottom: 12px;
-}
-
-.browser-bar {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: center;
-  padding: 7px 10px;
-  border-bottom: 1px solid rgba(147, 170, 203, 0.14);
-}
-
-.browser-nav {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.browser-nav button {
-  min-height: 30px;
-  padding: 0 8px;
-  font-size: 11px;
-}
-
-.browser-nav button.is-live {
-  color: var(--mint);
-  border-color: rgba(124, 228, 176, 0.42);
-  background: rgba(124, 228, 176, 0.12);
-}
-
-.browser-bar input {
-  min-width: 0;
-  height: 30px;
-  border: 1px solid rgba(147, 170, 203, 0.18);
-  border-radius: 999px;
-  background: rgba(4, 10, 19, 0.74);
-  color: var(--text);
-  outline: none;
-  padding: 0 11px;
-  font-size: 12px;
-}
-
-.browser-bar input:focus {
-  border-color: rgba(125, 220, 255, 0.48);
-}
-
-.browser-screen {
-  position: relative;
-  min-width: 0;
-  min-height: 0;
-  border: 1px solid rgba(147, 170, 203, 0.16);
-  border-left: 0;
-  border-right: 0;
-  border-radius: 0;
-  background:
-    linear-gradient(135deg, rgba(125, 220, 255, 0.05), rgba(245, 198, 106, 0.03)),
-    rgba(3, 8, 15, 0.78);
-  overflow: hidden;
-  outline: none;
-  cursor: crosshair;
-}
-
-.browser-screen:focus {
-  border-color: rgba(124, 228, 176, 0.58);
-  box-shadow: 0 0 0 1px rgba(124, 228, 176, 0.18);
-}
-
-.browser-screen.is-busy::after {
-  content: "";
-  position: absolute;
-  right: 9px;
-  top: 9px;
-  width: 13px;
-  height: 13px;
-  border: 2px solid rgba(125, 220, 255, 0.24);
-  border-top-color: rgba(125, 220, 255, 0.94);
-  border-radius: 50%;
-  animation: browser-spin 0.8s linear infinite;
-}
-
-@keyframes browser-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.browser-screen canvas,
-.browser-screen img {
-  width: 100%;
-  height: 100%;
-  display: none;
-  object-fit: fill;
-  background: #050914;
-}
-
-.browser-screen.has-canvas canvas {
-  display: block;
-}
-
-.browser-screen.has-image img {
-  display: block;
-}
-
-.browser-screen.has-canvas .browser-empty,
-.browser-screen.has-image .browser-empty {
-  display: none;
-}
-
-.browser-empty {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  color: var(--muted);
-  text-align: center;
-  font-size: 13px;
-}
-
-.browser-meta {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 7px 11px;
-  color: var(--muted);
-  font-size: 11px;
 }
 
 .wis-shell {
@@ -9072,7 +8916,6 @@ details.agent-action-row .agent-action-row-summary {
   .resources-widget,
   .topology-widget,
   .studio-widget,
-  .browser-widget,
   .wis-widget,
   .drop-widget {
     left: 14px;
@@ -9085,7 +8928,6 @@ details.agent-action-row .agent-action-row-summary {
   .os-shell[data-mobile-launcher="top"] .resources-widget,
   .os-shell[data-mobile-launcher="top"] .topology-widget,
   .os-shell[data-mobile-launcher="top"] .studio-widget,
-  .os-shell[data-mobile-launcher="top"] .browser-widget,
   .os-shell[data-mobile-launcher="top"] .wis-widget,
   .os-shell[data-mobile-launcher="top"] .drop-widget {
     width: min(344px, calc(100dvw - 28px));
@@ -9103,11 +8945,6 @@ details.agent-action-row .agent-action-row-summary {
 
   .studio-widget {
     top: 926px;
-    bottom: auto;
-  }
-
-  .browser-widget {
-    top: 1236px;
     bottom: auto;
   }
 
@@ -9147,17 +8984,6 @@ details.agent-action-row .agent-action-row-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .widget-resize-handle {
-    width: 34px;
-    height: 34px;
-  }
-
-  .widget-resize-handle::before {
-    right: 8px;
-    bottom: 8px;
-    width: 14px;
-    height: 14px;
-  }
 }
 
 /* Compact run timeline UX */

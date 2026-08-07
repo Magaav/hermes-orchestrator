@@ -7,6 +7,7 @@ V3 = "v3"
 V4 = "v4-source-investigation"
 V4_FLAG = "source-investigation-read-only"
 V5 = "v5"
+V6 = "v6"
 
 
 class ProtocolError(ValueError):
@@ -19,6 +20,7 @@ def select(body: dict[str, Any]) -> str:
     flag = str(body.get("investigation_mode") or "").strip()
     if requested in {"", V3}: return V3
     if requested == V5: return V5
+    if requested == V6: return V6
     if requested == V4 and flag == V4_FLAG: return V4
     if requested == V4: raise ProtocolError("v4_read_only_flag_required", "V4 requires the explicit read-only source-investigation flag.")
     raise ProtocolError("protocol_unknown", "Unknown Master:frontier protocol.")

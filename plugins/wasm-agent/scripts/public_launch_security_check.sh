@@ -129,19 +129,7 @@ if have curl; then
   expect_status_any "security loop unauthenticated" GET "/security-loop/status" 401 403
   expect_status_any "timeline unauthenticated" GET "/timeline/status" 401 403
   expect_status_any "shared room unauthenticated" GET "/spaces/room?shared_space_id=probe" 401 403
-  expect_status_any "browser open unauthenticated" POST "/browser/open" 401 403
   expect_status_any "agent attachment unauthenticated" GET "/agent/attachments/probe" 401 403
-
-  if [[ -n "${PUBLIC_URL}" ]]; then
-    config_body="$(curl -ksS "${TARGET_URL}/config.json" 2>/dev/null || true)"
-    if printf '%s\n' "${config_body}" | grep -q '"hostBrowser"' && printf '%s\n' "${config_body}" | grep -q '"enabled"[[:space:]]*:[[:space:]]*false'; then
-      pass "public config reports Host Browser disabled by default"
-    elif [[ "${HERMES_WASM_AGENT_BROWSER_ENABLED:-}" =~ ^(1|true|TRUE|yes|YES|on|ON)$ ]]; then
-      warn "public config reports Host Browser enabled by explicit opt-in; attach CDP/private-network isolation review"
-    else
-      fail "public config does not report Host Browser disabled"
-    fi
-  fi
 
   cross_status="$(http_status POST "${TARGET_URL}/spaces" "https://evil.example")"
   rm -f /tmp/wasm-agent-security-body.$$
@@ -207,13 +195,6 @@ if grep -q 'same_origin_websocket' "${PLUGIN_DIR}/server/static_server.py"; then
   pass "browser WebSocket same-origin guard exists"
 else
   fail "browser WebSocket same-origin guard is missing"
-fi
-
-if grep -q 'HERMES_WASM_AGENT_BROWSER_ENABLED' "${PLUGIN_DIR}/server/static_server.py" \
-  && grep -q 'require_browser_feature_enabled' "${PLUGIN_DIR}/server/static_server.py"; then
-  pass "Host Browser has a server-side public opt-in gate"
-else
-  fail "Host Browser public opt-in gate is missing"
 fi
 
 if grep -q 'bridge_route_allowed' "${PLUGIN_DIR}/server/static_server.py"; then

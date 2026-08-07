@@ -19,6 +19,13 @@ state, and product UI surfaces.
 - Production native clients must use `https://wa.colmeio.com`; never route
   production behavior to `127.0.0.1:8877`, `localhost`, `0.0.0.0`, or emulator
   dev origins.
+- When the user intentionally starts the Windows browser-sharing bridge and
+  requests browser automation, Chrome is available at
+  `http://127.0.0.1:9222` through the cloud reverse tunnel or
+  `http://172.18.16.1:9222` from WSL while the sharing terminal remains open.
+  Follow `/local/docs/context/BROWSER_BRIDGE.md`: verify `/json/version`, use
+  the available endpoint freely for the user-authorized task, and keep browser
+  actions scoped to the requested product workflow.
 - Keep the app client-first where possible. Server work should be explicit:
   auth, presence/relay, sync, backup, provisioning, native diagnostics, or
   release metadata.

@@ -1,0 +1,179 @@
+.artifact-foundry-widget {
+  display: flex;
+  flex-direction: column;
+}
+
+.artifact-foundry-scroll-host {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  scrollbar-gutter: stable;
+}
+
+.artifact-foundry-shell {
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  min-height: 100%;
+  padding: 1rem;
+  color: var(--text-color, #eef2ff);
+  background: radial-gradient(circle at 90% 0%, rgba(36, 190, 150, .18), transparent 36%), #101621;
+}
+
+.artifact-foundry-intro {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.artifact-foundry-intro h2,
+.artifact-foundry-intro p,
+.artifact-foundry-panel p {
+  margin: 0;
+}
+
+.artifact-foundry-eyebrow {
+  color: #76ddc0;
+  font-size: .72rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.artifact-foundry-chip {
+  flex: none;
+  padding: .35rem .55rem;
+  border: 1px solid #3b786b;
+  border-radius: 999px;
+  font-size: .72rem;
+}
+
+.artifact-foundry-panel {
+  display: grid;
+  gap: .7rem;
+  padding: .9rem;
+  border: 1px solid #2d4650;
+  border-radius: .8rem;
+  background: rgba(10, 21, 29, .86);
+}
+
+.artifact-foundry-panel label {
+  display: grid;
+  gap: .35rem;
+}
+
+.artifact-foundry-panel input[type="number"] {
+  box-sizing: border-box;
+  max-width: 8rem;
+  padding: .5rem;
+  color: inherit;
+  border: 1px solid #3b5d67;
+  border-radius: .5rem;
+  background: #091219;
+}
+
+.artifact-foundry-file {
+  cursor: pointer;
+  width: max-content;
+  padding: .55rem .75rem;
+  border: 1px solid #3b786b;
+  border-radius: .55rem;
+  background: #163a35;
+}
+
+.artifact-foundry-file input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+}
+
+.artifact-foundry-seed,
+.artifact-foundry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+}
+
+.artifact-foundry-actions {
+  justify-content: flex-start;
+}
+
+.artifact-foundry-actions button {
+  cursor: pointer;
+  padding: .55rem .75rem;
+  color: inherit;
+  border: 1px solid #47736d;
+  border-radius: .55rem;
+  background: #1a3938;
+  font: inherit;
+}
+
+.artifact-foundry-actions button:disabled {
+  cursor: default;
+  opacity: .45;
+}
+
+.artifact-foundry-status,
+.artifact-foundry-boundary {
+  margin: 0;
+  color: #b9cbd0;
+}
+
+.artifact-foundry-boundary {
+  color: #f2ca78;
+  font-size: .78rem;
+}
+
+.artifact-foundry-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: .5rem;
+}
+
+.artifact-foundry-metrics div {
+  display: grid;
+  gap: .15rem;
+  min-width: 0;
+  padding: .55rem;
+  border-radius: .55rem;
+  background: #14242c;
+}
+
+.artifact-foundry-metrics span {
+  color: #91adb3;
+  font-size: .7rem;
+}
+
+.artifact-foundry-metrics strong {
+  overflow-wrap: anywhere;
+}
+
+.artifact-foundry-panel output,
+.artifact-foundry-panel pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .72rem;
+}
+
+.artifact-foundry-panel pre {
+  max-height: 15rem;
+  overflow: auto;
+}
+
+@media (max-width: 560px) {
+  .artifact-foundry-intro {
+    display: grid;
+  }
+
+  .artifact-foundry-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

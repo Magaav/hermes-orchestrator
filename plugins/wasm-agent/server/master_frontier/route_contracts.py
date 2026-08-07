@@ -4,6 +4,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 
 PUBLIC_ROUTE_CONTRACT_KEYS = (
@@ -13,8 +14,14 @@ PUBLIC_ROUTE_CONTRACT_KEYS = (
     "owner",
     "workspace_root",
     "cwd",
+    "browser_entry_url",
+    "client_ui",
+    "mcp",
     "allowed_read_roots",
     "allowed_write_roots",
+    "allowed_edit_operations",
+    "implementation_invariants",
+    "required_owner_paths",
     "likely_paths",
     "lookup_handles",
     "caps",
@@ -26,6 +33,8 @@ PUBLIC_ROUTE_CONTRACT_KEYS = (
     "entities",
     "reason",
 )
+
+MCP_SERVER_ID = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
 
 
 def clipped(value: Any, limit: int = 200) -> str:
@@ -52,10 +61,59 @@ def rel_path(value: Any) -> str:
     return "/".join(parts)
 
 
+def symbol_search_batches(contract: dict[str, Any]) -> list[list[str]]:
+    """Return primary hints then declared bounded source roots for zero-match fallback."""
+    likely = [
+        path for item in (contract.get("likely_paths") if isinstance(contract.get("likely_paths"), list) else [])[:24]
+        if (path := rel_path(item))
+    ]
+    source_index = contract.get("source_index") if isinstance(contract.get("source_index"), dict) else {}
+    fallback = [
+        path for item in (source_index.get("include_roots") if isinstance(source_index.get("include_roots"), list) else [])[:12]
+        if (path := rel_path(item)) and path not in likely
+    ]
+    batches = [batch for batch in (likely, fallback) if batch]
+    return batches or [[""]]
+
+
+def normalize_mcp_authority(value: Any) -> dict[str, Any]:
+    """Keep route-owned MCP authority while dropping server transport config."""
+    config = value if isinstance(value, dict) else {}
+    raw_servers = config.get("servers") if isinstance(config.get("servers"), list) else []
+    servers: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_servers[:64]:
+        if not isinstance(item, dict):
+            continue
+        server_id = str(item.get("id") or "").strip()
+        mode = str(item.get("mode") or "read-only").strip()
+        raw_tools = item.get("tools") if isinstance(item.get("tools"), list) else []
+        if not MCP_SERVER_ID.fullmatch(server_id) or server_id in seen:
+            continue
+        if mode not in {"read-only", "read-write"}:
+            continue
+        tools: list[str] = []
+        for raw_tool in raw_tools[:512]:
+            tool = str(raw_tool or "").strip()
+            if not tool or len(tool) > 256 or any(ord(char) < 32 for char in tool):
+                continue
+            if tool not in tools:
+                tools.append(tool)
+        if not tools:
+            continue
+        seen.add(server_id)
+        servers.append({"id": server_id, "tools": tools, "mode": mode})
+    return {"servers": servers}
+
+
 def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]:
     route_id = clipped(str(raw.get("route_id") or raw.get("id") or "").strip(), 160)
     surface = clipped(str(raw.get("surface") or "").strip(), 120)
     workspace_root = contract_path(plugin_root, raw.get("workspace_root") or ".")
+    browser_entry_url = clipped(str(raw.get("browser_entry_url") or "").strip(), 2000)
+    parsed_browser_url = urlparse(browser_entry_url)
+    if parsed_browser_url.scheme not in {"http", "https"} or not parsed_browser_url.netloc:
+        browser_entry_url = ""
 
     def paths(key: str, fallback: list[str]) -> list[str]:
         values = raw.get(key)
@@ -83,6 +141,14 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
             "command": clean_command,
             "timeout_sec": timeout_sec,
             "description": clipped(str(item.get("description") or ""), 240),
+            "evidence_paths": [
+                clipped(rel_path(path), 240)
+                for path in (
+                    item.get("evidence_paths")
+                    if isinstance(item.get("evidence_paths"), list) else []
+                )[:12]
+                if rel_path(path)
+            ],
         })
     aliases = raw.get("aliases") if isinstance(raw.get("aliases"), list) else []
     source_index = raw.get("source_index") if isinstance(raw.get("source_index"), dict) else {}
@@ -93,8 +159,32 @@ def normalize_contract(raw: dict[str, Any], plugin_root: Path) -> dict[str, Any]
         "owner": clipped(str(raw.get("owner") or "").strip(), 160),
         "workspace_root": workspace_root,
         "cwd": workspace_root,
+        "browser_entry_url": browser_entry_url,
+        "client_ui": raw.get("client_ui") if isinstance(raw.get("client_ui"), dict) else {},
+        "mcp": normalize_mcp_authority(raw.get("mcp")),
         "allowed_read_roots": paths("allowed_read_roots", [raw.get("workspace_root") or "."]),
         "allowed_write_roots": paths("allowed_write_roots", []),
+        "allowed_edit_operations": (
+            [
+                name for name in ("create", "replace", "append", "move", "delete")
+                if name in {
+                    str(item or "").strip().lower()
+                    for item in raw["allowed_edit_operations"][:8]
+                }
+            ]
+            if isinstance(raw.get("allowed_edit_operations"), list)
+            else None
+        ),
+        "implementation_invariants": [
+            clipped(str(item or "").strip(), 400)
+            for item in (raw.get("implementation_invariants") if isinstance(raw.get("implementation_invariants"), list) else [])[:12]
+            if str(item or "").strip()
+        ],
+        "required_owner_paths": [
+            clipped(rel_path(item), 240)
+            for item in (raw.get("required_owner_paths") if isinstance(raw.get("required_owner_paths"), list) else [])[:24]
+            if rel_path(item)
+        ],
         "likely_paths": [
             clipped(rel_path(item), 240)
             for item in (raw.get("likely_paths") if isinstance(raw.get("likely_paths"), list) else [])[:80]
@@ -239,6 +329,28 @@ def resolve_runtime_entity_contract(text: str, contracts: list[dict[str, Any]]) 
     return None
 
 
+def resolve_entity(text: str, contract: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve the most specific declared entity match, never an ad-hoc runtime term."""
+    haystack = str(text or "").lower()
+    if not haystack:
+        return None
+    matches: list[tuple[int, int, dict[str, Any]]] = []
+    entities = contract.get("entities") if isinstance(contract.get("entities"), list) else []
+    for index, item in enumerate(entities[:24]):
+        if not isinstance(item, dict):
+            continue
+        terms = item.get("match_terms") if isinstance(item.get("match_terms"), list) else []
+        matched = [
+            str(term).strip().lower() for term in terms[:12]
+            if str(term or "").strip() and re.search(
+                rf"(?<![a-z0-9_-]){re.escape(str(term).strip().lower())}(?![a-z0-9_-])", haystack,
+            )
+        ]
+        if matched:
+            matches.append((max(len(term) for term in matched), -index, dict(item)))
+    return max(matches, key=lambda value: (value[0], value[1]))[2] if matches else None
+
+
 def resolve_contract(
     contracts: list[dict[str, Any]],
     *,
@@ -352,6 +464,13 @@ def dispatch_workspace_contract(action: dict[str, Any], envelope: dict[str, Any]
         seen.add(route_id)
         candidates.append(contract)
 
+    for value in (
+        action.get("route_id"), action.get("route"),
+        envelope.get("route_id"), envelope.get("route"),
+    ):
+        route_id = clipped(str(value or "").strip().lower(), 160)
+        if route_id:
+            add_candidate(by_route_id.get(route_id))
     for route_id in explicit_route_ids(action, contracts):
         add_candidate(by_route_id.get(route_id))
     tokens = set(route_tokens(

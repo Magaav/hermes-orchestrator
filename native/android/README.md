@@ -454,7 +454,14 @@ native.capabilities.auditLog.v1
 native.capabilities.releaseFeedValidation.v1
 native.capabilities.crashSafeStatus.v1
 native.capabilities.capabilityManifest.v1
+native.capabilities.observabilityLease.v1
 ```
+
+Android observability is a native lease behind the existing downloaded-operation
+bridge; it adds no WebView JavaScript interface and has no idle observer. Enable
+clamps to 5–120 seconds, WebView debugging is disabled automatically at expiry,
+and no public TCP debugging port is opened. Installed APK/device proof remains
+required before treating the capability as available in production.
 
 The first downloaded-operation proof path is `run_android_hermes_wake_proof`.
 Its operation inputs may set `wakeThreshold` or `wake_threshold`; the Android

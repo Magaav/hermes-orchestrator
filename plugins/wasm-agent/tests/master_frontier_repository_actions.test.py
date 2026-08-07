@@ -11,7 +11,7 @@ from pathlib import Path
 
 SERVER = Path(__file__).resolve().parents[1] / "server"
 sys.path.insert(0, str(SERVER))
-from master_frontier import repository_actions  # noqa: E402
+from master_frontier import repository_actions, repository_path_policy  # noqa: E402
 
 
 class RepositoryActionsTests(unittest.TestCase):
@@ -27,6 +27,11 @@ class RepositoryActionsTests(unittest.TestCase):
         self.transaction_env.stop()
         self.transaction_state.cleanup()
         repository_actions._RECOVERY_BLOCKS.clear()
+
+    def test_shared_text_source_policy_accepts_javascript_modules_not_binaries(self) -> None:
+        self.assertTrue(repository_path_policy.writable_text_source(Path("tests/widget.test.mjs")))
+        self.assertTrue(repository_path_policy.writable_text_source(Path("public/widget.tsx")))
+        self.assertFalse(repository_path_policy.writable_text_source(Path("public/model.wasm")))
 
     def apply(self, root: Path, operations: list[dict], *, dry_run: bool = False) -> dict:
         def resolve(value: str) -> Path:
@@ -73,6 +78,36 @@ class RepositoryActionsTests(unittest.TestCase):
             self.assertEqual(result["postimage_sha256"]["x.txt"], hashlib.sha256(b"two\n").hexdigest())
             with self.assertRaisesRegex(repository_actions.RepositoryActionError, "changed since it was read"):
                 self.apply(root, [{"op":"replace","path":"x.txt","find":"two","replace":"three","expected_sha256":before}])
+
+    def test_preimage_bound_whole_file_replace_accepts_content_postimage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); target = root / "x.txt"; target.write_text("one\n")
+            before = hashlib.sha256(b"one\n").hexdigest()
+            result = self.apply(root, [{
+                "op": "replace", "path": "x.txt", "content": "two\n", "expected_sha256": before,
+            }])
+            self.assertEqual(target.read_text(), "two\n")
+            self.assertEqual(result["postimage_sha256"]["x.txt"], hashlib.sha256(b"two\n").hexdigest())
+
+    def test_whole_file_replace_without_preimage_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); target = root / "x.txt"; target.write_text("one\n")
+            with self.assertRaisesRegex(repository_actions.RepositoryActionError, "expected_sha256"):
+                self.apply(root, [{"op": "replace", "path": "x.txt", "content": "two\n"}])
+            self.assertEqual(target.read_text(), "one\n")
+
+    def test_replace_cannot_empty_a_source_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); target = root / "x.txt"; target.write_text("one\n")
+            before = hashlib.sha256(b"one\n").hexdigest()
+            for operation in (
+                {"op": "replace", "path": "x.txt", "content": "", "expected_sha256": before},
+                {"op": "replace", "path": "x.txt", "find": "one\n", "replace": "", "expected_sha256": before},
+            ):
+                with self.assertRaises(repository_actions.RepositoryActionError) as raised:
+                    self.apply(root, [operation])
+                self.assertEqual(raised.exception.code, "patch_empty_postimage")
+                self.assertEqual(target.read_text(), "one\n")
 
     def test_commit_failure_rolls_back_already_replaced_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

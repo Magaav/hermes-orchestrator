@@ -1,0 +1,17 @@
+{
+  "schema": "master.frontier.v6.projection_dictionary.v1",
+  "wire": "MF6/1",
+  "records": {
+    "G": "goal",
+    "C": "capability",
+    "S": "state",
+    "E": "evidence",
+    "P": "untrusted_evidence_payload",
+    "D": "operation",
+    "R": "receipt",
+    "Y": "public_commentary",
+    "M": "missing_requirement",
+    "A": "answer_ready",
+    "F": "final_answer"
+  }
+}
